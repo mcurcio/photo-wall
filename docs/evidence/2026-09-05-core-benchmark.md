@@ -38,4 +38,12 @@ Native image `sha256:8bf573f5fd7e4d09e4f8c0e0ad51e70d2ebb6058d3f15d7f7651284d202
 
 Canonical's signed checksums authenticated upstream `ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz`, 1,257,196,128 bytes, SHA-256 `790652faeb4f61ce7bb12f5cb61734595c61d3cd882915b8b5f9918106c80d37`, signing fingerprint `843938DF228D22F7B3742BC0D94AA3F0EFE21092`. This is an input identity, not a Photo Wall image or boot result. Image binaries and build scratch remain outside Git.
 
-Remaining acceptance includes clean-checkout verification of the expanded core, complete real Immich → worker → gateway → Player integration, authenticated operator walkthrough, Player-only packaging, signed common image and boot/update/rollback tests, physical two-Pi PXE/dual-output/continuity evidence, and final independent integrated review. The PR stays draft while these gates remain open.
+Remaining acceptance includes complete real Immich → worker → gateway → Player integration, authenticated operator walkthrough, Player-only packaging, signed common image and boot/update/rollback tests, physical two-Pi PXE/dual-output/continuity evidence, and final independent integrated review. The PR stays draft while these gates remain open.
+
+## Clean-checkout follow-up
+
+Exact committed revision **`dda8e98c5c54dc8ca9c007599f8a919eadbd5248`** was checked out separately with no uncommitted implementation or shared virtual environment. `uv sync --frozen` installed its locked dependencies. `python3 scripts/configure.py` created private settings; alternate loopback ports and a dedicated Compose project isolated this test from the existing development services. `docker compose up -d --build --wait` built the committed Dockerfile and started all three services healthy with new empty database/media/configuration volumes.
+
+`.venv/bin/python scripts/test_local.py -q --tb=short` then passed **494 tests, four dependency deprecation warnings, 162.04 seconds**. Ruff and all 38 committed Markdown documents' relative links passed. `/healthz` reported healthy database, running scheduler and no scheduler error. `git status --porcelain` returned empty. Unlike the earlier worktree command, the clean suite needed no appliance exclusions because unfinished files were absent from this commit.
+
+Built Linux arm64 identities: central `sha256:47074a6f980f9b243d47863091f263838d59fd515aff20ed24967e04f96b9ef3`; worker `sha256:aa125b1b7146fb63ac669e13ee5e9697ceed7d6a8d705b35e679cdc27ada7824`; PostgreSQL platform image `sha256:3ddb45e650f78fce89db773ddd67e1d86568e3b9d369832ce7a8934fc848a58a`. The build includes the final 1 MiB WebSocket transport limit. These are local container build identities, not published registry artifacts or the Pi appliance image.

@@ -9,6 +9,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. All r
 - [x] Resolve initial time/outage/reboot semantics before schemas/storage in [decision 0001](decisions/0001-mvp-time-recovery-and-module-contracts.md).
 - [x] Integrate initial independent requirements, contract and registry reviews; fix scoped material findings. Full architecture/integrated correctness reviews remain required.
 - [x] Versioned contracts and initial deterministic clock/cache/Runtime/Planner fault tests.
+- [x] Clean-checkout dependency install, central/worker/database image builds and healthy startup; complete 494-test suite on committed `dda8e98`.
 - [ ] PostgreSQL migrations, central application/media worker, clean-checkout launch, operator configuration and health.
 - [x] Network enrollment, separate admin authority, persistent Frames/Outputs/retirement; automatic physical PXE discovery remains below.
 - [ ] Preview/commit/revert calibration and two Outputs plus second Player.
@@ -37,7 +38,7 @@ Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, rem
 - Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
 - Signed upstream Ubuntu base download is verified. Common-image/bootstrap and signed A/B update implementation are in progress and excluded from this core checkpoint; no final appliance checksum or boot result exists.
 
-See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for commands, artifact identities, failed attempts and evidence boundaries. Next gates are a clean-checkout verification of this checkpoint, complete real-media network integration, Player-only packaging, signed image/boot/update qualification, physical bench results, and final independent review.
+See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for commands, artifact identities, failed attempts and evidence boundaries. Next gates are complete real-media network integration, Player-only packaging, signed image/boot/update qualification, physical bench results, and final independent review.
 
 ## Evidence rules
 
