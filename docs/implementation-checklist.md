@@ -1,6 +1,6 @@
 # Runnable MVP delivery checklist
 
-Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. All requirements remain authoritative. Unchecked means incomplete or unverified.
+Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) is open from `feat/runnable-mvp` to `main` and will receive verified benchmark updates. All requirements remain authoritative. Unchecked means incomplete or unverified.
 
 ## Current state (2026-09-05 core benchmark)
 
@@ -27,7 +27,9 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. All r
 
 ## External dependencies requested early
 
-Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub read/auth works; user requested one draft PR with benchmark updates. Push is pending exact destination/payload authorization after automatic approval review rejected it. Repository license and security-reporting contact remain owner decisions before a code release.
+Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub authentication works; explicit user authorization resolved the automatic push-approval gate, and draft PR #2 is open. Feature-branch pushes and PR updates are authorized; main is protected and merging requires the owner. Repository license and security-reporting contact remain owner decisions before a code release.
+
+The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. This session's delegation runtime lists Astra, Sol, Terra, Luna and GPT-5.5, but not Spark. Use supported Luna for suitable small leaves while retaining capable agents for cross-module design/review; do not claim a fallback is Spark. Recheck availability before future dispatch.
 
 ## Verified core benchmark
 
@@ -36,7 +38,7 @@ Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, rem
 - Runtime snapshot recovery, nested Scenes, Program rollover, current-state recording Actuator reveal, required cue membership/deadlines, exact secured assets and current-authority readiness/commit/revocation have regression coverage.
 - Single-process Player networking, identity, cache integrity/reacquisition, bounded transfers, clock gating, actual draw acknowledgments and outage/rejoin are integrated with a RecordingRenderer. Native Linux smoke separately verifies JPEG/PNG/H.264, seek, composition/calibration and two distinct Weston outputs. Physical DRM/HDMI and live hotplug remain unqualified.
 - Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
-- Signed upstream Ubuntu base download is verified. Common-image/bootstrap and signed A/B update implementation are in progress and excluded from this core checkpoint; no final appliance checksum or boot result exists.
+- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. Common-image/bootstrap integration remains in progress; no final appliance checksum or boot result exists.
 
 See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for commands, artifact identities, failed attempts and evidence boundaries. Next gates are complete real-media network integration, Player-only packaging, signed image/boot/update qualification, physical bench results, and final independent review.
 

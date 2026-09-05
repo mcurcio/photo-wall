@@ -42,7 +42,7 @@ Update the owning documents as contracts and implementation evolve. Add verified
 
 ### Subagent model selection
 
-The requested project preference is **`codex-spark-5.3-flash`** for suitable lightweight subagent work. OpenAI documents Spark's model identifier as **`gpt-5.3-codex-spark`**; the documentation does not establish an alias mapping for the requested spelling. [OpenAI models](https://learn.chatgpt.com/docs/models).
+The requested project preference is **`gpt-5.3-codex-spark`** for suitable lightweight subagent work. Prefer it for clear, bounded implementation, focused tests, mechanical changes and documentation; keep ambiguous design and integrated correctness review on a model suited to those tasks. [Official subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
 Resolve the usable identifier from the actual subagent runtime's supported models before dispatch. Do not pass the requested spelling automatically or invent an unsupported name. Prefer available Spark for clear, bounded leaf implementation, mechanical refactors, focused tests, and documentation work. If Spark is unavailable, select a supported model suited to the task and disclose the fallback in the work report.
 
