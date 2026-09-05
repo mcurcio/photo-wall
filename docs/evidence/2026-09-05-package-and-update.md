@@ -2,6 +2,8 @@
 
 Status: released module benchmark; final appliance assembly and boot remain unqualified. This checkpoint adds the Player-only package builder and signed userspace A/B store to the same draft PR. The implementation was reviewed upward before publication; final cross-module review is still required.
 
+GitHub Actions also passed at committed checkpoint `9614ccd6fc4d0ee3e6266e11c39067b28c2112e4`: [PR run 33998569140](https://github.com/mcurcio/photo-wall/actions/runs/33998569140). The PostgreSQL/host suite completed with **553 passed, 46 skipped, 4 warnings in 44.20 seconds**. The 46 skips require host FFmpeg; the mandatory pinned Linux worker preparation suite separately passed **55 tests in 170.72 seconds**. Ruff, relative links in 41 Markdown documents, Compose startup and HTTP health passed. The duplicate branch-push run also succeeded. These are overlapping suites and are not summed.
+
 ## Player package
 
 `pytest --noconftest tests/test_player_package.py -q` passed **64 tests**. The standalone command avoids importing the unrelated PostgreSQL fixture; every packaging fixture and assertion remains active. Scoped Ruff passed. Tests include exact lock selection, target markers/tags, package/metadata/RECORD boundaries, unsafe paths, corrupted downloads, archive size limits and subprocess timeouts.
