@@ -1,0 +1,32 @@
+# Coordination integration review
+
+Date: 2026-09-05. Reviewer: independent Player execution/integration agent.
+Scope: [Coordinator](../../central/coordination.py), [RuntimeStore](../../central/runtime_store.py), registry configuration authority, migrations 003/004 and Player HTTP/WebSocket adapters. This is a pre-fix review; the orchestrator must verify fixes on the final revision.
+
+## Material findings
+
+1. **P1 — A skipped required cue can be recreated with fewer members after a child expires.** `_groups` derives identity and membership from the current projection, so a same-start 10-second child on an unavailable Frame disappears while a 60-second sibling remains. A PostgreSQL reproduction skipped the original two-member cue at its deadline, then committed the same surviving assignment under a new one-member group after the short child ended. With an unchanged manifest, delivery returned both a Commit and cancellation for that assignment. Preserve the admitted cue identity/membership and terminal skipped state across projection narrowing; only a real owner epoch/generation change establishes a replacement cohort. Ended participants in an already committed cue need explicit completion treatment for renewal.
+
+2. **P1 — Late readiness bypasses a pending cue's deadline.** `_commit_due` checks ready participants before checking an expired pending deadline. A cue offered before its intended start of 1010 accepted its first readiness at 1011 and issued a Commit, instead of skipping the missed start. Check the existing deadline before allowing an initial grant. A previously admitted late-join grace remains distinct from a missed normal start.
+
+3. **P1 — Runtime cancellation does not revoke a removed layer at the Player.** A real database-to-recording-Executor reproduction cancelled a Run and delivered a newer empty Plan with no cancellation IDs. The Player still held the previous assignment as active under its original lease (`fallback=False`). The agreed repair is that omission from a full current-state Plan revokes execution immediately while keeping its inactive secured-byte lease; only unchanged assignments remaining in the Plan preserve old execution until renewed commitment. This keeps explicit lifecycle cancellation distinct from natural completion.
+
+4. **P1 — Plan/configuration snapshots disagree for mixed validation state.** `advance` populates Plan bindings using only enabled Outputs, while PlayerConfiguration contains every bound Output, including unvalidated calibration targets. One enabled plus one unvalidated Output produced two configuration bindings and one Plan binding. The executor correctly rejects that mismatch. Carry the complete configuration bindings in each Plan; select layers only for enabled Outputs.
+
+5. **P2 — Configuration changes can deliver stale playback grants.** After calibration changes and before the next scheduler advance, `delivery` returns the new configuration together with the old Plan and grants. Per-layer `_authorized` checks only Output/Frame/generation, not the full configuration snapshot; the reproduction delivered Plan binding revision 3 with desired binding revision 4. Require exact current Plan/configuration binding equality for playback delivery and grant readiness. Delayed secured feedback from an old retained offer may still lock identical bytes under current epoch/generation, without authorizing stale execution.
+
+The orchestrator accepted these findings. For required-group failure, use a revision/epoch-bound nonterminal invalidation distinct from terminal Run cancellation. This permits explicit changed-cohort rejoin with current-state readiness while preventing delayed revocation from invalidating a new grant for the same secured assignment.
+
+## Executed evidence
+
+- **PostgreSQL integration:** `.venv/bin/python scripts/test_local.py tests/test_coordination.py tests/test_registry.py -q` — 17 passed; one upstream Starlette/AnyIO deprecation warning. Each fixture used and removed its own `pw_test_*` schema. These existing tests passed despite the uncovered integration gaps.
+- **PostgreSQL plus simulated Player reproductions:** mixed Output validation, stale calibration snapshot delivery, narrowing a skipped nested cue, late initial readiness, and cancelling an active Run. The observed failure values were respectively: binding counts `2/1`; Plan/current binding revisions `3/4`; skipped two-member group plus committed one-member group; one late Commit; empty new Plan with the old assignment still active.
+- **Read-only review:** RuntimeStore applies commands and current advancement under a single advisory transaction boundary and leaves projection reads unpersisted. Coordinator's global serialization plus sorted Player locks protect current epoch/binding through configuration/offer transactions. `_offer` validates all blob rows before inserting any references, and missing-media rejection occurs before partial offer publication. Existing tests exercise duplicate admission/restart, missing blobs, stale bindings and bounded outstanding offers. The review did not independently stress every lock interleaving or real media filesystem state.
+
+## Orchestrator remediation verification
+
+All five findings were fixed before the core checkpoint. Stable admitted cue identity/membership and terminal skip state are persisted through migration 006; an expired short child cannot recreate a smaller successful cohort. Initial readiness is checked against the existing deadline before commitment. Full-Plan omission immediately revokes execution while preserving inactive secured bytes. Plans carry the complete configuration bindings and select work only for enabled Outputs. Delivery/readiness require an exact current configuration snapshot before granting playback.
+
+`tests/test_coordination.py` includes the required-child expiry, late-readiness, mixed-calibration and stale-calibration regressions. `tests/test_executor.py` covers full-plan removal and revision/epoch-bound revocation, including preservation of inactive secured bytes. These tests passed in the combined **494-test** core checkpoint, with real PostgreSQL and a loopback Player session. See [the dated record](../evidence/2026-09-05-core-benchmark.md).
+
+This is orchestrator verification of the independent findings, not a substitute for the final independent integrated review. No Pi, PXE or visible synchronization result is established by this review.

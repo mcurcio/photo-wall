@@ -34,6 +34,7 @@ class Contribution(FrozenModel):
     opacity: Unit = 1
     fade_in_seconds: Seconds = 0
     fade_out_seconds: Seconds = 0
+    retain_on_expiry: bool = False
     ramp_from: Unit = 0
     ramp_to: Unit = 0
 
@@ -45,6 +46,8 @@ class Contribution(FrozenModel):
             raise ValueError("media contributions need source or authored asset references")
         if self.kind != "media" and (self.source_refs or self.asset_refs):
             raise ValueError("only media contributions carry media references")
+        if self.retain_on_expiry and (self.kind != "media" or self.opacity != 1):
+            raise ValueError("only opaque media contributions may retain a still")
         return self
 
 
@@ -141,6 +144,7 @@ class Intent(FrozenModel):
     base_opacity: Unit
     fade_in_seconds: Seconds
     fade_out_seconds: Seconds
+    retain_on_expiry: bool = False
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
 
@@ -681,6 +685,7 @@ class Runtime:
                     base_opacity=contribution.opacity,
                     fade_in_seconds=contribution.fade_in_seconds,
                     fade_out_seconds=contribution.fade_out_seconds,
+                    retain_on_expiry=contribution.retain_on_expiry,
                     actuator_value=value, phase=run.phase,
                 ))
         winners: dict[str, Intent] = {}

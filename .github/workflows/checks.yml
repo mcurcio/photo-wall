@@ -15,7 +15,7 @@ concurrency:
 jobs:
   portable-and-postgres:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -27,7 +27,11 @@ jobs:
       - run: python scripts/check_docs.py
       - run: python scripts/configure.py
       - run: docker compose up -d --build --wait
-      - run: .venv/bin/python scripts/test_local.py -q
+      - run: .venv/bin/python scripts/test_local.py -q --tb=short
+      - name: Qualify conversion in the pinned Linux worker
+        run: |
+          docker build --target media-test --tag photo-wall-media-test:ci .
+          docker run --rm --network none photo-wall-media-test:ci
       - run: curl --fail http://127.0.0.1:8000/healthz
       - name: Service diagnostics
         if: failure()

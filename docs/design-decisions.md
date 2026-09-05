@@ -2,7 +2,7 @@
 
 **Status: open decisions for the proposed implementation.** Product behavior is defined in [requirements](requirements.md); [architecture](architecture.md) describes the recommended technical direction. This register contains choices that still need a recorded outcome. Resolve the choices needed by each [implementation slice](implementation-plan.md) while independent work continues.
 
-Accepted implementation decisions: [0001 — time/recovery/module contracts](decisions/0001-mvp-time-recovery-and-module-contracts.md) and [0002 — registry/enrollment/calibration](decisions/0002-registry-and-enrollment.md). These resolve their stated initial policies; the register below retains the remaining qualification and scope questions.
+Accepted implementation decisions: [0001 — time/recovery/module contracts](decisions/0001-mvp-time-recovery-and-module-contracts.md), [0002 — registry/enrollment/calibration](decisions/0002-registry-and-enrollment.md), [0003 — coordination and execution](decisions/0003-coordination-and-player-execution.md), [0004 — media publication and recovery](decisions/0004-media-publication-and-worker-recovery.md), and [0005 — native platform and registration fallback](decisions/0005-native-platform-and-registration-fallback.md). These resolve their stated policies; the register below retains remaining qualification and scope questions.
 
 ## Initial implementation
 

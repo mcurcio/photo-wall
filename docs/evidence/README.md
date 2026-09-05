@@ -6,4 +6,7 @@ Evidence classes are separate:
 - **Integration:** actual database, HTTP service, packaged launch, real declared-version Immich and network-isolation tests when run.
 - **Physical:** checksum-identified appliance boot, fresh Pi PXE, HDMI rendering/continuity and visible coordination on named equipment.
 
-No physical or Immich integration evidence exists yet. Container images for central services are not the required Pi appliance artifact. Keep binary artifacts and private deployment data outside Git. Detailed dated records identify revisions, executed commands, failures and limits; the [delivery checklist](../implementation-checklist.md) tracks remaining acceptance.
+Real Immich and native Linux integration have executed evidence; physical Pi/PXE evidence remains pending. Container images for central services are not the required Pi appliance artifact. Keep binary artifacts and private deployment data outside Git. Detailed dated records identify revisions, executed commands, failures and limits; the [delivery checklist](../implementation-checklist.md) tracks remaining acceptance.
+
+- [2026-09-05 foundation](2026-09-05-foundation.md): clean-checkout central launch and 94 passing portable/PostgreSQL tests.
+- [2026-09-05 core benchmark](2026-09-05-core-benchmark.md): 494 core tests, real Immich isolation, pinned Linux conversion, native two-output routing and released Player service integration; appliance and physical gates remain open.

@@ -63,7 +63,7 @@ Use PostgreSQL for central configuration and authoritative execution records. Ke
 
 The Player is one process with one display-resource owner. Its session module handles plans and configuration; the equipment agent observes Outputs and applies bindings; the cache secures files; the executor prepares and schedules local operations; the Renderer owns decoding, composition, effects and calibration. Diagnostics collect outcomes from every module. Weston, clock discipline and process supervision remain OS services.
 
-Embed GStreamer through Python/PyGObject rather than launching a media-player executable. Python orchestrates; native elements and GPU operations handle sustained media processing. This keeps preparation, local capacity and visible output under coordinated control without routing decoded frames through Python arrays. Nested Runs need not map to nested pipelines or processes.
+Embed GStreamer through Python/PyGObject rather than launching a media-player executable. Python orchestrates; native elements and GPU operations handle sustained media processing. The initial [native implementation decision](decisions/0005-native-platform-and-registration-fallback.md) permits bounded appsink buffer uploads into GLArea composition, with no Python pixel-processing loops; its copy cost must be qualified before claiming a device capacity. Nested Runs need not map to nested pipelines or processes.
 
 The Renderer uses this conceptual order:
 
@@ -107,7 +107,7 @@ Keep maintenance, blanking, Panel power, Player shutdown, reboot and updates dis
 
 ## Appliance operation
 
-Implement [automatic Player provisioning](requirements.md#player-provisioning) with one common Raspberry Pi OS image delivered over PXE. Package discovery and enrollment support in the image and prepare their deployment configuration centrally. Use the [Raspberry Pi network-boot documentation](https://www.raspberrypi.com/documentation/computers/remote-access.html#network-boot-your-raspberry-pi) to define the supported network-boot-capable hardware precondition. Choose local installation versus diskless runtime according to the required outage behavior; define persistent identity/cache layout and a reproducible reimage path.
+Implement [automatic Player provisioning](requirements.md#player-provisioning) with one common Ubuntu24.04.4 Raspberry Pi arm64 image delivered over PXE, following the [accepted platform decision](decisions/0005-native-platform-and-registration-fallback.md). Package discovery and enrollment support in the image and prepare their deployment configuration centrally. Use the [Raspberry Pi network-boot documentation](https://www.raspberrypi.com/documentation/computers/remote-access.html#network-boot-your-raspberry-pi) to define the supported network-boot-capable hardware precondition. Run the verified rootfs in RAM with a persistent owned identity/cache volume and a reproducible reimage path.
 
 Boot establishes networking, discovers the Control Plane, automatically registers and reports equipment so the Player appears before Frame binding. Establish time and reconcile configuration/plans before preparing authorized content and presenting it. Keep a last-known-good state. Integrity-verify update artifacts and design staged rollout, health gates and rollback before unattended fleet operation.
 

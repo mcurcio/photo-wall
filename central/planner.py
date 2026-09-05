@@ -190,6 +190,8 @@ class _ProjectionBuilder:
                 )
             elif not snapshot.candidates:
                 self.diagnose("source_empty", intent=intent, assignment=identity, source=source)
+            elif any(c.preparation_failure for c in snapshot.candidates):
+                self.diagnose("asset_preparation_failed", intent=intent, assignment=identity, source=source)
 
     def _pool(self, intent: Intent, profile: FrameProfile) -> tuple[Candidate, ...]:
         key = (intent.asset_refs, intent.source_refs, profile)
@@ -213,7 +215,7 @@ class _ProjectionBuilder:
                 (entry[1] for entry in merged.values()),
                 key=lambda candidate: (-candidate.captured_at, candidate.asset_id),
             )
-        pool = tuple(candidate for candidate in candidates if eligible(candidate, profile))
+        pool = tuple(candidate for candidate in candidates if not candidate.preparation_failure and eligible(candidate, profile))
         self.pools[key] = pool
         return pool
 
@@ -263,6 +265,10 @@ class _ProjectionBuilder:
             ) or locked.presentation != expected_kind:
                 self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
                 return
+            if locked.retain_on_expiry != bool(intent.retain_on_expiry and locked.variant and
+                                               locked.variant.media_type != "video/mp4"):
+                self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
+                return
             self.used_locks.add(identity)
             self.layers[player].append(locked.model_copy(update={
                 field: fields[field] for field in arbitration
@@ -293,7 +299,8 @@ class _ProjectionBuilder:
         if not _variant_usable(candidate, binding.profile):
             self.diagnose("variant_incompatible", intent=intent, assignment=identity)
             return
-        self.layers[player].append(Layer(**fields, presentation="media", variant=candidate.variant))
+        self.layers[player].append(Layer(**fields, presentation="media", variant=candidate.variant,
+            retain_on_expiry=intent.retain_on_expiry and candidate.kind == "image"))
 
     def result(self, now: float, horizon_end: float) -> Projection:
         for identity, lock in self.locks.items():

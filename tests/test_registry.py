@@ -1,15 +1,11 @@
 """Actual PostgreSQL integration, isolated in a fresh schema for every test."""
 
 import base64
-import os
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-import psycopg
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
-from psycopg.conninfo import make_conninfo
 
 from central.app import create_app
 from central.db import Database
@@ -22,35 +18,19 @@ from central.registry import (
     enrollment_message,
 )
 from contracts.models import Calibration, FrameProfile
-from contracts.time import ManualClock
 
 ADMIN = "test-operator-" + "x" * 40
 
 
-@pytest.fixture
-def registry():
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
-    db.migrate()
-    reg = Registry(db, ManualClock(1000))
-    yield reg
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
-
-
-def enroll(registry, key=None, count=2):
+def enroll(registry, key=None, count=2, persistence="durable"):
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     nonce = registry.challenge(public)["nonce"]
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         signature=base64.b64encode(key.sign(enrollment_message(nonce, outputs))).decode())
+    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs, persistence=persistence,
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, persistence))).decode())
     return registry.enroll(request), key, request
 
 
@@ -84,6 +64,33 @@ def test_registration_without_panels_and_observation_removal(registry):
     observations = {o["output_id"]: o["observation"] for o in registry.inventory()["outputs"]}
     assert observations["HDMI-A-1"]["connected"] is True
     assert observations["HDMI-A-2"]["connected"] is False
+
+
+def test_volatile_player_appears_with_storage_fault_but_cannot_be_bound(registry):
+    identity, _, _ = enroll(registry, persistence="volatile")
+    inventory = registry.inventory()
+    assert inventory["players"][0]["health"]["storage_fault"] is True
+    assert len(inventory["outputs"]) == 2
+    frame(registry)
+    with pytest.raises(RegistryError, match="persistent_storage_required"):
+        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    assert registry.configuration_for(identity["player_id"], 1)["execution_bindings"] == []
+
+
+def test_loss_of_persistence_disables_existing_binding_and_signed_flag_cannot_be_forged(registry):
+    identity, key, request = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    with pytest.raises(RegistryError, match="invalid_proof"):
+        registry.enroll(request.model_copy(update={"persistence": "volatile"}))
+    identity, _, _ = enroll(registry, key, persistence="volatile")
+    config = registry.configuration_for(identity["player_id"], identity["authority_epoch"])
+    assert len(config["bindings"]) == 1
+    assert config["execution_bindings"] == []
+    identity, _, _ = enroll(registry, key)
+    config = registry.configuration_for(identity["player_id"], identity["authority_epoch"])
+    assert len(config["execution_bindings"]) == 1
 
 
 def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):

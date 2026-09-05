@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
-from typing import Annotated
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -15,6 +13,9 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
+from contracts.enrollment import Enrollment as Enrollment
+from contracts.enrollment import OutputReport as OutputReport
+from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.models import Calibration, FrameProfile, Identifier, Model, OutputBinding
 from contracts.time import Clock
 
@@ -23,32 +24,6 @@ class RegistryError(Exception):
     def __init__(self, code: str, status: int = 409):
         self.code, self.status = code, status
         super().__init__(code)
-
-
-class OutputReport(Model):
-    output_id: Identifier
-    width_px: int = Field(ge=0, le=16384)
-    height_px: int = Field(ge=0, le=16384)
-    connected: bool = True
-
-
-class Enrollment(Model):
-    public_key: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-    nonce: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-    signature: Annotated[str, Field(min_length=88, max_length=88)]
-    outputs: tuple[OutputReport, ...] = Field(default=(), max_length=2)
-
-    @model_validator(mode="after")
-    def unique_outputs(self):
-        if len({o.output_id for o in self.outputs}) != len(self.outputs):
-            raise ValueError("duplicate output")
-        return self
-
-
-def enrollment_message(nonce: str, outputs: tuple[OutputReport, ...]) -> bytes:
-    return json.dumps({"purpose": "photo-wall-enroll-v1", "nonce": nonce,
-                       "outputs": [o.model_dump() for o in outputs]},
-                      sort_keys=True, separators=(",", ":")).encode()
 
 
 class FrameCreate(Model):
@@ -110,7 +85,7 @@ class Registry:
         try:
             signature = base64.b64decode(request.signature, validate=True)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(request.public_key)).verify(
-                signature, enrollment_message(request.nonce, request.outputs)
+                signature, enrollment_message(request.nonce, request.outputs, request.persistence)
             )
         except (ValueError, InvalidSignature) as exc:
             raise RegistryError("invalid_proof", 403) from exc
@@ -144,6 +119,9 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
+            conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
+                         (Jsonb({"persistence": request.persistence,
+                                 "storage_fault": request.persistence == "volatile"}), player_id))
             self._audit(conn, "player_enrolled", player_id)
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
 
@@ -175,10 +153,12 @@ class Registry:
         try:
             with self.db.transaction() as conn:
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
-                player = conn.execute("SELECT retired_at FROM players WHERE id=%s FOR UPDATE",
+                player = conn.execute("SELECT retired_at,health FROM players WHERE id=%s FOR UPDATE",
                                       (player_id,)).fetchone()
                 if not player or player["retired_at"] is not None:
                     raise RegistryError("unknown_or_retired_player", 404)
+                if player["health"].get("persistence") == "volatile":
+                    raise RegistryError("persistent_storage_required")
                 frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                      (frame_id,)).fetchone()
                 if not frame:
@@ -263,21 +243,28 @@ class Registry:
 
     def configuration_for(self, player_id: str, epoch: int) -> dict[str, list[OutputBinding]]:
         with self.db.transaction() as conn:
-            if not conn.execute("SELECT 1 FROM players WHERE id=%s AND authority_epoch=%s "
-                                "AND retired_at IS NULL FOR SHARE", (player_id, epoch)).fetchone():
-                raise RegistryError("stale_authority", 403)
-            self._expire_previews(conn)
-            rows = conn.execute("SELECT f.*,b.output_id FROM bindings b JOIN frames f ON f.id=b.frame_id "
-                                "WHERE b.player_id=%s ORDER BY b.output_id", (player_id,)).fetchall()
-            bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
-                                  configuration_revision=r["configuration_revision"],
-                                  profile=FrameProfile.model_validate(r["profile"]),
-                                  calibration=Calibration.model_validate(r["calibration"]),
-                                  preview=Calibration.model_validate(r["preview"]) if r["preview"] else None,
-                                  preview_expires=r["preview_expires"])
-                    for r in rows]
-            return {"bindings": bindings, "execution_bindings": [binding for binding, row in
-                    zip(bindings, rows, strict=True) if row["calibration_valid"]]}
+            return self.configuration_in(conn, player_id, epoch)
+
+    def configuration_in(self, conn, player_id: str, epoch: int) -> dict[str, list[OutputBinding]]:
+        """Hold registry authority through the caller's offer/configuration transaction."""
+        player = conn.execute("SELECT health FROM players WHERE id=%s AND authority_epoch=%s "
+                              "AND retired_at IS NULL FOR SHARE", (player_id, epoch)).fetchone()
+        if not player:
+            raise RegistryError("stale_authority", 403)
+        self._expire_previews(conn)
+        rows = conn.execute("SELECT f.*,b.output_id FROM bindings b JOIN frames f ON f.id=b.frame_id "
+                            "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
+                            (player_id,)).fetchall()
+        bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
+                              configuration_revision=r["configuration_revision"],
+                              profile=FrameProfile.model_validate(r["profile"]),
+                              calibration=Calibration.model_validate(r["calibration"]),
+                              preview=Calibration.model_validate(r["preview"]) if r["preview"] else None,
+                              preview_expires=r["preview_expires"])
+                for r in rows]
+        return {"bindings": bindings, "execution_bindings": [binding for binding, row in
+                zip(bindings, rows, strict=True) if row["calibration_valid"] and
+                player["health"].get("persistence") != "volatile"]}
 
     def inventory(self) -> dict:
         with self.db.transaction() as conn:

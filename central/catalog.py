@@ -14,6 +14,7 @@ class Candidate(Model):
     original_height: int = Field(gt=0)
     captured_at: Instant
     variant: Variant | None = None
+    preparation_failure: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
 
 
 class CatalogSnapshot(Model):

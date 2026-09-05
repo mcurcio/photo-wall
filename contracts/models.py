@@ -107,6 +107,34 @@ class Variant(Model):
         return f"/v1/media/{self.sha256}"
 
 
+class PlayerConfiguration(Model):
+    protocol: Literal[1] = 1
+    player_id: Identifier
+    authority_epoch: int = Field(ge=1)
+    configuration_revision: int = Field(ge=1)
+    bindings: tuple[OutputBinding, ...]
+    # Unvalidated bindings remain visible for calibration but cannot execute media.
+    enabled_outputs: tuple[Identifier, ...] = ()
+
+    def authorizes(self, layer: Layer) -> bool:
+        return any(b.output_id == layer.output_id and b.frame_id == layer.frame_id
+                   and b.generation == layer.binding_generation
+                   and b.output_id in self.enabled_outputs for b in self.bindings)
+
+    @model_validator(mode="after")
+    def coherent_outputs(self) -> Self:
+        outputs = {binding.output_id for binding in self.bindings}
+        if len(outputs) != len(self.bindings):
+            raise ValueError("duplicate Output")
+        if len({binding.frame_id for binding in self.bindings}) != len(self.bindings):
+            raise ValueError("duplicate Frame")
+        if len(set(self.enabled_outputs)) != len(self.enabled_outputs):
+            raise ValueError("duplicate enabled Output")
+        if not set(self.enabled_outputs) <= outputs:
+            raise ValueError("enabled Output must be bound")
+        return self
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier
@@ -125,6 +153,7 @@ class Layer(Model):
     fade_in: float = Field(default=0, ge=0)
     fade_out: float = Field(default=0, ge=0)
     required: bool = True
+    retain_on_expiry: bool = False
 
     @model_validator(mode="after")
     def interval(self) -> Self:
@@ -136,6 +165,10 @@ class Layer(Model):
             raise ValueError("black layer cannot carry media")
         if self.fade_in + self.fade_out > self.end - self.start:
             raise ValueError("fades exceed layer interval")
+        if self.retain_on_expiry and (
+            self.variant is None or self.variant.media_type == "video/mp4" or self.opacity != 1
+        ):
+            raise ValueError("only an opaque still may be retained")
         return self
 
     def position(self, now: float) -> float:
@@ -213,6 +246,7 @@ class Commit(Model):
     plan_id: Identifier
     revision: int = Field(ge=1)
     authority_epoch: int = Field(ge=1)
+    readiness_sequence: int = Field(ge=1)
     assignment_ids: tuple[Identifier, ...]
     committed_at: Instant
 
@@ -232,3 +266,18 @@ class Observation(Model):
     status: Literal["presented", "failed", "skipped", "fallback"]
     position: float = Field(default=0, ge=0)
     detail: Literal["none", "decode", "download", "capacity", "clock", "expired", "authority"] = "none"
+
+
+class Revocation(Model):
+    plan_id: Identifier
+    revision: int = Field(ge=1)
+    authority_epoch: int = Field(ge=1)
+    sequence: int = Field(ge=1)
+    assignment_ids: tuple[Identifier, ...]
+    mode: Literal["invalidate", "cancel"] = "invalidate"
+
+    @model_validator(mode="after")
+    def unique_assignments(self) -> Self:
+        if len(set(self.assignment_ids)) != len(self.assignment_ids):
+            raise ValueError("duplicate revoked assignment")
+        return self

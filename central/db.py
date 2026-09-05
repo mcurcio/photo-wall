@@ -7,6 +7,8 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 
+MEDIA_LOCK = 734118325
+
 
 class Database:
     def __init__(self, dsn: str):
@@ -14,7 +16,9 @@ class Database:
 
     @contextmanager
     def transaction(self):
-        with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
+        with psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=5) as conn:
+            conn.execute("SET LOCAL lock_timeout='5s'")
+            conn.execute("SET LOCAL statement_timeout='10s'")
             yield conn
 
     def migrate(self) -> None:
