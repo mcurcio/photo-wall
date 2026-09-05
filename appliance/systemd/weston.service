@@ -1,0 +1,28 @@
+[Unit]
+Description=Photo Wall black kiosk compositor
+After=systemd-user-sessions.service systemd-logind.service
+Wants=systemd-logind.service
+Conflicts=getty@tty1.service
+
+[Service]
+User=wall
+Group=wall
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=XDG_RUNTIME_DIR=/run/user/10001
+Environment=LIBSEAT_BACKEND=logind
+Environment=XDG_SESSION_TYPE=wayland
+ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=kiosk-shell.so --config=/etc/xdg/weston/weston.ini --log=/run/user/10001/weston.log --socket=wayland-0
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

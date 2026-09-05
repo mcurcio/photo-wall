@@ -433,30 +433,97 @@ def _linux_boot_id() -> str:
     return value
 
 
-def validate_boot_report(path: Path, release_id: str, boot_id: str) -> None:
-    """Bind service health to the successfully mounted rootfs reported by bootstrap."""
-    info = path.lstat()
-    if info.st_uid != STATE_OWNER_UID or stat.S_IMODE(info.st_mode) != 0o600:
-        raise UpdateError("invalid_boot_report_ownership")
+def _boot_report(path: Path, boot_id: str) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate report field")
+            result[key] = value
+        return result
+
     try:
-        report = json.loads(_regular(path, 4096))
-    except (ValueError, UnicodeError) as error:
+        with _reader(path, 4096) as stream:
+            info = os.fstat(stream.fileno())
+            if info.st_uid != STATE_OWNER_UID or stat.S_IMODE(info.st_mode) != 0o600:
+                raise UpdateError("invalid_boot_report_ownership")
+            data = stream.read(4097)
+            if len(data) > 4096:
+                raise UpdateError("invalid_boot_report")
+        report = json.loads(data, object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError) as error:
         raise UpdateError("invalid_boot_report") from error
     if (not isinstance(report, dict)
             or set(report) != {"schema", "boot_id", "release_id", "slot", "trial", "persistence", "fault"}
             or type(report["schema"]) is not int or report["schema"] != 1
-            or report["boot_id"] != boot_id or report["release_id"] != release_id
+            or report["boot_id"] != boot_id
+            or not isinstance(report["release_id"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", report["release_id"])
             or report["slot"] not in ("A", "B") or report["trial"] is not True
             or report["persistence"] != "durable" or report["fault"] is not None):
         raise UpdateError("boot_report_mismatch")
+    return report
+
+
+def validate_boot_report(path: Path, release_id: str, boot_id: str) -> None:
+    """Bind service health to the successfully mounted rootfs reported by bootstrap."""
+    if _boot_report(path, boot_id)["release_id"] != release_id:
+        raise UpdateError("boot_report_mismatch")
+
+
+def accept_trial(store: SlotStore, release_id: str, *,
+                 boot_report: Path = Path("/run/photo-wall/boot.json"),
+                 health_report: Path = Path("/run/photo-wall/service-health.json")) -> bool:
+    """Accept only this actual boot's reported trial after 30 seconds of observed health."""
+    boot_id = _linux_boot_id()
+    validate_boot_report(boot_report, release_id, boot_id)
+    gate = HealthGate(boot_id)
+    deadline = time.monotonic()+180
+    while time.monotonic() < deadline:
+        try:
+            health = json.loads(_regular(health_report, 4096))
+            if not isinstance(health, dict):
+                health = {}
+        except (UpdateError, ValueError, RecursionError):
+            health = {}
+        sampled_at = time.monotonic()
+        if sampled_at >= deadline:
+            break
+        if gate.observe(health, sampled_at):
+            if _linux_boot_id() != boot_id:
+                raise UpdateError("boot_changed")
+            validate_boot_report(boot_report, release_id, boot_id)
+            confirmed_at = time.monotonic()
+            if confirmed_at >= deadline:
+                break
+            # Report/boot reads can themselves stall; never promote from an aged health sample.
+            if not gate.observe(health, confirmed_at):
+                continue
+            return store.mark_good(release_id, boot_id)
+        time.sleep(min(.25, max(0, deadline-time.monotonic())))
+    raise UpdateError("healthy_trial_interval_not_met")
+
+
+def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"), *,
+                   boot_report: Path = Path("/run/photo-wall/boot.json"),
+                   health_report: Path = Path("/run/photo-wall/service-health.json")) -> bool:
+    """Derive this boot's release and trust policy; never select or stage another release."""
+    from appliance.bootstrap import BootConfig
+
+    config = BootConfig.load(config_dir)
+    report = _boot_report(boot_report, _linux_boot_id())
+    store = SlotStore(state_root, config.directory / "release.pub.pem", config.boot_abi,
+                      config.configuration_sha256)
+    return accept_trial(store, report["release_id"], boot_report=boot_report,
+                        health_report=health_report)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-root", required=True, type=Path)
-    parser.add_argument("--public-key", required=True, type=Path)
-    parser.add_argument("--boot-abi", required=True)
-    parser.add_argument("--configuration-sha256", required=True)
+    parser.add_argument("--public-key", type=Path)
+    parser.add_argument("--boot-abi")
+    parser.add_argument("--configuration-sha256")
     commands = parser.add_subparsers(dest="command", required=True)
     stage = commands.add_parser("stage")
     for name in ("manifest", "signature", "rootfs"):
@@ -464,7 +531,17 @@ def main() -> None:
     commands.add_parser("select")
     for command in ("reject", "mark-good"):
         commands.add_parser(command).add_argument("--release-id", required=True)
+    current = commands.add_parser("accept-current")
+    current.add_argument("--config-dir", type=Path, default=Path("/etc/photo-wall"))
     args = parser.parse_args()
+    explicit = args.public_key, args.boot_abi, args.configuration_sha256
+    if args.command == "accept-current":
+        if any(value is not None for value in explicit):
+            parser.error("accept-current derives trust policy from --config-dir; no overrides")
+        accept_current(args.state_root, args.config_dir)
+        return
+    if any(value is None for value in explicit):
+        parser.error("this command requires --public-key, --boot-abi and --configuration-sha256")
     store = SlotStore(args.state_root, args.public_key, args.boot_abi, args.configuration_sha256)
     if args.command == "stage":
         with _reader(args.rootfs, MAX_ROOTFS_BYTES) as stream:
@@ -481,23 +558,7 @@ def main() -> None:
     elif args.command == "reject":
         store.reject_boot(args.release_id, boot_id)
     else:
-        validate_boot_report(Path("/run/photo-wall/boot.json"), args.release_id, boot_id)
-        gate = HealthGate(boot_id)
-        deadline = time.monotonic()+180
-        while time.monotonic() < deadline:
-            try:
-                health = json.loads(_regular(Path("/run/photo-wall/service-health.json"), 4096))
-                if not isinstance(health, dict):
-                    health = {}
-            except (UpdateError, ValueError, RecursionError):
-                health = {}
-            if gate.observe(health, time.monotonic()):
-                if _linux_boot_id() != boot_id:
-                    raise UpdateError("boot_changed")
-                store.mark_good(args.release_id, boot_id)
-                return
-            time.sleep(.25)
-        raise UpdateError("healthy_trial_interval_not_met")
+        accept_trial(store, args.release_id)
 
 
 if __name__ == "__main__":

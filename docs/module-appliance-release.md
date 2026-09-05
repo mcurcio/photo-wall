@@ -43,13 +43,25 @@ for that boot and yields the common network fallback. New boots reverify active
 bytes. With no active release, an unsuccessful first trial returns no selection;
 it never promotes itself merely because no previous release exists.
 
-`mark_good` requires the current trial's exact release and boot identity. The CLI
-additionally observes `/run/photo-wall/service-health.json` continuously for 30
+`mark_good` requires the current trial's exact release and boot identity. Public
+`accept_trial(store, release_id, *, boot_report, health_report)` additionally
+observes `/run/photo-wall/service-health.json` continuously for 30
 seconds, using the actual Linux boot ID and monotonic time. It requires fresh,
 increasing samples with durable persistence, healthy state, a stable Player ID
 and current positive authority epoch. Invalid/missing/stale/unhealthy samples or
-identity changes reset that interval. The local API stays available to the
-bootstrap/test harness; only the CLI performs service health acceptance.
+identity changes reset that interval. It verifies the root-owned successful
+trial report before observation and again immediately before promotion; a boot
+change or report replacement cannot bypass that binding. Health age is rechecked
+after those final reads; a slow read cannot promote from a now-stale sample. The low-level local
+`mark_good` API stays available to the bootstrap/test harness. Both automatic
+and explicit CLI acceptance delegate to the same `accept_trial` gate.
+
+`accept_current(state_root, config_dir=/etc/photo-wall, *, boot_report,
+health_report)` uses `BootConfig.load` to validate the embedded public files,
+configuration digest and boot ABI. It reads the actual Linux boot ID and the
+root-owned report to obtain this boot's release ID, constructs the matching
+SlotStore, and calls `accept_trial`. It never selects or stages a release. There
+is no baked release ID in the rootfs and no alternate health policy.
 
 
 The updater's fixed internal paths are `updates/{A,B}/manifest.json`,
@@ -72,7 +84,7 @@ production executable is `/usr/bin/openssl`; no command, path, URL or executable
 from a signed manifest is evaluated. The verifier authenticates bytes before
 calling the shared canonical parser.
 
-The CLI is `python3 -m appliance.updates`, with required `--state-root`,
+The CLI is `python3 -m appliance.updates`. Existing commands require `--state-root`,
 `--public-key`, `--boot-abi` and `--configuration-sha256` arguments. `stage` takes
 local `--manifest`, `--signature` and `--rootfs` files. `select` emits a JSON
 selection using the actual Linux boot ID; `reject --release-id` releases only the
@@ -82,6 +94,14 @@ durable trial with no boot fault, before observing service health. Its poll
 interval is 250 ms, maximum sample age/gap is2 seconds, acceptance interval is30 seconds
 and total waiting bound is180 seconds. A common fallback, previous boot report,
 volatile registration or stale healthy file cannot accept the candidate.
+
+The automatic systemd adapter invokes `python3.12 -I -m appliance.updates
+--state-root /var/lib/photo-wall accept-current --config-dir /etc/photo-wall`.
+This command derives the key, ABI and configuration digest from those public
+configuration files and rejects explicit overrides. Missing state/report,
+common or active fallback, volatile persistence and any boot fault fail closed.
+The [appliance builder](module-appliance-builder.md) owns its root systemd unit;
+the updater owns report validation, health timing and the durable promotion.
 
 ## Executed evidence
 
@@ -95,6 +115,26 @@ symlink rejection, identity/cache preservation, boot-report identity and sampled
 health success/failure. Tests on macOS explicitly substitute the synthetic
 fixture owner for production uid 0 and use the installed OpenSSL 3.6.0 because
 macOS's `/usr/bin/openssl` is LibreSSL; production defaults remain unchanged.
+
+The subsequent automatic acceptance integration passed **83 tests** (62 updater
+and 21 shared release checks) with `.venv/bin/python -m pytest -q --noconftest
+tests/test_updates.py tests/test_release.py`, plus scoped Ruff. This standalone
+invocation avoids the unrelated PostgreSQL fixture import during host memory
+pressure. New tests exercise real signed-slot/current-configuration integration,
+the automatic and compatible explicit CLIs, ineligible/missing/stale reports,
+missing/changing/unhealthy service samples, configuration and boot changes, the
+180-second timeout, and delayed final validation resetting the health interval.
+
+The final `accept-current` source also passed a separate real Linux CLI smoke on
+Python 3.12.3/AArch64 with uid 0 and OpenSSL 3.0.13. It used the actual Linux boot
+ID, root-owned report/state, generated signing keys and a thread publishing
+current health samples. Four fallback/volatile/faulted/old-boot reports were
+rejected; the valid signed synthetic trial was promoted after **30.232 seconds**
+of real elapsed time. The process was capped at 128 MiB and 0.25 CPU, with no
+network or host mounts. The exercised `appliance/updates.py` SHA-256 was
+`cec15c9f018edb02e20f3a2069c6ac96ff94b178d0e929662c46df3ac056bd05`.
+Health and rootfs bytes were synthetic; this does not establish actual native
+health, systemd startup, SquashFS boot or physical rollback.
 
 A separate isolated Ubuntu arm64 container smoke exercised the current stdlib
 updater with actual uid 0-owned state and `/usr/bin/openssl` **OpenSSL 3.0.13**. It

@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from appliance import updates
 from appliance.updates import HealthGate, SlotStore, UpdateError, verify_release
-from contracts.release import Release
+from contracts.release import Release, configuration_digest
 
 ABI, CONFIG = "b"*64, "c"*64
 
@@ -354,9 +354,9 @@ def test_cli_health_failure_never_calls_mark_good(rig, monkeypatch):
             return json.dumps(health(0)).encode()
         return original_regular(path, limit)
     monkeypatch.setattr(updates, "_regular", stale_health)
-    ticks = iter([100, 100, 100, 200, 200, 300])
-    monkeypatch.setattr(updates.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(updates.time, "sleep", lambda _seconds: None)
+    now = [100.0]
+    monkeypatch.setattr(updates.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(updates.time, "sleep", lambda seconds: now.__setitem__(0, now[0]+seconds))
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root), "--public-key",
                                    str(rig.public), "--boot-abi", ABI, "--configuration-sha256", CONFIG,
                                    "mark-good", "--release-id", release.release_id])
@@ -393,6 +393,165 @@ def test_cli_accepts_only_after_thirty_seconds_of_fresh_health(rig, monkeypatch)
     assert accepted_at == [30]
     state = json.loads((rig.root/"updates/state.json").read_text())
     assert state["active"]["release_id"] == release.release_id
+
+
+@pytest.fixture
+def acceptance(rig, tmp_path, monkeypatch):
+    """Real signed slot/config/report, with only wall time and Linux boot ID simulated."""
+    config_dir = tmp_path / "public"
+    config_dir.mkdir()
+    files = {"public.json": b'{"schema":1}\n', "ca.pem": b"public test CA\n",
+             "release.pub.pem": rig.public.read_bytes(), "bootstrap.json": json.dumps(dict(
+                 schema=1, release_origin="https://wall.example", time_server="wall.example")).encode()}
+    for name, data in files.items():
+        (config_dir / name).write_bytes(data)
+    config_hash = configuration_digest(files)
+    (config_dir / "boot-policy.json").write_text(json.dumps(dict(
+        schema=1, boot_abi=ABI, configuration_sha256=config_hash)))
+    store = SlotStore(rig.root, config_dir / "release.pub.pem", ABI, config_hash)
+    release, manifest, signature, data = rig.signed(configuration_sha256=config_hash)
+    store.stage(manifest, signature, [data])
+    boot_id = "11111111-2222-3333-4444-555555555555"
+    selected = store.select_boot(boot_id)
+    report_path, health_path = tmp_path / "boot.json", tmp_path / "service-health.json"
+    report = dict(schema=1, boot_id=boot_id, release_id=release.release_id,
+                  slot=selected.slot, trial=True, persistence="durable", fault=None)
+    report_path.write_text(json.dumps(report))
+    report_path.chmod(0o600)
+    now = [0.0]
+    def write_health(**changes):
+        health_path.write_text(json.dumps(health(now[0], boot_id=boot_id, **changes)))
+    write_health()
+    def advance(seconds):
+        now[0] += seconds
+        write_health()
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: boot_id)
+    # Keep subprocess/OpenSSL's actual timeout clock independent of this simulated service clock.
+    monkeypatch.setattr(updates, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=advance))
+    return SimpleNamespace(store=store, release=release, config_dir=config_dir, boot_id=boot_id,
+                           report=report, report_path=report_path, health_path=health_path,
+                           now=now, advance=advance, write_health=write_health)
+
+
+def accept_current(rig, acceptance):
+    return updates.accept_current(rig.root, acceptance.config_dir,
+                                  boot_report=acceptance.report_path,
+                                  health_report=acceptance.health_path)
+
+
+def test_accept_current_derives_exact_policy_and_promotes_only_after_full_health(rig, acceptance):
+    assert accept_current(rig, acceptance)
+    assert acceptance.now == [30.0]
+    state = json.loads((rig.root / "updates/state.json").read_text())
+    assert state["active"]["release_id"] == acceptance.release.release_id
+    assert state["selected"]["accepted"] and state["selected"]["boot_id"] == acceptance.boot_id
+    assert (rig.root / "player/identity.key").read_bytes() == b"private fixture identity"
+
+
+@pytest.mark.parametrize("fault", ["missing", "volatile", "fallback", "old_boot", "boot_fault",
+                                    "ownership", "duplicate", "no_selected_trial"])
+def test_accept_current_never_promotes_ineligible_boot(rig, acceptance, fault):
+    a = acceptance
+    if fault == "missing":
+        a.report_path.unlink()
+    elif fault == "ownership":
+        a.report_path.chmod(0o644)
+    elif fault == "duplicate":
+        a.report_path.write_text('{"schema":1,' + json.dumps(a.report)[1:])
+    elif fault == "no_selected_trial":
+        a.store.reject_boot(a.release.release_id, a.boot_id)
+    else:
+        changes = {"volatile": {"persistence": "volatile"},
+                   "fallback": {"slot": None, "trial": False},
+                   "old_boot": {"boot_id": "old-boot"},
+                   "boot_fault": {"fault": "update_storage"}}[fault]
+        a.report_path.write_text(json.dumps(a.report | changes))
+    with pytest.raises(UpdateError):
+        accept_current(rig, a)
+    state = json.loads((rig.root / "updates/state.json").read_text())
+    assert state["active"] is None
+
+
+@pytest.mark.parametrize("fault", ["missing", "stale", "unhealthy", "wrong_epoch", "invalid"])
+def test_accept_current_times_out_without_fresh_continuous_health(rig, acceptance, monkeypatch, fault):
+    a = acceptance
+    def advance(seconds):
+        a.now[0] += seconds
+        if fault == "missing":
+            a.health_path.unlink(missing_ok=True)
+        elif fault == "unhealthy":
+            a.write_health(healthy=False)
+        elif fault == "wrong_epoch":
+            a.write_health(authority_epoch=int(a.now[0]) + 1)
+        elif fault == "invalid":
+            a.health_path.write_bytes(b"not JSON")
+        # stale leaves the initial once-healthy file untouched.
+    monkeypatch.setattr(updates.time, "sleep", advance)
+    with pytest.raises(UpdateError, match="healthy_trial_interval_not_met"):
+        accept_current(rig, a)
+    assert a.now == [180.0]
+    assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
+
+
+@pytest.mark.parametrize("fault", ["boot_changed", "report_changed", "trust_changed"])
+def test_acceptance_revalidates_boot_report_and_trust(rig, acceptance, monkeypatch, fault):
+    a = acceptance
+    if fault == "trust_changed":
+        (a.config_dir / "public.json").write_bytes(b"changed configuration")
+    elif fault == "boot_changed":
+        monkeypatch.setattr(updates, "_linux_boot_id", lambda: (
+            a.boot_id if a.now[0] < 30 else "00000000-2222-3333-4444-555555555555"))
+    else:
+        def advance(seconds):
+            a.advance(seconds)
+            if a.now[0] >= 30:
+                a.report_path.write_text(json.dumps(a.report | {"trial": False}))
+        monkeypatch.setattr(updates.time, "sleep", advance)
+    with pytest.raises((UpdateError, ValueError)):
+        accept_current(rig, a)
+    assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
+
+
+def test_cli_accept_current_uses_public_config_and_same_real_gate(rig, acceptance, monkeypatch):
+    a = acceptance
+    real_accept = updates.accept_current
+    monkeypatch.setattr(updates, "accept_current", lambda state, config: real_accept(
+        state, config, boot_report=a.report_path, health_report=a.health_path))
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
+                                   "accept-current", "--config-dir", str(a.config_dir)])
+    updates.main()
+    assert a.now == [30.0]
+    assert json.loads((rig.root / "updates/state.json").read_text())["active"] is not None
+
+
+def test_slow_final_report_validation_cannot_promote_aged_health(rig, acceptance, monkeypatch):
+    original = updates.validate_boot_report
+    delayed = []
+    def validate(*args):
+        original(*args)
+        if acceptance.now[0] >= 30 and not delayed:
+            acceptance.now[0] += 3
+            delayed.append(True)
+    monkeypatch.setattr(updates, "validate_boot_report", validate)
+    assert accept_current(rig, acceptance)
+    assert delayed and acceptance.now[0] >= 63
+
+
+def test_cli_accept_current_rejects_explicit_trust_override(rig, acceptance, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
+                                   "--public-key", str(rig.public), "accept-current",
+                                   "--config-dir", str(acceptance.config_dir)])
+    with pytest.raises(SystemExit) as error:
+        updates.main()
+    assert error.value.code == 2
+    assert acceptance.now == [0.0]
+
+
+def test_legacy_cli_still_requires_all_explicit_trust_arguments(rig, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root), "select"])
+    with pytest.raises(SystemExit) as error:
+        updates.main()
+    assert error.value.code == 2
 
 
 def test_staging_validated_active_release_is_idempotent_without_ambiguous_trial(rig):

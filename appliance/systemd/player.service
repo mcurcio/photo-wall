@@ -1,0 +1,42 @@
+[Unit]
+Description=Photo Wall single-process Player
+Wants=network-online.target photo-wall-weston.service
+After=network-online.target photo-wall-weston.service
+PartOf=photo-wall-weston.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=wall
+Group=wall
+SupplementaryGroups=render video
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=XDG_RUNTIME_DIR=/run/user/10001
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=GDK_BACKEND=wayland
+Environment=GDK_GL=gles
+Environment=PYOPENGL_PLATFORM=egl
+# Change only the runtime directory, preserving the root-owned boot report.
+ExecStartPre=+/usr/bin/install -d -o wall -g wall -m 0700 /run/photo-wall
+# Native failure must still allow network registration with unavailable capacity.
+ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
+ExecStart=/opt/photo-wall/venv/bin/python -m player.service --config /etc/photo-wall/public.json
+Restart=always
+RestartSec=2
+TimeoutStopSec=150
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/run/photo-wall
+ReadWritePaths=-/var/lib/photo-wall/player
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
