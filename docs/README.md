@@ -1,6 +1,8 @@
 # Documentation guide
 
-Photo Wall separates product behavior, implementation design, delivery work, and verification. Start with the requirements, then read the documents relevant to the change. The project is at the design stage; a described component or experiment is not evidence that it has been implemented or qualified.
+Photo Wall separates product behavior, implementation design, delivery work, and verification. Start with the requirements, then read the documents relevant to the change. The project is implementing its first MVP; a described component or experiment is not evidence that it has been implemented or qualified.
+
+Implementation status and commands: [delivery checklist](implementation-checklist.md), [runbook](runbook.md), and [evidence](evidence/README.md).
 
 ## Reading order and ownership
 

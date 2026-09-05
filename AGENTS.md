@@ -2,7 +2,7 @@
 
 Read [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the [documentation guide](docs/README.md) before changing the project. Use the owning document for each concern: [requirements](docs/requirements.md), [architecture](docs/architecture.md), [execution contract](docs/execution-contract.md), [implementation plan](docs/implementation-plan.md), [validation](docs/validation.md), and [design decisions](docs/design-decisions.md).
 
-The project is at the design stage, without application setup, build, or test commands. Add and verify them with implementation tooling; do not invent successful runs or hardware results.
+The MVP is in progress. Read [the runbook](docs/runbook.md), [implementation checklist](docs/implementation-checklist.md), and dated [evidence](docs/evidence/README.md) before continuing. Run `.venv/bin/python -m pytest -q`, `.venv/bin/python -m ruff check .`, and `python3 scripts/check_docs.py`; with the local Compose database running, run `.venv/bin/python scripts/test_local.py -q`. Report skipped integration checks explicitly. Do not invent successful runs or hardware results.
 
 ## Required development approach
 

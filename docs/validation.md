@@ -1,6 +1,6 @@
 # Validation
 
-This specification maps [requirements](requirements.md) to ownership, evidence, and proposed [implementation slices](implementation-plan.md). No test harness or qualification results exist yet. Release scope and open policies remain [design decisions](design-decisions.md); resolve relevant choices before evaluating dependent behavior.
+This specification maps [requirements](requirements.md) to ownership, evidence, and proposed [implementation slices](implementation-plan.md). Portable and PostgreSQL tests now exist; dated [evidence](evidence/README.md) distinguishes what ran from unqualified appliance/media/physical paths. Release scope and open policies remain [design decisions](design-decisions.md); resolve relevant choices before evaluating dependent behavior.
 
 ## Acceptance matrix
 

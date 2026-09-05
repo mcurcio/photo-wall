@@ -1,0 +1,1 @@
+ALTER TABLE frames ADD COLUMN configuration_revision INTEGER NOT NULL DEFAULT 1;

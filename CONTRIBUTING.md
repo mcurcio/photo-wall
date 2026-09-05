@@ -1,6 +1,6 @@
 # Contributing to Photo Wall
 
-Photo Wall is at the design stage. Contributions should connect a bounded behavior to an implementation and evidence that it works. The [requirements](docs/requirements.md) define the product; the [implementation plan](docs/implementation-plan.md) identifies useful slices. Central simulation and physical Player qualification can proceed in parallel.
+Photo Wall is implementing its first MVP. Contributions should connect a bounded behavior to an implementation and evidence that it works. The [requirements](docs/requirements.md) define the product; the [implementation plan](docs/implementation-plan.md) identifies useful slices. Central simulation and physical Player qualification can proceed in parallel.
 
 ## Get oriented
 
@@ -9,7 +9,7 @@ git clone https://github.com/mcurcio/photo-wall.git
 cd photo-wall
 ```
 
-Read the [documentation guide](docs/README.md), then the requirements and documents relevant to the change. There are no application setup, launch, build, or test commands yet. The first implementation contribution should establish real commands with pinned dependencies and verify them from a clean checkout. Add configuration examples without secrets, and include storage and migration instructions when persistence is introduced.
+Read the [documentation guide](docs/README.md), then the requirements and documents relevant to the change. The [runbook](docs/runbook.md) owns the current setup, launch, test and recovery commands. Keep dependencies locked and verify clean-checkout commands with each delivery. Configuration examples must not contain secrets. Keep storage and migration instructions alongside the runnable implementation.
 
 ## Design principles
 

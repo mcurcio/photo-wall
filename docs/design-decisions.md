@@ -2,6 +2,8 @@
 
 **Status: open decisions for the proposed implementation.** Product behavior is defined in [requirements](requirements.md); [architecture](architecture.md) describes the recommended technical direction. This register contains choices that still need a recorded outcome. Resolve the choices needed by each [implementation slice](implementation-plan.md) while independent work continues.
 
+Accepted implementation decisions: [0001 — time/recovery/module contracts](decisions/0001-mvp-time-recovery-and-module-contracts.md) and [0002 — registry/enrollment/calibration](decisions/0002-registry-and-enrollment.md). These resolve their stated initial policies; the register below retains the remaining qualification and scope questions.
+
 ## Initial implementation
 
 | ID | Decision | Starting point and evidence needed | Resolve before |
