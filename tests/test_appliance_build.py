@@ -21,6 +21,7 @@ from appliance.build import (
     decompress_base,
     execution_inventory,
     finalize,
+    install_runtime_packages,
     inventory,
     manifest,
     mbr,
@@ -222,11 +223,59 @@ def test_initramfs_boundary_allows_kernel_media_drivers_but_only_minimal_python(
 
 def test_player_sandbox_keeps_wayland_runtime_visible():
     service = (Path(__file__).parents[1] / "appliance/systemd/player.service").read_text()
+    assert "RuntimeDirectory=photo-wall/player" in service
+    assert "RuntimeDirectoryMode=0700" in service
+    assert "ExecStartPre=+/usr/bin/install -d" not in service
     assert "ProtectHome=read-only" in service
     assert "InaccessiblePaths=-/home -/root" in service
     assert "\nProtectHome=yes\n" not in "\n" + service
     assert "XDG_RUNTIME_DIR=/run/user/10001" in service
     assert "ReadWritePaths=/run/user" not in service
+
+
+def test_runtime_package_apt_transport_config_is_root_scoped_and_written_first(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/sbin").mkdir()
+    (root / "usr/bin/python3.12").write_bytes(b"python")
+    (root / "etc").mkdir()
+    (root / "etc/os-release").write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    (root / "etc/apt/sources.list.d").mkdir(parents=True)
+    (root / "var/lib/apt/lists").mkdir(parents=True)
+    (root / "dev").mkdir()
+    for name in ("null", "zero", "random", "urandom"):
+        (root / "dev" / name).write_bytes(b"")
+    evidence = tmp_path / "evidence"
+    calls = []
+    expected_config = (
+        'Acquire::Retries "2";\n'
+        'Acquire::http::Timeout "30";\n'
+        'Acquire::https::Timeout "30";\n')
+    config = root / "etc/apt/apt.conf.d/99-photo-wall-transport"
+    seen_at_update = []
+
+    def fake_in_root(_root, *argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[:2] == ("apt-get", "update"):
+            seen_at_update.append(config.read_text())
+        if argv[:1] == ("dpkg-query",):
+            if (evidence / "base-packages.tsv").exists():
+                return b"photo-wall-base\t1\tarm64\n"
+            return b"linux-image-generic\t1\tarm64\ncloud-init\t1\tall\n"
+        return b""
+
+    monkeypatch.setattr("appliance.build.in_root", fake_in_root)
+    monkeypatch.setattr("appliance.build.shutil.which", lambda _name: "/bin/true")
+    monkeypatch.setattr("appliance.build.checked_file", lambda _path, _maximum: {
+        "sha256": "0" * 64, "size": 1})
+
+    install_runtime_packages(root, evidence)
+
+    assert config.read_text() == expected_config
+    assert config.stat().st_mode & 0o777 == 0o644
+    assert seen_at_update == [expected_config]
+    apt_calls = [argv for argv, _kwargs in calls if argv[:1] == ("apt-get",)]
+    assert [argv[1] for argv in apt_calls] == ["update", "purge", "--download-only", "install"]
 
 
 def test_executing_builder_and_helpers_must_match_exported_source():

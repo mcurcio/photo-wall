@@ -1,7 +1,8 @@
 # CI appliance image and VM gate
 
 The ARM64 workflow builds the Raspberry Pi appliance from the exact checked out
-commit on `ubuntu-24.04-arm`. It first builds or restores the central image and
+commit on `ubuntu-24.04-arm`. It first checks the Player service sandbox, then
+builds or restores the central image and
 pinned Linux appliance builder through separate BuildKit caches, then runs `scripts/build_ci_image.py` inside that
 builder. The orchestration calls the existing package, Ubuntu input,
 appliance, signing, finalization, and generic-initramfs builders; it does not
@@ -20,6 +21,27 @@ python3 scripts/build_ci_image.py \
   --central-image sha256:<central-image-id> \
   --builder-image sha256:<builder-image-id>
 ```
+
+On the disposable Linux runner, the workflow runs the Player unit preflight
+immediately after checkout, before container builds and image assembly:
+
+```sh
+sudo python3 scripts/check_player_unit.py
+```
+
+This command requires root and PID 1 systemd 255. It refuses to mutate a host
+where the `wall` account/group or UID 10001, `/run/photo-wall`,
+`/run/user/10001`, or `/var/lib/photo-wall` already exists. It creates a
+uniquely named temporary unit from the checked-in
+`appliance/systemd/player.service`, retaining its sandbox and production
+`ExecStartPre` while replacing only dependencies, type, restart policy,
+timeout, and the test `ExecStart`. The probe runs as UID 10001 and checks the
+RuntimeDirectory-created writable leaf, the protected boot record, the
+Wayland socket, read-only runtime state, and hidden `/home` and private `/tmp`
+canaries. It emits only a fixed JSON status and removes only resources created
+by that run. This is a fast systemd contract check; it does not build an image,
+boot a VM, or qualify Raspberry Pi hardware. A live runner result must be
+recorded separately from the portable unit-rendering tests.
 
 The output directory contains the finalized signed disk during the e2e step,
 then its compressed `.img.xz` upload form, PXE bundle, `artifact.json`,
@@ -60,8 +82,10 @@ cleanup and the runner's available workspace.
 
 The first hosted build spent about 12 minutes extracting Ubuntu, 5 minutes
 installing runtime packages and 3–4 minutes preparing the builder container.
-The workflow targets the repeated container layers and Ubuntu extraction;
-warm-cache speedups require a measured hosted run before being claimed.
+The workflow targets the repeated container layers and Ubuntu extraction.
+The first completed warm assembly took 11m11s compared with 22m15s cold;
+the [dated evidence](evidence/2026-09-05-ci-cache.md) separates those phase
+measurements from image boot qualification and the preceding download timeout.
 
 - Central and builder images use separate ARM64
   [BuildKit GitHub cache scopes](https://docs.docker.com/build/ci/github-actions/cache/).

@@ -23,6 +23,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check the Player service sandbox before image assembly
+        timeout-minutes: 3
+        run: sudo python3 scripts/check_player_unit.py
+
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 

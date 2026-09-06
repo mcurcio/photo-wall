@@ -499,6 +499,13 @@ def install_runtime_packages(root: Path, evidence: Path) -> None:
     for path in (apt / "sources.list.d").glob("*"):
         if path.is_file() or path.is_symlink():
             path.unlink()
+    apt_config = apt / "apt.conf.d/99-photo-wall-transport"
+    apt_config.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    apt_config.write_text(
+        'Acquire::Retries "2";\n'
+        'Acquire::http::Timeout "30";\n'
+        'Acquire::https::Timeout "30";\n')
+    apt_config.chmod(0o644)
     (apt / "sources.list").write_text("".join(
         f"deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] "
         f"https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT} {suite} main universe restricted multiverse\n"

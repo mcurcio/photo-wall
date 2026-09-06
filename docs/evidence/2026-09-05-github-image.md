@@ -124,3 +124,46 @@ skips / 4 dependency warnings in 93.62 seconds**. Ubuntu's actual
 retained isolated Linux root; this checks unit configuration and executable
 paths, not successful namespace creation or socket access. No manual Pi image
 was rebuilt. A hosted boot of the corrected revision remains required.
+
+Further review found a concrete startup-ordering defect: the required
+`ReadWritePaths=/run/photo-wall/player` path was created by an `ExecStartPre`
+command, but mount namespaces are prepared before that command can run.
+The initial assumption that the command's `+` prefix exempted it from this
+check was incorrect. In the pinned systemd 255 implementation,
+[`exec_needs_mount_namespace`](https://raw.githubusercontent.com/systemd/systemd/v255/src/core/execute.c)
+requires a namespace for nonempty write paths, and
+[`apply_mount_namespace`](https://raw.githubusercontent.com/systemd/systemd/v255/src/core/exec-invoke.c)
+passes those paths even for fully privileged commands.
+
+The corrected unit uses `RuntimeDirectory=photo-wall/player` and mode `0700`
+to create the child before command namespaces. Its root-owned parent and
+protected boot report remain separate from Player health. **23 focused tests
+passed / 2 Linux file-tooling skips**, and Ubuntu's actual unit validator
+passed again. This establishes a source-supported correction; a successful
+service execution and exact-image boot remain distinct qualification gates.
+
+The subsequent live check in a disposable, network-isolated Ubuntu ARM64
+container running systemd **255.4-1ubuntu8.17** reproduced the old unit's
+failure: `Failed to set up mount namespacing: /run/photo-wall/player: No such
+file or directory`, followed by `226/NAMESPACE`. The corrected unit passed
+the same check as UID 10001: writable runtime and durable state, Wayland Unix
+socket connection, read-only user runtime, protected boot record/parent,
+hidden home, private temporary files, and runtime-directory removal on stop.
+All temporary paths, account and group were removed after both runs. **8
+focused preflight tests also passed on Linux**, including actual Unix-socket
+cleanup. The first probe exposed a fixture-only redundant group deletion;
+that bookkeeping error was corrected before the passing run.
+
+GitHub now runs this short live-systemd preflight immediately after checkout,
+before building containers or assembling an image. It uses the checked-in
+service sandbox and startup preparation with a synthetic probe executable.
+It qualifies that service contract, not the full Player, VM boot, or hardware.
+
+The combined early preflight, RuntimeDirectory correction and bounded APT
+transport change passed **833 PostgreSQL-backed tests / 10 host-specific
+skips / 4 dependency warnings in 94.18 seconds**. Ruff, all 53 documentation
+link sets and actionlint passed. The skipped filesystem tools, GNU tar, TFTP
+and root-UID cases remain explicitly separate from the live systemd evidence.
+The subsequent group-collision regression passed in the eight-test Linux
+preflight suite and the final live probe passed again; no preexisting `wall`
+group is reused or removed.
