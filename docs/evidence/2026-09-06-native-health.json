@@ -1,0 +1,18 @@
+{
+  "acceptance_elapsed_seconds": 30.437,
+  "boot_id": "638cfae2-09d5-479d-bf7a-7ed15edd1690",
+  "elapsed_seconds": 32.322,
+  "health_after_native_initialization": true,
+  "health_before_native_initialization": false,
+  "native_capacity_after": true,
+  "native_capacity_before": false,
+  "qualification": {
+    "central": "synthetic",
+    "physical": false,
+    "production_native_adapter": true,
+    "rootfs": "synthetic"
+  },
+  "release_id": "bec0055ae8bee5e40fc7cba96255907637d2e24d5da9fb3701a530519e860f1f",
+  "result": "passed",
+  "schema": 1
+}

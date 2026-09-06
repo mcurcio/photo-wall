@@ -19,3 +19,6 @@ Real Immich and native Linux integration have executed evidence; physical Pi/PXE
 - [2026-09-05 CI cache checks](2026-09-05-ci-cache.md): verified metadata-preserving base and container caches; measured warm assembly at 11m11s versus 22m15s cold.
 - [2026-09-06 systemd updates](2026-09-06-systemd-updates.md): five actual Linux acceptance/recovery adapter scenarios passed; reboot action recorded, with native health and physical rollback still unqualified.
 - [2026-09-06 central health](2026-09-06-central-health.md): scheduler errors and stale coordination now affect service health; 840 PostgreSQL-backed tests passed.
+
+- [2026-09-06 restart content](2026-09-06-restart-content.md): same-key epoch changes preserve secured bytes while requiring fresh readiness and commitments.
+- [2026-09-06 native health](2026-09-06-native-health.md): actual native Player health promoted a signed synthetic trial after 30.437s; physical/full-image acceptance remains separate.

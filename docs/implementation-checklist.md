@@ -58,3 +58,19 @@ Next gates are boot/update qualification, the authenticated operator walkthrough
 ## Evidence rules
 
 Put dated command/revision/result records in `docs/evidence/`. Label each simulated, integration, or physical. A test filename or manifest is not proof it ran. No physical Pi image/boot result exists yet. Never commit credentials, private media, binary images, or unsanitized private server responses.
+
+## Subsequent review and native-health checkpoint
+
+The final integrated core review found a Player-restart content-lock defect:
+epoch rotation could reroll secured bytes after a source change. The
+[correction](evidence/2026-09-06-restart-content.md) preserves exact historical
+content under unchanged binding authority while requiring fresh-epoch
+readiness/commitments; 22 focused coordination checks passed and independent
+review found no residual issue in that scope. The older full-media pass is
+not relabeled as a pass for this new core revision.
+
+A [native-health adapter run](evidence/2026-09-06-native-health.md) passed
+production 30-second trial acceptance after 30.437s using real GTK/GStreamer
+capacity and Player-generated health, with synthetic authority and rootfs.
+Full-image native acceptance, actual rollback, authenticated browser QA and
+physical qualification remain open.
