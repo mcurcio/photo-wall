@@ -181,8 +181,15 @@ read-only, locates the unique `PWSTATE` ext4 filesystem, verifies the production
 state marker and rejects symlinks along `/player/cache/<sha>.blob`. It verifies
 the exact bounded size and SHA-256 without exporting media bytes. Its temporary
 filesystem/tooling permissions are confined to that container; both original
-disk and VM directory mounts are read-only. A2 and restored A3 must each
-present a newly committed assignment using the same converted bytes, and the
+disk and VM directory mounts are read-only. After this first stopped-disk proof, a separate owned `media-control` volume
+holds a fixed denial marker. Central mounts it read-only and the checked worker
+acts as the test writer; production media cleanup owns neither the mount nor its
+contents. The CI gateway denies media bodies with a fixed 503 response while
+control/enrollment stays available. Denial persists across central restart and
+is verified for the exact photo URL before and after each later drawing.
+A2 and restored A3 must each
+present a newly committed assignment using the same converted bytes under this
+delivery denial, and the
 stopped A3 disk must retain the same cache object. No additional boot is inserted.
 
 The harness also checks exact container network memberships and verifies DNS

@@ -170,3 +170,8 @@ with its SHA-256 for the package builder only; this tool environment is never
 copied into the appliance runtime. Ubuntu package resolution remains pinned to the dated snapshot in
 `appliance/build.py` and the builder Dockerfile. No repository private key,
 operator credential, or upstream connection secret enters the build context.
+
+The derived upstream fixture explicitly uses the daemon's default builder for
+its already-loaded central parent. A selected container-based Buildx builder
+cannot see that local parent tag. The isolated reproduction and cache-gate
+correction are recorded in [media evidence](evidence/2026-09-06-vm-media.md).

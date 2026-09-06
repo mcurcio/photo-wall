@@ -76,3 +76,55 @@ def test_unverified_or_symlinked_bundle_is_never_served(bundle, failure):
         path.symlink_to(saved)
     with pytest.raises((OSError, ValueError, InvalidSignature)):
         BootBundle.load(root, public)
+
+
+def test_persistent_media_fault_denies_bodies_but_preserves_control(tmp_path):
+    from scripts.boot_gateway import install_media_denial
+
+    control = tmp_path / "control"
+    control.mkdir()
+    delivered = []
+    def app():
+        result = FastAPI()
+        @result.get("/v1/media/{digest}")
+        def media(digest):
+            delivered.append(digest)
+            return {"bytes": "photo"}
+        @result.get("/v1/player/state")
+        def state():
+            return {"control": "available"}
+        install_media_denial(result, control)
+        return result
+    with TestClient(app()) as client:
+        assert client.get("/v1/media/" + "a" * 64).status_code == 200
+    (control / "media-blocked").write_bytes(b"photo-wall-ci-media-blocked-v1\n")
+    # Recreating the app models the central restart: denial is persistent.
+    for _ in range(2):
+        with TestClient(app()) as client:
+            for method in ("GET", "HEAD"):
+                response = client.request(method, "/v1/media/" + "a" * 64)
+                assert response.status_code == 503
+                assert response.headers["x-photo-wall-fixture"] == "media-blocked"
+                if method == "GET":
+                    assert response.json() == {"error": "fixture_media_blocked"}
+            assert client.get("/v1/player/state").json() == {"control": "available"}
+    assert len(delivered) == 1
+
+
+def test_invalid_or_unreadable_fault_marker_keeps_delivery_denied(tmp_path, monkeypatch):
+    from scripts import boot_gateway
+
+    app = FastAPI()
+    boot_gateway.install_media_denial(app, tmp_path)
+    marker = tmp_path / "media-blocked"
+    marker.symlink_to(tmp_path / "missing")
+    with TestClient(app) as client:
+        assert client.get("/v1/media/" + "a" * 64).status_code == 503
+        original = boot_gateway.os.lstat
+        def denied(path, *args, **kwargs):
+            if path == marker:
+                raise PermissionError("private-path")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(boot_gateway.os, "lstat", denied)
+        response = client.get("/v1/media/" + "a" * 64)
+        assert response.status_code == 503 and "private-path" not in response.text

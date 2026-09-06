@@ -149,7 +149,9 @@ class FixtureHost:
             require(actual == base_image, "fixture_base_changed")
             self._command(["docker", "tag", base_image, self.project + "-base:local"],
                           timeout=30, capture=False)
-        self.compose("build", "central-probe", timeout=600, capture=False)
+        # The parent is loaded in this Docker daemon. A selected docker-container
+        # Buildx builder (as in GHA) cannot resolve that daemon-local FROM tag.
+        self.compose("build", "--builder", "default", "central-probe", timeout=600, capture=False)
 
     def export_runtime(self) -> None:
         # Container state includes the fixture runtime key; target is private 0700.

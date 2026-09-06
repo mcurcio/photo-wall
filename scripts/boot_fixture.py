@@ -59,7 +59,8 @@ def expected(bundle):
 def initialize():
     if os.geteuid() != 0:
         raise ValueError('root initialization required')
-    media_mode = len(sys.argv) == 4 and sys.argv[3] == 'media'
+    media_mode = len(sys.argv) == 4 and sys.argv[3] in ('media', 'media-control')
+    control_mode = media_mode and sys.argv[3] == 'media-control'
     if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and not media_mode):
         raise ValueError('invalid initialization arguments')
     for name, names in (('bundle', None), ('public', {'public.json','bootstrap.json','ca.pem','release.pub.pem'}),
@@ -74,6 +75,12 @@ def initialize():
             path.chmod(0o600 if name == 'tls' else 0o444)
         os.chown(root, 10001, 10001)
         root.chmod(0o700 if name == 'tls' else 0o555)
+    if control_mode:
+        control = Path('/fixture-control')
+        if not control.is_dir() or control.is_symlink() or any(control.iterdir()):
+            raise ValueError('unexpected fixture control files')
+        os.chown(control, 10001, 10001)
+        control.chmod(0o700)
     private = Path('/private')
     if media_mode:
         media = Path('/media')
@@ -228,7 +235,9 @@ def media_spec(value: dict | None) -> dict | None:
     """Validate the public identity needed to attach the optional media worker."""
     if value is None:
         return None
-    require(isinstance(value, dict) and set(value) == MEDIA_KEYS, "media_spec_invalid")
+    require(isinstance(value, dict) and set(value) in (MEDIA_KEYS, MEDIA_KEYS | {"delivery_control"}),
+            "media_spec_invalid")
+    require("delivery_control" not in value or value["delivery_control"] is True, "media_control_invalid")
     require(isinstance(value["worker_image"], str)
             and WORKER_IMAGE_PATTERN.fullmatch(value["worker_image"]) is not None,
             "media_worker_image_invalid")
@@ -369,6 +378,10 @@ def composition(project: str, media: dict | None = None) -> dict:
             networks={"database":{}, "upstream":{}},
             depends_on={"database":{"condition":"service_healthy"}},
         )
+    if media is not None and media.get("delivery_control"):
+        services["central"]["environment"]["PHOTO_WALL_FIXTURE_MEDIA_CONTROL"] = "/fixture-control"
+        services["central"]["volumes"].append(volume(project, "media-control", "/fixture-control"))
+        services["worker"]["volumes"].append(volume(project, "media-control", "/fixture-control", readonly=False))
     networks = {name:dict(external=True,name=project+"-"+name) for name in ("front","database")}
     volumes = {name:dict(external=True,name=project+"-"+name)
                for name in ("database","bundle","public","tls","probe")}
@@ -376,6 +389,8 @@ def composition(project: str, media: dict | None = None) -> dict:
         networks["upstream"] = dict(external=True, name=media["upstream_project"]+"_upstream_net")
         volumes.update({name:dict(external=True,name=project+"-"+name)
                         for name in ("media", "private")})
+    if media is not None and media.get("delivery_control"):
+        volumes["media-control"] = dict(external=True, name=project+"-media-control")
     return dict(services=services, networks=networks, volumes=volumes)
 
 
@@ -566,6 +581,8 @@ class BootFixture:
         if self.media is not None:
             allowed["volume"].update({self.project+"-"+n for n in ("media", "private")})
             allowed["container"].add(self.project+"-worker")
+            if self.media.get("delivery_control"):
+                allowed["volume"].add(self.project+"-media-control")
         require(kind in allowed and name in allowed[kind],"unrecorded_resource")
         if missing_ok and not self.exists(kind,name):
             return None
@@ -667,11 +684,13 @@ class BootFixture:
         with self.locked():
             self.check_inputs()
             seed_names = ("bundle", "public", "tls", "media", "private") if self.media is not None else ("bundle", "public", "tls")
+            if self.media and self.media.get("delivery_control"):
+                seed_names += ("media-control",)
             missing = [name for name in seed_names
                        if not self.exists("volume", self.project+"-"+name)]
             if missing:
                 if self.media is not None and self.marker["initialized"] \
-                        and any(name in missing for name in ("media", "private")):
+                        and any(name in missing for name in ("media", "private", "media-control")):
                     raise FixtureError("media_volume_missing")
                 if self.marker["initialized"]:
                     self.marker["initialized"] = False
@@ -704,6 +723,8 @@ class BootFixture:
             for name in ("front","database"):
                 self.create_resource("network",name)
             volume_names = ("database","bundle","public","tls","probe","media","private") if self.media is not None else ("database","bundle","public","tls","probe")
+            if self.media and self.media.get("delivery_control"):
+                volume_names += ("media-control",)
             for name in volume_names:
                 self.create_resource("volume",name)
             if not self.marker["initialized"]:
@@ -712,11 +733,14 @@ class BootFixture:
                     self.remove(seed)
                     seed = self.remember("container",self.project+"-seed")
                 seed_names = ("bundle","public","tls","probe","media","private") if self.media is not None else ("bundle","public","tls","probe")
+                if self.media and self.media.get("delivery_control"):
+                    seed_names += ("media-control",)
                 mounts = [argument for name in seed_names for argument in
-                          ("--mount",f"type=volume,source={self.project}-{name},target=/{name},volume-nocopy")]
+                          ("--mount",f"type=volume,source={self.project}-{name},target=/"
+                           + ("fixture-control" if name == "media-control" else name) + ",volume-nocopy")]
                 init_args = ["init", encoded(self.expect()).decode().strip()]
                 if self.media is not None:
-                    init_args.append("media")
+                    init_args.append("media-control" if self.media.get("delivery_control") else "media")
                 self.run(["docker","create","--name",seed["name"],"--label",LABEL+"="+self.project,
                           "--network","none","--memory","192m","--cpus","0.5","--user","0:0",
                           *mounts,image["name"],"python","/opt/boot-fixture/runtime.py",*init_args],timeout=30)

@@ -612,6 +612,7 @@ class ApplianceE2E:
         require(not self.checked_vm()["Running"], "vm_stop_failed")
         if media:
             media.verify_cache("before_restart")
+            media.block_delivery()
         self.run(["docker", "start", self.name], timeout=30)
         second = self.wait_enrollment(first)
         require(self.report["boots"][-1]["slot"] == "A"

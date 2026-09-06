@@ -20,6 +20,46 @@ from scripts.immich_fixture import FixtureHost
 
 MEDIA_TIMEOUT = 420
 CACHE_TIMEOUT = 300
+DELIVERY_MARKER = r'''
+import os, stat, sys
+path = '/fixture-control/media-blocked'
+expected = b'photo-wall-ci-media-blocked-v1\n'
+if sys.argv[1] == 'create':
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, expected)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fd = os.open('/fixture-control', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+try:
+    info = os.fstat(fd)
+    if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == 10001
+            and stat.S_IMODE(info.st_mode) == 0o600 and os.read(fd, 128) == expected):
+        raise ValueError('media_marker_invalid')
+finally:
+    os.close(fd)
+print('media-blocked')
+'''
+DELIVERY_PROBE = r'''
+import ssl, sys, urllib.error, urllib.request
+client = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile='/public/ca.pem')))
+try:
+    client.open('https://photo-wall.test/v1/media/' + sys.argv[1], timeout=5)
+except urllib.error.HTTPError as error:
+    if not (error.code == 503 and error.headers.get('X-Photo-Wall-Fixture') == 'media-blocked'
+            and error.read(128) == b'{"error":"fixture_media_blocked"}'):
+        raise ValueError('media_denial_invalid')
+else:
+    raise RuntimeError('media_delivery_open')
+print('media-blocked')
+'''
 DENIAL_PROBE = """
 import json, socket, sys
 try:
@@ -48,12 +88,22 @@ class ApplianceMedia:
 
     def prepare(self) -> tuple[dict, Path]:
         h = self.harness
+        h.report["media_setup_phase"] = "create"
         self.upstream = FixtureHost.create(h.state / "immich")
-        self.upstream.build(base_image=h.central_image)
+        h.report["media_setup_phase"] = "build"
+        try:
+            self.upstream.build(base_image=h.central_image)
+        except Exception:
+            raise FixtureError("media_fixture_build_failed") from None
+        h.report["media_setup_phase"] = "start"
         self.upstream.compose("up", "-d", "--wait", "--wait-timeout", "240", timeout=600, capture=False)
+        h.report["media_setup_phase"] = "topology"
         inventory, upstream_ip = self.upstream.topology()
+        h.report["media_setup_phase"] = "initialize"
         initialized = self.upstream.role("setup", "initialize")
+        h.report["media_setup_phase"] = "export"
         self.upstream.export_runtime()
+        h.report["media_setup_phase"] = "connections"
         runtime = self.upstream.state / "runtime"
         connection = json.loads(read_file(runtime / "connection.json", 16384))
         private = h.state / "worker-connections.json"
@@ -74,8 +124,27 @@ class ApplianceMedia:
         self.upstream_ip = upstream_ip
         h.report["media"] = dict(worker_image=self.worker_image, upstream=initialized,
                                   upstream_inventory=inventory, presentations={}, cache={})
+        h.report["media_setup_phase"] = "ready"
         return dict(worker_image=self.worker_image, upstream_project=self.upstream.project,
-                    upstream_network_id=network_id), private
+                    upstream_network_id=network_id, delivery_control=True), private
+
+    def _delivery_denial(self, create: bool):
+        h = self.harness
+        central = h.fixture_central()
+        worker = h.fixture.project + "-worker"
+        h.fixture.check(h.fixture.resources["container:" + worker])
+        h.fixture.check(h.fixture.resources["volume:" + h.fixture.project + "-media-control"])
+        require(h.run(["docker", "exec", worker, "python", "-c", DELIVERY_MARKER,
+                       "create" if create else "verify"], timeout=15).strip() == b"media-blocked",
+                "media_delivery_marker_invalid")
+        digest = h.report["media"]["presentations"]["fresh"]["sha256"]
+        require(h.run(["docker", "exec", central, "python", "-c", DELIVERY_PROBE, digest],
+                      timeout=15).strip() == b"media-blocked", "media_delivery_not_blocked")
+
+    def block_delivery(self):
+        require(not self.harness.checked_vm()["Running"], "media_block_requires_stopped_vm")
+        self._delivery_denial(True)
+        self.harness.report["media"]["delivery_blocked_after_first_acquisition"] = True
 
     def probe(self, action: str, player: dict, *args: str) -> dict:
         h = self.harness
@@ -95,6 +164,8 @@ class ApplianceMedia:
 
     def wait_presentation(self, label: str, player: dict):
         h = self.harness
+        if label != "fresh":
+            self._delivery_denial(False)
         deadline = time.monotonic() + MEDIA_TIMEOUT
         expected = h.report["media"]["presentations"].get("fresh", {}).get("sha256")
         args = ["--output-id", self.setup["output_id"], "--original-sha256", self.photo["sha256"]]
@@ -126,6 +197,8 @@ class ApplianceMedia:
                         and proof["original_sha256"] == self.photo["sha256"]
                         and (expected is None or proof["sha256"] == expected), "media_evidence_mismatch")
                 h.report["media"]["presentations"][label] = proof
+                if label != "fresh":
+                    self._delivery_denial(False)
                 return proof
             time.sleep(2)
         raise FixtureError("native_photo_presentation_timeout")

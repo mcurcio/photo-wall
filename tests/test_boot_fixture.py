@@ -121,11 +121,12 @@ def prepared_fixture(tmp_path: Path) -> BootFixture:
     return BootFixture.prepare(tmp_path / "fixture-state", bundle, deployment, CENTRAL_IMAGE)
 
 
-def prepared_media_fixture(tmp_path: Path) -> BootFixture:
+def prepared_media_fixture(tmp_path: Path, *, control=False) -> BootFixture:
     bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "fixture-data")
     connections = write_connections(tmp_path / "connections.json")
     return BootFixture.prepare(tmp_path / "fixture-state", bundle, deployment, CENTRAL_IMAGE,
-                               media=media_spec(), connections_file=connections)
+                               media=media_spec() | ({"delivery_control": True} if control else {}),
+                               connections_file=connections)
 
 
 def test_composition_contract_has_isolated_dns_and_networks():
@@ -575,3 +576,28 @@ def test_shared_base_tag_is_checked_by_exact_identity_without_relabeling(tmp_pat
     fixture.inspect = lambda *_: ({}, "sha256:" + "1" * 64)
     with pytest.raises(FixtureError, match="base_image_changed"):
         fixture.check(record)
+
+
+def test_media_control_has_separate_owned_persistent_volume(tmp_path):
+    fixture = prepared_media_fixture(tmp_path, control=True)
+    document = read_json(fixture.state / "compose.json")
+    name = fixture.project + "-media-control"
+    assert document["volumes"]["media-control"] == dict(external=True, name=name)
+    for service, readonly in (("central", True), ("worker", False)):
+        mount = next(item for item in document["services"][service]["volumes"]
+                     if item["target"] == "/fixture-control")
+        assert mount["source"] == "media-control" and mount["read_only"] is readonly
+    assert document["services"]["central"]["environment"]["PHOTO_WALL_FIXTURE_MEDIA_CONTROL"] == "/fixture-control"
+    fixture.marker["initialized"] = True
+    write_json(fixture.state / "fixture.json", fixture.marker)
+    fixture.check_inputs = lambda: None
+    fixture.exists = lambda kind, candidate: candidate != name
+    with pytest.raises(FixtureError, match="media_volume_missing"):
+        fixture.up()
+    assert read_json(fixture.state / "fixture.json")["initialized"] is True
+
+
+@pytest.mark.parametrize("invalid", [False, 1, "true", None])
+def test_media_control_requires_explicit_boolean_opt_in(invalid):
+    with pytest.raises(FixtureError, match="media_control_invalid"):
+        composition("pw-boot-" + "a" * 16, media_spec() | dict(delivery_control=invalid))

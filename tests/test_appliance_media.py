@@ -110,6 +110,7 @@ def test_upstream_reuses_exact_loaded_image_instead_of_rebuilding(tmp_path, monk
     monkeypatch.setattr(host, "_command", command)
     host.build(base_image=digest)
     assert calls[1] == ["docker", "tag", digest, host.project + "-base:local"]
+    assert calls[-1][-4:] == ["build", "--builder", "default", "central-probe"]
     assert not any(args[:2] == ["docker", "build"] for args in calls)
 
 
@@ -127,3 +128,70 @@ def test_upstream_rejects_changed_image_before_tagging(tmp_path, monkeypatch):
     with pytest.raises(HarnessError, match="fixture_base_changed"):
         host.build(base_image="sha256:" + "a" * 64)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("erase_restart,erase_rollback", [(False, False), (True, False), (False, True)])
+def test_cache_qualification_cannot_reacquire_lost_bytes(tmp_path, monkeypatch, erase_restart, erase_rollback):
+    from scripts import test_appliance_e2e as e2e
+
+    platform = dict(running=True, epoch=0, cached=False, acquisitions=0, blocked=False)
+    harness = object.__new__(e2e.ApplianceE2E)
+    harness.state, harness.name, harness.central_image = tmp_path, "vm", "image"
+    harness.inputs = dict(bundle=tmp_path, deployment=tmp_path)
+    harness.report = dict(boots=[], checks={}, qualification=e2e.unqualified())
+    def player():
+        return dict(player_id="p-" + "b" * 32, authority_epoch=platform["epoch"], persistence="durable", retired=False)
+    harness.inventory = lambda: [player()] if platform["epoch"] else []
+    def enroll(previous=None):
+        platform["epoch"] += 1
+        harness.report["boots"].append(dict(slot="A", trial=False))
+        return player()
+    harness.wait_enrollment = enroll
+    harness.checked_vm = lambda: dict(Running=platform["running"])
+    def run(args, **kwargs):
+        if args[:2] == ["docker", "stop"] and args[-1] == "vm":
+            platform["running"] = False
+        if args[:2] == ["docker", "start"] and args[-1] == "vm":
+            platform["running"] = True
+            if erase_restart:
+                platform["cached"] = False
+        return b""
+    harness.run = run
+    harness.fixture_central = lambda: "central"
+    harness.start_vm = harness.wait_trial_acceptance = lambda: None
+    harness.wait_player_requests = lambda _: None
+    def rollback(previous):
+        if erase_rollback:
+            platform["cached"] = False
+        harness.report["fallback_enrollment"] = enroll(previous)
+    harness.exercise_rollback = rollback
+    class Media:
+        def prepare(self):
+            return {}, tmp_path / "connections"
+        def network_denial(self, label):
+            pass
+        def configure(self, player):
+            pass
+        def wait_presentation(self, label, player):
+            if not platform["cached"]:
+                if platform["blocked"]:
+                    raise FixtureError("native_photo_presentation_timeout")
+                platform["acquisitions"] += 1
+                platform["cached"] = True
+        def verify_cache(self, label):
+            assert not platform["running"] and platform["cached"]
+        def block_delivery(self):
+            assert not platform["running"]
+            platform["blocked"] = True
+    harness.media = Media()
+    monkeypatch.setattr(e2e.BootFixture, "prepare", lambda *a, **kw: SimpleNamespace(up=lambda: None))
+    monkeypatch.setattr(e2e.time, "sleep", lambda _: None)
+    if erase_restart or erase_rollback:
+        with pytest.raises(FixtureError, match="native_photo_presentation_timeout"):
+            harness.execute()
+        assert not any(harness.report["qualification"].values())
+        assert "populated_cache_survives_restart_and_rollback" not in harness.report["checks"]
+    else:
+        harness.execute()
+        assert harness.report["checks"]["populated_cache_survives_restart_and_rollback"] is True
+    assert platform["acquisitions"] == 1
