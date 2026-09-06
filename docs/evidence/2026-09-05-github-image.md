@@ -43,3 +43,29 @@ Image upload is gated on successful e2e, so this disk was **not uploaded** and i
 not available as a downloadable qualified artifact. Only the public build-log
 artifact was uploaded. No healthy-trial, automatic rollback, physical Pi/PXE,
 HDMI or visible-rendering result is claimed. See the [e2e contract](../module-appliance-e2e.md).
+
+## Follow-up source verification
+
+At `1edbbd358f8591e9fda1c39e5837a43cfb38bf27`, the full local PostgreSQL-backed
+suite passed **802 tests / 4 explicit Linux-only skips / 4 dependency warnings**.
+The skips were two opt-in Linux image-tooling fixtures, real Linux TFTP and the
+root-owned Linux UID gate. The sandboxed portable run had 683 passes, 122
+integration skips and one loopback permission failure; the authorized full
+integration run passed that loopback test.
+
+[Standard GitHub CI job](https://github.com/mcurcio/photo-wall/actions/runs/34014002087/job/101434552008)
+passed **756 tests / 50 explicit skips**, then **55 pinned Linux media preparation
+tests**. A separate copy of the exact committed source in the existing isolated
+ARM64 builder passed **153 tests in 77.84 seconds** with actual FAT/ext4/squashfs
+creation, libguestfs metadata-preserving extraction and root-owned updater
+permissions. This was focused file tooling, not another manual Pi image build.
+
+An independent startup review subsequently found that ordinary accepted boots
+incorrectly failed the enabled trial-acceptance service. The correction makes
+a protected, current non-trial report a successful no-op only when it matches
+the accepted selected and active slot. Trial acceptance remains strict. The
+follow-up change passed **132 related local checks / 1 Linux UID skip**, then
+**76 actual Linux updater checks**, including accepted-boot CLI success without
+health polling/state mutation and rejection of mismatched or malformed reports.
+This establishes the command's behavior, not an actual systemd or Pi reboot.
+Counts overlap and are not summed.

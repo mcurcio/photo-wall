@@ -508,6 +508,45 @@ def test_accept_current_derives_exact_policy_and_promotes_only_after_full_health
     assert (rig.root / "player/identity.key").read_bytes() == b"private fixture identity"
 
 
+def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, acceptance, monkeypatch):
+    assert accept_current(rig, acceptance)
+    selected = acceptance.store.select_boot("boot-restart")
+    assert selected and not selected.trial
+    acceptance.report_path.write_text(json.dumps(dict(
+        schema=1, boot_id="boot-restart", release_id=selected.release.release_id,
+        slot=selected.slot, trial=False, persistence="durable", fault=None)))
+    acceptance.report_path.chmod(0o600)
+    acceptance.health_path.unlink()
+    before = (rig.root / "updates/state.json").read_bytes()
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-restart")
+    real_accept_current = updates.accept_current
+    monkeypatch.setattr(updates, "accept_current",
+                        lambda state_root, config_dir: real_accept_current(
+                            state_root, config_dir, boot_report=acceptance.report_path,
+                            health_report=acceptance.health_path))
+    monkeypatch.setattr(sys, "argv", ["updates", "--state-root", str(rig.root),
+                                      "accept-current", "--config-dir", str(acceptance.config_dir)])
+    assert updates.main() is None
+    assert acceptance.now == [30.0]
+    assert (rig.root / "updates/state.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("change", [{"release_id": "f" * 64}, {"slot": "B"}, {"trial": 0}])
+def test_accepted_restart_noop_rejects_mismatched_or_malformed_report(
+        rig, acceptance, monkeypatch, change):
+    assert accept_current(rig, acceptance)
+    selected = acceptance.store.select_boot("boot-restart")
+    assert selected and selected.slot == "A" and not selected.trial
+    acceptance.report_path.write_text(json.dumps(dict(
+        schema=1, boot_id="boot-restart", release_id=selected.release.release_id,
+        slot=selected.slot, trial=False, persistence="durable", fault=None) | change))
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-restart")
+    before = (rig.root / "updates/state.json").read_bytes()
+    with pytest.raises(UpdateError, match="boot_report_mismatch"):
+        accept_current(rig, acceptance)
+    assert (rig.root / "updates/state.json").read_bytes() == before
+
+
 def failed_trial(rig, acceptance):
     a = acceptance
     assert a.store.mark_good(a.release.release_id, a.boot_id)

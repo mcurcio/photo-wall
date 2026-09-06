@@ -43,7 +43,8 @@ The build phases remove the compressed Ubuntu input after decompression unless
 source export, player wheelhouse, and package staging after each consuming
 phase. Sparse decompression preserves the raw image bytes without allocating
 whole zero-filled blocks on Linux. These measures reduce peak workspace use;
-the first hosted run must establish the actual disk budget. Every generated output
+the [first hosted build](evidence/2026-09-05-github-image.md) recorded about 106 GiB
+initial free space and completed assembly; its peak usage was not measured. Every generated output
 is a new regular-file-backed path outside Git. A failed fixture setup or build removes its newly created private deployment
 and temporary workspace; preexisting paths are refused and preserved. Successful
 builds remove the signing key and retain only the disposable TLS fixture until

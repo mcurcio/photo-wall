@@ -433,7 +433,7 @@ def _linux_boot_id() -> str:
     return value
 
 
-def _boot_report(path: Path, boot_id: str) -> dict:
+def _boot_report(path: Path, boot_id: str, *, require_trial: bool = True) -> dict:
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -459,7 +459,8 @@ def _boot_report(path: Path, boot_id: str) -> dict:
             or report["boot_id"] != boot_id
             or not isinstance(report["release_id"], str)
             or not re.fullmatch(r"[a-f0-9]{64}", report["release_id"])
-            or report["slot"] not in ("A", "B") or report["trial"] is not True
+            or report["slot"] not in ("A", "B") or type(report["trial"]) is not bool
+            or (require_trial and report["trial"] is not True)
             or report["persistence"] != "durable" or report["fault"] is not None):
         raise UpdateError("boot_report_mismatch")
     return report
@@ -511,9 +512,25 @@ def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"),
     from appliance.bootstrap import BootConfig
 
     config = BootConfig.load(config_dir)
-    report = _boot_report(boot_report, _linux_boot_id())
+    boot_id = _linux_boot_id()
+    report = _boot_report(boot_report, boot_id, require_trial=False)
     store = SlotStore(state_root, config.directory / "release.pub.pem", config.boot_abi,
                       config.configuration_sha256)
+    if not report["trial"]:
+        # Bootstrap reports an accepted active slot on an ordinary restart. It
+        # is already authenticated and must not be subjected to the trial
+        # health wait or mutate update state again. Require the protected
+        # report to agree with the current accepted selection before no-oping.
+        with store._locked():
+            state = store._state()
+            active, selected = state["active"], state["selected"]
+            if (not active or not selected or not selected["accepted"]
+                    or selected["trial"]
+                    or selected["boot_id"] != boot_id
+                    or any(selected[key] != report[key] for key in ("slot", "release_id"))
+                    or any(active[key] != report[key] for key in ("slot", "release_id"))):
+                raise UpdateError("boot_report_mismatch")
+        return False
     return accept_trial(store, report["release_id"], boot_report=boot_report,
                         health_report=health_report)
 

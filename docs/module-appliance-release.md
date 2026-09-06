@@ -60,8 +60,12 @@ and explicit CLI acceptance delegate to the same `accept_trial` gate.
 health_report)` uses `BootConfig.load` to validate the embedded public files,
 configuration digest and boot ABI. It reads the actual Linux boot ID and the
 root-owned report to obtain this boot's release ID, constructs the matching
-SlotStore, and calls `accept_trial`. It never selects or stages a release. There
-is no baked release ID in the rootfs and no alternate health policy.
+SlotStore, and calls `accept_trial` for a trial boot. On an ordinary accepted
+restart, a valid non-trial report must match the current accepted selection,
+active slot, release and boot ID; the command then succeeds without polling
+health or changing state. The lower-level trial gate remains trial-only.
+It never selects or stages a release. There is no baked release ID in the
+rootfs and no alternate health policy.
 
 `rollback_current_allowed(state_root, config_dir=/etc/photo-wall, *, boot_report)`
 is the bounded predicate used by the trial-failure recovery unit. Under the
