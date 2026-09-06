@@ -26,6 +26,8 @@ from contracts.models import Calibration, Identifier, Model, Observation, Readin
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
+SCHEDULER_MAX_AGE = 10.0
+
 
 class Challenge(Model):
     public_key: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -83,22 +85,28 @@ def create_app(db: Database | None = None, clock: Clock | None = None,
     media_root = media_root or (Path(os.environ["PHOTO_WALL_MEDIA_ROOT"])
                                if "PHOTO_WALL_MEDIA_ROOT" in os.environ else None)
     media_gateway = MediaGateway(MediaStore(coordinator.media, media_root)) if media_root else None
-    scheduler_health = {"running": False, "last_tick": None, "error": None}
+    scheduler_health = {"enabled": run_scheduler, "running": False, "status":
+                        "starting" if run_scheduler else "disabled", "last_tick": None,
+                        "last_tick_monotonic": None, "error": None}
 
     async def scheduler():
         scheduler_health["running"] = True
+        scheduler_health["status"] = "starting"
         try:
             while True:
                 try:
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(coordinator.media.request_acquisitions, projection.acquisitions)
-                    scheduler_health.update(last_tick=clock.utc(), error=None)
+                    scheduler_health.update(last_tick=clock.utc(),
+                                           last_tick_monotonic=clock.monotonic(),
+                                           error=None, status="ok")
                 except Exception:
                     # Sanitized health only: driver exceptions may include connection secrets.
-                    scheduler_health["error"] = "coordination_unavailable"
+                    scheduler_health.update(error="coordination_unavailable",
+                                           status="coordination_unavailable")
                 await asyncio.sleep(1)
         finally:
-            scheduler_health["running"] = False
+            scheduler_health.update(running=False, status="stopped")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -145,11 +153,33 @@ def create_app(db: Database | None = None, clock: Clock | None = None,
     @app.get("/healthz")
     def health():
         try:
-            healthy = db.healthy()
+            database = db.healthy()
         except Exception:
-            healthy = False
-        return JSONResponse({"status": "ok" if healthy else "unavailable", "database": healthy,
-                             "protocol": 1, "scheduler": scheduler_health}, status_code=200 if healthy else 503)
+            database = False
+        scheduler = dict(scheduler_health)
+        last_tick_monotonic = scheduler["last_tick_monotonic"]
+        scheduler.pop("last_tick_monotonic", None)
+        if scheduler["enabled"]:
+            if scheduler["status"] == "stopped":
+                scheduler["status"] = "stopped"
+            elif scheduler["error"] is not None:
+                scheduler["status"] = scheduler["error"]
+            elif last_tick_monotonic is None:
+                scheduler["status"] = "starting"
+            elif not scheduler["running"]:
+                scheduler["status"] = "stopped"
+            else:
+                try:
+                    age = clock.monotonic() - last_tick_monotonic
+                except Exception:
+                    age = SCHEDULER_MAX_AGE + 1
+                scheduler["status"] = "ok" if 0 <= age <= SCHEDULER_MAX_AGE else "stale"
+            healthy = database and scheduler["status"] == "ok"
+        else:
+            scheduler["status"] = "disabled"
+            healthy = database
+        return JSONResponse({"status": "ok" if healthy else "unavailable", "database": database,
+                             "protocol": 1, "scheduler": scheduler}, status_code=200 if healthy else 503)
 
     @app.get("/", include_in_schema=False)
     def index():

@@ -163,3 +163,11 @@ the production verifier path and Linux filesystem/locking calls, using synthetic
 payload bytes; it is not a SquashFS mount, real image boot, forced power cut or
 physical update/rollback result. Those remain the [platform build and boot
 acceptance gates](module-appliance-platform.md).
+
+On 2026-09-06, the [actual systemd adapter suite](evidence/2026-09-06-systemd-updates.md)
+passed five scenarios using the installed acceptance and recovery units:
+30-second healthy promotion, the 180-second health failure and real `OnFailure`
+transition, plus three recovery-condition skips. Only the reboot action was
+replaced with a verified marker command. This qualifies service wiring and
+persistent-state preservation with synthetic health/rootfs bytes; actual image
+rollback and physical health remain separate.

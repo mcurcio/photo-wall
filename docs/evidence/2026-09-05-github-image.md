@@ -167,3 +167,21 @@ and root-UID cases remain explicitly separate from the live systemd evidence.
 The subsequent group-collision regression passed in the eight-test Linux
 preflight suite and the final live probe passed again; no preexisting `wall`
 group is reused or removed.
+
+## Warm image confirms the missing runtime path
+
+[Run 34018139184](https://github.com/mcurcio/photo-wall/actions/runs/34018139184)
+at feature head `498f7b8`, actual merge/source
+`453739ffc95e0a90fde28f22a26b7c70f1b54f23`, completed warm image assembly in
+11m11s. Its 5,906,628,608-byte disk SHA-256 was
+`c420a33da7dba520c0802c2a38e3b3b9e109330750eec87b92e6c6d32e790e74`.
+The [sanitized report](2026-09-05-github-warm-vm-report.json) retained a durable,
+fault-free slot A trial boot, then Player `226/NAMESPACE` with classified
+`player_runtime` / `ENOENT`. This independently confirms the missing path
+reproduced by the live preflight. Enrollment timed out; the protected original
+disk stayed unchanged and no qualified image was uploaded. This image predates
+the RuntimeDirectory correction.
+
+The [corrected run at 1eb16ef](https://github.com/mcurcio/photo-wall/actions/runs/34019308971)
+passed the new live-systemd preflight on GitHub's ARM64 runner at 07:33:39 UTC.
+Image assembly and exact-artifact boot for that corrected source remain pending.
