@@ -22,8 +22,9 @@ RUN apt-get install -y --no-install-recommends python3-pytest && \
 # exact Packaging version recorded in uv.lock rather than Noble's apt version.
 COPY uv.lock /tmp/photo-wall-tools.lock
 RUN python3.12 -c 'import tomllib; p=next(p for p in tomllib.load(open("/tmp/photo-wall-tools.lock","rb"))["package"] if p["name"]=="packaging"); w=next(w for w in p["wheels"] if w["url"].endswith("-py3-none-any.whl")); print("packaging @ " + w["url"] + " --hash=" + w["hash"])' > /tmp/photo-wall-build-tools.txt
-RUN python3.12 -m pip install --break-system-packages --no-cache-dir --no-deps --require-hashes \
-      -r /tmp/photo-wall-build-tools.txt && \
-    python3.12 -c 'from packaging.markers import Marker; assert Marker("python_version >= \"3.12\"").evaluate(context="requirement")'
+RUN python3.12 -m pip install --target /opt/photo-wall-build-tools --no-cache-dir --no-deps --require-hashes \
+      -r /tmp/photo-wall-build-tools.txt
+ENV PYTHONPATH=/opt/photo-wall-build-tools
+RUN python3.12 -c 'from packaging.markers import Marker; assert Marker("python_version >= \"3.12\"").evaluate(context="requirement")'
 WORKDIR /work
 CMD ["/bin/sh"]
