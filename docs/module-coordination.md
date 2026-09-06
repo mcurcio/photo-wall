@@ -29,13 +29,19 @@ stills. It is false by default, including temporary overlays.
 
 Offers use a stable per-epoch plan ID and increasing revisions, retaining exact
 manifests until their execution lease expires. At most 64 outstanding offers are
-allowed per Player; missing acknowledgment produces backpressure and degraded
+allowed per Player epoch; missing acknowledgment produces backpressure and degraded
 health. Horizon renewal is quantized to 30 seconds while retaining at least the
 configured 300-second preparation horizon. A manifest change may produce an
 earlier revision. Neither an acknowledgment timeout nor changed live membership
 permits rerolling possibly secured bytes: all unexpired offers and confirmed locks
-are conservative Planner locks under their current binding authority. Old offers
-can accept delayed byte-security feedback but never authorize playback of an
+are conservative Planner locks under their current binding authority, including
+those recorded before a same-key Player epoch rotation. A matching enabled
+Frame/Output/generation keeps that exact content identity. Historical offers
+only constrain content: fresh plan revisions, offer budgets, readiness and
+commitments remain current-epoch scoped. Retired Players, disabled Outputs,
+stale bindings and expired content do not regain authority. Conflicting live
+content records fail closed with `inconsistent_content_lock`. Old offers in
+the current epoch can accept delayed byte-security feedback but never authorize playback of an
 obsolete revision. An explicit release acknowledgment may later optimize this
 conservative expiry policy; it is not assumed from silence.
 

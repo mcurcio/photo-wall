@@ -177,7 +177,9 @@ class Coordinator:
                                 "ORDER BY revision", (self.clock.utc(),)).fetchall():
             plan = Plan.model_validate(row["manifest"])
             config = configurations.get(plan.player_id)
-            if config and config.authority_epoch == plan.authority_epoch:
+            # A restarted Player loses execution authority, not the exact
+            # content identity of an unexpired, possibly secured assignment.
+            if config:
                 result[plan.player_id].append(plan)
         return result
 
@@ -187,7 +189,7 @@ class Coordinator:
         for row in conn.execute("SELECT player_id,authority_epoch,layer FROM assignment_locks "
                                 "WHERE valid_until>%s", (self.clock.utc(),)).fetchall():
             config = configs.get(row["player_id"])
-            if config and config.authority_epoch == row["authority_epoch"]:
+            if config:
                 layers.append((row["player_id"], Layer.model_validate(row["layer"])))
         for player, layer in layers:
             if layer.end <= self.clock.utc() or not self._authorized(layer, configs[player]):
@@ -295,7 +297,10 @@ class Coordinator:
             groups = self._groups(conn, runtime, now, horizon_end, configurations)
             for proposal in projection.players:
                 config = configurations[proposal.player_id]
-                previous = offers[proposal.player_id]
+                # Historical offers feed content locks only. Reconciliation,
+                # revision reuse and backpressure belong to the fresh epoch.
+                previous = [plan for plan in offers[proposal.player_id]
+                            if plan.authority_epoch == config.authority_epoch]
                 latest = previous[-1] if previous else None
                 bindings = config.bindings
                 membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}

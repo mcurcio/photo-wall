@@ -165,7 +165,7 @@ def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a"):
     return variant
 
 
-def test_offers_protect_possible_secured_bytes_across_restart_and_new_query_membership(registry):
+def test_offers_protect_possible_secured_bytes_across_central_restart_and_new_query_membership(registry):
     player = setup_players(registry, count=1)[0]
     original = publish_fixture_catalog(registry)
     coordinator = Coordinator(registry.db, registry.clock)
