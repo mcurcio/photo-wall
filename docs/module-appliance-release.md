@@ -178,3 +178,16 @@ and promoted a signed synthetic trial after 30.437s. This closes the
 native-capacity-to-health-to-acceptance adapter gap with synthetic authority
 samples and rootfs bytes; it does not qualify full-image native acceptance
 or physical rollback.
+
+
+### Trial completion evidence
+
+The production `accept-current` command emits a small public JSON event only
+after its normal acceptance operation returns: `event` is
+`photo-wall-trial-acceptance`, `boot_id` identifies the current Linux boot, and
+`accepted` distinguishes a newly promoted trial from an already accepted boot.
+A failed health interval emits no successful event. Credentials, filesystem
+paths and health contents are excluded. The VM qualification gate binds a true
+event to its protected first-trial boot report, then requires the next actual
+boot to select the same accepted release and slot. This adds observability;
+the signed-state and continuous-health requirements are unchanged.

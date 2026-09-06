@@ -20,7 +20,12 @@ from contracts.enrollment import Enrollment, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.time import ManualClock
 from player.identity import load_identity
-from player.output_discovery import discover_outputs, output_app_id
+from player.output_discovery import (
+    CONFIGURED_OUTPUT_IDS,
+    discover_outputs,
+    output_app_id,
+    weston_ini,
+)
 from player.rendering import RecordingRenderer
 from player.service import (
     MAX_JSON,
@@ -131,6 +136,55 @@ def test_drm_ids_are_stable_disconnected_and_do_not_guess_scanout(tmp_path):
     assert discover_outputs(tmp_path).fault == "output_discovery"
     with pytest.raises(ValueError):
         output_app_id("../../config")
+
+
+def test_virtual_drm_ids_are_stable_and_use_canonical_routing(tmp_path):
+    for name, status in (("card0-Virtual-2", "disconnected"), ("card0-Virtual-1", "connected")):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "status").write_text(status)
+    found = discover_outputs(tmp_path)
+    assert found.fault is None
+    assert [(o.output_id, o.connected, o.width_px, o.height_px) for o in found.outputs] == [
+        ("Virtual-1", True, 0, 0), ("Virtual-2", False, 0, 0)]
+    assert output_app_id("Virtual-1") == "photo-wall-Virtual-1"
+
+
+def test_connector_discovery_rejects_mixed_or_duplicate_virtual_outputs(tmp_path):
+    for index, name in enumerate(("HDMI-A-1", "Virtual-1", "Virtual-2")):
+        path = tmp_path / f"card{index}-{name}"
+        path.mkdir()
+        (path / "status").write_text("connected")
+    assert discover_outputs(tmp_path).fault == "output_discovery"
+    duplicate = tmp_path / "duplicate"
+    for index in range(2):
+        path = duplicate / f"card{index}-Virtual-1"
+        path.mkdir(parents=True)
+        (path / "status").write_text("connected")
+    assert discover_outputs(duplicate).fault == "output_discovery"
+
+
+def test_connector_routing_and_generated_weston_config_are_bounded():
+    assert CONFIGURED_OUTPUT_IDS == ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
+    for output_id in CONFIGURED_OUTPUT_IDS:
+        assert output_app_id(output_id) == "photo-wall-" + output_id
+    assert output_app_id("HDMI-A-3") == "photo-wall-HDMI-A-3"
+    for invalid in ("Virtual-3", "DP-1", "../../config"):
+        with pytest.raises(ValueError):
+            output_app_id(invalid)
+    config = weston_ini()
+    assert config.count("[output]") == 4
+    assert all(f"name={output_id}\napp-ids=photo-wall-{output_id}" in config
+               for output_id in CONFIGURED_OUTPUT_IDS)
+
+
+def test_numeric_hdmi_connector_suffix_remains_supported(tmp_path):
+    path = tmp_path / "card0-HDMI-A-3"
+    path.mkdir()
+    (path / "status").write_text("connected")
+    found = discover_outputs(tmp_path)
+    assert found.fault is None
+    assert found.outputs[0].output_id == "HDMI-A-3"
 
 
 class Server:

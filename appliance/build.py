@@ -620,13 +620,12 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
         wants.symlink_to("/etc/systemd/system/" + target.name)
     weston = root / "etc/xdg/weston"
     weston.mkdir(parents=True, exist_ok=True)
-    # Generate app IDs through the same Player helper used for the GTK windows.
+    # Generate compositor routing through the same canonical Player helper used
+    # for GTK windows. This keeps HDMI and headless Virtual connector names in
+    # one bounded configuration list.
     ini = in_root(root, "/opt/photo-wall/venv/bin/python", "-c",
-                  "from player.output_discovery import output_app_id;"
-                  "print('[core]\\nidle-time=0\\nrequire-input=false\\nxwayland=false\\n'"
-                  "'[shell]\\nbackground-color=0xff000000');"
-                  "[print('\\n[output]\\nname='+n+'\\napp-ids='+output_app_id(n))"
-                  " for n in ('HDMI-A-1','HDMI-A-2')]")
+                  "from player.output_discovery import weston_ini;"
+                  "print(weston_ini(), end='')")
     (weston / "weston.ini").write_bytes(ini)
     passwd = (root / "etc/passwd").read_text()
     if not any(line.startswith("wall:") for line in passwd.splitlines()):

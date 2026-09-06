@@ -23,7 +23,12 @@ The full generic module manifest has a shared 16 MiB producer/consumer limit;
 small fixture JSON retains its separate 1 MiB limit.
 
 Each run creates a fresh private fixture and a QEMU `virt` guest with two virtual
-CPUs and 3 GiB RAM in a 4 GiB container. The disk and generic boot files are
+CPUs and 3 GiB RAM in a 4 GiB container. A software-rendered `virtio-gpu-pci`
+device exposes up to two virtual DRM Outputs without host GPU access. The
+generic initramfs validates and preloads its GPU module dependency closure
+before switching to the signed Pi root; the root contains the Pi module tree.
+The stock Player discovers real `Virtual-1`/`Virtual-2` connectors and uses the
+same native GTK/GStreamer path and Weston kiosk routing as its HDMI Outputs. The disk and generic boot files are
 mounted read-only; a private qcow2 overlay receives writes. There are no host
 devices, host ports, guest credentials or replacement Player process. The
 ordinary systemd Player from the signed root must register itself. Its network
@@ -36,13 +41,21 @@ The automated scenarios require:
 1. A successful signed HTTPS/DNS/NTP fixture probe and initially empty inventory.
 2. A protected bootstrap report for the expected release and durable state,
    followed by one durable Player registration.
-3. A VM power cycle using the same overlay, a different boot ID, and the same
-   Player identity with a higher authority epoch.
-4. A central-service outage and restart, followed by a successful authenticated
+3. The first boot must select trial slot A. The production acceptance command
+   must emit its successful, boot-bound completion event after the unchanged
+   30-second Player health gate and durable promotion. No health report,
+   acceptance state or replacement Player is injected by the fixture.
+4. A VM power cycle using the same overlay, a different boot ID, and the same
+   Player identity with a higher authority epoch. The protected boot report
+   must now select the same release in accepted, non-trial slot A.
+5. A central-service outage and restart, followed by a successful authenticated
    Player state request and unchanged Player identity/authority.
-5. Cleanup of only recorded test resources and an unchanged original disk hash.
+6. Cleanup of only recorded test resources and an unchanged original disk hash.
 
-Boot enrollment is bounded to ten minutes per boot, reconnection to two minutes,
+Boot enrollment is bounded to ten minutes per boot. Observing trial acceptance
+after enrollment is bounded to 210 seconds; the production unit retains its
+180-second health deadline and 30-second continuous-health requirement.
+Reconnection is bounded to two minutes,
 and each VM process to fifteen minutes. Container logs are capped. The public
 JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
@@ -64,12 +77,19 @@ resources fail closed. VM cleanup, fixture cleanup and the original disk check
 are attempted independently; a failure in one cannot suppress the others, and
 any cleanup failure prevents a passing qualification result.
 
-The headless VM has no physical panels. Its pass qualifies generic userspace
-boot, durable enrollment and reconnection only. It does not qualify native
-rendering, healthy-trial acceptance, automatic update rollback, Pi firmware,
-EEPROM/PXE networking, onboard Ethernet or dual HDMI. Those fields remain false
-in the report. Updater fault tests are separate evidence, and physical scenarios
+The VM has no physical panels. A pass of the strengthened gate qualifies generic
+userspace boot, durable enrollment/reconnection and healthy-trial acceptance
+using native initialization on virtual DRM. It does not establish a centrally
+committed native media draw, automatic update rollback, Pi firmware, EEPROM/PXE
+networking, onboard Ethernet or dual HDMI. `native_rendering`,
+`automatic_rollback` and physical qualification fields therefore remain false.
+A failure or cleanup error clears all qualification fields. Physical scenarios
 require a Pi bench with remote power, serial/network access and display capture.
+
+The virtual-GPU and native-trial extension is not yet qualified by a hosted
+boot. Its focused local checks and actual Linux module/option probes are
+prerequisites, not substitute image evidence. Earlier hosted passes below used
+the enrollment-only gate and retain their explicit false native/trial fields.
 
 The first [hosted passing artifact](evidence/2026-09-05-github-image.md#first-hosted-exact-image-boot-pass)
 completed all five scenarios at feature head `1eb16ef`, actual PR merge source

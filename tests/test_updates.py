@@ -508,7 +508,7 @@ def test_accept_current_derives_exact_policy_and_promotes_only_after_full_health
     assert (rig.root / "player/identity.key").read_bytes() == b"private fixture identity"
 
 
-def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, acceptance, monkeypatch):
+def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, acceptance, monkeypatch, capsys):
     assert accept_current(rig, acceptance)
     selected = acceptance.store.select_boot("boot-restart")
     assert selected and not selected.trial
@@ -529,6 +529,8 @@ def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, accept
     assert updates.main() is None
     assert acceptance.now == [30.0]
     assert (rig.root / "updates/state.json").read_bytes() == before
+    assert json.loads(capsys.readouterr().out) == dict(
+        event="photo-wall-trial-acceptance", boot_id="boot-restart", accepted=False)
 
 
 @pytest.mark.parametrize("change", [{"release_id": "f" * 64}, {"slot": "B"}, {"trial": 0}])
@@ -704,7 +706,7 @@ def test_acceptance_revalidates_boot_report_and_trust(rig, acceptance, monkeypat
     assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
 
 
-def test_cli_accept_current_uses_public_config_and_same_real_gate(rig, acceptance, monkeypatch):
+def test_cli_accept_current_uses_public_config_and_same_real_gate(rig, acceptance, monkeypatch, capsys):
     a = acceptance
     real_accept = updates.accept_current
     monkeypatch.setattr(updates, "accept_current", lambda state, config: real_accept(
@@ -714,6 +716,23 @@ def test_cli_accept_current_uses_public_config_and_same_real_gate(rig, acceptanc
     updates.main()
     assert a.now == [30.0]
     assert json.loads((rig.root / "updates/state.json").read_text())["active"] is not None
+    assert json.loads(capsys.readouterr().out) == dict(
+        event="photo-wall-trial-acceptance", boot_id=a.boot_id, accepted=True)
+
+
+def test_cli_failed_health_emits_no_acceptance_event(rig, acceptance, monkeypatch, capsys):
+    a = acceptance
+    a.health_path.unlink()
+    monkeypatch.setattr(updates.time, "sleep", lambda seconds: a.now.__setitem__(0, a.now[0] + seconds))
+    real_accept = updates.accept_current
+    monkeypatch.setattr(updates, "accept_current", lambda state, config: real_accept(
+        state, config, boot_report=a.report_path, health_report=a.health_path))
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
+                                   "accept-current", "--config-dir", str(a.config_dir)])
+    with pytest.raises(UpdateError, match="healthy_trial_interval_not_met"):
+        updates.main()
+    assert capsys.readouterr().out == ""
+    assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
 
 
 def test_slow_final_report_validation_cannot_promote_aged_health(rig, acceptance, monkeypatch):

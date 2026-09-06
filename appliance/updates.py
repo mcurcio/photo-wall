@@ -589,7 +589,12 @@ def main() -> None:
     if args.command == "accept-current":
         if any(value is not None for value in explicit):
             parser.error("accept-current derives trust policy from --config-dir; no overrides")
-        accept_current(args.state_root, args.config_dir)
+        boot_id = _linux_boot_id()
+        accepted = accept_current(args.state_root, args.config_dir)
+        # Public completion evidence follows the real health gate and durable
+        # promotion. No credentials, paths, or health-report contents are logged.
+        print(json.dumps(dict(event="photo-wall-trial-acceptance", boot_id=boot_id,
+                              accepted=accepted)), flush=True)
         return
     if args.command == "rollback-current-allowed":
         if any(value is not None for value in explicit):

@@ -31,7 +31,7 @@ MAX_FILES = 100_000
 COMMAND_TIMEOUT = 300
 PRODUCTION_INITRD_SIZE = 64_614_282
 PRODUCTION_INITRD_SHA256 = "98435d9d6d785aea06676ceb9319284e61baeff99a78b1ef253006d9ff6d2d8e"
-REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "loop", "squashfs",
+REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "virtio_gpu", "loop", "squashfs",
                     "overlay", "ext4", "vfat")
 PROTECTED_PREFIXES = ("usr/bin/python3.12", "usr/lib/python3.12", "etc/photo-wall",
                       "scripts/photowall")
@@ -273,13 +273,22 @@ def _module_files(root: Path, release: str) -> dict[str, dict]:
     return inventory(path, maximum_files=MAX_FILES, maximum_bytes=MAX_MODULE_BYTES)
 
 
+def _module_name(value: str) -> str:
+    """Return the normalized Linux module name for a module path."""
+    name = Path(value).name
+    for suffix in (".ko.zst", ".ko.xz", ".ko.gz", ".ko"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)].replace("-", "_")
+    return name.replace("-", "_")
+
+
 def _module_status(root: Path, name: str, release: str) -> str | None:
     path = root / "lib/modules" / release
     for directory, _, files in os.walk(path, followlinks=False):
-        if any(file.startswith(name + ".ko") for file in files):
+        if any(_module_name(file) == name for file in files):
             return "module"
     builtins = path / "modules.builtin"
-    if builtins.is_file() and any(Path(line.strip()).name == name + ".ko"
+    if builtins.is_file() and any(_module_name(line.strip()) == name
                                   for line in builtins.read_text().splitlines() if line.strip()):
         return "builtin"
     return None
@@ -303,7 +312,7 @@ def _remove_module_trees(segments: list[Path]) -> set[str]:
     return releases
 
 
-def _append_modules(segments: list[Path]) -> None:
+def _append_modules(segments: list[Path], names: tuple[str, ...] = REQUIRED_MODULES) -> list[str]:
     target = None
     for segment in reversed(segments):
         candidate = segment / "conf/modules"
@@ -319,11 +328,88 @@ def _append_modules(segments: list[Path]) -> None:
     original = target.read_bytes()
     lines = original.decode("utf-8", errors="strict").splitlines()
     present = {line.strip().split()[0] for line in lines if line.strip() and not line.lstrip().startswith("#")}
-    additions = [name for name in REQUIRED_MODULES if name not in present]
+    additions = [name for name in names if name not in present]
     if additions:
         if original and not original.endswith(b"\n"):
             original += b"\n"
         target.write_bytes(original + ("\n".join(additions) + "\n").encode())
+    return additions
+
+
+def _configured_modules(segments: list[Path]) -> set[str]:
+    """Read the one initramfs-tools module list without following links."""
+    target = None
+    for segment in reversed(segments):
+        candidate = segment / "conf/modules"
+        if os.path.lexists(candidate):
+            target = candidate
+            break
+    if target is None or target.is_symlink() or not target.is_file():
+        raise BuildError("initramfs_modules_config")
+    return {_module_name(line.strip().split()[0]) for line in target.read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")}
+
+
+def _module_dependency_closure(root: Path, release: str, requested: str = "virtio_gpu") -> tuple[str, ...]:
+    """Prove a requested module and its depmod closure are present in the tree."""
+    module_root = root / "lib/modules" / release
+    depfile = module_root / "modules.dep"
+    if depfile.is_symlink() or not depfile.is_file():
+        raise BuildError("generic_modules_dep_missing")
+    dep_lines = checked_file(depfile, MAX_MODULE_BYTES)["size"]
+    if dep_lines > MAX_MODULE_BYTES:
+        raise BuildError("generic_modules_dep_limit")
+    dependencies: dict[str, set[str]] = {}
+    for raw in depfile.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            raise BuildError("generic_modules_dep_invalid")
+        left, right = line.split(":", 1)
+        module = _module_name(left.strip())
+        if not left.strip().endswith((".ko", ".ko.gz", ".ko.xz", ".ko.zst")) or not module:
+            raise BuildError("generic_modules_dep_invalid")
+        values = set()
+        for dependency in right.split():
+            if not dependency.endswith((".ko", ".ko.gz", ".ko.xz", ".ko.zst")):
+                raise BuildError("generic_modules_dep_invalid")
+            values.add(_module_name(dependency))
+        if module in dependencies and dependencies[module] != values:
+            raise BuildError("generic_modules_dep_invalid")
+        dependencies[module] = values
+    builtin_names: set[str] = set()
+    builtin = module_root / "modules.builtin"
+    if builtin.is_symlink():
+        raise BuildError("generic_modules_builtin_invalid")
+    if os.path.lexists(builtin) and not builtin.is_file():
+        raise BuildError("generic_modules_builtin_invalid")
+    if builtin.is_file():
+        if builtin.stat().st_size:
+            checked_file(builtin, MAX_MODULE_BYTES)
+        for raw in builtin.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line:
+                if not line.endswith((".ko", ".ko.gz", ".ko.xz", ".ko.zst")):
+                    raise BuildError("generic_modules_builtin_invalid")
+                builtin_names.add(_module_name(line))
+    if _module_status(root, requested, release) is None:
+        raise BuildError("generic_gpu_missing")
+    pending = [requested]
+    closure: set[str] = set()
+    while pending:
+        module = pending.pop()
+        if module in closure:
+            continue
+        if len(closure) >= MAX_FILES:
+            raise BuildError("generic_modules_dep_limit")
+        if module not in dependencies and module not in builtin_names:
+            raise BuildError("generic_gpu_dependency_missing")
+        if _module_status(root, module, release) is None:
+            raise BuildError("generic_gpu_dependency_missing")
+        closure.add(module)
+        pending.extend(sorted(dependencies.get(module, set()) - closure))
+    return tuple(sorted(closure))
 
 
 def _add_hook(segments: list[Path]) -> None:
@@ -456,7 +542,7 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
         protected_before = {path.name: _protected_inventory(path) for path in segments}
         content_before = {path.name: _content_inventory(path) for path in segments}
         original_module_releases = _remove_module_trees(segments)
-        _append_modules(segments)
+        configured_modules_added = _append_modules(segments)
         _add_hook(segments)
         module_segment = segments[-1]
         module_root = module_segment / "lib/modules" / release
@@ -468,6 +554,10 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
         for name in REQUIRED_MODULES:
             if not _has_module(module_segment, name, release):
                 raise BuildError("generic_module_missing")
+        gpu_dependency_closure = _module_dependency_closure(module_segment, release)
+        configured_modules_added += _append_modules(segments, gpu_dependency_closure)
+        if not set(gpu_dependency_closure).issubset(_configured_modules(segments)):
+            raise BuildError("generic_gpu_preload_missing")
         for segment in segments:
             _verify_preserved(content_before[segment.name], _content_inventory(segment))
         archives = []
@@ -512,6 +602,15 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
             segment.name: {name: _module_status(segment, name, release) for name in REQUIRED_MODULES}
             for segment in reopened_segments if (segment / "lib/modules" / release).is_dir()
         }
+        reopened_module_segment = next((segment for segment in reopened_segments
+                                        if (segment / "lib/modules" / release).is_dir()), None)
+        if reopened_module_segment is None:
+            raise BuildError("reopened_module_missing")
+        reopened_gpu_dependency_closure = _module_dependency_closure(reopened_module_segment, release)
+        if reopened_gpu_dependency_closure != gpu_dependency_closure:
+            raise BuildError("reopened_gpu_dependency_closure")
+        if not set(gpu_dependency_closure).issubset(_configured_modules(reopened_segments)):
+            raise BuildError("reopened_gpu_preload_missing")
         kernel = workspace / "Image"
         kernel_record = _kernel_image(generic_kernel, kernel)
         output.mkdir(mode=0o700)
@@ -537,7 +636,9 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
             "substitutions": [
                 {"kind": "kernel", "replacement": "generic ARM64 Image", "release": release},
                 {"kind": "modules", "removed_releases": sorted(original_module_releases),
-                 "replacement_release": release, "skipped_unsafe_links": skipped_links},
+                 "replacement_release": release, "skipped_unsafe_links": skipped_links,
+                 "conf_modules_added": configured_modules_added,
+                 "gpu_preload": list(gpu_dependency_closure)},
                 {"kind": "observability-hook", "path": "/" + HOOK_PATH,
                  "order_path": "/" + ORDER_PATH,
                  "order_addition": ORDER_ADDITION.decode(),
@@ -547,6 +648,9 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                            "required_modules": list(REQUIRED_MODULES),
                            "module_status": module_status,
                            "reopened_module_status": reopened_module_status,
+                           "gpu_dependency_closure": list(gpu_dependency_closure),
+                           "reopened_gpu_dependency_closure": list(reopened_gpu_dependency_closure),
+                           "conf_modules_added": configured_modules_added,
                            "original_pi_modules_absent": not bool(original_module_releases & {release})},
             "qualified": {"generic_vm_boot": False, "physical_pi_boot": False},
         }

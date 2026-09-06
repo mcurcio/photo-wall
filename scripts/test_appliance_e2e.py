@@ -2,7 +2,8 @@
 
 The signed disk is read-only. A private qcow2 overlay is reused across a power
 cycle; only the stock Player enrolls. No guest credentials or test Player are
-injected. This gate cannot qualify Pi firmware, HDMI, or healthy native trials.
+injected. Native trial acceptance uses the stock Player with virtual DRM;
+this gate cannot qualify Pi firmware, HDMI, or actual media presentation.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ LABEL = "org.photo-wall.appliance-e2e"
 MAX_DISK = 8 * 1024**3
 BOOT_TIMEOUT = 600
 RECOVERY_TIMEOUT = 120
+TRIAL_TIMEOUT = 210
 
 # Executed inside the fixture's existing central container. Its credential stays
 # in that container; only a neutral projection of the authenticated API returns.
@@ -62,6 +64,7 @@ exec timeout --signal=TERM --kill-after=10 900 qemu-system-aarch64 \\
     -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 systemd.journald.forward_to_console=1' \\
     -drive file=/vm/disk.qcow2,if=none,format=qcow2,id=state \\
     -device virtio-blk-pci,drive=state \\
+    -device virtio-gpu-pci,max_outputs=2 \\
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile= \\
     -display none -monitor none -serial stdio -no-reboot
 """
@@ -137,6 +140,8 @@ def boot_reports(serial: str, release_id: str) -> list[dict]:
             continue
         if not isinstance(report, dict) or "boot_id" not in report:
             continue
+        if report.get("event") == "photo-wall-trial-acceptance":
+            continue
         require(report.get("schema") == 1 and report.get("release_id") == release_id
                 and report.get("persistence") == "durable" and report.get("fault") is None
                 and re.fullmatch(r"[a-f0-9-]{36}", report.get("boot_id", "")) is not None,
@@ -145,6 +150,26 @@ def boot_reports(serial: str, release_id: str) -> list[dict]:
             result.append({key: report[key] for key in
                            ("schema", "boot_id", "release_id", "persistence", "fault", "slot", "trial")})
     return result
+
+
+def trial_acceptance(serial: str, boot_id: str) -> dict | None:
+    """Read only the stock acceptance CLI's bounded, boot-bound public event."""
+    for line in serial.splitlines():
+        start = line.find('{')
+        if start < 0 or len(line) - start > 4096:
+            continue
+        try:
+            value = json.loads(line[start:])
+        except ValueError:
+            continue
+        if (not isinstance(value, dict) or value.get("event") != "photo-wall-trial-acceptance"
+                or value.get("boot_id") != boot_id):
+            continue
+        require(set(value) == {"event", "boot_id", "accepted"}
+                and type(value["accepted"]) is bool, "invalid_trial_acceptance_event")
+        if value["accepted"]:
+            return value
+    return None
 
 
 def _service_prefix(service: str) -> str:
@@ -248,6 +273,7 @@ class ApplianceE2E:
             generic_initrd_sha256=inputs["generic_record"]["outputs"]["initrd"]["sha256"],
             central_image=central_image, builder_image=builder_image, checks={}, boots=[],
             substitutions=inputs["generic_record"]["substitutions"],
+            virtual_graphics=dict(device="virtio-gpu-pci", max_outputs=2, host_gpu=False),
             qualification=unqualified())
 
     def checked_vm(self):
@@ -305,12 +331,18 @@ class ApplianceE2E:
             rows = self.inventory()
             self.report["last_inventory_count"] = len(rows)
             row = enrollment(rows, previous)
-            reports = boot_reports(self.serial(), self.inputs["release"].release_id)
+            serial = self.serial()
+            reports = boot_reports(serial, self.inputs["release"].release_id)
             observed = self.report.setdefault("observed_boot_reports", [])
             for report in reports:
                 if report["boot_id"] not in {old["boot_id"] for old in observed}:
                     observed.append(report)
             require(len(observed) <= 4, "unexpected_boot_count")
+            accepted = self.report.setdefault("trial_acceptances", {})
+            for report in observed:
+                event = trial_acceptance(serial, report["boot_id"])
+                if event:
+                    accepted[report["boot_id"]] = event
             # Enrollment can lag until the initial report has left the bounded
             # serial-log tail. Retain verified reports across polling attempts.
             fresh = [r for r in observed if r["boot_id"] not in
@@ -320,6 +352,21 @@ class ApplianceE2E:
                 return row
             time.sleep(5)
         raise FixtureError("guest_enrollment_timeout")
+
+    def wait_trial_acceptance(self):
+        boot = self.report["boots"][0]
+        require(boot["slot"] == "A" and boot["trial"] is True, "fresh_boot_not_trial")
+        deadline = time.monotonic() + TRIAL_TIMEOUT
+        while time.monotonic() < deadline:
+            require(self.checked_vm()["Running"], "vm_stopped_during_trial")
+            event = (self.report.get("trial_acceptances", {}).get(boot["boot_id"])
+                     or trial_acceptance(self.serial(), boot["boot_id"]))
+            if event:
+                self.report.setdefault("trial_acceptances", {})[boot["boot_id"]] = event
+                self.report["checks"]["native_healthy_trial_promoted"] = True
+                return
+            time.sleep(3)
+        raise FixtureError("native_trial_acceptance_timeout")
 
     def wait_player_requests(self, since: str):
         deadline = time.monotonic() + RECOVERY_TIMEOUT
@@ -347,14 +394,20 @@ class ApplianceE2E:
         self.report["first_enrollment"] = first
         self.report["checks"]["fresh_durable_enrollment"] = True
         print(json.dumps({"phase": "fresh_boot", "status": "passed"}), flush=True)
+        print(json.dumps({"phase": "native_trial", "status": "started"}), flush=True)
+        self.wait_trial_acceptance()
+        print(json.dumps({"phase": "native_trial", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "power_cycle", "status": "started"}), flush=True)
         self.checked_vm()
         self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
         require(not self.checked_vm()["Running"], "vm_stop_failed")
         self.run(["docker", "start", self.name], timeout=30)
         second = self.wait_enrollment(first)
+        require(self.report["boots"][-1]["slot"] == "A"
+                and self.report["boots"][-1]["trial"] is False, "accepted_trial_not_durable")
         self.report["second_enrollment"] = second
         self.report["checks"]["identity_survives_power_cycle"] = True
+        self.report["checks"]["accepted_slot_survives_power_cycle"] = True
         print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "central_recovery", "status": "started"}), flush=True)
         central = self.fixture_central()
@@ -370,6 +423,7 @@ class ApplianceE2E:
         self.report["checks"]["central_outage_rejoin"] = True
         print(json.dumps({"phase": "central_recovery", "status": "passed"}), flush=True)
         self.report["qualification"]["generic_vm"] = True
+        self.report["qualification"]["healthy_trial"] = True
 
     def cleanup(self):
         errors = []
@@ -426,7 +480,7 @@ class ApplianceE2E:
         attempt("disk", disk_check)
         self.report["cleanup_phases"] = phases
         if errors:
-            self.report["qualification"]["generic_vm"] = False
+            self.report["qualification"] = unqualified()
             raise FixtureError("cleanup_failed:" + ";".join(errors[:8]))
 
 
@@ -462,7 +516,7 @@ def main():
         report.update(status="failed" if failure else "passed", finished_at=timestamp())
         if failure:
             report["failure"] = failure
-            report["qualification"]["generic_vm"] = False
+            report["qualification"] = unqualified()
         write_json(args.report, report)
     print(json.dumps(dict(status=report["status"], report=str(args.report))))
     raise SystemExit(1 if failure else 0)

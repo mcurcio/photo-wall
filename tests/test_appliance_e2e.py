@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.boot_fixture import FixtureError
-from scripts.test_appliance_e2e import ApplianceE2E, boot_reports, checked_inputs, enrollment
+from scripts.test_appliance_e2e import (
+    ApplianceE2E,
+    boot_reports,
+    checked_inputs,
+    enrollment,
+    trial_acceptance,
+)
 
 RELEASE = "a" * 64
 BOOT = "01234567-89ab-cdef-0123-456789abcdef"
@@ -56,6 +62,102 @@ def test_console_noise_and_duplicate_reports_do_not_invent_boots():
     serial = "kernel messages\n" + json.dumps(report()) + "\n" + json.dumps(report())
     assert boot_reports(serial, RELEASE) == [report()]
     assert boot_reports("invalid {not json}\n", RELEASE) == []
+
+
+def acceptance_event(**changes):
+    return dict(event="photo-wall-trial-acceptance", boot_id=BOOT, accepted=True) | changes
+
+
+def test_only_completed_acceptance_for_selected_boot_counts():
+    noise = "service: " + json.dumps(acceptance_event(boot_id="other")) + "\n"
+    noise += json.dumps(acceptance_event(accepted=False)) + "\ninvalid {json\n"
+    assert trial_acceptance(noise, BOOT) is None
+    assert trial_acceptance(noise + "systemd: " + json.dumps(acceptance_event()), BOOT) == acceptance_event()
+
+
+def test_acceptance_events_do_not_masquerade_as_boot_reports():
+    serial = "\n".join(json.dumps(value) for value in (report(), acceptance_event()))
+    assert boot_reports(serial, RELEASE) == [report()]
+    assert trial_acceptance(serial, BOOT) == acceptance_event()
+
+
+@pytest.mark.parametrize("changes", [dict(accepted=1), dict(accepted="true"), dict(private="hidden")])
+def test_malformed_acceptance_event_fails_closed(changes):
+    with pytest.raises(FixtureError, match="invalid_trial_acceptance_event"):
+        trial_acceptance(json.dumps(acceptance_event(**changes)), BOOT)
+
+
+def test_native_trial_wait_retains_event_and_requires_fresh_trial():
+    harness = object.__new__(ApplianceE2E)
+    harness.report = dict(boots=[report()], checks={})
+    harness.checked_vm = lambda: dict(Running=True)
+    harness.serial = lambda: json.dumps(acceptance_event())
+    harness.wait_trial_acceptance()
+    assert harness.report["trial_acceptances"] == {BOOT: acceptance_event()}
+    assert harness.report["checks"]["native_healthy_trial_promoted"] is True
+    harness.report["boots"][0]["trial"] = False
+    with pytest.raises(FixtureError, match="fresh_boot_not_trial"):
+        harness.wait_trial_acceptance()
+
+
+def test_trial_wait_times_out_without_turning_enrollment_into_acceptance(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    now = [0]
+    monkeypatch.setattr(e2e, "time", SimpleNamespace(
+        monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds)))
+    harness = object.__new__(ApplianceE2E)
+    harness.report = dict(boots=[report()], checks={})
+    harness.checked_vm = lambda: dict(Running=True)
+    harness.serial = lambda: json.dumps(acceptance_event(accepted=False))
+    with pytest.raises(FixtureError, match="native_trial_acceptance_timeout"):
+        harness.wait_trial_acceptance()
+    assert harness.report["checks"] == {}
+
+
+@pytest.mark.parametrize("restart_trial", [False, True])
+def test_image_execution_requires_accepted_state_on_actual_restart(tmp_path, monkeypatch, restart_trial):
+    from scripts import test_appliance_e2e as e2e
+
+    fixture = SimpleNamespace(up=lambda: None)
+    monkeypatch.setattr(e2e.BootFixture, "prepare", lambda *args: fixture)
+    monkeypatch.setattr(e2e.time, "sleep", lambda seconds: None)
+    harness = object.__new__(ApplianceE2E)
+    harness.state, harness.name, harness.central_image = tmp_path, "vm", "central-image"
+    harness.inputs = dict(bundle=tmp_path, deployment=tmp_path)
+    harness.report = dict(boots=[], checks={}, qualification=e2e.unqualified())
+    rows = iter(([], [row(authority_epoch=2)]))
+    harness.inventory = lambda: next(rows)
+    harness.start_vm = lambda: None
+    harness.fixture_central = lambda: "central"
+    harness.wait_player_requests = lambda since: None
+    running = [True]
+    harness.checked_vm = lambda: dict(Running=running[0])
+    harness.serial = lambda: json.dumps(acceptance_event())
+
+    def command(args, **kwargs):
+        if args[-1] == "vm":
+            running[0] = args[1] == "start"
+
+    harness.run = command
+
+    def enroll(previous=None):
+        boot = report() if previous is None else report(
+            boot_id="11234567-89ab-cdef-0123-456789abcdef", trial=restart_trial)
+        harness.report["boots"].append(boot)
+        return row(authority_epoch=1 if previous is None else 2)
+
+    harness.wait_enrollment = enroll
+    if restart_trial:
+        with pytest.raises(FixtureError, match="accepted_trial_not_durable"):
+            harness.execute()
+        assert not any(harness.report["qualification"].values())
+    else:
+        harness.execute()
+        assert harness.report["qualification"]["healthy_trial"]
+        assert harness.report["qualification"]["generic_vm"]
+        assert not harness.report["qualification"]["native_rendering"]
+        assert not harness.report["qualification"]["automatic_rollback"]
 
 
 @pytest.mark.parametrize("changes", [dict(release_id="c" * 64), dict(persistence="volatile"),

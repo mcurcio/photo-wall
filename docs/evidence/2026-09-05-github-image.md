@@ -1,7 +1,7 @@
 # GitHub Actions appliance build — 2026-09-05 Pacific
 
-**Latest checkpoint: second hosted ARM64 image build and generic-VM e2e passed.**
-See the [second passing artifact and report](#second-hosted-exact-image-boot-pass).
+**Latest checkpoint: third hosted ARM64 image build and generic-VM e2e passed.**
+See the [third passing artifact and report](#third-hosted-exact-image-boot-pass).
 The earlier failures below are retained as historical evidence. This is
 integration evidence, not a physical Pi result.
 
@@ -287,3 +287,58 @@ status 1 in the headless guest, so healthy-trial acceptance, native rendering,
 physical Pi/PXE, HDMI and automatic rollback remain false. The exact source,
 component identities, substitutions and qualification fields are retained in
 the [public e2e report artifact](https://github.com/mcurcio/photo-wall/actions/runs/34020566014/artifacts/9986238598).
+
+## Third hosted exact-image boot pass
+
+[Run 34023366287](https://github.com/mcurcio/photo-wall/actions/runs/34023366287)
+completed successfully from feature head
+`1ec354e59ba733c7056265b1b5414218b1143c61` through the actual PR merge/source
+revision `e1d82eda5f9c4743c3baee1dfb8562a55a450f11`. The signed disk was built,
+reopened and booted as the exact uploaded image. It is 5,906,628,608 bytes with
+SHA-256
+`3d2db815e5bd832100a54fc4e5c77a75b0205592cd03701d1443e84e4f4b2aa8`.
+Release ID is
+`a8b3697cccb31c42c1251049fd5ea5aba75cf3f4331ed3f4a696a6f62bd6d22a`;
+rootfs, configuration, generic kernel, generic initramfs and boot ABI hashes
+are respectively
+`c96ee54ce4ba776c79ed91c0e92dc6e560d7341cba393ad802fcb299d14b1901`,
+`6cd087badd47fe19742b79c85a2263de56f2e143407220817b916143e719a62e`,
+`552e27f48eefa445d0d6bbc501e5972d1a43bf0e2cb78ea5345fed9e01736f58`,
+`7f2a161654c32d55fd1b2ce5f990033d3c7e4df4c28471b9b7c6c5a79fc64bb6` and
+`f3bdff50bb831bba08a53718b450799537fe2c630ef19cc886f12398395693d2`.
+The builder and central component images were
+`sha256:5730240d163aba338b8f0333001619c46b6bee94cf2c32c78a95d4e36850a5bc`
+and
+`sha256:236686a9364eeab68ec0dd8b5c05da7eda294f0c710feec01c78b039cf54925e`.
+
+The Player inventory is bound to the same source revision: source tree
+`30beb90b605703f4a66d352b2c171deb0995c4a3`, source SHA-256
+`2e3e239344462ade7cbea824095f53905ff42da6abdef2d69fc3130664f4d90c`,
+requirements SHA-256
+`f6d5e6ce8219d86d8cedd783f7d0bba5944500488c519d1cc30e33b7e43cff50`, and
+wheel
+`photo_wall_player-0.1.0+ge1d82eda5f9c4743c3baee1dfb8562a55a450f11-py3-none-any.whl`
+with SHA-256
+`da182ff3c324d9ca4aa7ca3f6e4fb49c0bf6a7a6a8f3b4a41df2fa267a159438` and size
+47,682 bytes.
+
+Cached assembly completed in **9m18s**, versus the recorded **22m33s** cold
+baseline, about **59% less elapsed time**. The image artifact
+[`photo-wall-arm64-e1d82eda5f9c4743c3baee1dfb8562a55a450f11.zip`](https://github.com/mcurcio/photo-wall/actions/runs/34023366287/artifacts/9986783700)
+has artifact ID `9986783700`, size 1,769,515,790 bytes and ZIP SHA-256
+`0cfa808fd476120d60e281f67ba6455d1ff0fb106c8104c0f481a3d057556013`.
+The [e2e report artifact](https://github.com/mcurcio/photo-wall/actions/runs/34023366287/artifacts/9986783941)
+has ID `9986783941`, size 1,519 bytes and ZIP SHA-256
+`2a8976f5d17fa3880866b2534532dd495f80f3c56a39175a4e2e789dfb4eafee`.
+
+All five generic-VM checks passed: fresh durable enrollment, central
+outage/rejoin, identity across the power cycle, signed HTTPS/DNS/NTP and
+unchanged original-disk integrity. Both durable slot A trial boots used the
+same release with boot IDs
+`d0221f34-fd79-4014-9f43-71e8567d299c` and
+`09dc1000-43a7-4a09-b205-e17b5bb131a1`; the same Player remained durable and
+the report inventory ended at one. Weston exited with status 1 in the headless
+guest. Thus generic VM qualification is true, while healthy-trial acceptance,
+native rendering, physical Pi/PXE, HDMI and automatic rollback remain false.
+This is exact-image generic software-emulation evidence; it does not qualify
+native GPU or physical behavior.

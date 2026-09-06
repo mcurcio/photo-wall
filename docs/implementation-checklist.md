@@ -10,19 +10,21 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 - [x] Integrate initial independent requirements, contract and registry reviews; fix scoped material findings. Full architecture/integrated correctness reviews remain required.
 - [x] Versioned contracts and initial deterministic clock/cache/Runtime/Planner fault tests.
 - [x] Clean-checkout dependency install, central/worker/database image builds and healthy startup; complete 494-test suite on committed `dda8e98`.
-- [ ] PostgreSQL migrations, central application/media worker, clean-checkout launch, operator configuration and health.
+- [x] PostgreSQL migrations, central application/media worker, clean-checkout launch, operator configuration and health; authenticated browser walkthrough remains separate.
 - [x] Network enrollment, separate admin authority, persistent Frames/Outputs/retirement; automatic physical PXE discovery remains below.
-- [ ] Preview/commit/revert calibration and two Outputs plus second Player.
+- [x] Preview/commit/revert calibration, two Outputs and a second Player are covered by service and demo integration; physical display qualification remains separate.
 - [x] Runtime nested Scenes, fixed roles, independent overlay/calendar boundary, current position reveal, recording Actuators.
 - [x] Pure rolling Planner, hard compatibility, locked exact assets, readiness/capacity/commit separation, with PostgreSQL/recording-Player integration.
 - [x] Pinned real Immich/query, evolving candidates during ongoing Run, bounded preparation/delivery; full two-Player/three-Output network demo passed with simulated actuation.
-- [ ] Single Python Player networking/cache/sync/execution/embedded GStreamer/GTK; ordinary continuity.
-- [ ] Restart/download/deletion/cache/outage/rejoin fault matrix and scoped update/rollback.
+- [x] Single-process Python Player networking, cache/sync/execution, embedded GStreamer/GTK integration and ordinary continuity; native full-image and physical rendering remain separate.
+- [x] Restart/download/deletion/cache/outage/rejoin fault matrix and scoped update/rollback contracts are tested, including actual Linux systemd acceptance/recovery scenarios; actual image rollback remains pending.
 - [x] Common Pi 5 image and PXE tree built; revision/config/package manifest/checksum retained outside Git.
-- [x] Boot-test the checksum-identified appliance artifact in the generic ARM64 VM: hosted enrollment, power-cycle identity and central recovery passed at `1eb16ef`; physical/native gates remain separate.
+- [x] Boot-test the checksum-identified appliance artifact in the generic ARM64 VM: hosted enrollment, power-cycle identity and central recovery passed at `1eb16ef` and the later hosted exact-image run; physical/native gates remain separate.
+- [ ] Authenticated operator browser walkthrough, including configuration and calibration.
+- [ ] Native initialization and sustained-health acceptance on the exact hosted image; committed native media and actual automatic image rollback.
 - [ ] Physical fresh PXE registration, replacement, dual Output rendering, continuity, visible coordination.
 - [x] Real Immich v2.5.6 adapter fixture with Player-to-Immich DNS and numeric access blocked. Complete worker-to-renderer integration remains a separate gate.
-- [ ] CI and reproducible demo; verified clean setup/build/run/test/recovery instructions.
+- [x] Reproducible CI and full-media demo workflows with retained setup/build/run/test/recovery instructions; standard checks for `387d2e2` passed, while its image job remains in progress.
 - [ ] Final independent correctness review and verification on final code revision.
 - [ ] Publish/update single PR and acceptance evidence; keep draft until gates pass.
 
@@ -30,7 +32,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 
 Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub authentication works; explicit user authorization resolved the automatic push-approval gate, and draft PR #2 is open. Feature-branch pushes and PR updates are authorized; main is protected and merging requires the owner. Repository license and security-reporting contact remain owner decisions before a code release.
 
-The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. It became available during this task and completed the full-demo evidence review and documentation work. Its five-hour usage pool temporarily exhausted; the waiting Spark agent resumed on 2026-09-06 and independently reviewed the live update-service test and central-health correction. Prefer Spark for suitable bounded leaves while keeping integrated design and correctness with a capable owner; no fallback is described as Spark.
+Earlier bounded Spark work, including the full-demo evidence review, remains valid. Spark is currently unavailable because its context window failed; this is a context limitation, not a quota report. Keep integrated design and correctness with a capable owner until it is available again.
 
 ## Verified core benchmark
 
@@ -39,21 +41,51 @@ The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. It bec
 - Runtime snapshot recovery, nested Scenes, Program rollover, current-state recording Actuator reveal, required cue membership/deadlines, exact secured assets and current-authority readiness/commit/revocation have regression coverage.
 - Single-process Player networking, identity, cache integrity/reacquisition, bounded transfers, clock gating, actual draw acknowledgments and outage/rejoin are integrated with a RecordingRenderer. Native Linux smoke separately verifies JPEG/PNG/H.264, seek, composition/calibration and two distinct Weston outputs. Physical DRM/HDMI and live hotplug remain unqualified.
 - Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
-- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. The final signed image and common PXE tree now have verified checksums; boot qualification remains pending.
+- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. The final signed image and common PXE tree have verified checksums; subsequent hosted exact-image evidence records generic-VM boot qualification for the later image line, while physical qualification remains pending.
 
 See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for its commands, identities and limits.
 
-## Full wall and appliance checkpoints
+## Current acceptance checkpoints
 
-The [full wall demo](evidence/2026-09-05-full-wall.md) passed one uninterrupted command with two Players, three Outputs, five prepared variants and 485 final Readiness-to-Commit checks. Both live uploads appeared during the same Run. Secured deletion, permission/upstream recovery, fallback beyond central lease expiry, recovery on every Output, same-key/new-epoch rejoin and final upstream network denials passed. Actuation remained simulated; native rendering and physical measurements are separate gates.
+The [full wall evidence](evidence/2026-09-05-full-wall.md) records the current
+core/Player revision `1ec354e` full-media pass with **410 final
+Readiness-to-Commit checks**. Exact secured deletion is now bound to the
+selected Player, epoch, Output, assignment, Run and variant bytes. The command
+uses simulated actuation and Outputs; native full-image and physical rendering
+remain separate gates. The latest corrected harness validation recorded
+**865 passed / 15 explicit skips / 4 dependency warnings** at the latest
+`387d2e2` harness revision; detailed historical
+attempts and limits remain in the dated evidence.
 
-Appliance source checkpoint `073f57d7547507de452a2fd273088d7542a6d070` has a matching Player-only bundle exported from a clean checkout. [Its CI run](https://github.com/mcurcio/photo-wall/actions/runs/33999952831) passed **643 tests with 48 explicit skips**, then **55 pinned Linux preparation tests**. The skips comprise 46 host conversion cases and two separately enabled Linux image-tooling cases. The signed builder/bootstrap, automatic 30-second trial health acceptance, public release gateway and synthetic time helper are committed. The [final signed image](evidence/2026-09-05-appliance-image.md) and common PXE tree are built, authenticated, reopened and copied with matching hashes. The latest actual Linux appliance suite passed 138 checks. VM boot and physical qualification remain pending. The subsequent full-wall checkpoint `72d74e7` also has [green CI](https://github.com/mcurcio/photo-wall/actions/runs/34007945286).
+The signed checkpoint at source `073f57d` has a matching Player-only bundle,
+authenticated image/PXE identities and **138 actual Linux appliance checks**;
+see [appliance image evidence](evidence/2026-09-05-appliance-image.md). Hosted
+run 34020566014 then built and booted the exact signed image from the later
+`d9f656b` source line: assembly took **10m13s versus 22m33s cold**, and generic
+VM enrollment, power-cycle identity and central rejoin passed. See the
+[hosted image evidence](evidence/2026-09-05-github-image.md#second-hosted-exact-image-boot-pass).
 
-A revision-bound full demo passed at core/Player `901a3a5`: two Players, three simulated Outputs, five variants and 374 final Readiness-to-Commit checks, including all live-change and recovery phases. The preceding retry failed its secured-presentation check; both attempts and the diagnostic limits remain in the [full-wall evidence](evidence/2026-09-05-full-wall.md). Standard GitHub checks at `d9f656b` passed 799 checks (56 explicit skips) plus 55 Linux conversion tests. At core `d9f656b`, two failed attempts were retained (live-lock evidence, then recovery deadline); the subsequent full command passed all phases in 328.86s with 374 final commit checks. The corrected recovery budget accommodates the documented reconnect delay; measured recovery was 64.18s. The original live-lock failure remains unproven. The first verified hosted Ubuntu cache restore took 7.716 seconds internally, compared with 725.636 seconds for cold extraction; that run subsequently timed out during package downloading. The next warm image completed assembly in 11m11s versus 22m15s cold, but confirmed the missing Player runtime directory during VM startup. The RuntimeDirectory fix passed the early live-service check and full hosted generic-VM enrollment, power-cycle identity and central-rejoin gate; the exact artifact is downloadable in the [image evidence](evidence/2026-09-05-github-image.md#first-hosted-exact-image-boot-pass). Physical/native acceptance remains open. [Cache evidence](evidence/2026-09-05-ci-cache.md) records measured assembly gains separately from boot qualification.
+Run 34023366287 built, reopened and boot-tested the exact signed image for
+`1ec354e` after **9m18s** assembly, about **59% less** than the recorded 22m33s
+cold assembly, and published the image and e2e report artifacts. All five
+generic-VM checks passed; healthy-trial acceptance, native rendering, physical
+Pi/PXE, HDMI and automatic rollback remain false. Standard checks run
+34024871867 for `387d2e2` also passed **824 tests / 56 explicit skips / 4
+warnings**, followed by **55 pinned Linux media tests**. Its image run
+34024871863 remains live/pending, so no latest image or native GPU qualification
+is claimed from that job.
 
-Five actual Linux systemd acceptance/recovery scenarios now pass with production 30/180-second health timing and a recorded recovery action; actual image rollback and native health remain separate. The central-health correction and integration tests passed 840 PostgreSQL-backed checks, with 15 explicit skips. See [update-service evidence](evidence/2026-09-06-systemd-updates.md) and [health evidence](evidence/2026-09-06-central-health.md).
+Five actual Linux systemd acceptance/recovery scenarios pass with production
+30/180-second health timing and a recorded recovery action. Actual image
+rollback, native healthy-trial acceptance and physical qualification remain
+separate; see [update-service evidence](evidence/2026-09-06-systemd-updates.md)
+and [health evidence](evidence/2026-09-06-central-health.md).
 
-Next gates are boot/update qualification, the authenticated operator walkthrough, physical bench results and final independent review. The PR remains draft.
+The remaining acceptance gates are an authenticated operator browser
+walkthrough, full-image native health, actual image rollback, fresh physical
+Pi PXE/registration/replacement, dual HDMI continuity and visible
+coordination, final independent review, and release-owner decisions. The PR
+remains draft.
 
 ## Evidence rules
 
@@ -74,3 +106,22 @@ production 30-second trial acceptance after 30.437s using real GTK/GStreamer
 capacity and Player-generated health, with synthetic authority and rootfs.
 Full-image native acceptance, actual rollback, authenticated browser QA and
 physical qualification remain open.
+
+
+## Virtual graphics and native trial gate under verification
+
+The next image gate uses a real virtual DRM device, stock Player connector
+integration, and generic GPU modules loaded before entering the signed root.
+The production acceptance CLI emits a boot-bound event only after its normal
+health gate. A pass now also requires that promotion to survive the real VM
+power cycle as the same accepted, non-trial slot A. Native media presentation,
+automatic rollback and physical fields remain false.
+
+Local validation passed **883 tests / 15 explicit platform or opt-in skips /
+four dependency warnings in 104.48 seconds**, including the preceding 112
+focused updater/VM checks (one Linux-root-only skip). The retained Linux builder
+confirmed the real `6.8.0-139-generic` GPU closure (`virtio_gpu`,
+`virtio_dma_buf`) and QEMU's `max_outputs` option. These are preparation checks;
+no hosted native-trial pass is claimed. The ownership-separated connector and
+module changes received bounded independent review. Full final review remains
+required after hosted verification.
