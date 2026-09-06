@@ -143,6 +143,19 @@ def test_trial_wait_times_out_without_turning_enrollment_into_acceptance(monkeyp
     assert harness.report["checks"] == {}
 
 
+def test_failed_native_trial_service_stops_without_waiting_for_host_deadline(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    monkeypatch.setattr(e2e.time, "sleep", lambda _: pytest.fail("waited after terminal failure"))
+    harness = object.__new__(ApplianceE2E)
+    harness.report = dict(boots=[report()], checks={})
+    harness.checked_vm = lambda: dict(Running=True)
+    harness.serial = lambda: "photo-wall-accept-trial.service: Main process exited, code=exited, status=1/FAILURE"
+    with pytest.raises(FixtureError, match="native_trial_service_failed"):
+        harness.wait_trial_acceptance()
+    assert harness.report["checks"] == {}
+
+
 @pytest.mark.parametrize("restart_trial", [False, True])
 def test_image_execution_requires_accepted_state_on_actual_restart(tmp_path, monkeypatch, restart_trial):
     from scripts import test_appliance_e2e as e2e
@@ -519,7 +532,7 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
         "arbitrary-token.service: Failed with result secret\n")
     assert result == dict(systemd_chdir_failure=True, kernel_panic=False, out_of_memory=False,
                          failed_services=["systemd-networkd"], service_exit_status={},
-                         namespace_failures={},
+                         namespace_failures={}, player_faults=[],
                          python_errors=["ModuleNotFoundError"])
     assert "private-input" not in json.dumps(result)
     assert "arbitrary-token" not in json.dumps(result)
@@ -601,3 +614,33 @@ def test_vm_replacement_during_log_collection_cannot_be_stopped(tmp_path):
     assert all(args[1] == "inspect" for args in calls)
     assert fixture.calls == 1
     assert harness.report["checks"]["signed_disk_unchanged"] is True
+
+
+def test_health_samples_are_bounded_boot_bound_and_never_promote_a_trial():
+    from scripts.vm_health_probe import sample_once
+
+    sample = sample_once(1, BOOT, 100, report_reader=lambda: {},
+        systemctl_runner=lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="private-secret"),
+        socket_state=lambda: "missing")
+    harness = object.__new__(ApplianceE2E)
+    harness.report = dict(boots=[report()], checks={})
+    values = [sample | dict(sample_index=index) for index in range(1, 62)]
+    values += [sample | dict(boot_id="11111111-1111-1111-1111-111111111111"),
+               sample | dict(private="private-secret")]
+    serial = "\n".join(json.dumps(value) for value in values)
+    harness.record_trial_events(serial, [report()])
+    harness.record_trial_events(serial, [report()])
+    assert len(harness.report["health_diagnostics"][BOOT]) == 60
+    assert harness.report["trial_acceptances"] == {} and harness.report["checks"] == {}
+    assert boot_reports(serial, RELEASE) == []
+    assert "private-secret" not in json.dumps(harness.report)
+
+
+def test_serial_player_faults_export_only_known_complete_codes():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics("player fault: native_initialization\n"
+        "player fault: secret_token\nplayer fault: connection_failed_extra\n"
+        "player fault: health_storage\n")
+    assert result["player_faults"] == ["native_initialization", "health_storage"]
+    assert "secret_token" not in json.dumps(result)

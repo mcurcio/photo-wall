@@ -94,3 +94,16 @@ def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
 def test_required_preloads_include_qemu_gpu_and_9p_transport():
     assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"} <= set(build_vm_initrd.REQUIRED_MODULES)
     assert set(build_vm_initrd.PRELOAD_ROOTS) == {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"}
+
+
+def test_health_observer_is_independent_read_only_and_shell_valid():
+    import subprocess
+
+    hook = build_vm_initrd.HOOK_BYTES
+    health = hook.split(b"PHOTO_WALL_CI_HEALTH'\n", 1)[1].split(b"PHOTO_WALL_CI_HEALTH\n", 1)[0]
+    assert b"After=photo-wall-player.service\n" in health
+    assert b"accept-trial" not in health and b"Requires=" not in health
+    assert b"ProtectSystem=strict\n" in health and b"ReadWritePaths=" not in health
+    assert b"RuntimeMaxSec=620\n" in health and b"Restart=no\n" in health
+    assert b"ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_health_probe.py\n" in health
+    subprocess.run(["/bin/sh", "-n"], input=hook, check=True)

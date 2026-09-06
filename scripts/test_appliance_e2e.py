@@ -43,7 +43,8 @@ ROLLBACK_TIMEOUT = 870
 VM_PROCESS_TIMEOUT = 3 * BOOT_TIMEOUT + RECOVERY_TIMEOUT + STAGE_TIMEOUT + ROLLBACK_TIMEOUT + 480
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 PUBLIC_EVENTS = {"photo-wall-trial-acceptance", "photo-wall-trial-phase",
-                 "photo-wall-stage-trial", "photo-wall-rollback-allowed"}
+                 "photo-wall-stage-trial", "photo-wall-rollback-allowed",
+                 "photo-wall-health-diagnostic"}
 
 # Executed inside the fixture's existing central container. Its credential stays
 # in that container; only a neutral projection of the authenticated API returns.
@@ -295,6 +296,9 @@ def serial_diagnostics(serial: str) -> dict:
         "namespace_failures": namespace_diagnostics(plain, services),
         "python_errors": [kind for kind in ("ModuleNotFoundError", "ImportError", "PermissionError",
                           "FileNotFoundError", "SSLCertVerificationError") if kind + ":" in plain],
+        "player_faults": [code for code in ("native_initialization", "connection_failed",
+            "registration_required", "identity_storage", "health_storage", "execution_failed")
+            if re.search(r"player fault: " + code + r"(?:\r?$|\s)", plain, re.MULTILINE)],
     }
 
 
@@ -386,6 +390,11 @@ class ApplianceE2E:
         (share / controller.name).write_bytes(payload)
         (share / controller.name).chmod(0o400)
         self.report["rollback_controller_sha256"] = hashlib.sha256(payload).hexdigest()
+        health_probe = Path(__file__).with_name("vm_health_probe.py")
+        payload = read_file(health_probe, 64 * 1024)
+        (share / health_probe.name).write_bytes(payload)
+        (share / health_probe.name).chmod(0o400)
+        self.report["health_probe_sha256"] = hashlib.sha256(payload).hexdigest()
         launcher = directory / "launch.sh"
         launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
                            str(self.report["deadlines_seconds"]["vm_process"])))
@@ -447,6 +456,8 @@ class ApplianceE2E:
         return observed
 
     def record_trial_events(self, serial: str, boots: list[dict]):
+        from scripts.vm_health_probe import validate_event
+
         accepted = self.report.setdefault("trial_acceptances", {})
         for boot in boots:
             event = trial_acceptance(serial, boot["boot_id"])
@@ -456,6 +467,14 @@ class ApplianceE2E:
             for phase in trial_phases(serial, boot["boot_id"]):
                 if phase not in {item["phase"] for item in phases}:
                     phases.append(dict(phase=phase, observed_at=timestamp()))
+            samples = self.report.setdefault("health_diagnostics", {}).setdefault(boot["boot_id"], [])
+            seen = {sample["sample_index"] for sample in samples}
+            for value in serial_records(serial):
+                sample = validate_event(value, boot["boot_id"])
+                if sample is not None and sample["sample_index"] not in seen:
+                    samples.append(sample)
+                    seen.add(sample["sample_index"])
+            samples.sort(key=lambda sample: sample["sample_index"])
 
     def wait_enrollment(self, previous=None):
         deadline = time.monotonic() + BOOT_TIMEOUT
@@ -486,12 +505,17 @@ class ApplianceE2E:
         deadline = time.monotonic() + TRIAL_TIMEOUT
         while time.monotonic() < deadline:
             require(self.checked_vm()["Running"], "vm_stopped_during_trial")
-            self.record_trial_events(self.serial(), [boot])
+            serial = self.serial()
+            self.record_trial_events(serial, [boot])
             event = self.report["trial_acceptances"].get(boot["boot_id"])
             if event:
                 self.report.setdefault("trial_acceptances", {})[boot["boot_id"]] = event
                 self.report["checks"]["native_healthy_trial_promoted"] = True
                 return
+            # This is the first A boot only. A terminal acceptance-service
+            # failure cannot become success by waiting out the host deadline.
+            require("photo-wall-accept-trial" not in serial_diagnostics(serial)["failed_services"],
+                    "native_trial_service_failed")
             time.sleep(3)
         raise FixtureError("native_trial_acceptance_timeout")
 
@@ -650,7 +674,9 @@ class ApplianceE2E:
             state = self.checked_vm()
             self.report["vm_exit_state"] = state
             try:
-                self.report["serial_diagnostics"] = serial_diagnostics(self.serial())
+                serial = self.serial()
+                self.report["serial_diagnostics"] = serial_diagnostics(serial)
+                self.record_trial_events(serial, self.report.get("observed_boot_reports", []))
             except Exception as error:
                 code = error_code(error)
                 phases["vm_logs"] = code

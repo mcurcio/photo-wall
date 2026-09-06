@@ -107,6 +107,17 @@ error messages to public labels and errno names. Unknown paths/messages become
 The parser follows the [systemd v255 mount-failure format](https://github.com/systemd/systemd/blob/v255/src/core/exec-invoke.c)
 and bounds each service's distinct records to eight. These diagnostics locate
 a startup failure; they cannot turn a failed enrollment into qualification.
+The volatile CI health observer starts independently after the Player service.
+It reads the private health report, fixed Player/Weston/acceptance service states,
+and Wayland socket status. At most 60 boot-bound samples over 600 seconds expose
+only allowlisted states, health freshness and booleans; no Player identifier,
+credential or arbitrary command/file content is exported. The host checks that
+schema, retains samples only for observed boots, and records the observer source
+hash. These samples are diagnostic and cannot establish acceptance or rendering.
+A known failure of the first A acceptance service terminates its host wait
+immediately; a passing gate still requires the production completion event.
+The observer has a read-only service filesystem and no update/health write path.
+
 Cleanup checks container identities before stopping or removing them; replacement
 resources fail closed. VM cleanup, fixture cleanup and the original disk check
 are attempted independently; a failure in one cannot suppress the others, and

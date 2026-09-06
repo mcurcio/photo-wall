@@ -79,9 +79,41 @@ HOOK_BYTES = (
     b"        ln -s /etc/systemd/system/photo-wall-ci-rollback.service \"${rootmnt:-/root}/etc/systemd/system/multi-user.target.wants/photo-wall-ci-rollback.service\" || return 0\n"
     b"    fi\n"
     b"}\n"
+    b'install_ci_health_service() {\n'
+    b'    service="${rootmnt:-/root}/etc/systemd/system/photo-wall-ci-health.service"\n'
+    b'    [ -e "$service" ] && return 0\n'
+    b'    mkdir -p -- "${rootmnt:-/root}/etc/systemd/system/multi-user.target.wants" || return 0\n'
+    b'    if cat > "$service" <<\'PHOTO_WALL_CI_HEALTH\'\n'
+    b'[Unit]\n'
+    b'Description=Photo Wall test-only native health observer\n'
+    b'After=photo-wall-player.service\n'
+    b'\n'
+    b'[Service]\n'
+    b'Type=simple\n'
+    b'ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_health_probe.py\n'
+    b'Restart=no\n'
+    b'RuntimeMaxSec=620\n'
+    b'TimeoutStopSec=5\n'
+    b'NoNewPrivileges=yes\n'
+    b'ProtectSystem=strict\n'
+    b'ProtectHome=read-only\n'
+    b'PrivateTmp=yes\n'
+    b'RestrictAddressFamilies=AF_UNIX\n'
+    b'\n'
+    b'[Install]\n'
+    b'WantedBy=multi-user.target\n'
+    b'PHOTO_WALL_CI_HEALTH\n'
+    b'    then\n'
+    b'        chmod 0644 "$service" || return 0\n'
+    b'        ln -s /etc/systemd/system/photo-wall-ci-health.service "${rootmnt:-/root}/etc/systemd/system/multi-user.target.wants/photo-wall-ci-health.service" || return 0\n'
+    b'    fi\n'
+    b'}\n'
     b"if mount -t 9p -o trans=virtio,version=9p2000.L,ro photo-wall-ci \"$ci\"; then\n"
     b"    if [ -f \"$ci/vm_rollback_control.py\" ]; then\n"
     b"        install_ci_service\n"
+    b"    fi\n"
+    b'    if [ -f "$ci/vm_health_probe.py" ]; then\n'
+    b"        install_ci_health_service\n"
     b"    fi\n"
     b"fi\n"
 )
@@ -692,7 +724,9 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                  "order_addition": ORDER_ADDITION.decode(),
                  "rollback_service_path": "/etc/systemd/system/photo-wall-ci-rollback.service",
                  "rollback_service_exec": "/usr/bin/python3 -I /run/photo-wall-ci/vm_rollback_control.py",
-                 "behavior": "print /run/photo-wall/boot.json and, when the tagged read-only photo-wall-ci share is available, install the volatile rollback controller service"},
+                 "health_service_path": "/etc/systemd/system/photo-wall-ci-health.service",
+                 "health_service_exec": "/usr/bin/python3 -I /run/photo-wall-ci/vm_health_probe.py",
+                 "behavior": "print /run/photo-wall/boot.json and, when the tagged read-only photo-wall-ci share is available, install volatile rollback control and read-only health diagnostics"},
             ],
             "validation": {"reopened": True, "protected_bytes_equal": True,
                            "required_modules": list(REQUIRED_MODULES),

@@ -32,7 +32,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 
 Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub authentication works; explicit user authorization resolved the automatic push-approval gate, and draft PR #2 is open. Feature-branch pushes and PR updates are authorized; main is protected and merging requires the owner. Repository license and security-reporting contact remain owner decisions before a code release.
 
-Earlier bounded Spark work, including the full-demo evidence review, remains valid. Spark is currently unavailable because its context window failed; this is a context limitation, not a quota report. Keep integrated design and correctness with a capable owner until it is available again.
+Earlier bounded Spark work, including the full-demo evidence review, remains valid. Spark is not listed by the current collaboration runtime, and an earlier Spark initialization remains pending. Current bounded leaves use the disclosed Luna fallback; this is not a quota report. Keep integrated design and correctness with a capable owner until it is available again.
 
 ## Verified core benchmark
 
@@ -152,3 +152,24 @@ Current hosted acceptance and rollback remain pending.
 The corrected source also passed all five actual Linux/systemd adapter scenarios
 in 216.70 seconds and bounded independent updater review. The recovery action
 was a marker; it does not close the actual image-reboot gate.
+
+## Media-gate and CI decomposition checkpoint
+
+Checkpoint `4ed7a95` makes the exact-image gate require a real Immich photo,
+committed native drawing, and preserved converted bytes after restart and
+rollback. Its [local preparation evidence](evidence/2026-09-06-vm-media.md)
+records 1,001 PostgreSQL-backed tests, final 51 focused checks, real HTTPS
+operator/worker preparation with a simulated Player, and read-only tiny
+filesystem checks. None qualifies a native full-image drawing.
+
+[Standard CI 34031354659](https://github.com/mcurcio/photo-wall/actions/runs/34031354659)
+passed **963 tests / 56 explicit skips / four warnings in 64.10s** plus **55
+Linux media tests in 153.80s**. The parallel jobs started at 11:49:53 UTC and
+finished at 11:51:58 and 11:53:13 UTC: 3m20s elapsed. The preceding parallel
+benchmark was 3m05s versus 5m12s serial. Separate caches and loaded-image reuse
+remain active; every revision still runs both suites.
+
+The [26ee139 hosted failure](evidence/2026-09-06-vm-rollback.md#hosted-acceptance-failure-at-26ee139)
+enrolled durably, then failed native trial acceptance. Hosted native/rollback
+qualification remains open. The current media-gate image run is independent
+and has not yet qualified.

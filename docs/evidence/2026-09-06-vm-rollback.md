@@ -173,3 +173,56 @@ Python errors, kernel panic or OOM in the retained diagnostic projection.
 The already queued [26ee139 image run](https://github.com/mcurcio/photo-wall/actions/runs/34029064970)
 then started automatically. It has unchanged application/appliance source;
 its outcome must be read independently rather than inferred from this failure.
+
+## Hosted acceptance failure at `26ee139`
+
+[Run 34029064970](https://github.com/mcurcio/photo-wall/actions/runs/34029064970)
+completed on 2026-09-06 with `native_trial_acceptance_timeout`. Both roots
+assembled in **12m13s**. Unlike the preceding enrollment timeout, this run
+registered durable Player `p-ab2e3e3e2973a29eb98e2d5b1b8875e2` at epoch 1.
+The acceptance service exited with status 1; it did not promote A. Its
+verification phase was observed at 11:39:58.928609 UTC and health at
+11:40:14.815925 UTC. The report finished at 11:51:03.951480 UTC. No panic,
+OOM, Python error or namespace failure was classified. The precise unmet
+health condition is absent from the retained report, so no cause is claimed.
+All qualification flags remain false; cleanup and original-disk integrity passed.
+No downloadable image was published.
+
+The [sanitized report artifact](https://github.com/mcurcio/photo-wall/actions/runs/34029064970/artifacts/9988722951)
+is 2,229 bytes as an archive. Local report:
+`/private/tmp/photo-wall-e2e-34029064970/e2e-report.json`.
+
+| Identity | Value |
+| --- | --- |
+| Actual PR merge/source | `5f68e8ec0a069015bbbefaf8011aabf8e510f717` |
+| Raw disk SHA-256 | `72e95aae16d0fe0e68f0f85825b0a93e78b31024a5903cf62f3827e3da581ec8` |
+| Release A | `dfa382d153bfd66d817dd57b07201a4b155e2f81f5232c6872878033d6820fab` |
+| Rootfs A | `c8027aab8c9dcbb1c7ba8c6ce804907c9d3458c98cd74bfbb0dbbc96f007163d` |
+| Configuration SHA-256 | `327a2d79e9ca43c8762d976132858f7ce7429ad90589660509f6ca0554828c8b` |
+| Generic initrd SHA-256 | `ab4454e9017c45acd05f5d45083b210bd7e38781170e90f8bb828d8fbe6179ac` |
+
+The raw disk was **5,906,628,608 bytes**. This run used the same application
+and appliance source as `d449103`; `26ee139` changed standard CI and documentation.
+The next `4ed7a95` image run includes the media gate and a longer outer enrollment
+window, but does not change the production health criteria.
+
+### Diagnostic and failure-wait correction
+
+The next harness checkpoint captures a bounded read-only health observer in
+its declared generic-initramfs CI substitution. It records known service
+states, Wayland socket status, and a sanitized projection of the private Player
+health report: missing/invalid/present, health boolean, identity validity,
+current boot and sample-age category. It never copies the Player identifier or
+arbitrary report/command contents. Sixty samples per boot and a 600-second
+observer window bound the evidence. A first-A acceptance-service failure now
+ends its wait immediately instead of waiting the remaining 540-second host
+window; success still requires the production acceptance event.
+
+Independent bounded review confirmed production isolation and caught malformed
+persistence types and contradictory diagnostic fields, both corrected. Final
+portable validation passed **101 focused observer/host/initramfs/control tests
+in 0.58s**, including bounded retention, wrong-boot rejection and no sleep after
+a terminal acceptance failure. Ruff, all 59 documentation link checks, workflow
+validation and diff checks passed. These are diagnostic/harness checks, not a
+hosted native-health pass. The `4ed7a95` image already running does not include
+this observer or early failure classification.
