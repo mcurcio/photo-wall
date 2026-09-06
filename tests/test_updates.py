@@ -415,8 +415,9 @@ def test_cli_health_failure_never_calls_mark_good(rig, monkeypatch):
         return original_regular(path, limit)
     monkeypatch.setattr(updates, "_regular", stale_health)
     now = [100.0]
-    monkeypatch.setattr(updates.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(updates.time, "sleep", lambda seconds: now.__setitem__(0, now[0]+seconds))
+    monkeypatch.setattr(updates, "time", SimpleNamespace(
+        monotonic=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0]+seconds)))
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root), "--public-key",
                                    str(rig.public), "--boot-abi", ABI, "--configuration-sha256", CONFIG,
                                    "mark-good", "--release-id", release.release_id])
@@ -438,16 +439,18 @@ def test_cli_accepts_only_after_thirty_seconds_of_fresh_health(rig, monkeypatch)
             return json.dumps(health(now[0])).encode()
         return original_regular(path, limit)
     monkeypatch.setattr(updates, "_regular", fresh_health)
-    monkeypatch.setattr(updates.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(updates.time, "sleep", lambda duration: now.__setitem__(0, now[0]+duration))
+    monkeypatch.setattr(updates, "time", SimpleNamespace(
+        monotonic=lambda: now[0],
+        sleep=lambda duration: now.__setitem__(0, now[0]+duration)))
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root), "--public-key",
                                    str(rig.public), "--boot-abi", ABI, "--configuration-sha256", CONFIG,
                                    "mark-good", "--release-id", release.release_id])
     accepted_at = []
     original_mark = SlotStore.mark_good
-    def record_acceptance(store, *args):
-        accepted_at.append(now[0])
-        return original_mark(store, *args)
+    def record_acceptance(store, *args, **kwargs):
+        callback = kwargs["before_commit"]
+        kwargs["before_commit"] = lambda: (callback(), accepted_at.append(now[0]))[0]
+        return original_mark(store, *args, **kwargs)
     monkeypatch.setattr(SlotStore, "mark_good", record_acceptance)
     updates.main()
     assert accepted_at == [30]
@@ -508,6 +511,64 @@ def test_accept_current_derives_exact_policy_and_promotes_only_after_full_health
     assert (rig.root / "player/identity.key").read_bytes() == b"private fixture identity"
 
 
+def test_verification_delay_cannot_age_a_preverification_health_sample_into_acceptance(
+        rig, acceptance, monkeypatch):
+    original_verify = SlotStore._verify_slot
+    verifying = [False]
+
+    def delayed_verify(store, record, **kwargs):
+        verifying[0] = True
+        acceptance.now[0] += 240.0
+        acceptance.health_path.unlink(missing_ok=True)
+        return original_verify(store, record, **kwargs)
+
+    def advance(seconds):
+        if verifying[0]:
+            acceptance.now[0] += seconds
+        else:
+            acceptance.advance(seconds)
+
+    monkeypatch.setattr(SlotStore, "_verify_slot", delayed_verify)
+    monkeypatch.setattr(updates.time, "sleep", advance)
+    with pytest.raises(UpdateError, match="healthy_trial_interval_not_met"):
+        accept_current(rig, acceptance)
+    assert acceptance.now == [420.0]
+    assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
+
+
+def test_verification_timeout_preserves_unaccepted_state_and_skips_health_callback(
+        rig, acceptance, monkeypatch):
+    before = (rig.root / "updates/state.json").read_bytes()
+    callback_called = []
+    original_verify = updates.verify_release
+
+    def delayed_signature(*args, **kwargs):
+        result = original_verify(*args, **kwargs)
+        acceptance.now[0] += updates.SLOT_VERIFY_TIMEOUT + 1
+        return result
+
+    monkeypatch.setattr(updates, "verify_release", delayed_signature)
+    with pytest.raises(UpdateError, match="slot_verification_timeout"):
+        acceptance.store.mark_good(acceptance.release.release_id, acceptance.boot_id,
+                                   before_commit=lambda: callback_called.append(True))
+    assert not callback_called
+    assert (rig.root / "updates/state.json").read_bytes() == before
+
+
+def test_trial_verifies_slot_once_before_health_gate(rig, acceptance, monkeypatch):
+    calls = []
+    original_verify = SlotStore._verify_slot
+
+    def counted_verify(store, record, **kwargs):
+        calls.append(acceptance.now[0])
+        return original_verify(store, record, **kwargs)
+
+    monkeypatch.setattr(SlotStore, "_verify_slot", counted_verify)
+    assert accept_current(rig, acceptance)
+    assert calls == [0.0]
+    assert acceptance.now == [30.0]
+
+
 def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, acceptance, monkeypatch, capsys):
     assert accept_current(rig, acceptance)
     selected = acceptance.store.select_boot("boot-restart")
@@ -521,9 +582,9 @@ def test_accept_current_cli_noops_for_authenticated_accepted_restart(rig, accept
     monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-restart")
     real_accept_current = updates.accept_current
     monkeypatch.setattr(updates, "accept_current",
-                        lambda state_root, config_dir: real_accept_current(
+                        lambda state_root, config_dir, **kwargs: real_accept_current(
                             state_root, config_dir, boot_report=acceptance.report_path,
-                            health_report=acceptance.health_path))
+                            health_report=acceptance.health_path, **kwargs))
     monkeypatch.setattr(sys, "argv", ["updates", "--state-root", str(rig.root),
                                       "accept-current", "--config-dir", str(acceptance.config_dir)])
     assert updates.main() is None
@@ -712,15 +773,16 @@ def test_acceptance_revalidates_boot_report_and_trust(rig, acceptance, monkeypat
 def test_cli_accept_current_uses_public_config_and_same_real_gate(rig, acceptance, monkeypatch, capsys):
     a = acceptance
     real_accept = updates.accept_current
-    monkeypatch.setattr(updates, "accept_current", lambda state, config: real_accept(
-        state, config, boot_report=a.report_path, health_report=a.health_path))
+    monkeypatch.setattr(updates, "accept_current", lambda state, config, **kwargs: real_accept(
+        state, config, boot_report=a.report_path, health_report=a.health_path, **kwargs))
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
                                    "accept-current", "--config-dir", str(a.config_dir)])
     updates.main()
     assert a.now == [30.0]
     assert json.loads((rig.root / "updates/state.json").read_text())["active"] is not None
-    assert json.loads(capsys.readouterr().out) == dict(
-        event="photo-wall-trial-acceptance", boot_id=a.boot_id, accepted=True)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["phase"] for event in events[:-1]] == ["verifying", "health"]
+    assert events[-1] == dict(event="photo-wall-trial-acceptance", boot_id=a.boot_id, accepted=True)
 
 
 def test_cli_failed_health_emits_no_acceptance_event(rig, acceptance, monkeypatch, capsys):
@@ -728,13 +790,15 @@ def test_cli_failed_health_emits_no_acceptance_event(rig, acceptance, monkeypatc
     a.health_path.unlink()
     monkeypatch.setattr(updates.time, "sleep", lambda seconds: a.now.__setitem__(0, a.now[0] + seconds))
     real_accept = updates.accept_current
-    monkeypatch.setattr(updates, "accept_current", lambda state, config: real_accept(
-        state, config, boot_report=a.report_path, health_report=a.health_path))
+    monkeypatch.setattr(updates, "accept_current", lambda state, config, **kwargs: real_accept(
+        state, config, boot_report=a.report_path, health_report=a.health_path, **kwargs))
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
                                    "accept-current", "--config-dir", str(a.config_dir)])
     with pytest.raises(UpdateError, match="healthy_trial_interval_not_met"):
         updates.main()
-    assert capsys.readouterr().out == ""
+    phase_events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["phase"] for event in phase_events] == ["verifying", "health"]
+    assert all(event["event"] == "photo-wall-trial-phase" for event in phase_events)
     assert json.loads((rig.root / "updates/state.json").read_text())["active"] is None
 
 

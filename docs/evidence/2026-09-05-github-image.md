@@ -342,3 +342,48 @@ guest. Thus generic VM qualification is true, while healthy-trial acceptance,
 native rendering, physical Pi/PXE, HDMI and automatic rollback remain false.
 This is exact-image generic software-emulation evidence; it does not qualify
 native GPU or physical behavior.
+
+## Native-trial image failure at `afff7b1`
+
+[Run 34025872502](https://github.com/mcurcio/photo-wall/actions/runs/34025872502)
+built source `c789de804a26e892b92462ad6e742b472b5c04a6` (the PR merge for
+feature `afff7b1`). Cold assembly passed in **21m20s**, including a verified
+base-cache miss, 712.95-second extraction, 117.086-second package installation,
+155.47-second image preparation and 197.917-second finalization. The completed
+pristine extraction was cached for later jobs.
+
+The image is 5,906,628,608 bytes with SHA-256
+`3308ade97942d6b6d7a547bf6fb0b0e1f1bbae78cb10935ec9b2a62aeee055bb`;
+release `8efceaf289b462db3583303375387e0b6a0a4cf68e41a3e44fc302215242192c`,
+rootfs `0755fc3293455a1fdb6c0318c2cd89cc5185438475907180edb248848cb38056`,
+configuration `7619d7fe504e2a5aa9a6526dd7423865db36e794ed6f3cfb6899f676b7a29c5a`,
+generic initramfs `bb4e255f7755681f8d448fd21ffda8d12b9876960e494b8236fbc52d91b354ca`.
+
+Fresh durable trial A enrolled after about **8m41s**, with boot ID
+`31320eb0-002a-4ca0-a810-9a06f96d808c` and Player
+`p-c3763d0954f4bf76f506608bedf739b9`, authority epoch 1. The next gate failed
+with `native_trial_acceptance_timeout`. The acceptance service was killed by
+`TERM` at its 200-second service boundary. Sanitized diagnostics showed no
+Player/Weston service failure, kernel panic, OOM or listed Python error, but do
+not prove which acceptance phase exhausted the limit. In particular, they do
+not establish that hashing was the cause.
+
+Cleanup and unchanged original-disk checks passed. **All qualification fields
+remain false**, and no image download was published. The
+[small failure report](https://github.com/mcurcio/photo-wall/actions/runs/34025872502/artifacts/9987552894)
+has artifact ID `9987552894`, ZIP size 1,588 bytes and SHA-256
+`985359662d214e6793b8d11d3e0a8c2e0b3946309698dfe350229b275454cbe2`.
+Local copies are `/private/tmp/photo-wall-e2e-34025872502/e2e-report.json` and
+`/private/tmp/photo-wall-ci-34025872502-full.log`.
+
+Subsequent inspection found an independent acceptance-ordering gap: the
+implementation completed its health interval before doing the final full-slot
+verification, allowing the sample to age before promotion. The correction
+must verify the slot under the update lock first, then observe fresh sustained
+health immediately before promotion, with separate bounded verification and
+health phases. The next hosted run must establish the resulting behavior.
+
+The subsequent rollback checkpoint's standard run
+[34027456270](https://github.com/mcurcio/photo-wall/actions/runs/34027456270)
+passed **883 tests / 56 skips / four warnings in 62.15 seconds**, plus **55 Linux
+media tests in 127.58 seconds**. Its image run still requires qualification.

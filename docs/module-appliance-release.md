@@ -43,7 +43,9 @@ for that boot and yields the common network fallback. New boots reverify active
 bytes. With no active release, an unsuccessful first trial returns no selection;
 it never promotes itself merely because no previous release exists.
 
-`mark_good` requires the current trial's exact release and boot identity. Public
+`mark_good` requires the current trial's exact release and boot identity. It
+authenticates that slot under the update lock, then runs an optional caller-owned
+`before_commit` guard before publishing the new active state. Public
 `accept_trial(store, release_id, *, boot_report, health_report)` additionally
 observes `/run/photo-wall/player/service-health.json` continuously for 30
 seconds, using the actual Linux boot ID and monotonic time. It requires fresh,
@@ -110,7 +112,10 @@ matching selected boot. `mark-good --release-id` requires the bootstrap's
 root-owned mode 0600 `/run/photo-wall/boot.json` under a root-owned parent to identify that same successful,
 durable trial with no boot fault, before observing service health. Its poll
 interval is 250 ms, maximum sample age/gap is2 seconds, acceptance interval is30 seconds
-and total waiting bound is180 seconds. A common fallback, previous boot report,
+and the health waiting bound is180 seconds. Full-slot verification happens
+first, with its own 300-second deadline, under the same exclusive update lock
+held through health observation and promotion. No second image hash runs after
+the final fresh health sample. A common fallback, previous boot report,
 volatile registration or stale healthy file cannot accept the candidate.
 
 The automatic systemd adapter invokes `python3.12 -I -m appliance.updates
@@ -120,6 +125,10 @@ configuration files and rejects explicit overrides. Missing state/report,
 common or active fallback, volatile persistence and any boot fault fail closed.
 The [appliance builder](module-appliance-builder.md) owns its root systemd unit;
 the updater owns report validation, health timing and the durable promotion.
+The acceptance service has a 510-second cap covering verification, the unchanged
+health interval and overhead. Recovery separately authenticates the fallback
+within 300 seconds, with a 310-second command and 320-second unit cap. These
+bounds do not extend the 180-second health deadline or relax sample freshness.
 
 ## Executed evidence
 
@@ -191,6 +200,13 @@ paths and health contents are excluded. The VM qualification gate binds a true
 event to its protected first-trial boot report, then requires the next actual
 boot to select the same accepted release and slot. This adds observability;
 the signed-state and continuous-health requirements are unchanged.
+
+The CLI also emits bounded `photo-wall-trial-phase` diagnostics for `verifying`
+and `health`, bound to the current Linux boot ID. These events identify progress;
+only the final successful acceptance event and a subsequent accepted boot count
+as qualification. This separation follows the
+[hosted native-trial timeout](evidence/2026-09-05-github-image.md#native-trial-image-failure-at-afff7b1),
+whose older diagnostics could not identify the delayed phase.
 
 The production `rollback-current-allowed` predicate similarly emits
 `photo-wall-rollback-allowed` with the current `boot_id` and `allowed: true`

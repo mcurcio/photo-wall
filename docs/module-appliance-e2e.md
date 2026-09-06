@@ -71,12 +71,18 @@ The automated scenarios require:
    resources and verify the original disk hash remains unchanged.
 
 Boot enrollment is bounded to ten minutes per boot. Observing trial acceptance
-after enrollment is bounded to 210 seconds; the production unit retains its
-180-second health deadline and 30-second continuous-health requirement.
+after enrollment is bounded to 540 seconds. Slot verification has a separate
+300-second deadline before the unchanged 180-second health deadline and
+30-second continuous-health requirement. The update lock spans verification,
+fresh health observation and promotion. The production unit has a 510-second
+cap; a verification delay cannot age the final health interval.
 Reconnection is bounded to two minutes. Candidate staging has a 900-second
 guest limit and 930-second host observation limit; production recovery evidence
-has 330 seconds, covering the unchanged health and verified-fallback deadlines.
-Each VM process has a one-hour cap covering staging and its subsequent boots.
+has 870 seconds, covering the 510-second acceptance unit, 320-second recovery
+unit and observation margin. The recovery predicate separately bounds fallback
+verification to 300 seconds. Each VM process has a 70-minute cap covering
+staging and its subsequent boots. After the explicit A2 restart, bounded waits
+total at most 3,720 seconds within that 4,200-second cap.
 Container logs are capped. The public
 JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
@@ -85,6 +91,9 @@ Input validation failures also emit an unqualified report marked `preflight`,
 without copying unverified artifact fields or starting fixture services.
 Validated boot reports are retained across polls so serial-log rollover cannot
 erase earlier boot evidence while enrollment is pending. Diagnostic output
+also retains boot-bound `verifying` and `health` phase events with host observation
+timestamps. These diagnostics locate a delayed phase and cannot qualify acceptance.
+Diagnostic output
 includes only bounded numeric/named exits for fixed system services and the
 final inventory count, rather than raw service messages.
 Mount-namespace failures additionally map a fixed set of system paths and
@@ -108,8 +117,11 @@ fields therefore remain false.
 A failure or cleanup error clears all qualification fields. Physical scenarios
 require a Pi bench with remote power, serial/network access and display capture.
 
-The virtual-GPU/native-trial extension and subsequent rollback extension are
-not yet qualified by a hosted boot. Their focused local checks and actual Linux module/option probes are
+The first hosted virtual-GPU/native-trial run failed at its former acceptance
+service deadline after durable enrollment; [the failure record](evidence/2026-09-05-github-image.md#native-trial-image-failure-at-afff7b1)
+does not establish which phase caused that timeout. The corrected acceptance
+ordering and subsequent rollback extension are not yet qualified by a hosted
+boot. Their focused local checks and actual Linux module/option probes are
 prerequisites, not substitute image evidence. Earlier hosted passes below used
 the enrollment-only gate and retain their explicit false native/trial fields.
 

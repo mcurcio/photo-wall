@@ -14,7 +14,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +25,7 @@ OPENSSL = "/usr/bin/openssl"
 STATE_OWNER_UID = 0  # Tests on non-root development hosts explicitly substitute their fixture owner.
 MARKER = b"photo-wall-state-v1\n"
 MARGIN = 64*1024**2
+SLOT_VERIFY_TIMEOUT = 300
 SLOT_FILES = {"manifest.json", "manifest.sig", "rootfs.squashfs"}
 
 
@@ -257,13 +258,19 @@ class SlotStore:
         path.rmdir()
         _fsync_dir(self.root)
 
-    def _verify_slot(self, record: dict) -> BootSelection:
+    def _verify_slot(self, record: dict, *, deadline: float | None = None) -> BootSelection:
+        def check_deadline() -> None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise UpdateError("slot_verification_timeout")
+
+        check_deadline()
         slot = record["slot"]
         directory = self.root/slot
         _directory(directory, private=True)
         release = verify_release(_regular(directory/"manifest.json", MAX_MANIFEST_BYTES),
                                  _regular(directory/"manifest.sig", 64), self.public_key,
                                  self.boot_abi, self.configuration_sha256)
+        check_deadline()
         if release.release_id != record["release_id"]:
             raise UpdateError("slot_release_mismatch")
         path = directory/"rootfs.squashfs"
@@ -274,12 +281,14 @@ class SlotStore:
                     or info.st_size != release.rootfs_size):
                 raise UpdateError("invalid_rootfs")
             while data := stream.read(1024**2):
+                check_deadline()
                 total += len(data)
                 if total > release.rootfs_size:
                     raise UpdateError("invalid_rootfs")
                 digest.update(data)
         if total != release.rootfs_size or digest.hexdigest() != release.rootfs_sha256:
             raise UpdateError("invalid_rootfs")
+        check_deadline()
         return BootSelection(release, path, slot, False, "")
 
     def stage(self, manifest: bytes, signature: bytes, chunks: Iterable[bytes]) -> Release:
@@ -380,7 +389,8 @@ class SlotStore:
             self._save(state)
             return True
 
-    def mark_good(self, release_id: str, boot_id: str) -> bool:
+    def mark_good(self, release_id: str, boot_id: str, *,
+                  before_commit: Callable[[], None] | None = None) -> bool:
         with self._locked():
             state = self._state()
             selected = state["selected"]
@@ -389,7 +399,9 @@ class SlotStore:
                 raise UpdateError("trial_mismatch")
             if selected["accepted"]:
                 return False
-            self._verify_slot(selected)
+            self._verify_slot(selected, deadline=time.monotonic() + SLOT_VERIFY_TIMEOUT)
+            if before_commit is not None:
+                before_commit()
             state["active"] = dict(slot=selected["slot"], release_id=release_id)
             state["pending"] = None
             selected["accepted"] = True
@@ -474,40 +486,50 @@ def validate_boot_report(path: Path, release_id: str, boot_id: str) -> None:
 
 def accept_trial(store: SlotStore, release_id: str, *,
                  boot_report: Path = Path("/run/photo-wall/boot.json"),
-                 health_report: Path = Path("/run/photo-wall/player/service-health.json")) -> bool:
-    """Accept only this actual boot's reported trial after 30 seconds of observed health."""
+                 health_report: Path = Path("/run/photo-wall/player/service-health.json"),
+                 progress: Callable[[str], None] | None = None) -> bool:
+    """Authenticate the slot, then accept after 30 seconds of observed health."""
     boot_id = _linux_boot_id()
     validate_boot_report(boot_report, release_id, boot_id)
     gate = HealthGate(boot_id)
-    deadline = time.monotonic()+180
-    while time.monotonic() < deadline:
-        try:
-            health = json.loads(_regular(health_report, 4096))
-            if not isinstance(health, dict):
+
+    def health_before_commit() -> None:
+        if progress is not None:
+            progress("health")
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            try:
+                health = json.loads(_regular(health_report, 4096))
+                if not isinstance(health, dict):
+                    health = {}
+            except (UpdateError, ValueError, RecursionError):
                 health = {}
-        except (UpdateError, ValueError, RecursionError):
-            health = {}
-        sampled_at = time.monotonic()
-        if sampled_at >= deadline:
-            break
-        if gate.observe(health, sampled_at):
-            if _linux_boot_id() != boot_id:
-                raise UpdateError("boot_changed")
-            validate_boot_report(boot_report, release_id, boot_id)
-            confirmed_at = time.monotonic()
-            if confirmed_at >= deadline:
+            sampled_at = time.monotonic()
+            if sampled_at >= deadline:
                 break
-            # Report/boot reads can themselves stall; never promote from an aged health sample.
-            if not gate.observe(health, confirmed_at):
-                continue
-            return store.mark_good(release_id, boot_id)
-        time.sleep(min(.25, max(0, deadline-time.monotonic())))
-    raise UpdateError("healthy_trial_interval_not_met")
+            if gate.observe(health, sampled_at):
+                if _linux_boot_id() != boot_id:
+                    raise UpdateError("boot_changed")
+                validate_boot_report(boot_report, release_id, boot_id)
+                confirmed_at = time.monotonic()
+                if confirmed_at >= deadline:
+                    break
+                # Report/boot reads can themselves stall; never promote from an aged health sample.
+                if not gate.observe(health, confirmed_at):
+                    continue
+                return
+            time.sleep(min(.25, max(0, deadline-time.monotonic())))
+        raise UpdateError("healthy_trial_interval_not_met")
+
+    if progress is not None:
+        progress("verifying")
+    return store.mark_good(release_id, boot_id, before_commit=health_before_commit)
 
 
 def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"), *,
                    boot_report: Path = Path("/run/photo-wall/boot.json"),
-                   health_report: Path = Path("/run/photo-wall/player/service-health.json")) -> bool:
+                   health_report: Path = Path("/run/photo-wall/player/service-health.json"),
+                   progress: Callable[[str], None] | None = None) -> bool:
     """Derive this boot's release and trust policy; never select or stage another release."""
     from appliance.bootstrap import BootConfig
 
@@ -532,7 +554,7 @@ def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"),
                 raise UpdateError("boot_report_mismatch")
         return False
     return accept_trial(store, report["release_id"], boot_report=boot_report,
-                        health_report=health_report)
+                        health_report=health_report, progress=progress)
 
 
 def rollback_current_allowed(state_root: Path, config_dir: Path = Path("/etc/photo-wall"), *,
@@ -562,7 +584,7 @@ def rollback_current_allowed(state_root: Path, config_dir: Path = Path("/etc/pho
                 or not active or active["slot"] == selected["slot"]
                 or active["release_id"] == selected["release_id"]):
             return False
-        fallback = store._verify_slot(active)
+        fallback = store._verify_slot(active, deadline=time.monotonic() + SLOT_VERIFY_TIMEOUT)
         return (fallback.release.release_id == active["release_id"]
                 and fallback.release.release_id != selected["release_id"])
 
@@ -590,7 +612,10 @@ def main() -> None:
         if any(value is not None for value in explicit):
             parser.error("accept-current derives trust policy from --config-dir; no overrides")
         boot_id = _linux_boot_id()
-        accepted = accept_current(args.state_root, args.config_dir)
+        def progress(phase: str) -> None:
+            print(json.dumps(dict(event="photo-wall-trial-phase", boot_id=boot_id, phase=phase),
+                              sort_keys=True, separators=(",", ":")), flush=True)
+        accepted = accept_current(args.state_root, args.config_dir, progress=progress)
         # Public completion evidence follows the real health gate and durable
         # promotion. No credentials, paths, or health-report contents are logged.
         print(json.dumps(dict(event="photo-wall-trial-acceptance", boot_id=boot_id,

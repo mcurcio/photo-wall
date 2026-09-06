@@ -33,11 +33,13 @@ LABEL = "org.photo-wall.appliance-e2e"
 MAX_DISK = 8 * 1024**3
 BOOT_TIMEOUT = 600
 RECOVERY_TIMEOUT = 120
-TRIAL_TIMEOUT = 210
+TRIAL_TIMEOUT = 540
 STAGE_TIMEOUT = 930
-ROLLBACK_TIMEOUT = 330
+# Cover the 510s acceptance unit plus 320s recovery unit and observation margin.
+ROLLBACK_TIMEOUT = 870
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
-PUBLIC_EVENTS = {"photo-wall-trial-acceptance", "photo-wall-stage-trial", "photo-wall-rollback-allowed"}
+PUBLIC_EVENTS = {"photo-wall-trial-acceptance", "photo-wall-trial-phase",
+                 "photo-wall-stage-trial", "photo-wall-rollback-allowed"}
 
 # Executed inside the fixture's existing central container. Its credential stays
 # in that container; only a neutral projection of the authenticated API returns.
@@ -63,7 +65,7 @@ umask 077
 if [ ! -e /vm/disk.qcow2 ]; then
     qemu-img create -f qcow2 -F raw -b /input.img /vm/disk.qcow2
 fi
-exec timeout --signal=TERM --kill-after=10 3600 qemu-system-aarch64 \\
+exec timeout --signal=TERM --kill-after=10 4200 qemu-system-aarch64 \\
     -machine virt -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
     -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 systemd.journald.forward_to_console=1' \\
@@ -212,6 +214,18 @@ def trial_acceptance(serial: str, boot_id: str) -> dict | None:
     return None
 
 
+def trial_phases(serial: str, boot_id: str) -> list[str]:
+    result = []
+    for value in serial_records(serial):
+        if value.get("event") != "photo-wall-trial-phase" or value.get("boot_id") != boot_id:
+            continue
+        require(set(value) == {"event", "boot_id", "phase"}
+                and value["phase"] in {"verifying", "health"}, "invalid_trial_phase_event")
+        if value["phase"] not in result:
+            result.append(value["phase"])
+    return result
+
+
 def _service_prefix(service: str) -> str:
     return r"(?<![A-Za-z0-9_.@-])" + re.escape(service + ".service") + r": "
 
@@ -316,7 +330,7 @@ class ApplianceE2E:
             virtual_graphics=dict(device="virtio-gpu-pci", max_outputs=2, host_gpu=False),
             rollback_candidate=inputs["candidate_metadata"],
             deadlines_seconds=dict(boot=BOOT_TIMEOUT, stage=STAGE_TIMEOUT,
-                                   recovery=ROLLBACK_TIMEOUT, vm_process=3600),
+                                   trial=TRIAL_TIMEOUT, recovery=ROLLBACK_TIMEOUT, vm_process=4200),
             qualification=unqualified())
 
     def checked_vm(self):
@@ -387,11 +401,8 @@ class ApplianceE2E:
             if matching is None:
                 observed.append(report)
         require(len(observed) <= 4, "unexpected_boot_count")
-        accepted = self.report.setdefault("trial_acceptances", {})
-        for boot in observed:
-            event = trial_acceptance(serial, boot["boot_id"])
-            if event:
-                accepted[boot["boot_id"]] = event
+        self.record_trial_events(serial, observed)
+        accepted = self.report["trial_acceptances"]
         if "candidate" in self.inputs:
             sequence = ((self.inputs["release"].release_id, "A", True),
                         (self.inputs["release"].release_id, "A", False),
@@ -414,6 +425,17 @@ class ApplianceE2E:
                 if event:
                     self.report["recovery_event"] = event
         return observed
+
+    def record_trial_events(self, serial: str, boots: list[dict]):
+        accepted = self.report.setdefault("trial_acceptances", {})
+        for boot in boots:
+            event = trial_acceptance(serial, boot["boot_id"])
+            if event:
+                accepted[boot["boot_id"]] = event
+            phases = self.report.setdefault("trial_phases", {}).setdefault(boot["boot_id"], [])
+            for phase in trial_phases(serial, boot["boot_id"]):
+                if phase not in {item["phase"] for item in phases}:
+                    phases.append(dict(phase=phase, observed_at=timestamp()))
 
     def wait_enrollment(self, previous=None):
         deadline = time.monotonic() + BOOT_TIMEOUT
@@ -444,8 +466,8 @@ class ApplianceE2E:
         deadline = time.monotonic() + TRIAL_TIMEOUT
         while time.monotonic() < deadline:
             require(self.checked_vm()["Running"], "vm_stopped_during_trial")
-            event = (self.report.get("trial_acceptances", {}).get(boot["boot_id"])
-                     or trial_acceptance(self.serial(), boot["boot_id"]))
+            self.record_trial_events(self.serial(), [boot])
+            event = self.report["trial_acceptances"].get(boot["boot_id"])
             if event:
                 self.report.setdefault("trial_acceptances", {})[boot["boot_id"]] = event
                 self.report["checks"]["native_healthy_trial_promoted"] = True
@@ -502,8 +524,8 @@ class ApplianceE2E:
         self.wait_rollback_evidence(lambda: "recovery_event" in self.report,
                                    timeout=ROLLBACK_TIMEOUT, failure="production_recovery_timeout")
         # One deadline covers both fallback boot evidence and its enrollment.
-        # The QEMU process restarted for A2 has a 3600s cap; its bounded waits
-        # total at most 3180s, leaving room for fixture/control command overhead.
+        # The QEMU process restarted for A2 has a 4200s cap; its bounded waits
+        # total at most 3720s, leaving room for fixture/control command overhead.
         restored = self.wait_enrollment(previous)
         require(len(self.report["observed_boot_reports"]) == 4
                 and self.report["boots"][-1] == self.report["observed_boot_reports"][3],

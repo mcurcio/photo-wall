@@ -61,7 +61,7 @@ No local full Pi image build, VM launch or physical reboot was performed for
 this checkpoint. GitHub Actions must build and execute this new four-boot gate
 before `automatic_rollback` can be qualified.
 
-## Reviewed source identity
+## Reviewed source identity at `3f88b33`
 
 | File | SHA-256 |
 | --- | --- |
@@ -71,3 +71,73 @@ before `automatic_rollback` can be qualified.
 | `scripts/build_vm_initrd.py` | `2d461d99dd775b9d56c97aeb53404c0b27789801a5069a2ebd82d4aa51c2fe2e` |
 | `scripts/test_appliance_e2e.py` | `761d9e8b79a2fae74eabb0e16613e62a946d6aefb9af5bd7a4236410576c0273` |
 | `scripts/vm_rollback_control.py` | `a51c7c23b5cb21e6994f924b68a604699f30faec65e9397e27892fd926b79416` |
+
+## Actual candidate assembly and superseded hosted run
+
+A focused Linux probe used actual `mksquashfs`/`unsquashfs` on a tiny synthetic
+root. The 4,096-byte candidate contained the original inventory plus exactly
+the 46-byte failure override. Reopening returned the exact override bytes,
+and the original root and base bundle were unchanged. Candidate SHA-256 was
+`c750ef3e8e8dc56acd5da24f8c8775614d8d20ea09e13faec6b9907f0edb81ea`.
+The base payload was synthetic (42 bytes); this was packaging-adapter evidence,
+not a full Pi image or boot. Only the probe's temporary directory was removed.
+
+[Hosted run 34027456271](https://github.com/mcurcio/photo-wall/actions/runs/34027456271)
+then completed the actual primary image and signed rollback candidate at
+source `062c5904503726b64812769a3d9d5a891526af9c`, the PR merge for `3f88b33`.
+Assembly took **11m57s**. The pristine cache was a verified hit restored in
+**7.68 seconds**, and preparing the second candidate took **155.535 seconds**,
+without repeating package installation. Both A/B compressed roots are
+672,530,432 bytes, with different hashes:
+
+- A release: `14c9df851a2853f5d7a778cfd4bee068057a4b4a6ddb679a51be44ac072161a8`;
+  rootfs: `b98e29eda5bc96d03f2517d4ee954e772ec483e9f43dd59f4d98d0b71bd64081`.
+- B release: `a860c6874ed99ce3323374c40ce59c8bca7fb511f22ce15f60c5a1e1354c18e2`;
+  rootfs: `acb0e0d0424a90e48fc0c9d3cde3b9faeb14b83ac19b61facb532d6521776350`.
+
+The original disk is 5,906,628,608 bytes, SHA-256
+`48a6ca3df43e6d4e4cc265a586876e0ff2e48d56bad4444c2d3701fe0d2ffdc0`.
+The run was intentionally canceled after successful assembly because its
+acceptance code retained the reproduced stale-health defect below. Cancellation
+was confirmed by GitHub; it was not triggered by a polling timeout. No hosted
+rollback qualification or downloadable passing image is claimed from this run.
+Log: `/private/tmp/photo-wall-ci-34027456271-full.log`.
+
+## Verify before observing final trial health
+
+The preceding [native hosted run](2026-09-05-github-image.md#native-trial-image-failure-at-afff7b1)
+enrolled its Player but exhausted the acceptance service's 200-second cap.
+That report does not identify the delayed phase. Independent inspection found
+that full-slot verification happened after the final fresh health observation,
+allowing a long verification to age the sample before promotion.
+
+The new regression test was run against an isolated copy of the old `3f88b33`
+updater. It supplied fresh health through the initial 30 seconds, then removed
+health during a simulated 240-second verification delay. The old code promoted
+the trial: the test failed with `DID NOT RAISE`. The corrected implementation
+verifies first, then requires a fresh interval under the same update lock, and
+rejects that scenario without changing active state. The old-source probe
+directory was cleaned; log: `/private/tmp/photo-wall-old-acceptance-regression.log`.
+
+Full corrected regression: **930 passed / 15 skips / four warnings in 101.06s**
+(`scripts/test_local.py -q --tb=short`), log
+`/private/tmp/photo-wall-trial-verification-regression.log`. Focused updater,
+host evidence and service-fixture checks: **131 passed / six platform or opt-in
+skips in 4.94s**, log `/private/tmp/photo-wall-trial-verification-focused.log`.
+The owning [boot contract](../module-appliance-e2e.md) records the separate
+verification/health bounds and phase diagnostics. The 30-second interval,
+180-second health deadline and two-second sample freshness are unchanged.
+The [actual Linux systemd rerun](2026-09-06-systemd-updates.md#rerun-after-verificationhealth-ordering-correction)
+also passed five scenarios in 216.70 seconds, with 30.389-second healthy
+promotion and 180.2-second failed-health recovery. Recovery used the verified
+marker override; it was not an actual reboot. Bounded independent updater
+review found no material blocker. The hosted gate remains unqualified.
+
+Corrected source identities:
+
+| File | SHA-256 |
+| --- | --- |
+| `appliance/updates.py` | `2ea2fe260177ca53c8fa7b443ee64a29c5d5eee5bb3365787fc573b2a01d5ae5` |
+| `appliance/systemd/accept-trial.service` | `1974ad28ca2aa48e554fdc37c2dfcd041ca1f23e3a80df3a052e8ec9e56600e8` |
+| `appliance/systemd/trial-recovery.service` | `7aae2b0e5d504b93e06249233280f08112fdd20e096241fbb484cb30d2d701ec` |
+| `scripts/test_appliance_e2e.py` | `4277c1b42265f96108552b0829690fc7320d8febb8b5dd22f4f5369653ef762d` |

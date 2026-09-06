@@ -54,3 +54,29 @@ reviewed the test before execution and fixed command argument, reboot-guard,
 cleanup-ownership and assertion gaps. Synthetic health and rootfs payloads
 qualify the adapters and state transitions; they do not prove native rendering,
 SquashFS boot, actual power loss or physical rollback.
+
+## Rerun after verification/health ordering correction
+
+The corrected updater and service limits passed the same five actual Linux
+scenarios in a fresh container: **5 passed in 216.70 seconds**. Healthy
+promotion took **30.389 seconds**; missing health reached recovery after
+**180.2 seconds**. The recovery action remained a verified marker override,
+so this is service integration evidence rather than an actual reboot.
+
+The container used the same tooling image and systemd version, private
+cgroups, disabled networking and no host mounts. It and its temporary dependency
+staging were removed. Retained run record:
+`/private/tmp/photo-wall-systemd-updates-rerun-20260906.log`.
+
+The test file hash remained
+`fd167c2ba4d2fd44be372ba415a4f41ab354758c47c19c9b14cf5cff27c27e32`.
+Corrected updater SHA-256:
+`2ea2fe260177ca53c8fa7b443ee64a29c5d5eee5bb3365787fc573b2a01d5ae5`;
+acceptance unit:
+`1974ad28ca2aa48e554fdc37c2dfcd041ca1f23e3a80df3a052e8ec9e56600e8`;
+recovery unit:
+`7aae2b0e5d504b93e06249233280f08112fdd20e096241fbb484cb30d2d701ec`.
+The [regression record](2026-09-06-vm-rollback.md#verify-before-observing-final-trial-health)
+documents the reproduced old-code failure and corrected lock/health ordering.
+Bounded independent review found no material blocker in that updater scope.
+Hosted image qualification and final strong review remain open.

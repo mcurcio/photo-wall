@@ -15,6 +15,7 @@ from scripts.test_appliance_e2e import (
     enrollment,
     rollback_event,
     trial_acceptance,
+    trial_phases,
 )
 
 RELEASE = "a" * 64
@@ -81,6 +82,31 @@ def test_acceptance_events_do_not_masquerade_as_boot_reports():
     serial = "\n".join(json.dumps(value) for value in (report(), acceptance_event()))
     assert boot_reports(serial, RELEASE) == [report()]
     assert trial_acceptance(serial, BOOT) == acceptance_event()
+
+
+def test_trial_diagnostics_are_boot_bound_and_cannot_count_as_acceptance():
+    events = [dict(event="photo-wall-trial-phase", boot_id=BOOT, phase=phase)
+              for phase in ("verifying", "health")]
+    serial = "\n".join(json.dumps(item) for item in events)
+    assert trial_phases(serial, BOOT) == ["verifying", "health"]
+    assert trial_phases(serial, "another-boot") == []
+    assert trial_acceptance(serial, BOOT) is None
+    assert boot_reports(serial, RELEASE) == []
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {}
+    harness.record_trial_events(serial, [report()])
+    first = harness.report["trial_phases"][BOOT].copy()
+    harness.record_trial_events(serial, [report()])
+    assert harness.report["trial_phases"][BOOT] == first
+    assert all(set(item) == {"phase", "observed_at"} for item in first)
+    assert harness.report["trial_acceptances"] == {}
+
+
+@pytest.mark.parametrize("changes", [dict(phase="accepted"), dict(private="secret")])
+def test_trial_diagnostics_reject_unknown_fields_or_phases(changes):
+    event = dict(event="photo-wall-trial-phase", boot_id=BOOT, phase="health") | changes
+    with pytest.raises(FixtureError, match="invalid_trial_phase_event"):
+        trial_phases(json.dumps(event), BOOT)
 
 
 @pytest.mark.parametrize("changes", [dict(accepted=1), dict(accepted="true"), dict(private="hidden")])

@@ -24,7 +24,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 - [ ] Native initialization and sustained-health acceptance on the exact hosted image; committed native media and actual automatic image rollback.
 - [ ] Physical fresh PXE registration, replacement, dual Output rendering, continuity, visible coordination.
 - [x] Real Immich v2.5.6 adapter fixture with Player-to-Immich DNS and numeric access blocked. Complete worker-to-renderer integration remains a separate gate.
-- [x] Reproducible CI and full-media demo workflows with retained setup/build/run/test/recovery instructions; standard checks for `387d2e2` passed, while its image job remains in progress.
+- [x] Reproducible CI and full-media demo workflows with retained setup/build/run/test/recovery instructions; standard checks for `3f88b33` passed. Hosted native/rollback qualification remains incomplete.
 - [ ] Final independent correctness review and verification on final code revision.
 - [ ] Publish/update single PR and acceptance evidence; keep draft until gates pass.
 
@@ -128,12 +128,27 @@ required after hosted verification.
 
 Standard CI at `afff7b1` (run 34025872485) passed **842 tests / 56 skips /
 four warnings in 58.15 seconds**, plus **55 Linux media tests in 164.89 seconds**.
-Its image run 34025872502 completed cold assembly in **21m20s** and is boot-testing;
-no native-trial pass is claimed yet. A subsequent four-boot rollback gate is
-being validated locally: it reuses the prepared root for one signed failed
+Its image run 34025872502 completed cold assembly in **21m20s**, enrolled its
+Player and then failed native acceptance at the service time limit. No
+native-trial pass is claimed. A subsequent four-boot rollback gate
+reuses the prepared root for one signed failed
 candidate, stages through the production CLI, and requires the production
 recovery service's actual fallback reboot. Hosted rollback remains unqualified.
 The [rollback preparation checkpoint](evidence/2026-09-06-vm-rollback.md) passed
 924 PostgreSQL-backed tests (15 skips/four warnings) and 160 final focused tests
 (one Linux-root skip), with bounded independent reviews. The candidate adds
 one compression pass while reusing extraction, packages and Player packaging.
+
+Run 34027456271 then built both signed roots in **11m57s**, with a verified
+7.68-second base-cache restoration and 155.535-second candidate preparation.
+It was canceled after assembly because the superseded acceptance code could
+promote stale health after a slow verification. A regression reproduced that
+defect against the old source. The corrected ordering verifies first and then
+observes fresh health under the same lock; **930 tests / 15 skips / four warnings**
+and **131 focused tests / six platform or opt-in skips** pass. Separate
+verification limits and public phase diagnostics preserve the original
+30-second continuous-health and 180-second health-deadline requirements.
+Current hosted acceptance and rollback remain pending.
+The corrected source also passed all five actual Linux/systemd adapter scenarios
+in 216.70 seconds and bounded independent updater review. The recovery action
+was a marker; it does not close the actual image-reboot gate.
