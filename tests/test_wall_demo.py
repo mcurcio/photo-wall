@@ -5,11 +5,13 @@ import copy
 import hashlib
 import json
 import stat
+import sys
 
 import pytest
 
 from scripts.demo_wall import (
     CORE_IMAGES,
+    PLAYER_REVISION,
     PLAYER_RUNNER,
     DemoError,
     DemoHost,
@@ -17,10 +19,13 @@ from scripts.demo_wall import (
     composition,
     core_image_mapping,
     local_source_inventory,
+    main,
     operator_action,
     outage_checks,
     preserved_locks,
     retryable_operator_error,
+    run_demo,
+    validate_selected_revision,
     write_json,
 )
 
@@ -186,7 +191,9 @@ def test_core_image_override_defaults_are_historical_and_persisted(tmp_path, mon
     host = DemoHost.create(tmp_path / "state", tmp_path / "fixture", wheelhouse, "baseline",
                            central_image=override["central"], worker_image=override["worker"])
     assert host.core_images == override
-    assert json.loads((host.state / "demo.json").read_text())["core_images"] == override
+    marker = json.loads((host.state / "demo.json").read_text())
+    assert marker["core_images"] == override
+    assert marker["revision"] == PLAYER_REVISION
 
     old_state = tmp_path / "old-state"
     old_state.mkdir()
@@ -197,6 +204,123 @@ def test_core_image_override_defaults_are_historical_and_persisted(tmp_path, mon
     })
     old_host = DemoHost(old_state)
     assert old_host.core_images == CORE_IMAGES
+    assert old_host.revision == PLAYER_REVISION
+
+
+def test_nonhistorical_revision_requires_paired_images_and_matching_wheelhouse(tmp_path, monkeypatch):
+    revision = "e" * 40
+    monkeypatch.setattr("scripts.demo_wall._git_output",
+                        lambda *args: "commit" if args[:2] == ("cat-file", "-t") else "")
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    write_json(wheelhouse / "inventory.json", {"revision": PLAYER_REVISION})
+    with pytest.raises(DemoError, match="revision_requires_core_images"):
+        validate_selected_revision(revision, wheelhouse)
+    with pytest.raises(DemoError, match="player_revision_mismatch"):
+        validate_selected_revision(revision, wheelhouse, "sha256:" + "a" * 64,
+                                   "sha256:" + "b" * 64)
+
+
+def test_nonhistorical_source_mismatch_is_rejected_before_demo_creation(tmp_path, monkeypatch):
+    revision = "f" * 40
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    write_json(wheelhouse / "inventory.json", {"revision": revision})
+    called = False
+
+    def create(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("scripts.demo_wall._git_output", lambda *args: "different")
+    monkeypatch.setattr(DemoHost, "create", create)
+    with pytest.raises(DemoError, match="core_revision_mismatch"):
+        run_demo(
+            tmp_path / "state", tmp_path / "fixture", wheelhouse, "baseline", True,
+            "sha256:" + "a" * 64, "sha256:" + "b" * 64, revision)
+    assert not (tmp_path / "state").exists()
+    assert not called
+
+
+def test_selected_historical_revision_rejects_tracked_core_drift(tmp_path, monkeypatch):
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    write_json(wheelhouse / "inventory.json", {"revision": PLAYER_REVISION})
+
+    def git_probe(*args):
+        if args[:2] == ("cat-file", "-t"):
+            return "commit"
+        if args[:2] == ("diff", "--name-only"):
+            return "central/app.py"
+        return ""
+
+    monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
+    with pytest.raises(DemoError, match="core_dirty"):
+        validate_selected_revision(PLAYER_REVISION, wheelhouse)
+
+
+def test_selected_revision_rejects_untracked_core_drift(tmp_path, monkeypatch):
+    revision = "2" * 40
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    write_json(wheelhouse / "inventory.json", {"revision": revision})
+
+    def git_probe(*args):
+        if args[:2] == ("cat-file", "-t"):
+            return "commit"
+        if args[:2] == ("status", "--short"):
+            return "?? player/new_source.py"
+        return ""
+
+    monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
+    with pytest.raises(DemoError, match="core_dirty"):
+        validate_selected_revision(revision, wheelhouse,
+                                   "sha256:" + "a" * 64, "sha256:" + "b" * 64)
+
+
+def test_valid_selected_commit_allows_later_noncore_checkout_changes(tmp_path, monkeypatch):
+    revision = "3" * 40
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    write_json(wheelhouse / "inventory.json", {"revision": revision})
+    probes = []
+
+    def git_probe(*args):
+        probes.append(args)
+        if args[:2] == ("cat-file", "-t"):
+            return "commit"
+        return ""
+
+    monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
+    images = validate_selected_revision(revision, wheelhouse,
+                                        "sha256:" + "a" * 64, "sha256:" + "b" * 64)
+    assert images == {"central": "sha256:" + "a" * 64, "worker": "sha256:" + "b" * 64}
+    assert probes[0][:2] == ("cat-file", "-t")
+    assert not any(args[:2] == ("rev-parse", "HEAD") for args in probes)
+
+
+def test_revision_must_be_lowercase_40_hex_before_git_or_filesystem_access(tmp_path, monkeypatch):
+    called = False
+
+    def git_probe(*args):
+        nonlocal called
+        called = True
+        return "commit"
+
+    monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
+    with pytest.raises(DemoError, match="exact_revision_required"):
+        validate_selected_revision("G" * 40, tmp_path / "missing-wheelhouse")
+    assert not called
+
+
+def test_plan_records_selected_revision_and_image_requirement(monkeypatch, capsys):
+    revision = "1" * 40
+    monkeypatch.setattr(sys, "argv", ["demo_wall.py", "plan", "--revision", revision])
+    main()
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["revision"] == revision
+    assert plan["player_revision"] == revision
+    assert plan["requires_core_images"] is True
 
 
 def _mock_audit_host(tmp_path, monkeypatch, mutation=None):

@@ -12,7 +12,7 @@ The baseline uses one Player and one Output. The full scenario uses two Outputs 
 
 ## Reproducing the checkpoint
 
-The benchmark uses core revision `dda8e98c5c54dc8ca9c007599f8a919eadbd5248`. First prepare the [real Immich fixture](module-immich-fixture.md) and build the [Player-only wheelhouse](module-player-package.md) at that revision. The harness rejects core source drift and a different Player revision. It runs from a checkout with those same central/media/contracts/Player files; later appliance and harness changes do not change that core.
+The historical benchmark defaults to core revision `dda8e98c5c54dc8ca9c007599f8a919eadbd5248`. First prepare the [real Immich fixture](module-immich-fixture.md) and build the [Player-only wheelhouse](module-player-package.md) at the selected revision. Pass `--revision` with exactly 40 lowercase hexadecimal characters to reproduce another complete demo from a checkout at that revision. The preflight requires a valid commit, a clean core source checkout at that exact revision, and a wheelhouse whose inventory names that revision; nonhistorical revisions additionally require paired immutable central and worker image IDs. It completes before creating demo state or building images. The selected revision is recorded in the plan, marker, evidence, and provenance. Older markers without a revision continue to mean the historical default.
 
 Build central and worker from that checkout, then pass their exact image IDs. The optional overrides must be supplied together. Defaults retain the original benchmark's local IDs; overriding them lets a clean machine use its own equivalent builds without editing source.
 
@@ -25,6 +25,7 @@ demo_worker_id=$(docker image inspect --format '{{.Id}}' photo-wall-demo-core-wo
   --state-dir /absolute/new-wall-demo \
   --immich-state /absolute/retained-immich-fixture \
   --wheelhouse /absolute/player-wheelhouse \
+  --revision dda8e98c5c54dc8ca9c007599f8a919eadbd5248 \
   --central-image "$demo_central_id" --worker-image "$demo_worker_id" \
   --scenario full --keep
 ```

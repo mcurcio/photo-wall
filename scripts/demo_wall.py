@@ -26,6 +26,8 @@ CORE_IMAGES = {
     "worker": "sha256:aa125b1b7146fb63ac669e13ee5e9697ceed7d6a8d705b35e679cdc27ada7824",
 }
 CORE_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
+REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
 
 # This is the ONLY benchmark application code copied into the Player image.
 # It imports source-neutral Player/contracts and stdlib; no host harness follows.
@@ -225,6 +227,36 @@ def core_image_mapping(central_image=None, worker_image=None):
     return {"central": central_image, "worker": worker_image}
 
 
+def _git_output(*args: str) -> str:
+    try:
+        result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
+                                text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise DemoError("core_revision_unavailable") from None
+    require(result.returncode == 0, "core_revision_unavailable")
+    return result.stdout.strip()
+
+
+def validate_selected_revision(revision: str, wheelhouse: Path, central_image=None,
+                               worker_image=None) -> dict:
+    """Validate revision-bound inputs before creating any demo state."""
+    require(isinstance(revision, str) and REVISION_PATTERN.fullmatch(revision) is not None,
+            "exact_revision_required")
+    images = core_image_mapping(central_image, worker_image)
+    if revision != PLAYER_REVISION:
+        require(central_image is not None and worker_image is not None,
+                "revision_requires_core_images")
+    require(_git_output("cat-file", "-t", revision) == "commit", "core_revision_mismatch")
+    dirty = "\n".join(filter(None, (
+        _git_output("diff", "--name-only", revision, "--", *CORE_SOURCE_PATHS),
+        _git_output("status", "--short", "--untracked-files=all", "--", *CORE_SOURCE_PATHS),
+    )))
+    require(not dirty, "core_dirty")
+    inventory = read_json(Path(wheelhouse) / "inventory.json")
+    require(inventory.get("revision") == revision, "player_revision_mismatch")
+    return images
+
+
 def local_source_inventory():
     paths = sorted(path for name in ("central", "media", "contracts", "player")
                    for path in (ROOT / name).rglob("*") if path.suffix in (".py", ".sql"))
@@ -308,6 +340,9 @@ class DemoHost:
         self.marker = read_json(self.state / "demo.json")
         self.project = self.marker["project"]
         require(re.fullmatch(r"pw-wall-demo-[a-f0-9]{12}", self.project) is not None, "invalid_demo_marker")
+        self.revision = self.marker.get("revision", PLAYER_REVISION)
+        require(isinstance(self.revision, str) and REVISION_PATTERN.fullmatch(self.revision) is not None,
+                "invalid_demo_revision")
         require(self.marker["state"] == str(self.state), "demo_path_mismatch")
         marker_images = self.marker.get("core_images")
         if marker_images is None:
@@ -323,14 +358,19 @@ class DemoHost:
 
     @classmethod
     def create(cls, state: Path, fixture_state: Path, wheelhouse: Path, scenario: str,
-               central_image=None, worker_image=None):
+               central_image=None, worker_image=None, revision=PLAYER_REVISION):
         import secrets
 
         core_images = core_image_mapping(central_image, worker_image)
+        require(isinstance(revision, str) and REVISION_PATTERN.fullmatch(revision) is not None,
+                "exact_revision_required")
+        if revision != PLAYER_REVISION:
+            require(central_image is not None and worker_image is not None,
+                    "revision_requires_core_images")
         from scripts.immich_fixture import FixtureHost
         fixture = FixtureHost(fixture_state)
         inventory = read_json(wheelhouse / "inventory.json")
-        require(inventory.get("revision") == PLAYER_REVISION, "player_revision_mismatch")
+        require(inventory.get("revision") == revision, "player_revision_mismatch")
         require(hashlib.sha256((wheelhouse / "requirements.txt").read_bytes()).hexdigest() ==
                 inventory["requirements_sha256"], "player_requirements_mismatch")
         for wheel in inventory["wheels"]:
@@ -346,7 +386,7 @@ class DemoHost:
         capture = 631_152_000 + int(project[-8:], 16) % (10*365*86400)
         write_json(state / "demo.json", dict(schema=1, project=project, state=str(state),
             immich_state=str(fixture_state.resolve()), wheelhouse=str(wheelhouse.resolve()),
-            scenario=scenario, capture_start=capture, core_images=core_images))
+            scenario=scenario, capture_start=capture, revision=revision, core_images=core_images))
         with (state / ".env").open("w") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(f"DEMO_DB_PASSWORD={secrets.token_hex(24)}\nDEMO_ADMIN_TOKEN={secrets.token_hex(32)}\n"
@@ -866,12 +906,13 @@ def full_sequence(host, evidence, save):
 
 
 def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, keep: bool,
-             central_image=None, worker_image=None):
-    core_images = core_image_mapping(central_image, worker_image)
+             central_image=None, worker_image=None, revision=PLAYER_REVISION):
+    core_images = validate_selected_revision(revision, wheelhouse, central_image, worker_image)
     host = DemoHost.create(state, fixture_state, wheelhouse, scenario,
-                           central_image=core_images["central"], worker_image=core_images["worker"])
+                           central_image=core_images["central"], worker_image=core_images["worker"],
+                           revision=revision)
     evidence = dict(schema=1, started_utc=datetime.now(timezone.utc).isoformat(), status="running",
-                    scenario=scenario, player_revision=PLAYER_REVISION, phases={})
+                    scenario=scenario, revision=revision, player_revision=revision, phases={})
     def save():
         write_json(host.state / "evidence.json", evidence)
     save()
@@ -879,9 +920,9 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
         host.build()
         evidence["provenance"] = dict(harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             player_inventory=read_json(wheelhouse / "inventory.json"),
-            core_images=host.core_images, core_revision=PLAYER_REVISION,
+            core_images=host.core_images, core_revision=revision,
             workspace_revision=host.command(["git", "rev-parse", "HEAD"]).strip(),
-            core_dirty=host.command(["git", "diff", "--name-only", PLAYER_REVISION, "--", "central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock"]).splitlines())
+            core_dirty=host.command(["git", "diff", "--name-only", revision, "--", *CORE_SOURCE_PATHS]).splitlines())
         require(not evidence["provenance"]["core_dirty"], "core_dirty")
         save()
         host.compose("run", "--rm", "--no-deps", "init", timeout=60)
@@ -944,7 +985,8 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
         evidence["status"] = "passed"
         evidence["finished_utc"] = datetime.now(timezone.utc).isoformat()
         save()
-        return {"status": "passed", "scenario": scenario, "state_dir": str(host.state), "checks": checks}
+        return {"status": "passed", "scenario": scenario, "revision": revision,
+                "state_dir": str(host.state), "checks": checks}
     except Exception as error:
         code = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
         evidence["status"], evidence["error"] = "failed", code
@@ -973,6 +1015,7 @@ def main():
     parser.add_argument("--immich-state", type=Path)
     parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--scenario", choices=("baseline", "full"), default="baseline")
+    parser.add_argument("--revision", default=PLAYER_REVISION)
     parser.add_argument("--central-image")
     parser.add_argument("--worker-image")
     parser.add_argument("--keep", action="store_true")
@@ -984,7 +1027,9 @@ def main():
     elif args.command == "operator":
         result = operator_action(args.action)
     elif args.command == "plan":
-        result = dict(schema=1, scenarios=["baseline", "full"], player_revision=PLAYER_REVISION,
+        require(REVISION_PATTERN.fullmatch(args.revision) is not None, "exact_revision_required")
+        result = dict(schema=1, scenarios=["baseline", "full"], revision=args.revision,
+            player_revision=args.revision, requires_core_images=args.revision != PLAYER_REVISION,
             topology="isolated wall and backend, worker-only retained upstream access", host_ports=False,
             actuation="simulated", required_inputs=["new state-dir", "retained immich-state", "exact wheelhouse"])
     else:
@@ -993,7 +1038,7 @@ def main():
             core_image_mapping(args.central_image, args.worker_image)
             require(args.immich_state is not None and args.wheelhouse is not None, "missing_fixture_inputs")
             result = run_demo(args.state_dir, args.immich_state, args.wheelhouse, args.scenario, args.keep,
-                              args.central_image, args.worker_image)
+                              args.central_image, args.worker_image, args.revision)
         elif args.command == "status":
             host = DemoHost(args.state_dir)
             result = dict(marker=host.marker, evidence=read_json(host.state / "evidence.json"))
