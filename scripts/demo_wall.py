@@ -773,6 +773,33 @@ def outage_checks(reports, expiry):
                 "outage_lease_overrun")
 
 
+def delete_secured_original(host, evidence, save, before, reports, portrait_sha):
+    """Journal the selected lock and deletion before waiting for its presentation."""
+    fields = ("player_id", "authority_epoch", "assignment_id", "run_id", "sha256",
+              "start", "end", "valid_until")
+    candidates = [dict((field, lock[field]) for field in fields)
+                   for lock in before["locks"]
+                   if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+    evidence["phases"]["deleted_secured_pre_delete"] = dict(
+        central=before, players=reports, portrait_variant_sha256=portrait_sha,
+        future_portrait_locks=candidates)
+    save()
+    deletion = {"invoked_utc": time.time()}
+    evidence["phases"]["deleted_secured_delete"] = deletion
+    save()
+    try:
+        result = host.role("upstream-tools", "delete")
+    except Exception as error:
+        code = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
+        deletion["error"] = code
+        save()
+        raise
+    deletion["completed_utc"] = time.time()
+    deletion["result"] = result
+    save()
+    return result, deletion["completed_utc"]
+
+
 def retryable_operator_error(error):
     return str(error) in ("docker_command_failed", "operator_http_502", "operator_http_503",
                           "operator_http_504", "operator_transport")
@@ -839,8 +866,7 @@ def full_sequence(host, evidence, save):
                         if job["original_sha1"] == portrait_sha1 and job["state"] == "ready")
     before, reports = await_state(lambda snapshot, _: any(item["sha256"] == portrait_sha and
         item["start"] > snapshot["utc"] + 3 for item in snapshot["locks"]), "portrait_not_secured", 40)
-    deleted = host.role("upstream-tools", "delete")
-    deleted_at = time.time()
+    deleted, deleted_at = delete_secured_original(host, evidence, save, before, reports, portrait_sha)
     snapshot, reports = await_state(lambda snapshot, reports: any(event["utc"] > deleted_at and
         any(layer["sha256"] == portrait_sha for layer in event["layers"])
         for report in reports.values() for event in report["events"]), "deleted_secured_not_presented", 45)

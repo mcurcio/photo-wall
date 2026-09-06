@@ -40,4 +40,12 @@ The full configuration caps worker at 768 MiB, central at 384 MiB, PostgreSQL at
 
 The full passing run used a 70-second live-presentation wait. The harness now allows 120 seconds for that phase to accommodate held assignments, a four-member rotation and a safely skipped cue; the exact-byte, complete-group and clock predicates are unchanged. That budget change has focused coverage and is not described as another full run. A transient connection refusal while central restarts is retried within the phase deadline; authority, schema and unknown failures are not hidden as startup retries.
 
+The secured-deletion phase saves its pre-delete central/Player snapshot and
+exact future assignment identities and validity times before mutation. It
+then records the invocation/completion times and mutation result before the
+presentation wait. A timeout retains this evidence alongside the last sampled
+central/Player state, allowing a missed presentation to be investigated without
+guessing which assignment the test selected. The presentation and clock
+requirements remain unchanged.
+
 Standalone checks run with `.venv/bin/python -m pytest --noconftest tests/test_wall_demo.py -q`. They need no PostgreSQL fixture and cover role containment, complete-group evidence, lock preservation, per-Output outage/recovery, retry classification, immutable image overrides and complete source inventories. Native GTK/GStreamer/HDMI and accelerated calendar/nested-Scene tests remain separate evidence classes.

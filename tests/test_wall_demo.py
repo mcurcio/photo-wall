@@ -18,6 +18,7 @@ from scripts.demo_wall import (
     baseline_checks,
     composition,
     core_image_mapping,
+    delete_secured_original,
     local_source_inventory,
     main,
     operator_action,
@@ -311,6 +312,46 @@ def test_revision_must_be_lowercase_40_hex_before_git_or_filesystem_access(tmp_p
     with pytest.raises(DemoError, match="exact_revision_required"):
         validate_selected_revision("G" * 40, tmp_path / "missing-wheelhouse")
     assert not called
+
+
+def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failure():
+    events = []
+    saved = []
+    evidence = {"phases": {}}
+    before = {"utc": 100.0, "locks": [{
+        "player_id": "player-one", "authority_epoch": 2,
+        "assignment_id": "assignment-portrait", "run_id": "run-1",
+        "sha256": "p" * 64, "start": 110.0, "end": 118.0, "valid_until": 118.0,
+    }]}
+    reports = {"player-one": {"player_id": "player-one", "events": []}}
+
+    class Host:
+        def role(self, role, action):
+            events.append(("role", role, action))
+            return {"action": action, "assets": [{"label": "portrait", "deleted": True}]}
+
+    def save():
+        import copy
+        events.append(("save",))
+        saved.append(copy.deepcopy(evidence))
+
+    result, completed = delete_secured_original(Host(), evidence, save, before, reports,
+                                                "p" * 64)
+    assert result["action"] == "delete"
+    assert completed == evidence["phases"]["deleted_secured_delete"]["completed_utc"]
+    assert events[0] == ("save",)
+    assert events[1] == ("save",)
+    assert events[2] == ("role", "upstream-tools", "delete")
+    assert events[3] == ("save",)
+    pre = saved[0]["phases"]["deleted_secured_pre_delete"]
+    assert pre["central"] == before and pre["players"] == reports
+    assert pre["future_portrait_locks"] == [before["locks"][0]]
+    assert "completed_utc" not in saved[1]["phases"]["deleted_secured_delete"]
+    # A later timeout update cannot erase the pre-delete lock identity or mutation result.
+    evidence["phases"]["deleted_secured_wait"] = {"error": "deleted_secured_not_presented"}
+    save()
+    assert saved[-1]["phases"]["deleted_secured_pre_delete"] == pre
+    assert saved[-1]["phases"]["deleted_secured_delete"]["result"] == result
 
 
 def test_plan_records_selected_revision_and_image_requirement(monkeypatch, capsys):
