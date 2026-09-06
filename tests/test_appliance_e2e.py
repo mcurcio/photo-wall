@@ -118,3 +118,16 @@ def test_changed_generic_kernel_is_rejected(inputs):
     (generic / "Image").write_bytes(b"wrong kernel")
     with pytest.raises(FixtureError, match="generic_identity_mismatch"):
         checked_inputs(manifest)
+
+
+def test_serial_diagnostics_keep_only_fixed_public_fault_names():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics(
+        "systemd[1]: \x1b[0;31msystemd-networkd.service: Main process exited, status=200/CHDIR\x1b[0m\n"
+        "ModuleNotFoundError: private-input-must-not-escape\n"
+        "arbitrary-token.service: Failed with result secret\n")
+    assert result == dict(systemd_chdir_failure=True, kernel_panic=False, out_of_memory=False,
+                         failed_services=["systemd-networkd"], python_errors=["ModuleNotFoundError"])
+    assert "private-input" not in json.dumps(result)
+    assert "arbitrary-token" not in json.dumps(result)

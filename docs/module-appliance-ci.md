@@ -44,8 +44,10 @@ source export, player wheelhouse, and package staging after each consuming
 phase. Sparse decompression preserves the raw image bytes without allocating
 whole zero-filled blocks on Linux. These measures reduce peak workspace use;
 the first hosted run must establish the actual disk budget. Every generated output
-is a new regular-file-backed path outside Git. Failure leaves no signing key
-in the artifact directory.
+is a new regular-file-backed path outside Git. A failed fixture setup or build removes its newly created private deployment
+and temporary workspace; preexisting paths are refused and preserved. Successful
+builds remove the signing key and retain only the disposable TLS fixture until
+the job finishes. No private deployment file enters the artifact directory.
 
 Before fetching inputs, the orchestrator records the runner's measured free
 space and requires at least 8 GiB. The workflow does not delete unrelated SDK

@@ -55,41 +55,45 @@ def _openssl(*argv: str) -> None:
 def _fixture_deployment(destination: Path) -> tuple[Path, Path]:
     """Create public config plus a disposable TLS server fixture."""
     destination = _new_directory(destination, label="deployment")
-    public, private = destination / "public", destination / "private"
-    public.mkdir(mode=0o700)
-    private.mkdir(mode=0o700)
-    signing_key = private / "release-signing.key"
-    ca_key, ca_cert = private / "ca.key.pem", public / "ca.pem"
-    server_key, server_csr, server_cert = private / "server.key.pem", private / "server.csr", private / "server.pem"
-    release_pub = public / "release.pub.pem"
-    phase("fixture_signing_key", _openssl, "genpkey", "-algorithm", "ED25519", "-out", str(signing_key))
-    _openssl("pkey", "-in", str(signing_key), "-pubout", "-out", str(release_pub))
-    _openssl("genrsa", "-out", str(ca_key), "2048")
-    _openssl("req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", "1",
-             "-subj", "/CN=Photo Wall CI CA", "-addext", "basicConstraints=critical,CA:TRUE",
-             "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-out", str(ca_cert))
-    _openssl("genrsa", "-out", str(server_key), "2048")
-    _openssl("req", "-new", "-key", str(server_key), "-subj", "/CN=photo-wall.test", "-out", str(server_csr))
-    extensions = destination / "server.ext"
-    serial = destination / "ca.srl"
-    extensions.write_text("subjectAltName=DNS:photo-wall.test\n")
-    _openssl("x509", "-req", "-in", str(server_csr), "-CA", str(ca_cert), "-CAkey", str(ca_key),
-             "-CAcreateserial", "-CAserial", str(serial), "-days", "1", "-sha256",
-             "-extfile", str(extensions), "-out", str(server_cert))
-    extensions.unlink()
-    serial.unlink(missing_ok=True)
-    ca_key.unlink()
-    server_csr.unlink()
-    (public / "bootstrap.json").write_bytes(appliance.canonical({
-        "schema": 1, "release_origin": "https://photo-wall.test", "time_server": "photo-wall.test"}))
-    (public / "public.json").write_bytes(appliance.canonical({
-        "schema": 1, "central_origin": "https://photo-wall.test",
-        "state_dir": "/var/lib/photo-wall/player", "ca_file": "/etc/photo-wall/ca.pem"}))
-    for path in (signing_key, server_key):
-        path.chmod(0o600)
-    for path in (ca_cert, release_pub, public / "bootstrap.json", public / "public.json"):
-        path.chmod(0o600)
-    return destination, signing_key
+    try:
+        public, private = destination / "public", destination / "private"
+        public.mkdir(mode=0o700)
+        private.mkdir(mode=0o700)
+        signing_key = private / "release-signing.key"
+        ca_key, ca_cert = private / "ca.key.pem", public / "ca.pem"
+        server_key, server_csr, server_cert = private / "server.key.pem", private / "server.csr", private / "server.pem"
+        release_pub = public / "release.pub.pem"
+        phase("fixture_signing_key", _openssl, "genpkey", "-algorithm", "ED25519", "-out", str(signing_key))
+        _openssl("pkey", "-in", str(signing_key), "-pubout", "-out", str(release_pub))
+        _openssl("genrsa", "-out", str(ca_key), "2048")
+        _openssl("req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", "1",
+                 "-subj", "/CN=Photo Wall CI CA", "-addext", "basicConstraints=critical,CA:TRUE",
+                 "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-out", str(ca_cert))
+        _openssl("genrsa", "-out", str(server_key), "2048")
+        _openssl("req", "-new", "-key", str(server_key), "-subj", "/CN=photo-wall.test", "-out", str(server_csr))
+        extensions = destination / "server.ext"
+        serial = destination / "ca.srl"
+        extensions.write_text("subjectAltName=DNS:photo-wall.test\n")
+        _openssl("x509", "-req", "-in", str(server_csr), "-CA", str(ca_cert), "-CAkey", str(ca_key),
+                 "-CAcreateserial", "-CAserial", str(serial), "-days", "1", "-sha256",
+                 "-extfile", str(extensions), "-out", str(server_cert))
+        extensions.unlink()
+        serial.unlink(missing_ok=True)
+        ca_key.unlink()
+        server_csr.unlink()
+        (public / "bootstrap.json").write_bytes(appliance.canonical({
+            "schema": 1, "release_origin": "https://photo-wall.test", "time_server": "photo-wall.test"}))
+        (public / "public.json").write_bytes(appliance.canonical({
+            "schema": 1, "central_origin": "https://photo-wall.test",
+            "state_dir": "/var/lib/photo-wall/player", "ca_file": "/etc/photo-wall/ca.pem"}))
+        for path in (signing_key, server_key):
+            path.chmod(0o600)
+        for path in (ca_cert, release_pub, public / "bootstrap.json", public / "public.json"):
+            path.chmod(0o600)
+        return destination, signing_key
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 def _record(path: Path, maximum: int) -> dict:
@@ -118,11 +122,13 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
     diagnostics.mkdir(mode=0o700, exist_ok=True)
     free_before = phase("disk_space", _preflight_space, output.parent)
     deployment = deployment or output.parent / (".photo-wall-ci-deployment-" + revision[:12])
-    deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
-    temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
-    appliance.outside_git(temporary)
+    signing_key = temporary = None
+    completed = False
     keep_cache = base_cache is not None
     try:
+        deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
+        temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
+        appliance.outside_git(temporary)
         input_dir = (base_cache or temporary / "input").absolute()
         input_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         phase("fetch_ubuntu", appliance.run,
@@ -200,10 +206,12 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
             "qualified": {"image_built": True, "generic_vm_boot": False, "physical_pi": False},
         }
         (output / "ci-image.json").write_bytes(appliance.canonical(manifest))
+        completed = True
         return manifest
     finally:
         try:
-            for owner in (temporary / "package-evidence", temporary / "bundle/inventory"):
+            owners = () if temporary is None else (temporary / "package-evidence", temporary / "bundle/inventory")
+            for owner in owners:
                 for name in ("apt-update.log", "apt-purge.log", "apt-download.log", "apt-install.log",
                              "initramfs-build.log", "pip-install.log", "package-state.txt"):
                     path = owner / name
@@ -212,8 +220,12 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
                             appliance.checked_file(path, 4 * 1024**2)
                         shutil.copyfile(path, diagnostics / name)
         finally:
-            signing_key.unlink(missing_ok=True)
-            shutil.rmtree(temporary, ignore_errors=True)
+            if signing_key is not None:
+                signing_key.unlink(missing_ok=True)
+                if not completed:
+                    shutil.rmtree(deployment, ignore_errors=True)
+            if temporary is not None:
+                shutil.rmtree(temporary, ignore_errors=True)
 
 
 def main() -> None:

@@ -140,6 +140,23 @@ def boot_reports(serial: str, release_id: str) -> list[dict]:
     return result
 
 
+def serial_diagnostics(serial: str) -> dict:
+    """Return fixed diagnostic names, never guest messages or credentials."""
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", serial)
+    services = ("systemd-networkd", "systemd-resolved", "photo-wall-player",
+                "photo-wall-weston", "photo-wall-accept-trial", "photo-wall-trial-recovery")
+    failed = [service for service in services if re.search(
+        re.escape(service + ".service") + r": (?:Failed|Main process exited)", plain)]
+    return {
+        "systemd_chdir_failure": "200/CHDIR" in plain,
+        "kernel_panic": "Kernel panic" in plain,
+        "out_of_memory": "Out of memory:" in plain,
+        "failed_services": failed,
+        "python_errors": [kind for kind in ("ModuleNotFoundError", "ImportError", "PermissionError",
+                          "FileNotFoundError", "SSLCertVerificationError") if kind + ":" in plain],
+    }
+
+
 def enrollment(rows: list, previous: dict | None = None) -> dict | None:
     if not rows:
         return None
@@ -255,15 +272,19 @@ class ApplianceE2E:
         raise FixtureError("player_reconnection_timeout")
 
     def execute(self):
+        print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
         self.fixture = BootFixture.prepare(self.state / "services", self.inputs["bundle"],
                                           self.inputs["deployment"], self.central_image)
         self.fixture.up()
         self.report["checks"]["signed_https_dns_ntp"] = True
         require(self.inventory() == [], "fixture_not_empty")
+        print(json.dumps({"phase": "fresh_boot", "status": "started"}), flush=True)
         self.start_vm()
         first = self.wait_enrollment()
         self.report["first_enrollment"] = first
         self.report["checks"]["fresh_durable_enrollment"] = True
+        print(json.dumps({"phase": "fresh_boot", "status": "passed"}), flush=True)
+        print(json.dumps({"phase": "power_cycle", "status": "started"}), flush=True)
         self.checked_vm()
         self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
         require(not self.checked_vm()["Running"], "vm_stop_failed")
@@ -271,6 +292,8 @@ class ApplianceE2E:
         second = self.wait_enrollment(first)
         self.report["second_enrollment"] = second
         self.report["checks"]["identity_survives_power_cycle"] = True
+        print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
+        print(json.dumps({"phase": "central_recovery", "status": "started"}), flush=True)
         central = self.fixture_central()
         self.run(["docker", "stop", "--time", "10", central], timeout=30)
         # Long enough to break the existing HTTP/WebSocket sessions and exercise
@@ -282,6 +305,7 @@ class ApplianceE2E:
         self.wait_player_requests(since)
         require(enrollment(self.inventory()) == second, "recovery_identity_or_authority_changed")
         self.report["checks"]["central_outage_rejoin"] = True
+        print(json.dumps({"phase": "central_recovery", "status": "passed"}), flush=True)
         self.report["qualification"]["generic_vm"] = True
 
     def cleanup(self):
@@ -289,11 +313,7 @@ class ApplianceE2E:
             state = self.checked_vm()
             self.report["vm_exit_state"] = state
             serial = self.serial()
-            self.report["serial_diagnostics"] = {
-                "systemd_chdir_failure": "200/CHDIR" in serial,
-                "kernel_panic": "Kernel panic" in serial,
-                "out_of_memory": "Out of memory:" in serial,
-            }
+            self.report["serial_diagnostics"] = serial_diagnostics(serial)
             if state["Running"]:
                 self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
             self.checked_vm()
