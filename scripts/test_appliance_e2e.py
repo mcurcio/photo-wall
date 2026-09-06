@@ -309,20 +309,62 @@ class ApplianceE2E:
         self.report["qualification"]["generic_vm"] = True
 
     def cleanup(self):
-        if self.container_id:
+        errors = []
+        phases = {}
+
+        def error_code(error):
+            value = str(error) if isinstance(error, FixtureError) else type(error).__name__
+            return re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:96] or type(error).__name__
+
+        def attempt(name, callback):
+            try:
+                callback()
+            except Exception as error:
+                # Keep cleanup evidence bounded and free of command output or
+                # deployment data.  Continue with every independently owned
+                # resource even when an earlier phase fails.
+                code = error_code(error)
+                phases[name] = code
+                errors.append(name + ":" + code)
+
+        def vm_cleanup():
+            # The identity check is the destructive-action boundary.  If the
+            # VM was replaced or disappeared, fail closed and leave it alone.
             state = self.checked_vm()
             self.report["vm_exit_state"] = state
-            serial = self.serial()
-            self.report["serial_diagnostics"] = serial_diagnostics(serial)
+            try:
+                self.report["serial_diagnostics"] = serial_diagnostics(self.serial())
+            except Exception as error:
+                code = error_code(error)
+                phases["vm_logs"] = code
+                errors.append("vm_logs:" + code)
+            # Logging may have failed because the named VM was replaced.
+            # Recheck before stopping, and address the immutable container ID.
+            state = self.checked_vm()
             if state["Running"]:
-                self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
-            self.checked_vm()
-            self.run(["docker", "rm", self.name], timeout=30)
+                self.run(["docker", "stop", "--time", "15", self.container_id], timeout=30)
+            # Revalidate identity and stopped state before removing anything.
+            stopped = self.checked_vm()
+            require(not stopped["Running"], "vm_stop_failed")
+            self.run(["docker", "rm", self.container_id], timeout=30)
+
+        if self.container_id:
+            attempt("vm", vm_cleanup)
         if self.fixture:
-            self.fixture.down()
-        self.report["checks"]["signed_disk_unchanged"] = (
-            file_hash(self.inputs["disk"], MAX_DISK) == self.inputs["disk_record"]["sha256"])
-        require(self.report["checks"]["signed_disk_unchanged"], "signed_disk_changed")
+            attempt("fixture", self.fixture.down)
+
+        self.report["checks"]["signed_disk_unchanged"] = False
+
+        def disk_check():
+            unchanged = file_hash(self.inputs["disk"], MAX_DISK) == self.inputs["disk_record"]["sha256"]
+            self.report["checks"]["signed_disk_unchanged"] = unchanged
+            require(unchanged, "signed_disk_changed")
+
+        attempt("disk", disk_check)
+        self.report["cleanup_phases"] = phases
+        if errors:
+            self.report["qualification"]["generic_vm"] = False
+            raise FixtureError("cleanup_failed:" + ";".join(errors[:8]))
 
 
 def main():

@@ -2,7 +2,7 @@
 Description=Photo Wall single-process Player
 Wants=network-online.target photo-wall-weston.service
 After=network-online.target photo-wall-weston.service
-PartOf=photo-wall-weston.service
+# Compositor restart loops must not repeatedly interrupt network enrollment.
 StartLimitIntervalSec=0
 
 [Service]

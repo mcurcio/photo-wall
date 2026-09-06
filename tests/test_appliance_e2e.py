@@ -48,20 +48,84 @@ def test_old_inventory_cannot_prove_restart_and_changed_identity_fails():
         enrollment([row(persistence="volatile")])
 
 
-def test_cleanup_refuses_replaced_vm_before_any_removal():
-    calls = []
+class CleanupFixture:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = 0
 
-    def run(args, **kwargs):
-        calls.append(args)
-        return ('other-container\nsha256:' + 'd' * 64 + '\npw-vm-fixture\n' +
-                json.dumps(dict(Running=True, ExitCode=0, OOMKilled=False))).encode()
+    def down(self):
+        self.calls += 1
+        if self.error:
+            raise FixtureError(self.error)
 
+
+def make_cleanup_harness(tmp_path, run, fixture):
+    disk = tmp_path / "signed.img"
+    disk.write_bytes(b"signed disk")
     harness = object.__new__(ApplianceE2E)
     harness.run, harness.name = run, "pw-vm-fixture"
     harness.container_id, harness.builder_image = "original-container", "sha256:" + "d" * 64
-    with pytest.raises(FixtureError, match="vm_identity_changed"):
+    harness.fixture = fixture
+    harness.inputs = {"disk": disk, "disk_record": {
+        "sha256": hashlib.sha256(disk.read_bytes()).hexdigest()}}
+    harness.report = {"checks": {}, "qualification": {"generic_vm": True}}
+    return harness
+
+
+def test_cleanup_refuses_replaced_vm_but_continues_owned_cleanup(tmp_path):
+    calls = []
+    fixture = CleanupFixture()
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1] == "inspect":
+            return ('other-container\nsha256:' + 'd' * 64 + '\npw-vm-fixture\n' +
+                    json.dumps(dict(Running=True, ExitCode=0, OOMKilled=False))).encode()
+        raise AssertionError(args)
+
+    harness = make_cleanup_harness(tmp_path, run, fixture)
+    with pytest.raises(FixtureError, match="cleanup_failed:vm:vm_identity_changed"):
         harness.cleanup()
     assert all(args[1] == "inspect" for args in calls)
+    assert fixture.calls == 1
+    assert harness.report["checks"]["signed_disk_unchanged"] is True
+    assert harness.report["qualification"]["generic_vm"] is False
+
+
+def test_cleanup_missing_vm_still_cleans_fixture_and_checks_disk(tmp_path):
+    fixture = CleanupFixture()
+
+    def run(args, **kwargs):
+        if args[1] == "inspect":
+            raise FixtureError("docker_command_failed")
+        raise AssertionError(args)
+
+    harness = make_cleanup_harness(tmp_path, run, fixture)
+    with pytest.raises(FixtureError, match="cleanup_failed:vm:docker_command_failed"):
+        harness.cleanup()
+    assert fixture.calls == 1
+    assert harness.report["checks"]["signed_disk_unchanged"] is True
+
+
+def test_fixture_cleanup_failure_still_checks_disk(tmp_path):
+    fixture = CleanupFixture("fixture_down_failed")
+
+    def run(args, **kwargs):
+        if args[1] == "inspect":
+            return ("original-container\nsha256:" + "d" * 64 + "\npw-vm-fixture\n" +
+                    json.dumps(dict(Running=False, ExitCode=0, OOMKilled=False))).encode()
+        if args[1] == "logs":
+            return b""
+        if args[1] == "rm":
+            return b""
+        raise AssertionError(args)
+
+    harness = make_cleanup_harness(tmp_path, run, fixture)
+    with pytest.raises(FixtureError, match="cleanup_failed:fixture:fixture_down_failed"):
+        harness.cleanup()
+    assert harness.report["checks"]["signed_disk_unchanged"] is True
+    assert harness.report["cleanup_phases"] == {"fixture": "fixture_down_failed"}
+    assert harness.report["qualification"]["generic_vm"] is False
 
 
 @pytest.fixture
@@ -131,3 +195,23 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
                          failed_services=["systemd-networkd"], python_errors=["ModuleNotFoundError"])
     assert "private-input" not in json.dumps(result)
     assert "arbitrary-token" not in json.dumps(result)
+
+
+def test_vm_replacement_during_log_collection_cannot_be_stopped(tmp_path):
+    fixture = CleanupFixture()
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1] == "inspect":
+            identity = "original-container" if len(calls) == 1 else "replacement"
+            return (identity + "\nsha256:" + "d" * 64 + "\npw-vm-fixture\n" +
+                    json.dumps(dict(Running=True, ExitCode=0, OOMKilled=False))).encode()
+        raise AssertionError(args)
+
+    harness = make_cleanup_harness(tmp_path, run, fixture)
+    with pytest.raises(FixtureError, match="vm_identity_changed"):
+        harness.cleanup()
+    assert all(args[1] == "inspect" for args in calls)
+    assert fixture.calls == 1
+    assert harness.report["checks"]["signed_disk_unchanged"] is True

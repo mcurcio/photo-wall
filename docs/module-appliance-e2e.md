@@ -24,7 +24,10 @@ Each run creates a fresh private fixture and a QEMU `virt` guest with two virtua
 CPUs and 3 GiB RAM in a 4 GiB container. The disk and generic boot files are
 mounted read-only; a private qcow2 overlay receives writes. There are no host
 devices, host ports, guest credentials or replacement Player process. The
-ordinary systemd Player from the signed root must register itself.
+ordinary systemd Player from the signed root must register itself. Its network
+service starts after Weston but does not inherit compositor restart jobs; a
+missing DRM device must not create an enrollment restart loop. Each service
+retains its own failure restart policy.
 
 The automated scenarios require:
 
@@ -43,7 +46,9 @@ JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
 Player identity state and raw guest disks are excluded from test-report uploads.
 Cleanup checks container identities before stopping or removing them; replacement
-resources fail closed.
+resources fail closed. VM cleanup, fixture cleanup and the original disk check
+are attempted independently; a failure in one cannot suppress the others, and
+any cleanup failure prevents a passing qualification result.
 
 The headless VM has no physical panels. Its pass qualifies generic userspace
 boot, durable enrollment and reconnection only. It does not qualify native
