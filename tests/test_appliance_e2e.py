@@ -77,6 +77,23 @@ def test_old_inventory_cannot_prove_restart_and_changed_identity_fails():
         enrollment([row(persistence="volatile")])
 
 
+def test_enrollment_can_follow_a_verified_boot_report_leaving_the_log_tail(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {"boots": []}
+    harness.inputs = {"release": SimpleNamespace(release_id=RELEASE)}
+    harness.checked_vm = lambda: dict(Running=True, OOMKilled=False)
+    inventories = iter(([], [row()]))
+    serials = iter((json.dumps(report()), "later service messages"))
+    harness.inventory = lambda: next(inventories)
+    harness.serial = lambda: next(serials)
+    monkeypatch.setattr(e2e.time, "sleep", lambda seconds: None)
+    assert harness.wait_enrollment() == row()
+    assert harness.report["boots"] == [report()]
+    assert harness.report["last_inventory_count"] == 1
+
+
 class CleanupFixture:
     def __init__(self, error=None):
         self.error = error
@@ -242,9 +259,25 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
         "ModuleNotFoundError: private-input-must-not-escape\n"
         "arbitrary-token.service: Failed with result secret\n")
     assert result == dict(systemd_chdir_failure=True, kernel_panic=False, out_of_memory=False,
-                         failed_services=["systemd-networkd"], python_errors=["ModuleNotFoundError"])
+                         failed_services=["systemd-networkd"], service_exit_status={},
+                         python_errors=["ModuleNotFoundError"])
     assert "private-input" not in json.dumps(result)
     assert "arbitrary-token" not in json.dumps(result)
+
+
+def test_serial_diagnostics_expose_bounded_service_exit_codes_without_messages():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics(
+        "photo-wall-player.service: Control process exited, code=exited, status=226/NAMESPACE\n"
+        "photo-wall-player.service: Main process exited, code=killed, status=6/ABRT\n"
+        "photo-wall-player.service: Control process exited, code=exited, status=226/NAMESPACE\n"
+        "private-token.service: Main process exited, code=exited, status=203/EXEC\n"
+        "photo-wall-player.service: private path and token must not escape\n")
+    assert result["service_exit_status"] == {"photo-wall-player": [
+        dict(code="exited", status=226, name="NAMESPACE"),
+        dict(code="killed", status=6, name="ABRT")]}
+    assert "private" not in json.dumps(result)
 
 
 def test_vm_replacement_during_log_collection_cannot_be_stopped(tmp_path):

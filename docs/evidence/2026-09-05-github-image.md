@@ -69,3 +69,26 @@ follow-up change passed **132 related local checks / 1 Linux UID skip**, then
 health polling/state mutation and rejection of mismatched or malformed reports.
 This establishes the command's behavior, not an actual systemd or Pi reboot.
 Counts overlap and are not summed.
+
+## Hosted VM attempt after the manifest fix
+
+[Run 34014002058](https://github.com/mcurcio/photo-wall/actions/runs/34014002058)
+also built and reopened its signed disk successfully. Actual PR merge/source
+revision: `6340b92066f0a86b2034f29ee1b29bbf8bdf638d`, from feature head `1edbbd3`.
+Disk size: 5,906,628,608 bytes; SHA-256:
+`16a50d54cfc0613209c23d6711938f5b64276abd0237729a79452fd373e41881`.
+
+The [public e2e report](2026-09-05-github-vm-report.json) records a successful
+signed HTTPS/DNS/NTP fixture probe, followed by `guest_enrollment_timeout` after
+ten minutes. The guest container remained running. Diagnostics identified
+failed Player, Weston and trial-acceptance services, with no observed kernel
+panic, out-of-memory event, CHDIR failure or allowlisted Python exception type.
+The available report does not establish the service failure cause.
+
+Cleanup passed and the original disk hash remained unchanged. No reboot,
+reconnection or generic/physical qualification passed, and no image artifact
+was uploaded. A subsequent harness correction retains validated boot reports
+when they leave the bounded serial-log tail, and records numeric service exit
+codes plus final inventory count. **20 focused e2e tests passed**, including
+late enrollment after log rollover and sanitized exit-code reporting. That is
+harness evidence, not a successful rerun of the guest.

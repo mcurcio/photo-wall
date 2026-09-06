@@ -154,11 +154,20 @@ def serial_diagnostics(serial: str) -> dict:
                 "photo-wall-weston", "photo-wall-accept-trial", "photo-wall-trial-recovery")
     failed = [service for service in services if re.search(
         re.escape(service + ".service") + r": (?:Failed|Main process exited)", plain)]
+    exits = {}
+    for service in services:
+        matches = re.findall(re.escape(service + ".service")
+            + r": (?:Main|Control) process exited, code=(exited|killed|dumped), "
+              r"status=([0-9]{1,3})(?:/([A-Z0-9_]{1,32}))?", plain)
+        if matches:
+            exits[service] = [dict(code=code, status=int(status), name=name)
+                             for code, status, name in sorted(set(matches))[:8]]
     return {
         "systemd_chdir_failure": "200/CHDIR" in plain,
         "kernel_panic": "Kernel panic" in plain,
         "out_of_memory": "Out of memory:" in plain,
         "failed_services": failed,
+        "service_exit_status": exits,
         "python_errors": [kind for kind in ("ModuleNotFoundError", "ImportError", "PermissionError",
                           "FileNotFoundError", "SSLCertVerificationError") if kind + ":" in plain],
     }
@@ -254,9 +263,18 @@ class ApplianceE2E:
         while time.monotonic() < deadline:
             status = self.checked_vm()
             require(status["Running"] and not status["OOMKilled"], "vm_stopped_before_enrollment")
-            row = enrollment(self.inventory(), previous)
+            rows = self.inventory()
+            self.report["last_inventory_count"] = len(rows)
+            row = enrollment(rows, previous)
             reports = boot_reports(self.serial(), self.inputs["release"].release_id)
-            fresh = [r for r in reports if r["boot_id"] not in
+            observed = self.report.setdefault("observed_boot_reports", [])
+            for report in reports:
+                if report["boot_id"] not in {old["boot_id"] for old in observed}:
+                    observed.append(report)
+            require(len(observed) <= 4, "unexpected_boot_count")
+            # Enrollment can lag until the initial report has left the bounded
+            # serial-log tail. Retain verified reports across polling attempts.
+            fresh = [r for r in observed if r["boot_id"] not in
                      {old["boot_id"] for old in self.report["boots"]}]
             if row and fresh:
                 self.report["boots"].append(fresh[-1])

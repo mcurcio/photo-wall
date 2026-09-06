@@ -49,6 +49,10 @@ sanitized failure codes and explicit qualification limits. Private TLS keys,
 Player identity state and raw guest disks are excluded from test-report uploads.
 Input validation failures also emit an unqualified report marked `preflight`,
 without copying unverified artifact fields or starting fixture services.
+Validated boot reports are retained across polls so serial-log rollover cannot
+erase earlier boot evidence while enrollment is pending. Diagnostic output
+includes only bounded numeric/named exits for fixed system services and the
+final inventory count, rather than raw service messages.
 Cleanup checks container identities before stopping or removing them; replacement
 resources fail closed. VM cleanup, fixture cleanup and the original disk check
 are attempted independently; a failure in one cannot suppress the others, and
