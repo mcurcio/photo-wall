@@ -1,8 +1,8 @@
 # CI appliance image and VM gate
 
 The ARM64 workflow builds the Raspberry Pi appliance from the exact checked out
-commit on `ubuntu-24.04-arm`. It first builds the central image and the pinned
-Linux appliance builder, then runs `scripts/build_ci_image.py` inside that
+commit on `ubuntu-24.04-arm`. It first builds or restores the central image and
+pinned Linux appliance builder through separate BuildKit caches, then runs `scripts/build_ci_image.py` inside that
 builder. The orchestration calls the existing package, Ubuntu input,
 appliance, signing, finalization, and generic-initramfs builders; it does not
 reimplement any image format or boot logic.
@@ -16,6 +16,7 @@ python3 scripts/build_ci_image.py \
   --output-dir /work/photo-wall-artifact \
   --deployment-dir /work/photo-wall-deployment \
   --base-cache /work/photo-wall-base-cache \
+  --extracted-base-cache /work/photo-wall-extracted-base \
   --central-image sha256:<central-image-id> \
   --builder-image sha256:<builder-image-id>
 ```
@@ -54,6 +55,50 @@ Before fetching inputs, the orchestrator records the runner's measured free
 space and requires at least 8 GiB. The workflow does not delete unrelated SDK
 or tool caches to manufacture capacity; it relies on the explicit phase
 cleanup and the runner's available workspace.
+
+## Reusable build inputs
+
+The first hosted build spent about 12 minutes extracting Ubuntu, 5 minutes
+installing runtime packages and 3–4 minutes preparing the builder container.
+The workflow targets the repeated container layers and Ubuntu extraction;
+warm-cache speedups require a measured hosted run before being claimed.
+
+- Central and builder images use separate ARM64
+  [BuildKit GitHub cache scopes](https://docs.docker.com/build/ci/github-actions/cache/).
+  Both images are loaded locally and their immutable image IDs still bind the
+  image build and VM test. No registry write credentials are required.
+  Runtime dependencies are installed before application source is copied, so
+  ordinary code edits retain the dependency layer.
+- The extracted-base cache contains a metadata-preserving archive of pristine
+  Ubuntu and a bounded integrity manifest. Its exact key includes the runner
+  architecture, pinned base and extraction/build-input implementation hashes.
+  Changed inputs miss the cache. Restore verifies the expected fingerprint,
+  archive size/hash and safe archive structure before materializing a new root.
+  File ownership, hardlinks, permissions, xattrs and ACLs must survive reuse.
+  Invalid entries or failed restoration are recorded as misses and use the
+  fresh path; interrupted restores remove their temporary root and propagate
+  cancellation. Cache publication failure leaves the fresh extracted root usable.
+- The cache is produced before runtime package installation or Photo Wall
+  configuration. It contains no deployment trust keys, Player identity,
+  configured appliance root or signed output. The completed cache is saved
+  before e2e, including when a later image phase fails. Cache service upload
+  failures do not turn a valid image into a failed build.
+
+Cache reuse follows [GitHub's branch access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching):
+a PR's cache remains scoped to that PR and is unavailable to the base branch.
+The cache is a CI acceleration input; final source/configuration binding,
+signing, disk reopening, generic initramfs generation and e2e still run for
+every revision. Build and boot share one runner so the raw disk and private
+disposable fixture do not need an intermediate artifact transfer. Standard
+checks run on PRs and main pushes, avoiding duplicate feature-push/PR runs.
+
+`--base-cache` retains the small signed-input download set plus the compressed
+base; it is distinct from `--extracted-base-cache`, which skips download,
+decompression and libguestfs extraction on a verified hit. Both are optional;
+without them the original fresh build remains available.
+Each build phase emits elapsed seconds and a collapsed GitHub log group, so
+subsequent cold/warm comparisons can distinguish restoration, installation,
+assembly and test costs. See the [optimization checks](evidence/2026-09-05-ci-cache.md).
 
 The workflow has `contents: read`, pinned action commit SHAs, push-to-main,
 pull-request, and manual triggers. Each PR keeps one image run active and the

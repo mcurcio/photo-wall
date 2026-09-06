@@ -2,12 +2,14 @@ FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ff
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
+# Keep locked third-party dependencies reusable when application code changes.
+RUN uv sync --frozen --no-dev --no-install-project && useradd --system --uid 10001 --create-home wall \
+    && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
 COPY central ./central
 COPY contracts ./contracts
 COPY media ./media
 COPY player ./player
-RUN uv sync --frozen --no-dev && useradd --system --uid 10001 --create-home wall \
-    && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
+RUN uv sync --frozen --no-dev
 USER wall
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 

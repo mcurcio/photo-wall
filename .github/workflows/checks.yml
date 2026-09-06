@@ -2,7 +2,7 @@ name: MVP checks
 
 on:
   push:
-    branches: [main, feat/runnable-mvp]
+    branches: [main]
   pull_request:
 
 permissions:

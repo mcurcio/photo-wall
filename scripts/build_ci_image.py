@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Direct-file invocation is supported for local inspection as well as the CI
@@ -22,21 +23,31 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from appliance import build as appliance
-from scripts import build_player, build_vm_initrd, fetch_ubuntu
+from scripts import build_player, build_vm_initrd, ci_base_cache, fetch_ubuntu
 
 MIN_FREE_BYTES = 8 * 1024**3
 
 
 def phase(name, function, *args, **kwargs):
     """Identify failed public build stages without echoing private inputs."""
+    started = time.monotonic()
+    grouped = os.environ.get("GITHUB_ACTIONS") == "true"
+    if grouped:
+        print(f"::group::{name}", flush=True)
     print(json.dumps({"phase": name, "status": "started"}), flush=True)
     try:
         result = function(*args, **kwargs)
-    except Exception:
-        print(json.dumps({"phase": name, "status": "failed"}), flush=True)
+    except BaseException:
+        print(json.dumps({"phase": name, "status": "failed",
+                          "elapsed_seconds": round(time.monotonic() - started, 3)}), flush=True)
         raise
-    print(json.dumps({"phase": name, "status": "passed"}), flush=True)
-    return result
+    else:
+        print(json.dumps({"phase": name, "status": "passed",
+                          "elapsed_seconds": round(time.monotonic() - started, 3)}), flush=True)
+        return result
+    finally:
+        if grouped:
+            print("::endgroup::", flush=True)
 
 
 def _new_directory(path: Path, *, label: str) -> Path:
@@ -107,9 +118,66 @@ def _preflight_space(path: Path) -> int:
     return free
 
 
+def _prepare_base_root(temporary: Path, repository: Path, diagnostics: Path, *,
+                       base_cache: Path | None,
+                       extracted_base_cache: Path | None) -> tuple[Path, dict]:
+    """Obtain the pristine base root, optionally restoring its public cache."""
+    cache_record = {"requested": extracted_base_cache is not None, "hit": False,
+                    "published": False, "fingerprint": None}
+    expected = None
+    root = temporary / "root"
+    if extracted_base_cache is not None:
+        expected = ci_base_cache.fingerprint(repository)
+        cache_record = phase("extracted_base_cache_restore", ci_base_cache.restore,
+                             extracted_base_cache, root, expected)
+        print(json.dumps({"phase": "extracted_base_cache", "status": "passed",
+                          "hit": cache_record["hit"], "fingerprint": expected,
+                          **({"reason": cache_record["reason"]}
+                             if "reason" in cache_record else {})}), flush=True)
+        if cache_record["hit"]:
+            return root, cache_record
+
+    input_dir = (base_cache or temporary / "input").absolute()
+    input_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    phase("fetch_ubuntu", appliance.run,
+          [sys.executable, str(repository / "scripts/fetch_ubuntu.py"), str(input_dir)],
+          timeout=3600, log=diagnostics / "fetch-ubuntu.log")
+    compressed = input_dir / fetch_ubuntu.IMAGE
+    base_image = temporary / "base.img"
+    phase("decompress", appliance.decompress_base, compressed, base_image)
+    if base_cache is None:
+        shutil.rmtree(input_dir)
+    phase("extract", appliance.run, [sys.executable, "-m", "appliance.build", "extract",
+                   str(base_image), str(root)], timeout=900,
+          env=dict(os.environ, PYTHONPATH=str(repository)), log=diagnostics / "extract.log")
+    base_image.unlink()
+
+    if expected is not None:
+        if extracted_base_cache.exists() or extracted_base_cache.is_symlink():
+            # An exact-key cache path should be absent on a miss. Leave a
+            # malformed restored path untouched and make this build usable.
+            cache_record = {"requested": True, "hit": False, "published": False,
+                            "fingerprint": expected, "reason": "cache_exists"}
+            print(json.dumps({"phase": "extracted_base_cache_publish", "status": "skipped",
+                              "hit": False, "fingerprint": expected,
+                              "reason": "cache_exists"}), flush=True)
+        else:
+            try:
+                cache_record = phase("extracted_base_cache_publish", ci_base_cache.publish,
+                                     root, extracted_base_cache, expected)
+            except (ci_base_cache.CacheError, appliance.BuildError, OSError):
+                cache_record = {"requested": True, "hit": False, "published": False,
+                                "fingerprint": expected, "reason": "cache_publish_failed"}
+            print(json.dumps({"phase": "extracted_base_cache", "status": "passed",
+                              "hit": False, "fingerprint": expected,
+                              "published": cache_record["published"]}), flush=True)
+    return root, cache_record
+
+
 def build(repository: Path, revision: str, output: Path, *, deployment: Path | None = None,
           base_cache: Path | None = None, builder_image: str | None = None,
-          central_image: str | None = None) -> dict:
+          central_image: str | None = None,
+          extracted_base_cache: Path | None = None) -> dict:
     if not isinstance(revision, str) or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise appliance.BuildError("revision_invalid")
     repository = repository.resolve(strict=True)
@@ -124,26 +192,13 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
     deployment = deployment or output.parent / (".photo-wall-ci-deployment-" + revision[:12])
     signing_key = temporary = None
     completed = False
-    keep_cache = base_cache is not None
     try:
         deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
         temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
         appliance.outside_git(temporary)
-        input_dir = (base_cache or temporary / "input").absolute()
-        input_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        phase("fetch_ubuntu", appliance.run,
-              [sys.executable, str(repository / "scripts/fetch_ubuntu.py"), str(input_dir)],
-              timeout=3600, log=diagnostics / "fetch-ubuntu.log")
-        compressed = input_dir / fetch_ubuntu.IMAGE
-        base_image = temporary / "base.img"
-        phase("decompress", appliance.decompress_base, compressed, base_image)
-        if not keep_cache:
-            shutil.rmtree(input_dir)
-        root = temporary / "root"
-        phase("extract", appliance.run, [sys.executable, "-m", "appliance.build", "extract",
-                       str(base_image), str(root)], timeout=900,
-                      env=dict(os.environ, PYTHONPATH=str(repository)), log=diagnostics / "extract.log")
-        base_image.unlink()
+        root, extracted_cache_record = _prepare_base_root(
+            temporary, repository, diagnostics, base_cache=base_cache,
+            extracted_base_cache=extracted_base_cache)
         evidence = temporary / "package-evidence"
         phase("runtime_packages", appliance.install_runtime_packages, root, evidence)
         player = temporary / "player"
@@ -186,6 +241,7 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
             "source_commit": revision,
             "builder_image": builder_image,
             "central_image": central_image,
+            "extracted_base_cache": extracted_cache_record,
             "disk": {"path": str(image_path), **_record(image_path, 16 * 1024**3)},
             # These three paths intentionally remain absolute: the VM harness
             # runs on the same CI host before the output directory is uploaded.
@@ -235,6 +291,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--deployment-dir", type=Path)
     parser.add_argument("--base-cache", type=Path)
+    parser.add_argument("--extracted-base-cache", type=Path)
     parser.add_argument("--builder-image")
     parser.add_argument("--central-image")
     args = parser.parse_args()
@@ -243,7 +300,8 @@ def main() -> None:
     try:
         result = build(args.repository, args.revision, args.output_dir,
                        deployment=args.deployment_dir, base_cache=args.base_cache,
-                       builder_image=args.builder_image, central_image=args.central_image)
+                       builder_image=args.builder_image, central_image=args.central_image,
+                       extracted_base_cache=args.extracted_base_cache)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f"CI appliance build failed: {exc}\n")
     print(json.dumps(result, sort_keys=True))
