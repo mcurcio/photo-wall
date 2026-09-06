@@ -141,3 +141,35 @@ Corrected source identities:
 | `appliance/systemd/accept-trial.service` | `1974ad28ca2aa48e554fdc37c2dfcd041ca1f23e3a80df3a052e8ec9e56600e8` |
 | `appliance/systemd/trial-recovery.service` | `7aae2b0e5d504b93e06249233280f08112fdd20e096241fbb484cb30d2d701ec` |
 | `scripts/test_appliance_e2e.py` | `4277c1b42265f96108552b0829690fc7320d8febb8b5dd22f4f5369653ef762d` |
+
+## Corrected verification reached health; enrollment deadline failed
+
+[Run 34028634101](https://github.com/mcurcio/photo-wall/actions/runs/34028634101)
+at feature `d449103` (actual merge/source
+`12f2be9279bc68a60e536bccff820f8bda419ca2`) assembled A and B in **12m09s**,
+10:54:23–11:06:32 UTC on 2026-09-06. Its exact-artifact e2e failed
+`guest_enrollment_timeout`; cleanup and the original disk checksum passed.
+The [sanitized report](https://github.com/mcurcio/photo-wall/actions/runs/34028634101/artifacts/9988218403)
+records a durable A trial boot, but zero enrolled Players. All qualification
+flags remain false and no downloadable image was published.
+
+For boot `a35464d0-20b0-4bf0-942a-fd643db93672`, the host observed verification
+at 11:15:41.278 and the health phase at 11:16:03.777 UTC, approximately 22.5s
+apart. The test finished at 11:17:40.914 after the 600-second enrollment
+deadline. This establishes that verification reached the health gate; it
+does not establish healthy Player startup, trial acceptance or the precise
+reason enrollment was delayed. There were no classified failed services,
+Python errors, kernel panic or OOM in the retained diagnostic projection.
+
+| Artifact | Identity |
+| --- | --- |
+| Original disk | 5,906,628,608 bytes; `c9a50b6fc97d88675c0c1d8e7c50521d603c41cd95926cbfe769fbe9490a3e80` |
+| A release | `82c26294265175dcee1c26224f4e717576c41229aed616b5c24bd9b3681f308c` |
+| A rootfs | `89b397904b33c131c5740c7583b491f33d6fcc41f71680323a35165e3a223f9d` |
+| B release | `c31e04f12061b1068a04e102230cddba12c3ced76e029dc5beb96122c8abd190` |
+| B rootfs | `85de36829a6830e913e7cf250659a1aa048d7fb2b2e3f013810ef75394a24ae8` |
+| Generic initramfs | `479fe86cf86aad51e0f020e1ae850f1ab0f6696c45a39b3bc3be92251a9e1c9d` |
+
+The already queued [26ee139 image run](https://github.com/mcurcio/photo-wall/actions/runs/34029064970)
+then started automatically. It has unchanged application/appliance source;
+its outcome must be read independently rather than inferred from this failure.

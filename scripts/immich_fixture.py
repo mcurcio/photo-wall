@@ -137,9 +137,18 @@ class FixtureHost:
             raise HarnessError("docker_command_failed")
         return stdout or ""
 
-    def build(self) -> None:
-        self._command(["docker", "build", "--tag", self.project + "-base:local",
-                       "--file", str(ROOT / "Dockerfile"), str(ROOT)], timeout=600, capture=False)
+    def build(self, *, base_image: str | None = None) -> None:
+        if base_image is None:
+            self._command(["docker", "build", "--tag", self.project + "-base:local",
+                           "--file", str(ROOT / "Dockerfile"), str(ROOT)], timeout=600, capture=False)
+        else:
+            require(re.fullmatch(r"sha256:[a-f0-9]{64}", base_image) is not None,
+                    "immutable_fixture_base_required")
+            actual = self._command(["docker", "image", "inspect", "--format", "{{.Id}}", base_image],
+                                   timeout=30, capture=True).strip()
+            require(actual == base_image, "fixture_base_changed")
+            self._command(["docker", "tag", base_image, self.project + "-base:local"],
+                          timeout=30, capture=False)
         self.compose("build", "central-probe", timeout=600, capture=False)
 
     def export_runtime(self) -> None:

@@ -205,10 +205,13 @@ def _prepare_base_root(temporary: Path, repository: Path, diagnostics: Path, *,
 
 def build(repository: Path, revision: str, output: Path, *, deployment: Path | None = None,
           base_cache: Path | None = None, builder_image: str | None = None,
-          central_image: str | None = None,
+          central_image: str | None = None, worker_image: str | None = None,
           extracted_base_cache: Path | None = None) -> dict:
     if not isinstance(revision, str) or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise appliance.BuildError("revision_invalid")
+    if worker_image is not None and (not worker_image.startswith("sha256:") or len(worker_image) != 71
+            or any(c not in "0123456789abcdef" for c in worker_image[7:])):
+        raise appliance.BuildError("worker_image_invalid")
     repository = repository.resolve(strict=True)
     output = output.absolute()
     appliance.outside_git(output)
@@ -269,6 +272,7 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
             "source_commit": revision,
             "builder_image": builder_image,
             "central_image": central_image,
+            "worker_image": worker_image,
             "extracted_base_cache": extracted_cache_record,
             "disk": {"path": str(image_path), **_record(image_path, 16 * 1024**3)},
             # These three paths intentionally remain absolute: the VM harness
@@ -324,6 +328,7 @@ def main() -> None:
     parser.add_argument("--extracted-base-cache", type=Path)
     parser.add_argument("--builder-image")
     parser.add_argument("--central-image")
+    parser.add_argument("--worker-image")
     args = parser.parse_args()
     if not args.revision:
         parser.error("--revision or GITHUB_SHA is required")
@@ -331,6 +336,7 @@ def main() -> None:
         result = build(args.repository, args.revision, args.output_dir,
                        deployment=args.deployment_dir, base_cache=args.base_cache,
                        builder_image=args.builder_image, central_image=args.central_image,
+                       worker_image=args.worker_image,
                        extracted_base_cache=args.extracted_base_cache)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f"CI appliance build failed: {exc}\n")

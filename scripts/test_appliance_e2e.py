@@ -3,7 +3,8 @@
 The signed disk is read-only. A private qcow2 overlay is reused across a power
 cycle; only the stock Player enrolls. No guest credentials or test Player are
 injected. Native trial acceptance uses the stock Player with virtual DRM;
-this gate cannot qualify Pi firmware, HDMI, or actual media presentation.
+the optional real-media fixture also requires native photo presentation and
+populated cache preservation. This cannot qualify Pi firmware or HDMI.
 """
 
 from __future__ import annotations
@@ -31,12 +32,15 @@ from scripts.build_vm_initrd import MAX_MANIFEST_BYTES
 
 LABEL = "org.photo-wall.appliance-e2e"
 MAX_DISK = 8 * 1024**3
-BOOT_TIMEOUT = 600
+# TCG boot can consume nine minutes before native userspace starts. Keep the
+# outer enrollment deadline beyond its verification and native-health window.
+BOOT_TIMEOUT = 900
 RECOVERY_TIMEOUT = 120
 TRIAL_TIMEOUT = 540
 STAGE_TIMEOUT = 930
 # Cover the 510s acceptance unit plus 320s recovery unit and observation margin.
 ROLLBACK_TIMEOUT = 870
+VM_PROCESS_TIMEOUT = 3 * BOOT_TIMEOUT + RECOVERY_TIMEOUT + STAGE_TIMEOUT + ROLLBACK_TIMEOUT + 480
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 PUBLIC_EVENTS = {"photo-wall-trial-acceptance", "photo-wall-trial-phase",
                  "photo-wall-stage-trial", "photo-wall-rollback-allowed"}
@@ -65,7 +69,7 @@ umask 077
 if [ ! -e /vm/disk.qcow2 ]; then
     qemu-img create -f qcow2 -F raw -b /input.img /vm/disk.qcow2
 fi
-exec timeout --signal=TERM --kill-after=10 4200 qemu-system-aarch64 \\
+exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aarch64 \\
     -machine virt -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
     -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 systemd.journald.forward_to_console=1' \\
@@ -149,10 +153,13 @@ def checked_inputs(manifest: Path) -> dict:
     for slot, selected in (("A", release), ("B", candidate)):
         require(metadata["slots"][slot] == dict(release_id=selected.release_id,
             rootfs_sha256=selected.rootfs_sha256, rootfs_size=selected.rootfs_size), "candidate_slot_mismatch")
+    runtime_images = ({name: image_id(data[name + "_image"]) for name in ("central", "builder", "worker")}
+                      if data.get("worker_image") else None)
     return dict(source_commit=data["source_commit"], disk=path, disk_record=disk,
                 generic=generic, generic_record=record, bundle=bundle, deployment=deployment,
                 release=release, candidate=candidate, candidate_dir=candidate_dir,
-                candidate_metadata=metadata)
+                candidate_metadata=metadata,
+                worker_image=runtime_images["worker"] if runtime_images else None, runtime_images=runtime_images)
 
 
 def serial_records(serial: str):
@@ -309,7 +316,12 @@ def enrollment(rows: list, previous: dict | None = None) -> dict | None:
 
 class ApplianceE2E:
     def __init__(self, inputs: dict, state: Path, central_image: str, builder_image: str,
-                 *, run=command):
+                 *, run=command, worker_image: str | None = None):
+        require(worker_image == inputs.get("worker_image"), "worker_image_manifest_mismatch")
+        if worker_image is not None:
+            image_id(worker_image)
+            require(inputs.get("runtime_images") == dict(central=central_image, builder=builder_image,
+                                                          worker=worker_image), "runtime_image_manifest_mismatch")
         require(state.is_absolute() and not state.exists() and not state.is_symlink(), "new_e2e_state_required")
         require(not any((p / ".git").exists() for p in (state, *state.parents)), "state_inside_git")
         state.mkdir(mode=0o700)
@@ -330,8 +342,15 @@ class ApplianceE2E:
             virtual_graphics=dict(device="virtio-gpu-pci", max_outputs=2, host_gpu=False),
             rollback_candidate=inputs["candidate_metadata"],
             deadlines_seconds=dict(boot=BOOT_TIMEOUT, stage=STAGE_TIMEOUT,
-                                   trial=TRIAL_TIMEOUT, recovery=ROLLBACK_TIMEOUT, vm_process=4200),
+                                   trial=TRIAL_TIMEOUT, recovery=ROLLBACK_TIMEOUT,
+                                   vm_process=VM_PROCESS_TIMEOUT),
             qualification=unqualified())
+        self.media = None
+        if worker_image is not None:
+            from scripts.appliance_media import CACHE_TIMEOUT, MEDIA_TIMEOUT, ApplianceMedia
+            self.media = ApplianceMedia(self, worker_image)
+            self.report["deadlines_seconds"].update(media=MEDIA_TIMEOUT, cache=CACHE_TIMEOUT,
+                vm_process=VM_PROCESS_TIMEOUT + 2 * MEDIA_TIMEOUT + 60)
 
     def checked_vm(self):
         # Select only public identity/state fields; Docker configuration may hold secrets.
@@ -368,7 +387,8 @@ class ApplianceE2E:
         (share / controller.name).chmod(0o400)
         self.report["rollback_controller_sha256"] = hashlib.sha256(payload).hexdigest()
         launcher = directory / "launch.sh"
-        launcher.write_text(LAUNCHER)
+        launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
+                           str(self.report["deadlines_seconds"]["vm_process"])))
         launcher.chmod(0o555)
         args = ["docker", "create", "--name", self.name, "--label", LABEL+"="+self.name,
             "--user", f"{os.geteuid()}:{os.getegid()}", "--read-only", "--cap-drop", "ALL",
@@ -524,8 +544,8 @@ class ApplianceE2E:
         self.wait_rollback_evidence(lambda: "recovery_event" in self.report,
                                    timeout=ROLLBACK_TIMEOUT, failure="production_recovery_timeout")
         # One deadline covers both fallback boot evidence and its enrollment.
-        # The QEMU process restarted for A2 has a 4200s cap; its bounded waits
-        # total at most 3720s, leaving room for fixture/control command overhead.
+        # A2/B/A3 share one QEMU process budget covering all three boot waits,
+        # staging and recovery, with extra media waits and command margin.
         restored = self.wait_enrollment(previous)
         require(len(self.report["observed_boot_reports"]) == 4
                 and self.report["boots"][-1] == self.report["observed_boot_reports"][3],
@@ -537,8 +557,13 @@ class ApplianceE2E:
 
     def execute(self):
         print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
+        media = getattr(self, "media", None)
+        options = {}
+        if media:
+            specification, connections = media.prepare()
+            options = dict(media=specification, connections_file=connections)
         self.fixture = BootFixture.prepare(self.state / "services", self.inputs["bundle"],
-                                          self.inputs["deployment"], self.central_image)
+                                          self.inputs["deployment"], self.central_image, **options)
         self.fixture.up()
         self.report["checks"]["signed_https_dns_ntp"] = True
         require(self.inventory() == [], "fixture_not_empty")
@@ -551,10 +576,18 @@ class ApplianceE2E:
         print(json.dumps({"phase": "native_trial", "status": "started"}), flush=True)
         self.wait_trial_acceptance()
         print(json.dumps({"phase": "native_trial", "status": "passed"}), flush=True)
+        if media:
+            print(json.dumps({"phase": "native_photo", "status": "started"}), flush=True)
+            media.network_denial("before")
+            media.configure(first)
+            media.wait_presentation("fresh", first)
+            print(json.dumps({"phase": "native_photo", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "power_cycle", "status": "started"}), flush=True)
         self.checked_vm()
         self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
         require(not self.checked_vm()["Running"], "vm_stop_failed")
+        if media:
+            media.verify_cache("before_restart")
         self.run(["docker", "start", self.name], timeout=30)
         second = self.wait_enrollment(first)
         require(self.report["boots"][-1]["slot"] == "A"
@@ -563,6 +596,8 @@ class ApplianceE2E:
         self.report["checks"]["identity_survives_power_cycle"] = True
         self.report["checks"]["accepted_slot_survives_power_cycle"] = True
         print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
+        if media:
+            media.wait_presentation("after_restart", second)
         print(json.dumps({"phase": "central_recovery", "status": "started"}), flush=True)
         central = self.fixture_central()
         self.run(["docker", "stop", "--time", "10", central], timeout=30)
@@ -577,6 +612,15 @@ class ApplianceE2E:
         self.report["checks"]["central_outage_rejoin"] = True
         print(json.dumps({"phase": "central_recovery", "status": "passed"}), flush=True)
         self.exercise_rollback(second)
+        if media:
+            media.wait_presentation("after_rollback", self.report["fallback_enrollment"])
+            media.network_denial("after")
+            self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
+            require(not self.checked_vm()["Running"], "vm_stop_failed")
+            media.verify_cache("after_rollback")
+            self.report["checks"]["native_committed_photo"] = True
+            self.report["checks"]["populated_cache_survives_restart_and_rollback"] = True
+            self.report["qualification"]["native_rendering"] = True
         self.report["qualification"]["generic_vm"] = True
         self.report["qualification"]["healthy_trial"] = True
         self.report["qualification"]["automatic_rollback"] = True
@@ -625,6 +669,8 @@ class ApplianceE2E:
             attempt("vm", vm_cleanup)
         if self.fixture:
             attempt("fixture", self.fixture.down)
+        if getattr(self, "media", None):
+            attempt("media", self.media.down)
 
         self.report["checks"]["signed_disk_unchanged"] = False
 
@@ -647,6 +693,7 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--central-image", required=True)
     parser.add_argument("--builder-image", required=True)
+    parser.add_argument("--worker-image")
     args = parser.parse_args()
     require(args.report.is_absolute() and not args.report.exists() and not args.report.is_symlink(),
             "new_absolute_report_required")
@@ -656,7 +703,7 @@ def main():
     failure = None
     try:
         harness = ApplianceE2E(checked_inputs(args.manifest), args.state,
-                               args.central_image, args.builder_image)
+                               args.central_image, args.builder_image, worker_image=args.worker_image)
         report = harness.report
         report["phase"] = "execution"
         harness.execute()

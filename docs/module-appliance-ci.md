@@ -46,7 +46,7 @@ recorded separately from the portable unit-rendering tests.
 The output directory contains the finalized signed disk during the e2e step,
 then its compressed `.img.xz` upload form, PXE bundle, `artifact.json`,
 `ci-image.json`, and `generic-boot/`. `ci-image.json` records
-the source commit, central and builder image identities, disk size/hash,
+the source commit, central, worker and builder image identities, disk size/hash,
 release identities, and the generic kernel/initramfs paths. Its three runtime
 paths (`bundle`, `generic_boot`, and `deployment`) are absolute because the
 e2e harness consumes the manifest on the same runner before artifact upload.
@@ -92,9 +92,9 @@ a subsequent assembly took 10m13s after a 19s cache-restoration step, versus
 the [dated evidence](evidence/2026-09-05-ci-cache.md) separates those phase
 measurements from image boot qualification and the preceding download timeout.
 
-- Central and builder images use separate ARM64
+- Central, production media worker and builder images use separate ARM64
   [BuildKit GitHub cache scopes](https://docs.docker.com/build/ci/github-actions/cache/).
-  Both images are loaded locally and their immutable image IDs still bind the
+  Images are loaded locally and their immutable image IDs still bind the
   image build and VM test. No registry write credentials are required.
   Runtime dependencies are installed before application source is copied, so
   ordinary code edits retain the dependency layer.

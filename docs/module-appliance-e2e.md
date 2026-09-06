@@ -70,7 +70,10 @@ The automated scenarios require:
    Player identity with a higher authority epoch. Cleanup only recorded test
    resources and verify the original disk hash remains unchanged.
 
-Boot enrollment is bounded to ten minutes per boot. Observing trial acceptance
+Boot enrollment is bounded to fifteen minutes per emulated boot. The earlier
+ten-minute deadline cut off a run after verification reached health but before
+its health window could finish; [the failed run](evidence/2026-09-06-vm-rollback.md#corrected-verification-reached-health-enrollment-deadline-failed)
+does not prove that a longer wait will produce enrollment. Observing trial acceptance
 after enrollment is bounded to 540 seconds. Slot verification has a separate
 300-second deadline before the unchanged 180-second health deadline and
 30-second continuous-health requirement. The update lock spans verification,
@@ -80,9 +83,11 @@ Reconnection is bounded to two minutes. Candidate staging has a 900-second
 guest limit and 930-second host observation limit; production recovery evidence
 has 870 seconds, covering the 510-second acceptance unit, 320-second recovery
 unit and observation margin. The recovery predicate separately bounds fallback
-verification to 300 seconds. Each VM process has a 70-minute cap covering
-staging and its subsequent boots. After the explicit A2 restart, bounded waits
-total at most 3,720 seconds within that 4,200-second cap.
+verification to 300 seconds. The base VM process budget is 5,100 seconds,
+covering three 900-second boot waits, reconnection, staging, recovery and
+480 seconds of command margin. Real-media mode adds two 420-second presentation
+waits and 60 seconds of margin, for 6,000 seconds. Offline cache probes run only
+while the VM is stopped and have separate 300-second limits.
 Container logs are capped. The public
 JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
@@ -110,12 +115,72 @@ any cleanup failure prevents a passing qualification result.
 The VM has no physical panels. A pass of the strengthened gate qualifies generic
 userspace boot, durable enrollment/reconnection, healthy-trial acceptance
 using native initialization on virtual DRM, and automatic rollback of the signed
-failed candidate. It does not establish a centrally committed native media draw,
-preservation of a populated media cache, Pi firmware, EEPROM/PXE networking,
-onboard Ethernet or dual HDMI. `native_rendering` and physical qualification
-fields therefore remain false.
+failed candidate. Without the media extension below, `native_rendering` remains
+false. Neither mode establishes Pi firmware, EEPROM/PXE networking, onboard
+Ethernet or dual HDMI; physical qualification fields remain false.
 A failure or cleanup error clears all qualification fields. Physical scenarios
 require a Pi bench with remote power, serial/network access and display capture.
+
+## Real-media extension
+
+GitHub Actions supplies `--worker-image` to both build and boot commands. Its
+immutable production ARM64 worker image ID joins the central and builder IDs
+in `ci-image.json`; the media gate rejects runtime IDs that differ from that
+manifest. The worker has its own BuildKit cache and shares central dependency
+layers. The upstream fixture reuses the loaded central image, avoiding a second
+application build. Omitting the worker selects the historical boot-only mode,
+which cannot set `native_rendering` true.
+
+`scripts/appliance_media.py` owns a fresh disposable Immich 2.5.6 fixture through
+the existing `FixtureHost`. It uploads the existing synthetic fixture, takes
+the portrait's recorded capture instant and original SHA-256, and privately
+wraps its read-only connection credential with the production worker loader.
+The optional `BootFixture` media mode shares a media volume read-only with
+central and read-write with the worker. Only the worker joins the borrowed
+upstream network; its identity and Compose labels are checked, and boot-fixture
+cleanup never deletes it. Owned resource cleanup precedes upstream cleanup.
+
+After A1's native healthy acceptance, the operator helper creates a Frame for
+one actual connected Output, binds and commits calibration, configures a
+one-second image-only favorite query around that portrait, and schedules a
+looping photo Scene. It uses authenticated operator HTTP and does not write
+readiness, media, commits or observations into the database. The first Program
+starts 90 seconds ahead and runs for two hours, covering the bounded reboot
+scenario.
+
+The read-only evidence query joins a ready production worker result and ready
+media blob to the secured assignment, offered Plan, current configuration,
+latest readiness, valid commit, committed coordination group and presented
+observation. Player, epoch, Plan/revision, assignment, Frame/Output, binding,
+original source hash and converted JPEG hash must agree. Presentation must be
+inside the assignment and Plan intervals. The latest readiness sequence may
+exceed the commit's historical sequence; both are explicitly reported, and
+the production coordinator owns the historical readiness decision. This is
+not inferred from the latest renewed commit timestamp: the bounded host wait
+retains up to 64 earlier real SQL grant snapshots. A prior grant may support a
+later drawing only for the same Player/epoch/Plan/revision/assignment/group,
+with a timestamp before that drawing and a still-valid current commit. These
+public snapshots return only to the test helper, never a production write API.
+These records qualify native behavior only when paired with the exact VM's stock Player/renderer.
+Unit tests using synthetic observations do not qualify rendering.
+
+A1 must present the selected photo before the existing power cycle. With QEMU
+stopped, a separate networkless libguestfs container opens the qcow2 overlay
+read-only, locates the unique `PWSTATE` ext4 filesystem, verifies the production
+state marker and rejects symlinks along `/player/cache/<sha>.blob`. It verifies
+the exact bounded size and SHA-256 without exporting media bytes. Its temporary
+filesystem/tooling permissions are confined to that container; both original
+disk and VM directory mounts are read-only. A2 and restored A3 must each
+present a newly committed assignment using the same converted bytes, and the
+stopped A3 disk must retain the same cache object. No additional boot is inserted.
+
+The harness also checks exact container network memberships and verifies DNS
+and numeric TCP denial to Immich from the VM's outer egress namespace before
+and after rollback. This test-driver probe does not put upstream configuration
+inside the Player. Passing media mode enables `native_rendering` and the
+populated-cache check; physical qualification remains false. Actual image
+qualification is still pending; [local preparation evidence](evidence/2026-09-06-vm-media.md)
+separately records real services, tiny filesystems and synthetic record tests.
 
 The first hosted virtual-GPU/native-trial run failed at its former acceptance
 service deadline after durable enrollment; [the failure record](evidence/2026-09-05-github-image.md#native-trial-image-failure-at-afff7b1)

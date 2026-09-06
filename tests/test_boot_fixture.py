@@ -25,6 +25,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from contracts.release import Release, configuration_digest
 from scripts.boot_fixture import (
     LABEL,
+    RUNTIME,
     SOURCE_LABEL,
     BootFixture,
     FixtureError,
@@ -35,6 +36,24 @@ from scripts.boot_fixture import (
 
 CENTRAL_IMAGE = "sha256:" + "0" * 64
 HOSTS = "https://photo-wall.test"
+WORKER_IMAGE = "sha256:" + "1" * 64
+UPSTREAM_PROJECT = "pw-immich-fixture-" + "2" * 12
+UPSTREAM_NETWORK_ID = "3" * 64
+
+
+def media_spec():
+    return dict(worker_image=WORKER_IMAGE, upstream_project=UPSTREAM_PROJECT,
+                upstream_network_id=UPSTREAM_NETWORK_ID)
+
+
+def write_connections(path: Path, *, connection_id="fixture-library"):
+    path.write_text(json.dumps({"schema": 1, "connections": [{
+        "connection_id": connection_id, "base_url": "http://immich:2283/api",
+        "owner_id": "00000000-0000-0000-0000-000000000001", "api_key": "fixture-secret",
+        "allow_http": True,
+    }]}))
+    path.chmod(0o600)
+    return path
 
 
 def synthetic_bundle_and_deployment(root: Path):
@@ -102,6 +121,13 @@ def prepared_fixture(tmp_path: Path) -> BootFixture:
     return BootFixture.prepare(tmp_path / "fixture-state", bundle, deployment, CENTRAL_IMAGE)
 
 
+def prepared_media_fixture(tmp_path: Path) -> BootFixture:
+    bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "fixture-data")
+    connections = write_connections(tmp_path / "connections.json")
+    return BootFixture.prepare(tmp_path / "fixture-state", bundle, deployment, CENTRAL_IMAGE,
+                               media=media_spec(), connections_file=connections)
+
+
 def test_composition_contract_has_isolated_dns_and_networks():
     project = "pw-boot-" + "0" * 16
     document = composition(project)
@@ -119,6 +145,126 @@ def test_composition_contract_has_isolated_dns_and_networks():
 
     for name in ("database", "bundle", "public", "tls", "probe"):
         assert document["volumes"][name]["external"] is True
+
+
+def test_media_composition_isolated_and_public_marker_excludes_secret(tmp_path):
+    project = "pw-boot-" + "0" * 16
+    document = composition(project, media_spec())
+    central = document["services"]["central"]
+    worker = document["services"]["worker"]
+    assert central["environment"]["PHOTO_WALL_MEDIA_ROOT"] == "/media"
+    assert next(item for item in central["volumes"] if item["target"] == "/media")["read_only"]
+    assert worker["image"] == WORKER_IMAGE
+    assert worker["user"] == "10001:10001"
+    assert worker["networks"] == {"database": {}, "upstream": {}}
+    assert worker["environment"]["PHOTO_WALL_CONNECTIONS_FILE"] == "/private/connections.json"
+    assert {item["target"] for item in worker["volumes"]} == {"/media", "/private"}
+    assert next(item for item in worker["volumes"] if item["target"] == "/media")["read_only"] is False
+    assert next(item for item in worker["volumes"] if item["target"] == "/private")["read_only"] is True
+    assert document["networks"]["upstream"]["name"] == UPSTREAM_PROJECT + "_upstream_net"
+
+    fixture = prepared_media_fixture(tmp_path)
+    marker = read_json(fixture.state / "fixture.json")
+    assert marker["media"] == media_spec()
+    assert marker["private_connections_sha256"] == hashlib.sha256(
+        (fixture.state / "private/connections.json").read_bytes()).hexdigest()
+    assert "fixture-secret" not in json.dumps(marker)
+    assert stat.S_IMODE((fixture.state / "private/connections.json").stat().st_mode) == 0o600
+    assert read_json(fixture.state / "compose.json") == composition(fixture.project, media_spec())
+    dockerfile = (fixture.state / "context/Dockerfile").read_text()
+    assert "COPY --chown=10001:10001 scripts/ /opt/boot-fixture/scripts/" in dockerfile
+    assert "COPY --chown=10001:10001 central/ /app/central/" not in dockerfile
+
+
+@pytest.mark.parametrize("media,connections,error", [
+    (media_spec(), None, "media_inputs_incomplete"),
+    (None, Path("/tmp/unused-connections.json"), "media_inputs_incomplete"),
+    ({"worker_image": WORKER_IMAGE, "upstream_project": UPSTREAM_PROJECT,
+      "upstream_network_id": "g" * 64}, Path("/tmp/unused-connections.json"),
+     "media_upstream_network_invalid"),
+])
+def test_media_prepare_requires_bounded_identity_inputs(tmp_path, media, connections, error):
+    bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "invalid-media")
+    actual = None
+    if connections is not None:
+        actual = write_connections(tmp_path / "connections.json")
+    with pytest.raises(FixtureError, match=error):
+        BootFixture.prepare(tmp_path / "state", bundle, deployment, CENTRAL_IMAGE,
+                            media=media, connections_file=actual)
+
+
+def test_media_prepare_rejects_non_fixture_connection_scope(tmp_path):
+    bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "invalid-connections")
+    connections = write_connections(tmp_path / "connections.json", connection_id="other")
+    with pytest.raises(FixtureError, match="connections_scope_invalid"):
+        BootFixture.prepare(tmp_path / "state", bundle, deployment, CENTRAL_IMAGE,
+                            media=media_spec(), connections_file=connections)
+
+
+def test_media_worker_image_is_checked_by_immutable_digest(tmp_path):
+    fixture = prepared_media_fixture(tmp_path)
+    fixture.inspect = lambda *_args: ({LABEL: fixture.project}, "worker-id")
+    fixture.run = lambda args, **_kwargs: (WORKER_IMAGE + "\n").encode()
+    record = {"kind": "container", "name": fixture.project + "-worker", "id": None}
+    assert fixture.check(record) == "worker-id"
+
+    fixture.run = lambda args, **_kwargs: ("sha256:" + "f" * 64 + "\n").encode()
+    with pytest.raises(FixtureError, match="worker_image_changed"):
+        fixture.check({"kind": "container", "name": fixture.project + "-worker", "id": None})
+
+
+def test_initialized_media_fixture_fails_closed_when_owned_volume_is_missing(tmp_path):
+    fixture = prepared_media_fixture(tmp_path)
+    fixture.marker["initialized"] = True
+    write_json(fixture.state / "fixture.json", fixture.marker)
+    fixture.check_inputs = lambda: None
+    fixture._check_borrowed_network = lambda: None
+    missing_name = fixture.project + "-media"
+    fixture.exists = lambda kind, name: name != missing_name
+    with pytest.raises(FixtureError, match="media_volume_missing"):
+        fixture.up()
+    assert read_json(fixture.state / "fixture.json")["initialized"] is True
+
+
+def test_media_borrowed_network_identity_is_verified_but_never_cleaned(tmp_path):
+    fixture = prepared_media_fixture(tmp_path)
+    upstream = UPSTREAM_PROJECT + "_upstream_net"
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        if args[1:3] == ["network", "inspect"]:
+            return (json.dumps({"com.docker.compose.project": UPSTREAM_PROJECT,
+                                "com.docker.compose.network": "upstream_net"}) + "\n"
+                    + UPSTREAM_NETWORK_ID + "\ntrue\n" + upstream + "\n").encode()
+        return b""
+
+    fixture.run = run
+    fixture._check_borrowed_network()
+    assert calls[-1][-1] == upstream
+
+    fixture.run = lambda *_args, **_kwargs: (json.dumps({"wrong": "network"})
+                                             + "\n" + UPSTREAM_NETWORK_ID + "\nfalse\n"
+                                             + upstream + "\n").encode()
+    with pytest.raises(FixtureError, match="upstream_network_invalid"):
+        fixture._check_borrowed_network()
+
+    fixture.resources = {"container:" + fixture.project + "-worker":
+                         {"kind": "container", "name": fixture.project + "-worker", "id": None}}
+    fixture.inspect = lambda *_args: ({LABEL: fixture.project}, "worker-id")
+    def cleanup_run(args, **_kwargs):
+        calls.append(args)
+        return (WORKER_IMAGE + "\n").encode() if "{{.Image}}" in args else b""
+
+    fixture.run = cleanup_run
+    fixture.down()
+    assert not any(call[1:3] == ["network", "rm"] and upstream in call for call in calls)
+
+
+def test_media_seed_runtime_validates_private_document_before_chown():
+    assert "from media.worker import load_connections" in RUNTIME
+    assert "os.chown(document, 10001, 10001)" in RUNTIME
+    assert "fixture-library" in RUNTIME
 
 
 @pytest.mark.parametrize(
