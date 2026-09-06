@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: appliance-${{ github.ref }}
-  cancel-in-progress: true
+  # Finish the current image benchmark while keeping the newest revision pending.
+  cancel-in-progress: false
 
 jobs:
   build-and-boot:

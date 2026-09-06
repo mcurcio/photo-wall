@@ -55,7 +55,10 @@ or tool caches to manufacture capacity; it relies on the explicit phase
 cleanup and the runner's available workspace.
 
 The workflow has `contents: read`, pinned action commit SHAs, push-to-main,
-pull-request, and manual triggers. It runs the root-owned
+pull-request, and manual triggers. Each PR keeps one image run active and the
+latest revision pending, so benchmark pushes do not cancel a costly build
+already underway; superseded pending revisions are replaced according to
+[GitHub concurrency semantics](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency). It runs the root-owned
 `scripts/test_appliance_e2e.py` against the exact disk and generic boot
 directory recorded in `ci-image.json`. That test requires signed release
 identity, headless durable enrollment, restart identity continuity, central
