@@ -1,6 +1,6 @@
 # Development setup and recovery
 
-Status: central, PostgreSQL and the media worker launch together. The Player service has passed a recording-renderer network integration, and native rendering has separate Linux evidence. Complete real-media wall integration, appliance image and physical qualification remain in progress. Follow the [delivery checklist](implementation-checklist.md) and [evidence](evidence/README.md).
+Status: central, PostgreSQL and the media worker launch together. The full real-media wall demo has passed with two network Players and three recording-renderer Outputs; native rendering has separate Linux evidence. Final appliance image, boot and physical qualification remain in progress. Follow the [delivery checklist](implementation-checklist.md) and [evidence](evidence/README.md).
 
 ## Local launch
 
@@ -64,4 +64,4 @@ If an Output moves, bind the destination persistent Frame. If a Player is replac
 
 Preview carries a 30-second expiry and both proposed/committed settings so the Executor can revert locally through an outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Offline old equipment cannot learn of immediate retirement through a partition; it rejects obsolete work on rejoin and respects the bounded plan lease. Player warm-outage/cold-reboot policy is defined in [decision 0001](decisions/0001-mvp-time-recovery-and-module-contracts.md). Reboot reuses the durable key and cached bytes but obtains fresh authority before execution.
 
-The [real Immich fixture](module-immich-fixture.md), [Player-only package builder](module-player-package.md), and [signed update store](module-appliance-release.md) provide their separately verified commands and limits. Full common-image/PXE, automatic boot acceptance, end-to-end wall demo and physical measurement instructions remain under integration. No final appliance checksum or boot claim exists yet.
+The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [signed update store](module-appliance-release.md) provide their commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md) now includes automatic healthy-trial acceptance. Final common-image/PXE and physical measurement instructions remain under qualification. No final appliance checksum or boot claim exists yet.

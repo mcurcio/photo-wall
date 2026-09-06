@@ -2,7 +2,7 @@
 
 Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) is open from `feat/runnable-mvp` to `main` and will receive verified benchmark updates. All requirements remain authoritative. Unchecked means incomplete or unverified.
 
-## Current state (2026-09-05 core benchmark)
+## Current state (2026-09-05 integration benchmarks)
 
 - [x] Read repository guidance and all canonical documents; main clean at `ae44c77`.
 - [x] Fetch origin and isolate `feat/runnable-mvp` worktree; preserve original checkout.
@@ -15,7 +15,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 - [ ] Preview/commit/revert calibration and two Outputs plus second Player.
 - [x] Runtime nested Scenes, fixed roles, independent overlay/calendar boundary, current position reveal, recording Actuators.
 - [x] Pure rolling Planner, hard compatibility, locked exact assets, readiness/capacity/commit separation, with PostgreSQL/recording-Player integration.
-- [ ] Pinned real Immich/query, evolving candidates during ongoing Run, bounded preparation/delivery.
+- [x] Pinned real Immich/query, evolving candidates during ongoing Run, bounded preparation/delivery; full two-Player/three-Output network demo passed with simulated actuation.
 - [ ] Single Python Player networking/cache/sync/execution/embedded GStreamer/GTK; ordinary continuity.
 - [ ] Restart/download/deletion/cache/outage/rejoin fault matrix and scoped update/rollback.
 - [ ] Common Pi 5 PXE image build; revision/config/package manifest/checksum outside Git; boot test artifact.
@@ -29,7 +29,7 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 
 Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub authentication works; explicit user authorization resolved the automatic push-approval gate, and draft PR #2 is open. Feature-branch pushes and PR updates are authorized; main is protected and merging requires the owner. Repository license and security-reporting contact remain owner decisions before a code release.
 
-The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. This session's delegation runtime lists Astra, Sol, Terra, Luna and GPT-5.5, but not Spark. Use supported Luna for suitable small leaves while retaining capable agents for cross-module design/review; do not claim a fallback is Spark. Recheck availability before future dispatch.
+The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. It became available during this task and completed the full-demo evidence review and documentation work. Its five-hour usage pool subsequently reached 100%; the reported reset is 2026-09-06 at 00:42 Pacific. Use supported fallback agents while that pool is unavailable, then prefer Spark again for suitable leaves. Integrated design and correctness review remain with a capable owner; no fallback is described as Spark.
 
 ## Verified core benchmark
 
@@ -40,7 +40,15 @@ The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. This s
 - Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
 - Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. Common-image/bootstrap integration remains in progress; no final appliance checksum or boot result exists.
 
-See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for commands, artifact identities, failed attempts and evidence boundaries. Next gates are complete real-media network integration, Player-only packaging, signed image/boot/update qualification, physical bench results, and final independent review.
+See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for its commands, identities and limits.
+
+## Full wall and appliance checkpoints
+
+The [full wall demo](evidence/2026-09-05-full-wall.md) passed one uninterrupted command with two Players, three Outputs, five prepared variants and 485 final Readiness-to-Commit checks. Both live uploads appeared during the same Run. Secured deletion, permission/upstream recovery, fallback beyond central lease expiry, recovery on every Output, same-key/new-epoch rejoin and final upstream network denials passed. Actuation remained simulated; native rendering and physical measurements are separate gates.
+
+Appliance source checkpoint `073f57d7547507de452a2fd273088d7542a6d070` has a matching Player-only bundle exported from a clean checkout. [Its CI run](https://github.com/mcurcio/photo-wall/actions/runs/33999952831) passed **643 tests with 48 explicit skips**, then **55 pinned Linux preparation tests**. The skips comprise 46 host conversion cases and two separately enabled Linux image-tooling cases. The signed builder/bootstrap, automatic 30-second trial health acceptance, public release gateway and synthetic time helper are committed. Actual final image construction, signed finalization, VM boot and physical qualification remain pending.
+
+Next gates are complete image/boot/update qualification, the authenticated operator walkthrough, physical bench results and final independent review. The PR remains draft.
 
 ## Evidence rules
 
