@@ -109,3 +109,20 @@ jobs:
           path: ${{ runner.temp }}/photo-wall-ci/e2e-report.json
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Make public build diagnostics readable
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/photo-wall-ci/diagnostics"
+          if [ -d "$diagnostics" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$diagnostics"
+          fi
+
+      - name: Upload public build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-arm64-build-log-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-ci/diagnostics
+          if-no-files-found: ignore
+          retention-days: 7

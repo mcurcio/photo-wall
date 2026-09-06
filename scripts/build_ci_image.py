@@ -27,6 +27,18 @@ from scripts import build_player, build_vm_initrd, fetch_ubuntu
 MIN_FREE_BYTES = 8 * 1024**3
 
 
+def phase(name, function, *args, **kwargs):
+    """Identify failed public build stages without echoing private inputs."""
+    print(json.dumps({"phase": name, "status": "started"}), flush=True)
+    try:
+        result = function(*args, **kwargs)
+    except Exception:
+        print(json.dumps({"phase": name, "status": "failed"}), flush=True)
+        raise
+    print(json.dumps({"phase": name, "status": "passed"}), flush=True)
+    return result
+
+
 def _new_directory(path: Path, *, label: str) -> Path:
     path = path.absolute()
     appliance.outside_git(path)
@@ -50,7 +62,7 @@ def _fixture_deployment(destination: Path) -> tuple[Path, Path]:
     ca_key, ca_cert = private / "ca.key.pem", public / "ca.pem"
     server_key, server_csr, server_cert = private / "server.key.pem", private / "server.csr", private / "server.pem"
     release_pub = public / "release.pub.pem"
-    _openssl("genpkey", "-algorithm", "ED25519", "-out", str(signing_key))
+    phase("fixture_signing_key", _openssl, "genpkey", "-algorithm", "ED25519", "-out", str(signing_key))
     _openssl("pkey", "-in", str(signing_key), "-pubout", "-out", str(release_pub))
     _openssl("genrsa", "-out", str(ca_key), "2048")
     _openssl("req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", "1",
@@ -102,34 +114,38 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
     if output.exists() or output.is_symlink():
         raise appliance.BuildError("output_exists")
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    free_before = _preflight_space(output.parent)
+    diagnostics = output.parent / "diagnostics"
+    diagnostics.mkdir(mode=0o700, exist_ok=True)
+    free_before = phase("disk_space", _preflight_space, output.parent)
     deployment = deployment or output.parent / (".photo-wall-ci-deployment-" + revision[:12])
-    deployment, signing_key = _fixture_deployment(deployment)
+    deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
     temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
     appliance.outside_git(temporary)
     keep_cache = base_cache is not None
     try:
         input_dir = (base_cache or temporary / "input").absolute()
         input_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        appliance.run([sys.executable, str(repository / "scripts/fetch_ubuntu.py"), str(input_dir)], timeout=3600)
+        phase("fetch_ubuntu", appliance.run,
+              [sys.executable, str(repository / "scripts/fetch_ubuntu.py"), str(input_dir)],
+              timeout=3600, log=diagnostics / "fetch-ubuntu.log")
         compressed = input_dir / fetch_ubuntu.IMAGE
         base_image = temporary / "base.img"
-        appliance.decompress_base(compressed, base_image)
+        phase("decompress", appliance.decompress_base, compressed, base_image)
         if not keep_cache:
             shutil.rmtree(input_dir)
         root = temporary / "root"
-        appliance.run([sys.executable, "-m", "appliance.build", "extract",
+        phase("extract", appliance.run, [sys.executable, "-m", "appliance.build", "extract",
                        str(base_image), str(root)], timeout=900,
-                      env=dict(os.environ, PYTHONPATH=str(repository)))
+                      env=dict(os.environ, PYTHONPATH=str(repository)), log=diagnostics / "extract.log")
         base_image.unlink()
         evidence = temporary / "package-evidence"
-        appliance.install_runtime_packages(root, evidence)
+        phase("runtime_packages", appliance.install_runtime_packages, root, evidence)
         player = temporary / "player"
-        player_inventory = build_player.build(repository, revision, player)
+        player_inventory = phase("player_package", build_player.build, repository, revision, player)
         source = temporary / "source"
-        appliance.export_source(repository, source, revision)
+        phase("source_export", appliance.export_source, repository, source, revision)
         bundle = temporary / "bundle"
-        appliance.prepare(root, source, player, deployment / "public", evidence, bundle)
+        phase("prepare_image", appliance.prepare, root, source, player, deployment / "public", evidence, bundle)
         shutil.rmtree(root)
         shutil.rmtree(player)
         shutil.rmtree(source)
@@ -140,7 +156,8 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
         if _record(signature, 64)["size"] != 64:
             raise appliance.BuildError("release_signature_size")
         final = output
-        final_report = appliance.finalize(bundle, signature, final, trusted_public=deployment / "public")
+        final_report = phase("finalize_image", appliance.finalize, bundle, signature, final,
+                             trusted_public=deployment / "public")
         signing_key.unlink(missing_ok=True)
         generic_dir = output / "generic-boot"
         pi_initrd = output / "pxe/initrd.img"
@@ -153,7 +170,7 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
         if not generic_modules.is_dir() or generic_modules.is_symlink():
             raise appliance.BuildError("generic_modules_missing")
         initrd_record = _record(pi_initrd, build_vm_initrd.MAX_INITRD_BYTES)
-        generic_manifest = build_vm_initrd.build(
+        generic_manifest = phase("generic_initramfs", build_vm_initrd.build,
             pi_initrd, generic_kernel, generic_modules, generic_dir,
             expected_size=initrd_record["size"], expected_sha256=initrd_record["sha256"])
         image_path = output / final_report["image"]
@@ -185,8 +202,18 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
         (output / "ci-image.json").write_bytes(appliance.canonical(manifest))
         return manifest
     finally:
-        signing_key.unlink(missing_ok=True)
-        shutil.rmtree(temporary, ignore_errors=True)
+        try:
+            for owner in (temporary / "package-evidence", temporary / "bundle/inventory"):
+                for name in ("apt-update.log", "apt-purge.log", "apt-download.log", "apt-install.log",
+                             "initramfs-build.log", "pip-install.log", "package-state.txt"):
+                    path = owner / name
+                    if path.is_file() and not path.is_symlink():
+                        if path.stat().st_size:
+                            appliance.checked_file(path, 4 * 1024**2)
+                        shutil.copyfile(path, diagnostics / name)
+        finally:
+            signing_key.unlink(missing_ok=True)
+            shutil.rmtree(temporary, ignore_errors=True)
 
 
 def main() -> None:
