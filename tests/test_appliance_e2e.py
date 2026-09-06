@@ -13,10 +13,12 @@ from scripts.test_appliance_e2e import (
     boot_reports,
     checked_inputs,
     enrollment,
+    rollback_event,
     trial_acceptance,
 )
 
 RELEASE = "a" * 64
+CANDIDATE = "c" * 64
 BOOT = "01234567-89ab-cdef-0123-456789abcdef"
 PLAYER = "p-" + "b" * 32
 
@@ -131,6 +133,7 @@ def test_image_execution_requires_accepted_state_on_actual_restart(tmp_path, mon
     harness.start_vm = lambda: None
     harness.fixture_central = lambda: "central"
     harness.wait_player_requests = lambda since: None
+    harness.exercise_rollback = lambda previous: None
     running = [True]
     harness.checked_vm = lambda: dict(Running=running[0])
     harness.serial = lambda: json.dumps(acceptance_event())
@@ -157,7 +160,7 @@ def test_image_execution_requires_accepted_state_on_actual_restart(tmp_path, mon
         assert harness.report["qualification"]["healthy_trial"]
         assert harness.report["qualification"]["generic_vm"]
         assert not harness.report["qualification"]["native_rendering"]
-        assert not harness.report["qualification"]["automatic_rollback"]
+        assert harness.report["qualification"]["automatic_rollback"]
 
 
 @pytest.mark.parametrize("changes", [dict(release_id="c" * 64), dict(persistence="volatile"),
@@ -300,11 +303,25 @@ def inputs(tmp_path, monkeypatch):
         image_size=disk_record["size"], release_id=RELEASE, pxe_files={"initrd.img": production}))
     for name in ("bundle", "deployment"):
         (tmp_path / name).mkdir()
-    monkeypatch.setattr("scripts.boot_gateway.BootBundle.load", lambda *args:
-                        SimpleNamespace(release=SimpleNamespace(revision="f" * 40, release_id=RELEASE)))
+    from scripts.build_rollback_candidate import FAULT_CONTENT, FAULT_PATH
+    candidate_dir = tmp_path / "deployment/rollback-candidate"
+    candidate_dir.mkdir()
+    releases = {slot: SimpleNamespace(revision="f" * 40, release_id=identity,
+                boot_abi="b" * 64, configuration_sha256="d" * 64,
+                rootfs_sha256=identity, rootfs_size=123) for slot, identity in
+                (("A", RELEASE), ("B", CANDIDATE))}
+    metadata = dict(schema=1, kind="ci-rollback-candidate", source_revision="f" * 40,
+                    boot_abi="b" * 64, configuration_sha256="d" * 64,
+                    fault_path=FAULT_PATH, content_sha256=hashlib.sha256(FAULT_CONTENT).hexdigest(),
+                    slots={slot: {key: getattr(value, key) for key in
+                           ("release_id", "rootfs_sha256", "rootfs_size")} for slot, value in releases.items()})
+    put(candidate_dir / "candidate.json", metadata)
+    monkeypatch.setattr("scripts.boot_gateway.BootBundle.load", lambda directory, *_:
+                        SimpleNamespace(release=releases["B" if directory == candidate_dir else "A"]))
     manifest = tmp_path / "ci-image.json"
     put(manifest, dict(schema=1, source_commit="f" * 40, disk=dict(path=str(disk), **disk_record),
-        generic_boot=str(generic), bundle=str(tmp_path / "bundle"), deployment=str(tmp_path / "deployment")))
+        generic_boot=str(generic), bundle=str(tmp_path / "bundle"), deployment=str(tmp_path / "deployment"),
+        rollback_candidate=dict(path=str(candidate_dir), metadata=metadata)))
     return manifest, disk, generic
 
 
@@ -351,6 +368,120 @@ def test_changed_generic_kernel_is_rejected(inputs):
     (generic / "Image").write_bytes(b"wrong kernel")
     with pytest.raises(FixtureError, match="generic_identity_mismatch"):
         checked_inputs(manifest)
+
+
+@pytest.mark.parametrize("change", ["missing", "metadata", "slot", "abi", "fault"])
+def test_candidate_preflight_rejects_unbound_evidence(inputs, change):
+    manifest, _, _ = inputs
+    data = json.loads(manifest.read_text())
+    if change == "missing":
+        del data["rollback_candidate"]
+    else:
+        candidate = data["rollback_candidate"]
+        if change == "metadata":
+            candidate["metadata"]["source_revision"] = "0" * 40
+        else:
+            if change == "slot":
+                candidate["metadata"]["slots"]["B"]["rootfs_sha256"] = "0" * 64
+            elif change == "abi":
+                candidate["metadata"]["boot_abi"] = "0" * 64
+            else:
+                candidate["metadata"]["content_sha256"] = "0" * 64
+            from pathlib import Path
+            (Path(candidate["path"]) / "candidate.json").write_text(json.dumps(candidate["metadata"]))
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(FixtureError, match="rollback_candidate_required|candidate_.*mismatch"):
+        checked_inputs(manifest)
+
+
+def test_rollback_event_requires_exact_fields_and_boolean_types():
+    expected = dict(event="photo-wall-rollback-allowed", boot_id=BOOT, allowed=True)
+    assert rollback_event(json.dumps(expected), expected) == expected
+    assert rollback_event(json.dumps(expected | dict(boot_id="old")), expected) is None
+    for changes in (dict(allowed=1), dict(extra="private"), dict(allowed=False)):
+        with pytest.raises(FixtureError, match="invalid_rollback_event"):
+            rollback_event(json.dumps(expected | changes), expected)
+
+
+def rollback_harness(tmp_path, monkeypatch, fault=None):
+    from scripts import test_appliance_e2e as e2e
+
+    now = [0]
+    monkeypatch.setattr(e2e, "time", SimpleNamespace(monotonic=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds)))
+    harness = object.__new__(ApplianceE2E)
+    harness.state = tmp_path
+    (tmp_path / "vm/share").mkdir(parents=True)
+    harness.inputs = dict(release=SimpleNamespace(release_id=RELEASE),
+                          candidate=SimpleNamespace(release_id=CANDIDATE))
+    boots = [report(boot_id=f"{number}1234567-89ab-cdef-0123-456789abcdef",
+                    release_id=CANDIDATE if number == 2 else RELEASE,
+                    slot="B" if number == 2 else "A", trial=number in {0, 2})
+             for number in range(4)]
+    harness.report = dict(boots=boots[:2], observed_boot_reports=boots[:2], checks={})
+    harness.checked_vm = lambda: dict(Running=True, OOMKilled=False)
+    stage = dict(event="photo-wall-stage-trial", boot_id=boots[1]["boot_id"],
+                 current_release_id=RELEASE, candidate_release_id=CANDIDATE, slot="B")
+    recovery = dict(event="photo-wall-rollback-allowed", boot_id=boots[2]["boot_id"], allowed=True)
+    if fault == "wrong_stage":
+        stage["candidate_release_id"] = RELEASE
+    if fault == "stale_stage":
+        stage["boot_id"] = boots[0]["boot_id"]
+    if fault == "stale_recovery":
+        recovery["boot_id"] = boots[0]["boot_id"]
+    if fault == "trial_fallback":
+        boots[3]["trial"] = True
+    observations = [stage, boots[2], recovery, boots[3]]
+    if fault == "missing_trial":
+        observations.remove(boots[2])
+    if fault == "candidate_accepted":
+        observations.insert(2, acceptance_event(boot_id=boots[2]["boot_id"]))
+    if fault == "panic":
+        observations.insert(2, "Kernel panic - not syncing")
+    if fault == "loop":
+        observations[-1] = json.dumps(boots[3]) + "\n" + json.dumps(report(
+            boot_id="41234567-89ab-cdef-0123-456789abcdef", trial=False))
+    serials = iter(observations)
+    seen = []
+
+    def serial():
+        value = next(serials, None)
+        if value is not None:
+            seen.append(value if isinstance(value, str) else json.dumps(value))
+        return "\n".join(seen)
+
+    harness.serial = serial
+    restored = row(authority_epoch=2 if fault == "stale_inventory" else 3)
+    if fault == "changed_identity":
+        restored["player_id"] = "p-" + "d" * 32
+    harness.inventory = lambda: [restored]
+    harness.run = lambda *_args, **_kwargs: pytest.fail("host attempted to control fallback")
+    return harness, boots
+
+
+def test_rollback_requires_production_reboot_and_new_identity_epoch(tmp_path, monkeypatch):
+    harness, boots = rollback_harness(tmp_path, monkeypatch)
+    harness.exercise_rollback(row(authority_epoch=2))
+    assert harness.report["boots"] == boots
+    assert harness.report["fallback_enrollment"] == row(authority_epoch=3)
+    assert all(harness.report["checks"].values())
+    control = json.loads((tmp_path / "vm/share/control.json").read_text())
+    assert control == dict(schema=1, action="stage-trial", current={key: boots[1][key]
+        for key in ("boot_id", "release_id", "slot")}, candidate=dict(release_id=CANDIDATE))
+
+
+@pytest.mark.parametrize("fault, failure", [
+    ("wrong_stage", "invalid_rollback_event"), ("stale_stage", "candidate_staging_timeout"),
+    ("stale_recovery", "production_recovery_timeout"), ("missing_trial", "unexpected_boot_sequence"),
+    ("trial_fallback", "unexpected_boot_sequence"), ("candidate_accepted", "failed_candidate_accepted"),
+    ("panic", "guest_crashed_during_rollback"), ("loop", "unexpected_boot_count"),
+    ("stale_inventory", "guest_enrollment_timeout"), ("changed_identity", "durable_identity_changed"),
+])
+def test_unrelated_restarts_and_incomplete_rollback_cannot_pass(tmp_path, monkeypatch, fault, failure):
+    harness, _ = rollback_harness(tmp_path, monkeypatch, fault)
+    with pytest.raises(FixtureError, match=failure):
+        harness.exercise_rollback(row(authority_epoch=2))
+    assert "production_automatic_rollback" not in harness.report["checks"]
 
 
 def test_serial_diagnostics_keep_only_fixed_public_fault_names():

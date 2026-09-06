@@ -600,9 +600,15 @@ def main() -> None:
         if any(value is not None for value in explicit):
             parser.error("rollback-current-allowed derives trust policy from --config-dir; no overrides")
         try:
+            boot_id = _linux_boot_id()
             allowed = rollback_current_allowed(args.state_root, args.config_dir)
         except (UpdateError, OSError, ValueError):
             raise SystemExit(1) from None
+        if allowed:
+            # The recovery service logs this only after authenticating both the
+            # failed trial and its fallback, before requesting its own reboot.
+            print(json.dumps(dict(event="photo-wall-rollback-allowed", boot_id=boot_id,
+                                  allowed=True)), flush=True)
         raise SystemExit(0 if allowed else 1)
     if any(value is None for value in explicit):
         parser.error("this command requires --public-key, --boot-abi and --configuration-sha256")

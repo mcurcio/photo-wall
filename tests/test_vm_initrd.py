@@ -46,6 +46,35 @@ def test_gpu_closure_rejects_tampered_dependency_metadata(tmp_path):
         build_vm_initrd._module_dependency_closure(root, RELEASE)
 
 
+def test_virtio_9p_preload_closure_proves_transitive_dependencies(tmp_path):
+    root = _module_tree(tmp_path)
+    module_root = root / "lib/modules" / RELEASE
+    (module_root / "fs/9p").mkdir(parents=True)
+    (module_root / "net/9p").mkdir(parents=True)
+    (module_root / "net/9p/9pnet_virtio.ko").write_bytes(b"virtio")
+    (module_root / "net/9p/9pnet.ko").write_bytes(b"net")
+    (module_root / "fs/9p/9p.ko").write_bytes(b"9p")
+    (module_root / "modules.dep").write_text(
+        "kernel/drivers/gpu/drm/virtio/virtio-gpu.ko: kernel/drivers/gpu/drm/drm.ko\n"
+        "kernel/drivers/gpu/drm/drm.ko:\n"
+        "fs/9p/9p.ko:\n"
+        "net/9p/9pnet.ko: fs/9p/9p.ko\n"
+        "net/9p/9pnet_virtio.ko: net/9p/9pnet.ko\n",
+        encoding="utf-8",
+    )
+
+    assert build_vm_initrd._module_dependency_closure(
+        root, RELEASE, "9pnet_virtio") == ("9p", "9pnet", "9pnet_virtio")
+
+
+def test_hook_is_read_only_share_guarded_and_ordered_before_existing_entries():
+    assert b"mount -t 9p -o trans=virtio,version=9p2000.L,ro photo-wall-ci" in build_vm_initrd.HOOK_BYTES
+    assert b"ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_rollback_control.py" in build_vm_initrd.HOOK_BYTES
+    assert b"Restart=no" in build_vm_initrd.HOOK_BYTES
+    assert b"After=photo-wall-accept-trial.service" in build_vm_initrd.HOOK_BYTES
+    assert build_vm_initrd.ORDER_ADDITION.startswith(b"/scripts/init-bottom/photo-wall-evidence")
+
+
 def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
     segment = tmp_path / "main"
     (segment / "conf").mkdir(parents=True)
@@ -60,3 +89,8 @@ def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
     assert second == []
     assert after_first == config.read_bytes()
     assert build_vm_initrd._configured_modules([segment]) == {"virtio_gpu", "drm"}
+
+
+def test_required_preloads_include_qemu_gpu_and_9p_transport():
+    assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"} <= set(build_vm_initrd.REQUIRED_MODULES)
+    assert set(build_vm_initrd.PRELOAD_ROOTS) == {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"}

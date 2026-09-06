@@ -50,8 +50,10 @@ the source commit, central and builder image identities, disk size/hash,
 release identities, and the generic kernel/initramfs paths. Its three runtime
 paths (`bundle`, `generic_boot`, and `deployment`) are absolute because the
 e2e harness consumes the manifest on the same runner before artifact upload.
-The deployment directory is separate from the upload tree and contains only
-disposable CI TLS/signing material. The workflow uploads the output tree and a
+The deployment directory is separate from the upload tree and contains
+disposable CI TLS/signing material plus the signed rollback candidate bundle.
+Its path and public A/B metadata are recorded under `rollback_candidate`.
+The workflow uploads the output tree and a
 sanitized e2e report; it never uploads that private directory.
 
 These are qualification images configured for `https://photo-wall.test` with
@@ -70,11 +72,12 @@ the [first hosted build](evidence/2026-09-05-github-image.md) recorded about 106
 initial free space and completed assembly; its peak usage was not measured. Every generated output
 is a new regular-file-backed path outside Git. A failed fixture setup or build removes its newly created private deployment
 and temporary workspace; preexisting paths are refused and preserved. Successful
-builds remove the signing key and retain only the disposable TLS fixture until
+builds remove the signing key and retain the disposable TLS fixture and signed candidate until
 the job finishes. No private deployment file enters the artifact directory.
 
 Before fetching inputs, the orchestrator records the runner's measured free
-space and requires at least 8 GiB. The workflow does not delete unrelated SDK
+space and requires at least 9 GiB, including room for the private rollback
+candidate's bounded 1 GiB compressed rootfs. The workflow does not delete unrelated SDK
 or tool caches to manufacture capacity; it relies on the explicit phase
 cleanup and the runner's available workspace.
 

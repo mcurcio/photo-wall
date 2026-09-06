@@ -31,8 +31,9 @@ MAX_FILES = 100_000
 COMMAND_TIMEOUT = 300
 PRODUCTION_INITRD_SIZE = 64_614_282
 PRODUCTION_INITRD_SHA256 = "98435d9d6d785aea06676ceb9319284e61baeff99a78b1ef253006d9ff6d2d8e"
-REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "virtio_gpu", "loop", "squashfs",
-                    "overlay", "ext4", "vfat")
+REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "virtio_gpu", "9p", "9pnet",
+                    "9pnet_virtio", "loop", "squashfs", "overlay", "ext4", "vfat")
+PRELOAD_ROOTS = ("virtio_gpu", "9p", "9pnet", "9pnet_virtio")
 PROTECTED_PREFIXES = ("usr/bin/python3.12", "usr/lib/python3.12", "etc/photo-wall",
                       "scripts/photowall")
 HOOK_PATH = "scripts/init-bottom/photo-wall-evidence"
@@ -46,6 +47,42 @@ HOOK_BYTES = (
     b"if [ -f \"$report\" ]; then\n"
     b"    printf '%s\\n' 'photo-wall: boot report'\n"
     b"    cat -- \"$report\"\n"
+    b"fi\n"
+    b"ci=/run/photo-wall-ci\n"
+    b"mkdir -p -- \"$ci\"\n"
+    b"install_ci_service() {\n"
+    b"    service=\"${rootmnt:-/root}/etc/systemd/system/photo-wall-ci-rollback.service\"\n"
+    b"    [ -e \"$service\" ] && return 0\n"
+    b"    mkdir -p -- \"${rootmnt:-/root}/etc/systemd/system/multi-user.target.wants\" || return 0\n"
+    b"    if cat > \"$service\" <<'PHOTO_WALL_CI_SERVICE'\n"
+    b"[Unit]\n"
+    b"Description=Photo Wall test-only VM rollback controller\n"
+    b"After=photo-wall-accept-trial.service\n"
+    b"\n"
+    b"[Service]\n"
+    b"Type=oneshot\n"
+    b"ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_rollback_control.py\n"
+    b"Restart=no\n"
+    b"TimeoutStartSec=3600\n"
+    b"NoNewPrivileges=yes\n"
+    b"ProtectSystem=strict\n"
+    b"ProtectHome=yes\n"
+    b"PrivateTmp=yes\n"
+    b"ReadWritePaths=/var/lib/photo-wall\n"
+    b"RestrictAddressFamilies=AF_UNIX\n"
+    b"\n"
+    b"[Install]\n"
+    b"WantedBy=multi-user.target\n"
+    b"PHOTO_WALL_CI_SERVICE\n"
+    b"    then\n"
+    b"        chmod 0644 \"$service\" || return 0\n"
+    b"        ln -s /etc/systemd/system/photo-wall-ci-rollback.service \"${rootmnt:-/root}/etc/systemd/system/multi-user.target.wants/photo-wall-ci-rollback.service\" || return 0\n"
+    b"    fi\n"
+    b"}\n"
+    b"if mount -t 9p -o trans=virtio,version=9p2000.L,ro photo-wall-ci \"$ci\"; then\n"
+    b"    if [ -f \"$ci/vm_rollback_control.py\" ]; then\n"
+    b"        install_ci_service\n"
+    b"    fi\n"
     b"fi\n"
 )
 
@@ -554,10 +591,15 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
         for name in REQUIRED_MODULES:
             if not _has_module(module_segment, name, release):
                 raise BuildError("generic_module_missing")
-        gpu_dependency_closure = _module_dependency_closure(module_segment, release)
-        configured_modules_added += _append_modules(segments, gpu_dependency_closure)
-        if not set(gpu_dependency_closure).issubset(_configured_modules(segments)):
-            raise BuildError("generic_gpu_preload_missing")
+        dependency_closures = {
+            requested: _module_dependency_closure(module_segment, release, requested)
+            for requested in PRELOAD_ROOTS
+        }
+        preload_modules = tuple(sorted(set().union(*dependency_closures.values())))
+        configured_modules_added += _append_modules(segments, preload_modules)
+        if not set(preload_modules).issubset(_configured_modules(segments)):
+            raise BuildError("generic_preload_missing")
+        gpu_dependency_closure = dependency_closures["virtio_gpu"]
         for segment in segments:
             _verify_preserved(content_before[segment.name], _content_inventory(segment))
         archives = []
@@ -606,11 +648,15 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                                         if (segment / "lib/modules" / release).is_dir()), None)
         if reopened_module_segment is None:
             raise BuildError("reopened_module_missing")
-        reopened_gpu_dependency_closure = _module_dependency_closure(reopened_module_segment, release)
-        if reopened_gpu_dependency_closure != gpu_dependency_closure:
-            raise BuildError("reopened_gpu_dependency_closure")
-        if not set(gpu_dependency_closure).issubset(_configured_modules(reopened_segments)):
-            raise BuildError("reopened_gpu_preload_missing")
+        reopened_dependency_closures = {
+            requested: _module_dependency_closure(reopened_module_segment, release, requested)
+            for requested in PRELOAD_ROOTS
+        }
+        if reopened_dependency_closures != dependency_closures:
+            raise BuildError("reopened_dependency_closure")
+        if not set(preload_modules).issubset(_configured_modules(reopened_segments)):
+            raise BuildError("reopened_preload_missing")
+        reopened_gpu_dependency_closure = reopened_dependency_closures["virtio_gpu"]
         kernel = workspace / "Image"
         kernel_record = _kernel_image(generic_kernel, kernel)
         output.mkdir(mode=0o700)
@@ -638,11 +684,15 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                 {"kind": "modules", "removed_releases": sorted(original_module_releases),
                  "replacement_release": release, "skipped_unsafe_links": skipped_links,
                  "conf_modules_added": configured_modules_added,
-                 "gpu_preload": list(gpu_dependency_closure)},
+                 "preload_roots": list(PRELOAD_ROOTS),
+                 "preload_modules": list(preload_modules),
+                 "dependency_closures": {key: list(value) for key, value in dependency_closures.items()}},
                 {"kind": "observability-hook", "path": "/" + HOOK_PATH,
                  "order_path": "/" + ORDER_PATH,
                  "order_addition": ORDER_ADDITION.decode(),
-                 "behavior": "print /run/photo-wall/boot.json to the serial console"},
+                 "rollback_service_path": "/etc/systemd/system/photo-wall-ci-rollback.service",
+                 "rollback_service_exec": "/usr/bin/python3 -I /run/photo-wall-ci/vm_rollback_control.py",
+                 "behavior": "print /run/photo-wall/boot.json and, when the tagged read-only photo-wall-ci share is available, install the volatile rollback controller service"},
             ],
             "validation": {"reopened": True, "protected_bytes_equal": True,
                            "required_modules": list(REQUIRED_MODULES),
@@ -650,6 +700,9 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                            "reopened_module_status": reopened_module_status,
                            "gpu_dependency_closure": list(gpu_dependency_closure),
                            "reopened_gpu_dependency_closure": list(reopened_gpu_dependency_closure),
+                           "preload_modules": list(preload_modules),
+                           "dependency_closures": {key: list(value) for key, value in dependency_closures.items()},
+                           "reopened_dependency_closures": {key: list(value) for key, value in reopened_dependency_closures.items()},
                            "conf_modules_added": configured_modules_added,
                            "original_pi_modules_absent": not bool(original_module_releases & {release})},
             "qualified": {"generic_vm_boot": False, "physical_pi_boot": False},

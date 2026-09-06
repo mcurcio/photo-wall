@@ -616,7 +616,7 @@ def test_rollback_probe_rejects_corrupt_active_fallback(rig, acceptance, monkeyp
         updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
 
 
-def test_rollback_probe_cli_returns_zero_for_verified_failed_trial(rig, acceptance, monkeypatch):
+def test_rollback_probe_cli_returns_zero_for_verified_failed_trial(rig, acceptance, monkeypatch, capsys):
     a, _candidate, _selected, _report = failed_trial(rig, acceptance)
     monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
     assert updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
@@ -630,9 +630,11 @@ def test_rollback_probe_cli_returns_zero_for_verified_failed_trial(rig, acceptan
     with pytest.raises(SystemExit) as error:
         updates.main()
     assert error.value.code == 0
+    assert json.loads(capsys.readouterr().out) == dict(
+        event="photo-wall-rollback-allowed", boot_id="boot-2", allowed=True)
 
 
-def test_rollback_probe_cli_skips_without_active_fallback(rig, acceptance, monkeypatch):
+def test_rollback_probe_cli_skips_without_active_fallback(rig, acceptance, monkeypatch, capsys):
     monkeypatch.setattr(updates, "_linux_boot_id", lambda: acceptance.boot_id)
     monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
                                       "rollback-current-allowed", "--config-dir",
@@ -640,6 +642,7 @@ def test_rollback_probe_cli_skips_without_active_fallback(rig, acceptance, monke
     with pytest.raises(SystemExit) as error:
         updates.main()
     assert error.value.code == 1
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("fault", ["missing", "volatile", "fallback", "old_boot", "boot_fault",

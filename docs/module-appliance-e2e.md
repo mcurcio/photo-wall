@@ -10,7 +10,7 @@ builder owns the image format and authenticated release; the
 [boot fixture](module-boot-fixture.md) owns isolated central, PostgreSQL,
 HTTPS, DNS and NTP services. The generic-initramfs builder preserves production
 bootstrap and configuration bytes while substituting the compatible ARM64
-kernel/modules and adding a serial boot-report hook. Its manifest records each
+kernel/modules and adding a serial boot-report and test-control hook. Its manifest records each
 substitution and verifies the preserved content after reopening.
 
 The input `ci-image.json` contains the source commit, disk path/size/SHA-256,
@@ -21,6 +21,13 @@ kernel/initramfs checksums. It also binds the generic initramfs input to the
 production initramfs recorded in the finalized image's PXE inventory.
 The full generic module manifest has a shared 16 MiB producer/consumer limit;
 small fixture JSON retains its separate 1 MiB limit.
+The private rollback candidate has its own signed release and rootfs checksum.
+Preflight binds both A/B identities to the same source, boot ABI and public
+configuration, and verifies the recorded candidate fault. The candidate builder
+reuses the prepared root, adds a Player service override that exits unsuccessfully,
+and compresses once more before the configured root is discarded. It does not
+repeat Ubuntu extraction, package installation or Player packaging. Candidate
+bytes remain under the private deployment directory, outside image uploads.
 
 Each run creates a fresh private fixture and a QEMU `virt` guest with two virtual
 CPUs and 3 GiB RAM in a 4 GiB container. A software-rendered `virtio-gpu-pci`
@@ -50,13 +57,27 @@ The automated scenarios require:
    must now select the same release in accepted, non-trial slot A.
 5. A central-service outage and restart, followed by a successful authenticated
    Player state request and unchanged Player identity/authority.
-6. Cleanup of only recorded test resources and an unchanged original disk hash.
+6. Through a read-only 9p share, publish a command bound to the accepted second
+   boot. The test-only controller verifies that boot and invokes the production
+   staging CLI for signed candidate B. Locked readback must show A unchanged
+   and B pending but unconsumed before the controller requests the initial reboot.
+7. Observe the protected B trial boot. Its failed Player cannot satisfy the
+   unchanged health gate. The production recovery predicate must authenticate
+   the failed trial and fallback, emit its boot-bound completion event, and the
+   production recovery service must reboot into accepted A. The harness does
+   not request that fallback reboot or select/reject/promote any slot.
+8. Observe the fourth distinct boot ID, original accepted release A and same
+   Player identity with a higher authority epoch. Cleanup only recorded test
+   resources and verify the original disk hash remains unchanged.
 
 Boot enrollment is bounded to ten minutes per boot. Observing trial acceptance
 after enrollment is bounded to 210 seconds; the production unit retains its
 180-second health deadline and 30-second continuous-health requirement.
-Reconnection is bounded to two minutes,
-and each VM process to fifteen minutes. Container logs are capped. The public
+Reconnection is bounded to two minutes. Candidate staging has a 900-second
+guest limit and 930-second host observation limit; production recovery evidence
+has 330 seconds, covering the unchanged health and verified-fallback deadlines.
+Each VM process has a one-hour cap covering staging and its subsequent boots.
+Container logs are capped. The public
 JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
 Player identity state and raw guest disks are excluded from test-report uploads.
@@ -78,16 +99,17 @@ are attempted independently; a failure in one cannot suppress the others, and
 any cleanup failure prevents a passing qualification result.
 
 The VM has no physical panels. A pass of the strengthened gate qualifies generic
-userspace boot, durable enrollment/reconnection and healthy-trial acceptance
-using native initialization on virtual DRM. It does not establish a centrally
-committed native media draw, automatic update rollback, Pi firmware, EEPROM/PXE
-networking, onboard Ethernet or dual HDMI. `native_rendering`,
-`automatic_rollback` and physical qualification fields therefore remain false.
+userspace boot, durable enrollment/reconnection, healthy-trial acceptance
+using native initialization on virtual DRM, and automatic rollback of the signed
+failed candidate. It does not establish a centrally committed native media draw,
+preservation of a populated media cache, Pi firmware, EEPROM/PXE networking,
+onboard Ethernet or dual HDMI. `native_rendering` and physical qualification
+fields therefore remain false.
 A failure or cleanup error clears all qualification fields. Physical scenarios
 require a Pi bench with remote power, serial/network access and display capture.
 
-The virtual-GPU and native-trial extension is not yet qualified by a hosted
-boot. Its focused local checks and actual Linux module/option probes are
+The virtual-GPU/native-trial extension and subsequent rollback extension are
+not yet qualified by a hosted boot. Their focused local checks and actual Linux module/option probes are
 prerequisites, not substitute image evidence. Earlier hosted passes below used
 the enrollment-only gate and retain their explicit false native/trial fields.
 

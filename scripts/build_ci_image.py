@@ -23,9 +23,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from appliance import build as appliance
-from scripts import build_player, build_vm_initrd, ci_base_cache, fetch_ubuntu
+from scripts import (
+    build_player,
+    build_rollback_candidate,
+    build_vm_initrd,
+    ci_base_cache,
+    fetch_ubuntu,
+)
 
-MIN_FREE_BYTES = 8 * 1024**3
+# Include the additional bounded rollback rootfs retained in the private fixture.
+MIN_FREE_BYTES = 9 * 1024**3
 
 
 def phase(name, function, *args, **kwargs):
@@ -61,6 +68,28 @@ def _new_directory(path: Path, *, label: str) -> Path:
 
 def _openssl(*argv: str) -> None:
     appliance.run(["openssl", *argv], timeout=30)
+
+
+def _sign_release(signing_key: Path, manifest: Path, signature: Path) -> dict:
+    """Create and size-check one raw Ed25519 release signature."""
+    appliance.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(signing_key),
+                   "-in", str(manifest), "-out", str(signature)], timeout=30)
+    record = _record(signature, 64)
+    if record["size"] != 64:
+        raise appliance.BuildError("release_signature_size")
+    return record
+
+
+def _prepare_and_sign_rollback_candidate(root: Path, bundle: Path,
+                                         deployment: Path, signing_key: Path) -> tuple[Path, dict, dict]:
+    """Build the private CI candidate while the configured root is still present."""
+    destination = deployment / "rollback-candidate"
+    metadata = phase("prepare_rollback_candidate", build_rollback_candidate.prepare,
+                     root, bundle, destination)
+    signature = destination / "release.sig"
+    signature_record = phase("sign_rollback_candidate", _sign_release,
+                             signing_key, destination / "release.json", signature)
+    return destination, metadata, signature_record
 
 
 def _fixture_deployment(destination: Path) -> tuple[Path, Path]:
@@ -207,15 +236,14 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
         phase("source_export", appliance.export_source, repository, source, revision)
         bundle = temporary / "bundle"
         phase("prepare_image", appliance.prepare, root, source, player, deployment / "public", evidence, bundle)
+        rollback_candidate, rollback_metadata, _rollback_signature_record = (
+            _prepare_and_sign_rollback_candidate(root, bundle, deployment, signing_key))
         shutil.rmtree(root)
         shutil.rmtree(player)
         shutil.rmtree(source)
         release = json.loads((bundle / "release.json").read_text())
         signature = temporary / "release.sig"
-        appliance.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(signing_key),
-                       "-in", str(bundle / "release.json"), "-out", str(signature)], timeout=30)
-        if _record(signature, 64)["size"] != 64:
-            raise appliance.BuildError("release_signature_size")
+        _sign_release(signing_key, bundle / "release.json", signature)
         final = output
         final_report = phase("finalize_image", appliance.finalize, bundle, signature, final,
                              trusted_public=deployment / "public")
@@ -248,6 +276,8 @@ def build(repository: Path, revision: str, output: Path, *, deployment: Path | N
             "bundle": str(output / "pxe/appliance"),
             "generic_boot": str(generic_dir),
             "deployment": str(deployment),
+            "rollback_candidate": {"path": str(rollback_candidate),
+                                    "metadata": rollback_metadata},
             "identities": {"release_id": hashlib.sha256((output / "pxe/appliance/release.json").read_bytes()).hexdigest(),
                            "rootfs_sha256": release["rootfs_sha256"],
                            "configuration_sha256": release["configuration_sha256"],

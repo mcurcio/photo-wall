@@ -191,3 +191,11 @@ paths and health contents are excluded. The VM qualification gate binds a true
 event to its protected first-trial boot report, then requires the next actual
 boot to select the same accepted release and slot. This adds observability;
 the signed-state and continuous-health requirements are unchanged.
+
+The production `rollback-current-allowed` predicate similarly emits
+`photo-wall-rollback-allowed` with the current `boot_id` and `allowed: true`
+only after authenticating the failed durable trial and its accepted fallback.
+A skip or failure emits no successful event. The recovery service still owns
+the reboot; an event alone does not qualify rollback. The VM gate requires the
+subsequent actual boot to restore the expected accepted release and durable
+Player identity.

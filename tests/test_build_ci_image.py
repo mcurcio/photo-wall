@@ -1,6 +1,7 @@
 """Cheap guards for the CI image orchestration boundary."""
 
 import json
+import shutil
 import ssl
 import stat
 import subprocess
@@ -9,8 +10,16 @@ from pathlib import Path
 import pytest
 
 from appliance.build import BuildError
+from appliance.updates import verify_release
+from contracts.release import Release, configuration_digest
 from player.service import PlayerConfig
-from scripts.build_ci_image import _fixture_deployment, _new_directory, build
+from scripts.build_ci_image import (
+    _fixture_deployment,
+    _new_directory,
+    _prepare_and_sign_rollback_candidate,
+    _sign_release,
+    build,
+)
 
 
 def test_ci_output_and_deployment_paths_must_be_new_and_outside_git(tmp_path):
@@ -48,6 +57,62 @@ def test_disposable_deployment_has_valid_player_config_and_matching_tls(tmp_path
     assert {p.name for p in (deployment / "public").iterdir()} == {
         "public.json", "bootstrap.json", "ca.pem", "release.pub.pem"}
     assert json.loads((deployment / "public/bootstrap.json").read_bytes())["time_server"] == "photo-wall.test"
+
+
+def test_shared_release_signer_produces_verifiable_ed25519_signature(tmp_path, monkeypatch):
+    version = subprocess.run(["openssl", "version"], capture_output=True, text=True, check=True).stdout
+    if not version.startswith("OpenSSL 3."):
+        pytest.skip("CI fixture signing requires OpenSSL 3")
+    monkeypatch.setattr("appliance.updates.OPENSSL", shutil.which("openssl"))
+    deployment, key = _fixture_deployment(tmp_path / "deployment")
+    public = deployment / "public"
+    config = configuration_digest({name: (public / name).read_bytes()
+                                   for name in ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")})
+    manifest = tmp_path / "release.json"
+    release = Release(revision="a" * 40, boot_abi="b" * 64,
+                      configuration_sha256=config,
+                      rootfs_sha256="c" * 64, rootfs_size=1)
+    manifest.write_bytes(release.encode())
+    signature = tmp_path / "release.sig"
+    record = _sign_release(key, manifest, signature)
+    assert record["size"] == 64
+    assert verify_release(manifest.read_bytes(), signature.read_bytes(), public / "release.pub.pem",
+                          release.boot_abi, config) == release
+
+
+def test_rollback_candidate_orchestration_keeps_private_path_and_signs_after_prepare(tmp_path, monkeypatch):
+    from scripts import build_ci_image as ci
+
+    root, bundle, deployment = (tmp_path / name for name in ("root", "bundle", "deployment"))
+    root.mkdir()
+    bundle.mkdir()
+    deployment.mkdir()
+    signing_key = tmp_path / "release-signing.key"
+    signing_key.write_bytes(b"fixture")
+    calls = []
+
+    def prepare(*args):
+        calls.append(("prepare", args))
+        destination = args[-1]
+        destination.mkdir()
+        (destination / "release.json").write_bytes(b"manifest")
+        return {"schema": 1, "kind": "ci-rollback-candidate"}
+
+    def sign(*args):
+        calls.append(("sign", args))
+        args[-1].write_bytes(b"s" * 64)
+        return {"sha256": "s" * 64, "size": 64}
+
+    monkeypatch.setattr(ci.build_rollback_candidate, "prepare", prepare)
+    monkeypatch.setattr(ci, "_sign_release", sign)
+    path, metadata, signature = _prepare_and_sign_rollback_candidate(root, bundle, deployment, signing_key)
+
+    assert path == deployment / "rollback-candidate"
+    assert metadata["kind"] == "ci-rollback-candidate"
+    assert signature["size"] == 64
+    assert calls[0][0] == "prepare" and calls[1][0] == "sign"
+    assert calls[1][1][1] == path / "release.json"
+    assert (path / "release.sig").read_bytes() == b"s" * 64
 
 
 def test_fixture_failure_removes_created_private_material(tmp_path, monkeypatch):

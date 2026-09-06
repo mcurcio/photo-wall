@@ -71,9 +71,9 @@ cold assembly, and published the image and e2e report artifacts. All five
 generic-VM checks passed; healthy-trial acceptance, native rendering, physical
 Pi/PXE, HDMI and automatic rollback remain false. Standard checks run
 34024871867 for `387d2e2` also passed **824 tests / 56 explicit skips / 4
-warnings**, followed by **55 pinned Linux media tests**. Its image run
-34024871863 remains live/pending, so no latest image or native GPU qualification
-is claimed from that job.
+warnings**, followed by **55 pinned Linux media tests**. Its redundant image
+run 34024871863 was canceled after the native-trial revision queued; that change
+contained only demo/evidence files. It supplies no image qualification.
 
 Five actual Linux systemd acceptance/recovery scenarios pass with production
 30/180-second health timing and a recorded recovery action. Actual image
@@ -125,3 +125,15 @@ confirmed the real `6.8.0-139-generic` GPU closure (`virtio_gpu`,
 no hosted native-trial pass is claimed. The ownership-separated connector and
 module changes received bounded independent review. Full final review remains
 required after hosted verification.
+
+Standard CI at `afff7b1` (run 34025872485) passed **842 tests / 56 skips /
+four warnings in 58.15 seconds**, plus **55 Linux media tests in 164.89 seconds**.
+Its image run 34025872502 completed cold assembly in **21m20s** and is boot-testing;
+no native-trial pass is claimed yet. A subsequent four-boot rollback gate is
+being validated locally: it reuses the prepared root for one signed failed
+candidate, stages through the production CLI, and requires the production
+recovery service's actual fallback reboot. Hosted rollback remains unqualified.
+The [rollback preparation checkpoint](evidence/2026-09-06-vm-rollback.md) passed
+924 PostgreSQL-backed tests (15 skips/four warnings) and 160 final focused tests
+(one Linux-root skip), with bounded independent reviews. The candidate adds
+one compression pass while reusing extraction, packages and Player packaging.
