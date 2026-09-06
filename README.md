@@ -8,7 +8,7 @@ Players must [start through PXE and appear centrally without local setup](docs/r
 
 ## Project status
 
-**MVP implementation in progress.** Central and media worker services launch with PostgreSQL. The full real-media demo passes with two network Players and three simulated Outputs, including live Immich updates and outage/rejoin recovery. Native Linux rendering has separate integration evidence. The signed appliance builder is committed; final image construction, boot and hardware qualification remain incomplete. See the [setup and recovery runbook](docs/runbook.md), [delivery checklist](docs/implementation-checklist.md), and [acceptance evidence](docs/evidence/README.md).
+**MVP implementation in progress.** Central and media worker services launch with PostgreSQL. The full real-media demo passes with two network Players and three simulated Outputs, including live Immich updates and outage/rejoin recovery. Native Linux rendering has separate integration evidence. A signed Pi 5 image and common PXE tree are built and verified; boot and hardware qualification remain incomplete. See the [setup and recovery runbook](docs/runbook.md), [delivery checklist](docs/implementation-checklist.md), and [acceptance evidence](docs/evidence/README.md).
 
 The proposed foundation is one modular central application and a media preparation worker, with one Python Player process embedding GStreamer and GTK on each Raspberry Pi. Weston hosts the display session. Exact builds, rendering capacity, deployment mechanics, and visible synchronization still require qualification.
 

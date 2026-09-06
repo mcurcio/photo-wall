@@ -1,0 +1,17 @@
+# Photo Wall common PXE tree filename policy for tftpd-hpa.
+#
+# Rules are evaluated top-to-bottom.  The deny rules run before the one
+# permitted rewrite, so a serial prefix cannot hide an unsafe path.
+
+# The common tree is read-only.  Refuse every TFTP PUT (WRQ) request.
+aP ^.*$
+
+# Refuse absolute names, traversal components, and Windows path separators.
+aG ^/
+aG (^|/)\.\.(/|$)
+aG [\\]
+
+# Raspberry Pi's default serial prefix is one 8-hex directory.  Remove one
+# leading prefix for RRQ (GET) requests and leave all other path components
+# unchanged.  Do not use `g`: a second prefix must not be stripped.
+rG ^[[:xdigit:]]{8}/(.*)$ \1

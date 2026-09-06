@@ -18,7 +18,8 @@ Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draf
 - [x] Pinned real Immich/query, evolving candidates during ongoing Run, bounded preparation/delivery; full two-Player/three-Output network demo passed with simulated actuation.
 - [ ] Single Python Player networking/cache/sync/execution/embedded GStreamer/GTK; ordinary continuity.
 - [ ] Restart/download/deletion/cache/outage/rejoin fault matrix and scoped update/rollback.
-- [ ] Common Pi 5 PXE image build; revision/config/package manifest/checksum outside Git; boot test artifact.
+- [x] Common Pi 5 image and PXE tree built; revision/config/package manifest/checksum retained outside Git.
+- [ ] Boot-test the checksum-identified appliance artifact.
 - [ ] Physical fresh PXE registration, replacement, dual Output rendering, continuity, visible coordination.
 - [x] Real Immich v2.5.6 adapter fixture with Player-to-Immich DNS and numeric access blocked. Complete worker-to-renderer integration remains a separate gate.
 - [ ] CI and reproducible demo; verified clean setup/build/run/test/recovery instructions.
@@ -38,7 +39,7 @@ The user reaffirmed `gpt-5.3-codex-spark` for appropriate bounded leaves. It bec
 - Runtime snapshot recovery, nested Scenes, Program rollover, current-state recording Actuator reveal, required cue membership/deadlines, exact secured assets and current-authority readiness/commit/revocation have regression coverage.
 - Single-process Player networking, identity, cache integrity/reacquisition, bounded transfers, clock gating, actual draw acknowledgments and outage/rejoin are integrated with a RecordingRenderer. Native Linux smoke separately verifies JPEG/PNG/H.264, seek, composition/calibration and two distinct Weston outputs. Physical DRM/HDMI and live hotplug remain unqualified.
 - Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
-- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. Common-image/bootstrap integration remains in progress; no final appliance checksum or boot result exists.
+- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. The final signed image and common PXE tree now have verified checksums; boot qualification remains pending.
 
 See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for its commands, identities and limits.
 
@@ -46,9 +47,9 @@ See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for its
 
 The [full wall demo](evidence/2026-09-05-full-wall.md) passed one uninterrupted command with two Players, three Outputs, five prepared variants and 485 final Readiness-to-Commit checks. Both live uploads appeared during the same Run. Secured deletion, permission/upstream recovery, fallback beyond central lease expiry, recovery on every Output, same-key/new-epoch rejoin and final upstream network denials passed. Actuation remained simulated; native rendering and physical measurements are separate gates.
 
-Appliance source checkpoint `073f57d7547507de452a2fd273088d7542a6d070` has a matching Player-only bundle exported from a clean checkout. [Its CI run](https://github.com/mcurcio/photo-wall/actions/runs/33999952831) passed **643 tests with 48 explicit skips**, then **55 pinned Linux preparation tests**. The skips comprise 46 host conversion cases and two separately enabled Linux image-tooling cases. The signed builder/bootstrap, automatic 30-second trial health acceptance, public release gateway and synthetic time helper are committed. Actual final image construction, signed finalization, VM boot and physical qualification remain pending.
+Appliance source checkpoint `073f57d7547507de452a2fd273088d7542a6d070` has a matching Player-only bundle exported from a clean checkout. [Its CI run](https://github.com/mcurcio/photo-wall/actions/runs/33999952831) passed **643 tests with 48 explicit skips**, then **55 pinned Linux preparation tests**. The skips comprise 46 host conversion cases and two separately enabled Linux image-tooling cases. The signed builder/bootstrap, automatic 30-second trial health acceptance, public release gateway and synthetic time helper are committed. The [final signed image](evidence/2026-09-05-appliance-image.md) and common PXE tree are built, authenticated, reopened and copied with matching hashes. The latest actual Linux appliance suite passed 138 checks. VM boot and physical qualification remain pending. The subsequent full-wall checkpoint `72d74e7` also has [green CI](https://github.com/mcurcio/photo-wall/actions/runs/34007945286).
 
-Next gates are complete image/boot/update qualification, the authenticated operator walkthrough, physical bench results and final independent review. The PR remains draft.
+Next gates are boot/update qualification, the authenticated operator walkthrough, physical bench results and final independent review. The PR remains draft.
 
 ## Evidence rules
 

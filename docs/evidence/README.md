@@ -12,3 +12,5 @@ Real Immich and native Linux integration have executed evidence; physical Pi/PXE
 - [2026-09-05 core benchmark](2026-09-05-core-benchmark.md): 494 core tests, real Immich isolation, pinned Linux conversion, native two-output routing and released Player service integration; appliance and physical gates remain open.
 - [2026-09-05 packaging and update store](2026-09-05-package-and-update.md): offline Player-only ARM64 install, 64 package tests, and 62 updater/Release tests with Linux signature/staging/fallback smoke; complete image/boot integration remains open.
 - [2026-09-05 full wall](2026-09-05-full-wall.md): uninterrupted real-media network demo with two Players, three simulated Outputs, live source changes, secured deletion, outages and rejoin.
+
+- [2026-09-05 appliance image](2026-09-05-appliance-image.md): signed Pi 5 image and common PXE tree built, reopened and copied with verified checksums; 138 Linux appliance checks passed, boot and physical qualification pending.
