@@ -21,6 +21,80 @@ The operator interface lists Players and Outputs, creates persistent Frames, bin
 
 The worker starts with an empty private connection list and remains healthy while idle. Its configuration is described in [the worker module](module-media-worker.md); a deployment must provision that file as UID 10001, mode 0600 in the `connections` volume and restart `worker`. Never put an upstream API key in operator forms, Source definitions, Player configuration, Git or command-line arguments. The [Immich fixture](module-immich-fixture.md) generates its own synthetic media and disposable private configuration for reproducible adapter tests.
 
+To provision a real worker connection, use the Compose service's mounted
+`connections` volume and feed a separately prepared private file through
+Docker standard input. This keeps the API key out of shell arguments, history
+and Docker output. Prepare the source file outside the repository with the
+deployment's approved secret editor or secret manager, and make it mode 0600
+before using it:
+
+```sh
+python3 - <<'PY'
+import os
+from pathlib import Path
+path = Path.home() / ".photo-wall-connections.json"
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.fchmod(fd, 0o600)
+os.close(fd)
+print("Created private connection file with mode 0600.")
+PY
+```
+
+The command refuses to overwrite an existing file. Do not place that file in
+Git or a shared temporary directory; populate it with the deployment's approved secret
+editor or secret manager, keep it for the next command only, and remove it
+with the deployment's secret-management procedure afterward.
+
+Use this shape as the file contents, replacing only the values in the approved
+private editor. `base_url` must end in `/api` (or `/api/`), and `ca_file` is a path
+inside the worker container when a separately provisioned private CA is
+required:
+
+```json
+{"schema":1,"connections":[{"connection_id":"immich-main","base_url":"https://immich.example.test/api","owner_id":"00000000-0000-4000-8000-000000000000","api_key":"PASTE_KEY_HERE","allow_http":false,"ca_file":null}]}
+```
+
+Validate and publish the staged file as the worker UID. The existing worker
+loader performs the schema, ownership, mode, size, URL/TLS-policy and
+secret-shape checks; it does not replace an actual upstream TLS connection
+test. A failed check removes the staged file without printing its contents.
+
+```sh
+docker compose run --rm --no-deps -T --user 10001:10001 \
+  --entrypoint /bin/sh worker -c '
+set -eu
+trap "rm -f /etc/photo-wall/private/.connections.json.new" EXIT
+umask 077
+cat > /etc/photo-wall/private/.connections.json.new
+chmod 0600 /etc/photo-wall/private/.connections.json.new
+python -c "from pathlib import Path; from media.worker import load_connections; load_connections(Path(\"/etc/photo-wall/private/.connections.json.new\"))" >/dev/null 2>&1
+mv /etc/photo-wall/private/.connections.json.new /etc/photo-wall/private/connections.json
+' < ~/.photo-wall-connections.json
+docker compose restart worker
+docker compose exec -T worker stat -c '%u:%g %a' /etc/photo-wall/private/connections.json
+```
+
+The final command must report `10001:10001 600`. Updating this file takes
+effect after a worker restart. Do not use `cat` to display the private document,
+an inline heredoc, or a command argument for the private document or API key.
+Worker diagnostics are sanitized, but never send the private document to a log
+command. The fixture helpers remain disposable test configuration and do not
+provision a deployment worker.
+
+In the Scene form, keep live source selection for a changing collection, or
+select **Choose a photo or video for each Frame** to keep a specific current
+asset for each participating Frame. Source freshness and immutable references
+are checked centrally; playback still requires compatible, prepared media.
+The [authored-media contract](module-authored-media.md) describes retention and
+capacity. Development checks for this form require Node.js and execute its
+event flow with a synthetic DOM; this is separate from the authenticated
+browser walkthrough.
+
+For immediate activation, choose a priority and whether an already active Scene
+should be ignored, restarted, or queued. Queue requests require an expiry;
+**Force** is an explicit override. Queued and ignored requests report their
+actual outcome without claiming that a new Run started.
+
 `PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds. The scheduler enqueues bounded preparation requests, and the separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits. Its pinned Linux FFmpeg build is qualified separately from host conversion tools.
 
 Automatic key-proof enrollment exists at `/v1/enrollment/challenge` and `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The common appliance image and PXE tree are built; boot and physical PXE qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
@@ -64,4 +138,4 @@ If an Output moves, bind the destination persistent Frame. If a Player is replac
 
 Preview carries a 30-second expiry and both proposed/committed settings so the Executor can revert locally through an outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Offline old equipment cannot learn of immediate retirement through a partition; it rejects obsolete work on rejoin and respects the bounded plan lease. Player warm-outage/cold-reboot policy is defined in [decision 0001](decisions/0001-mvp-time-recovery-and-module-contracts.md). Reboot reuses the durable key and cached bytes but obtains fresh authority before execution.
 
-The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [signed update store](module-appliance-release.md) provide their commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md) now includes automatic healthy-trial acceptance. The [signed image evidence](evidence/2026-09-05-appliance-image.md) records its checksum and exact package/configuration inputs. The [common PXE service](module-pxe-service.md) and [isolated boot fixture](module-boot-fixture.md) document their separate service boundaries. Boot and physical measurements remain pending.
+The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [signed update store](module-appliance-release.md) provide their commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md) now includes automatic healthy-trial acceptance. The [GitHub ARM image workflow](module-appliance-ci.md) and [headless image e2e gate](module-appliance-e2e.md) describe the exact disposable qualification configuration and its limits; production images still need the deployment's public configuration and trust inputs. The [signed image evidence](evidence/2026-09-05-appliance-image.md) records its checksum and exact package/configuration inputs. The [common PXE service](module-pxe-service.md) and [isolated boot fixture](module-boot-fixture.md) document their separate service boundaries. Boot and physical measurements remain pending.

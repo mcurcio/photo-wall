@@ -1,7 +1,9 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
-let token = '', state = {frames: [], players: [], outputs: []};
+let token = '', state = {frames: [], players: [], outputs: []}, mediaState = {sources: []};
+const authored = {source: '', candidates: new Map(), selections: new Map(), invalid: new Set(),
+  status: 'off', request: 0, loading: false};
 let refreshing = false;
 const errors = {
   unauthorized: 'The token was not accepted. Reconnect with your operator token.',
@@ -9,6 +11,10 @@ const errors = {
   source_revision_immutable: 'Use a new source name or revision to change this query.',
   binding_generation_conflict: 'This Frame changed. Refresh and review its binding.',
   calibration_revision_conflict: 'Calibration changed. Refresh and review the saved values.',
+  source_not_fresh: 'Refresh this source successfully before choosing photos.',
+  authored_candidate_limit: 'The authored photo/video capacity is full.',
+  authored_asset_not_found: 'That photo or video is no longer available.',
+  authored_asset_not_member: 'That photo or video is no longer in the selected source.',
   invalid_command: 'Check the values and references in this command.',
   invalid_request: 'Check the required fields and their values.',
 };
@@ -112,6 +118,7 @@ async function refreshContent() {
   refreshing = true;
   try {
     const [media, runtime] = await Promise.all([api('/v1/operator/media'), api('/v1/operator/runtime')]);
+    mediaState = media;
     const health = media.health;
     $('media-health').textContent = 'Stored/reserved: ' + (health.accounted_bytes / 1024 ** 2).toFixed(1) +
       ' MiB · Quota: ' + (health.max_bytes / 1024 ** 2).toFixed(0) + ' MiB · Worker: ' +
@@ -137,15 +144,155 @@ async function refreshContent() {
     options('remove-program', programs.map(program => [program.program_id, program.program_id]));
     options('control-run', runtime.current.runs.filter(run => ['body', 'outro'].includes(run.phase))
       .map(run => [run.run_id, run.scene_id + ' / ' + run.run_id]));
+    await loadAuthoredCandidates();
   } finally { refreshing = false; }
+}
+
+function selectedSceneFrames() {
+  return Array.from($('scene-frames').selectedOptions, item => item.value);
+}
+
+function rememberAuthoredSelections() {
+  for (const select of $('authored-choosers').querySelectorAll('select[data-frame]')) {
+    if (select.value) authored.selections.set(select.dataset.frame, select.value);
+  }
+}
+
+function authoredStatus(text, error = false) {
+  $('authored-status').textContent = text;
+  $('authored-status').classList.toggle('error', error);
+}
+
+function updateAuthoredAvailability() {
+  const source = mediaState.sources.find(item => item.source_ref === $('scene-source').value);
+  const enabled = $('scene-authored').checked;
+  const sourceReady = Boolean(source && source.status === 'ok');
+  // A stale source prevents entering authored mode, while an already-selected
+  // mode remains available for an explicit user choice to switch back to live.
+  $('scene-authored').disabled = (!sourceReady || authored.status === 'unavailable') && !enabled;
+  $('create-scene').disabled = enabled && (!sourceReady || authored.loading || authored.status !== 'ok');
+}
+
+function candidateLabel(candidate) {
+  const state = candidate.variant ? 'Prepared' : candidate.preparation_failure ?
+    'Needs a new preparation attempt' : 'Awaiting preparation';
+  const kind = candidate.kind === 'video' ? 'Video' : 'Photo';
+  return kind + ' · ' + candidate.original_width + '×' + candidate.original_height +
+    ' · ' + date(candidate.captured_at) + ' · Ref …' + String(candidate.asset_id).slice(-8) + ' · ' + state;
+}
+
+function renderAuthoredChoosers(candidates) {
+  const frames = selectedSceneFrames();
+  const container = $('authored-choosers');
+  const available = new Set(candidates.map(candidate => candidate.asset_id));
+  authored.invalid.clear();
+  container.replaceChildren();
+  for (const frame of frames) {
+    const label = document.createElement('label');
+    label.textContent = 'Photo or video for ' + frame;
+    const select = document.createElement('select');
+    select.dataset.frame = frame;
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = 'Choose a current photo or video';
+    select.append(empty);
+    for (const candidate of candidates) {
+      const option = document.createElement('option');
+      option.value = candidate.asset_id;
+      option.textContent = candidateLabel(candidate);
+      select.append(option);
+    }
+    const previous = authored.selections.get(frame);
+    if (previous && available.has(previous)) {
+      select.value = previous;
+    } else if (previous) {
+      authored.selections.delete(frame);
+      authored.invalid.add(frame);
+    }
+    select.onchange = () => {
+      if (select.value) authored.selections.set(frame, select.value);
+      else authored.selections.delete(frame);
+      authored.invalid.delete(frame);
+      updateAuthoredAvailability();
+    };
+    container.append(label, select);
+  }
+  container.hidden = false;
+  const missing = frames.filter(frame => !authored.selections.has(frame));
+  authoredStatus(authored.invalid.size ?
+    'A previous choice is no longer current. Choose a replacement for each affected Frame.' :
+    (missing.length ? 'Choose one current photo or video for each Frame.' :
+      'Selections are current. Playback requires compatible, prepared media.'));
+  updateAuthoredAvailability();
+}
+
+async function loadAuthoredCandidates() {
+  rememberAuthoredSelections();
+  const sourceRef = $('scene-source').value;
+  if (!$('scene-authored').checked) {
+    authored.request += 1;
+    authored.loading = false;
+    authored.status = 'off';
+    $('authored-choosers').hidden = true;
+    authoredStatus('Live source selection is active.');
+    updateAuthoredAvailability();
+    return;
+  }
+  const source = mediaState.sources.find(item => item.source_ref === sourceRef);
+  if (authored.source !== sourceRef) {
+    authored.selections.clear();
+    authored.invalid.clear();
+  }
+  authored.source = sourceRef;
+  const request = ++authored.request;
+  authored.loading = true;
+  authored.status = source && source.status === 'ok' ? 'loading' : 'unavailable';
+  $('authored-choosers').hidden = false;
+  $('authored-choosers').replaceChildren();
+  if (!source || source.status !== 'ok') {
+    authored.loading = false;
+    authoredStatus('Authoring is disabled until this source has a successful refresh.', true);
+    updateAuthoredAvailability();
+    return;
+  }
+  authoredStatus('Loading current photos…');
+  try {
+    const data = await api('/v1/operator/sources/' + endpoint(sourceRef) + '/candidates');
+    if (request !== authored.request || sourceRef !== $('scene-source').value) return;
+    if (data.status !== 'ok') {
+      authored.loading = false;
+      authored.status = 'unavailable';
+      authoredStatus('Authoring is disabled until this source has a successful refresh.', true);
+      updateAuthoredAvailability();
+      return;
+    }
+    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+    const unique = new Map(candidates.map(candidate => [candidate.asset_id, candidate]));
+    if (unique.size !== candidates.length || candidates.some(candidate => !candidate.asset_id)) {
+      throw Error('The source returned an invalid current photo list.');
+    }
+    authored.loading = false;
+    authored.status = 'ok';
+    authored.candidates = unique;
+    renderAuthoredChoosers(candidates);
+  } catch (error) {
+    if (request !== authored.request) return;
+    authored.loading = false;
+    authored.status = 'error';
+    authoredStatus(error.message, true);
+    updateAuthoredAvailability();
+  }
 }
 
 function action(id, command, saved = 'Saved.') {
   $(id).onclick = async () => {
     $(id).disabled = true;
-    try { await command(); message(saved); }
+    try {
+      const result = await command();
+      message(typeof saved === 'function' ? saved(result) : saved);
+    }
     catch (error) { message(error.message, true); }
-    finally { $(id).disabled = false; }
+    finally { $(id).disabled = false; if (id === 'create-scene') updateAuthoredAvailability(); }
   };
 }
 
@@ -177,6 +324,16 @@ action('retire', async () => {
   await refresh();
 });
 $('cal-frame').onchange = loadCalibration;
+$('scene-source').onchange = loadAuthoredCandidates;
+$('scene-frames').onchange = loadAuthoredCandidates;
+$('scene-authored').onchange = loadAuthoredCandidates;
+function updateActivationOptions() {
+  const queue = $('activate-repeat').value === 'queue';
+  $('activate-expires').disabled = !queue;
+  if (!queue) $('activate-expires').value = '';
+}
+$('activate-repeat').onchange = updateActivationOptions;
+updateActivationOptions();
 for (const button of document.querySelectorAll('[data-cal]')) button.onclick = async () => {
   button.disabled = true;
   try {
@@ -200,14 +357,30 @@ action('create-source', async () => {
   await refreshContent();
 });
 action('create-scene', async () => {
-  const frames = Array.from($('scene-frames').selectedOptions, item => item.value);
+  const frames = selectedSceneFrames();
   if (!frames.length) throw Error('Select at least one participating Frame.');
   const scene_id = required('scene-id'), source = required('scene-source');
+  let contributions;
+  if ($('scene-authored').checked) {
+    if (authored.source !== source || authored.status !== 'ok' || authored.loading) {
+      throw Error('Load the current photos for this source before saving.');
+    }
+    const selections = new Map(Array.from($('authored-choosers').querySelectorAll('select[data-frame]'))
+      .map(select => [select.dataset.frame, select.value]));
+    if (selections.size !== frames.length || frames.some(frame => !authored.candidates.has(selections.get(frame)))) {
+      throw Error('Choose one current photo or video for each Frame.');
+    }
+    const asset_ids = [...new Set(selections.values())];
+    await api('/v1/operator/authored-candidates', 'POST', {source_ref: source, asset_ids});
+    contributions = frames.map(frame => ({target: 'frame:' + frame, role: frame,
+      asset_refs: [selections.get(frame)], kind: 'media', retain_on_expiry: true}));
+  } else {
+    contributions = frames.map(frame => ({target: 'frame:' + frame, role: frame,
+      source_refs: [source], kind: 'media', retain_on_expiry: true}));
+  }
   await api('/v1/operator/scenes/' + endpoint(scene_id), 'PUT', {scene_id,
     revision: +$('scene-revision').value, cycle_seconds: +$('cycle-seconds').value,
-    loop: $('scene-loop').value === 'true', contributions: frames.map(frame => ({
-      target: 'frame:' + frame, role: frame, source_refs: [source], kind: 'media', retain_on_expiry: true,
-    }))});
+    loop: $('scene-loop').value === 'true', contributions});
   await refreshContent();
 });
 action('create-program', async () => {
@@ -218,11 +391,23 @@ action('create-program', async () => {
   await refreshContent();
 });
 action('activate', async () => {
+  const rawPriority = $('activate-priority').value.trim();
+  if (!/^-?\d+$/.test(rawPriority)) throw Error('Priority must be a whole number.');
+  const priority = Number(rawPriority);
+  if (!Number.isSafeInteger(priority)) throw Error('Priority must be a safe whole number.');
+  const repeat = $('activate-repeat').value;
+  const expires_at = repeat === 'queue' ? instant('activate-expires', true) : null;
+  if (repeat === 'queue' && expires_at === null) throw Error('Queue repeat requires an expiry.');
   const admission = await api('/v1/operator/activations', 'POST', {
-    scene_id: required('activate-scene'), activation_id: 'operator:' + crypto.randomUUID()});
-  if (admission.status !== 'admitted') throw Error('Scene ' + admission.status + (admission.reason ? ': ' + admission.reason : ''));
+    scene_id: required('activate-scene'), activation_id: 'operator:' + crypto.randomUUID(),
+    priority, repeat, force: $('activate-force').checked, expires_at});
   await refreshContent();
-}, 'Scene started.');
+  if (!['admitted', 'queued', 'ignored'].includes(admission.status)) {
+    throw Error('Scene ' + admission.status + (admission.reason ? ': ' + admission.reason : ''));
+  }
+  return admission;
+}, admission => ({admitted: 'Scene started.', queued: 'Scene queued.',
+  ignored: 'Scene already active; request ignored.'}[admission.status]));
 for (const operation of ['finish', 'cancel']) action(operation + '-run', async () => {
   await api('/v1/operator/runs/' + endpoint(required('control-run')) + '/' + operation, 'POST');
   await refreshContent();
