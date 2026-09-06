@@ -70,3 +70,9 @@ rendering, healthy-trial acceptance, automatic update rollback, Pi firmware,
 EEPROM/PXE networking, onboard Ethernet or dual HDMI. Those fields remain false
 in the report. Updater fault tests are separate evidence, and physical scenarios
 require a Pi bench with remote power, serial/network access and display capture.
+
+The first [hosted passing artifact](evidence/2026-09-05-github-image.md#first-hosted-exact-image-boot-pass)
+completed all five scenarios at feature head `1eb16ef`, actual PR merge source
+`61b9950dde9e2d61e149ed7927abe974d306a88a`. The public report retains exact
+hashes and explicit false hardware/native qualification fields. Later
+revisions require their own workflow result.

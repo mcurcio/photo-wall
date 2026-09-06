@@ -1,7 +1,9 @@
 # GitHub Actions appliance build — 2026-09-05 Pacific
 
-**Actual hosted ARM64 build passed; automated boot qualification failed before
-starting the VM.** This is integration evidence, not a physical Pi result.
+**Latest checkpoint: hosted ARM64 image build and generic-VM e2e passed.**
+See the [passing artifact and report](#first-hosted-exact-image-boot-pass).
+The earlier failures below are retained as historical evidence. This is
+integration evidence, not a physical Pi result.
 
 [Run 34012404107](https://github.com/mcurcio/photo-wall/actions/runs/34012404107)
 built feature head `205d222f296b190b42b6c2a8d5b6e21cd7ba259f` through GitHub's PR
@@ -184,4 +186,48 @@ the RuntimeDirectory correction.
 
 The [corrected run at 1eb16ef](https://github.com/mcurcio/photo-wall/actions/runs/34019308971)
 passed the new live-systemd preflight on GitHub's ARM64 runner at 07:33:39 UTC.
-Image assembly and exact-artifact boot for that corrected source remain pending.
+The corrected image and automated generic-VM e2e subsequently passed, as recorded below.
+
+## First hosted exact-image boot pass
+
+[Run 34019308971](https://github.com/mcurcio/photo-wall/actions/runs/34019308971)
+completed **successfully** at feature head `1eb16ef`, actual PR merge/source
+`61b9950dde9e2d61e149ed7927abe974d306a88a`. The
+[sanitized report](2026-09-06-github-passing-vm-report.json) records two
+fault-free durable slot A trial boots with distinct boot IDs. The same Player
+identity persisted and its authority epoch advanced from 1 to 2. Signed
+HTTPS/DNS/NTP, fresh enrollment, power-cycle continuity, central outage/rejoin,
+cleanup and original disk integrity all passed. No Player namespace, Python,
+OOM or kernel-panic failure was reported. Weston failed in this headless VM;
+native rendering and healthy-trial acceptance remain explicitly unqualified.
+
+The [downloadable artifact](https://github.com/mcurcio/photo-wall/actions/runs/34019308971/artifacts/9985713962)
+is 1,769,508,410 bytes as a GitHub ZIP, digest
+`bb239063bf325a473767a929a471b3ad16a434b69936e0f685cae487f6aaacba`.
+Its uncompressed signed disk is **5,906,628,608 bytes**, SHA-256
+`9b59a3a9a33810e539f4d1fe30428347ffd97c30c776344a0512bc9fce661100`.
+Release ID: `98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75`.
+The full configuration/rootfs/kernel/initramfs hashes and disposable service
+image IDs are in the report. Artifacts use a seven-day retention period and
+contain disposable CI trust, not deployment credentials.
+
+The APT configuration change correctly invalidated the extraction cache for
+this run: cold assembly took **22m33s**, including 708.539s extraction and
+152.826s runtime packages. The new pristine cache was saved for subsequent
+revisions. Test setup began at 08:00:12 UTC; fresh VM boot took **9m06s**,
+power-cycle boot **9m37s**, and central recovery **36s**. The report completed
+at 08:20:27 UTC, and compression/upload completed by 08:24:01 UTC. This is
+actual generic ARM64 software-emulated boot evidence, with the documented
+kernel/modules/observability substitutions. It does not establish Pi firmware,
+fresh LAN PXE, physical HDMI, native healthy-trial acceptance or automatic
+rollback. Those report qualifications remain false.
+
+An independent integrated appliance source review found no concrete material
+defects after the startup fixes; it did not claim the unexecuted physical and
+native acceptance gates. The next revision's hosted run remains separately
+tracked and this pass is not relabeled as a pass for later source.
+
+A separate evidence review cross-checked the published ZIP size/hash/link,
+source checkout, disk and component hashes, phase durations, both enrollment
+records and all qualification fields against the hosted log. No discrepancy
+was found.

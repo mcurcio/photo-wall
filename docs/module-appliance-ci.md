@@ -84,6 +84,8 @@ The first hosted build spent about 12 minutes extracting Ubuntu, 5 minutes
 installing runtime packages and 3–4 minutes preparing the builder container.
 The workflow targets the repeated container layers and Ubuntu extraction.
 The first completed warm assembly took 11m11s compared with 22m15s cold;
+a subsequent assembly took 10m13s after a 19s cache-restoration step, versus
+22m33s for the preceding cold build;
 the [dated evidence](evidence/2026-09-05-ci-cache.md) separates those phase
 measurements from image boot qualification and the preceding download timeout.
 

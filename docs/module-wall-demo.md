@@ -40,12 +40,28 @@ The full configuration caps worker at 768 MiB, central at 384 MiB, PostgreSQL at
 
 The full passing run used a 70-second live-presentation wait. The harness now allows 120 seconds for that phase to accommodate held assignments, a four-member rotation and a safely skipped cue; the exact-byte, complete-group and clock predicates are unchanged. That budget change has focused coverage and is not described as another full run. A transient connection refusal while central restarts is retried within the phase deadline; authority, schema and unknown failures are not hidden as startup retries.
 
-The secured-deletion phase saves its pre-delete central/Player snapshot and
-exact future assignment identities and validity times before mutation. It
-then records the invocation/completion times and mutation result before the
-presentation wait. A timeout retains this evidence alongside the last sampled
-central/Player state, allowing a missed presentation to be investigated without
-guessing which assignment the test selected. The presentation and clock
-requirements remain unchanged.
+The live-evolution phase now journals a pre-mutation central/Player snapshot
+under `evolved_pre_change` before invoking `upstream-tools: evolve`, and
+records `evolved_change.invoked_utc`, `evolved_change.completed_utc`, and
+`evolved_change.result` before any membership wait and lock preservation checks.
+A failed mutation records `failed_utc` and a sanitized error. This keeps mutation timing and output even if later checks time out.
+
+The secured-deletion phase saves its pre-delete central/Player snapshot and exact
+future assignment identities and validity times under `deleted_secured_pre_delete`.
+It then records the invocation/completion times and mutation result under
+`deleted_secured_delete` before the presentation wait. A timeout retains this
+evidence alongside the last sampled central/Player state, allowing a missed
+presentation to be investigated without guessing which assignment the test
+selected. The presentation and clock requirements remain unchanged.
 
 Standalone checks run with `.venv/bin/python -m pytest --noconftest tests/test_wall_demo.py -q`. They need no PostgreSQL fixture and cover role containment, complete-group evidence, lock preservation, per-Output outage/recovery, retry classification, immutable image overrides and complete source inventories. Native GTK/GStreamer/HDMI and accelerated calendar/nested-Scene tests remain separate evidence classes.
+
+The central-recovery wait is now 120 seconds. The Player's documented
+1/5/15/60-second reconnect policy can consume the former entire 60-second
+window before bounded state/readiness requests and the next eight-second
+cue. This is a fixture budget correction, not a production-policy change.
+Every Output must still show fresh nonfallback content; the same Run and
+100 ms clock requirements remain. `central_restart` records the restart
+return time and allowed window before waiting; a passing `central_recovered`
+phase records monotonic elapsed seconds. The earlier timeout remains a failed
+run in the dated evidence, and is not reclassified by this change.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -773,31 +774,46 @@ def outage_checks(reports, expiry):
                 "outage_lease_overrun")
 
 
+def journal_upstream_mutation(host, evidence, save, before, reports, action, pre_key, change_key, pre=None):
+    """Persist exact pre-mutation evidence and mutation lifecycle around one upstream action."""
+    pre_mutation = dict(
+        central=copy.deepcopy(before),
+        players=copy.deepcopy(reports),
+        action=action,
+    )
+    if pre is not None:
+        pre_mutation.update(pre)
+    evidence["phases"][pre_key] = pre_mutation
+    save()
+    change = {"invoked_utc": time.time()}
+    evidence["phases"][change_key] = change
+    save()
+    try:
+        result = host.role("upstream-tools", action)
+    except Exception as error:
+        change["failed_utc"] = time.time()
+        change["error"] = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
+        save()
+        raise
+    change["completed_utc"] = time.time()
+    change["result"] = result
+    save()
+    return result, change["completed_utc"]
+
+
 def delete_secured_original(host, evidence, save, before, reports, portrait_sha):
     """Journal the selected lock and deletion before waiting for its presentation."""
     fields = ("player_id", "authority_epoch", "assignment_id", "run_id", "sha256",
               "start", "end", "valid_until")
     candidates = [dict((field, lock[field]) for field in fields)
-                   for lock in before["locks"]
-                   if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
-    evidence["phases"]["deleted_secured_pre_delete"] = dict(
-        central=before, players=reports, portrait_variant_sha256=portrait_sha,
-        future_portrait_locks=candidates)
-    save()
-    deletion = {"invoked_utc": time.time()}
-    evidence["phases"]["deleted_secured_delete"] = deletion
-    save()
-    try:
-        result = host.role("upstream-tools", "delete")
-    except Exception as error:
-        code = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
-        deletion["error"] = code
-        save()
-        raise
-    deletion["completed_utc"] = time.time()
-    deletion["result"] = result
-    save()
-    return result, deletion["completed_utc"]
+                  for lock in before["locks"]
+                  if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+    return journal_upstream_mutation(
+        host, evidence, save, before, reports, "delete",
+        pre_key="deleted_secured_pre_delete",
+        change_key="deleted_secured_delete",
+        pre=dict(portrait_variant_sha256=portrait_sha, future_portrait_locks=candidates),
+    )
 
 
 def retryable_operator_error(error):
@@ -842,8 +858,12 @@ def full_sequence(host, evidence, save):
         save()
 
     # One Run must survive membership edits; current locks freeze exact assignment bytes.
-    before, _ = sample()
-    evolved = host.role("upstream-tools", "evolve")
+    before, reports = sample()
+    evolved, _ = journal_upstream_mutation(
+        host, evidence, save, before, reports, "evolve",
+        pre_key="evolved_pre_change",
+        change_key="evolved_change",
+    )
     expected = {item["sha1"] for item in evolved["assets"] if item["favorite"] and not item["deleted"]}
     snapshot, reports = await_state(lambda snapshot, _: {item["sha1"] for item in snapshot["members"]} == expected,
                                     "live_membership_timeout")
@@ -908,12 +928,19 @@ def full_sequence(host, evidence, save):
     finally:
         host.compose("start", "central", capture=False)
     resumed_at = time.time()
+    # Allow the documented 60s reconnect backoff, bounded HTTP reconciliation
+    # and readiness, then the next 8s cue. Keep the complete-output predicate.
+    recovery_seconds = 120
+    recovery_started = time.monotonic()
+    phases["central_restart"] = dict(resumed_at=resumed_at, recovery_budget_seconds=recovery_seconds)
+    save()
     snapshot, reports = await_state(lambda snapshot, reports: all(all(event["utc"] > resumed_at and
         event["layers"] and not event["fallback"] for event in current_outputs(report))
-        for report in reports.values()), "central_recovery_timeout", 60)
+        for report in reports.values()), "central_recovery_timeout", recovery_seconds)
     require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
             "restart_run_changed")
-    record("central_recovered", snapshot, reports)
+    record("central_recovered", snapshot, reports,
+           recovery_elapsed_seconds=time.monotonic() - recovery_started)
 
     old = reports["player-one"]
     cache_before = host.byte_audit()["player-one"]

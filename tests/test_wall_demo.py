@@ -19,6 +19,7 @@ from scripts.demo_wall import (
     composition,
     core_image_mapping,
     delete_secured_original,
+    journal_upstream_mutation,
     local_source_inventory,
     main,
     operator_action,
@@ -352,6 +353,82 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     save()
     assert saved[-1]["phases"]["deleted_secured_pre_delete"] == pre
     assert saved[-1]["phases"]["deleted_secured_delete"]["result"] == result
+
+
+def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failure():
+    events = []
+    saved = []
+    evidence = {"phases": {}}
+    before = {"utc": 100.0, "locks": [{"player_id": "player-one", "authority_epoch": 2,
+        "assignment_id": "assignment-live", "run_id": "run-1", "sha256": "l" * 64,
+        "start": 110.0, "end": 118.0, "valid_until": 118.0,
+    }]}
+    reports = {"player-one": {"player_id": "player-one", "events": [{"output_id": "one", "layers": []}]}}
+
+    class Host:
+        def role(self, role, action):
+            events.append(("role", role, action))
+            return {"action": action, "assets": [{"label": "older-live", "sha1": "l", "deleted": False}]}
+
+    def save():
+        import copy
+        events.append(("save",))
+        saved.append(copy.deepcopy(evidence))
+
+    result, completed = journal_upstream_mutation(
+        Host(), evidence, save, before, reports, "evolve",
+        pre_key="evolved_pre_change",
+        change_key="evolved_change",
+    )
+    assert result["action"] == "evolve"
+    assert completed == evidence["phases"]["evolved_change"]["completed_utc"]
+    assert events[0] == ("save",)
+    assert events[1] == ("save",)
+    assert events[2] == ("role", "upstream-tools", "evolve")
+    assert events[3] == ("save",)
+    pre = saved[0]["phases"]["evolved_pre_change"]
+    assert pre["central"] == before and pre["players"] == reports
+    assert pre["action"] == "evolve"
+    assert "completed_utc" not in saved[1]["phases"]["evolved_change"]
+    evidence["phases"]["evolved_wait"] = {"error": "live_membership_timeout"}
+    save()
+    assert saved[-1]["phases"]["evolved_pre_change"] == pre
+    assert saved[-1]["phases"]["evolved_change"]["result"] == result
+
+
+def test_journaled_upstream_mutation_preserves_error_timepoint_and_result_fields():
+    events = []
+    saved = []
+    evidence = {"phases": {}}
+    before = {"utc": 200.0, "locks": []}
+    reports = {"player-one": {"player_id": "player-one", "events": []}}
+
+    class Host:
+        def role(self, _, __):
+            events.append(("role", _, __))
+            raise DemoError("operator_http_503")
+
+    def save():
+        import copy
+        events.append(("save",))
+        saved.append(copy.deepcopy(evidence))
+
+    with pytest.raises(DemoError, match="operator_http_503"):
+        journal_upstream_mutation(
+            Host(), evidence, save, before, reports, "evolve",
+            pre_key="evolved_pre_change",
+            change_key="evolved_change",
+        )
+    assert events[:2] == [("save",), ("save",)]
+    assert events[2] == ("role", "upstream-tools", "evolve")
+    assert evidence["phases"]["evolved_change"]["error"] == "operator_http_503"
+    assert "result" not in evidence["phases"]["evolved_change"]
+    assert "completed_utc" not in evidence["phases"]["evolved_change"]
+    assert evidence["phases"]["evolved_change"]["failed_utc"] >= evidence["phases"]["evolved_change"]["invoked_utc"]
+    evidence["phases"]["evolved_wait"] = {"error": "live_membership_timeout"}
+    save()
+    assert saved[-1]["phases"]["evolved_pre_change"]["central"] == before
+    assert saved[-1]["phases"]["evolved_change"]["error"] == "operator_http_503"
 
 
 def test_plan_records_selected_revision_and_image_requirement(monkeypatch, capsys):
