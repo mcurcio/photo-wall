@@ -58,6 +58,8 @@ EVENT_FIELDS = {
 }
 SERVICE_FIELDS = {"active_state", "sub_state", "result", "exec_main_status"}
 PUBLIC_EVENT = "photo-wall-health-diagnostic"
+HEALTH_REASONS = {"healthy", "executor", "identity", "configuration", "clock",
+                  "renderer_capacity", "disconnected"}
 
 
 class ProbeError(ValueError):
@@ -119,13 +121,19 @@ def _missing(error: BaseException) -> bool:
     )
 
 
+def _valid_reason(healthy: Any, reason: Any) -> bool:
+    return (type(healthy) is bool and isinstance(reason, str) and reason in HEALTH_REASONS
+            and healthy == (reason == "healthy"))
+
+
 def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float) -> dict[str, Any]:
     base = dict(report_status="missing", healthy=None, persistence="invalid",
                 current_boot=False, identity_valid=False, sample_age="missing")
     if value is None:
         return base
     required = {"boot_id", "sampled_monotonic", "player_id", "authority_epoch", "persistence", "healthy"}
-    if not isinstance(value, Mapping) or set(value) != required:
+    if (not isinstance(value, Mapping)
+            or set(value) not in (required, required | {"health_reason"})):
         base["report_status"] = "invalid"
         base["sample_age"] = "invalid"
         return base
@@ -144,8 +152,10 @@ def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float
     valid_persistence = (type(value["persistence"]) is str
                          and value["persistence"] in {"durable", "volatile"})
     valid_healthy = type(value["healthy"]) is bool
+    valid_reason = ("health_reason" not in value
+                    or _valid_reason(value["healthy"], value["health_reason"]))
     if not all((valid_boot, valid_sample, valid_identity, valid_epoch,
-                valid_persistence, valid_healthy)):
+                valid_persistence, valid_healthy, valid_reason)):
         base["report_status"] = "invalid"
         base["sample_age"] = "invalid"
         return base
@@ -154,6 +164,8 @@ def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float
                 persistence=value["persistence"], current_boot=report_boot == boot_id,
                 identity_valid=True,
                 sample_age="future" if age < 0 else "fresh" if age <= MAX_AGE else "stale")
+    if "health_reason" in value:
+        base["health_reason"] = value["health_reason"]
     return base
 
 
@@ -220,7 +232,11 @@ def validate_event(value: Any, boot_id: str) -> dict[str, Any] | None:
     """Validate and project one public event for the host-side parser."""
     try:
         expected_boot = _boot_id(boot_id)
-        if not isinstance(value, dict) or set(value) != EVENT_FIELDS:
+        if (not isinstance(value, dict)
+                or set(value) not in (EVENT_FIELDS, EVENT_FIELDS | {"health_reason"})):
+            return None
+        if "health_reason" in value and (value["report_status"] != "present"
+                or not _valid_reason(value["healthy"], value["health_reason"])):
             return None
         if (value["event"] != PUBLIC_EVENT or value["boot_id"] != expected_boot
                 or type(value["sample_index"]) is not int

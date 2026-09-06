@@ -8,7 +8,9 @@ import inspect
 import json
 import stat
 from concurrent.futures import Future
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -26,7 +28,7 @@ from player.output_discovery import (
     output_app_id,
     weston_ini,
 )
-from player.rendering import RecordingRenderer
+from player.rendering import CapacityResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     GLibDispatcher,
@@ -459,6 +461,80 @@ def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("stage", ["json", "schema"])
+@pytest.mark.parametrize("delay,healthy", [(.2, True), (1.1, False)])
+def test_clock_transport_sample_excludes_local_parsing_but_bounds_its_age(
+        tmp_path, monkeypatch, stage, delay, healthy):
+    async def check():
+        from player import service as module
+        service, _ = await rig(tmp_path)
+        try:
+            owner, attribute = (module, "_json") if stage == "json" else (State, "model_validate")
+            original = getattr(owner, attribute)
+            def delayed(value):
+                parsed = original(value)
+                service.clock.advance(delay)
+                return parsed
+            monkeypatch.setattr(owner, attribute, delayed)
+            await service.poll_state()
+            assert service.mapping.healthy() is healthy
+            assert service.mapping.uncertainty == (0 if healthy else 86400)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
+    async def check():
+        service, server = await rig(tmp_path)
+        class DelayedBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                body = server.state.model_dump_json().encode()
+                yield body[:20]
+                service.clock.advance(.2)
+                yield body[20:]
+        def respond(request):
+            assert request.method == "GET" and request.url.path == "/v1/player/state"
+            return httpx.Response(200, headers={"Content-Type": "application/json"},
+                                  stream=DelayedBody())
+        try:
+            await service.client.aclose()
+            service.client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            await service.poll_state()
+            assert service.mapping.uncertainty == pytest.approx(.2)
+            assert not service.mapping.healthy()
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("fault", ["dispatch_delay", "parse_clock_step"])
+def test_clock_receipt_sample_rejects_stale_dispatch_and_post_receipt_step(tmp_path, monkeypatch, fault):
+    async def check():
+        from player import service as module
+        service, _ = await rig(tmp_path)
+        try:
+            if fault == "dispatch_delay":
+                original = service.dispatch
+                async def dispatch(callback):
+                    service.clock.advance(1.1)
+                    return await original(callback)
+                monkeypatch.setattr(service, "dispatch", dispatch)
+            else:
+                original = module._json
+                def parse(value):
+                    parsed = original(value)
+                    service.clock.step_utc(.02)
+                    return parsed
+                monkeypatch.setattr(module, "_json", parse)
+            await service.poll_state()
+            assert service.mapping.uncertainty == 86400
+            assert not service.mapping.healthy()
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
 def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     class GLib:
         callbacks = []
@@ -484,14 +560,101 @@ def test_health_has_boot_authority_and_no_secrets(tmp_path):
         try:
             service.health_path = tmp_path / "health.json"
             service.boot_id = "00000000-1111-2222-3333-444444444444"
-            service._write_health(service._health())
+            service._write_health(*service._health_status())
             body = json.loads(service.health_path.read_text())
             assert body["healthy"] and body["authority_epoch"] == 1
+            assert body["health_reason"] == "healthy"
             assert body["sampled_monotonic"] == 0 and body["boot_id"] == service.boot_id
             assert "token" not in body and "public_key" not in body
             assert stat.S_IMODE(service.health_path.stat().st_mode) == 0o600
             service._write_health(False)
-            assert not json.loads(service.health_path.read_text())["healthy"]
+            body = json.loads(service.health_path.read_text())
+            assert not body["healthy"] and body["health_reason"] == "disconnected"
+            service.boot_id = ""
+            service._write_health(True)
+            body = json.loads(service.health_path.read_text())
+            assert not body["healthy"] and body["health_reason"] == "identity"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("reason", ["executor", "identity", "configuration", "clock",
+                                    "renderer_capacity", "healthy"])
+def test_health_reason_preserves_gate_order_and_single_evaluation(tmp_path, monkeypatch, reason):
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            calls = []
+            def clock():
+                calls.append("clock")
+                return reason != "clock"
+            def capacity(_):
+                calls.append("renderer_capacity")
+                return CapacityResult(reason == "healthy")
+            monkeypatch.setattr(service.mapping, "healthy", clock)
+            monkeypatch.setattr(service.renderer, "capacity", capacity)
+            if reason == "executor":
+                service.executor = None
+            if reason in {"executor", "identity"}:
+                service.identity = replace(service.identity, persistence="volatile")
+            if reason in {"executor", "identity", "configuration"}:
+                service._configuration = None
+            assert service._health_status() == (reason == "healthy", reason)
+            expected = ([] if reason in {"executor", "identity", "configuration"}
+                        else ["clock"] if reason == "clock" else ["clock", "renderer_capacity"])
+            assert calls == expected
+            calls.clear()
+            assert service._health() is (reason == "healthy")
+            assert calls == expected
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("healthy,reason", [(True, "clock"), (False, "healthy"),
+                                            (False, "private-error"), (False, "")])
+def test_health_writer_rejects_inconsistent_or_unbounded_reasons(tmp_path, healthy, reason):
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            service.health_path = tmp_path / "health.json"
+            service.boot_id = "00000000-1111-2222-3333-444444444444"
+            with pytest.raises(ValueError, match="inconsistent health reason"):
+                service._write_health(healthy, reason)
+            assert not service.health_path.exists()
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("reason", ["healthy", "clock"])
+def test_control_writes_one_consistent_health_sample_consumed_by_vm_probe(tmp_path, monkeypatch, reason):
+    from scripts.vm_health_probe import sample_once
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            service.health_path = tmp_path / "health.json"
+            service.boot_id = "00000000-1111-2222-3333-444444444444"
+            calls = []
+            async def poll():
+                service._stop.set()
+            def status():
+                calls.append(reason)
+                return reason == "healthy", reason
+            monkeypatch.setattr(service, "poll_state", poll)
+            monkeypatch.setattr(service, "_feedback", lambda: (None, ()))
+            monkeypatch.setattr(service, "_health_status", status)
+            await service._control_loop()
+            assert calls == [reason]
+            value = sample_once(1, service.boot_id, service.clock.monotonic(),
+                report_reader=lambda: json.loads(service.health_path.read_text()),
+                systemctl_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+                socket_state=lambda: "present")
+            assert value["report_status"] == "present"
+            assert value["health_reason"] == reason
+            assert value["healthy"] is (reason == "healthy")
+            assert value["identity_valid"] and value["current_boot"] and value["sample_age"] == "fresh"
         finally:
             await close(service)
     asyncio.run(check())

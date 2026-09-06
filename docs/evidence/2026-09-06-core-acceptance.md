@@ -65,3 +65,11 @@ checks passed. There is no production code change in this test extension.
 Recording Actuator tests satisfy the explicitly accepted initial scope; this
 record does not establish production Actuator hardware, a networked calendar
 presentation, or visible timing.
+
+The pushed test/evidence checkpoint `1bb103685b55c671a0feea7c6da631b7542df866`
+then passed [standard CI 34034069777](https://github.com/mcurcio/photo-wall/actions/runs/34034069777):
+**1,004 tests / 56 explicit skips / four warnings in 85.31s**, plus **55 Linux
+media tests in 159.08s**. The media job started at 12:45:49 UTC and application
+one second later; both completed by 12:49:00 UTC (**3m11s overall**). These
+counts overlap the scoped local checks. Log:
+`/private/tmp/photo-wall-ci-checks-1bb1036.log`.

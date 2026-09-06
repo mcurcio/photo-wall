@@ -110,7 +110,11 @@ a startup failure; they cannot turn a failed enrollment into qualification.
 The volatile CI health observer starts independently after the Player service.
 It reads the private health report, fixed Player/Weston/acceptance service states,
 and Wayland socket status. At most 60 boot-bound samples over 600 seconds expose
-only allowlisted states, health freshness and booleans; no Player identifier,
+only allowlisted states, health freshness, booleans and the optional fixed
+`health_reason` defined by the [Player service](module-player-service.md).
+Legacy reports without that reason remain readable; newer reports require
+the reason to agree with the health boolean. Unknown or contradictory values
+fail closed. No Player identifier,
 credential or arbitrary command/file content is exported. The host checks that
 schema, retains samples only for observed boots, and records the observer source
 hash. These samples are diagnostic and cannot establish acceptance or rendering.

@@ -271,6 +271,11 @@ class PlayerService:
         return headers
 
     async def request(self, method: str, path: str, *, body=None, authenticated=True) -> dict:
+        value, _ = await self._request_with_receipt(method, path, body=body, authenticated=authenticated)
+        return value
+
+    async def _request_with_receipt(self, method: str, path: str, *, body=None,
+                                    authenticated=True) -> tuple[dict, tuple[float, float]]:
         async with asyncio.timeout(15):
             async with self.client.stream(method, self.origin + path, json=body,
                     headers=self._headers(authenticated), follow_redirects=False) as response:
@@ -285,7 +290,10 @@ class PlayerService:
                     if len(data) + len(chunk) > MAX_JSON:
                         raise ServiceError("body_limit")
                     data.extend(chunk)
-                return _json(bytes(data))
+                # Local JSON/schema work is not transport latency. Keep its delay
+                # visible to the later sample-age gate instead of inflating RTT.
+                received = self.clock.utc(), self.clock.monotonic()
+                return _json(bytes(data)), received
 
     @staticmethod
     def _status(response):
@@ -430,18 +438,38 @@ class PlayerService:
                 and any(layer.assignment_id == observation.assignment_id for layer in self._plan.layers))
 
     def _health(self):
-        self._main()
-        return (self.executor is not None and self.identity.persistence == "durable"
-                and self._configuration is not None and self.mapping.healthy()
-                and self.renderer.capacity(()).available)
+        return self._health_status()[0]
 
-    def _write_health(self, healthy: bool):
+    def _health_status(self):
+        """One renderer-thread evaluation owns both health and its public reason."""
+        self._main()
+        if self.executor is None:
+            return False, "executor"
+        if self.identity.persistence != "durable":
+            return False, "identity"
+        if self._configuration is None:
+            return False, "configuration"
+        if not self.mapping.healthy():
+            return False, "clock"
+        if not self.renderer.capacity(()).available:
+            return False, "renderer_capacity"
+        return True, "healthy"
+
+    def _write_health(self, healthy: bool, reason: str | None = None):
         if self.health_path is None:
             return
+        if reason is None:
+            reason = "healthy" if healthy else "disconnected"
+        if healthy and not self.boot_id:
+            healthy, reason = False, "identity"
+        if (reason not in {"healthy", "executor", "identity", "configuration", "clock",
+                           "renderer_capacity", "disconnected"}
+                or (reason == "healthy") != bool(healthy)):
+            raise ValueError("inconsistent health reason")
         body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
                     player_id=self.registration.player_id if self.registration else None,
                     authority_epoch=self.registration.authority_epoch if self.registration else None,
-                    persistence=self.identity.persistence, healthy=bool(healthy and self.boot_id))
+                    persistence=self.identity.persistence, healthy=bool(healthy), health_reason=reason)
         temporary = None
         try:
             # The root-owned /run/photo-wall parent protects boot.json; this
@@ -541,8 +569,8 @@ class PlayerService:
 
     async def poll_state(self):
         before_utc, before_mono = self.clock.utc(), self.clock.monotonic()
-        state = State.model_validate(await self.request("GET", "/v1/player/state"))
-        after_utc, after_mono = self.clock.utc(), self.clock.monotonic()
+        body, (after_utc, after_mono) = await self._request_with_receipt("GET", "/v1/player/state")
+        state = State.model_validate(body)
         elapsed = after_mono - before_mono
         uncertainty = (elapsed / 2 + abs(state.server_time - (before_utc + elapsed / 2)))
         if (elapsed < 0 or not math.isfinite(uncertainty)
@@ -555,7 +583,7 @@ class PlayerService:
             started = asyncio.get_running_loop().time()
             await self.poll_state()
             readiness, observations = await self.dispatch(self._feedback)
-            self._write_health(await self.dispatch(self._health))
+            self._write_health(*await self.dispatch(self._health_status))
             if readiness is not None:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))

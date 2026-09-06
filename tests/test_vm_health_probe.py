@@ -48,6 +48,38 @@ def test_valid_sample_is_a_bounded_public_projection():
     assert probe.validate_event(value, BOOT) == value
 
 
+@pytest.mark.parametrize("reason", sorted(probe.HEALTH_REASONS))
+def test_optional_health_reason_survives_only_as_a_consistent_closed_enum(reason):
+    healthy = reason == "healthy"
+    value = sample(report_reader=lambda: report(healthy=healthy, health_reason=reason))
+    assert value["report_status"] == "present"
+    assert value["health_reason"] == reason
+    assert value["healthy"] is healthy
+    assert probe.validate_event(value, BOOT) == value
+    assert "secret-player-id" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("reason,healthy", [
+    ("clock", True), ("healthy", False), ("private-secret", False),
+    (None, False), ([], False), ({"secret": "private-secret"}, False), (1, False),
+])
+def test_invalid_or_contradictory_reason_is_never_exported(reason, healthy):
+    value = sample(report_reader=lambda: report(healthy=healthy, health_reason=reason))
+    assert value["report_status"] == "invalid"
+    assert value["healthy"] is None
+    assert "health_reason" not in value
+    assert "private-secret" not in json.dumps(value)
+    event = sample(report_reader=lambda: report(healthy=healthy)) | {"health_reason": reason}
+    assert probe.validate_event(event, BOOT) is None
+
+
+def test_missing_or_invalid_health_cannot_claim_a_component_reason():
+    missing = sample(report_reader=lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    invalid = sample(report_reader=lambda: report(healthy=1))
+    for value in (missing, invalid):
+        assert probe.validate_event(value | {"health_reason": "clock"}, BOOT) is None
+
+
 @pytest.mark.parametrize("changes", [
     {"secret": "do-not-export"},
     {"healthy": 1},

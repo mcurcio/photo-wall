@@ -199,3 +199,14 @@ reveals the January Run at position 25; a recording Actuator trace yields
 `0 → 0.8 → 25/60 → 0.5` without projection effects or hidden-cue replay.
 Separate Executor tests cover video reveal at position 32. These are software
 checks and do not establish physical presentation or real Actuator hardware.
+
+The `c5e6073` image subsequently failed sustained-health acceptance after
+fixture setup and durable enrollment passed. Fresh reports alternated healthy
+and unhealthy while Player/Weston stayed active; the [completed result](evidence/2026-09-06-vm-media.md#completed-c5e6073-image-result)
+retains exact identity and all qualification flags false. The subsequent
+[clock-sampling correction](evidence/2026-09-06-player-clock.md) removes
+reproduced local-processing inflation from transport uncertainty and adds a
+fixed health reason without relaxing thresholds. Its offline service suite
+passed 72 tests with one database skip; observer/host checks passed 97 tests.
+Both local-processing regressions fail against the old timing method. Current
+hosted regression and exact-image qualification remain required.
