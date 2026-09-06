@@ -173,3 +173,29 @@ The [26ee139 hosted failure](evidence/2026-09-06-vm-rollback.md#hosted-acceptanc
 enrolled durably, then failed native trial acceptance. Hosted native/rollback
 qualification remains open. The current media-gate image run is independent
 and has not yet qualified.
+
+## Current fixture and cache-evidence checkpoint
+
+At `c5e6073`, [standard checks](https://github.com/mcurcio/photo-wall/actions/runs/34032886077)
+passed **1,004 tests / 56 explicit skips / four warnings**, plus **55 Linux media
+tests**, in 3m23s overall. The [current image run](https://github.com/mcurcio/photo-wall/actions/runs/34032885905)
+assembled both signed roots in **11m09s** and began exact-artifact e2e; its
+qualification remains pending at this checkpoint.
+
+[Independent media-gate review](evidence/2026-09-06-vm-media.md#independent-cache-gate-correction)
+closed a P2 by preventing media re-download from hiding cache loss after restart
+or rollback. The fixture also explicitly uses the daemon builder for its loaded
+parent image. The [latest bounded native bridge](evidence/2026-09-06-vm-media.md#bounded-native-and-central-bridge)
+reported healthy capacity and a central grant but obtained no joined native
+presentation. Full-image rendering/rollback, authenticated operator QA,
+physical qualification and final independent acceptance remain unchecked.
+
+An [independent current-source acceptance audit](evidence/2026-09-06-core-acceptance.md) of Frame/calibration/replacement
+and nested/calendar behavior passed **146 tests with actual PostgreSQL, no skips
+and one dependency warning** in 12.34s. It found no concrete implementation
+defect in those scopes. The combined Runtime scenario crosses January 1 under
+an independently activated nested portrait overlay, preserves fixed roles and
+reveals the January Run at position 25; a recording Actuator trace yields
+`0 → 0.8 → 25/60 → 0.5` without projection effects or hidden-cue replay.
+Separate Executor tests cover video reveal at position 32. These are software
+checks and do not establish physical presentation or real Actuator hardware.

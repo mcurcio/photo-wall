@@ -48,11 +48,20 @@ def test_calendar_boundary_projection_overlay_and_current_reveal():
     runtime.set_program(Program(
         program_id="jan", scene_id="january", starts_at=midnight, ends_at=midnight + 300,
     ))
-    december = runtime.advance(midnight - 10).for_target("frame:left").run_id
+    initial = runtime.advance(midnight - 10)
+    december = initial.for_target("frame:left").run_id
+    adapter = RecordingActuator()
+    adapter.apply(initial, now=midnight - 10, authorized_run_ids={december})
     overlay = runtime.activate("overlay", "manual-overlay", midnight - 10, priority=10).run_id
     before = runtime.export_state()
+    before_records = tuple(adapter.records)
     projected = runtime.project(midnight + 25)
     assert runtime.export_state() == before
+    assert tuple(adapter.records) == before_records
+    with pytest.raises(ValueError, match="current instant"):
+        adapter.apply(projected, now=midnight - 10,
+                      authorized_run_ids={run.run_id for run in projected.runs})
+    assert tuple(adapter.records) == before_records
     assert projected.for_target("frame:left").scene_id == "january"
     assert projected.for_target("frame:left").cycle_position == 25
     assert projected.for_target("actuator:lamp").actuator_value == pytest.approx(25 / 60)
@@ -60,12 +69,34 @@ def test_calendar_boundary_projection_overlay_and_current_reveal():
     assert get_run(still_covered, december).phase == "body"  # outgoing cycle ends at +30
     assert get_run(still_covered, overlay).phase == "body"
     assert still_covered.for_target("frame:left").role == "left-speaker"
+    assert still_covered.for_target("frame:left").asset_refs == ("left-portrait",)
+    assert still_covered.for_target("frame:right").role == "right-speaker"
     assert still_covered.for_target("frame:right").asset_refs == ("right-portrait",)
+    assert still_covered.for_target("frame:surround").kind == "black"
     assert still_covered.for_target("actuator:lamp").actuator_value == 0.8
+    adapter.apply(still_covered, now=midnight + 10,
+                  authorized_run_ids={run.run_id for run in still_covered.runs})
+    assert adapter.records[-1].run_id == overlay
+    assert adapter.records[-1].value == 0.8
     reveal = runtime.advance(midnight + 25)
     assert reveal == projected
-    assert runtime.advance(midnight + 30).for_target("frame:left").scene_id == "january"
-    assert get_run(runtime.advance(midnight + 30), december).phase == "completed"
+    january = reveal.for_target("frame:left").run_id
+    adapter.apply(reveal, now=midnight + 25,
+                  authorized_run_ids={run.run_id for run in reveal.runs})
+    assert [record.run_id for record in adapter.records] == [december, overlay, january]
+    assert [record.at - midnight for record in adapter.records] == [-10, 10, 25]
+    assert [record.value for record in adapter.records] == pytest.approx([0, 0.8, 25 / 60])
+    assert {record.target for record in adapter.records} == {"actuator:lamp"}
+    assert adapter.apply(reveal, now=midnight + 25,
+                         authorized_run_ids={run.run_id for run in reveal.runs}) == ()
+    later = runtime.advance(midnight + 30)
+    assert later.for_target("frame:left").scene_id == "january"
+    assert get_run(later, december).phase == "completed"
+    adapter.apply(later, now=midnight + 30,
+                  authorized_run_ids={run.run_id for run in later.runs})
+    assert [record.run_id for record in adapter.records] == [december, overlay, january, january]
+    assert [record.at - midnight for record in adapter.records] == [-10, 10, 25, 30]
+    assert [record.value for record in adapter.records] == pytest.approx([0, 0.8, 25 / 60, 0.5])
 
 
 @pytest.mark.parametrize("cover_lamp", [False, True])
