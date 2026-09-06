@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  COMPOSE_PROJECT_NAME: photo-wall-ci
+
 concurrency:
   group: checks-${{ github.ref }}
   cancel-in-progress: true
@@ -26,11 +29,40 @@ jobs:
       - run: .venv/bin/python -m ruff check .
       - run: python scripts/check_docs.py
       - run: python scripts/configure.py
-      - run: docker compose up -d --build --wait
+      - name: Set up the container build cache
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Build or restore the pinned Linux media test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-test
+          platforms: linux/amd64
+          load: true
+          tags: photo-wall-media-test:ci
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+          cache-to: type=gha,scope=photo-wall-checks-amd64-v1,mode=max,ignore-error=true
+      - name: Build or restore the central image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: central
+          platforms: linux/amd64
+          load: true
+          tags: photo-wall-ci-central
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+      - name: Build or restore the media worker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-worker
+          platforms: linux/amd64
+          load: true
+          tags: photo-wall-ci-worker
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+      - run: docker compose up -d --no-build --wait
       - run: .venv/bin/python scripts/test_local.py -q --tb=short
       - name: Qualify conversion in the pinned Linux worker
         run: |
-          docker build --target media-test --tag photo-wall-media-test:ci .
           docker run --rm --network none photo-wall-media-test:ci
       - run: curl --fail http://127.0.0.1:8000/healthz
       - name: Service diagnostics

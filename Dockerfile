@@ -1,20 +1,22 @@
-FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f AS runtime
+FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f AS deps
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 # Keep locked third-party dependencies reusable when application code changes.
 RUN uv sync --frozen --no-dev --no-install-project && useradd --system --uid 10001 --create-home wall \
     && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+
+FROM deps AS runtime
 COPY central ./central
 COPY contracts ./contracts
 COPY media ./media
 COPY player ./player
 RUN uv sync --frozen --no-dev
 USER wall
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 
-FROM runtime AS media-worker
-USER root
+# System media packages do not depend on application source changes.
+FROM deps AS media-system
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
        'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260905T000000Z trixie main' \
@@ -28,6 +30,10 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && chown wall:wall /etc/photo-wall/private/connections.json \
     && chmod 0600 /etc/photo-wall/private/connections.json \
     && rm -rf /var/lib/apt/lists/*
+
+FROM media-system AS media-worker
+# Both branches share the same Python base and absolute environment path.
+COPY --from=runtime /app /app
 USER wall
 ENV PHOTO_WALL_MEDIA_ROOT="/var/lib/photo-wall/media" \
     PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"

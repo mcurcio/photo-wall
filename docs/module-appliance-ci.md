@@ -69,6 +69,19 @@ warm-cache speedups require a measured hosted run before being claimed.
   image build and VM test. No registry write credentials are required.
   Runtime dependencies are installed before application source is copied, so
   ordinary code edits retain the dependency layer.
+- The standard `MVP checks` workflow uses one AMD64 BuildKit cache scope for
+  the loaded `media-test`, `central`, and `media-worker` images. It builds the
+  media test target first so the shared dependency and pinned FFmpeg layers are
+  available to the Compose images, then starts Compose with
+  `COMPOSE_PROJECT_NAME=photo-wall-ci` and `--no-build`. The loaded image names
+  are consequently `photo-wall-ci-central` and `photo-wall-ci-worker`; the
+  isolated conversion check reuses `photo-wall-media-test:ci` without network
+  access. Cache upload failure remains an accelerator failure and does not
+  change the checks' source or runtime validation.
+  FFmpeg installs in a source-free stage. The worker copies the application
+  and locked environment from the shared runtime at the same `/app` path;
+  application edits therefore retain the FFmpeg layer without adding those
+  system packages to central or duplicating application installation logic.
 - The extracted-base cache contains a metadata-preserving archive of pristine
   Ubuntu and a bounded integrity manifest. Its exact key includes the runner
   architecture, pinned base and extraction/build-input implementation hashes.
