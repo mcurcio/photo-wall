@@ -27,6 +27,7 @@ from scripts.demo_wall import (
     preserved_locks,
     retryable_operator_error,
     run_demo,
+    selected_secured_presentation,
     validate_selected_revision,
     write_json,
 )
@@ -66,6 +67,40 @@ def test_player_runner_imports_only_stdlib_and_source_neutral_packages():
     import sys
     assert imports <= sys.stdlib_module_names | {"player", "contracts"}
     assert "RecordingRenderer" in PLAYER_RUNNER and "simulated_actuation" in PLAYER_RUNNER
+
+
+def test_player_runner_recorder_logs_only_successful_presentations():
+    """Exercise the exact Recorder class shipped inside the Player image."""
+    from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, Variant
+    from player.rendering import LocalLayer, OutputComposition
+
+    tree = ast.parse(PLAYER_RUNNER)
+    imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    recorder_class = next(node for node in tree.body
+                          if isinstance(node, ast.ClassDef) and node.name == "Recorder")
+    module = ast.fix_missing_locations(ast.Module(body=[*imports, recorder_class], type_ignores=[]))
+    namespace = {"__name__": "test_player_runner_recorder"}
+    exec(compile(module, "<PLAYER_RUNNER Recorder>", "exec"), namespace)
+
+    renderer = namespace["Recorder"]()
+    binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-1", generation=1,
+                            profile=FrameProfile(width_px=64, height_px=48, diagonal_inches=20))
+    variant = Variant(sha256="a" * 64, size=1, media_type="image/png", width=1, height=1)
+    layer = Layer(assignment_id="assignment-1", run_id="run-1", output_id="HDMI-A-1",
+                  frame_id="frame-1", binding_generation=1, start=100, end=110,
+                  media_origin=100, variant=variant)
+    composition = OutputComposition(binding, Calibration(), (LocalLayer(layer, None, 0, 1),))
+
+    renderer.pending.add("assignment-1")
+    assert renderer.present(composition).status == "pending"
+    assert not renderer.events and renderer.last == {}
+    renderer.pending.clear()
+    renderer.presentation_failures.add("assignment-1")
+    assert renderer.present(composition).status == "failed"
+    assert not renderer.events and renderer.last == {}
+    renderer.presentation_failures.clear()
+    assert renderer.present(composition).status == "presented"
+    assert len(renderer.events) == 1 and renderer.last["HDMI-A-1"]
 
 
 def example():
@@ -321,7 +356,7 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     evidence = {"phases": {}}
     before = {"utc": 100.0, "locks": [{
         "player_id": "player-one", "authority_epoch": 2,
-        "assignment_id": "assignment-portrait", "run_id": "run-1",
+        "assignment_id": "assignment-portrait", "run_id": "run-1", "output_id": "HDMI-A-1",
         "sha256": "p" * 64, "start": 110.0, "end": 118.0, "valid_until": 118.0,
     }]}
     reports = {"player-one": {"player_id": "player-one", "events": []}}
@@ -353,6 +388,77 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     save()
     assert saved[-1]["phases"]["deleted_secured_pre_delete"] == pre
     assert saved[-1]["phases"]["deleted_secured_delete"]["result"] == result
+
+
+def _selected_presentation_fixture():
+    lock = {
+        "player_id": "p-player-one", "authority_epoch": 2,
+        "assignment_id": "assignment-portrait", "run_id": "run-1", "output_id": "HDMI-A-1",
+        "sha256": "p" * 64, "start": 110.0, "end": 118.0, "valid_until": 118.0,
+    }
+    event = {
+        "utc": 111.0, "output_id": "HDMI-A-1", "fallback": False,
+        "layers": [{"assignment_id": "assignment-portrait", "run_id": "run-1",
+                     "sha256": "p" * 64}],
+    }
+    before = {"utc": 100.0, "locks": [lock]}
+    reports = {"player-one": {"player_id": "p-player-one", "authority_epoch": 2,
+                               "events": [event]}}
+    return before, reports, lock, event
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda lock, event, reports: event["layers"][0].update(assignment_id="other"),
+    lambda lock, event, reports: reports["player-one"].update(player_id="other"),
+    lambda lock, event, reports: reports["player-one"].update(authority_epoch=3),
+    lambda lock, event, reports: event.update(output_id="HDMI-A-2"),
+    lambda lock, event, reports: event["layers"][0].update(run_id="other"),
+    lambda lock, event, reports: event["layers"][0].update(sha256="q" * 64),
+    lambda lock, event, reports: event.update(utc=109.0),
+    lambda lock, event, reports: event.update(utc=109.5),
+    lambda lock, event, reports: event.update(utc=118.0),
+    lambda lock, event, reports: event.update(fallback=True),
+])
+def test_selected_secured_presentation_requires_exact_postdelete_identity(mutation):
+    before, reports, lock, event = _selected_presentation_fixture()
+    mutation(lock, event, reports)
+    assert selected_secured_presentation(before, reports, lock["sha256"], 109.0) is None
+
+
+def test_selected_secured_presentation_records_exact_match_after_late_snapshot():
+    before, reports, lock, _ = _selected_presentation_fixture()
+    proof = selected_secured_presentation(before, reports, lock["sha256"], 109.0)
+    assert proof == {
+        "player_id": "p-player-one", "authority_epoch": 2, "output_id": "HDMI-A-1",
+        "assignment_id": "assignment-portrait", "run_id": "run-1", "sha256": "p" * 64,
+        "event_utc": 111.0,
+    }
+
+
+def test_selected_secured_presentation_uses_earlier_valid_until_boundary():
+    before, reports, lock, event = _selected_presentation_fixture()
+    lock["end"] = 120.0
+    lock["valid_until"] = 112.0
+    event["utc"] = 111.0
+    assert selected_secured_presentation(before, reports, lock["sha256"], 109.0)
+    event["utc"] = 112.0
+    assert selected_secured_presentation(before, reports, lock["sha256"], 109.0) is None
+
+
+def test_delete_secured_original_refuses_empty_selection_without_mutation():
+    events = []
+    evidence = {"phases": {}}
+    before = {"utc": 100.0, "locks": []}
+    reports = {"player-one": {"player_id": "player-one", "events": []}}
+
+    class Host:
+        def role(self, role, action):
+            events.append((role, action))
+            raise AssertionError("mutation must not run")
+
+    with pytest.raises(DemoError, match="portrait_not_secured"):
+        delete_secured_original(Host(), evidence, lambda: None, before, reports, "p" * 64)
+    assert events == []
 
 
 def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failure():

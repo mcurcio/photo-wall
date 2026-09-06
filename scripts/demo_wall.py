@@ -61,6 +61,8 @@ class Recorder(RecordingRenderer):
 
     def present(self, composition):
         result = super().present(composition)
+        if result.status != "presented":
+            return result
         content = tuple((item.layer.assignment_id,
                          item.layer.variant.sha256 if item.layer.variant else None)
                         for item in composition.layers)
@@ -69,6 +71,7 @@ class Recorder(RecordingRenderer):
             self.events.append(dict(utc=time.time(), monotonic=time.monotonic(),
                 output_id=composition.binding.output_id, frame_id=composition.binding.frame_id,
                 fallback=composition.fallback, layers=[dict(assignment_id=item.layer.assignment_id,
+                    run_id=item.layer.run_id,
                     sha256=item.layer.variant.sha256 if item.layer.variant else None,
                     media_type=item.layer.variant.media_type if item.layer.variant else None,
                     position=item.position) for item in composition.layers]))
@@ -710,6 +713,7 @@ def operator_action(action: str):
                    build=job["result"].get("build") if job["result"] else None) for job in jobs],
         locks=[dict(player_id=row["player_id"], authority_epoch=row["authority_epoch"],
                     assignment_id=row["assignment_id"], sha256=row["layer"]["variant"]["sha256"],
+                    output_id=row["layer"]["output_id"],
                     start=row["layer"]["start"], end=row["layer"]["end"], valid_until=row["valid_until"], run_id=row["layer"]["run_id"]) for row in locks if row["layer"]["variant"]],
         commits=commits, observations=observations, groups=groups, faults=faults,
         members=[dict(sha1=row["metadata"]["original_sha1"], captured_at=row["metadata"]["captured_at"],
@@ -803,17 +807,46 @@ def journal_upstream_mutation(host, evidence, save, before, reports, action, pre
 
 def delete_secured_original(host, evidence, save, before, reports, portrait_sha):
     """Journal the selected lock and deletion before waiting for its presentation."""
-    fields = ("player_id", "authority_epoch", "assignment_id", "run_id", "sha256",
+    fields = ("player_id", "authority_epoch", "assignment_id", "run_id", "output_id", "sha256",
               "start", "end", "valid_until")
     candidates = [dict((field, lock[field]) for field in fields)
                   for lock in before["locks"]
                   if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+    require(candidates, "portrait_not_secured")
     return journal_upstream_mutation(
         host, evidence, save, before, reports, "delete",
         pre_key="deleted_secured_pre_delete",
         change_key="deleted_secured_delete",
         pre=dict(portrait_variant_sha256=portrait_sha, future_portrait_locks=candidates),
     )
+
+
+def selected_secured_presentation(before, reports, portrait_sha, deleted_at):
+    """Find one exact selected lock presented after deletion before its lease ends."""
+    selected = [lock for lock in before["locks"]
+                if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+    for lock in selected:
+        limit = min(lock["end"], lock["valid_until"])
+        # DemoHost reports are keyed by stable role name, while the lock binds
+        # the authenticated Player ID.  Resolve by the report's identity so a
+        # role label can never accidentally stand in for a Player identity.
+        report = next((candidate for candidate in reports.values()
+                       if candidate.get("player_id") == lock["player_id"]), None)
+        if not report or (report.get("player_id"), report.get("authority_epoch")) != (
+                lock["player_id"], lock["authority_epoch"]):
+            continue
+        for event in report.get("events", ()):
+            if (event.get("utc", 0) <= deleted_at or event.get("utc", 0) < lock["start"]
+                    or event.get("utc", 0) >= limit or event.get("output_id") != lock["output_id"]
+                    or event.get("fallback")):
+                continue
+            for layer in event.get("layers", ()):
+                if (layer.get("assignment_id"), layer.get("run_id"), layer.get("sha256")) == (
+                        lock["assignment_id"], lock["run_id"], portrait_sha):
+                    return dict(player_id=lock["player_id"], authority_epoch=lock["authority_epoch"],
+                                output_id=lock["output_id"], assignment_id=lock["assignment_id"],
+                                run_id=lock["run_id"], sha256=portrait_sha, event_utc=event["utc"])
+    return None
 
 
 def retryable_operator_error(error):
@@ -887,10 +920,15 @@ def full_sequence(host, evidence, save):
     before, reports = await_state(lambda snapshot, _: any(item["sha256"] == portrait_sha and
         item["start"] > snapshot["utc"] + 3 for item in snapshot["locks"]), "portrait_not_secured", 40)
     deleted, deleted_at = delete_secured_original(host, evidence, save, before, reports, portrait_sha)
-    snapshot, reports = await_state(lambda snapshot, reports: any(event["utc"] > deleted_at and
-        any(layer["sha256"] == portrait_sha for layer in event["layers"])
-        for report in reports.values() for event in report["events"]), "deleted_secured_not_presented", 45)
-    record("deleted_secured", snapshot, reports, preserved_live_locks=preserved_locks(before, snapshot), upstream=deleted)
+    snapshot, reports = await_state(
+        lambda snapshot, reports: selected_secured_presentation(
+            before, reports, portrait_sha, deleted_at) is not None,
+        "deleted_secured_not_presented", 45)
+    presentation = selected_secured_presentation(before, reports, portrait_sha, deleted_at)
+    require(presentation is not None, "deleted_secured_not_presented")
+    record("deleted_secured", snapshot, reports,
+           preserved_live_locks=preserved_locks(before, snapshot),
+           selected_presentation=presentation, upstream=deleted)
 
     host.role("upstream-tools", "deny")
     snapshot, reports = await_state(source_status("permission"), "permission_not_reported")

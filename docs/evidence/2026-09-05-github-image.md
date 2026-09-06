@@ -1,7 +1,7 @@
 # GitHub Actions appliance build — 2026-09-05 Pacific
 
-**Latest checkpoint: hosted ARM64 image build and generic-VM e2e passed.**
-See the [passing artifact and report](#first-hosted-exact-image-boot-pass).
+**Latest checkpoint: second hosted ARM64 image build and generic-VM e2e passed.**
+See the [second passing artifact and report](#second-hosted-exact-image-boot-pass).
 The earlier failures below are retained as historical evidence. This is
 integration evidence, not a physical Pi result.
 
@@ -231,3 +231,59 @@ A separate evidence review cross-checked the published ZIP size/hash/link,
 source checkout, disk and component hashes, phase durations, both enrollment
 records and all qualification fields against the hosted log. No discrepancy
 was found.
+
+## Second hosted exact-image boot pass
+
+[Run 34020566014](https://github.com/mcurcio/photo-wall/actions/runs/34020566014)
+completed successfully from feature head `d9f656b3730b799bff89d4103f5c87774c665c35`
+through actual PR merge/source revision
+`64f9558f3598b8bf8424c6888f794d92737aed1c`. The signed disk was built,
+reopened and then booted as the exact uploaded image. It is 5,906,628,608 bytes
+with SHA-256
+`d55fb36185b42e0f57203bd897a2f14d3c96d1546479bdfbf47cebf469db3933`.
+Its release ID is
+`20e30c90a28f4e89d42c91f058afb12f98f8fbe0d01794ddacb6d3d2fa978fe3`;
+rootfs, configuration, generic kernel and generic initramfs hashes are
+`c766c86cac7c053d2486828e5fda009b596f233a8518d22c948c3bb7f1bfaf3a`,
+`87bb0ffdc836a363418a779c875a4def48d2e462b06a3f4804833b203e5e595a`,
+`552e27f48eefa445d0d6bbc501e5972d1a43bf0e2cb78ea5345fed9e01736f58` and
+`a77245f7217ca4c24266eab10d0a2d2a1e4b2a321d2fa5cda9cb90572a5c9e09`.
+The boot ABI hash is
+`f3bdff50bb831bba08a53718b450799537fe2c630ef19cc886f12398395693d2`.
+
+The hosted build reused the verified ARM64 extracted-base cache. Its recorded
+assembly phases were 7.879s cache restore, 151.956s runtime packages, 1.094s
+Player package, 0.039s source export, 190.185s image preparation, 221.464s
+finalization and 34.892s generic initramfs generation: **10m13s** from
+assembly start to completed metadata, versus the recorded **22m33s** cold
+assembly baseline (about 55% less elapsed time). The builder image was
+`sha256:5730240d163aba338b8f0333001619c46b6bee94cf2c32c78a95d4e36850a5bc`
+and the central image was
+`sha256:9a2108aa020b82539fb4bedbdaf271a37ea08dc4366de81b32c2245e0cbb3919`.
+
+The public [signed image artifact](https://github.com/mcurcio/photo-wall/actions/runs/34020566014/artifacts/9986238336)
+is `photo-wall-arm64-64f9558f3598b8bf8424c6888f794d92737aed1c.zip`,
+artifact ID `9986238336`, 1,769,515,428 bytes, SHA-256
+`f0de74c3135f1d646d9c7c63352370f25aeafd6c4439a0e7335832d5411e77a4`.
+The [e2e report artifact](https://github.com/mcurcio/photo-wall/actions/runs/34020566014/artifacts/9986238598)
+is ID `9986238598`, 1,521 bytes, SHA-256
+`59f408fbb125edeb1af0662fe628ec806f748ebd644d46ca343a726baf9d9a66`.
+
+The sanitized report records all five generic-VM checks passed: fresh durable
+enrollment, central outage/rejoin, identity across the power cycle, signed
+HTTPS/DNS/NTP checks and unchanged original-disk integrity. Both durable slot A
+trial boots used the same release and distinct boot IDs
+`5d28225f-a417-4be7-a937-c2cb05caa512` and
+`548f3c33-2276-4006-9fd7-6bb85f9636a8`; the same Player ID retained identity
+while its authority epoch advanced from 1 to 2. The report's source and Player
+inventory are bound to merge revision `64f9558f...`; the Player wheel is
+`photo_wall_player-0.1.0+g64f9558f3598b8bf8424c6888f794d92737aed1c-py3-none-any.whl`,
+SHA-256
+`d93cced129ee2b81e31645011cc016bb3d3ca919976d12c92467be51a56baf6f`,
+47,685 bytes.
+
+This is generic ARM64 software-emulated boot evidence. Weston exited with
+status 1 in the headless guest, so healthy-trial acceptance, native rendering,
+physical Pi/PXE, HDMI and automatic rollback remain false. The exact source,
+component identities, substitutions and qualification fields are retained in
+the [public e2e report artifact](https://github.com/mcurcio/photo-wall/actions/runs/34020566014/artifacts/9986238598).

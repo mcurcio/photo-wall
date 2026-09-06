@@ -52,7 +52,14 @@ It then records the invocation/completion times and mutation result under
 `deleted_secured_delete` before the presentation wait. A timeout retains this
 evidence alongside the last sampled central/Player state, allowing a missed
 presentation to be investigated without guessing which assignment the test
-selected. The presentation and clock requirements remain unchanged.
+selected. The 45-second wait requires one of those exact selected assignments
+to be presented after deletion completes and within its start/end/validity
+window. The proof binds Player identity and authority epoch, Output, assignment,
+Run and exact Variant SHA; a later assignment with the same bytes cannot pass.
+Player reports are indexed by their authenticated identity independently of
+container role names. The recorder logs only successful presentations, and the
+matched tuple and event UTC are saved as `deleted_secured.checks.selected_presentation`.
+The 100 ms clock gate remains unchanged.
 
 Standalone checks run with `.venv/bin/python -m pytest --noconftest tests/test_wall_demo.py -q`. They need no PostgreSQL fixture and cover role containment, complete-group evidence, lock preservation, per-Output outage/recovery, retry classification, immutable image overrides and complete source inventories. Native GTK/GStreamer/HDMI and accelerated calendar/nested-Scene tests remain separate evidence classes.
 
