@@ -76,10 +76,11 @@ async function fetchStub(path, init = {}) {
   if (path === '/v1/operator/runtime') return response(runtime);
   if (path.includes('/candidates')) {
     if (control.deferCandidates) return new Promise(resolve => control.deferredCandidates.push({path, resolve}));
-    return response({status:'ok', candidates:[candidate('asset-aaaaaaaa'), candidate('asset-bbbbbbbb')]});
+    return response({status:'ok', candidates:path.includes('frame_id=frame-b') ?
+      [candidate('asset-bbbbbbbb')] : [candidate('asset-aaaaaaaa'), candidate('asset-bbbbbbbb')]});
   }
-  if (path === '/v1/operator/authored-candidates') {
-    control.calls.push({kind:'POST', body:JSON.parse(init.body)});
+  if (path.endsWith('/authored')) {
+    control.calls.push({kind:'AUTHORED', body:JSON.parse(init.body)});
     if (control.failPost) return response({error:'authored_asset_not_found'}, false);
     return response({status:'ok'});
   }
@@ -140,13 +141,16 @@ const test = `(async () => {
   assert(choosers.length === 2, 'did not render one chooser per Frame');
   assert(choosers[0].children.some(option => option.textContent.includes('Ref …aaaaaaaa')),
     'candidate labels do not distinguish opaque asset references');
+  assert(!choosers[1].children.some(option => option.value === 'asset-aaaaaaaa'), 'incompatible option offered on second Frame');
   choosers[0].value = 'asset-aaaaaaaa'; choosers[1].value = 'asset-bbbbbbbb';
   $('scene-id').value = 'scene-1'; $('scene-revision').value = '1'; $('cycle-seconds').value = '10'; $('scene-loop').value = 'true';
   control.calls.length = 0; await $('create-scene').onclick();
-  assert(control.calls.map(call => call.kind).join(',') === 'POST,PUT', 'authored POST must precede Scene PUT');
-  assert(control.calls[1].body.contributions.every(item => item.asset_refs && !item.source_refs), 'authored Scene did not use asset refs');
+  assert(control.calls.length === 1 && control.calls[0].kind === 'AUTHORED', 'authored save must be one atomic request');
+  assert(control.calls[0].body.source_ref === 'source:a' && control.calls[0].body.asset_ids.length === 2, 'authored request lacks source or refs');
+  assert(control.calls[0].body.scene.contributions.every(item => item.asset_refs && !item.source_refs), 'authored Scene did not use asset refs');
   control.failPost = true; control.calls.length = 0; await $('create-scene').onclick();
-  assert(!control.calls.some(call => call.kind === 'PUT'), 'Scene PUT ran after authored POST failure');
+  assert(control.calls.length === 1 && control.calls[0].kind === 'AUTHORED' && $('message').textContent.includes('no longer available'),
+    'failed atomic save issued a second request or was not reported');
   control.failPost = false;
   $('scene-authored').checked = false; await loadAuthoredCandidates();
   control.calls.length = 0; await $('create-scene').onclick();
@@ -158,9 +162,11 @@ const test = `(async () => {
   control.deferCandidates = true;
   $('scene-source').value = 'source:a'; const pendingA = loadAuthoredCandidates();
   $('scene-source').value = 'source:b'; const pendingB = loadAuthoredCandidates();
-  assert(control.deferredCandidates.length === 2, 'candidate requests were not issued independently');
-  control.deferredCandidates[1].resolve(response({status:'ok', candidates:[candidate('asset-bbbbbbbb', 2000)]})); await pendingB;
-  control.deferredCandidates[0].resolve(response({status:'ok', candidates:[candidate('asset-aaaaaaaa', 3000)]})); await pendingA;
+  assert(control.deferredCandidates.length === 4, 'per-Frame candidate requests were not issued independently');
+  for (const item of control.deferredCandidates.slice(2)) item.resolve(response({status:'ok', candidates:[candidate('asset-bbbbbbbb', 2000)]}));
+  await pendingB;
+  for (const item of control.deferredCandidates.slice(0, 2)) item.resolve(response({status:'ok', candidates:[candidate('asset-aaaaaaaa', 3000)]}));
+  await pendingA;
   const finalText = $('authored-choosers').querySelectorAll('select[data-frame]')[0].children.map(option => option.textContent).join('|');
   assert(finalText.includes('Ref …bbbbbbbb') && !finalText.includes('Ref …aaaaaaaa'), 'late source response replaced current choices');
   mediaState.sources.find(item => item.source_ref === 'source:b').status = 'permission';

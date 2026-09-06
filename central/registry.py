@@ -149,6 +149,22 @@ class Registry:
             raise RegistryError("frame_exists") from exc
         return frame.model_dump()
 
+    def frame_profile(self, frame_id: str) -> FrameProfile:
+        """Read the persistent profile for a Frame, whether it is bound yet."""
+        with self.db.transaction() as conn:
+            return self.frame_profiles_in(conn, (frame_id,))[frame_id]
+
+    def frame_profiles_in(self, conn, frame_ids) -> dict[str, FrameProfile]:
+        """Read all requested Frame profiles in the caller's transaction."""
+        ids = tuple(dict.fromkeys(frame_ids))
+        if not ids:
+            return {}
+        rows = conn.execute("SELECT id,profile FROM frames WHERE id=ANY(%s)", (list(ids),)).fetchall()
+        profiles = {row["id"]: FrameProfile.model_validate(row["profile"]) for row in rows}
+        if len(profiles) != len(ids):
+            raise RegistryError("unknown_frame", 404)
+        return profiles
+
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
         try:
             with self.db.transaction() as conn:

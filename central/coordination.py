@@ -16,8 +16,9 @@ from pydantic import Field
 
 from central.db import MEDIA_LOCK, Database
 from central.media_repository import MediaRepository
-from central.planner import PlannerLimits, Projection, assignment_id, project
+from central.planner import PlannerLimits, Projection, assignment_id, eligible, project
 from central.registry import Registry, RegistryError
+from central.runtime import Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import (
     Commit,
@@ -68,6 +69,63 @@ class Coordinator:
         self.limits = limits or CoordinationLimits()
         self.registry, self.runtime = Registry(db, clock), RuntimeStore(db, clock)
         self.media = MediaRepository(db, clock)
+
+    @staticmethod
+    def _scene_contributions(scene: Scene):
+        pending = [scene]
+        while pending:
+            current = pending.pop()
+            yield from current.contributions
+            yield from current.outro_contributions
+            pending.extend(child.scene for child in current.children)
+
+    @classmethod
+    def _authored_scene_refs(cls, scene: Scene) -> tuple[set[str], bool]:
+        asset_refs: set[str] = set()
+        has_source_refs = False
+        for contribution in cls._scene_contributions(scene):
+            asset_refs.update(contribution.asset_refs)
+            has_source_refs = has_source_refs or bool(contribution.source_refs)
+        return asset_refs, has_source_refs
+
+    def _authored_scene_profiles(self, conn, scene: Scene):
+        frame_ids = {
+            contribution.target.removeprefix("frame:")
+            for contribution in self._scene_contributions(scene)
+            if contribution.asset_refs
+        }
+        return self.registry.frame_profiles_in(conn, frame_ids)
+
+    def _validate_authored_scene(self, conn, scene: Scene, asset_ids: tuple[str, ...], profiles) -> None:
+        candidates = self.media._authored_candidates_in(conn, asset_ids)
+        for contribution in self._scene_contributions(scene):
+            if contribution.asset_refs and not any(
+                eligible(candidates[asset_id], profiles[contribution.target.removeprefix("frame:")])
+                for asset_id in contribution.asset_refs
+            ):
+                raise RegistryError("authored_incompatible", 409)
+
+    def configure_authored_scene(self, scene: Scene, source_ref: str,
+                                 asset_ids: tuple[str, ...]) -> dict:
+        """Atomically author media refs and adopt their Scene definition."""
+        try:
+            requested = tuple(asset_ids)
+            requested_set = set(requested)
+        except (TypeError, ValueError) as exc:
+            raise RegistryError("invalid_authored_scene", 422) from exc
+        scene_refs, has_source_refs = self._authored_scene_refs(scene)
+        if (not requested or len(requested) != len(requested_set) or
+                requested_set != scene_refs or has_source_refs):
+            raise RegistryError("invalid_authored_scene", 422)
+        with self._transaction() as conn, self.runtime.edit(conn) as runtime:
+            # Keep the existing Runtime -> Frame profile -> MEDIA lock order.
+            profiles = self._authored_scene_profiles(conn, scene)
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+            authored = self.media._author_authored_candidates_in(conn, source_ref, requested)
+            self._validate_authored_scene(conn, scene, requested, profiles)
+            runtime.set_scene(scene)
+            return {"status": "configured", "scene_id": scene.scene_id,
+                    "revision": scene.revision, **authored}
 
     @contextmanager
     def _transaction(self):

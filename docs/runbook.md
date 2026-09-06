@@ -83,8 +83,10 @@ provision a deployment worker.
 
 In the Scene form, keep live source selection for a changing collection, or
 select **Choose a photo or video for each Frame** to keep a specific current
-asset for each participating Frame. Source freshness and immutable references
-are checked centrally; playback still requires compatible, prepared media.
+asset for each participating Frame. Each chooser lists only media compatible
+with that Frame. The Scene and its references save together; source freshness,
+membership and compatibility are rechecked centrally. Playback still requires
+prepared media.
 The [authored-media contract](module-authored-media.md) describes retention and
 capacity. Development checks for this form require Node.js and execute its
 event flow with a synthetic DOM; this is separate from the authenticated

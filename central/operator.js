@@ -13,6 +13,8 @@ const errors = {
   calibration_revision_conflict: 'Calibration changed. Refresh and review the saved values.',
   source_not_fresh: 'Refresh this source successfully before choosing photos.',
   authored_candidate_limit: 'The authored photo/video capacity is full.',
+  authored_incompatible: 'A selected photo or video is incompatible with its Frame. Refresh the choices.',
+  unknown_frame: 'A selected Frame is no longer available. Refresh the inventory.',
   authored_asset_not_found: 'That photo or video is no longer available.',
   authored_asset_not_member: 'That photo or video is no longer in the selected source.',
   invalid_command: 'Check the values and references in this command.',
@@ -170,7 +172,7 @@ function updateAuthoredAvailability() {
   // A stale source prevents entering authored mode, while an already-selected
   // mode remains available for an explicit user choice to switch back to live.
   $('scene-authored').disabled = (!sourceReady || authored.status === 'unavailable') && !enabled;
-  $('create-scene').disabled = enabled && (!sourceReady || authored.loading || authored.status !== 'ok');
+  $('create-scene').disabled = enabled && (!sourceReady || authored.loading || authored.status !== 'ok' || !selectedSceneFrames().length);
 }
 
 function candidateLabel(candidate) {
@@ -181,20 +183,21 @@ function candidateLabel(candidate) {
     ' · ' + date(candidate.captured_at) + ' · Ref …' + String(candidate.asset_id).slice(-8) + ' · ' + state;
 }
 
-function renderAuthoredChoosers(candidates) {
+function renderAuthoredChoosers() {
   const frames = selectedSceneFrames();
   const container = $('authored-choosers');
-  const available = new Set(candidates.map(candidate => candidate.asset_id));
   authored.invalid.clear();
   container.replaceChildren();
   for (const frame of frames) {
+    const available = authored.candidates.get(frame) || new Map();
+    const candidates = [...available.values()];
     const label = document.createElement('label');
     label.textContent = 'Photo or video for ' + frame;
     const select = document.createElement('select');
     select.dataset.frame = frame;
     const empty = document.createElement('option');
     empty.value = '';
-    empty.textContent = 'Choose a current photo or video';
+    empty.textContent = candidates.length ? 'Choose a compatible photo or video' : 'No compatible photos or videos';
     select.append(empty);
     for (const candidate of candidates) {
       const option = document.createElement('option');
@@ -220,9 +223,9 @@ function renderAuthoredChoosers(candidates) {
   container.hidden = false;
   const missing = frames.filter(frame => !authored.selections.has(frame));
   authoredStatus(authored.invalid.size ?
-    'A previous choice is no longer current. Choose a replacement for each affected Frame.' :
-    (missing.length ? 'Choose one current photo or video for each Frame.' :
-      'Selections are current. Playback requires compatible, prepared media.'));
+    'A previous choice is no longer eligible. Choose a replacement for each affected Frame.' :
+    (missing.length ? 'Choose one compatible photo or video for each Frame.' :
+      'Selections are compatible. Playback requires prepared media.'));
   updateAuthoredAvailability();
 }
 
@@ -257,24 +260,32 @@ async function loadAuthoredCandidates() {
   }
   authoredStatus('Loading current photos…');
   try {
-    const data = await api('/v1/operator/sources/' + endpoint(sourceRef) + '/candidates');
-    if (request !== authored.request || sourceRef !== $('scene-source').value) return;
-    if (data.status !== 'ok') {
-      authored.loading = false;
-      authored.status = 'unavailable';
-      authoredStatus('Authoring is disabled until this source has a successful refresh.', true);
-      updateAuthoredAvailability();
-      return;
-    }
-    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-    const unique = new Map(candidates.map(candidate => [candidate.asset_id, candidate]));
-    if (unique.size !== candidates.length || candidates.some(candidate => !candidate.asset_id)) {
-      throw Error('The source returned an invalid current photo list.');
+    const frames = selectedSceneFrames(), byFrame = new Map();
+    // Keep database reads bounded while the form loads multiple Frame choices.
+    for (let offset = 0; offset < frames.length; offset += 4) {
+      const batch = await Promise.all(frames.slice(offset, offset + 4).map(async frame => ({frame,
+        data: await api('/v1/operator/sources/' + endpoint(sourceRef) + '/candidates?frame_id=' + endpoint(frame))})));
+      if (request !== authored.request || sourceRef !== $('scene-source').value) return;
+      for (const {frame, data} of batch) {
+        if (data.status !== 'ok') {
+          authored.loading = false;
+          authored.status = 'unavailable';
+          authoredStatus('Authoring is disabled until this source has a successful refresh.', true);
+          updateAuthoredAvailability();
+          return;
+        }
+        const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+        const unique = new Map(candidates.map(candidate => [candidate.asset_id, candidate]));
+        if (unique.size !== candidates.length || candidates.some(candidate => !candidate.asset_id)) {
+          throw Error('The source returned an invalid current photo list.');
+        }
+        byFrame.set(frame, unique);
+      }
     }
     authored.loading = false;
     authored.status = 'ok';
-    authored.candidates = unique;
-    renderAuthoredChoosers(candidates);
+    authored.candidates = byFrame;
+    renderAuthoredChoosers();
   } catch (error) {
     if (request !== authored.request) return;
     authored.loading = false;
@@ -360,27 +371,27 @@ action('create-scene', async () => {
   const frames = selectedSceneFrames();
   if (!frames.length) throw Error('Select at least one participating Frame.');
   const scene_id = required('scene-id'), source = required('scene-source');
-  let contributions;
+  let contributions, asset_ids;
   if ($('scene-authored').checked) {
     if (authored.source !== source || authored.status !== 'ok' || authored.loading) {
       throw Error('Load the current photos for this source before saving.');
     }
     const selections = new Map(Array.from($('authored-choosers').querySelectorAll('select[data-frame]'))
       .map(select => [select.dataset.frame, select.value]));
-    if (selections.size !== frames.length || frames.some(frame => !authored.candidates.has(selections.get(frame)))) {
+    if (selections.size !== frames.length || frames.some(frame => !authored.candidates.get(frame)?.has(selections.get(frame)))) {
       throw Error('Choose one current photo or video for each Frame.');
     }
-    const asset_ids = [...new Set(selections.values())];
-    await api('/v1/operator/authored-candidates', 'POST', {source_ref: source, asset_ids});
+    asset_ids = [...new Set(selections.values())];
     contributions = frames.map(frame => ({target: 'frame:' + frame, role: frame,
       asset_refs: [selections.get(frame)], kind: 'media', retain_on_expiry: true}));
   } else {
     contributions = frames.map(frame => ({target: 'frame:' + frame, role: frame,
       source_refs: [source], kind: 'media', retain_on_expiry: true}));
   }
-  await api('/v1/operator/scenes/' + endpoint(scene_id), 'PUT', {scene_id,
-    revision: +$('scene-revision').value, cycle_seconds: +$('cycle-seconds').value,
-    loop: $('scene-loop').value === 'true', contributions});
+  const scene = {scene_id, revision: +$('scene-revision').value,
+    cycle_seconds: +$('cycle-seconds').value, loop: $('scene-loop').value === 'true', contributions};
+  await api('/v1/operator/scenes/' + endpoint(scene_id) + (asset_ids ? '/authored' : ''), 'PUT',
+    asset_ids ? {scene, source_ref: source, asset_ids} : scene);
   await refreshContent();
 });
 action('create-program', async () => {

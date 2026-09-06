@@ -16,9 +16,9 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
-from central.planner import AcquisitionRequest
+from central.planner import AcquisitionRequest, eligible
 from central.registry import RegistryError
-from contracts.models import Digest, Identifier, Instant, Model, Variant
+from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
 from contracts.time import Clock
 from media.models import OriginalAsset, RefreshResult, SourceSpec
 
@@ -202,7 +202,7 @@ class MediaRepository:
         conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s) ON CONFLICT(source_ref) "
                      "DO UPDATE SET snapshot=EXCLUDED.snapshot", (source_ref, Jsonb(snapshot.model_dump(mode="json"))))
 
-    def source_candidates(self, source_ref: str) -> dict:
+    def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None) -> dict:
         """Return only neutral candidates from a configured source."""
         with self.transaction() as conn:
             source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
@@ -211,6 +211,8 @@ class MediaRepository:
             candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), self.clock.utc())
             if len(candidates) > 1000:
                 raise RegistryError("source_candidate_limit", 409)
+            if profile is not None:
+                candidates = tuple(candidate for candidate in candidates if eligible(candidate, profile))
             snapshot_row = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
                                         (source_ref,)).fetchone()
             refreshed_at = CatalogSnapshot.model_validate(snapshot_row["snapshot"]).refreshed_at if snapshot_row else self.clock.utc()
@@ -218,6 +220,12 @@ class MediaRepository:
                     "refreshed_at": refreshed_at,
                     "count": len(candidates),
                     "candidates": [candidate.model_dump(mode="json") for candidate in candidates]}
+
+    @staticmethod
+    def _authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:
+        rows = conn.execute("SELECT asset_id,candidate FROM authored_candidates WHERE asset_id=ANY(%s)",
+                            (list(asset_ids),)).fetchall()
+        return {row["asset_id"]: Candidate.model_validate(row["candidate"]) for row in rows}
 
     def _candidate_capacity(self, conn) -> int:
         source_count = conn.execute(
@@ -228,48 +236,53 @@ class MediaRepository:
 
     def author_authored_candidates(self, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
         """Persist immutable, centrally derived references from current membership."""
+        with self.transaction() as conn:
+            return self._author_authored_candidates_in(conn, source_ref, asset_ids)
+
+    def _author_authored_candidates_in(self, conn, source_ref: str,
+                                       asset_ids: tuple[str, ...]) -> dict:
+        """Author refs on a caller-owned transaction already holding MEDIA_LOCK."""
         if not 1 <= len(asset_ids) <= 1000 or len(asset_ids) != len(set(asset_ids)):
             raise RegistryError("invalid_authored_candidates", 422)
-        with self.transaction() as conn:
-            source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
-            if source is None:
-                raise RegistryError("source_not_found", 404)
-            # Failed refreshes retain the last successful membership for
-            # diagnosis and existing execution, but cannot create new durable
-            # authored authority from stale upstream data.
-            if source["status"] != "ok":
-                raise RegistryError("source_not_fresh", 409)
-            rows = conn.execute("SELECT a.asset_id,a.metadata FROM source_members m JOIN asset_revisions a "
-                                "ON a.asset_id=m.asset_id WHERE m.source_ref=%s AND a.asset_id=ANY(%s)",
-                                (source_ref, list(asset_ids))).fetchall()
-            members = {row["asset_id"]: OriginalAsset.model_validate(row["metadata"]) for row in rows}
-            missing = [asset_id for asset_id in asset_ids if asset_id not in members]
-            if missing:
-                known = {row["asset_id"] for row in conn.execute(
-                    "SELECT asset_id FROM asset_revisions WHERE asset_id=ANY(%s)", (missing,)).fetchall()}
-                if any(asset_id not in known for asset_id in missing):
-                    raise RegistryError("authored_asset_not_found", 404)
-                raise RegistryError("authored_asset_not_member", 409)
-            existing_rows = conn.execute("SELECT asset_id,candidate,source_ref FROM authored_candidates "
-                                         "WHERE asset_id=ANY(%s)", (list(asset_ids),)).fetchall()
-            existing = {row["asset_id"]: row for row in existing_rows}
-            for asset_id in asset_ids:
-                candidate = members[asset_id].candidate
-                old = existing.get(asset_id)
-                if old:
-                    prior = Candidate.model_validate(old["candidate"]).model_copy(
-                        update={"variant": None, "preparation_failure": None})
-                    if prior != candidate:
-                        raise RegistryError("authored_candidate_immutable", 409)
-            new = [asset_id for asset_id in asset_ids if asset_id not in existing]
-            if self._candidate_capacity(conn) + len(new) > self.limits.max_authored_candidates:
-                raise RegistryError("authored_candidate_limit", 409)
-            for asset_id in new:
-                conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
-                             "VALUES(%s,%s,%s,%s)",
-                             (asset_id, Jsonb(members[asset_id].candidate.model_dump(mode="json")),
-                              source_ref, self.clock.utc()))
-            return {"asset_refs": list(asset_ids), "created": len(new)}
+        source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
+        if source is None:
+            raise RegistryError("source_not_found", 404)
+        # Failed refreshes retain the last successful membership for
+        # diagnosis and existing execution, but cannot create new durable
+        # authored authority from stale upstream data.
+        if source["status"] != "ok":
+            raise RegistryError("source_not_fresh", 409)
+        rows = conn.execute("SELECT a.asset_id,a.metadata FROM source_members m JOIN asset_revisions a "
+                            "ON a.asset_id=m.asset_id WHERE m.source_ref=%s AND a.asset_id=ANY(%s)",
+                            (source_ref, list(asset_ids))).fetchall()
+        members = {row["asset_id"]: OriginalAsset.model_validate(row["metadata"]) for row in rows}
+        missing = [asset_id for asset_id in asset_ids if asset_id not in members]
+        if missing:
+            known = {row["asset_id"] for row in conn.execute(
+                "SELECT asset_id FROM asset_revisions WHERE asset_id=ANY(%s)", (missing,)).fetchall()}
+            if any(asset_id not in known for asset_id in missing):
+                raise RegistryError("authored_asset_not_found", 404)
+            raise RegistryError("authored_asset_not_member", 409)
+        existing_rows = conn.execute("SELECT asset_id,candidate,source_ref FROM authored_candidates "
+                                     "WHERE asset_id=ANY(%s)", (list(asset_ids),)).fetchall()
+        existing = {row["asset_id"]: row for row in existing_rows}
+        for asset_id in asset_ids:
+            candidate = members[asset_id].candidate
+            old = existing.get(asset_id)
+            if old:
+                prior = Candidate.model_validate(old["candidate"]).model_copy(
+                    update={"variant": None, "preparation_failure": None})
+                if prior != candidate:
+                    raise RegistryError("authored_candidate_immutable", 409)
+        new = [asset_id for asset_id in asset_ids if asset_id not in existing]
+        if self._candidate_capacity(conn) + len(new) > self.limits.max_authored_candidates:
+            raise RegistryError("authored_candidate_limit", 409)
+        for asset_id in new:
+            conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
+                         "VALUES(%s,%s,%s,%s)",
+                         (asset_id, Jsonb(members[asset_id].candidate.model_dump(mode="json")),
+                          source_ref, self.clock.utc()))
+        return {"asset_refs": list(asset_ids), "created": len(new)}
 
     def set_recipe(self, recipe_id: str):
         # Validate through the shared digest field without introducing a second wire definition.

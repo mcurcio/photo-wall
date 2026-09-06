@@ -7,7 +7,12 @@ credentials never cross this API.
 
 `GET /v1/operator/sources/{source_ref}/candidates` returns the current neutral
 candidate data, source status, and snapshot refresh time for a configured
-source. `POST
+source. An optional `frame_id` filters the list using the persistent Frame
+profile and the shared `central.planner.eligible` predicate. The unfiltered
+1,000-candidate limit still applies. Missing or failed variants remain visible
+with their preparation status; original-media compatibility does not imply
+playback readiness. Binding generations do not change the immutable Frame
+profile. An unknown Frame returns 404. `POST
 /v1/operator/authored-candidates` accepts `{ "source_ref": "…",
 "asset_ids": ["…"] }`, with one to 1,000 unique asset IDs. The central
 service requires the source's latest refresh status to be `ok`, verifies current
@@ -18,6 +23,23 @@ references and the number newly created, for example
 `{"asset_refs":["asset-…"],"created":1}`. Repeating the same request is
 idempotent.
 
+The operator form saves through `PUT /v1/operator/scenes/{scene_id}/authored`
+with `{ "scene": <Scene>, "source_ref": "…", "asset_ids": ["…"] }`.
+It requires exactly the unique asset references used by that Scene's body,
+outro and nested children, and rejects live source references in this operation.
+The Coordinator takes its coordination lock, the Runtime lock, then the media
+lock in one PostgreSQL transaction. It rechecks freshness, membership,
+immutable metadata, capacity and each Frame's original-media compatibility,
+and saves the references and Scene together. Any failure rolls back both.
+The response contains `status: "configured"`, `scene_id`, `revision`,
+`asset_refs` and `created`. Repeating a successful current-source request
+creates no extra authored rows. Live Scene saves use the existing Scene PUT.
+
+Per-Frame candidate reads are advisory and may observe different refresh times.
+The atomic save validates all choices against current membership; stale or
+incompatible choices cannot gain durable authority through the form. This
+reuses the Planner's eligibility rule and preserves its final fail-closed check.
+
 Authored rows retain their immutable candidate snapshot after a source no
 longer contains the asset. New rows record nullable source provenance so
 legacy rows remain readable. The total of source snapshot candidates and
@@ -25,7 +47,7 @@ authored rows is bounded by the planner's 10,000 candidate limit. Duplicate
 requests do not consume capacity. Unknown assets return 404; known assets that
 are no longer members return 409; stale source status, immutable metadata
 conflicts and capacity conflicts return 409; malformed requests return 422.
-Authored rows are conservatively retained for the MVP because Scene ownership
+Successfully created authored rows are conservatively retained for the MVP because Scene ownership
 and reference-aware deletion are not implemented; they permanently consume the
 bounded authored capacity until that lifecycle is added.
 
@@ -38,14 +60,14 @@ publication remain unchanged. A candidate with no ready variant can be
 acquired normally; a candidate in cooldown is excluded from the unsecured
 pool while existing locks retain their authority.
 
-The endpoints require the existing operator bearer token. They are backend
-only in this module: operator controls and safe worker connection provisioning
-are integrated separately. Worker configuration uses the established wrapper
+The endpoints require the existing operator bearer token. The [runbook](runbook.md) describes the operator controls and private worker
+connection provisioning. Worker configuration uses the established wrapper
 shape `{ "schema": 1, "connections": [ … ] }` and must be provisioned through
 the deployment's existing secret handling; no connection secret belongs in an
 authored-candidate request.
 
-Integration coverage lives in `tests/test_authored_media.py` and uses the
+Integration coverage lives in `tests/test_authored_media.py`,
+`tests/test_authored_scene.py` and `tests/test_authored_compatibility.py`, and uses the
 shared isolated PostgreSQL fixture. Run it with:
 
 ```sh

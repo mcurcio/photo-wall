@@ -64,6 +64,10 @@ class AuthoredCandidatesRequest(Model):
         return self
 
 
+class AuthoredSceneRequest(AuthoredCandidatesRequest):
+    scene: Scene
+
+
 def create_app(db: Database | None = None, clock: Clock | None = None,
                admin_token: str | None = None, *, run_scheduler: bool | None = None,
                media_root: Path | None = None) -> FastAPI:
@@ -289,12 +293,19 @@ def create_app(db: Database | None = None, clock: Clock | None = None,
         return {"created": coordinator.media.configure_source(source)}
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
-    def source_candidates(source_ref: Identifier):
-        return coordinator.media.source_candidates(source_ref)
+    def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):
+        profile = registry.frame_profile(frame_id) if frame_id is not None else None
+        return coordinator.media.source_candidates(source_ref, profile=profile)
 
     @app.post("/v1/operator/authored-candidates", dependencies=[Depends(admin)])
     def author_candidates(request: AuthoredCandidatesRequest):
         return coordinator.media.author_authored_candidates(request.source_ref, request.asset_ids)
+
+    @app.put("/v1/operator/scenes/{scene_id}/authored", dependencies=[Depends(admin)])
+    def configure_authored_scene(scene_id: Identifier, request: AuthoredSceneRequest):
+        if request.scene.scene_id != scene_id:
+            raise ValueError("Scene identity mismatch")
+        return coordinator.configure_authored_scene(request.scene, request.source_ref, request.asset_ids)
 
     @app.put("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
     def configure_scene(scene_id: Identifier, scene: Scene):
