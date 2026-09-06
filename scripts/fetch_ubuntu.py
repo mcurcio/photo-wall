@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -15,6 +16,24 @@ BASE = "https://cdimage.ubuntu.com/ubuntu/releases/24.04/release/"
 IMAGE = "ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz"
 DIGEST = "790652faeb4f61ce7bb12f5cb61734595c61d3cd882915b8b5f9918106c80d37"
 SIGNER = "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
+GPG_DIAGNOSTIC_LIMIT = 4096
+
+
+def _gpg(keyhome: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run public-input verification without starting an unavailable agent."""
+    command = ["gpg", "--batch", "--no-autostart", "--homedir", str(keyhome), *arguments]
+    try:
+        return subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr or ""
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        if detail:
+            bounded = detail[-GPG_DIAGNOSTIC_LIMIT:]
+            print(bounded, file=sys.stderr, end="" if bounded.endswith("\n") else "\n")
+        raise ValueError("signature_tool_failed") from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("signature_tool_failed") from None
 
 
 def fetch(url: str, path: Path, maximum: int):
@@ -53,12 +72,13 @@ def main():
     key = root / "ubuntu-cdimage.asc"
     fetch("https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x" + SIGNER, key, 1024 * 1024)
     keyhome = root / "verification-keyring"
+    if keyhome.is_symlink():
+        raise ValueError("invalid_verification_keyring")
     keyhome.mkdir(mode=0o700, exist_ok=True)
-    gpg = ["gpg", "--batch", "--homedir", str(keyhome)]
-    subprocess.run([*gpg, "--import", str(key)], check=True, capture_output=True, timeout=30)
-    result = subprocess.run([*gpg, "--status-fd", "1", "--verify",
-                             str(root / "SHA256SUMS.gpg"), str(root / "SHA256SUMS")],
-                            check=True, capture_output=True, text=True, timeout=30)
+    keyhome.chmod(0o700)
+    _gpg(keyhome, "--import", str(key))
+    result = _gpg(keyhome, "--status-fd", "1", "--verify",
+                  str(root / "SHA256SUMS.gpg"), str(root / "SHA256SUMS"))
     if not any(line.startswith("[GNUPG:] VALIDSIG " + SIGNER + " ")
                for line in result.stdout.splitlines()):
         raise ValueError("unexpected_image_signer")
