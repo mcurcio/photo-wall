@@ -205,6 +205,7 @@ def decompress_base(source: Path, destination: Path) -> None:
     if record["size"] != BASE_BYTES:
         raise BuildError("base_size")
     total, deadline = 0, time.monotonic() + 600
+    zeros = bytes(MIB)
     created = False
     try:
         with lzma.open(source, "rb") as incoming, destination.open("xb") as outgoing:
@@ -213,7 +214,13 @@ def decompress_base(source: Path, destination: Path) -> None:
                 total += len(block)
                 if total > MAX_RAW_BYTES or time.monotonic() > deadline:
                     raise BuildError("base_limit")
-                outgoing.write(block)
+                # Sparse holes preserve exact logical bytes while avoiding
+                # allocating the upstream image's unused zero-filled capacity.
+                if block == zeros[:len(block)]:
+                    outgoing.seek(len(block), os.SEEK_CUR)
+                else:
+                    outgoing.write(block)
+            outgoing.truncate(total)
             outgoing.flush()
             os.fsync(outgoing.fileno())
         if not total:
@@ -594,9 +601,12 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
             target.chmod(0o755)
-    for name in ("weston.service", "player.service", "accept-trial.service"):
+    for name in ("weston.service", "player.service", "accept-trial.service", "trial-recovery.service"):
         target = root / "etc/systemd/system" / ("photo-wall-" + name)
         shutil.copyfile(source / "appliance/systemd" / name, target)
+        if name == "trial-recovery.service":
+            # This unit is activated only by accept-trial failure, never at boot.
+            continue
         wants = root / "etc/systemd/system/multi-user.target.wants" / target.name
         wants.parent.mkdir(parents=True, exist_ok=True)
         wants.unlink(missing_ok=True)
@@ -653,7 +663,7 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
 def boot_abi(root: Path, boot_tree: Path, kernel: str) -> tuple[str, dict]:
     if not re.fullmatch(r"[a-zA-Z0-9.+-]{1,100}", kernel):
         raise BuildError("kernel_invalid")
-    # initramfs/policy/config are generated after this inventory; no digest cycle.
+    # Generated initramfs and policy/config digests are kept outside this inventory.
     files = {"modules/" + key: value for key, value in inventory(root / "usr/lib/modules" / kernel).items()}
     firmware = root / "usr/lib/firmware"
     if firmware.is_dir():
@@ -662,6 +672,23 @@ def boot_abi(root: Path, boot_tree: Path, kernel: str) -> tuple[str, dict]:
         if (key.endswith((".dtb", ".dtbo", ".elf", ".dat", ".bin"))
                 or key in ("vmlinuz", "kernel8.img", "kernel_2712.img")):
             files["boot/" + key] = value
+    # These exact bytes are staged into the guest before policy generation and
+    # copied into the initramfs. Keep generated initramfs/policy out of the
+    # inventory so the expected ABI has no derived-value cycle.
+    boot_logic = {
+        "appliance/__init__.py": root / "usr/lib/python3/dist-packages/appliance/__init__.py",
+        "appliance/bootstrap.py": root / "usr/lib/python3/dist-packages/appliance/bootstrap.py",
+        "appliance/updates.py": root / "usr/lib/python3/dist-packages/appliance/updates.py",
+        "contracts/__init__.py": root / "usr/lib/python3/dist-packages/contracts/__init__.py",
+        "contracts/release.py": root / "usr/lib/python3/dist-packages/contracts/release.py",
+        "initramfs/hooks/photo-wall": root / "etc/initramfs-tools/hooks/photo-wall",
+        "initramfs/scripts/photowall": root / "etc/initramfs-tools/scripts/photowall",
+    }
+    for name, path in boot_logic.items():
+        try:
+            files["bootstrap-logic/" + name] = checked_file(path, 4 * MIB)
+        except (FileNotFoundError, NotADirectoryError):
+            raise BuildError("boot_logic_missing") from None
     if not files or not any(key.startswith("boot/") for key in files):
         raise BuildError("boot_abi_empty")
     return hashlib.sha256(canonical(files)).hexdigest(), files

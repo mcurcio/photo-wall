@@ -209,7 +209,7 @@ class PlayerService:
                  outputs: tuple[OutputReport, ...], renderer: Renderer, dispatcher: Callable,
                  *, clock: Clock | None = None, client: httpx.AsyncClient | None = None,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
-                 health_path: Path | None = Path("/run/photo-wall/service-health.json"),
+                 health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id")):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
@@ -444,8 +444,8 @@ class PlayerService:
                     persistence=self.identity.persistence, healthy=bool(healthy and self.boot_id))
         temporary = None
         try:
-            # /run/photo-wall is supplied by systemd RuntimeDirectory, not created
-            # with broader permissions by an unprivileged Player process.
+            # The root-owned /run/photo-wall parent protects boot.json; this
+            # Player-owned child is the only place health publication may write.
             fd, temporary = tempfile.mkstemp(prefix=".service-health-", dir=self.health_path.parent)
             with os.fdopen(fd, "w") as stream:
                 os.fchmod(stream.fileno(), 0o600)

@@ -14,3 +14,4 @@ Real Immich and native Linux integration have executed evidence; physical Pi/PXE
 - [2026-09-05 full wall](2026-09-05-full-wall.md): uninterrupted real-media network demo with two Players, three simulated Outputs, live source changes, secured deletion, outages and rejoin.
 
 - [2026-09-05 appliance image](2026-09-05-appliance-image.md): signed Pi 5 image and common PXE tree built, reopened and copied with verified checksums; 138 Linux appliance checks passed, boot and physical qualification pending.
+- [2026-09-05 appliance boot](2026-09-05-appliance-boot.md): signed root mounted with durable state in a generic VM; service startup failed because of OverlayFS root traversal permissions. The correction requires a new CI-built artifact and automated boot qualification.

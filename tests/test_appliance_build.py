@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import lzma
 import os
 import shutil
 import stat
@@ -16,6 +17,7 @@ from appliance.build import (
     boot_abi,
     checked_file,
     create_disk,
+    decompress_base,
     execution_inventory,
     finalize,
     inventory,
@@ -30,6 +32,20 @@ from appliance.build import (
     verify_initramfs,
     verify_release_boot,
 )
+
+
+def test_base_decompression_preserves_zero_holes_and_trailing_length(tmp_path, monkeypatch):
+    partitions = (Partition(12, 2048, 2048), Partition(131, 4096, 4096))
+    content = mbr(partitions, b"test") + bytes(8192 * 512 - 512)
+    source, target = tmp_path / "base.xz", tmp_path / "base.img"
+    source.write_bytes(lzma.compress(content))
+    monkeypatch.setattr("appliance.build.BASE_BYTES", source.stat().st_size)
+    monkeypatch.setattr("appliance.build.BASE_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+    decompress_base(source, target)
+    assert target.read_bytes() == content
+    assert read_mbr(target) == partitions
+    if sys.platform == "linux":
+        assert target.stat().st_blocks * 512 < len(content)
 
 
 def test_partition_image_checked_roundtrip_and_truncation(tmp_path):
@@ -123,7 +139,7 @@ def test_disk_refuses_existing_output_and_symlink_boot(tmp_path):
         create_disk(boot, tmp_path / "new", source_epoch=1_700_000_000)
 
 
-def test_boot_abi_covers_modules_firmware_and_excludes_generated_initrd(tmp_path):
+def test_boot_abi_covers_kernel_and_bootstrap_logic_but_excludes_derived_files(tmp_path):
     root, boot = tmp_path / "root", tmp_path / "boot"
     modules = root / "usr/lib/modules/test-kernel"
     modules.mkdir(parents=True)
@@ -132,11 +148,34 @@ def test_boot_abi_covers_modules_firmware_and_excludes_generated_initrd(tmp_path
     (boot / "vmlinuz").write_bytes(b"kernel")
     (boot / "pi.dtb").write_bytes(b"dtb")
     (boot / "initrd.img").write_bytes(b"initramfs")
+    logic = {
+        "usr/lib/python3/dist-packages/appliance/__init__.py": b"appliance init",
+        "usr/lib/python3/dist-packages/appliance/bootstrap.py": b"bootstrap",
+        "usr/lib/python3/dist-packages/appliance/updates.py": b"updates",
+        "usr/lib/python3/dist-packages/contracts/__init__.py": b"contracts init",
+        "usr/lib/python3/dist-packages/contracts/release.py": b"release",
+        "etc/initramfs-tools/hooks/photo-wall": b"hook",
+        "etc/initramfs-tools/scripts/photowall": b"mountroot",
+    }
+    for relative, value in logic.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value)
     first, _ = boot_abi(root, boot, "test-kernel")
     (boot / "initrd.img").write_bytes(b"generated later")
     assert boot_abi(root, boot, "test-kernel")[0] == first
     (modules / "test.ko").write_bytes(b"different module")
     assert boot_abi(root, boot, "test-kernel")[0] != first
+    (modules / "test.ko").write_bytes(b"module")
+    for relative in logic:
+        path = root / relative
+        path.write_bytes(path.read_bytes() + b" changed")
+        assert boot_abi(root, boot, "test-kernel")[0] != first
+        path.write_bytes(logic[relative])
+    (root / "etc/photo-wall").mkdir(parents=True)
+    (root / "etc/photo-wall/boot-policy.json").write_bytes(b"generated policy")
+    (root / "etc/photo-wall/public.json").write_bytes(b"public configuration")
+    assert boot_abi(root, boot, "test-kernel")[0] == first
 
 
 def test_manifest_names_only_actual_hashed_root(tmp_path):

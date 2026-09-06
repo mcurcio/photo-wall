@@ -239,7 +239,9 @@ class LinuxOps:
                  state_mount: Path = Path("/run/photo-wall-state")):
         self.run_root = run_root
         self.state_mount = state_mount
-        self.run_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Keep the root-written boot report protected by its parent directory;
+        # the Player publishes health below the separate player-owned child.
+        self.run_root.mkdir(mode=0o755, parents=True, exist_ok=True)
 
     def command(self, *argv: str, timeout: int = 30) -> bytes:
         with tempfile.TemporaryFile() as output:
@@ -372,6 +374,14 @@ class LinuxOps:
         self.command("mount", "-t", "tmpfs", "-o", "mode=0700,size=1100M,nodev,nosuid", "tmpfs", str(path))
         return path
 
+    def _prepare_root(self, rootmnt: Path) -> None:
+        """Make the merged root traversable, and verify its protected owner."""
+        rootmnt.chmod(0o755)
+        info = rootmnt.stat()
+        if (stat.S_IMODE(info.st_mode) != 0o755
+                or (os.geteuid() == ROOT_UID and info.st_uid != ROOT_UID)):
+            raise BootstrapError("root_permissions")
+
     def mount_root(self, image: Path, rootmnt: Path, state: Path | None) -> None:
         lower, writable = self.run_root / "lower", self.run_root / "overlay"
         lower.mkdir(mode=0o755, exist_ok=True)
@@ -383,11 +393,19 @@ class LinuxOps:
             mounted.append(lower)
             self.command("mount", "-t", "tmpfs", "-o", "size=512M,mode=0700,nodev,nosuid", "tmpfs", str(writable))
             mounted.append(writable)
-            for name in ("upper", "work"):
-                (writable / name).mkdir(mode=0o700)
-            options = f"lowerdir={lower},upperdir={writable}/upper,workdir={writable}/work"
+            # OverlayFS exposes the upper root's traversal mode at the merged
+            # root. Keep its contents private while leaving the root traversable
+            # for non-root system services in the selected userspace.
+            upper = writable / "upper"
+            work = writable / "work"
+            upper.mkdir(mode=0o755)
+            upper.chmod(0o755)
+            work.mkdir(mode=0o700)
+            work.chmod(0o700)
+            options = f"lowerdir={lower},upperdir={upper},workdir={work}"
             self.command("mount", "-t", "overlay", "-o", options, "overlay", str(rootmnt))
             mounted.append(rootmnt)
+            self._prepare_root(rootmnt)
             if state is not None:
                 target = rootmnt / "var/lib/photo-wall"
                 target.mkdir(mode=0o755, parents=True, exist_ok=True)

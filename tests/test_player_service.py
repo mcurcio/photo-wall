@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import inspect
 import json
 import stat
 from concurrent.futures import Future
@@ -440,6 +441,11 @@ def test_health_has_boot_authority_and_no_secrets(tmp_path):
         finally:
             await close(service)
     asyncio.run(check())
+
+
+def test_health_default_is_player_private_path():
+    default = inspect.signature(PlayerService).parameters["health_path"].default
+    assert default == Path("/run/photo-wall/player/service-health.json")
 
 
 def test_existing_identity_on_unwritable_volume_reuses_key_but_reports_volatile(tmp_path, monkeypatch):

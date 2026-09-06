@@ -12,11 +12,18 @@ RUN rm -f /etc/apt/sources.list.d/ubuntu.sources && \
       'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260905T000000Z noble-security main universe restricted multiverse' \
       > /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates python3.12 python3-guestfs libguestfs-tools linux-image-generic \
+      ca-certificates python3.12 python3-guestfs python3-packaging python3-pip git gnupg initramfs-tools-core libguestfs-tools linux-image-generic \
       qemu-system-arm squashfs-tools e2fsprogs dosfstools mtools xz-utils \
       openssl attr acl tar && \
     dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /tool-packages.tsv
 RUN apt-get install -y --no-install-recommends python3-pytest && \
     dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /tool-packages.tsv
+# build_player.py is a host-side tool, and its locked source requires the
+# exact Packaging version recorded in uv.lock rather than Noble's apt version.
+COPY uv.lock /tmp/photo-wall-tools.lock
+RUN python3.12 -c 'import tomllib; p=next(p for p in tomllib.load(open("/tmp/photo-wall-tools.lock","rb"))["package"] if p["name"]=="packaging"); w=next(w for w in p["wheels"] if w["url"].endswith("-py3-none-any.whl")); print("packaging @ " + w["url"] + " --hash=" + w["hash"])' > /tmp/photo-wall-build-tools.txt
+RUN python3.12 -m pip install --break-system-packages --no-cache-dir --no-deps --require-hashes \
+      -r /tmp/photo-wall-build-tools.txt && \
+    python3.12 -c 'from packaging.markers import Marker; assert Marker("python_version >= \"3.12\"").evaluate(context="requirement")'
 WORKDIR /work
 CMD ["/bin/sh"]

@@ -1,0 +1,111 @@
+name: ARM appliance image and VM e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appliance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Build the central image
+        id: central
+        run: |
+          docker build --target central --tag photo-wall-central:ci .
+          echo "digest=$(docker image inspect --format '{{.Id}}' photo-wall-central:ci)" >> "$GITHUB_OUTPUT"
+
+      - name: Build the pinned appliance builder
+        id: builder
+        run: |
+          docker build --file appliance/Dockerfile.builder --tag photo-wall-appliance-builder:ci .
+          echo "digest=$(docker image inspect --format '{{.Id}}' photo-wall-appliance-builder:ci)" >> "$GITHUB_OUTPUT"
+
+      - name: Pull the pinned PostgreSQL fixture image
+        run: docker pull postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94
+
+      - name: Assemble the signed image and generic boot artifact
+        env:
+          CENTRAL_IMAGE: ${{ steps.central.outputs.digest }}
+          BUILDER_IMAGE: ${{ steps.builder.outputs.digest }}
+        run: |
+          ci_root="$RUNNER_TEMP/photo-wall-ci"
+          install -d -m 0700 "$ci_root"
+          docker run --rm --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            "$BUILDER_IMAGE" \
+            python3.12 -m scripts.build_ci_image \
+              --repository "$GITHUB_WORKSPACE" \
+              --revision "$GITHUB_SHA" \
+              --output-dir "$ci_root/output" \
+              --deployment-dir "$ci_root/deployment" \
+              --central-image "$CENTRAL_IMAGE" \
+              --builder-image "$BUILDER_IMAGE"
+          sudo chown -R "$(id -u):$(id -g)" "$ci_root/output" "$ci_root/deployment"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Install the locked e2e harness environment
+        run: |
+          python -m pip install uv==0.7.8
+          uv sync --frozen
+
+      - name: Boot the exact built artifact
+        env:
+          CENTRAL_IMAGE: ${{ steps.central.outputs.digest }}
+          BUILDER_IMAGE: ${{ steps.builder.outputs.digest }}
+        run: |
+          ci_root="$RUNNER_TEMP/photo-wall-ci"
+          .venv/bin/python -m scripts.test_appliance_e2e \
+            --manifest "$ci_root/output/ci-image.json" \
+            --state "$ci_root/e2e-state" \
+            --report "$ci_root/e2e-report.json" \
+            --central-image "$CENTRAL_IMAGE" \
+            --builder-image "$BUILDER_IMAGE"
+
+      - name: Compress the disk for artifact upload
+        run: |
+          ci_root="$RUNNER_TEMP/photo-wall-ci"
+          disk=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["disk"]["path"])' "$ci_root/output/ci-image.json")
+          xz -T2 -6 "$disk"
+          cd "$ci_root/output"
+          sha256sum "$(basename "$disk").xz" ci-image.json artifact.json > UPLOAD-SHA256SUMS
+
+      - name: Upload the sanitized image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-ci/output
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload e2e report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-arm64-e2e-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-ci/e2e-report.json
+          if-no-files-found: ignore
+          retention-days: 7

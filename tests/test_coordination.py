@@ -1,17 +1,20 @@
 """Real PostgreSQL coordination with explicit clocks; no physical rendering claim."""
 
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha1
+from uuid import UUID
 
 import pytest
 from psycopg.types.json import Jsonb
 from test_registry import enroll, frame
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import CatalogSnapshot
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, Failure, Readiness, Variant
+from media.models import OriginalAsset
 
 
 def setup_players(registry, count=2):
@@ -134,13 +137,28 @@ def test_late_join_has_bounded_preparation_grace_and_keeps_logical_origin(regist
 
 def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a"):
     variant = Variant(sha256=digest, size=10, media_type="image/jpeg", width=1080, height=1920)
-    candidate = Candidate(asset_id=asset, kind="image", original_width=1080, original_height=1920,
-                          captured_at=registry.clock.utc(), variant=variant)
+    original = OriginalAsset(
+        connection_id="fixture", upstream_id=str(UUID(bytes=sha1(asset.encode()).digest()[:16])),
+        original_sha1=sha1(asset.encode()).hexdigest(), kind="image", raw_width=1080,
+        raw_height=1920, orientation=1, captured_at=registry.clock.utc(), file_size=10)
+    candidate = original.candidate.model_copy(update={"variant": variant})
     snapshot = CatalogSnapshot(source_ref="library:1", refreshed_at=registry.clock.utc(), candidates=(candidate,))
-    # These are metadata-only repository fixtures; this test does not claim real files/acquisition.
+    # Seed the same durable metadata and ready recipe state that a completed
+    # worker publication exposes; coordination hydrates variants through jobs.
+    recipe = "f" * 64
     with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
+                     "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
+                     (4 * 1024**3, recipe))
+        conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,%s,%s) ON CONFLICT(asset_id) DO NOTHING",
+                     (original.asset_id, Jsonb(original.model_dump(mode="json")), registry.clock.utc(),
+                      registry.clock.utc()))
         conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
                      (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
+        conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,variant_sha,updated_at) "
+                     "VALUES(%s,%s,%s,'ready',%s,%s,%s)",
+                     ("fixture-job-" + original.asset_id, original.asset_id, recipe,
+                      registry.clock.utc(), digest, registry.clock.utc()))
         conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s) ON CONFLICT(source_ref) "
                      "DO UPDATE SET snapshot=EXCLUDED.snapshot",
                      (snapshot.source_ref, Jsonb(snapshot.model_dump(mode="json"))))
@@ -207,10 +225,21 @@ def test_offer_bound_applies_backpressure_without_stopping_runtime(registry):
 def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(registry):
     player = setup_players(registry, count=1)[0]
     publish_fixture_catalog(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_blobs SET state='corrupt'")
     coordinator = Coordinator(registry.db, registry.clock)
-    schedule(coordinator, ["frame-0"], starts=1000, media=True)
+    coordinator.runtime.command("set_scene", Scene(scene_id="scheduled", loop=True, cycle_seconds=60,
+        contributions=(Contribution(target="frame:frame-0", kind="media", source_refs=("library:1",)),)))
+    coordinator.runtime.command("set_program", Program(program_id="calendar", scene_id="scheduled",
+                                                        starts_at=1000, ends_at=2000))
+    original_offer = coordinator._offer
+
+    def corrupt_after_planning(conn, plan, groups):
+        conn.execute("UPDATE media_blobs SET state='corrupt'")
+        original_offer(conn, plan, groups)
+
+    # The catalog is hydrated before _offer.  Exercise the publication race so
+    # a blob disappearing at that boundary refuses the whole offer atomically.
+    coordinator._offer = corrupt_after_planning
+    coordinator.advance()
     assert coordinator.delivery(player["player_id"], 1)["plan"] is None
     assert coordinator.runtime.read().project(1000).runs
     with registry.db.transaction() as conn:

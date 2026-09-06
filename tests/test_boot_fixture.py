@@ -1,0 +1,431 @@
+"""Isolated boot fixture composition, state, and cleanup boundaries."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509 import (
+    CertificateBuilder,
+    SubjectAlternativeName,
+    random_serial_number,
+)
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+from contracts.release import Release, configuration_digest
+from scripts.boot_fixture import (
+    LABEL,
+    SOURCE_LABEL,
+    BootFixture,
+    FixtureError,
+    composition,
+    read_json,
+    write_json,
+)
+
+CENTRAL_IMAGE = "sha256:" + "0" * 64
+HOSTS = "https://photo-wall.test"
+
+
+def synthetic_bundle_and_deployment(root: Path):
+    private = Ed25519PrivateKey.generate()
+    public = {
+        "ca.pem": b"fixture public ca\n",
+        "release.pub.pem": private.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo),
+        "bootstrap.json": json.dumps(dict(
+            schema=1, release_origin=HOSTS, time_server="photo-wall.test")).encode(),
+        "public.json": json.dumps(dict(
+            schema=1, central_origin=HOSTS)).encode(),
+    }
+    rootfs = b"fixture-rootfs-bytes"
+    release = Release(
+        revision="a" * 40,
+        boot_abi="b" * 64,
+        configuration_sha256=configuration_digest(public),
+        rootfs_sha256=hashlib.sha256(rootfs).hexdigest(),
+        rootfs_size=len(rootfs),
+    )
+    bundle = root / "bundle"
+    deployment = root / "deployment"
+    root.mkdir(parents=True, exist_ok=True)
+    bundle.mkdir()
+    (bundle / "release.json").write_bytes(release.encode())
+    (bundle / "release.sig").write_bytes(private.sign(release.encode()))
+    (bundle / release.rootfs_name).write_bytes(rootfs)
+    public_dir = deployment / "public"
+    private_dir = deployment / "private"
+    public_dir.mkdir(parents=True)
+    private_dir.mkdir(parents=True)
+    for name, data in public.items():
+        (public_dir / name).write_bytes(data)
+    server_private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "photo-wall.test")])
+    server_cert = (
+        CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(server_private.public_key())
+        .serial_number(random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=1))
+        .add_extension(
+            SubjectAlternativeName([x509.DNSName("photo-wall.test")]),
+            critical=False,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .sign(server_private, hashes.SHA256())
+    )
+    (private_dir / "server.pem").write_bytes(server_cert.public_bytes(serialization.Encoding.PEM))
+    (private_dir / "server.key.pem").write_bytes(
+        server_private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return bundle, deployment, release
+
+
+def prepared_fixture(tmp_path: Path) -> BootFixture:
+    bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "fixture-data")
+    return BootFixture.prepare(tmp_path / "fixture-state", bundle, deployment, CENTRAL_IMAGE)
+
+
+def test_composition_contract_has_isolated_dns_and_networks():
+    project = "pw-boot-" + "0" * 16
+    document = composition(project)
+
+    assert "database" in document["networks"]
+    assert "front" in document["networks"]
+    assert not any("ports" in service for service in document["services"].values())
+
+    central = document["services"]["central"]
+    assert central["networks"]["front"]["aliases"] == ["photo-wall.test"]
+    assert "front" in central["networks"] and "database" in central["networks"]
+
+    ntp = document["services"]["ntp"]
+    assert ntp["network_mode"] == "service:central"
+
+    for name in ("database", "bundle", "public", "tls", "probe"):
+        assert document["volumes"][name]["external"] is True
+
+
+@pytest.mark.parametrize(
+    "central_image,error",
+    [
+        ("latest", "exact_central_image_required"),
+        ("sha256:" + "g" * 64, "exact_central_image_required"),
+    ],
+)
+def test_prepare_rejects_invalid_state_markers(tmp_path, central_image, error):
+    bundle, deployment, _ = synthetic_bundle_and_deployment(tmp_path / "invalid-state")
+    with pytest.raises(FixtureError, match=error):
+        BootFixture.prepare(Path("state"), bundle, deployment, central_image)
+
+    project_root = tmp_path / "git-root"
+    (project_root / ".git").mkdir(parents=True)
+    with pytest.raises(FixtureError, match="state_inside_git"):
+        BootFixture.prepare(project_root / "state", bundle, deployment, CENTRAL_IMAGE)
+
+
+def test_prepare_records_private_state_and_source_identity(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    marker = read_json(fixture.state / "fixture.json")
+    assert stat.S_IMODE(fixture.state.stat().st_mode) == 0o700
+    assert marker["schema"] == 1
+    assert marker["central_image"] == CENTRAL_IMAGE
+    assert marker["initialized"] is False
+    assert re.fullmatch(r"pw-boot-[a-f0-9]{16}", marker["project"]) is not None
+
+    assert read_json(fixture.state / "compose.json") == composition(marker["project"])
+    context = fixture.state / "context"
+    for name in ("boot_gateway.py", "boot_time_fixture.py", "runtime.py",
+                 "appliance/__init__.py", "appliance/bootstrap.py", "appliance/updates.py",
+                 "contracts/release.py"):
+        assert stat.S_ISREG((context / name).stat().st_mode)
+    assert (context / "Dockerfile").read_text().startswith("FROM " + marker["project"] + "-base:local")
+    assert "RUN install -d -o 10001 -g 10001 -m 0700 /probe\n" in (context / "Dockerfile").read_text()
+
+
+def test_prepare_and_inputs_detect_synthetic_changes(tmp_path):
+    fixture = prepared_fixture(tmp_path / "tampered-input")
+    (fixture.state / "bundle" / "release.json").write_text("mutated")
+    with pytest.raises(FixtureError, match="fixture_input_changed"):
+        fixture.check_inputs()
+
+    fixture = prepared_fixture(tmp_path / "invalid-marker")
+    marker = read_json(fixture.state / "fixture.json")
+    marker["inputs"]["../outside"] = "tampered"
+    write_json(fixture.state / "fixture.json", marker)
+    with pytest.raises(FixtureError, match="input_path_invalid"):
+        BootFixture(fixture.state).check_inputs()
+
+    fixture = prepared_fixture(tmp_path / "linked-context")
+    (fixture.state / "context" / "link.py").symlink_to((fixture.state / "context" / "runtime.py"))
+    with pytest.raises(FixtureError, match="image_context_symlink"):
+        fixture.check_inputs()
+
+
+def test_inputs_reject_nonregular_context(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    os.mkfifo(fixture.state / "context" / "unexpected.fifo")
+    with pytest.raises(FixtureError, match="image_context_nonregular"):
+        fixture.check_inputs()
+
+
+def test_env_identity_rejects_changed_contents_and_mode(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    env = fixture.state / ".env"
+    original = env.read_text()
+    first, rest = original.split("\n", 1)
+    key, value = first.split("=", 1)
+    replacement = "1" if not value.startswith("1") else "0"
+    env.write_text(key + "=" + replacement + value[1:] + "\n" + rest)
+    with pytest.raises(FixtureError, match="env_changed"):
+        BootFixture(fixture.state)
+
+    fixture = prepared_fixture(tmp_path / "mode")
+    env = fixture.state / ".env"
+    env.chmod(0o644)
+    with pytest.raises(FixtureError, match="env_invalid"):
+        BootFixture(fixture.state)
+
+
+def test_probe_removes_scratch_volume_when_creation_fails(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    fixture.check_inputs = lambda: None
+    fixture.exists = lambda *_: False
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("synthetic volume-create failure")
+
+    fixture.run = fail
+    with pytest.raises(RuntimeError, match="volume-create failure"):
+        fixture._probe()
+    assert read_json(fixture.state / "resources.json") == {}
+
+
+def test_probe_records_bounded_failure_diagnostics(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    fixture.check_inputs = lambda: None
+    fixture.check = lambda *_args, **_kwargs: None
+    fixture.create_resource = lambda *_args, **_kwargs: None
+    fixture.exists = lambda *_: False
+    creates = []
+
+    def run(args, **_kwargs):
+        if args[1:3] == ["create", "--name"]:
+            creates.append(args)
+        if args[1:3] == ["container", "inspect"]:
+            return b'{"ExitCode":137,"OOMKilled":true}\n'
+        if args[1:3] == ["start", "-a"]:
+            raise FixtureError("docker_command_failed")
+        return b""
+
+    fixture.run = run
+    with pytest.raises(FixtureError, match="docker_command_failed"):
+        fixture._probe()
+    report = read_json(fixture.state / "report.json")
+    assert report == {
+        "failure_code": "docker_command_failed",
+        "operation": "probe.start",
+        "physical_pi": False,
+        "probe_exit_code": 137,
+        "probe_memory_bytes": 384 * 1024**2,
+        "probe_oom_killed": True,
+        "project": fixture.project,
+        "vm_boot": False,
+    }
+    create = creates[0]
+    assert any(f"source={fixture.project}-bundle,target=/bundle,volume-nocopy,readonly" in item
+               for item in create)
+    assert any(f"source={fixture.project}-public,target=/public,volume-nocopy,readonly" in item
+               for item in create)
+    assert any(f"source={fixture.project}-probe,target=/probe" in item
+               and "volume-nocopy" not in item for item in create)
+
+
+@pytest.mark.parametrize("initialized", [True, False])
+def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
+    fixture = prepared_fixture(tmp_path)
+    project = fixture.project
+    fixture.marker["initialized"] = initialized
+    fixture.resources = {
+        "volume:" + project + "-bundle": dict(
+            kind="volume", name=project + "-bundle", id="old-volume-id"),
+    }
+    write_json(fixture.state / "fixture.json", fixture.marker)
+    write_json(fixture.state / "resources.json", fixture.resources)
+    fixture.check_inputs = lambda: None
+    fixture.check = lambda *_args, **_kwargs: None
+    fixture.create_resource = lambda *_args, **_kwargs: None
+    copied = []
+
+    def exists(kind, name):
+        return not ((kind == "volume" and name == project + "-bundle")
+                    or (kind == "container" and name == project + "-seed"))
+
+    def run(args, **_kwargs):
+        if args[:3] == ["docker", "image", "inspect"]:
+            return (CENTRAL_IMAGE + "\n").encode()
+        if len(args) > 1 and args[1] == "cp":
+            copied.append(args)
+        return b""
+
+    fixture.exists = exists
+    fixture.run = run
+    fixture._probe = lambda: {"reseeded": True}
+    assert fixture.up() == {"reseeded": True}
+    assert len(copied) == 3
+    assert read_json(fixture.state / "fixture.json")["initialized"] is True
+    assert read_json(fixture.state / "resources.json")["volume:" + project + "-bundle"]["id"] is None
+
+
+class FakeDockerCommand:
+    def __init__(self, project: str, source_sha256: str):
+        self.project = project
+        self.source_sha256 = source_sha256
+        self.database_image = "image-id"
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str], timeout: int = 30) -> bytes:  # noqa: ARG002
+        self.calls.append(args)
+
+        if args[0] == "docker" and args[1] == "container" and args[2] in {"ls", "inspect"}:
+            if args[2] == "ls":
+                target = [item for item in args if item.startswith("name=")][0].removeprefix("name=")
+                return f"{target}\n".encode()
+            target = args[-1]
+            if args[3] == "--format" and args[4] == "{{.Image}}":
+                return f"{self.database_image}\n".encode()
+            return f'{{"{LABEL}":"{self.project}"}}\n{target}-id\n'.encode()
+
+        if args[1] == "network" and args[2] in {"ls", "inspect"}:
+            if args[2] == "ls":
+                target = [item for item in args if item.startswith("name=")][0].removeprefix("name=")
+                return f"{target}\n".encode()
+            target = args[-1]
+            return f'{{"{LABEL}":"{self.project}"}}\n{target}-id\n'.encode()
+
+        if args[1] == "volume" and args[2] in {"ls", "inspect"}:
+            if args[2] == "ls":
+                target = [item for item in args if item.startswith("name=")][0].removeprefix("name=")
+                return f"{target}\n".encode()
+            target = args[-1]
+            return f'{{"{LABEL}":"{self.project}"}}\n{target}-id\n'.encode()
+
+        if args[1] == "image" and args[2] in {"ls", "inspect"}:
+            if args[2] == "ls":
+                reference = [item for item in args if item.startswith("reference=")][0].removeprefix("reference=")
+                return f"{reference}\n".encode()
+            if args[3] == "--format" and args[4] == "{{.Id}}":
+                return b"image-id\n"
+            return json.dumps({LABEL: self.project, SOURCE_LABEL: self.source_sha256}).encode() + b"\nimage-id\n"
+
+        # remove commands in cleanup paths
+        if args[2] == "rm":
+            return b""
+
+        return b""
+
+
+def test_locked_fixture_blocks_concurrent_mutation(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    with fixture.locked():
+        with pytest.raises(FixtureError, match="fixture_busy"):
+            with BootFixture(fixture.state).locked():
+                pass
+
+
+def test_down_removes_only_recorded_resources_in_kind_order(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    project = fixture.project
+    fake = FakeDockerCommand(project, fixture.marker["source_sha256"])
+    fixture.run = fake
+    fixture.resources = {
+        "container:" + project + "-database": dict(kind="container", name=project + "-database", id=None),
+        "container:" + project + "-central": dict(kind="container", name=project + "-central", id=None),
+        "network:" + project + "-front": dict(kind="network", name=project + "-front", id=None),
+        "network:" + project + "-database": dict(kind="network", name=project + "-database", id=None),
+        "volume:" + project + "-bundle": dict(kind="volume", name=project + "-bundle", id=None),
+        "volume:" + project + "-public": dict(kind="volume", name=project + "-public", id=None),
+        "volume:" + project + "-tls": dict(kind="volume", name=project + "-tls", id=None),
+        "volume:" + project + "-probe": dict(kind="volume", name=project + "-probe", id=None),
+        "volume:" + project + "-database": dict(kind="volume", name=project + "-database", id=None),
+        "image:" + project + ":local": dict(kind="image", name=project + ":local", id="image-id"),
+    }
+    write_json(fixture.state / "resources.json", fixture.resources)
+    fixture.marker["initialized"] = True
+    write_json(fixture.state / "fixture.json", fixture.marker)
+    result = fixture.down()
+    assert result == dict(project=project, removed=True, vm_boot=False)
+
+    position = {kind: [] for kind in ("container", "network", "volume", "image")}
+    for index, call in enumerate(fake.calls):
+        if call[:2] == ["docker", "container"] and call[2] == "rm":
+            position["container"].append(index)
+        elif call[:2] == ["docker", "network"] and call[2] == "rm":
+            position["network"].append(index)
+        elif call[:2] == ["docker", "volume"] and call[2] == "rm":
+            position["volume"].append(index)
+        elif call[:2] == ["docker", "image"] and call[2] == "rm":
+            position["image"].append(index)
+
+    assert position["container"] and position["network"] and position["volume"] and position["image"]
+    assert max(position["container"]) < min(position["network"])
+    assert max(position["network"]) < min(position["volume"])
+    assert max(position["volume"]) < min(position["image"])
+    assert read_json(fixture.state / "resources.json") == {}
+    assert read_json(fixture.state / "fixture.json")["initialized"] is False
+
+
+def test_check_rejects_database_using_replaced_image(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    fake = FakeDockerCommand(fixture.project, fixture.marker["source_sha256"])
+    fake.database_image = "sha256:" + "f" * 64
+    fixture.run = fake
+    with pytest.raises(FixtureError, match="database_image_changed"):
+        fixture.check({"kind": "container", "name": fixture.project + "-database", "id": None})
+
+
+def test_check_refuses_unowned_resource_identity(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    with pytest.raises(FixtureError, match="unrecorded_resource"):
+        fixture.check({"kind": "container", "name": "rogue", "id": None})
+
+
+def test_down_rejects_replaced_resource_before_removing_anything(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    fake = FakeDockerCommand(fixture.project, fixture.marker["source_sha256"])
+    fixture.run = fake
+    fixture.resources = {
+        "network:" + fixture.project + "-front": dict(
+            kind="network", name=fixture.project + "-front", id=None),
+        "network:" + fixture.project + "-database": dict(
+            kind="network", name=fixture.project + "-database", id="previous-network-id"),
+    }
+    write_json(fixture.state / "resources.json", fixture.resources)
+    with pytest.raises(FixtureError, match="resource_identity_changed"):
+        fixture.down()
+    assert not any(len(call) > 2 and call[2] == "rm" for call in fake.calls)
+
+
+def test_shared_base_tag_is_checked_by_exact_identity_without_relabeling(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    record = fixture.remember("image", fixture.project + "-base:local")
+    fixture.inspect = lambda *_: ({}, CENTRAL_IMAGE)
+    assert fixture.check(record) == CENTRAL_IMAGE
+    fixture.inspect = lambda *_: ({}, "sha256:" + "1" * 64)
+    with pytest.raises(FixtureError, match="base_image_changed"):
+        fixture.check(record)

@@ -473,7 +473,7 @@ def validate_boot_report(path: Path, release_id: str, boot_id: str) -> None:
 
 def accept_trial(store: SlotStore, release_id: str, *,
                  boot_report: Path = Path("/run/photo-wall/boot.json"),
-                 health_report: Path = Path("/run/photo-wall/service-health.json")) -> bool:
+                 health_report: Path = Path("/run/photo-wall/player/service-health.json")) -> bool:
     """Accept only this actual boot's reported trial after 30 seconds of observed health."""
     boot_id = _linux_boot_id()
     validate_boot_report(boot_report, release_id, boot_id)
@@ -506,7 +506,7 @@ def accept_trial(store: SlotStore, release_id: str, *,
 
 def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"), *,
                    boot_report: Path = Path("/run/photo-wall/boot.json"),
-                   health_report: Path = Path("/run/photo-wall/service-health.json")) -> bool:
+                   health_report: Path = Path("/run/photo-wall/player/service-health.json")) -> bool:
     """Derive this boot's release and trust policy; never select or stage another release."""
     from appliance.bootstrap import BootConfig
 
@@ -516,6 +516,38 @@ def accept_current(state_root: Path, config_dir: Path = Path("/etc/photo-wall"),
                       config.configuration_sha256)
     return accept_trial(store, report["release_id"], boot_report=boot_report,
                         health_report=health_report)
+
+
+def rollback_current_allowed(state_root: Path, config_dir: Path = Path("/etc/photo-wall"), *,
+                             boot_report: Path = Path("/run/photo-wall/boot.json")) -> bool:
+    """Permit a reboot only for a failed durable trial with a verified fallback.
+
+    This is a read-only predicate over update state. The lock protects the
+    decision from staging or acceptance while the two slot contents are
+    authenticated; it never selects, rejects or promotes a release.
+    """
+    from appliance.bootstrap import BootConfig
+
+    config = BootConfig.load(config_dir)
+    boot_id = _linux_boot_id()
+    report = _boot_report(boot_report, boot_id)
+    store = SlotStore(state_root, config.directory / "release.pub.pem", config.boot_abi,
+                      config.configuration_sha256)
+    with store._locked():
+        state = store._state()
+        selected, pending, active = state["selected"], state["pending"], state["active"]
+        if (not selected or selected["boot_id"] != boot_id or not selected["trial"]
+                or selected["accepted"] or report["release_id"] != selected["release_id"]
+                or report["slot"] != selected["slot"]
+                or not pending or not pending["consumed"]
+                or pending["slot"] != selected["slot"]
+                or pending["release_id"] != selected["release_id"]
+                or not active or active["slot"] == selected["slot"]
+                or active["release_id"] == selected["release_id"]):
+            return False
+        fallback = store._verify_slot(active)
+        return (fallback.release.release_id == active["release_id"]
+                and fallback.release.release_id != selected["release_id"])
 
 
 def main() -> None:
@@ -533,6 +565,8 @@ def main() -> None:
         commands.add_parser(command).add_argument("--release-id", required=True)
     current = commands.add_parser("accept-current")
     current.add_argument("--config-dir", type=Path, default=Path("/etc/photo-wall"))
+    rollback = commands.add_parser("rollback-current-allowed")
+    rollback.add_argument("--config-dir", type=Path, default=Path("/etc/photo-wall"))
     args = parser.parse_args()
     explicit = args.public_key, args.boot_abi, args.configuration_sha256
     if args.command == "accept-current":
@@ -540,6 +574,14 @@ def main() -> None:
             parser.error("accept-current derives trust policy from --config-dir; no overrides")
         accept_current(args.state_root, args.config_dir)
         return
+    if args.command == "rollback-current-allowed":
+        if any(value is not None for value in explicit):
+            parser.error("rollback-current-allowed derives trust policy from --config-dir; no overrides")
+        try:
+            allowed = rollback_current_allowed(args.state_root, args.config_dir)
+        except (UpdateError, OSError, ValueError):
+            raise SystemExit(1) from None
+        raise SystemExit(0 if allowed else 1)
     if any(value is None for value in explicit):
         parser.error("this command requires --public-key, --boot-abi and --configuration-sha256")
     store = SlotStore(args.state_root, args.public_key, args.boot_abi, args.configuration_sha256)

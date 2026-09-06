@@ -17,8 +17,10 @@ Environment=WAYLAND_DISPLAY=wayland-0
 Environment=GDK_BACKEND=wayland
 Environment=GDK_GL=gles
 Environment=PYOPENGL_PLATFORM=egl
-# Change only the runtime directory, preserving the root-owned boot report.
-ExecStartPre=+/usr/bin/install -d -o wall -g wall -m 0700 /run/photo-wall
+# Keep the root-written boot report in the root-owned parent directory.
+ExecStartPre=+/usr/bin/install -d -o root -g root -m 0755 /run/photo-wall
+# The Player publishes health only below its own private child directory.
+ExecStartPre=+/usr/bin/install -d -o wall -g wall -m 0700 /run/photo-wall/player
 # Native failure must still allow network registration with unavailable capacity.
 ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
 ExecStart=/opt/photo-wall/venv/bin/python -m player.service --config /etc/photo-wall/public.json
@@ -34,7 +36,7 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-ReadWritePaths=/run/photo-wall
+ReadWritePaths=/run/photo-wall/player
 ReadWritePaths=-/var/lib/photo-wall/player
 MemoryMax=2G
 

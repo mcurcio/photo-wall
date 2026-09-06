@@ -3,6 +3,7 @@
 import uuid
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository, StoreLimits
@@ -61,6 +62,27 @@ def test_failed_refresh_preserves_membership_and_distinct_latest_status(registry
         snapshot = repo.catalog_in(conn, registry.clock.utc())[0][spec.source_ref]
         assert snapshot.status == "permission" and len(snapshot.candidates) == 1
     assert repo.sources()[0]["last_success"] == 1000
+
+
+def test_refresh_capacity_rejects_replacement_before_displacing_catalog(registry):
+    limits = StoreLimits(max_authored_candidates=2)
+    repo, spec, originals = setup_repository(registry, limits=limits)
+    extra = asset(2)
+    with repo.transaction() as conn:
+        conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
+                     "VALUES(%s,%s,%s,%s)",
+                     (extra.asset_id, Jsonb(extra.candidate.model_dump(mode="json")), spec.source_ref, 1000))
+    registry.clock.advance(31)
+    lease = repo.begin_refresh()
+    with pytest.raises(RegistryError, match="metadata_capacity"):
+        repo.publish_refresh(lease, result(spec, originals[0], extra))
+    with registry.db.transaction() as conn:
+        snapshot = CatalogSnapshot.model_validate(conn.execute(
+            "SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s", (spec.source_ref,)
+        ).fetchone()["snapshot"])
+        assert [candidate.asset_id for candidate in snapshot.candidates] == [originals[0].asset_id]
+        assert conn.execute("SELECT count(*) AS n FROM source_members WHERE source_ref=%s",
+                            (spec.source_ref,)).fetchone()["n"] == 1
 
 
 def test_original_geometry_cannot_change_without_new_byte_revision(registry):

@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
@@ -51,6 +51,17 @@ class ActivationRequest(Model):
     repeat: Literal["ignore", "restart", "queue"] = "ignore"
     force: bool = False
     expires_at: float | None = None
+
+
+class AuthoredCandidatesRequest(Model):
+    source_ref: Identifier
+    asset_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def unique_assets(self):
+        if len(self.asset_ids) != len(set(self.asset_ids)):
+            raise ValueError("asset_ids must be unique")
+        return self
 
 
 def create_app(db: Database | None = None, clock: Clock | None = None,
@@ -276,6 +287,14 @@ def create_app(db: Database | None = None, clock: Clock | None = None,
         if source.source_ref != source_ref:
             raise ValueError("Source identity mismatch")
         return {"created": coordinator.media.configure_source(source)}
+
+    @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
+    def source_candidates(source_ref: Identifier):
+        return coordinator.media.source_candidates(source_ref)
+
+    @app.post("/v1/operator/authored-candidates", dependencies=[Depends(admin)])
+    def author_candidates(request: AuthoredCandidatesRequest):
+        return coordinator.media.author_authored_candidates(request.source_ref, request.asset_ids)
 
     @app.put("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
     def configure_scene(scene_id: Identifier, scene: Scene):

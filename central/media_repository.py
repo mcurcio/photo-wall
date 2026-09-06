@@ -33,6 +33,9 @@ class StoreLimits(Model):
     max_video_bytes: int = Field(default=256 * 1024**2, gt=0)
     lease_seconds: float = Field(default=600, ge=360, le=3600)
     refresh_seconds: float = Field(default=30, ge=1, le=3600)
+    # PlannerLimits.max_candidates is 10000; this shared bound covers source
+    # snapshots and retained authored references together.
+    max_authored_candidates: int = Field(default=10000, ge=1, le=10000)
 
 
 class RefreshLease(Model):
@@ -117,6 +120,18 @@ class MediaRepository:
             if row is None or row["generation"] != lease.generation or row["refresh_started"] != lease.started_at:
                 return False
             if result.snapshot.status == "ok":
+                # The snapshot is the shared planner input.  Check the
+                # replacement's contribution before changing either metadata
+                # or membership so an over-capacity refresh leaves the last
+                # usable catalog intact.
+                old_snapshot = conn.execute(
+                    "SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
+                    (lease.source.source_ref,)).fetchone()
+                old_count = (len(CatalogSnapshot.model_validate(old_snapshot["snapshot"]).candidates)
+                             if old_snapshot else 0)
+                if (self._candidate_capacity(conn) - old_count + len(result.snapshot.candidates)
+                        > self.limits.max_authored_candidates):
+                    raise RegistryError("metadata_capacity", 409)
                 existing_count = conn.execute("SELECT count(*) AS n FROM asset_revisions").fetchone()["n"]
                 new_assets = []
                 for asset in result.assets:
@@ -145,22 +160,116 @@ class MediaRepository:
             return True
 
     @staticmethod
-    def _refresh_catalog(conn, source_ref, now, status):
-        candidates = []
-        rows = conn.execute("SELECT a.metadata,b.variant FROM source_members m JOIN asset_revisions a "
-                            "ON a.asset_id=m.asset_id LEFT JOIN media_jobs j ON j.asset_id=a.asset_id "
-                            "AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) AND j.state='ready' "
-                            "LEFT JOIN media_blobs b ON b.digest=j.variant_sha AND b.state='ready' "
-                            "WHERE m.source_ref=%s ORDER BY a.asset_id", (source_ref,)).fetchall()
-        for row in rows:
-            asset = OriginalAsset.model_validate(row["metadata"])
-            candidate = asset.candidate
-            if row["variant"]:
-                candidate = candidate.model_copy(update={"variant": Variant.model_validate(row["variant"])})
-            candidates.append(candidate)
+    def _current_candidates(conn, source_ref):
+        rows = conn.execute("SELECT a.metadata FROM source_members m JOIN asset_revisions a "
+                            "ON a.asset_id=m.asset_id WHERE m.source_ref=%s ORDER BY a.asset_id",
+                            (source_ref,)).fetchall()
+        return tuple(OriginalAsset.model_validate(row["metadata"]).candidate for row in rows)
+
+    @staticmethod
+    def _hydrate_candidates(conn, candidates, now):
+        """Apply current recipe state to every catalog/authored candidate.
+
+        Variants and failures are worker state, so they are deliberately
+        hydrated at read time.  This also clears a variant after eviction.
+        """
+        candidates = tuple(candidates)
+        if not candidates:
+            return candidates
+        asset_ids = [candidate.asset_id for candidate in candidates]
+        variants = {}
+        for row in conn.execute(
+                "SELECT j.asset_id,b.variant FROM media_jobs j JOIN media_blobs b ON b.digest=j.variant_sha "
+                "WHERE j.asset_id=ANY(%s) AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
+                "AND j.state='ready' AND b.state='ready'", (asset_ids,)).fetchall():
+            variants[row["asset_id"]] = Variant.model_validate(row["variant"])
+        failed = {row["asset_id"]: row["failure_code"] or "preparation_failed" for row in conn.execute(
+            "SELECT asset_id,failure_code FROM media_jobs WHERE asset_id=ANY(%s) "
+            "AND recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
+            "AND (state='failed' OR (state='retry' AND retry_at>%s))", (asset_ids, now)).fetchall()}
+        hydrated = []
+        for candidate in candidates:
+            variant = variants.get(candidate.asset_id)
+            hydrated.append(candidate.model_copy(update={
+                "variant": variant,
+                "preparation_failure": failed.get(candidate.asset_id) if variant is None else None,
+            }))
+        return tuple(hydrated)
+
+    def _refresh_catalog(self, conn, source_ref, now, status):
+        candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), now)
         snapshot = CatalogSnapshot(source_ref=source_ref, refreshed_at=now, status=status, candidates=tuple(candidates))
         conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s) ON CONFLICT(source_ref) "
                      "DO UPDATE SET snapshot=EXCLUDED.snapshot", (source_ref, Jsonb(snapshot.model_dump(mode="json"))))
+
+    def source_candidates(self, source_ref: str) -> dict:
+        """Return only neutral candidates from a configured source."""
+        with self.transaction() as conn:
+            source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
+            if source is None:
+                raise RegistryError("source_not_found", 404)
+            candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), self.clock.utc())
+            if len(candidates) > 1000:
+                raise RegistryError("source_candidate_limit", 409)
+            snapshot_row = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
+                                        (source_ref,)).fetchone()
+            refreshed_at = CatalogSnapshot.model_validate(snapshot_row["snapshot"]).refreshed_at if snapshot_row else self.clock.utc()
+            return {"source_ref": source_ref, "status": source["status"],
+                    "refreshed_at": refreshed_at,
+                    "count": len(candidates),
+                    "candidates": [candidate.model_dump(mode="json") for candidate in candidates]}
+
+    def _candidate_capacity(self, conn) -> int:
+        source_count = conn.execute(
+            "SELECT COALESCE(sum(jsonb_array_length(snapshot->'candidates')),0) AS n FROM catalog_snapshots"
+        ).fetchone()["n"]
+        authored_count = conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
+        return source_count + authored_count
+
+    def author_authored_candidates(self, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
+        """Persist immutable, centrally derived references from current membership."""
+        if not 1 <= len(asset_ids) <= 1000 or len(asset_ids) != len(set(asset_ids)):
+            raise RegistryError("invalid_authored_candidates", 422)
+        with self.transaction() as conn:
+            source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
+            if source is None:
+                raise RegistryError("source_not_found", 404)
+            # Failed refreshes retain the last successful membership for
+            # diagnosis and existing execution, but cannot create new durable
+            # authored authority from stale upstream data.
+            if source["status"] != "ok":
+                raise RegistryError("source_not_fresh", 409)
+            rows = conn.execute("SELECT a.asset_id,a.metadata FROM source_members m JOIN asset_revisions a "
+                                "ON a.asset_id=m.asset_id WHERE m.source_ref=%s AND a.asset_id=ANY(%s)",
+                                (source_ref, list(asset_ids))).fetchall()
+            members = {row["asset_id"]: OriginalAsset.model_validate(row["metadata"]) for row in rows}
+            missing = [asset_id for asset_id in asset_ids if asset_id not in members]
+            if missing:
+                known = {row["asset_id"] for row in conn.execute(
+                    "SELECT asset_id FROM asset_revisions WHERE asset_id=ANY(%s)", (missing,)).fetchall()}
+                if any(asset_id not in known for asset_id in missing):
+                    raise RegistryError("authored_asset_not_found", 404)
+                raise RegistryError("authored_asset_not_member", 409)
+            existing_rows = conn.execute("SELECT asset_id,candidate,source_ref FROM authored_candidates "
+                                         "WHERE asset_id=ANY(%s)", (list(asset_ids),)).fetchall()
+            existing = {row["asset_id"]: row for row in existing_rows}
+            for asset_id in asset_ids:
+                candidate = members[asset_id].candidate
+                old = existing.get(asset_id)
+                if old:
+                    prior = Candidate.model_validate(old["candidate"]).model_copy(
+                        update={"variant": None, "preparation_failure": None})
+                    if prior != candidate:
+                        raise RegistryError("authored_candidate_immutable", 409)
+            new = [asset_id for asset_id in asset_ids if asset_id not in existing]
+            if self._candidate_capacity(conn) + len(new) > self.limits.max_authored_candidates:
+                raise RegistryError("authored_candidate_limit", 409)
+            for asset_id in new:
+                conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
+                             "VALUES(%s,%s,%s,%s)",
+                             (asset_id, Jsonb(members[asset_id].candidate.model_dump(mode="json")),
+                              source_ref, self.clock.utc()))
+            return {"asset_refs": list(asset_ids), "created": len(new)}
 
     def set_recipe(self, recipe_id: str):
         # Validate through the shared digest field without introducing a second wire definition.
@@ -253,24 +362,23 @@ class MediaRepository:
             raise RegistryError("stale_job")
         return row
 
-    @staticmethod
-    def catalog_in(conn, now):
+    def catalog_in(self, conn, now):
         """Exclude known impossible unsecured candidates during cooldown; locks bypass this pool."""
-        failed = {r["asset_id"]: r["failure_code"] or "preparation_failed" for r in conn.execute("SELECT asset_id,failure_code FROM media_jobs WHERE "
-                  "recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
-                  "AND (state='failed' OR (state='retry' AND retry_at>%s))", (now,)).fetchall()}
+        if self._candidate_capacity(conn) > self.limits.max_authored_candidates:
+            raise RegistryError("authored_candidate_limit", 409)
         snapshots = {}
         for row in conn.execute("SELECT * FROM catalog_snapshots").fetchall():
             snapshot = CatalogSnapshot.model_validate(row["snapshot"])
             snapshots[row["source_ref"]] = snapshot.model_copy(update={
-                "candidates": tuple(c.model_copy(update={"preparation_failure": failed[c.asset_id]})
-                    if c.asset_id in failed and c.variant is None else c for c in snapshot.candidates)})
+                "candidates": self._hydrate_candidates(conn, snapshot.candidates, now)})
         authored = {}
-        for row in conn.execute("SELECT * FROM authored_candidates").fetchall():
-            candidate = Candidate.model_validate(row["candidate"])
-            if candidate.asset_id in failed and candidate.variant is None:
-                candidate = candidate.model_copy(update={"preparation_failure": failed[candidate.asset_id]})
-            authored[row["asset_id"]] = candidate
+        rows = conn.execute("SELECT * FROM authored_candidates ORDER BY asset_id LIMIT %s",
+                            (self.limits.max_authored_candidates + 1,)).fetchall()
+        if len(rows) > self.limits.max_authored_candidates:
+            raise RegistryError("authored_candidate_limit", 409)
+        stored = [(row["asset_id"], Candidate.model_validate(row["candidate"])) for row in rows]
+        hydrated = self._hydrate_candidates(conn, tuple(candidate for _, candidate in stored), now)
+        authored = {asset_id: candidate for (asset_id, _), candidate in zip(stored, hydrated)}
         return snapshots, authored
 
     def health(self) -> dict:

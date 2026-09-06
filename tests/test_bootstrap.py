@@ -380,6 +380,50 @@ def test_linux_mount_rollback_attempts_all_paths_and_prevents_dirty_retry(tmp_pa
     ]
 
 
+def test_linux_overlay_keeps_private_work_and_traversable_upper_root(tmp_path):
+    ops = LinuxOps(tmp_path / "run")
+    calls = []
+
+    def command(*argv, **kwargs):
+        calls.append(argv)
+        return b""
+
+    ops.command = command
+    rootmnt = tmp_path / "root"
+    ops.mount_root(tmp_path / "rootfs", rootmnt, None)
+    upper = ops.run_root / "overlay/upper"
+    work = ops.run_root / "overlay/work"
+    assert stat.S_IMODE(upper.stat().st_mode) == 0o755
+    assert stat.S_IMODE(work.stat().st_mode) == 0o700
+    assert stat.S_IMODE(rootmnt.stat().st_mode) == 0o755
+    overlay = next(call for call in calls if call[:3] == ("mount", "-t", "overlay"))
+    assert f"upperdir={upper}" in overlay[4]
+    assert f"workdir={work}" in overlay[4]
+
+
+def test_linux_faulted_merged_root_is_cleaned_before_boot_fails(tmp_path, monkeypatch):
+    ops = LinuxOps(tmp_path / "run")
+    calls = []
+
+    def command(*argv, **kwargs):
+        calls.append(argv)
+        return b""
+
+    ops.command = command
+
+    def fault(_rootmnt):
+        raise BootstrapError("root_permissions")
+
+    monkeypatch.setattr(ops, "_prepare_root", fault)
+    with pytest.raises(BootstrapError, match="root_permissions"):
+        ops.mount_root(tmp_path / "rootfs", tmp_path / "root", None)
+    assert [call for call in calls if call[0] == "umount"] == [
+        ("umount", str(tmp_path / "root")),
+        ("umount", str(ops.run_root / "overlay")),
+        ("umount", str(ops.run_root / "lower")),
+    ]
+
+
 def test_failed_mount_cleanup_cannot_fall_back_to_common(tmp_path):
     ops = Ops(tmp_path, durable=True)
     selected = tmp_path / "slot"

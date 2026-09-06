@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
+import subprocess
+import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -329,6 +333,62 @@ def test_boot_report_accepts_only_actual_durable_trial(rig, tmp_path):
         updates.validate_boot_report(report_path, "a"*64, "boot-1")
 
 
+def test_default_health_report_is_player_private_path():
+    assert inspect.signature(updates.accept_trial).parameters["health_report"].default == Path(
+        "/run/photo-wall/player/service-health.json")
+    assert inspect.signature(updates.accept_current).parameters["health_report"].default == Path(
+        "/run/photo-wall/player/service-health.json")
+
+
+@pytest.mark.skipif(sys.platform != "linux" or os.geteuid() != 0,
+                    reason="requires a Linux root runner to exercise uid 10001")
+def test_player_uid_cannot_replace_boot_report_but_can_publish_health():
+    scratch = Path(tempfile.mkdtemp(prefix="photo-wall-perm-", dir="/tmp"))
+    try:
+        scratch.chmod(0o755)
+        runtime = scratch / "photo-wall"
+        player = runtime / "player"
+        runtime.mkdir(mode=0o755)
+        player.mkdir(mode=0o700)
+        os.chown(runtime, 0, 0)
+        os.chown(player, 10001, 10001)
+        boot = runtime / "boot.json"
+        boot.write_text("root boot report")
+        boot.chmod(0o600)
+        os.chown(boot, 0, 0)
+        health = player / "service-health.json"
+        health.write_text("old health")
+        health.chmod(0o600)
+        os.chown(health, 10001, 10001)
+        script = """
+import os
+from pathlib import Path
+import sys
+runtime = Path(sys.argv[1])
+player = runtime / "player"
+boot = runtime / "boot.json"
+for operation in (lambda: boot.unlink(), lambda: boot.rename(runtime / "boot.moved")):
+    try:
+        operation()
+    except PermissionError:
+        pass
+    else:
+        raise SystemExit("boot report was writable")
+temporary = player / ".service-health-test"
+temporary.write_text("new health")
+os.replace(temporary, player / "service-health.json")
+"""
+        result = subprocess.run([sys.executable, "-c", script, str(runtime)],
+                                preexec_fn=lambda: (os.setgroups([]), os.setgid(10001), os.setuid(10001)),
+                                capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert boot.read_text() == "root boot report"
+        assert not (runtime / "boot.moved").exists()
+        assert health.read_text() == "new health"
+    finally:
+        shutil.rmtree(scratch)
+
+
 def test_signature_rejects_different_key_and_noncanonical_authenticated_payload(rig, tmp_path):
     release, manifest, signature, _ = rig.signed()
     another = Ed25519PrivateKey.generate()
@@ -350,7 +410,7 @@ def test_cli_health_failure_never_calls_mark_good(rig, monkeypatch):
     monkeypatch.setattr(updates, "validate_boot_report", lambda *_args: None)
     original_regular = updates._regular
     def stale_health(path, limit):
-        if str(path) == "/run/photo-wall/service-health.json":
+        if str(path) == "/run/photo-wall/player/service-health.json":
             return json.dumps(health(0)).encode()
         return original_regular(path, limit)
     monkeypatch.setattr(updates, "_regular", stale_health)
@@ -374,7 +434,7 @@ def test_cli_accepts_only_after_thirty_seconds_of_fresh_health(rig, monkeypatch)
     monkeypatch.setattr(updates, "validate_boot_report", lambda *_args: None)
     original_regular = updates._regular
     def fresh_health(path, limit):
-        if str(path) == "/run/photo-wall/service-health.json":
+        if str(path) == "/run/photo-wall/player/service-health.json":
             return json.dumps(health(now[0])).encode()
         return original_regular(path, limit)
     monkeypatch.setattr(updates, "_regular", fresh_health)
@@ -446,6 +506,99 @@ def test_accept_current_derives_exact_policy_and_promotes_only_after_full_health
     assert state["active"]["release_id"] == acceptance.release.release_id
     assert state["selected"]["accepted"] and state["selected"]["boot_id"] == acceptance.boot_id
     assert (rig.root / "player/identity.key").read_bytes() == b"private fixture identity"
+
+
+def failed_trial(rig, acceptance):
+    a = acceptance
+    assert a.store.mark_good(a.release.release_id, a.boot_id)
+    candidate, manifest, signature, data = rig.signed(
+        b"second signed candidate", revision="d" * 40,
+        configuration_sha256=a.release.configuration_sha256)
+    assert a.store.stage(manifest, signature, [data]) == candidate
+    selected = a.store.select_boot("boot-2")
+    report = dict(schema=1, boot_id="boot-2", release_id=candidate.release_id,
+                  slot=selected.slot, trial=True, persistence="durable", fault=None)
+    a.report_path.write_text(json.dumps(report))
+    a.report_path.chmod(0o600)
+    return a, candidate, selected, report
+
+
+def test_rollback_probe_requires_distinct_verified_active_fallback(rig, acceptance, monkeypatch):
+    a = acceptance
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: a.boot_id)
+    state_path = rig.root / "updates/state.json"
+    before = state_path.read_bytes()
+    assert not updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+    assert state_path.read_bytes() == before
+
+    a, candidate, selected, report = failed_trial(rig, a)
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    before = state_path.read_bytes()
+    assert updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+    assert state_path.read_bytes() == before
+
+    # The mounted trial was already authenticated before boot. A later store
+    # corruption must not block reboot to the independently verified fallback.
+    (rig.root / "updates" / selected.slot / "rootfs.squashfs").write_bytes(b"corrupt")
+    assert updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+
+
+def test_rollback_probe_rejects_accepted_trial(rig, acceptance, monkeypatch):
+    a, candidate, _selected, _report = failed_trial(rig, acceptance)
+    assert a.store.mark_good(candidate.release_id, "boot-2")
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    assert not updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+
+
+def test_rollback_probe_rejects_mismatched_slot(rig, acceptance, monkeypatch):
+    a, _candidate, selected, report = failed_trial(rig, acceptance)
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    a.report_path.write_text(json.dumps(report | {"slot": "A" if selected.slot == "B" else "B"}))
+    assert not updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+
+
+@pytest.mark.parametrize("change", [{"boot_id": "stale"}, {"fault": "player_fault"}])
+def test_rollback_probe_rejects_stale_or_faulted_report(rig, acceptance, monkeypatch, change):
+    a, _candidate, _selected, report = failed_trial(rig, acceptance)
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    a.report_path.write_text(json.dumps(report | change))
+    with pytest.raises(UpdateError):
+        updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+
+
+def test_rollback_probe_rejects_corrupt_active_fallback(rig, acceptance, monkeypatch):
+    a, _candidate, selected, _report = failed_trial(rig, acceptance)
+    active_slot = "A" if selected.slot == "B" else "B"
+    (rig.root / "updates" / active_slot / "rootfs.squashfs").write_bytes(b"corrupt")
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    with pytest.raises(UpdateError, match="rootfs_integrity|invalid_rootfs"):
+        updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+
+
+def test_rollback_probe_cli_returns_zero_for_verified_failed_trial(rig, acceptance, monkeypatch):
+    a, _candidate, _selected, _report = failed_trial(rig, acceptance)
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: "boot-2")
+    assert updates.rollback_current_allowed(rig.root, a.config_dir, boot_report=a.report_path)
+    original_probe = updates.rollback_current_allowed
+    monkeypatch.setattr(updates, "rollback_current_allowed",
+                        lambda *args, **kwargs: original_probe(
+                            *args, boot_report=a.report_path, **kwargs))
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
+                                      "rollback-current-allowed", "--config-dir",
+                                      str(a.config_dir)])
+    with pytest.raises(SystemExit) as error:
+        updates.main()
+    assert error.value.code == 0
+
+
+def test_rollback_probe_cli_skips_without_active_fallback(rig, acceptance, monkeypatch):
+    monkeypatch.setattr(updates, "_linux_boot_id", lambda: acceptance.boot_id)
+    monkeypatch.setattr("sys.argv", ["updates", "--state-root", str(rig.root),
+                                      "rollback-current-allowed", "--config-dir",
+                                      str(acceptance.config_dir)])
+    with pytest.raises(SystemExit) as error:
+        updates.main()
+    assert error.value.code == 1
 
 
 @pytest.mark.parametrize("fault", ["missing", "volatile", "fallback", "old_boot", "boot_fault",

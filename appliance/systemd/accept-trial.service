@@ -2,6 +2,7 @@
 Description=Accept the current Photo Wall trial after sustained Player health
 Wants=photo-wall-player.service
 After=photo-wall-player.service
+OnFailure=photo-wall-trial-recovery.service
 
 [Service]
 Type=oneshot

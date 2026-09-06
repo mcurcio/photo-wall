@@ -4,7 +4,7 @@ Implemented and tested release/slot contract, 2026-09-05; physical boot and powe
 
 Canonical manifest bytes are sorted, compact UTF-8 JSON with exactly one trailing newline and exactly six fields: `schema=1`, clean 40-character Git `revision`, SHA-256 `boot_abi`, `configuration_sha256`, `rootfs_sha256`, and integer `rootfs_size` from one byte through 1 GiB. No arbitrary artifact path or URL is accepted. The only public rootfs artifact filename is `rootfs-<sha256>.squashfs`. A release ID is SHA-256 of canonical manifest bytes. Detached signatures are 64 raw Ed25519 bytes over those exact bytes. The deployment's public verification key is common public configuration; private signing keys and image binaries remain outside Git.
 
-The caller verifies the signature before trusting parsed fields, using the pinned OpenSSL Ed25519 verifier in both userspace and initramfs. Both reject a different boot ABI or public configuration hash before download/selection. Rootfs byte length and SHA-256 are verified before RAM mounting on every boot. Build records additionally retain the upstream input signature/checksum, package and Python inventories, file hashes, tool versions and public configuration bytes. The signed rootfs digest covers its embedded inventories. Boot ABI identifies the exact fixed kernel, modules and firmware/DTB set; a userspace update cannot replace these components.
+The caller verifies the signature before trusting parsed fields, using the pinned OpenSSL Ed25519 verifier in both userspace and initramfs. Both reject a different boot ABI or public configuration hash before download/selection. Rootfs byte length and SHA-256 are verified before RAM mounting on every boot. Build records additionally retain the upstream input signature/checksum, package and Python inventories, file hashes, tool versions and public configuration bytes. The signed rootfs digest covers its embedded inventories. Boot ABI identifies the exact fixed kernel, modules, firmware/DTB set and staged bootstrap/mountroot logic; a userspace update cannot replace these components.
 
 The updater operates only within an existing Photo Wall-owned state directory under an exclusive lock. It stores two complete release slots plus at most one bounded incoming candidate. It never formats storage or evicts Player cache pins. Check free space for the full incoming rootfs and a 64 MiB safety margin before transfer; an insufficient-space result preserves both complete slots. Reject symlinks, nonregular files, oversized manifests/signatures/images and partial/hash-mismatched/signature-mismatched downloads. Private atomic writes and directory fsync protect metadata. Interrupted incoming files can be cleaned only under the updater's owned paths.
 
@@ -45,7 +45,7 @@ it never promotes itself merely because no previous release exists.
 
 `mark_good` requires the current trial's exact release and boot identity. Public
 `accept_trial(store, release_id, *, boot_report, health_report)` additionally
-observes `/run/photo-wall/service-health.json` continuously for 30
+observes `/run/photo-wall/player/service-health.json` continuously for 30
 seconds, using the actual Linux boot ID and monotonic time. It requires fresh,
 increasing samples with durable persistence, healthy state, a stable Player ID
 and current positive authority epoch. Invalid/missing/stale/unhealthy samples or
@@ -62,6 +62,20 @@ configuration digest and boot ABI. It reads the actual Linux boot ID and the
 root-owned report to obtain this boot's release ID, constructs the matching
 SlotStore, and calls `accept_trial`. It never selects or stages a release. There
 is no baked release ID in the rootfs and no alternate health policy.
+
+`rollback_current_allowed(state_root, config_dir=/etc/photo-wall, *, boot_report)`
+is the bounded predicate used by the trial-failure recovery unit. Under the
+updater lock it rechecks the actual Linux boot ID and protected durable trial
+report, requires the selected record to be an unaccepted consumed trial, and
+authenticates a distinct active fallback slot. The mounted trial's stored bytes
+are not revalidated here because the protected report binds the already verified
+boot; a corrupt later trial copy must not block fallback. It never
+selects, rejects or promotes a release. A common/fallback boot, volatile or
+missing state, a first trial without an active release, an accepted or stale
+trial, and invalid/corrupt state all return a non-success condition; none can
+request a reboot. The recovery unit is scoped to the acceptance service's
+failure path; operator acceptance or manual recovery must coordinate with that
+unit rather than racing its predicate and reboot action.
 
 
 The updater's fixed internal paths are `updates/{A,B}/manifest.json`,
@@ -89,7 +103,7 @@ The CLI is `python3 -m appliance.updates`. Existing commands require `--state-ro
 local `--manifest`, `--signature` and `--rootfs` files. `select` emits a JSON
 selection using the actual Linux boot ID; `reject --release-id` releases only the
 matching selected boot. `mark-good --release-id` requires the bootstrap's
-root-owned mode 0600 `/run/photo-wall/boot.json` to identify that same successful,
+root-owned mode 0600 `/run/photo-wall/boot.json` under a root-owned parent to identify that same successful,
 durable trial with no boot fault, before observing service health. Its poll
 interval is 250 ms, maximum sample age/gap is2 seconds, acceptance interval is30 seconds
 and total waiting bound is180 seconds. A common fallback, previous boot report,
