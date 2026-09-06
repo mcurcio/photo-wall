@@ -106,6 +106,23 @@ def test_artifact_reader_rejects_wrong_hash_symlink_fifo_oversize(tmp_path):
         checked_file(fifo, 100)
 
 
+def test_generic_manifest_budget_accepts_large_valid_output():
+    from scripts.build_vm_initrd import MAX_MANIFEST_BYTES, _manifest_bytes
+
+    payload = _manifest_bytes({"schema": 1, "kind": "generic-vm-initramfs",
+                               "module_inventory": "x" * (MIB + 1)})
+    assert len(payload) > MIB
+    assert len(payload) <= MAX_MANIFEST_BYTES
+
+
+def test_generic_manifest_budget_rejects_oversized_output():
+    from scripts.build_vm_initrd import _manifest_bytes
+
+    with pytest.raises(BuildError, match="manifest_limit"):
+        _manifest_bytes({"schema": 1, "kind": "generic-vm-initramfs",
+                         "module_inventory": "x" * (16 * MIB)})
+
+
 def test_tree_never_walks_symlink_and_bounds_aggregate(tmp_path):
     tree = tmp_path / "tree"
     tree.mkdir()

@@ -20,10 +20,12 @@ from scripts.boot_fixture import (
     FixtureError,
     command,
     file_hash,
+    read_file,
     read_json,
     require,
     write_json,
 )
+from scripts.build_vm_initrd import MAX_MANIFEST_BYTES
 
 LABEL = "org.photo-wall.appliance-e2e"
 MAX_DISK = 8 * 1024**3
@@ -69,6 +71,11 @@ def timestamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def unqualified() -> dict:
+    return dict(generic_vm=False, physical_pi=False, pxe_lan=False,
+                native_rendering=False, healthy_trial=False, automatic_rollback=False)
+
+
 def absolute(path: str) -> Path:
     value = Path(path)
     require(value.is_absolute() and not value.is_symlink(), "absolute_regular_input_required")
@@ -90,7 +97,7 @@ def checked_inputs(manifest: Path) -> dict:
             and path.stat().st_size == disk["size"]
             and file_hash(path, MAX_DISK) == disk["sha256"], "disk_identity_mismatch")
     generic = absolute(data["generic_boot"])
-    record = read_json(generic / "manifest.json")
+    record = json.loads(read_file(generic / "manifest.json", MAX_MANIFEST_BYTES))
     require(record.get("kind") == "generic-vm-initramfs"
             and record.get("validation", {}).get("reopened") is True
             and record["validation"].get("protected_bytes_equal") is True,
@@ -193,8 +200,7 @@ class ApplianceE2E:
             generic_initrd_sha256=inputs["generic_record"]["outputs"]["initrd"]["sha256"],
             central_image=central_image, builder_image=builder_image, checks={}, boots=[],
             substitutions=inputs["generic_record"]["substitutions"],
-            qualification=dict(generic_vm=False, physical_pi=False, pxe_lan=False,
-                               native_rendering=False, healthy_trial=False, automatic_rollback=False))
+            qualification=unqualified())
 
     def checked_vm(self):
         # Select only public identity/state fields; Docker configuration may hold secrets.
@@ -377,25 +383,31 @@ def main():
     args = parser.parse_args()
     require(args.report.is_absolute() and not args.report.exists() and not args.report.is_symlink(),
             "new_absolute_report_required")
-    harness = ApplianceE2E(checked_inputs(args.manifest), args.state,
-                           args.central_image, args.builder_image)
+    harness = None
+    report = dict(schema=1, status="running", started_at=timestamp(), phase="preflight",
+                  checks={}, boots=[], qualification=unqualified())
     failure = None
     try:
+        harness = ApplianceE2E(checked_inputs(args.manifest), args.state,
+                               args.central_image, args.builder_image)
+        report = harness.report
+        report["phase"] = "execution"
         harness.execute()
     except (Exception, KeyboardInterrupt) as error:
         failure = str(error) if isinstance(error, FixtureError) else type(error).__name__
     finally:
-        try:
-            harness.cleanup()
-        except Exception as error:
-            harness.report["cleanup_error"] = str(error) if isinstance(error, FixtureError) else type(error).__name__
-            failure = failure or "cleanup_failed"
-        harness.report.update(status="failed" if failure else "passed", finished_at=timestamp())
+        if harness is not None:
+            try:
+                harness.cleanup()
+            except Exception as error:
+                report["cleanup_error"] = str(error) if isinstance(error, FixtureError) else type(error).__name__
+                failure = failure or "cleanup_failed"
+        report.update(status="failed" if failure else "passed", finished_at=timestamp())
         if failure:
-            harness.report["failure"] = failure
-            harness.report["qualification"]["generic_vm"] = False
-        write_json(args.report, harness.report)
-    print(json.dumps(dict(status=harness.report["status"], report=str(args.report))))
+            report["failure"] = failure
+            report["qualification"]["generic_vm"] = False
+        write_json(args.report, report)
+    print(json.dumps(dict(status=report["status"], report=str(args.report))))
     raise SystemExit(1 if failure else 0)
 
 

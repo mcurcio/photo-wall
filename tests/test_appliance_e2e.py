@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,34 @@ from scripts.test_appliance_e2e import ApplianceE2E, boot_reports, checked_input
 RELEASE = "a" * 64
 BOOT = "01234567-89ab-cdef-0123-456789abcdef"
 PLAYER = "p-" + "b" * 32
+
+
+@pytest.mark.parametrize("invalid_json", [False, True])
+def test_preflight_failure_writes_unqualified_report_without_starting_fixture(
+        inputs, tmp_path, monkeypatch, invalid_json):
+    from scripts import test_appliance_e2e as e2e
+
+    manifest, disk, _ = inputs
+    if invalid_json:
+        manifest.write_text('{"private-field":"private-input-must-not-escape"')
+    else:
+        disk.write_bytes(b"changed image")
+    result = tmp_path / "report.json"
+    state = tmp_path / "state"
+    monkeypatch.setattr(sys, "argv", ["e2e", "--manifest", str(manifest), "--state", str(state),
+        "--report", str(result), "--central-image", "sha256:" + "c" * 64,
+        "--builder-image", "sha256:" + "d" * 64])
+    monkeypatch.setattr(e2e, "ApplianceE2E", lambda *args: pytest.fail("preflight started fixture"))
+    with pytest.raises(SystemExit) as exit_info:
+        e2e.main()
+    assert exit_info.value.code == 1
+    recorded = json.loads(result.read_text())
+    assert recorded["status"] == "failed"
+    assert recorded["phase"] == "preflight"
+    assert recorded["failure"] == ("JSONDecodeError" if invalid_json else "disk_identity_mismatch")
+    assert not any(recorded["qualification"].values())
+    assert not state.exists()
+    assert "private-input" not in result.read_text()
 
 
 def report(**changes):
@@ -167,6 +196,27 @@ def test_image_and_initramfs_are_bound_to_same_final_artifact(inputs):
     record["input"]["expected_sha256"] = "0" * 64
     (generic / "manifest.json").write_text(json.dumps(record))
     with pytest.raises(FixtureError, match="initramfs_source_mismatch"):
+        checked_inputs(manifest)
+
+
+def test_full_generic_inventory_exceeding_fixture_json_limit_is_accepted(inputs):
+    manifest, disk, generic = inputs
+    record_path = generic / "manifest.json"
+    record = json.loads(record_path.read_text())
+    record["protected_inventory"] = {f"usr/lib/python3.12/module_{i}.py":
+        {"size": 1024, "sha256": "a" * 64} for i in range(12_000)}
+    record_path.write_text(json.dumps(record))
+    assert record_path.stat().st_size > 1024**2
+    assert checked_inputs(manifest)["disk"] == disk
+
+
+def test_generic_inventory_over_its_own_limit_is_rejected(inputs):
+    from scripts.build_vm_initrd import MAX_MANIFEST_BYTES
+
+    manifest, _, generic = inputs
+    with (generic / "manifest.json").open("wb") as stream:
+        stream.truncate(MAX_MANIFEST_BYTES + 1)
+    with pytest.raises(FixtureError, match="invalid_regular_file"):
         checked_inputs(manifest)
 
 

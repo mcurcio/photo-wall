@@ -19,6 +19,8 @@ directory. Before starting services, the harness verifies the disk checksum,
 signed release, configuration digest, final artifact metadata and generic
 kernel/initramfs checksums. It also binds the generic initramfs input to the
 production initramfs recorded in the finalized image's PXE inventory.
+The full generic module manifest has a shared 16 MiB producer/consumer limit;
+small fixture JSON retains its separate 1 MiB limit.
 
 Each run creates a fresh private fixture and a QEMU `virt` guest with two virtual
 CPUs and 3 GiB RAM in a 4 GiB container. The disk and generic boot files are
@@ -45,6 +47,8 @@ and each VM process to fifteen minutes. Container logs are capped. The public
 JSON report contains artifact identities, observed boot/enrollment results,
 sanitized failure codes and explicit qualification limits. Private TLS keys,
 Player identity state and raw guest disks are excluded from test-report uploads.
+Input validation failures also emit an unqualified report marked `preflight`,
+without copying unverified artifact fields or starting fixture services.
 Cleanup checks container identities before stopping or removing them; replacement
 resources fail closed. VM cleanup, fixture cleanup and the original disk check
 are attempted independently; a failure in one cannot suppress the others, and

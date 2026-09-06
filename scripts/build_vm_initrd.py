@@ -23,6 +23,10 @@ from appliance.build import BuildError, canonical, checked_file, inventory, outs
 MAX_INITRD_BYTES = 256 * 1024**2
 MAX_KERNEL_BYTES = 256 * 1024**2
 MAX_MODULE_BYTES = 1 * 1024**3
+# The generic manifest contains bounded module inventories.  The measured v2
+# output is 3,365,677 bytes; keep ample room for kernel/module metadata while
+# retaining a finite consumer-side read budget.
+MAX_MANIFEST_BYTES = 16 * 1024**2
 MAX_FILES = 100_000
 COMMAND_TIMEOUT = 300
 PRODUCTION_INITRD_SIZE = 64_614_282
@@ -44,6 +48,14 @@ HOOK_BYTES = (
     b"    cat -- \"$report\"\n"
     b"fi\n"
 )
+
+
+def _manifest_bytes(value: dict) -> bytes:
+    """Encode and bound the manifest before publishing it."""
+    payload = canonical(value)
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise BuildError("manifest_limit")
+    return payload
 
 
 def _path_record(path: Path, maximum: int) -> dict:
@@ -538,7 +550,7 @@ def build(input_initrd: Path, generic_kernel: Path, generic_modules: Path,
                            "original_pi_modules_absent": not bool(original_module_releases & {release})},
             "qualified": {"generic_vm_boot": False, "physical_pi_boot": False},
         }
-        (output / "manifest.json").write_bytes(canonical(manifest))
+        (output / "manifest.json").write_bytes(_manifest_bytes(manifest))
         return manifest
 
 

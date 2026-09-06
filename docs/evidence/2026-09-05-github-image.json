@@ -1,0 +1,41 @@
+{
+  "builder_image": "sha256:9f2ca83358be7f1258fba67da032be8b795c9aca302eb747418789320868ce6b",
+  "central_image": "sha256:3864ad51419872f7750ae3db7217dd1bd3eddd2bdcadc25da313a8332b751217",
+  "disk": {
+    "name": "photo-wall-pi5-8e10a9b98a04a70c06f6b2a3d4d9b24a046b2f0e-47065734d27b085b.img",
+    "sha256": "199b1365361212e38dd77efac7f12eb7d0931093f4ce1487c5a2990119292e7c",
+    "size": 5906628608
+  },
+  "disk_preflight": {
+    "free_bytes_before_build": 113677852672,
+    "minimum_free_bytes": 8589934592
+  },
+  "e2e": {
+    "failure": "invalid_regular_file",
+    "image_uploaded": false,
+    "phase": "preflight",
+    "status": "failed",
+    "vm_started": false
+  },
+  "feature_head": "205d222f296b190b42b6c2a8d5b6e21cd7ba259f",
+  "identities": {
+    "boot_abi": "44f117b8a01971790501949cb878937e9b19cbc2d8d2342aa9a95f82f4655618",
+    "configuration_sha256": "47065734d27b085ba232658ad763285b84d03d0da650e6949cb4629f4d8e931a",
+    "generic_initrd_sha256": "2fcf0857e9545857c0ddf0e71927ca33db33c10591f5b3ea54f5890a1f6e307f",
+    "generic_kernel_sha256": "552e27f48eefa445d0d6bbc501e5972d1a43bf0e2cb78ea5345fed9e01736f58",
+    "release_id": "a98a04dc36f766f2252c875c391912e1c0665451006a241bc90a1b1a8f0289d9",
+    "rootfs_sha256": "56e010fbce02db71900d994006d0f0e2f171092adbebcd7667f765a366f59bd2"
+  },
+  "qualified": {
+    "generic_vm_boot": false,
+    "image_built": true,
+    "physical_pi": false
+  },
+  "schema": 1,
+  "source_commit": "8e10a9b98a04a70c06f6b2a3d4d9b24a046b2f0e",
+  "tool_versions": {
+    "packaging": "26.3",
+    "python": "3.12.3"
+  },
+  "workflow_run": "https://github.com/mcurcio/photo-wall/actions/runs/34012404107"
+}
