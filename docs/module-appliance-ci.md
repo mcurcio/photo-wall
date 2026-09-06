@@ -98,14 +98,21 @@ measurements from image boot qualification and the preceding download timeout.
   image build and VM test. No registry write credentials are required.
   Runtime dependencies are installed before application source is copied, so
   ordinary code edits retain the dependency layer.
-- The standard `MVP checks` workflow uses one AMD64 BuildKit cache scope for
-  the loaded `media-test`, `central`, and `media-worker` images. It builds the
-  media test target first so the shared dependency and pinned FFmpeg layers are
-  available to the Compose images, then starts Compose with
+- The standard `MVP checks` workflow runs database/application checks and
+  isolated Linux media conversion in independent jobs. The application job
+  builds the worker first, reusing and publishing the existing AMD64 checks
+  cache, then loads central on the same builder and starts Compose with
   `COMPOSE_PROJECT_NAME=photo-wall-ci` and `--no-build`. The loaded image names
-  are consequently `photo-wall-ci-central` and `photo-wall-ci-worker`; the
-  isolated conversion check reuses `photo-wall-media-test:ci` without network
-  access. Cache upload failure remains an accelerator failure and does not
+  are consequently `photo-wall-ci-central` and `photo-wall-ci-worker`.
+  The media job builds `photo-wall-media-test:ci` from the same checkout and
+  runs conversion without network access. It imports both the checks cache
+  and its own media-test cache, but publishes only to the latter. Separate
+  [cache destinations](https://docs.docker.com/build/cache/backends/gha/#scope)
+  prevent the concurrent builds from overwriting each other's cache objects.
+  Neither job depends on the other; failures and reruns are isolated. This
+  trades a second runner's setup and shared-layer download for overlapping
+  execution; hosted elapsed time must establish the actual benefit.
+  Cache upload failure remains an accelerator failure and does not
   change the checks' source or runtime validation.
   FFmpeg installs in a source-free stage. The worker copies the application
   and locked environment from the shared runtime at the same `/app` path;

@@ -31,14 +31,14 @@ jobs:
       - run: python scripts/configure.py
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
-      - name: Build or restore the pinned Linux media test image
+      - name: Build or restore the media worker image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
-          target: media-test
+          target: media-worker
           platforms: linux/amd64
           load: true
-          tags: photo-wall-media-test:ci
+          tags: photo-wall-ci-worker
           cache-from: type=gha,scope=photo-wall-checks-amd64-v1
           cache-to: type=gha,scope=photo-wall-checks-amd64-v1,mode=max,ignore-error=true
       - name: Build or restore the central image
@@ -50,20 +50,8 @@ jobs:
           load: true
           tags: photo-wall-ci-central
           cache-from: type=gha,scope=photo-wall-checks-amd64-v1
-      - name: Build or restore the media worker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: .
-          target: media-worker
-          platforms: linux/amd64
-          load: true
-          tags: photo-wall-ci-worker
-          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
       - run: docker compose up -d --no-build --wait
       - run: .venv/bin/python scripts/test_local.py -q --tb=short
-      - name: Qualify conversion in the pinned Linux worker
-        run: |
-          docker run --rm --network none photo-wall-media-test:ci
       - run: curl --fail http://127.0.0.1:8000/healthz
       - name: Service diagnostics
         if: failure()
@@ -71,3 +59,25 @@ jobs:
       - name: Remove this job's services
         if: always()
         run: docker compose down --volumes
+
+  linux-media:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Set up the container build cache
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Build the pinned Linux media test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-test
+          platforms: linux/amd64
+          load: true
+          tags: photo-wall-media-test:ci
+          cache-from: |
+            type=gha,scope=photo-wall-checks-amd64-v1
+            type=gha,scope=photo-wall-media-test-amd64-v1
+          cache-to: type=gha,scope=photo-wall-media-test-amd64-v1,mode=max,ignore-error=true
+      - name: Qualify conversion in the pinned Linux worker
+        run: docker run --rm --network none photo-wall-media-test:ci
