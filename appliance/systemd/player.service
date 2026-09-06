@@ -30,7 +30,11 @@ TimeoutStopSec=150
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# Keep the logind/Wayland runtime directory visible for the compositor socket.
+# Hide the unrelated home trees explicitly instead of ProtectHome=yes, which
+# also hides /run/user and prevents the Player from reaching Wayland.
+ProtectHome=read-only
+InaccessiblePaths=-/home -/root
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

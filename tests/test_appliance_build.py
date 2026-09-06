@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -217,6 +218,15 @@ def test_initramfs_boundary_allows_kernel_media_drivers_but_only_minimal_python(
             verify_initramfs(contents + b"usr/lib/python3.12/" + forbidden + b"\n")
     with pytest.raises(BuildError, match="initramfs_incomplete"):
         verify_initramfs(contents.replace(b"scripts/photowall\n", b""))
+
+
+def test_player_sandbox_keeps_wayland_runtime_visible():
+    service = (Path(__file__).parents[1] / "appliance/systemd/player.service").read_text()
+    assert "ProtectHome=read-only" in service
+    assert "InaccessiblePaths=-/home -/root" in service
+    assert "\nProtectHome=yes\n" not in "\n" + service
+    assert "XDG_RUNTIME_DIR=/run/user/10001" in service
+    assert "ReadWritePaths=/run/user" not in service
 
 
 def test_executing_builder_and_helpers_must_match_exported_source():

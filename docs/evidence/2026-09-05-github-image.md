@@ -92,3 +92,35 @@ when they leave the bounded serial-log tail, and records numeric service exit
 codes plus final inventory count. **20 focused e2e tests passed**, including
 late enrollment after log rollover and sanitized exit-code reporting. That is
 harness evidence, not a successful rerun of the guest.
+
+## Cached-build boot diagnostics
+
+[Run 34015771816](https://github.com/mcurcio/photo-wall/actions/runs/34015771816)
+completed another signed image build and populated the pristine Ubuntu cache.
+Its actual PR merge/source revision was
+`ce30e4364e54af9eb2fbb5b6ddac9514afbf8220` (feature head `6a101a9`).
+The 5,906,628,608-byte disk SHA-256 was
+`2e29a6ee9390cdb36d773e35f1c87df03997143f656bf63e89c626140aaab9ec`.
+The [retained sanitized report](2026-09-05-github-cached-vm-report.json) records
+a durable, fault-free trial boot of slot A and the expected release, followed
+by zero enrolled Players and `guest_enrollment_timeout`. Player exited with
+**226/NAMESPACE**; Weston exited 1/FAILURE and trial acceptance was terminated
+with signal 15. The original disk remained unchanged; no image was uploaded
+and no boot/reboot qualification passed.
+
+This evidence narrows the Player failure to systemd namespace setup. A separate
+service review found a definite compositor-access contradiction:
+`ProtectHome=yes` hid `/run/user`, including the configured Wayland socket.
+The correction makes `/run/user` visible read-only while keeping `/home` and
+`/root` inaccessible, with the existing write exceptions retained. It does
+**not** establish the exact cause of 226/NAMESPACE. New diagnostics classify
+allowlisted mount paths and errno messages so a future failure can be located
+without publishing arbitrary guest paths or messages.
+
+The combined correction and diagnostics passed **45 focused tests / 2 Linux
+file-tooling skips**, then **824 PostgreSQL-backed tests / 10 host-specific
+skips / 4 dependency warnings in 93.62 seconds**. Ubuntu's actual
+`systemd-analyze --man=no verify` passed for the updated service inside the
+retained isolated Linux root; this checks unit configuration and executable
+paths, not successful namespace creation or socket access. No manual Pi image
+was rebuilt. A hosted boot of the corrected revision remains required.

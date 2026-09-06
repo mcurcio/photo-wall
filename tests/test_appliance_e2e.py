@@ -260,6 +260,7 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
         "arbitrary-token.service: Failed with result secret\n")
     assert result == dict(systemd_chdir_failure=True, kernel_panic=False, out_of_memory=False,
                          failed_services=["systemd-networkd"], service_exit_status={},
+                         namespace_failures={},
                          python_errors=["ModuleNotFoundError"])
     assert "private-input" not in json.dumps(result)
     assert "arbitrary-token" not in json.dumps(result)
@@ -278,6 +279,49 @@ def test_serial_diagnostics_expose_bounded_service_exit_codes_without_messages()
         dict(code="exited", status=226, name="NAMESPACE"),
         dict(code="killed", status=6, name="ABRT")]}
     assert "private" not in json.dumps(result)
+
+
+def test_namespace_diagnostics_classify_known_paths_without_exporting_guest_text():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics(
+        "systemd[123]: photo-wall-player.service: Failed to set up mount namespacing: "
+        "/run/systemd/unit-root/run/photo-wall/player: No such file or directory\n"
+        "photo-wall-player.service: Failed to set up mount namespacing: "
+        "/var/lib/photo-wall/player: Read-only file system\n"
+        "photo-wall-player.service: Failed to set up mount namespacing: Operation not permitted\n"
+        "photo-wall-player.service: Failed to set up mount namespacing: "
+        "/private-secret/path: private-secret error\n"
+        "private-photo-wall-player.service: Failed to set up mount namespacing: /home: Permission denied\n")
+    assert result["namespace_failures"] == {"photo-wall-player": [
+        dict(path="player_runtime", errno="ENOENT"),
+        dict(path="player_state", errno="EROFS"),
+        dict(path="unclassified", errno="unclassified"),
+        dict(path="unspecified", errno="EPERM"),
+    ]}
+    assert "private" not in json.dumps(result)
+
+
+def test_diagnostics_do_not_attribute_lookalike_units_to_the_player():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics(
+        "private-photo-wall-player.service: Failed to set up mount namespacing: /home: Permission denied\n"
+        "private-photo-wall-player.service: Main process exited, code=exited, status=226/NAMESPACE\n")
+    assert result["failed_services"] == []
+    assert result["service_exit_status"] == {}
+    assert result["namespace_failures"] == {}
+
+
+def test_namespace_diagnostics_deduplicate_and_bound_reported_failures():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    lines = [f"photo-wall-player.service: Failed to set up mount namespacing: {path}: Permission denied"
+             for path in ("/", "/home", "/root", "/run/user", "/run/user/10001", "/run/photo-wall",
+                          "/run/photo-wall/player", "/var/lib/photo-wall", "/tmp", "/var/tmp")]
+    result = serial_diagnostics("\n".join(lines * 5))["namespace_failures"]["photo-wall-player"]
+    assert len(result) == 8
+    assert len({(item["path"], item["errno"]) for item in result}) == 8
 
 
 def test_vm_replacement_during_log_collection_cannot_be_stopped(tmp_path):

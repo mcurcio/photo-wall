@@ -147,17 +147,55 @@ def boot_reports(serial: str, release_id: str) -> list[dict]:
     return result
 
 
+def _service_prefix(service: str) -> str:
+    return r"(?<![A-Za-z0-9_.@-])" + re.escape(service + ".service") + r": "
+
+
+def namespace_diagnostics(plain: str, services: tuple[str, ...]) -> dict:
+    """Classify systemd mount failures without exporting arbitrary guest paths."""
+    paths = {path: name for name, path in (
+        ("root", "/"), ("home", "/home"), ("root_home", "/root"),
+        ("user_runtime", "/run/user"), ("wall_runtime", "/run/user/10001"),
+        ("boot_runtime", "/run/photo-wall"), ("player_runtime", "/run/photo-wall/player"),
+        ("state", "/var/lib/photo-wall"), ("player_state", "/var/lib/photo-wall/player"),
+        ("tmp", "/tmp"), ("var_tmp", "/var/tmp"), ("modules", "/usr/lib/modules"),
+        ("proc", "/proc"), ("proc_sys", "/proc/sys"), ("sys", "/sys"),
+        ("cgroup", "/sys/fs/cgroup"),
+    )}
+    errors = {message: code for code, message in (
+        ("ENOENT", "No such file or directory"), ("EACCES", "Permission denied"),
+        ("EPERM", "Operation not permitted"), ("EROFS", "Read-only file system"),
+        ("ENOTDIR", "Not a directory"), ("ELOOP", "Too many levels of symbolic links"),
+        ("EINVAL", "Invalid argument"), ("ENOSPC", "No space left on device"),
+    )}
+    result = {}
+    for service in services:
+        found = set()
+        pattern = _service_prefix(service) + r"Failed to set up mount namespacing: ([^\r\n]{1,1024})"
+        for match in re.finditer(pattern, plain):
+            detail = match[1]
+            path, separator, error = detail.rpartition(": ")
+            if not separator:
+                path, error = "", detail
+            path = path.removeprefix("/run/systemd/unit-root") or ("/" if path else "")
+            label = paths.get(path, "unclassified" if path else "unspecified")
+            found.add((label, errors.get(error, "unclassified")))
+        if found:
+            result[service] = [dict(path=path, errno=error) for path, error in sorted(found)[:8]]
+    return result
+
+
 def serial_diagnostics(serial: str) -> dict:
     """Return fixed diagnostic names, never guest messages or credentials."""
     plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", serial)
     services = ("systemd-networkd", "systemd-resolved", "photo-wall-player",
                 "photo-wall-weston", "photo-wall-accept-trial", "photo-wall-trial-recovery")
     failed = [service for service in services if re.search(
-        re.escape(service + ".service") + r": (?:Failed|Main process exited)", plain)]
+        _service_prefix(service) + r"(?:Failed|Main process exited)", plain)]
     exits = {}
     for service in services:
-        matches = re.findall(re.escape(service + ".service")
-            + r": (?:Main|Control) process exited, code=(exited|killed|dumped), "
+        matches = re.findall(_service_prefix(service)
+            + r"(?:Main|Control) process exited, code=(exited|killed|dumped), "
               r"status=([0-9]{1,3})(?:/([A-Z0-9_]{1,32}))?", plain)
         if matches:
             exits[service] = [dict(code=code, status=int(status), name=name)
@@ -168,6 +206,7 @@ def serial_diagnostics(serial: str) -> dict:
         "out_of_memory": "Out of memory:" in plain,
         "failed_services": failed,
         "service_exit_status": exits,
+        "namespace_failures": namespace_diagnostics(plain, services),
         "python_errors": [kind for kind in ("ModuleNotFoundError", "ImportError", "PermissionError",
                           "FileNotFoundError", "SSLCertVerificationError") if kind + ":" in plain],
     }

@@ -53,6 +53,12 @@ Validated boot reports are retained across polls so serial-log rollover cannot
 erase earlier boot evidence while enrollment is pending. Diagnostic output
 includes only bounded numeric/named exits for fixed system services and the
 final inventory count, rather than raw service messages.
+Mount-namespace failures additionally map a fixed set of system paths and
+error messages to public labels and errno names. Unknown paths/messages become
+`unclassified`; raw guest paths, messages and credentials remain excluded.
+The parser follows the [systemd v255 mount-failure format](https://github.com/systemd/systemd/blob/v255/src/core/exec-invoke.c)
+and bounds each service's distinct records to eight. These diagnostics locate
+a startup failure; they cannot turn a failed enrollment into qualification.
 Cleanup checks container identities before stopping or removing them; replacement
 resources fail closed. VM cleanup, fixture cleanup and the original disk check
 are attempted independently; a failure in one cannot suppress the others, and
