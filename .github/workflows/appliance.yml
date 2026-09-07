@@ -124,6 +124,8 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-ci/docker-debug.log
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
           .venv/bin/python -m scripts.test_appliance_e2e \
@@ -157,6 +159,15 @@ jobs:
         with:
           name: photo-wall-arm64-e2e-${{ github.sha }}
           path: ${{ runner.temp }}/photo-wall-ci/e2e-report.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Docker debug diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-arm64-docker-debug-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-ci/docker-debug.log
           if-no-files-found: ignore
           retention-days: 7
 

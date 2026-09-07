@@ -403,6 +403,28 @@ def test_probe_records_bounded_failure_diagnostics(tmp_path):
                and "volume-nocopy" not in item for item in create)
 
 
+def test_docker_debug_flag_and_bounded_failure_log(tmp_path, monkeypatch):
+    from scripts.boot_fixture import (
+        MAX_DOCKER_DEBUG_ENTRY,
+        docker_debug_args,
+        record_docker_debug,
+    )
+
+    path = tmp_path / "docker-debug.log"
+    monkeypatch.setenv("PHOTO_WALL_DOCKER_DEBUG", "1")
+    monkeypatch.setenv("PHOTO_WALL_DOCKER_DEBUG_LOG", str(path))
+    args = ["docker", "exec", "fixture", "private-argument"]
+
+    assert docker_debug_args(args) == ["docker", "--debug", *args[1:]]
+    record_docker_debug(args, 17, b"x" * (MAX_DOCKER_DEBUG_ENTRY + 10))
+
+    logged = path.read_bytes()
+    assert logged.startswith(b"docker operation=exec exit=17\n")
+    assert b"private-argument" not in logged
+    assert len(logged) <= MAX_DOCKER_DEBUG_ENTRY + 64
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("initialized", [True, False])
 def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
     fixture = prepared_fixture(tmp_path)
