@@ -269,7 +269,8 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
         "systemd[1]: \x1b[0;31msystemd-networkd.service: Main process exited, status=200/CHDIR\x1b[0m\n"
         "ModuleNotFoundError: private-input-must-not-escape\n"
         "arbitrary-token.service: Failed with result secret\n")
-    assert result == dict(systemd_chdir_failure=True, kernel_panic=False, out_of_memory=False,
+    assert result == dict(qemu_device_error=False, systemd_chdir_failure=True,
+                         kernel_panic=False, out_of_memory=False,
                          failed_services=["systemd-networkd"], service_exit_status={},
                          namespace_failures={}, player_faults=[],
                          python_errors=["ModuleNotFoundError"])
@@ -369,6 +370,16 @@ def test_serial_player_faults_export_only_known_complete_codes():
         "player fault: health_storage\n")
     assert result["player_faults"] == ["native_initialization", "health_storage"]
     assert "secret_token" not in json.dumps(result)
+
+
+def test_serial_diagnostics_classifies_qemu_device_startup_failure_without_exporting_detail():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics(
+        "qemu-system-aarch64: -device missing: Device 'missing' not found\nprivate detail"
+    )
+    assert result["qemu_device_error"] is True
+    assert "missing" not in json.dumps(result)
 
 
 

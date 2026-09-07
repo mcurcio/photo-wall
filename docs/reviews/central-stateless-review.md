@@ -8,7 +8,7 @@ Scope: the complete central-authority/stateless-Player working-tree refactor bas
 
 | Severity | Finding | Disposition |
 |---|---|---|
-| P1 | A consumed candidate could fail during verification or before a functioning candidate userspace watchdog started, leaving rollback dependent on an external reboot. | Fixed. Trusted initramfs now requires and arms a nowayout kernel watchdog before candidate verification/download; systemd takes it over, pre-root failure forces reboot, and the generic VM supplies and preloads the SBSA watchdog. |
+| P1 | A consumed candidate could fail during verification or before a functioning candidate userspace watchdog started, leaving rollback dependent on an external reboot. | Fixed. Trusted initramfs now requires and arms a nowayout kernel watchdog before candidate verification/download; systemd takes it over, pre-root failure forces reboot, and the generic VM supplies and preloads QEMU's supported PCI `i6300esb` watchdog. |
 | P1 | The generic VM health probe accepted the superseded durable health shape and rejected the current Player report. | Fixed. The probe accepts the exact volatile schema, rejects durable/unknown forms, and emits bounded release and clock status including RTT, offset, delay, drift, uncertainty, and rejection counters. |
 | P1 | The operator UI still treated Player storage as a binding/health gate. | Fixed. Storage errors and output filtering were removed; Installation intent and current equipment/output observations drive binding. |
 | P2 | The boot fixture bypassed the shared daemon-builder policy. | Fixed. It now uses the same explicit Buildx `default` builder with `--load`, labels, and network policy as the other locally derived images. |

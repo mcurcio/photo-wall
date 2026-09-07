@@ -32,8 +32,8 @@ COMMAND_TIMEOUT = 300
 PRODUCTION_INITRD_SIZE = 64_614_282
 PRODUCTION_INITRD_SHA256 = "98435d9d6d785aea06676ceb9319284e61baeff99a78b1ef253006d9ff6d2d8e"
 REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "virtio_gpu", "9p", "9pnet",
-                    "9pnet_virtio", "sbsa_gwdt", "loop", "squashfs", "overlay", "ext4", "vfat")
-PRELOAD_ROOTS = ("virtio_gpu", "9p", "9pnet", "9pnet_virtio", "sbsa_gwdt")
+                    "9pnet_virtio", "i6300esb", "loop", "squashfs", "overlay", "ext4", "vfat")
+PRELOAD_ROOTS = ("virtio_gpu", "9p", "9pnet", "9pnet_virtio", "i6300esb")
 PROTECTED_PREFIXES = ("usr/bin/python3.12", "usr/lib/python3.12", "etc/photo-wall",
                       "scripts/photowall")
 HOOK_PATH = "scripts/init-bottom/photo-wall-evidence"

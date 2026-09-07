@@ -71,11 +71,11 @@ umask 077
 exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aarch64 \\
     -machine virt -uuid __DEVICE_UUID__ -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
-    -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 watchdog_core.nowayout=1 sbsa_gwdt.nowayout=1 systemd.journald.forward_to_console=1' \\
+    -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 watchdog_core.nowayout=1 i6300esb.nowayout=1 systemd.journald.forward_to_console=1' \\
     -drive file=/input.img,if=none,format=raw,readonly=on,id=bootstrap \\
     -device virtio-blk-pci,drive=bootstrap \\
     -device virtio-gpu-pci,max_outputs=2 \\
-    -device sbsa-gwdt \\
+    -device i6300esb \\
     -fsdev local,id=ci,path=/vm/share,security_model=none,readonly=on \\
     -device virtio-9p-pci,fsdev=ci,mount_tag=photo-wall-ci \\
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile= \\
@@ -265,6 +265,10 @@ def serial_diagnostics(serial: str) -> dict:
             exits[service] = [dict(code=code, status=int(status), name=name)
                              for code, status, name in sorted(set(matches))[:8]]
     return {
+        "qemu_device_error": bool(re.search(
+            r"qemu-system-aarch64: .*?(?:Device .* not found|not a valid device model name)",
+            plain,
+        )),
         "systemd_chdir_failure": "200/CHDIR" in plain,
         "kernel_panic": "Kernel panic" in plain,
         "out_of_memory": "Out of memory:" in plain,
