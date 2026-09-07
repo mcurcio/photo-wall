@@ -696,7 +696,10 @@ def operator_action(action: str):
             response = client.request(method, path, json=body)
         except httpx.HTTPError:
             raise DemoError("operator_transport") from None
-        require(response.status_code == (201 if method == "POST" and path == "/v1/operator/frames" else 200),
+        expected = 201 if method == "POST" and path == "/v1/operator/frames" else (
+            202 if method == "POST" and path.endswith("/refresh") else 200
+        )
+        require(response.status_code == expected,
                 "operator_http_" + str(response.status_code))
         require(len(response.content) <= MAX_EVIDENCE, "operator_body_bound")
         return response.json()
@@ -708,6 +711,8 @@ def operator_action(action: str):
         return request("PUT", "/v1/operator/sources/demo:1", {"schema": 1, "source_ref": "demo:1",
             "connection_ref": "demo-library", "favorites": True, "captured_from": start,
             "captured_until": start + 60, "media_types": ["image", "video"]})
+    if action == "refresh":
+        return request("POST", "/v1/operator/sources/demo:1/refresh")
     if action == "start":
         inventory = request("GET", "/v1/operator/inventory")
         outputs = sorted(inventory["outputs"], key=lambda output: (output["player_id"], output["output_id"]))
@@ -836,6 +841,15 @@ def rejoined_player_ready(old, report, rejoined_at):
                     for event in current_outputs(report)))
 
 
+def source_refresh_completed(snapshot, receipt, *, status=None):
+    """Match observed source state to the exact accepted refresh request."""
+    source = next((item for item in snapshot["media"]["sources"]
+                   if item["source_ref"] == receipt["source_ref"]), None)
+    return bool(source is not None
+                and source["refresh_completed_revision"] >= receipt["requested_revision"]
+                and (status is None or source["status"] == status))
+
+
 def journal_upstream_mutation(host, evidence, save, before, reports, action, pre_key, change_key, pre=None):
     """Persist exact pre-mutation evidence and mutation lifecycle around one upstream action."""
     pre_mutation = dict(
@@ -852,15 +866,16 @@ def journal_upstream_mutation(host, evidence, save, before, reports, action, pre
     save()
     try:
         result = host.role("upstream-tools", action)
+        change["completed_utc"] = time.time()
+        change["result"] = result
+        change["refresh"] = host.role("operator", "refresh")
     except Exception as error:
         change["failed_utc"] = time.time()
         change["error"] = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
         save()
         raise
-    change["completed_utc"] = time.time()
-    change["result"] = result
     save()
-    return result, change["completed_utc"]
+    return result, change["completed_utc"], change["refresh"]
 
 
 def delete_secured_original(host, evidence, save, before, reports, portrait_sha):
@@ -940,9 +955,8 @@ def full_sequence(host, evidence, save):
             require(time.monotonic() < deadline, code)
             time.sleep(2)
 
-    def source_status(status, after=0):
-        return lambda snapshot, _: (snapshot["media"]["sources"][0]["status"] == status and
-            (status != "ok" or snapshot["media"]["sources"][0]["last_success"] > after))
+    def refresh_status(receipt, status):
+        return lambda snapshot, _: source_refresh_completed(snapshot, receipt, status=status)
 
     def record(name, snapshot, reports, **checks):
         phases[name] = dict(central=snapshot, players=reports, checks=checks)
@@ -950,14 +964,17 @@ def full_sequence(host, evidence, save):
 
     # One Run must survive membership edits; current locks freeze exact assignment bytes.
     before, reports = sample()
-    evolved, _ = journal_upstream_mutation(
+    evolved, _, evolved_refresh = journal_upstream_mutation(
         host, evidence, save, before, reports, "evolve",
         pre_key="evolved_pre_change",
         change_key="evolved_change",
     )
     expected = {item["sha1"] for item in evolved["assets"] if item["favorite"] and not item["deleted"]}
-    snapshot, reports = await_state(lambda snapshot, _: {item["sha1"] for item in snapshot["members"]} == expected,
-                                    "live_membership_timeout")
+    snapshot, reports = await_state(
+        lambda snapshot, _: source_refresh_completed(snapshot, evolved_refresh, status="ok")
+        and {item["sha1"] for item in snapshot["members"]} == expected,
+        "live_membership_timeout",
+    )
     checked = preserved_locks(before, snapshot)
     require(checked > 0, "live_lock_proof_empty")
     require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
@@ -977,7 +994,12 @@ def full_sequence(host, evidence, save):
                         if job["original_sha1"] == portrait_sha1 and job["state"] == "ready")
     before, reports = await_state(lambda snapshot, _: any(item["sha256"] == portrait_sha and
         item["start"] > snapshot["utc"] + 3 for item in snapshot["locks"]), "portrait_not_secured", 40)
-    deleted, deleted_at = delete_secured_original(host, evidence, save, before, reports, portrait_sha)
+    deleted, deleted_at, deleted_refresh = delete_secured_original(
+        host, evidence, save, before, reports, portrait_sha
+    )
+    snapshot, reports = await_state(
+        refresh_status(deleted_refresh, "ok"), "deleted_refresh_timeout"
+    )
     snapshot, reports = await_state(
         lambda snapshot, reports: selected_secured_presentation(
             before, reports, portrait_sha, deleted_at) is not None,
@@ -989,23 +1011,35 @@ def full_sequence(host, evidence, save):
            selected_presentation=presentation, upstream=deleted)
 
     host.role("upstream-tools", "deny")
-    snapshot, reports = await_state(source_status("permission"), "permission_not_reported")
+    denied_refresh = host.role("operator", "refresh")
+    snapshot, reports = await_state(
+        refresh_status(denied_refresh, "permission"), "permission_not_reported"
+    )
     record("permission", snapshot, reports)
-    restored_at = time.time()
     host.role("upstream-tools", "restore")
-    snapshot, reports = await_state(source_status("ok", restored_at), "permission_recovery_timeout")
+    permission_recovery = host.role("operator", "refresh")
+    snapshot, reports = await_state(
+        refresh_status(permission_recovery, "ok"), "permission_recovery_timeout"
+    )
     record("permission_recovered", snapshot, reports)
 
     worker_id = host.compose("ps", "-q", "worker").strip()
     upstream = host.fixture.project + "_upstream_net"
     host.command(["docker", "network", "disconnect", upstream, worker_id], capture=False)
     try:
-        snapshot, reports = await_state(source_status("unavailable"), "upstream_outage_not_reported", 75)
+        outage_refresh = host.role("operator", "refresh")
+        snapshot, reports = await_state(
+            refresh_status(outage_refresh, "unavailable"),
+            "upstream_outage_not_reported",
+            75,
+        )
         record("upstream_outage", snapshot, reports)
     finally:
         host.command(["docker", "network", "connect", upstream, worker_id], capture=False)
-    restored_at = time.time()
-    snapshot, reports = await_state(source_status("ok", restored_at), "upstream_recovery_timeout", 75)
+    network_recovery = host.role("operator", "refresh")
+    snapshot, reports = await_state(
+        refresh_status(network_recovery, "ok"), "upstream_recovery_timeout", 75
+    )
     record("upstream_recovered", snapshot, reports)
 
     # Central is unavailable past every held lease, so the Player must reach fallback.
@@ -1096,6 +1130,7 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
                 require(time.monotonic() < deadline, "central_startup_timeout")
                 time.sleep(1)
         host.role("operator", "source")
+        initial_refresh = host.role("operator", "refresh")
         host.compose("up", "-d", "worker", *host.players, timeout=120, capture=False)
         deadline = time.monotonic() + 120
         while True:
@@ -1103,7 +1138,8 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
                 reports = {name: host.player_report(name) for name in host.players}
                 require(all(report["player_id"] for report in reports.values()), "enrollment_pending")
                 snapshot = host.role("operator", "snapshot")
-                require(snapshot["media"]["sources"][0]["status"] == "ok", "refresh_pending")
+                require(source_refresh_completed(snapshot, initial_refresh, status="ok"),
+                        "refresh_pending")
                 break
             except Exception:
                 require(time.monotonic() < deadline, "source_or_player_startup_timeout")

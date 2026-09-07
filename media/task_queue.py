@@ -6,7 +6,12 @@ from typing import Any
 
 import procrastinate
 
-from central.media_queue import MEDIA_QUEUE, MEDIA_STORAGE_LOCK, PREPARE_MEDIA_TASK
+from central.media_queue import (
+    MEDIA_QUEUE,
+    MEDIA_STORAGE_LOCK,
+    PREPARE_MEDIA_TASK,
+    REFRESH_MEDIA_SOURCE_TASK,
+)
 
 REFRESH_CRON = "* * * * * */30"
 MAINTENANCE_CRON = "*/5 * * * * 0"
@@ -30,6 +35,10 @@ class MediaRetryStrategy(procrastinate.BaseRetryStrategy):
         return procrastinate.RetryDecision(
             retry_in={"seconds": self.delays[attempt - 1]},
         )
+
+
+class RefreshRetryStrategy(MediaRetryStrategy):
+    delays = (5, 15, 30, 60)
 
 
 def create_worker_app(dsn: str) -> procrastinate.App:
@@ -58,6 +67,11 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     async def refresh_media(context, timestamp: int):
         del timestamp
         await context.additional_context["media_worker"].refresh_once()
+
+    @app.task(name=REFRESH_MEDIA_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True,
+              retry=RefreshRetryStrategy())
+    async def refresh_media_source(context, source_ref: str):
+        await context.additional_context["media_worker"].refresh_source(source_ref)
 
     @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,

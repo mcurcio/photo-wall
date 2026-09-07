@@ -38,7 +38,7 @@ def setup_source(registry, count=1, *, limits=None, assets=None):
     repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue())
     spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
     repo.configure_source(spec)
-    lease = repo.begin_refresh()
+    lease = repo.begin_scheduled_refresh()
     originals = tuple(assets) if assets is not None else tuple(asset(i + 1) for i in range(count))
     repo.publish_refresh(lease, refresh(spec, *originals))
     repo.set_recipe(RECIPE)
@@ -83,6 +83,32 @@ def test_authored_api_distinguishes_unknown_and_nonmember(registry):
         body["asset_ids"] = ["asset-never-seen"]
         assert client.post("/v1/operator/authored-candidates", headers=headers, json=body).json() == {
             "error": "authored_asset_not_found"}
+
+
+def test_operator_can_request_exact_asynchronous_source_refresh(registry):
+    _, spec, _ = setup_source(registry)
+    path = f"/v1/operator/sources/{spec.source_ref}/refresh"
+    with client_for(registry) as client:
+        assert client.post(path).status_code == 401
+        headers = {"Authorization": "Bearer " + ADMIN}
+        first = client.post(path, headers=headers)
+        second = client.post(path, headers=headers)
+        missing = client.post("/v1/operator/sources/missing:1/refresh", headers=headers)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json() == {
+        "source_ref": spec.source_ref,
+        "requested_revision": 1,
+        "completed_revision": 0,
+        "coalesced": False,
+    }
+    assert second.json() == {
+        "source_ref": spec.source_ref,
+        "requested_revision": 2,
+        "completed_revision": 0,
+        "coalesced": True,
+    }
+    assert missing.status_code == 404 and missing.json() == {"error": "source_not_found"}
 
 
 @pytest.mark.parametrize("status", ["unavailable", "permission", "incompatible"])

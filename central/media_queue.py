@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import procrastinate
 import psycopg
 
 PREPARE_MEDIA_TASK = "photo_wall.media.prepare"
+REFRESH_MEDIA_SOURCE_TASK = "photo_wall.media.refresh_source"
 MEDIA_QUEUE = "photo-wall-media"
 MEDIA_STORAGE_LOCK = "photo-wall-media-storage"
+MEDIA_REFRESH_LOCK_PREFIX = "photo-wall-media-refresh:"
 _SCHEMA_LOCK = 734118326
 
 
-class AcquisitionQueue(Protocol):
+class MediaTaskQueue(Protocol):
     def enqueue_in(self, conn: Any, job_id: str) -> int: ...
+    def enqueue_refresh_in(self, conn: Any, source_ref: str) -> "QueueReceipt": ...
+
+
+@dataclass(frozen=True, slots=True)
+class QueueReceipt:
+    coalesced: bool
 
 
 class ProcrastinateMediaQueue:
@@ -32,6 +41,24 @@ class ProcrastinateMediaQueue:
             queueing_lock=job_id,
             connection=conn,
         ).defer(job_id=job_id)
+
+    def enqueue_refresh_in(self, conn: Any, source_ref: str) -> QueueReceipt:
+        queueing_lock = "media-refresh:" + source_ref
+        try:
+            # The repository holds MEDIA_LOCK until commit. A conflicting todo
+            # job cannot capture a refresh revision before this request becomes
+            # visible, even if Procrastinate has already marked it doing.
+            with conn.transaction():
+                self.app.configure_task(
+                    REFRESH_MEDIA_SOURCE_TASK,
+                    queue=MEDIA_QUEUE,
+                    lock=MEDIA_REFRESH_LOCK_PREFIX + source_ref,
+                    queueing_lock=queueing_lock,
+                    connection=conn,
+                ).defer(source_ref=source_ref)
+            return QueueReceipt(coalesced=False)
+        except procrastinate.exceptions.AlreadyEnqueued:
+            return QueueReceipt(coalesced=True)
 
     @classmethod
     def apply_schema(cls, dsn: str) -> None:

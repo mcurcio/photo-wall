@@ -18,7 +18,7 @@ from pydantic import ConfigDict, Field, model_validator
 from central.catalog import CatalogSnapshot
 from central.db import Database
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
-from central.media_repository import JobLease, MediaRepository
+from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore
 from central.registry import RegistryError
 from contracts.models import Model, Positive
@@ -184,10 +184,7 @@ class MediaWorker:
             await _blocking(self.repository.set_recipe, recipe)
             self._recipe = recipe
 
-    async def refresh_once(self) -> bool:
-        lease = await _blocking(self.repository.begin_refresh)
-        if lease is None:
-            return False
+    async def _refresh(self, lease: RefreshLease) -> None:
         try:
             async with asyncio.timeout(self.limits.refresh_seconds):
                 result = await self._client(lease.source.connection_ref).refresh(lease.source)
@@ -203,11 +200,49 @@ class MediaWorker:
             status = error.status if isinstance(error, MediaError) else "unavailable"
             result = RefreshResult(snapshot=CatalogSnapshot(source_ref=lease.source.source_ref,
                 refreshed_at=self._utc(), status=status), diagnostics=(Diagnostic(code=code),))
-        await _blocking(self.repository.publish_refresh, lease, result)
+        if not await _blocking(self.repository.publish_refresh, lease, result):
+            raise RetryableMediaTask("stale_refresh")
         if result.snapshot.status != "ok":
             self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
         await _blocking(self.repository.worker_status, self._error)
+
+    async def refresh_once(self) -> bool:
+        lease = await _blocking(self.repository.begin_scheduled_refresh)
+        if lease is None:
+            return False
+        await self._refresh(lease)
+        requested, completed = await _blocking(
+            self.repository.refresh_revisions, lease.source.source_ref
+        )
+        if completed < requested:
+            await self._refresh_source(lease.source.source_ref, retry_busy=False)
         return True
+
+    async def refresh_source(self, source_ref: str) -> None:
+        """Complete every persisted request revision for one source."""
+        await self._refresh_source(source_ref, retry_busy=True)
+
+    async def _refresh_source(self, source_ref: str, *, retry_busy: bool) -> None:
+        for _ in range(8):
+            lease = await _blocking(
+                self.repository.begin_requested_refresh, source_ref
+            )
+            if lease is None:
+                requested, completed = await _blocking(
+                    self.repository.refresh_revisions, source_ref
+                )
+                if completed >= requested:
+                    return
+                if retry_busy:
+                    raise RetryableMediaTask("refresh_in_progress")
+                return
+            await self._refresh(lease)
+            requested, completed = await _blocking(
+                self.repository.refresh_revisions, source_ref
+            )
+            if completed >= requested:
+                return
+        raise RetryableMediaTask("refresh_not_caught_up")
 
     async def _fail(self, lease: JobLease, code: str, *, retry: bool = True):
         try:

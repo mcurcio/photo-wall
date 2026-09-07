@@ -16,7 +16,8 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
-from central.media_queue import AcquisitionQueue
+from central.media_ports import RefreshReceipt
+from central.media_queue import MediaTaskQueue
 from central.planner import AcquisitionRequest, eligible
 from central.registry import RegistryError
 from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
@@ -43,6 +44,7 @@ class RefreshLease(Model):
     source: SourceSpec
     generation: int = Field(ge=1)
     started_at: Instant
+    request_revision: int = Field(default=0, ge=0)
 
 
 class JobLease(Model):
@@ -57,7 +59,7 @@ class JobLease(Model):
 
 class MediaRepository:
     def __init__(self, db: Database, clock: Clock, limits: StoreLimits | None = None,
-                 *, queue: AcquisitionQueue | None = None):
+                 *, queue: MediaTaskQueue | None = None):
         self.db, self.clock, self.limits = db, clock, limits or StoreLimits()
         self.queue = queue
 
@@ -88,21 +90,76 @@ class MediaRepository:
 
     def sources(self) -> list[dict]:
         with self.db.transaction() as conn:
-            return conn.execute("SELECT source_ref,spec,next_refresh,last_success,status,diagnostics,counts "
+            return conn.execute("SELECT source_ref,spec,next_refresh,last_success,status,diagnostics,counts,"
+                                "refresh_requested_revision,refresh_completed_revision "
                                 "FROM media_sources ORDER BY source_ref").fetchall()
 
-    def begin_refresh(self) -> RefreshLease | None:
+    def request_refresh(self, source_ref: str) -> RefreshReceipt:
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT refresh_requested_revision,refresh_completed_revision FROM media_sources "
+                "WHERE source_ref=%s FOR UPDATE", (source_ref,),
+            ).fetchone()
+            if row is None:
+                raise RegistryError("source_not_found", 404)
+            if self.queue is None:
+                raise RegistryError("media_queue_unconfigured", 503)
+            revision = row["refresh_requested_revision"] + 1
+            conn.execute(
+                "UPDATE media_sources SET refresh_requested_revision=%s WHERE source_ref=%s",
+                (revision, source_ref),
+            )
+            queued = self.queue.enqueue_refresh_in(conn, source_ref)
+            return RefreshReceipt(
+                source_ref=source_ref,
+                requested_revision=revision,
+                completed_revision=row["refresh_completed_revision"],
+                coalesced=queued.coalesced,
+            )
+
+    def refresh_revisions(self, source_ref: str) -> tuple[int, int]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT refresh_requested_revision,refresh_completed_revision FROM media_sources "
+                "WHERE source_ref=%s", (source_ref,),
+            ).fetchone()
+            if row is None:
+                raise RegistryError("source_not_found", 404)
+            return row["refresh_requested_revision"], row["refresh_completed_revision"]
+
+    def begin_scheduled_refresh(self) -> RefreshLease | None:
+        return self._begin_refresh()
+
+    def begin_requested_refresh(self, source_ref: str) -> RefreshLease | None:
+        return self._begin_refresh(source_ref)
+
+    def _begin_refresh(self, source_ref: str | None = None) -> RefreshLease | None:
         now = self.clock.utc()
         with self.transaction() as conn:
-            row = conn.execute("SELECT * FROM media_sources WHERE next_refresh<=%s "
-                               "ORDER BY next_refresh,source_ref LIMIT 1 FOR UPDATE SKIP LOCKED", (now,)).fetchone()
+            if source_ref is None:
+                row = conn.execute(
+                    "SELECT * FROM media_sources WHERE "
+                    "(next_refresh<=%s OR refresh_requested_revision>refresh_completed_revision) "
+                    "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
+                    "ORDER BY next_refresh,source_ref LIMIT 1 FOR UPDATE SKIP LOCKED",
+                    (now, now),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM media_sources WHERE source_ref=%s "
+                    "AND refresh_requested_revision>refresh_completed_revision "
+                    "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
+                    "FOR UPDATE SKIP LOCKED",
+                    (source_ref, now),
+                ).fetchone()
             if row is None:
                 return None
             generation = row["generation"] + 1
             # A failed/killed refresh becomes eligible after its hard request budget, not immediately.
-            conn.execute("UPDATE media_sources SET generation=%s,refresh_started=%s,next_refresh=%s "
+            conn.execute("UPDATE media_sources SET generation=%s,refresh_started=%s,refresh_lease_until=%s "
                          "WHERE source_ref=%s", (generation, now, now + 90, row["source_ref"]))
-            return RefreshLease(source=SourceSpec.model_validate(row["spec"]), generation=generation, started_at=now)
+            return RefreshLease(source=SourceSpec.model_validate(row["spec"]), generation=generation,
+                                started_at=now, request_revision=row["refresh_requested_revision"])
 
     @staticmethod
     def _geometry(asset: OriginalAsset):
@@ -155,10 +212,13 @@ class MediaRepository:
                 for asset in result.assets:
                     conn.execute("INSERT INTO source_members VALUES(%s,%s)", (lease.source.source_ref, asset.asset_id))
             conn.execute("UPDATE media_sources SET next_refresh=%s,last_success=CASE WHEN %s THEN %s ELSE last_success END,"
-                         "status=%s,diagnostics=%s,counts=%s,refresh_started=NULL WHERE source_ref=%s",
+                         "status=%s,diagnostics=%s,counts=%s,refresh_started=NULL,"
+                         "refresh_lease_until=NULL,"
+                         "refresh_completed_revision=GREATEST(refresh_completed_revision,%s) WHERE source_ref=%s",
                          (now + self.limits.refresh_seconds, result.snapshot.status == "ok", now,
                           result.snapshot.status, Jsonb([d.model_dump(mode="json") for d in result.diagnostics]),
-                          Jsonb(result.counts.model_dump(mode="json")), lease.source.source_ref))
+                          Jsonb(result.counts.model_dump(mode="json")), lease.request_revision,
+                          lease.source.source_ref))
             self.refresh_catalog_in(conn, lease.source.source_ref, now, result.snapshot.status)
             return True
 

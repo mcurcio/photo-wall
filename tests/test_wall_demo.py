@@ -31,6 +31,7 @@ from scripts.demo_wall import (
     retryable_operator_error,
     run_demo,
     selected_secured_presentation,
+    source_refresh_completed,
     validate_selected_revision,
     write_json,
 )
@@ -380,6 +381,9 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     class Host:
         def role(self, role, action):
             events.append(("role", role, action))
+            if action == "refresh":
+                return {"source_ref": "demo:1", "requested_revision": 2,
+                        "completed_revision": 1, "coalesced": False}
             return {"action": action, "assets": [{"label": "portrait", "deleted": True}]}
 
     def save():
@@ -387,14 +391,17 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
         events.append(("save",))
         saved.append(copy.deepcopy(evidence))
 
-    result, completed = delete_secured_original(Host(), evidence, save, before, reports,
-                                                "p" * 64)
+    result, completed, receipt = delete_secured_original(
+        Host(), evidence, save, before, reports, "p" * 64
+    )
     assert result["action"] == "delete"
     assert completed == evidence["phases"]["deleted_secured_delete"]["completed_utc"]
     assert events[0] == ("save",)
     assert events[1] == ("save",)
     assert events[2] == ("role", "upstream-tools", "delete")
-    assert events[3] == ("save",)
+    assert events[3] == ("role", "operator", "refresh")
+    assert events[4] == ("save",)
+    assert receipt == evidence["phases"]["deleted_secured_delete"]["refresh"]
     pre = saved[0]["phases"]["deleted_secured_pre_delete"]
     assert pre["central"] == before and pre["players"] == reports
     assert pre["future_portrait_locks"] == [before["locks"][0]]
@@ -505,6 +512,9 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     class Host:
         def role(self, role, action):
             events.append(("role", role, action))
+            if action == "refresh":
+                return {"source_ref": "demo:1", "requested_revision": 3,
+                        "completed_revision": 2, "coalesced": False}
             return {"action": action, "assets": [{"label": "older-live", "sha1": "l", "deleted": False}]}
 
     def save():
@@ -512,7 +522,7 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
         events.append(("save",))
         saved.append(copy.deepcopy(evidence))
 
-    result, completed = journal_upstream_mutation(
+    result, completed, receipt = journal_upstream_mutation(
         Host(), evidence, save, before, reports, "evolve",
         pre_key="evolved_pre_change",
         change_key="evolved_change",
@@ -522,7 +532,9 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     assert events[0] == ("save",)
     assert events[1] == ("save",)
     assert events[2] == ("role", "upstream-tools", "evolve")
-    assert events[3] == ("save",)
+    assert events[3] == ("role", "operator", "refresh")
+    assert events[4] == ("save",)
+    assert receipt == evidence["phases"]["evolved_change"]["refresh"]
     pre = saved[0]["phases"]["evolved_pre_change"]
     assert pre["central"] == before and pre["players"] == reports
     assert pre["action"] == "evolve"
@@ -531,6 +543,21 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     save()
     assert saved[-1]["phases"]["evolved_pre_change"] == pre
     assert saved[-1]["phases"]["evolved_change"]["result"] == result
+
+
+def test_refresh_completion_matches_the_exact_accepted_revision():
+    receipt = {"source_ref": "demo:1", "requested_revision": 4,
+               "completed_revision": 3, "coalesced": True}
+    source = {"source_ref": "demo:1", "refresh_completed_revision": 4, "status": "ok"}
+    snapshot = {"media": {"sources": [source]}}
+
+    assert source_refresh_completed(snapshot, receipt, status="ok")
+    assert not source_refresh_completed(
+        {"media": {"sources": [dict(source, refresh_completed_revision=3)]}},
+        receipt,
+        status="ok",
+    )
+    assert not source_refresh_completed(snapshot, receipt, status="permission")
 
 
 def test_journaled_upstream_mutation_preserves_error_timepoint_and_result_fields():
@@ -566,6 +593,30 @@ def test_journaled_upstream_mutation_preserves_error_timepoint_and_result_fields
     save()
     assert saved[-1]["phases"]["evolved_pre_change"]["central"] == before
     assert saved[-1]["phases"]["evolved_change"]["error"] == "operator_http_503"
+
+
+def test_journaled_mutation_records_refresh_request_failure_after_upstream_success():
+    evidence = {"phases": {}}
+
+    class Host:
+        def role(self, role, action):
+            if role == "upstream-tools":
+                return {"action": action, "assets": []}
+            raise DemoError("operator_http_503")
+
+    with pytest.raises(DemoError, match="operator_http_503"):
+        journal_upstream_mutation(
+            Host(), evidence, lambda: None, {"locks": []}, {}, "evolve",
+            pre_key="evolved_pre_change",
+            change_key="evolved_change",
+        )
+
+    change = evidence["phases"]["evolved_change"]
+    assert change["result"] == {"action": "evolve", "assets": []}
+    assert change["completed_utc"] >= change["invoked_utc"]
+    assert change["failed_utc"] >= change["completed_utc"]
+    assert change["error"] == "operator_http_503"
+    assert "refresh" not in change
 
 
 def test_plan_records_selected_revision_and_image_requirement(monkeypatch, capsys):

@@ -105,11 +105,16 @@ class FakeSource:
         self.refreshes, self.downloads, self.closed = 0, 0, False
         self.fault = None
         self.gate = None
+        self.refresh_gate = None
+        self.refresh_entered = asyncio.Event()
         self.entered = asyncio.Event()
         self.cancelled = False
 
     async def refresh(self, spec):
         self.refreshes += 1
+        self.refresh_entered.set()
+        if self.refresh_gate:
+            await self.refresh_gate.wait()
         return RefreshResult(snapshot=CatalogSnapshot(source_ref=spec.source_ref,
             refreshed_at=self.clock.utc(), candidates=tuple(a.candidate for a in self.assets)),
             assets=self.assets)
@@ -206,6 +211,102 @@ def test_periodic_refresh_task_discovers_assets_without_enqueuing_job(worker_sto
     assert source.closed
 
 
+def test_source_task_catches_up_request_arriving_during_active_refresh(worker_storage):
+    configure_source(worker_storage)
+    source = FakeSource(worker_storage.clock, (original(),))
+    source.refresh_gate = asyncio.Event()
+    instance = worker(worker_storage, source)
+    first = worker_storage.repository.request_refresh("library:1")
+
+    async def exercise():
+        try:
+            task = asyncio.create_task(instance.refresh_source("library:1"))
+            await source.refresh_entered.wait()
+            second = await asyncio.to_thread(
+                worker_storage.repository.request_refresh, "library:1"
+            )
+            source.refresh_gate.set()
+            await task
+            return second
+        finally:
+            await close(instance)
+
+    second = asyncio.run(exercise())
+    assert (first.requested_revision, second.requested_revision) == (1, 2)
+    assert worker_storage.repository.refresh_revisions("library:1") == (2, 2)
+    assert source.refreshes == 2
+
+
+def test_scheduled_refresh_catches_up_request_arriving_during_upstream_io(worker_storage):
+    configure_source(worker_storage)
+    source = FakeSource(worker_storage.clock, (original(),))
+    source.refresh_gate = asyncio.Event()
+    instance = worker(worker_storage, source)
+
+    async def exercise():
+        try:
+            task = asyncio.create_task(instance.refresh_once())
+            await source.refresh_entered.wait()
+            receipt = await asyncio.to_thread(
+                worker_storage.repository.request_refresh, "library:1"
+            )
+            source.refresh_gate.set()
+            assert await task
+            return receipt
+        finally:
+            await close(instance)
+
+    receipt = asyncio.run(exercise())
+    assert receipt.requested_revision == 1
+    assert worker_storage.repository.refresh_revisions("library:1") == (1, 1)
+    assert source.refreshes == 2
+
+
+def test_scheduled_catch_up_defers_to_competing_exact_refresh_lease(
+    worker_storage, monkeypatch
+):
+    configure_source(worker_storage)
+    source = FakeSource(worker_storage.clock, (original(),))
+    source.refresh_gate = asyncio.Event()
+    instance = worker(worker_storage, source)
+    competing = []
+    revisions = worker_storage.repository.refresh_revisions
+
+    def claim_exact_before_read(source_ref):
+        if not competing:
+            competing.append(worker_storage.repository.begin_requested_refresh(source_ref))
+        return revisions(source_ref)
+
+    monkeypatch.setattr(
+        worker_storage.repository, "refresh_revisions", claim_exact_before_read
+    )
+
+    async def exercise():
+        try:
+            task = asyncio.create_task(instance.refresh_once())
+            await source.refresh_entered.wait()
+            await asyncio.to_thread(
+                worker_storage.repository.request_refresh, "library:1"
+            )
+            source.refresh_gate.set()
+            return await task
+        finally:
+            await close(instance)
+
+    assert asyncio.run(exercise())
+    assert competing[0] is not None and competing[0].request_revision == 1
+    assert revisions("library:1") == (1, 0)
+    assert worker_storage.repository.publish_refresh(
+        competing[0],
+        RefreshResult(snapshot=CatalogSnapshot(
+            source_ref="library:1",
+            refreshed_at=worker_storage.clock.utc(),
+            candidates=(original().candidate,),
+        ), assets=(original(),)),
+    )
+    assert revisions("library:1") == (1, 1)
+
+
 def test_procrastinate_task_processes_only_exact_job_and_publishes(worker_storage):
     queued(worker_storage)
     queued(worker_storage, 2)
@@ -255,6 +356,43 @@ def test_procrastinate_worker_consumes_deferred_job(worker_storage):
             await close(instance)
     asyncio.run(exercise())
     assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
+
+
+def test_procrastinate_worker_consumes_exact_deferred_source_refresh(worker_storage):
+    configure_source(worker_storage)
+    queue = ProcrastinateMediaQueue(worker_storage.db.dsn)
+    queue.apply_schema(worker_storage.db.dsn)
+    worker_storage.repository.queue = queue
+    receipt = worker_storage.repository.request_refresh("library:1")
+    source = FakeSource(worker_storage.clock, (original(),))
+    instance = worker(worker_storage, source)
+
+    async def exercise():
+        app = create_worker_app(worker_storage.db.dsn)
+        try:
+            with worker_storage.worker_lock():
+                async with app.open_async():
+                    await app.run_worker_async(
+                        queues=[MEDIA_QUEUE],
+                        concurrency=1,
+                        wait=False,
+                        additional_context={"media_worker": instance},
+                    )
+        finally:
+            await close(instance)
+
+    asyncio.run(exercise())
+    assert receipt.requested_revision == 1
+    assert worker_storage.repository.refresh_revisions("library:1") == (1, 1)
+    assert source.refreshes == 1
+    with worker_storage.db.transaction() as conn:
+        job = conn.execute(
+            "SELECT args,status FROM procrastinate_jobs "
+            "WHERE task_name='photo_wall.media.refresh_source'"
+        ).fetchone()
+        members = conn.execute("SELECT count(*) AS n FROM source_members").fetchone()["n"]
+    assert job == {"args": {"source_ref": "library:1"}, "status": "succeeded"}
+    assert members == 1
 
 
 @pytest.mark.parametrize("failure,state,error", [

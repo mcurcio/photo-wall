@@ -25,7 +25,8 @@ from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
 from central.media_gateway import MediaGateway
-from central.media_queue import AcquisitionQueue, ProcrastinateMediaQueue
+from central.media_ports import MediaApplication, RefreshReceipt
+from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.registry import Enrollment, FrameCreate, Registry, RegistryError
@@ -141,7 +142,7 @@ def create_app(
     run_scheduler: bool | None = None,
     media_root: Path | None = None,
     release_authority: ReleaseAuthority | None = None,
-    acquisition_queue: AcquisitionQueue | None = None,
+    media_queue: MediaTaskQueue | None = None,
     release_root: Path | None = None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
@@ -153,10 +154,11 @@ def create_app(
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
     release_authority = release_authority or _configured_release_authority(db, clock)
     registry = Registry(db, clock, release_authority)
-    acquisition_queue = acquisition_queue or (
+    media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
-    media_repository = MediaRepository(db, clock, queue=acquisition_queue)
+    media_repository = MediaRepository(db, clock, queue=media_queue)
+    media_application: MediaApplication = media_repository
     coordinator = Coordinator(
         db,
         clock,
@@ -202,7 +204,7 @@ def create_app(
                 try:
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(
-                        coordinator.media.request_acquisitions, projection.acquisitions
+                        media_application.request_acquisitions, projection.acquisitions
                     )
                     scheduler_health.update(
                         last_tick=clock.utc(),
@@ -223,8 +225,8 @@ def create_app(
     async def lifespan(app):
         db.migrate()
         _initialize_release_authority(release_authority)
-        if isinstance(acquisition_queue, ProcrastinateMediaQueue):
-            acquisition_queue.apply_schema(db.dsn)
+        if isinstance(media_queue, ProcrastinateMediaQueue):
+            media_queue.apply_schema(db.dsn)
         task = asyncio.create_task(scheduler()) if run_scheduler else None
         try:
             yield
@@ -569,22 +571,31 @@ def create_app(
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])
     def media_state():
-        return {"sources": coordinator.media.sources(), "health": coordinator.media.health()}
+        return {"sources": media_application.sources(), "health": media_application.health()}
 
     @app.put("/v1/operator/sources/{source_ref}", dependencies=[Depends(admin)])
     def configure_source(source_ref: Identifier, source: SourceSpec):
         if source.source_ref != source_ref:
             raise ValueError("Source identity mismatch")
-        return {"created": coordinator.media.configure_source(source)}
+        return {"created": media_application.configure_source(source)}
+
+    @app.post(
+        "/v1/operator/sources/{source_ref}/refresh",
+        dependencies=[Depends(admin)],
+        status_code=202,
+        response_model=RefreshReceipt,
+    )
+    def refresh_source(source_ref: Identifier):
+        return media_application.request_refresh(source_ref)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):
         profile = registry.frame_profile(frame_id) if frame_id is not None else None
-        return coordinator.media.source_candidates(source_ref, profile=profile)
+        return media_application.source_candidates(source_ref, profile=profile)
 
     @app.post("/v1/operator/authored-candidates", dependencies=[Depends(admin)])
     def author_candidates(request: AuthoredCandidatesRequest):
-        return coordinator.media.author_authored_candidates(request.source_ref, request.asset_ids)
+        return media_application.author_authored_candidates(request.source_ref, request.asset_ids)
 
     @app.put("/v1/operator/scenes/{scene_id}/authored", dependencies=[Depends(admin)])
     def configure_authored_scene(scene_id: Identifier, request: AuthoredSceneRequest):
