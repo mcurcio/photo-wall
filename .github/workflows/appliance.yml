@@ -1,4 +1,4 @@
-name: ARM appliance image and VM e2e
+name: ARM appliance build and launch
 
 on:
   push:
@@ -42,20 +42,6 @@ jobs:
           cache-from: type=gha,scope=photo-wall-central-arm64-v1
           cache-to: type=gha,scope=photo-wall-central-arm64-v1,mode=max,ignore-error=true
 
-      - name: Build or restore the production media worker
-        id: worker
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: .
-          target: media-worker
-          platforms: linux/arm64
-          load: true
-          tags: photo-wall-worker:ci
-          cache-from: |
-            type=gha,scope=photo-wall-central-arm64-v1
-            type=gha,scope=photo-wall-worker-arm64-v1
-          cache-to: type=gha,scope=photo-wall-worker-arm64-v1,mode=max,ignore-error=true
-
       - name: Build or restore the pinned appliance builder
         id: builder
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
@@ -84,7 +70,6 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
-          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
           install -d -m 0700 "$ci_root"
@@ -105,7 +90,6 @@ jobs:
               --deployment-dir "$ci_root/deployment" \
               --extracted-base-cache "$RUNNER_TEMP/photo-wall-extracted-base" \
               --central-image "$CENTRAL_IMAGE" \
-              --worker-image "$WORKER_IMAGE" \
               --builder-image "$BUILDER_IMAGE"
           sudo chown -R "$(id -u):$(id -g)" "$ci_root/output" "$ci_root/deployment"
 
@@ -136,11 +120,10 @@ jobs:
           python -m pip install uv==0.7.8
           uv sync --frozen
 
-      - name: Boot the exact built artifact
+      - name: Boot the exact artifact and launch the production Player
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
-          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
           .venv/bin/python -m scripts.test_appliance_e2e \
@@ -148,8 +131,8 @@ jobs:
             --state "$ci_root/e2e-state" \
             --report "$ci_root/e2e-report.json" \
             --central-image "$CENTRAL_IMAGE" \
-            --worker-image "$WORKER_IMAGE" \
-            --builder-image "$BUILDER_IMAGE"
+            --builder-image "$BUILDER_IMAGE" \
+            --scope smoke
 
       - name: Compress the disk for artifact upload
         run: |

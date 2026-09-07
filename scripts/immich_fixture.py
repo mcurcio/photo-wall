@@ -447,7 +447,8 @@ def serve() -> None:
     HTTPServer(("0.0.0.0", 8000), Health).serve_forever()
 
 
-def run_fixture(state: Path, keep: bool, *, page_size: int = 3) -> dict:
+def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
+                base_image: str | None = None) -> dict:
     require(type(page_size) is int and 1 <= page_size <= 1000, "invalid_page_size")
     host = FixtureHost.create(state)
     evidence = {"class": "integration", "scope": "real upstream adapter and network boundary",
@@ -464,7 +465,7 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3) -> dict:
     try:
         evidence["stage"] = "build"
         write_json(host.state / "evidence.json", evidence)
-        host.build()
+        host.build(base_image=base_image)
         evidence["stage"] = "startup"
         write_json(host.state / "evidence.json", evidence)
         host.compose("up", "-d", "--wait", "--wait-timeout", "240", timeout=600, capture=False)
@@ -530,6 +531,7 @@ def main() -> None:
         if name == "run":
             command.add_argument("--keep", action="store_true")
             command.add_argument("--page-size", type=int, default=3)
+            command.add_argument("--base-image")
     for name in ("setup", "verify"):
         command = commands.add_parser(name)
         command.add_argument("action")
@@ -541,7 +543,8 @@ def main() -> None:
         serve()
         return
     if args.command == "run":
-        result = run_fixture(args.state_dir, args.keep, page_size=args.page_size)
+        result = run_fixture(args.state_dir, args.keep, page_size=args.page_size,
+                             base_image=args.base_image)
     elif args.command == "cleanup":
         FixtureHost(args.state_dir).cleanup()
         result = {"cleaned": True}

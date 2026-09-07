@@ -155,9 +155,12 @@ latest revision pending, so benchmark pushes do not cancel a costly build
 already underway; superseded pending revisions are replaced according to
 [GitHub concurrency semantics](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency). It runs the root-owned
 `scripts/test_appliance_e2e.py` against the exact disk and generic boot
-directory recorded in `ci-image.json`. That test requires signed release
-identity, fresh-session enrollment, old-session rejection, central binding recovery,
-central rollback, and unchanged boot-disk/protected boot evidence. It reports generic VM and
+directory recorded in `ci-image.json`, using its explicit `--scope smoke` mode.
+That test requires signed accepted-release identity, a successful RAM-root boot,
+fresh-session production Player enrollment, and unchanged boot-disk/protected boot evidence.
+Controller, worker, and Player behavior runs in the separate full software E2E workflow;
+exact-image media, restart, and rollback qualification uses the harness's explicit full scope.
+The smoke report records generic VM and
 physical Pi/HDMI/PXE qualification separately; a passing workflow does not
 claim those hardware results. After e2e, the workflow compresses the raw disk
 in place and writes `UPLOAD-SHA256SUMS`; the raw disk is not uploaded, avoiding

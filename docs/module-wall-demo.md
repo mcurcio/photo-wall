@@ -1,8 +1,10 @@
 # Full media path demo
 
-Status: the harness has been refactored for central release authority and stateless Players. Its 57 focused tests pass. The earlier two-Player/three-Output result remains historical evidence for the MVP shape; the full scenario has not yet been rerun from a committed final refactor revision.
+Status: the harness has been refactored for central release authority and stateless Players. Its focused tests pass. The `Controller and Player software e2e` workflow now runs the full two-Player/three-Output scenario for each pull-request revision; a passing workflow result is still required before final acceptance evidence is recorded.
 
 The demo joins the real Immich fixture, central PostgreSQL application, Procrastinate media worker, media gateway, two Player processes, and three simulated Outputs. Media conversion, queueing, HTTP/WebSocket traffic, exact bytes, session epochs, cache validation, readiness, commitments, and observations are real. `RecordingRenderer` supplies simulated display actuation, so native GTK/GStreamer and physical HDMI remain separate gates.
+
+This is the software behavior gate. It runs independently of appliance construction so controller, worker, and Player regressions receive direct evidence and faster diagnosis. The appliance workflow separately checks that the signed image assembles, boots, and starts this production Player entry point.
 
 ## Isolation and authority
 

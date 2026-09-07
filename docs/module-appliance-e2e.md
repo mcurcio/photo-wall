@@ -1,29 +1,25 @@
 # Automated appliance boot qualification
 
-Status: the final-revision harness is implemented for stateless Players and centrally selected releases. Focused portable and PostgreSQL/HTTP tests pass. No current rebuilt-image result is claimed yet.
+Status: the appliance CI gate is intentionally narrow: build the signed image, boot it with the generic ARM64 kernel, and prove the production Player enrolls. Software behavior runs in the separate `Controller and Player software e2e` workflow. The harness retains an explicit `--scope full` mode for final exact-image media, reboot, and rollback qualification, but that longer acceptance run is not the routine appliance build gate.
 
-The [image workflow](../.github/workflows/appliance.yml) builds the exact checked-out revision. The [VM harness](../scripts/test_appliance_e2e.py) consumes its checksum-identified disk, PXE tree, signed accepted root, and separately signed failing candidate. The [boot fixture](module-boot-fixture.md) owns isolated central, PostgreSQL, HTTPS, DNS, NTP, and optional Immich services. Harness code owns lifecycle and evidence only.
+The [image workflow](../.github/workflows/appliance.yml) builds the exact checked-out revision. The [VM harness](../scripts/test_appliance_e2e.py) consumes its checksum-identified disk, PXE tree, and signed accepted root. The [boot fixture](module-boot-fixture.md) owns isolated central, PostgreSQL, HTTPS, DNS, and NTP services. Harness code owns lifecycle and evidence only.
 
 ## Preflight and isolation
 
-Before starting any service, preflight verifies the source revision, immutable central/worker/builder image IDs, disk checksum, single boot partition, PXE inventory, generic kernel/initramfs hashes, signed accepted and candidate manifests, exact rootfs hashes, common boot ABI, public configuration digest, and candidate fault. Candidate metadata uses `releases.accepted` and `releases.candidate`; no A/B slot names or local update state exist.
+Before starting any service, preflight verifies the source revision, immutable central/builder image IDs, disk checksum, single boot partition, PXE inventory, generic kernel/initramfs hashes, signed release inputs, exact rootfs hashes, boot ABI, and public configuration digest. The build still validates its generated failing candidate, while the smoke scope does not stage or boot that candidate.
 
 Each run creates a private fixture and QEMU `virt` guest. The disk and boot inputs are read-only. Guest writes land in a disposable qcow2 overlay and RAM root. A fixed QEMU UUID supplies generic-VM equipment matching; physical Pi uses its firmware serial. QEMU supplies its supported PCI `i6300esb` watchdog and the generic initramfs proves and preloads the matching Linux driver. The ordinary systemd Player and native GTK/GStreamer renderer must enroll and report. The fixture does not inject a Player, readiness, commitment, observation, health acceptance, release selection, or fallback.
 
-Public reports contain bounded artifact identities, hashes of ticket capabilities, boot/session epochs, allowlisted health states, exact presentation evidence, cleanup status, and explicit qualification flags. They exclude credentials, private keys, raw disk contents, and unbounded service output.
+Public smoke reports contain bounded artifact identities, hashes of ticket capabilities, the observed boot/session epoch, cleanup status, and explicit qualification flags. They exclude credentials, private keys, raw disk contents, and unbounded service output.
 
-## Required boot sequence
+## Routine appliance smoke sequence
 
 1. Start with an empty central database and no writable Player volume. Central registers the signed accepted release.
-2. Boot the accepted release. Bootstrap obtains a central ticket, copies the verified rootfs into RAM, the Player creates fresh credentials, and recognized equipment recovers its centrally assigned Frames. Unknown equipment remains unbound.
-3. Restart the Player process and then reboot the VM. Each enrollment receives a higher authority epoch; earlier tokens and grants fail. Any surviving cache file is revalidated before reuse.
-4. Stop and restart central while the Player process is running. Current authorized presentation may continue. State delivery resumes after reconnect.
-5. Register and stage the signed failing candidate through the authenticated operator API for the exact device. The next boot must carry a trial ticket selected and consumed centrally.
-6. Let the stock Player fail sustained health. The production watchdog must request and perform the reboot without fixture intervention.
-7. On the next boot, central must select the accepted release. PostgreSQL evidence must show the consumed failed trial, distinct boot attempts, current session binding, and no stale health promotion.
-8. Verify the original disk hash is unchanged and clean only resources owned by the run.
+2. Boot the accepted release. Bootstrap obtains a central ticket and copies the verified rootfs into RAM.
+3. Prove the production Player creates fresh credentials, enrolls, and reports volatile persistence and the selected accepted release.
+4. Verify the original disk hash is unchanged and clean only resources owned by the run.
 
-Duplicate requests for the same boot ID and request ID must return the same ticket without consuming another trial. A conflicting retry fails. Health from another boot, ticket, release, Player, epoch, or stale time cannot promote a release.
+Duplicate boot requests, stale health, session replacement, cache recovery, controller outages, media delivery, and execution behavior are covered by software integration and focused transaction tests. The longer `--scope full` image run remains available when collecting exact-image reboot, native media, and central rollback evidence.
 
 ## Native media extension
 

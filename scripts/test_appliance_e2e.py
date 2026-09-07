@@ -1,10 +1,11 @@
 """Boot the CI-built Pi disk with an explicitly substituted generic ARM64 kernel.
 
 The signed disk is read-only. All root and cache writes use RAM on every power
-cycle; only the stock Player enrolls. No guest credentials or test Player are
-injected. Native trial acceptance uses the stock Player with virtual DRM;
-the optional real-media fixture also requires native photo presentation and
-fresh-session photo reacquisition. This cannot qualify Pi firmware or HDMI.
+cycle; only the production Player enrolls. No guest credentials or test Player
+are injected. The smoke scope proves image boot and Player launch. The explicit
+full scope adds native media, restart, health, and rollback qualification using
+the production Player with virtual DRM. Neither scope qualifies Pi firmware or
+physical HDMI.
 """
 
 from __future__ import annotations
@@ -303,7 +304,9 @@ def enrollment(rows: list, previous: dict | None = None) -> dict | None:
 
 class ApplianceE2E:
     def __init__(self, inputs: dict, state: Path, central_image: str, builder_image: str,
-                 *, run=command, worker_image: str | None = None):
+                 *, run=command, worker_image: str | None = None, scope: str = "full"):
+        require(scope in ("smoke", "full"), "invalid_appliance_test_scope")
+        require(scope == "full" or worker_image is None, "smoke_worker_not_allowed")
         require(worker_image == inputs.get("worker_image"), "worker_image_manifest_mismatch")
         if worker_image is not None:
             image_id(worker_image)
@@ -312,7 +315,7 @@ class ApplianceE2E:
         require(state.is_absolute() and not state.exists() and not state.is_symlink(), "new_e2e_state_required")
         require(not any((p / ".git").exists() for p in (state, *state.parents)), "state_inside_git")
         state.mkdir(mode=0o700)
-        self.state, self.inputs, self.run = state.resolve(), inputs, run
+        self.state, self.inputs, self.run, self.scope = state.resolve(), inputs, run, scope
         self.central_image, self.builder_image = image_id(central_image), image_id(builder_image)
         self.fixture = None
         self.container_id = None
@@ -327,12 +330,14 @@ class ApplianceE2E:
             generic_initrd_sha256=inputs["generic_record"]["outputs"]["initrd"]["sha256"],
             central_image=central_image, builder_image=builder_image, checks={}, boots=[],
             substitutions=inputs["generic_record"]["substitutions"],
+            scope=scope,
             virtual_graphics=dict(device="virtio-gpu-pci", max_outputs=2, host_gpu=False),
-            rollback_candidate=inputs["candidate_metadata"],
             deadlines_seconds=dict(boot=BOOT_TIMEOUT, stage=STAGE_TIMEOUT,
                                    trial=TRIAL_TIMEOUT, recovery=ROLLBACK_TIMEOUT,
                                    vm_process=VM_PROCESS_TIMEOUT),
             qualification=unqualified())
+        if scope == "full":
+            self.report["rollback_candidate"] = inputs["candidate_metadata"]
         self.media = None
         if worker_image is not None:
             from scripts.appliance_media import MEDIA_TIMEOUT, ApplianceMedia
@@ -368,16 +373,17 @@ class ApplianceE2E:
         directory.mkdir(mode=0o700)
         share = directory / "share"
         share.mkdir(mode=0o700)
-        controller = Path(__file__).with_name("vm_rollback_control.py")
-        payload = read_file(controller, 64 * 1024)
-        (share / controller.name).write_bytes(payload)
-        (share / controller.name).chmod(0o400)
-        self.report["rollback_controller_sha256"] = hashlib.sha256(payload).hexdigest()
-        health_probe = Path(__file__).with_name("vm_health_probe.py")
-        payload = read_file(health_probe, 64 * 1024)
-        (share / health_probe.name).write_bytes(payload)
-        (share / health_probe.name).chmod(0o400)
-        self.report["health_probe_sha256"] = hashlib.sha256(payload).hexdigest()
+        if self.scope == "full":
+            controller = Path(__file__).with_name("vm_rollback_control.py")
+            payload = read_file(controller, 64 * 1024)
+            (share / controller.name).write_bytes(payload)
+            (share / controller.name).chmod(0o400)
+            self.report["rollback_controller_sha256"] = hashlib.sha256(payload).hexdigest()
+            health_probe = Path(__file__).with_name("vm_health_probe.py")
+            payload = read_file(health_probe, 64 * 1024)
+            (share / health_probe.name).write_bytes(payload)
+            (share / health_probe.name).chmod(0o400)
+            self.report["health_probe_sha256"] = hashlib.sha256(payload).hexdigest()
         launcher = directory / "launch.sh"
         launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
                            str(self.report["deadlines_seconds"]["vm_process"])).replace("__DEVICE_UUID__", self.device_uuid))
@@ -562,7 +568,30 @@ class ApplianceE2E:
         self.report["checks"]["production_automatic_rollback"] = True
         self.report["checks"]["equipment_reenrolls_after_rollback"] = True
 
+    def execute_smoke(self):
+        """Prove the signed image boots and starts the production Player."""
+        print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
+        self.fixture = BootFixture.prepare(self.state / "services", self.inputs["bundle"],
+                                          self.inputs["deployment"], self.central_image)
+        self.fixture.up()
+        self.report["checks"]["signed_https_dns_ntp"] = True
+        require(self.inventory() == [], "fixture_not_empty")
+        print(json.dumps({"phase": "appliance_launch", "status": "started"}), flush=True)
+        self.start_vm()
+        first = self.wait_enrollment()
+        require(self.report["boots"][-1]["trial"] is False, "smoke_selected_trial")
+        self.report["first_enrollment"] = first
+        self.report["checks"]["accepted_release_selected"] = True
+        self.report["checks"]["production_player_enrolled"] = True
+        self.report["qualification"]["generic_vm"] = True
+        self.report["pending"] = ["software behavior in the software e2e workflow",
+                                  "full exact-image qualification", "physical Pi qualification"]
+        print(json.dumps({"phase": "appliance_launch", "status": "passed"}), flush=True)
+
     def execute(self):
+        if self.scope == "smoke":
+            self.execute_smoke()
+            return
         print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
         media = getattr(self, "media", None)
         options = {}
@@ -702,6 +731,7 @@ def main():
     parser.add_argument("--central-image", required=True)
     parser.add_argument("--builder-image", required=True)
     parser.add_argument("--worker-image")
+    parser.add_argument("--scope", choices=("smoke", "full"), default="full")
     args = parser.parse_args()
     require(args.report.is_absolute() and not args.report.exists() and not args.report.is_symlink(),
             "new_absolute_report_required")
@@ -711,7 +741,8 @@ def main():
     failure = None
     try:
         harness = ApplianceE2E(checked_inputs(args.manifest), args.state,
-                               args.central_image, args.builder_image, worker_image=args.worker_image)
+                               args.central_image, args.builder_image, worker_image=args.worker_image,
+                               scope=args.scope)
         report = harness.report
         report["phase"] = "execution"
         harness.execute()

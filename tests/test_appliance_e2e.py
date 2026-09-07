@@ -399,6 +399,38 @@ def test_stable_equipment_requires_fresh_session_after_reboot():
         enrollment([row(device_id='device-'+'f'*64, authority_epoch=2)], row())
 
 
+def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    fixture = SimpleNamespace(up=lambda: None)
+    monkeypatch.setattr(e2e.BootFixture, "prepare", lambda *args, **kwargs: fixture)
+    harness = object.__new__(ApplianceE2E)
+    harness.scope = "smoke"
+    harness.state = tmp_path
+    harness.inputs = {"bundle": tmp_path / "bundle", "deployment": tmp_path / "deployment"}
+    harness.central_image = "sha256:" + "c" * 64
+    harness.report = {"checks": {}, "boots": [], "qualification": e2e.unqualified()}
+    harness.inventory = lambda: []
+    harness.start_vm = lambda: None
+
+    def wait_enrollment():
+        harness.report["boots"].append(report(trial=False))
+        return row()
+
+    harness.wait_enrollment = wait_enrollment
+    harness.execute()
+
+    assert harness.fixture is fixture
+    assert harness.report["first_enrollment"] == row()
+    assert harness.report["checks"] == {
+        "signed_https_dns_ntp": True,
+        "accepted_release_selected": True,
+        "production_player_enrolled": True,
+    }
+    assert harness.report["qualification"]["generic_vm"] is True
+    assert harness.report["qualification"]["automatic_rollback"] is False
+
+
 def test_serial_health_does_not_promote_central_acceptance(monkeypatch):
     from scripts import test_appliance_e2e as e2e
     harness = object.__new__(ApplianceE2E)
