@@ -47,6 +47,8 @@ VM_PROCESS_TIMEOUT = 3 * BOOT_TIMEOUT + RECOVERY_TIMEOUT + STAGE_TIMEOUT + ROLLB
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 PUBLIC_EVENTS = {"photo-wall-trial-reboot-requested", "photo-wall-trial-reboot-required",
                  "photo-wall-health-diagnostic"}
+RETRYABLE_PROBE_ERRORS = {"docker_command_failed", "docker_timeout"}
+PROBE_ATTEMPTS = 4
 
 # Executed inside the fixture's existing central container. Its credential stays
 # in that container; only a neutral projection of the authenticated API returns.
@@ -370,6 +372,22 @@ class ApplianceE2E:
         self.checked_vm()
         return self.run(["docker", "logs", "--tail", "3000", self.name], timeout=20).decode(errors="replace")
 
+    def enrollment_probe(self, name: str, callback):
+        """Retry read-only runner probes without weakening the enrollment deadline."""
+        require(name in ("vm_state", "central_inventory", "vm_serial"), "invalid_probe_name")
+        for attempt in range(1, PROBE_ATTEMPTS + 1):
+            try:
+                return callback()
+            except FixtureError as error:
+                code = str(error)
+                if code not in RETRYABLE_PROBE_ERRORS:
+                    raise
+                retries = self.report.setdefault("probe_retries", {})
+                retries[name] = retries.get(name, 0) + 1
+                if attempt == PROBE_ATTEMPTS:
+                    raise FixtureError(f"{name}_unavailable:{code}") from None
+                time.sleep(2)
+
     def start_vm(self):
         directory = self.state / "vm"
         directory.mkdir(mode=0o700)
@@ -455,12 +473,12 @@ class ApplianceE2E:
     def wait_enrollment(self, previous=None):
         deadline = time.monotonic() + BOOT_TIMEOUT
         while time.monotonic() < deadline:
-            status = self.checked_vm()
+            status = self.enrollment_probe("vm_state", self.checked_vm)
             require(status["Running"] and not status["OOMKilled"], "vm_stopped_before_enrollment")
-            rows = self.inventory()
+            rows = self.enrollment_probe("central_inventory", self.inventory)
             self.report["last_inventory_count"] = len(rows)
             row = enrollment(rows, previous)
-            serial = self.serial()
+            serial = self.enrollment_probe("vm_serial", self.serial)
             diagnostics = serial_diagnostics(serial)
             require(not diagnostics["kernel_panic"] and not diagnostics["out_of_memory"],
                     "guest_crashed_during_boot")

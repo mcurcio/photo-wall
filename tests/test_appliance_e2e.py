@@ -407,6 +407,39 @@ def test_stable_equipment_requires_fresh_session_after_reboot():
         enrollment([row(device_id='device-'+'f'*64, authority_epoch=2)], row())
 
 
+def test_enrollment_probe_retries_bounded_runner_failures(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {}
+    attempts = iter((FixtureError("docker_command_failed"), FixtureError("docker_timeout"), "ready"))
+    monkeypatch.setattr(e2e.time, "sleep", lambda seconds: seconds == 2)
+
+    def probe():
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    assert harness.enrollment_probe("central_inventory", probe) == "ready"
+    assert harness.report["probe_retries"] == {"central_inventory": 2}
+
+
+def test_enrollment_probe_names_persistent_failure(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {}
+    monkeypatch.setattr(e2e.time, "sleep", lambda _: None)
+
+    def unavailable():
+        raise FixtureError("docker_command_failed")
+
+    with pytest.raises(FixtureError, match="central_inventory_unavailable:docker_command_failed"):
+        harness.enrollment_probe("central_inventory", unavailable)
+    assert harness.report["probe_retries"] == {"central_inventory": e2e.PROBE_ATTEMPTS}
+
+
 def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeypatch):
     from scripts import test_appliance_e2e as e2e
 
