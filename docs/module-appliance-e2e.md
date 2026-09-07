@@ -12,11 +12,17 @@ Each run creates a private fixture and QEMU `virt` guest. The disk and boot inpu
 
 Public smoke reports contain bounded artifact identities, hashes of ticket capabilities, the observed boot/session epoch, cleanup status, and explicit qualification flags. They exclude credentials, private keys, raw disk contents, and unbounded service output.
 
+## Enrollment observation boundary
+
+The authenticated inventory probe validates the complete [Installation contract](architecture.md#installation-inventory-and-enrollment-observation), including nested Outputs and Frames, before projecting Equipment session facts. Successful transport with an empty inventory is a valid `pending` observation. Health may still be empty and Output feedback may arrive later; neither is required to recognize enrollment. Malformed inventory remains a contract failure.
+
+The harness waits explicitly for `ready` and a non-null session matching the boot's Equipment. On restart the same Player at an unchanged or older epoch remains pending until a strictly higher epoch appears. A retired Player, different Equipment, or unexpected additional Player fails the isolated-fixture check. It never uses the observation object's truthiness as completion. Boot selection, enrollment, release-health acceptance, and presentation are observed separately. Evidence converts typed models to JSON primitives at the report boundary, including pending observations, so ordinary JSON report writing supports both states while waiting for convergence.
+
 ## Routine appliance smoke sequence
 
 1. Start with an empty central database and no writable Player volume. Central registers the signed accepted release.
 2. Boot the accepted release. Bootstrap obtains a central ticket and copies the verified rootfs into RAM.
-3. Prove the production Player creates fresh credentials, enrolls, and reports volatile persistence and the selected accepted release.
+3. Prove the production Player creates fresh credentials and enrolls with a session matching the selected boot. Record volatile persistence and the selected release from their own boot/report fields; enrollment alone does not establish sustained health or rendering.
 4. Verify the original disk hash is unchanged and clean only resources owned by the run.
 
 Duplicate boot requests, stale health, session replacement, cache recovery, controller outages, media delivery, and execution behavior are covered by software integration and focused transaction tests. The longer `--scope full` image run remains available when collecting exact-image reboot, native media, and central rollback evidence.

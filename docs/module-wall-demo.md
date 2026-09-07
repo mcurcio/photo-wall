@@ -14,6 +14,12 @@ Each Player obtains a central boot ticket, creates fresh enrollment credentials,
 
 The full scenario is wired for two Outputs on one Player and a third on another, exact secured assignments, live source evolution, deletion after security, Player restart, central restart, and per-Output behavior. Its current restart step proves a higher authority epoch and reacquisition after disposable tmpfs loss. Focused Player tests separately prove valid-file reuse without a media request, deletion/corruption reacquisition, and rejection of old-session state. The health probe now exports bounded RTT, offset, delay, drift, and rejection counters from the authenticated `/v1/player/time` path. These paths remain unqualified at demo/image level until the final-revision runs record them.
 
+## Observing source changes
+
+After initial source configuration, upstream mutation, permission changes, or network fault/recovery, the operator helper requests a [source refresh](module-media-worker.md#source-refresh-requests) through the authenticated API and retains its receipt. The harness waits for that same Source's `refresh_completed_revision` to reach or exceed the receipt's `requested_revision`, then requires the expected source status and the scenario's media/assignment observations. Completion and success are separate: a permission-denial step must observe a completed request with `permission`, while recovery requires a new completed request with `ok`.
+
+A wall-clock delay, an old successful snapshot, or another Source's completion cannot satisfy this boundary. Periodic refresh remains enabled for normal live evolution and may satisfy a request through the shared repository lease. The harness does not call the upstream adapter directly, force catalog state, or mark a request complete. Reports retain request receipts beside the mutation/fault evidence so the outcome can be tied to the action that required fresh observation.
+
 ## Reproducing the current checkpoint
 
 Build a Player-only wheelhouse, central image, and media-worker image from the same clean committed revision. Image construction explicitly uses the daemon `default` builder with `--load`, allowing derived fixtures to reuse locally loaded parent images.

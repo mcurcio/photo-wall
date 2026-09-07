@@ -60,6 +60,14 @@ These are responsibility boundaries, not a service per box. The [execution contr
 
 Use PostgreSQL for all durable Photo Wall state: installation intent, Runtime/Planner/coordination records, media lifecycle, queue jobs, equipment recognition, and release/trial policy. Modules expose named operations and transaction-bound repository ports; they do not call another domain's private methods or SQL. Typed Pydantic transports cross process/domain boundaries. Psycopg pools own central connections, and atomic operations such as media request plus task defer share the caller's transaction.
 
+### Installation inventory and enrollment observation
+
+The Installation registry owns the complete [typed inventory](../central/installation_models.py) returned by `/v1/operator/inventory`: Players, nested Output observations, and Frames with their profiles, bindings, calibration, and revisions. Its repository selects public fields explicitly, and the HTTP response validates that complete contract. Consumers validate all three collections before projecting the smaller view they need; valid Player rows do not excuse malformed Output or Frame data.
+
+Enrollment observers need only Player ID, Equipment observation ID, authority epoch, and retirement state. Health is eventually consistent feedback and may still be empty when enrollment is visible. It neither supplies identity nor determines whether a new session exists. Output discovery, release-health acceptance, and observed presentation retain their own checks.
+
+The enrollment observation contract permits only `pending` with no session or `ready` with a session. Transport success does not imply readiness. The [appliance harness](module-appliance-e2e.md#enrollment-observation-boundary) owns the expected Equipment, boot, and session-epoch checks for its isolated fixture without adding enrollment policy to the Player.
+
 ## Player and rendering
 
 The Player is one process with one display-resource owner. Its session module holds only current plans/configuration and a fresh authority epoch; the equipment agent reports Outputs; the disposable cache secures exact bytes; the executor is the sole local authority owner; and the Renderer owns decoding, composition, effects and calibration. A Player has no database, durable identity, execution journal, update slots, or authoritative cache metadata. Diagnostics collect current observations. Weston, clock discipline and process supervision remain OS services.
@@ -83,6 +91,8 @@ Keep GTK operations on its main GLib thread, following [PyGObject threading guid
 ## Media preparation and cache
 
 Hide [Immich API](https://api.immich.app/) contracts behind a central adapter with a declared tested version range. Periodically refresh active queries into a bounded metadata working set. Source refresh, planning lookahead and cache retention are separate settings. New matching assets affect future uncommitted assignments; query edits follow authored-revision policy.
+
+An explicit source-refresh request persists a requested revision and atomically defers central work. The media repository records the completed revision only when a matching refresh lease publishes its outcome. This gives callers an observable completion boundary while periodic refresh continues normal runtime convergence; see [source refresh requests](module-media-worker.md#source-refresh-requests).
 
 Check source orientation and quality before preference ranking, then verify the chosen presentation variant. Upscaling cannot make an ineligible original qualify. Reuse qualifying Immich derivatives; permit wall-specific conversion only under the chosen derivative policy. Cache selected originals/variants centrally, with stable content identities and integrity metadata.
 

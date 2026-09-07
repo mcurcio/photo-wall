@@ -8,7 +8,19 @@ The central scheduler creates a domain `media_jobs` record and defers `photo_wal
 
 Procrastinate owns dispatch, its worker heartbeat state, task attempts, retry timing, queueing locks, and stalled-job semantics. Photo Wall does not schedule parallel heartbeat or stalled-retry tasks. The media repository retains the preparation/publication lifecycle that is meaningful to the Planner: requested recipe, capacity reservation, exact attempt token, publication journal, ready/failure state, references, and stale-attempt fence. A queue retry never bypasses the repository lease or grants media readiness by itself.
 
-The worker app uses queue `photo-wall-media`. Preparation jobs use a per-domain-job queueing lock so duplicate scheduler requests converge. Preparation and maintenance share `photo-wall-media-storage`, keeping the authoritative filesystem's single-writer requirement while allowing worker concurrency for independent periodic tasks. The default worker concurrency is four.
+The worker app uses queue `photo-wall-media`. Preparation jobs use a per-domain-job queueing lock so duplicate scheduler requests converge. Preparation and maintenance share `photo-wall-media-storage`, keeping the authoritative filesystem's single-writer requirement while allowing worker concurrency for independent tasks. Explicit and periodic source refresh share `photo-wall-media-refresh`. The default worker concurrency is four.
+
+## Source refresh requests
+
+The authenticated `POST /v1/operator/sources/{source_ref}/refresh` operation accepts a request for one configured Source. It increments that Source's persisted `refresh_requested_revision` and calls `MediaTaskQueue.enqueue_refresh_in(conn, source_ref)` in the same PostgreSQL transaction. A missing Source or unavailable queue fails the request; enqueue failure rolls back the revision. The 202 receipt contains `source_ref`, `requested_revision`, `completed_revision`, and `coalesced`. It acknowledges accepted work, without claiming that the upstream request has finished.
+
+Queued requests for one Source may coalesce under its queueing lock. Each caller still receives its own requested revision. A running refresh cannot absorb a later request merely by finishing: its repository lease captures the requested revision at acquisition. The exact-source task continues until the persisted completed revision catches up, with bounded retries for a busy or superseded lease. Requests arriving during upstream I/O remain pending for another refresh. Work and revisions survive central or worker restart.
+
+Both explicit and periodic refresh acquire the same repository lease, identified by Source, generation, and start time, with bounded expiry for recovery after worker loss. No database transaction spans upstream I/O. Publication checks that lease identity before changing catalog state and advancing `refresh_completed_revision` through the revision captured by that lease. A replaced attempt cannot overwrite the newer catalog or acknowledge its requests. Source, connection, and membership validation still apply.
+
+Completion means an outcome was published. That outcome can be `ok`, `permission`, `unavailable`, or another bounded source failure; callers assess status separately. Last successful membership remains distinct from latest status. `/v1/operator/media` exposes both revision counters with that status. The [demo](module-wall-demo.md) uses them to wait for its exact accepted request; queue delivery alone and an unrelated Source's refresh are insufficient evidence.
+
+Periodic refresh remains the ordinary mechanism for discovering live upstream changes. It can also satisfy pending revisions through the same lease and publication boundary. Explicit requests provide deterministic observation after an operator action or acceptance fault injection; they do not replace the runtime schedule or authorize content selection.
 
 ## Configuration and tasks
 
@@ -20,6 +32,7 @@ The worker app uses queue `photo-wall-media`. Preparation jobs use a per-domain-
 
 - `photo_wall.media.prepare`: execute one exact job ID with bounded retry.
 - `photo_wall.media.refresh`: refresh due active source metadata every 30 seconds.
+- `photo_wall.media.refresh_source`: complete persisted requests for the named Source, independently of its next periodic deadline.
 - `photo_wall.media.maintenance`: recover publication state and collect storage every five minutes under the storage lock.
 
 Photo Wall records bounded last-activity/error status when these domain tasks run; it does not maintain an independent liveness loop. Procrastinate's own worker state is the queue-worker liveness source.
@@ -36,4 +49,4 @@ Cancellation waits for adapter/preparer cleanup before releasing the storage loc
 
 ## Acceptance boundary
 
-Focused PostgreSQL tests cover atomic enqueue with caller commit/rollback, exact job execution, bounded typed retries, task registration, Procrastinate worker consumption, publication recovery, capacity pressure, and stale-attempt publication/cleanup refusal. Generated fixtures establish orchestration and storage behavior. Real Immich, exact-image conversion, and physical presentation remain separate acceptance work.
+Focused PostgreSQL tests cover atomic enqueue with caller commit/rollback, exact job execution, bounded typed retries, task registration, Procrastinate worker consumption, publication recovery, capacity pressure, and stale-attempt publication/cleanup refusal. Source-refresh checks cover persisted requested/completed revisions, coalesced requests, enqueue rollback, exact-source dispatch, requests during active work, periodic/explicit lease races, and stale publication refusal. Generated fixtures establish orchestration and storage behavior. Real Immich, exact-image conversion, and physical presentation remain separate acceptance work.

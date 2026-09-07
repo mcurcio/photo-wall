@@ -12,7 +12,7 @@ Disjoint implementation leaves can follow this contract:
 |---|---|---|
 | `media/immich.py` | Versioned upstream transport and response normalization | Connection configuration + `SourceSpec` -> bounded refresh result; selected immutable upstream revision -> bounded original byte stream. No SQL, Frame policy, or Player API. |
 | `media/prepare.py` | Probe, original validation, conversion, and recipe identity | Local original + expected metadata + recipe + resource limits -> exact `Variant`, original hashes, coded failure. No upstream transport or assignment authority. |
-| `media/worker.py` | Poll/lease/retry/cleanup orchestration | Repository interfaces + adapters + explicit clock -> refresh publication/job result. No independent source selection. |
+| `media/worker.py` | Queued task execution, repository leases, and cleanup orchestration | Repository interfaces + adapters + explicit clock -> refresh publication/job result. Procrastinate owns dispatch and retry timing; no independent source selection. |
 | Central repository and gateway, orchestrator-owned | Transactions, quotas, blob references, source/asset tables, authorized local delivery | Persisted publication and commitment interfaces below. All SQL and wire contract changes remain with this owner. |
 | Integration harness | Disposable real upstream and synthetic media | Separate fixture credentials; network denial and success/fault evidence. It does not mutate a user's existing Immich. |
 
@@ -142,7 +142,7 @@ The root-owned repository is the only SQL owner. Suggested logical records are `
 
 Define these repository operations before delegation:
 
-* `publish_refresh(source_ref, refresh_id, result, now)`: atomically replace a completed live working set/status and attach existing verified variants by immutable original/recipe identity. It does not delete referenced blobs or mutate admitted query definitions.
+* `request_refresh(source_ref) -> RefreshReceipt`, `begin_refresh(...) -> RefreshLease | None`, and `publish_refresh(lease, result)`: persist and atomically queue a Source-specific requested revision, lease bounded upstream work, then publish its working set/status and completed revision under the current lease fence. Periodic refresh shares this boundary. The [worker contract](module-media-worker.md#source-refresh-requests) owns completion and coalescing semantics. Refresh does not delete referenced blobs or mutate admitted query definitions.
 * `request_acquisitions(requests)`: idempotently create selected original/recipe jobs and defer their Procrastinate task through its external PostgreSQL connection in the same transaction. Reject the explicit job/count bound; never perform network or conversion inside the transaction.
 * `claim_job(job_id) -> Lease | None`: lock only the exact job delivered by Procrastinate, increment its attempt token, and transactionally reserve the complete worst-case staging budget under the media quota lock. No row lock survives the transaction during conversion.
 * `publish(lease, result)` and `fail(lease, code, retry=...)`: compare-and-swap on live attempt identity. An expired/stale task may clean its own staging files but cannot publish over a replacement attempt. Publication verifies expected original/recipe identity and transitions the blob/job atomically. A retry result is returned to Procrastinate, which applies the bounded 5/15/60-second schedule.
