@@ -14,6 +14,12 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
+from central.installation_models import (
+    FrameInventory,
+    InstallationInventory,
+    OutputInventory,
+    PlayerInventory,
+)
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
@@ -288,16 +294,23 @@ class Registry:
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
                 zip(bindings, rows, strict=True) if row["calibration_valid"]]}
 
-    def inventory(self) -> dict:
+    def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:
             self._expire_previews(conn)
             players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
                                    "FROM players ORDER BY registered_at,id").fetchall()
-            outputs = conn.execute("SELECT * FROM outputs ORDER BY player_id,output_id").fetchall()
-            frames = conn.execute("SELECT f.*,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
+            outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
+                                   "ORDER BY player_id,output_id").fetchall()
+            frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
+                                  "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
+                                  "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
                                   "ON b.frame_id=f.id ORDER BY f.id").fetchall()
             for frame in frames:
                 if frame["preview_expires"] is not None and frame["preview_expires"] <= self.clock.utc():
                     frame["preview"] = None
                     frame["preview_expires"] = None
-            return {"players": players, "outputs": outputs, "frames": frames}
+            return InstallationInventory(
+                players=tuple(PlayerInventory.model_validate(row) for row in players),
+                outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
+                frames=tuple(FrameInventory.model_validate(row) for row in frames),
+            )

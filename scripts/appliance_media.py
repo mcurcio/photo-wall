@@ -12,6 +12,7 @@ import re
 import time
 from pathlib import Path
 
+from central.installation_models import EquipmentSessionObservation
 from media.worker import load_connections
 from scripts.boot_fixture import FixtureError, read_file, require, write_json
 from scripts.immich_fixture import FixtureHost
@@ -84,15 +85,15 @@ class ApplianceMedia:
         return dict(worker_image=self.worker_image, upstream_project=self.upstream.project,
                     upstream_network_id=network_id, delivery_control=True), private
 
-    def probe(self, action: str, player: dict, *args: str) -> dict:
+    def probe(self, action: str, player: EquipmentSessionObservation, *args: str) -> dict:
         h = self.harness
         value = json.loads(h.run(["docker", "exec", h.fixture_central(), "python", "-m",
-            "scripts.vm_media_probe", action, "--player-id", player["player_id"],
-            "--epoch", str(player["authority_epoch"]), *args], timeout=30))
+            "scripts.vm_media_probe", action, "--player-id", player.player_id,
+            "--epoch", str(player.authority_epoch), *args], timeout=30))
         require(isinstance(value, dict) and "error" not in value, "media_probe_failed")
         return value
 
-    def configure(self, player: dict):
+    def configure(self, player: EquipmentSessionObservation):
         captured = datetime.datetime.fromisoformat(self.photo["captured"].replace("Z", "+00:00")).timestamp()
         self.setup = self.probe("configure", player, "--captured-from", str(captured),
                                 "--captured-until", str(captured + 1))
@@ -100,7 +101,7 @@ class ApplianceMedia:
                                    "starts_at"}, "media_configuration_invalid")
         self.harness.report["media"]["configuration"] = self.setup
 
-    def wait_presentation(self, label: str, player: dict):
+    def wait_presentation(self, label: str, player: EquipmentSessionObservation):
         h = self.harness
         deadline = time.monotonic() + MEDIA_TIMEOUT
         expected = h.report["media"]["presentations"].get("fresh", {}).get("sha256")
@@ -116,8 +117,8 @@ class ApplianceMedia:
                     and len(value["presentations"]) <= 32, "media_evidence_invalid")
             require(isinstance(value["grants"], list) and len(value["grants"]) <= 32, "media_grants_invalid")
             for grant in value["grants"]:
-                require(grant["player_id"] == player["player_id"]
-                        and grant["authority_epoch"] == player["authority_epoch"]
+                require(grant["player_id"] == player.player_id
+                        and grant["authority_epoch"] == player.authority_epoch
                         and grant["valid"] is True, "media_grant_authority")
                 key = tuple(grant[name] for name in ("plan_id", "revision", "assignment_id", "group_id"))
                 if key not in grants:
@@ -126,8 +127,8 @@ class ApplianceMedia:
                     grants[key] = grant
             if value["presentations"]:
                 proof = value["presentations"][0]
-                require(proof["player_id"] == player["player_id"]
-                        and proof["authority_epoch"] == player["authority_epoch"]
+                require(proof["player_id"] == player.player_id
+                        and proof["authority_epoch"] == player.authority_epoch
                         and proof["frame_id"] == self.setup["frame_id"]
                         and proof["output_id"] == self.setup["output_id"]
                         and proof["original_sha256"] == self.photo["sha256"]

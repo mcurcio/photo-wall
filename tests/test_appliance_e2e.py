@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from central.installation_models import EnrollmentObservation, EquipmentSessionObservation
 from scripts.boot_fixture import FixtureError
 from scripts.test_appliance_e2e import ApplianceE2E, boot_reports, checked_inputs, enrollment
 
@@ -22,7 +23,7 @@ def report(**changes):
 
 
 def row(**changes):
-    return dict(player_id=PLAYER, device_id=DEVICE, authority_epoch=1, retired=False) | changes
+    return EquipmentSessionObservation(**(dict(player_id=PLAYER, device_id=DEVICE, authority_epoch=1, retired=False) | changes))
 
 
 @pytest.mark.parametrize("invalid_json", [False, True])
@@ -400,10 +401,11 @@ def test_boot_evidence_redacts_capability_and_rejects_conflicting_or_durable_con
 
 
 def test_stable_equipment_requires_fresh_session_after_reboot():
-    assert enrollment([row(authority_epoch=2)], row()) == row(authority_epoch=2)
-    assert enrollment([row()], row()) is None
+    assert enrollment((row(authority_epoch=2),), row()) == EnrollmentObservation(state="ready", session=row(authority_epoch=2))
+    assert enrollment((row(),), row()) == EnrollmentObservation(state="pending")
+    assert enrollment(()) == EnrollmentObservation(state="pending")
     with pytest.raises(FixtureError, match='equipment_identity_changed'):
-        enrollment([row(device_id='device-'+'f'*64, authority_epoch=2)], row())
+        enrollment((row(device_id='device-'+'f'*64, authority_epoch=2),), row())
 
 
 def test_enrollment_probe_retries_bounded_runner_failures(monkeypatch):
@@ -443,7 +445,7 @@ def test_inventory_transport_soak_uses_authenticated_fixture_probe():
     harness = object.__new__(ApplianceE2E)
     harness.report = {"checks": {}}
     calls = []
-    harness.inventory = lambda: calls.append("inventory") or []
+    harness.inventory = lambda: calls.append("inventory") or ()
     harness.enrollment_probe = lambda name, callback: calls.append(name) or callback()
 
     harness.verify_inventory_transport(3)
@@ -506,7 +508,7 @@ def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeyp
     harness.execute()
 
     assert harness.fixture is fixture
-    assert harness.report["first_enrollment"] == row()
+    assert harness.report["first_enrollment"] == row().model_dump(mode="json")
     assert harness.report["checks"] == {
         "signed_https_dns_ntp": True,
         "central_inventory_pre_vm": True,
@@ -571,3 +573,41 @@ def test_rollback_requires_consumed_failed_trial_and_central_fallback(tmp_path, 
         assert control['action'] == 'reboot-for-trial' and control['schema'] == 2
         assert 'ticket_id' not in control['current']
         assert harness.report['checks']['production_automatic_rollback']
+
+
+def test_wait_enrollment_keeps_empty_and_prior_epoch_pending_and_serializes_ready(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {'boots': []}
+    harness.checked_vm = lambda: dict(Running=True, OOMKilled=False)
+    samples = iter(((), (row(),), (row(authority_epoch=2),)))
+    harness.inventory = lambda: next(samples)
+    harness.serial = lambda: ''  # The verified bootstrap report may have left the log tail.
+    harness.observe_serial = lambda _: [report()]
+    harness.enrollment_probe = lambda _name, callback: callback()
+    pending = []
+    def wait(_):
+        pending.append(json.loads(json.dumps(harness.report)))
+    monkeypatch.setattr(e2e.time, 'sleep', wait)
+
+    assert harness.wait_enrollment(previous=row(), boot=report()) == row(authority_epoch=2)
+    assert len(pending) == 2
+    assert all(item['last_enrollment_observation']['state'] == 'pending' and not item['boots'] for item in pending)
+    serialized = json.loads(json.dumps(harness.report))
+    assert serialized['last_enrollment_observation'] == dict(state='ready', session=row(authority_epoch=2).model_dump())
+    assert serialized['last_inventory'] == [row(authority_epoch=2).model_dump()]
+    assert serialized['boots'] == [report()]
+
+
+def test_wait_enrollment_rejects_equipment_other_than_the_selected_boot():
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {'boots': []}
+    harness.checked_vm = lambda: dict(Running=True, OOMKilled=False)
+    harness.inventory = lambda: (row(device_id='device-'+'f'*64),)
+    harness.serial = lambda: ''
+    harness.observe_serial = lambda _: [report()]
+    harness.enrollment_probe = lambda _name, callback: callback()
+    with pytest.raises(FixtureError, match='equipment_identity_changed'):
+        harness.wait_enrollment(boot=report())
+    assert harness.report['boots'] == []

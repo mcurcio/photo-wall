@@ -138,3 +138,20 @@ def test_native_rehydration_requires_delivery_from_the_current_boot(delivered):
             media.verify_rehydration('after_restart', after)
         assert not harness.report['media']['rehydration']
     assert calls[0][2:4] == ['--since', 'current-boot-start']
+
+
+def test_media_probe_consumes_the_typed_equipment_session():
+    import json
+    from types import SimpleNamespace
+
+    from central.installation_models import EquipmentSessionObservation
+
+    player = EquipmentSessionObservation(player_id='p-'+'a'*32, device_id='device-'+'b'*64,
+                                         authority_epoch=2, retired=False)
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        return json.dumps({'presentations': [], 'grants': []}).encode()
+    harness = SimpleNamespace(run=run, fixture_central=lambda: 'central')
+    assert ApplianceMedia(harness, 'image').probe('evidence', player) == dict(presentations=[], grants=[])
+    assert calls[0][-4:] == ['--player-id', player.player_id, '--epoch', '2']

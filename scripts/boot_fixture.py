@@ -30,7 +30,8 @@ POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d372
 PUBLIC = ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
 SOURCES = ("scripts/boot_gateway.py", "scripts/boot_time_fixture.py", "appliance/__init__.py",
            "appliance/bootstrap.py", "appliance/updates.py", "contracts/release.py",
-           "scripts/vm_media_evidence.py", "scripts/vm_media_probe.py", "scripts/vm_release_probe.py")
+           "scripts/vm_inventory_probe.py", "scripts/vm_media_evidence.py",
+           "scripts/vm_media_probe.py", "scripts/vm_release_probe.py")
 MAX_JSON = 1024**2
 MAX_ENV = 4096
 MAX_DOCKER_DEBUG_LOG = 512 * 1024

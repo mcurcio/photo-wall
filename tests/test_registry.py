@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from central.app import create_app
 from central.db import Database
+from central.installation_models import InstallationInventory
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -52,8 +53,8 @@ def frame(registry, frame_id="portrait"):
 
 def test_registration_precedes_binding_proof_replay_and_token_rotation(registry):
     identity, key, request = enroll(registry)
-    assert registry.inventory()["frames"] == []
-    assert len(registry.inventory()["outputs"]) == 2
+    assert registry.inventory().frames == ()
+    assert len(registry.inventory().outputs) == 2
     assert registry.bindings_for(identity["player_id"], identity["authority_epoch"]) == []
     assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
     with pytest.raises(RegistryError, match="used_challenge"):
@@ -67,21 +68,21 @@ def test_registration_precedes_binding_proof_replay_and_token_rotation(registry)
 
 def test_registration_without_panels_and_observation_removal(registry):
     identity, _, first = enroll(registry, count=0)
-    assert len(registry.inventory()["players"]) == 1
-    assert registry.inventory()["outputs"] == []
+    assert len(registry.inventory().players) == 1
+    assert registry.inventory().outputs == ()
     enroll(registry, count=2, device_id=first.device_id)
     enroll(registry, count=1, device_id=first.device_id)
-    observations = {o["output_id"]: o["observation"] for o in registry.inventory()["outputs"]}
-    assert observations["HDMI-A-1"]["connected"] is True
-    assert observations["HDMI-A-2"]["connected"] is False
+    observations = {o.output_id: o.observation for o in registry.inventory().outputs}
+    assert observations["HDMI-A-1"].connected is True
+    assert observations["HDMI-A-2"].connected is False
 
 
 def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(registry):
     identity, _, first = enroll(registry)
     inventory = registry.inventory()
-    assert inventory["players"][0]["device_id"] == first.device_id
-    assert inventory["players"][0]["health"]["boot_id"] == first.boot_id
-    assert len(inventory["outputs"]) == 2
+    assert inventory.players[0].device_id == first.device_id
+    assert inventory.players[0].health["boot_id"] == first.boot_id
+    assert len(inventory.outputs) == 2
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
@@ -123,7 +124,7 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     registry.clock.advance(61)
     with pytest.raises(RegistryError, match="expired"):
         registry.enroll(request)
-    assert registry.inventory()["players"] == []
+    assert registry.inventory().players == ()
 
 
 def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(registry):
@@ -141,8 +142,8 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
         enroll(registry, device_id=old_enrollment.device_id)
     assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
-    location = registry.inventory()["frames"][0]
-    assert (location["id"], location["width_mm"], location["calibration"]["gain"]) == ("portrait", 300, .8)
+    location = registry.inventory().frames[0]
+    assert (location.id, location.width_mm, location.calibration.gain) == ("portrait", 300, .8)
     with pytest.raises(RegistryError, match="generation_conflict"):
         registry.calibrate("portrait", "commit", 2, Calibration(gain=.5), expected_generation=1)
     registry.calibrate("portrait", "commit", 2, Calibration(gain=.9), expected_generation=3)
@@ -164,11 +165,11 @@ def test_two_outputs_and_concurrent_conflicting_binding_are_atomic(registry):
     with ThreadPoolExecutor(2) as pool:
         outcomes = list(pool.map(claim, ["left", "right"]))
     assert sorted(outcomes) == ["ok", "output_already_bound"]
-    frames = registry.inventory()["frames"]
-    unbound = next(f for f in frames if f["player_id"] is None)
-    registry.bind(unbound["id"], identity["player_id"], "HDMI-A-2", expected_generation=0)
+    frames = registry.inventory().frames
+    unbound = next(f for f in frames if f.player_id is None)
+    registry.bind(unbound.id, identity["player_id"], "HDMI-A-2", expected_generation=0)
     assert len(registry.bindings_for(identity["player_id"], 1, include_unvalidated=True)) == 2
-    assert all(f["generation"] == 1 for f in registry.inventory()["frames"])
+    assert all(f.generation == 1 for f in registry.inventory().frames)
 
 
 def test_delayed_binding_retry_cannot_undo_a_newer_transfer(registry):
@@ -181,7 +182,7 @@ def test_delayed_binding_retry_cannot_undo_a_newer_transfer(registry):
     registry.bind("portrait", second["player_id"], "HDMI-A-1", expected_generation=1)
     with pytest.raises(RegistryError, match="generation_conflict"):
         registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0)
-    assert registry.inventory()["frames"][0]["player_id"] == second["player_id"]
+    assert registry.inventory().frames[0].player_id == second["player_id"]
 
 
 def test_calibration_preview_expiry_revert_commit_conflict_and_restart(registry):
@@ -225,3 +226,17 @@ def test_http_operator_and_player_authority_are_separate_and_errors_are_sanitize
         assert "private-test-secret" not in response.text
         data = client.get("/v1/operator/inventory", headers={"Authorization": "Bearer " + ADMIN}).text
         assert identity["token"] not in data and "token_hash" not in data and "public_key" not in data
+
+
+def test_typed_inventory_preserves_the_complete_operator_json_response(registry):
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    expected = registry.inventory()
+    assert isinstance(expected, InstallationInventory)
+    assert expected.frames[0].profile.width_px == 1080
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        response = client.get("/v1/operator/inventory", headers={"Authorization": "Bearer " + ADMIN})
+        assert response.status_code == 200
+        assert response.json() == expected.model_dump(mode="json")
+        assert InstallationInventory.model_validate_json(response.content) == expected

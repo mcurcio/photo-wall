@@ -21,6 +21,12 @@ import time
 import uuid
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
+from central.installation_models import (
+    EnrollmentObservation,
+    EquipmentSessionObservation,
+)
 from scripts.boot_fixture import (
     BootFixture,
     FixtureError,
@@ -49,24 +55,6 @@ PUBLIC_EVENTS = {"photo-wall-trial-reboot-requested", "photo-wall-trial-reboot-r
                  "photo-wall-health-diagnostic"}
 RETRYABLE_PROBE_ERRORS = {"docker_command_failed", "docker_timeout"}
 PROBE_ATTEMPTS = 4
-
-# Executed inside the fixture's existing central container. Its credential stays
-# in that container; only a neutral projection of the authenticated API returns.
-INVENTORY_PROBE = r'''
-import json, os, ssl, urllib.request
-context = ssl.create_default_context(cafile='/public/ca.pem')
-request = urllib.request.Request('https://photo-wall.test/v1/operator/inventory',
-    headers={'Authorization':'Bearer '+os.environ['PHOTO_WALL_ADMIN_TOKEN']})
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-    urllib.request.HTTPSHandler(context=context))
-with opener.open(request, timeout=5) as response:
-    data = response.read(1048577)
-    if len(data)>1048576: raise ValueError('inventory_limit')
-    body = json.loads(data)
-print(json.dumps([dict(player_id=p['id'],authority_epoch=p['authority_epoch'],
-    device_id=p['device_id'],retired=p['retired_at'] is not None)
-    for p in body['players']]))
-'''
 
 LAUNCHER = """#!/bin/sh
 set -eu
@@ -288,22 +276,19 @@ def serial_diagnostics(serial: str) -> dict:
     }
 
 
-def enrollment(rows: list, previous: dict | None = None) -> dict | None:
+def enrollment(rows: tuple[EquipmentSessionObservation, ...],
+               previous: EquipmentSessionObservation | None = None) -> EnrollmentObservation:
     if not rows:
-        return None
+        return EnrollmentObservation(state="pending")
     require(len(rows) == 1, "unexpected_player_count")
     row = rows[0]
-    require(re.fullmatch(r"p-[a-f0-9]{32}", row.get("player_id", "")) is not None
-            and row.get("retired") is False
-            and re.fullmatch(r"device-[a-f0-9]{64}", row.get("device_id", "")) is not None
-            and type(row.get("authority_epoch")) is int and row["authority_epoch"] >= 1,
-            "invalid_guest_enrollment")
+    require(not row.retired, "invalid_guest_enrollment")
     if previous is not None:
-        require(row["player_id"] == previous["player_id"] and row["device_id"] == previous["device_id"],
+        require(row.player_id == previous.player_id and row.device_id == previous.device_id,
                 "equipment_identity_changed")
-        if row["authority_epoch"] <= previous["authority_epoch"]:
-            return None
-    return row
+        if row.authority_epoch <= previous.authority_epoch:
+            return EnrollmentObservation(state="pending")
+    return EnrollmentObservation(state="ready", session=row)
 
 
 class ApplianceE2E:
@@ -364,9 +349,10 @@ class ApplianceE2E:
         self.fixture.check(self.fixture.resources["container:" + name])
         return name
 
-    def inventory(self):
-        return json.loads(self.run(["docker", "exec", self.fixture_central(),
-                                   "python", "-c", INVENTORY_PROBE], timeout=15))
+    def inventory(self) -> tuple[EquipmentSessionObservation, ...]:
+        payload = self.run(["docker", "exec", self.fixture_central(),
+                            "python", "-m", "scripts.vm_inventory_probe"], timeout=15)
+        return TypeAdapter(tuple[EquipmentSessionObservation, ...]).validate_json(payload)
 
     def serial(self):
         self.checked_vm()
@@ -393,7 +379,8 @@ class ApplianceE2E:
         """Exercise the exact authenticated inventory path before VM load."""
         require(type(samples) is int and 1 <= samples <= 10, "invalid_inventory_samples")
         for _ in range(samples):
-            require(self.enrollment_probe("central_inventory", self.inventory) == [],
+            observed = enrollment(self.enrollment_probe("central_inventory", self.inventory))
+            require(observed.state == "pending",
                     "fixture_not_empty")
         self.report["checks"]["central_inventory_pre_vm"] = True
 
@@ -496,15 +483,17 @@ class ApplianceE2E:
                     seen.add(sample["sample_index"])
             samples.sort(key=lambda sample: sample["sample_index"])
 
-    def wait_enrollment(self, previous=None, boot=None):
+    def wait_enrollment(self, previous: EquipmentSessionObservation | None = None,
+                        boot: dict | None = None) -> EquipmentSessionObservation:
         deadline = time.monotonic() + BOOT_TIMEOUT
         while time.monotonic() < deadline:
             status = self.enrollment_probe("vm_state", self.checked_vm)
             require(status["Running"] and not status["OOMKilled"], "vm_stopped_before_enrollment")
             rows = self.enrollment_probe("central_inventory", self.inventory)
             self.report["last_inventory_count"] = len(rows)
-            self.report["last_inventory"] = rows
-            row = enrollment(rows, previous)
+            self.report["last_inventory"] = [row.model_dump(mode="json") for row in rows]
+            observation = enrollment(rows, previous)
+            self.report["last_enrollment_observation"] = observation.model_dump(mode="json")
             serial = self.enrollment_probe("vm_serial", self.serial)
             diagnostics = serial_diagnostics(serial)
             require(not diagnostics["kernel_panic"] and not diagnostics["out_of_memory"],
@@ -515,9 +504,12 @@ class ApplianceE2E:
             fresh = [r for r in observed if r["boot_id"] not in
                      {old["boot_id"] for old in self.report["boots"]}]
             selected = boot or (fresh[-1] if fresh else None)
-            if row and selected:
+            if observation.state == "ready" and selected:
+                session = observation.session
+                assert session is not None  # Enforced by EnrollmentObservation at the boundary.
+                require(session.device_id == selected["device_id"], "equipment_identity_changed")
                 self.report["boots"].append(selected)
-                return row
+                return session
             time.sleep(5)
         raise FixtureError("guest_enrollment_timeout")
 
@@ -584,7 +576,7 @@ class ApplianceE2E:
             time.sleep(3)
         raise FixtureError(failure)
 
-    def exercise_rollback(self, previous: dict):
+    def exercise_rollback(self, previous: EquipmentSessionObservation) -> EquipmentSessionObservation:
         require(len(self.report["boots"]) == 2, "rollback_requires_accepted_restart")
         boot = self.report["boots"][1]
         require(boot["trial"] is False, "rollback_requires_accepted_restart")
@@ -618,9 +610,10 @@ class ApplianceE2E:
                 and fallback["accepted_release_id"] == self.inputs["release"].release_id,
                 "central_rollback_unproven")
         self.report["central_failed_trial"] = failed
-        self.report["fallback_enrollment"] = restored
+        self.report["fallback_enrollment"] = restored.model_dump(mode="json")
         self.report["checks"]["production_automatic_rollback"] = True
         self.report["checks"]["equipment_reenrolls_after_rollback"] = True
+        return restored
 
     def execute_smoke(self):
         """Prove the signed image boots and starts the production Player."""
@@ -636,7 +629,7 @@ class ApplianceE2E:
         self.verify_boot_attempt(boot)
         first = self.wait_enrollment(boot=boot)
         require(self.report["boots"][-1]["trial"] is False, "smoke_selected_trial")
-        self.report["first_enrollment"] = first
+        self.report["first_enrollment"] = first.model_dump(mode="json")
         self.report["checks"]["accepted_release_selected"] = True
         self.report["checks"]["production_player_enrolled"] = True
         self.report["qualification"]["generic_vm"] = True
@@ -665,7 +658,7 @@ class ApplianceE2E:
         boot = self.wait_boot_report()
         self.verify_boot_attempt(boot)
         first = self.wait_enrollment(boot=boot)
-        self.report["first_enrollment"] = first
+        self.report["first_enrollment"] = first.model_dump(mode="json")
         self.report["checks"]["fresh_stateless_enrollment"] = True
         print(json.dumps({"phase": "fresh_boot", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "native_trial", "status": "started"}), flush=True)
@@ -685,7 +678,7 @@ class ApplianceE2E:
         self.run(["docker", "start", self.name], timeout=30)
         second = self.wait_enrollment(first)
         require(self.report["boots"][-1]["trial"] is False, "accepted_release_not_reselected")
-        self.report["second_enrollment"] = second
+        self.report["second_enrollment"] = second.model_dump(mode="json")
         self.report["checks"]["equipment_reenrolls_after_power_cycle"] = True
         self.report["checks"]["accepted_release_reselected"] = True
         print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
@@ -701,12 +694,12 @@ class ApplianceE2E:
         self.fixture_central()
         self.run(["docker", "start", central], timeout=30)
         self.wait_player_requests(since)
-        require(enrollment(self.inventory()) == second, "recovery_identity_or_authority_changed")
+        require(enrollment(self.inventory()).session == second, "recovery_identity_or_authority_changed")
         self.report["checks"]["central_outage_rejoin"] = True
         print(json.dumps({"phase": "central_recovery", "status": "passed"}), flush=True)
-        self.exercise_rollback(second)
+        restored = self.exercise_rollback(second)
         if media:
-            media.wait_presentation("after_rollback", self.report["fallback_enrollment"])
+            media.wait_presentation("after_rollback", restored)
             media.network_denial("after")
             self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
             require(not self.checked_vm()["Running"], "vm_stop_failed")

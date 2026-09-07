@@ -23,6 +23,7 @@ from pydantic import Field, model_validator
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
+from central.installation_models import InstallationInventory
 from central.media_gateway import MediaGateway
 from central.media_queue import AcquisitionQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
@@ -497,7 +498,11 @@ def create_app(
         except (RegistryError, ValueError):
             await websocket.close(code=1008)
 
-    @app.get("/v1/operator/inventory", dependencies=[Depends(admin)])
+    @app.get(
+        "/v1/operator/inventory",
+        dependencies=[Depends(admin)],
+        response_model=InstallationInventory,
+    )
     def inventory():
         return registry.inventory()
 
