@@ -22,8 +22,13 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
        'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260905T000000Z trixie main' \
        'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260905T000000Z trixie-security main' \
        > /etc/apt/sources.list \
-    && apt-get -o Acquire::Retries=3 update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && attempt=1 \
+    && until apt-get -o Acquire::Retries=5 update \
+          && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg; do \
+         if [ "$attempt" -ge 4 ]; then exit 1; fi; \
+         sleep $((attempt * 15)); \
+         attempt=$((attempt + 1)); \
+       done \
     && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /etc/photo-wall/packages.tsv \
     && sha256sum /usr/bin/ffmpeg /usr/bin/ffprobe > /etc/photo-wall/conversion-binaries.sha256 \
     && printf '%s\n' '{"schema":1,"connections":[]}' > /etc/photo-wall/private/connections.json \

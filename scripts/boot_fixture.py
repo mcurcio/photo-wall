@@ -431,12 +431,13 @@ def record_docker_debug(args: list[str], code: int, data: bytes) -> None:
 
 def command(args: list[str], timeout=180) -> bytes:
     launched = docker_debug_args(args)
-    child = subprocess.Popen(launched, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    child = subprocess.Popen(launched, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              stdin=subprocess.DEVNULL, start_new_session=True)
-    data, deadline = bytearray(), time.monotonic()+timeout
+    stdout, stderr, deadline = bytearray(), bytearray(), time.monotonic()+timeout
     try:
         with selectors.DefaultSelector() as poll:
             poll.register(child.stdout, selectors.EVENT_READ)
+            poll.register(child.stderr, selectors.EVENT_READ)
             while poll.get_map():
                 left = deadline-time.monotonic()
                 require(left > 0, "docker_timeout")
@@ -445,21 +446,25 @@ def command(args: list[str], timeout=180) -> bytes:
                     if not block:
                         poll.unregister(key.fileobj)
                     else:
-                        data.extend(block)
-                        require(len(data) <= 2*MAX_JSON, "docker_output_limit")
+                        destination = stdout if key.fileobj is child.stdout else stderr
+                        destination.extend(block)
+                        require(len(stdout) + len(stderr) <= 2*MAX_JSON, "docker_output_limit")
             try:
                 code = child.wait(timeout=max(.01,deadline-time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise FixtureError("docker_timeout") from None
             if code != 0:
-                record_docker_debug(args, code, bytes(data))
+                half = MAX_DOCKER_DEBUG_ENTRY // 2
+                record_docker_debug(args, code, b"stderr:\n" + bytes(stderr[-half:])
+                                    + b"\nstdout:\n" + bytes(stdout[-half:]))
                 raise FixtureError("docker_command_failed")
-            return bytes(data)
+            return bytes(stdout)
     finally:
         if child.poll() is None:
             os.killpg(child.pid,signal.SIGKILL)
         child.wait()
         child.stdout.close()
+        child.stderr.close()
 
 
 class BootFixture:

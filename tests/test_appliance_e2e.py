@@ -440,6 +440,47 @@ def test_enrollment_probe_names_persistent_failure(monkeypatch):
     assert harness.report["probe_retries"] == {"central_inventory": e2e.PROBE_ATTEMPTS}
 
 
+def test_inventory_transport_soak_uses_authenticated_fixture_probe():
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {"checks": {}}
+    calls = []
+    harness.inventory = lambda: calls.append("inventory") or []
+    harness.enrollment_probe = lambda name, callback: calls.append(name) or callback()
+
+    harness.verify_inventory_transport(3)
+
+    assert calls == ["central_inventory", "inventory"] * 3
+    assert harness.report["checks"]["central_inventory_pre_vm"] is True
+
+
+def test_boot_report_is_a_distinct_gate_before_player_enrollment(monkeypatch):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {"checks": {}, "boots": [], "observed_boot_reports": []}
+    harness.checked_vm = lambda: dict(Running=True, OOMKilled=False)
+    harness.serial = lambda: json.dumps(report())
+    harness.enrollment_probe = lambda _name, callback: callback()
+    harness.observe_serial = lambda serial: [report()] if serial else []
+    monkeypatch.setattr(e2e.time, "sleep", lambda _: None)
+
+    assert harness.wait_boot_report() == report()
+    assert harness.report["checks"]["bootstrap_reached_rootfs"] is True
+
+
+def test_central_boot_evidence_is_a_distinct_gate():
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {"checks": {}}
+    calls = []
+    harness.boot_evidence = lambda boot: calls.append(boot) or {"recorded": True}
+    harness.enrollment_probe = lambda name, callback: calls.append(name) or callback()
+
+    harness.verify_boot_attempt(report())
+
+    assert calls == ["central_boot_evidence", report()]
+    assert harness.report["checks"]["central_boot_attempt_recorded"] is True
+
+
 def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeypatch):
     from scripts import test_appliance_e2e as e2e
 
@@ -451,10 +492,14 @@ def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeyp
     harness.inputs = {"bundle": tmp_path / "bundle", "deployment": tmp_path / "deployment"}
     harness.central_image = "sha256:" + "c" * 64
     harness.report = {"checks": {}, "boots": [], "qualification": e2e.unqualified()}
-    harness.inventory = lambda: []
+    harness.verify_inventory_transport = lambda: harness.report["checks"].update(
+        central_inventory_pre_vm=True)
     harness.start_vm = lambda: None
+    harness.wait_boot_report = lambda: report(trial=False)
+    harness.verify_boot_attempt = lambda *_: harness.report["checks"].update(
+        central_boot_attempt_recorded=True)
 
-    def wait_enrollment():
+    def wait_enrollment(**_kwargs):
         harness.report["boots"].append(report(trial=False))
         return row()
 
@@ -465,6 +510,8 @@ def test_smoke_scope_stops_after_the_production_player_enrolls(tmp_path, monkeyp
     assert harness.report["first_enrollment"] == row()
     assert harness.report["checks"] == {
         "signed_https_dns_ntp": True,
+        "central_inventory_pre_vm": True,
+        "central_boot_attempt_recorded": True,
         "accepted_release_selected": True,
         "production_player_enrolled": True,
     }

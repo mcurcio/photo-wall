@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -423,6 +424,14 @@ def test_docker_debug_flag_and_bounded_failure_log(tmp_path, monkeypatch):
     assert b"private-argument" not in logged
     assert len(logged) <= MAX_DOCKER_DEBUG_ENTRY + 64
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_command_keeps_debug_stderr_out_of_structured_stdout():
+    from scripts.boot_fixture import command
+
+    result = command([sys.executable, "-c",
+        "import sys; sys.stderr.write('debug noise\\n'); sys.stdout.write('{\"ok\":true}\\n')"])
+    assert json.loads(result) == {"ok": True}
 
 
 @pytest.mark.parametrize("initialized", [True, False])

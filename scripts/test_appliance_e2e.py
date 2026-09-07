@@ -374,7 +374,8 @@ class ApplianceE2E:
 
     def enrollment_probe(self, name: str, callback):
         """Retry read-only runner probes without weakening the enrollment deadline."""
-        require(name in ("vm_state", "central_inventory", "vm_serial"), "invalid_probe_name")
+        require(name in ("vm_state", "central_inventory", "central_boot_evidence", "vm_serial"),
+                "invalid_probe_name")
         for attempt in range(1, PROBE_ATTEMPTS + 1):
             try:
                 return callback()
@@ -387,6 +388,31 @@ class ApplianceE2E:
                 if attempt == PROBE_ATTEMPTS:
                     raise FixtureError(f"{name}_unavailable:{code}") from None
                 time.sleep(2)
+
+    def verify_inventory_transport(self, samples: int = 3):
+        """Exercise the exact authenticated inventory path before VM load."""
+        require(type(samples) is int and 1 <= samples <= 10, "invalid_inventory_samples")
+        for _ in range(samples):
+            require(self.enrollment_probe("central_inventory", self.inventory) == [],
+                    "fixture_not_empty")
+        self.report["checks"]["central_inventory_pre_vm"] = True
+
+    def wait_boot_report(self):
+        """Prove bootstrap separately from production Player enrollment."""
+        deadline = time.monotonic() + BOOT_TIMEOUT
+        while time.monotonic() < deadline:
+            status = self.enrollment_probe("vm_state", self.checked_vm)
+            require(status["Running"] and not status["OOMKilled"], "vm_stopped_during_boot")
+            serial = self.enrollment_probe("vm_serial", self.serial)
+            diagnostics = serial_diagnostics(serial)
+            require(not diagnostics["kernel_panic"] and not diagnostics["out_of_memory"],
+                    "guest_crashed_during_boot")
+            observed = self.observe_serial(serial)
+            if observed:
+                self.report["checks"]["bootstrap_reached_rootfs"] = True
+                return observed[-1]
+            time.sleep(5)
+        raise FixtureError("guest_boot_report_timeout")
 
     def start_vm(self):
         directory = self.state / "vm"
@@ -470,7 +496,7 @@ class ApplianceE2E:
                     seen.add(sample["sample_index"])
             samples.sort(key=lambda sample: sample["sample_index"])
 
-    def wait_enrollment(self, previous=None):
+    def wait_enrollment(self, previous=None, boot=None):
         deadline = time.monotonic() + BOOT_TIMEOUT
         while time.monotonic() < deadline:
             status = self.enrollment_probe("vm_state", self.checked_vm)
@@ -487,8 +513,9 @@ class ApplianceE2E:
             # serial-log tail. Retain verified reports across polling attempts.
             fresh = [r for r in observed if r["boot_id"] not in
                      {old["boot_id"] for old in self.report["boots"]}]
-            if row and fresh:
-                self.report["boots"].append(fresh[-1])
+            selected = boot or (fresh[-1] if fresh else None)
+            if row and selected:
+                self.report["boots"].append(selected)
                 return row
             time.sleep(5)
         raise FixtureError("guest_enrollment_timeout")
@@ -507,6 +534,12 @@ class ApplianceE2E:
             require(all(value.get(k) == boot[k] for k in
                     ("boot_id", "device_id", "ticket_sha256", "release_id", "trial")), "central_boot_mismatch")
         return value
+
+    def verify_boot_attempt(self, boot: dict):
+        """Prove the reported bootstrap attempt also reached central storage."""
+        evidence = self.enrollment_probe("central_boot_evidence", lambda: self.boot_evidence(boot))
+        require(evidence is not None, "central_boot_attempt_missing")
+        self.report["checks"]["central_boot_attempt_recorded"] = True
 
     def wait_central_health(self):
         boot = self.report["boots"][-1]
@@ -595,10 +628,12 @@ class ApplianceE2E:
                                           self.inputs["deployment"], self.central_image)
         self.fixture.up()
         self.report["checks"]["signed_https_dns_ntp"] = True
-        require(self.inventory() == [], "fixture_not_empty")
+        self.verify_inventory_transport()
         print(json.dumps({"phase": "appliance_launch", "status": "started"}), flush=True)
         self.start_vm()
-        first = self.wait_enrollment()
+        boot = self.wait_boot_report()
+        self.verify_boot_attempt(boot)
+        first = self.wait_enrollment(boot=boot)
         require(self.report["boots"][-1]["trial"] is False, "smoke_selected_trial")
         self.report["first_enrollment"] = first
         self.report["checks"]["accepted_release_selected"] = True
@@ -623,10 +658,12 @@ class ApplianceE2E:
                                           candidate_bundle=self.inputs["candidate_dir"], **options)
         self.fixture.up()
         self.report["checks"]["signed_https_dns_ntp"] = True
-        require(self.inventory() == [], "fixture_not_empty")
+        self.verify_inventory_transport()
         print(json.dumps({"phase": "fresh_boot", "status": "started"}), flush=True)
         self.start_vm()
-        first = self.wait_enrollment()
+        boot = self.wait_boot_report()
+        self.verify_boot_attempt(boot)
+        first = self.wait_enrollment(boot=boot)
         self.report["first_enrollment"] = first
         self.report["checks"]["fresh_stateless_enrollment"] = True
         print(json.dumps({"phase": "fresh_boot", "status": "passed"}), flush=True)
