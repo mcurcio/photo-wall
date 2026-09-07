@@ -30,6 +30,7 @@ def test_render_unit_keeps_production_preflight_and_sandbox():
     assert "TimeoutStartSec=30s" in rendered
     assert rendered.count("ExecStart=\n") == 1
     assert rendered.endswith("ExecStart=/usr/bin/python3 /run/photo-wall/pw-check-probe.py\n")
+    assert "/var/lib/photo-wall/player" not in rendered
 
 
 def test_environment_rejects_existing_runtime_before_any_account_mutation(tmp_path, monkeypatch):
@@ -74,7 +75,7 @@ def test_environment_rejects_existing_wall_group_before_account_mutation(tmp_pat
 
 def test_probe_is_uid_bounded_and_contains_only_public_checks():
     text = check._probe_text(leaf="/run/photo-wall/player/leafhealth",
-                             state_leaf="/var/lib/photo-wall/player/preflight-state",
+                             state_leaf="/var/lib/photo-wall/preflight-state",
                              boot="/run/photo-wall/boot.json",
                              socket_path="/run/user/10001/wayland-0",
                              runtime="/run/user/10001/write-test",
@@ -83,6 +84,7 @@ def test_probe_is_uid_bounded_and_contains_only_public_checks():
     compile(text, "probe", "exec")
     assert "geteuid() != 10001" in text
     assert "errno.EROFS" in text
+    assert "must-not-write" in text
     assert "private" not in text.lower()
     assert "credential" not in text.lower()
 

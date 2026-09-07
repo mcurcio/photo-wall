@@ -91,7 +91,7 @@ class Created:
     user_run: pathlib.Path | None = None
     socket_path: pathlib.Path | None = None
     state: pathlib.Path | None = None
-    player_state: pathlib.Path | None = None
+    state_canary: pathlib.Path | None = None
     user: bool = False
     group: bool = False
 
@@ -234,7 +234,7 @@ def _source_text(source: pathlib.Path) -> str:
         "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only",
         "InaccessiblePaths=-/home -/root", "PrivateTmp=yes", "ProtectKernelTunables=yes",
         "ProtectKernelModules=yes", "ProtectControlGroups=yes", "RestrictSUIDSGID=yes",
-        "ReadWritePaths=/run/photo-wall/player", "ReadWritePaths=-/var/lib/photo-wall/player",
+        "ReadWritePaths=/run/photo-wall/player",
         "ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'",
     )
     if any(line not in text.splitlines() for line in required):
@@ -272,8 +272,14 @@ if os.geteuid() != 10001:
 
 with open({values["leaf"]}, "wb") as stream:
     stream.write(b"photo-wall-preflight\\n")
-with open({values["state_leaf"]}, "wb") as stream:
-    stream.write(b"photo-wall-state\\n")
+try:
+    with open({values["state_leaf"]}, "ab") as stream:
+        stream.write(b"must-not-write\\n")
+except OSError as error:
+    if error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+        raise SystemExit(17) from error
+else:
+    raise SystemExit(18)
 
 try:
     with open({values["boot"]}, "ab") as stream:
@@ -386,9 +392,9 @@ class Preflight:
         self.created.state = paths.state
         paths.state.mkdir(mode=0o755)
         _chown_mode(paths.state, 0, 0, 0o755)
-        self.created.player_state = paths.state / "player"
-        self.created.player_state.mkdir(mode=0o700)
-        _chown_mode(self.created.player_state, uid, gid, 0o700)
+        self.created.state_canary = paths.state / "preflight-state"
+        self.created.state_canary.write_bytes(b"root-owned-state-canary\n")
+        _chown_mode(self.created.state_canary, 0, 0, 0o644)
 
         self.created.user_run = paths.user_run
         paths.user_run.mkdir(mode=0o700)
@@ -408,7 +414,7 @@ class Preflight:
         self.created.probe = paths.wall_run / "pw-check-probe.py"
         self.created.probe.write_text(_probe_text(
             leaf="/run/photo-wall/player/leafhealth",
-            state_leaf="/var/lib/photo-wall/player/preflight-state",
+            state_leaf="/var/lib/photo-wall/preflight-state",
             boot="/run/photo-wall/boot.json",
             socket_path="/run/user/10001/wayland-0",
             runtime="/run/user/10001/pw-check-must-be-read-only",
@@ -453,14 +459,14 @@ class Preflight:
             raise PreflightError("leafhealth_missing") from None
         if metadata.st_uid != WALL_UID or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise PreflightError("leafhealth_permissions_invalid")
-        state_leaf = self.paths.state / "player" / "preflight-state"
+        state_leaf = self.paths.state / "preflight-state"
         try:
-            if state_leaf.read_bytes() != b"photo-wall-state\n":
+            if state_leaf.read_bytes() != b"root-owned-state-canary\n":
                 raise PreflightError("player_state_invalid")
             state_metadata = state_leaf.stat()
         except OSError:
             raise PreflightError("player_state_missing") from None
-        if state_metadata.st_uid != WALL_UID or stat.S_IMODE(state_metadata.st_mode) != 0o600:
+        if state_metadata.st_uid != 0 or stat.S_IMODE(state_metadata.st_mode) != 0o644:
             raise PreflightError("player_state_permissions_invalid")
         if self.created.boot_record is None:
             raise PreflightError("boot_record_missing")
@@ -507,7 +513,7 @@ class Preflight:
                  self.created.socket_path]
         if self.created.wall_run is not None:
             paths.extend((self.paths.wall_run / "player" / "leafhealth",
-                          self.paths.state / "player" / "preflight-state"))
+                          self.created.state_canary))
         boot_intact = self._boot_record_intact()
         clean = boot_intact and clean
         if boot_intact:
@@ -516,7 +522,7 @@ class Preflight:
             if path is None:
                 continue
             clean = _unlink(path, socket_ok=path == self.created.socket_path) and clean
-        directories = [self.created.player_state, self.created.state, self.created.user_run]
+        directories = [self.created.state, self.created.user_run]
         if self.created.wall_run is not None:
             directories.append(self.created.wall_run)
         for path in directories:
