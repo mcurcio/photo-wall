@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -44,6 +45,17 @@ def test_adapter_passes_the_caller_owned_connection_and_exact_job_identity():
         "connection": connection,
         "payload": {"job_id": "job-one"},
     }
+
+
+def test_schema_install_is_repeatable_and_safe_across_concurrent_central_starts(registry):
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(ProcrastinateMediaQueue.apply_schema, [registry.db.dsn] * 4))
+
+    ProcrastinateMediaQueue.apply_schema(registry.db.dsn)
+    with registry.db.transaction() as conn:
+        assert conn.execute(
+            "SELECT to_regclass('procrastinate_jobs') IS NOT NULL AS installed"
+        ).fetchone()["installed"] is True
 
 
 def test_retry_strategy_is_bounded_and_only_retries_coded_retryable_failures():
