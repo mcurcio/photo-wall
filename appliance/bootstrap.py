@@ -267,6 +267,12 @@ def file_chunks(path: Path):
 class LinuxOps:
     """Linux mount/device operations, injectable for portable state/fault tests."""
 
+    equipment_observations = (
+        ("pi", "/sys/firmware/devicetree/base/serial-number"),
+        ("dmi", "/sys/class/dmi/id/product_uuid"),
+        ("qemu", "/sys/firmware/qemu_fw_cfg/by_name/opt/photo-wall/equipment-id/raw"),
+    )
+
     def __init__(self, run_root: Path = Path("/run/photo-wall")):
         self.run_root = run_root
         self.run_root.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -296,10 +302,10 @@ class LinuxOps:
         return value
 
     def device_id(self) -> str:
-        # Pi firmware serial; DMI UUID is the equivalent fixed VM identifier.
+        # Pi firmware serial; DMI UUID and the explicit QEMU fixture observation
+        # are equivalent fixed equipment identifiers.
         # Neither MAC/IP nor a freshly generated session key is equipment identity.
-        for kind, name in (("pi", "/sys/firmware/devicetree/base/serial-number"),
-                           ("dmi", "/sys/class/dmi/id/product_uuid")):
+        for kind, name in self.equipment_observations:
             try:
                 with Path(name).open("rb") as stream:
                     raw = stream.read(257).strip(b"\x00\r\n ").lower()

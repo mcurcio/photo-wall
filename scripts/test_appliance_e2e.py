@@ -71,6 +71,7 @@ set -eu
 umask 077
 exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aarch64 \\
     -machine virt -uuid __DEVICE_UUID__ -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
+    -fw_cfg name=opt/photo-wall/equipment-id,string=__DEVICE_UUID__ \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
     -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 watchdog_core.nowayout=1 i6300esb.nowayout=1 systemd.journald.forward_to_console=1' \\
     -drive file=/input.img,if=none,format=raw,readonly=on,id=bootstrap \\
@@ -266,6 +267,7 @@ def serial_diagnostics(serial: str) -> dict:
             exits[service] = [dict(code=code, status=int(status), name=name)
                              for code, status, name in sorted(set(matches))[:8]]
     return {
+        "bootstrap_failed": "photo-wall: boot_failed" in plain,
         "qemu_device_error": bool(re.search(
             r"qemu-system-aarch64: .*?(?:Device .* not found|not a valid device model name)",
             plain,

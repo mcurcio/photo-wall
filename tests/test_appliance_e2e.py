@@ -269,13 +269,21 @@ def test_serial_diagnostics_keep_only_fixed_public_fault_names():
         "systemd[1]: \x1b[0;31msystemd-networkd.service: Main process exited, status=200/CHDIR\x1b[0m\n"
         "ModuleNotFoundError: private-input-must-not-escape\n"
         "arbitrary-token.service: Failed with result secret\n")
-    assert result == dict(qemu_device_error=False, systemd_chdir_failure=True,
+    assert result == dict(bootstrap_failed=False, qemu_device_error=False, systemd_chdir_failure=True,
                          kernel_panic=False, out_of_memory=False,
                          failed_services=["systemd-networkd"], service_exit_status={},
                          namespace_failures={}, player_faults=[],
                          python_errors=["ModuleNotFoundError"])
     assert "private-input" not in json.dumps(result)
     assert "arbitrary-token" not in json.dumps(result)
+
+
+def test_serial_diagnostics_classifies_bootstrap_failure_without_exporting_detail():
+    from scripts.test_appliance_e2e import serial_diagnostics
+
+    result = serial_diagnostics("private context\nphoto-wall: boot_failed\nprivate token")
+    assert result["bootstrap_failed"] is True
+    assert "private" not in json.dumps(result)
 
 
 

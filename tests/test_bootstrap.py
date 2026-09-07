@@ -150,6 +150,26 @@ def test_copy_preserves_existing_and_rejects_source_symlink(tmp_path):
         read_regular(link, 100)
 
 
+def test_qemu_equipment_observation_is_normalized_without_persisting_identity(tmp_path):
+    observation = tmp_path / "equipment-id"
+    observation.write_bytes(b"11111111-2222-3333-4444-555555555555\n")
+    ops = LinuxOps(tmp_path / "run")
+    ops.equipment_observations = (("qemu", str(observation)),)
+
+    expected = hashlib.sha256(b"qemu:11111111-2222-3333-4444-555555555555").hexdigest()
+    assert ops.device_id() == "device-" + expected
+
+
+def test_equipment_observation_rejects_untrusted_format(tmp_path):
+    observation = tmp_path / "equipment-id"
+    observation.write_bytes(b"uuid with spaces")
+    ops = LinuxOps(tmp_path / "run")
+    ops.equipment_observations = (("qemu", str(observation)),)
+
+    with pytest.raises(BootstrapError, match="boot_equipment_identity"):
+        ops.device_id()
+
+
 class Ops:
     def __init__(self, path):
         self.run_root = path / "run"

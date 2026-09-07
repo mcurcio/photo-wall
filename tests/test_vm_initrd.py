@@ -95,14 +95,15 @@ def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
 
 
 def test_required_preloads_include_qemu_gpu_9p_and_trusted_watchdog():
-    assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio", "i6300esb"} <= set(
+    assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio", "i6300esb", "qemu_fw_cfg"} <= set(
         build_vm_initrd.REQUIRED_MODULES)
     assert set(build_vm_initrd.PRELOAD_ROOTS) == {
-        "virtio_gpu", "9p", "9pnet", "9pnet_virtio", "i6300esb",
+        "virtio_gpu", "9p", "9pnet", "9pnet_virtio", "i6300esb", "qemu_fw_cfg",
     }
     from scripts.test_appliance_e2e import LAUNCHER
     assert "-device i6300esb" in LAUNCHER
     assert "i6300esb.nowayout=1" in LAUNCHER
+    assert "-fw_cfg name=opt/photo-wall/equipment-id,string=__DEVICE_UUID__" in LAUNCHER
 
 
 def test_health_observer_is_independent_read_only_and_shell_valid():
