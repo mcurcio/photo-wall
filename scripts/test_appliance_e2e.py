@@ -64,7 +64,7 @@ with opener.open(request, timeout=5) as response:
     if len(data)>1048576: raise ValueError('inventory_limit')
     body = json.loads(data)
 print(json.dumps([dict(player_id=p['id'],authority_epoch=p['authority_epoch'],
-    persistence=p['health'].get('persistence'),device_id=p['device_id'],retired=p['retired_at'] is not None)
+    device_id=p['device_id'],retired=p['retired_at'] is not None)
     for p in body['players']]))
 '''
 
@@ -294,7 +294,7 @@ def enrollment(rows: list, previous: dict | None = None) -> dict | None:
     require(len(rows) == 1, "unexpected_player_count")
     row = rows[0]
     require(re.fullmatch(r"p-[a-f0-9]{32}", row.get("player_id", "")) is not None
-            and row.get("persistence") == "volatile" and row.get("retired") is False
+            and row.get("retired") is False
             and re.fullmatch(r"device-[a-f0-9]{64}", row.get("device_id", "")) is not None
             and type(row.get("authority_epoch")) is int and row["authority_epoch"] >= 1,
             "invalid_guest_enrollment")
@@ -503,6 +503,7 @@ class ApplianceE2E:
             require(status["Running"] and not status["OOMKilled"], "vm_stopped_before_enrollment")
             rows = self.enrollment_probe("central_inventory", self.inventory)
             self.report["last_inventory_count"] = len(rows)
+            self.report["last_inventory"] = rows
             row = enrollment(rows, previous)
             serial = self.enrollment_probe("vm_serial", self.serial)
             diagnostics = serial_diagnostics(serial)

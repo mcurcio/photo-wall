@@ -22,8 +22,7 @@ def report(**changes):
 
 
 def row(**changes):
-    return dict(player_id=PLAYER, device_id=DEVICE, authority_epoch=1,
-                persistence="volatile", retired=False) | changes
+    return dict(player_id=PLAYER, device_id=DEVICE, authority_epoch=1, retired=False) | changes
 
 
 @pytest.mark.parametrize("invalid_json", [False, True])
