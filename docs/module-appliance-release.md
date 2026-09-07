@@ -1,217 +1,74 @@
-# Signed userspace release and A/B contract
+# Central signed release and rollback contract
 
-Implemented and tested release/slot contract, 2026-09-05; physical boot and power-loss qualification remain pending. This implements the fixed boot-ABI scope in [decision 0005](decisions/0005-native-platform-and-registration-fallback.md). The common bootstrap, updater and build tooling share the stdlib-only `contracts.release.Release`; never duplicate manifest parsing in shell.
+Status: central release authority, stateless bootstrap, and volatile trial watchdog are implemented and tested in isolation. Complete built-image rollback and physical Pi boot qualification remain pending. This contract supersedes the former Player-local A/B, `SlotStore`, and `PWSTATE` design. Earlier evidence for that design remains historical evidence only.
 
-Canonical manifest bytes are sorted, compact UTF-8 JSON with exactly one trailing newline and exactly six fields: `schema=1`, clean 40-character Git `revision`, SHA-256 `boot_abi`, `configuration_sha256`, `rootfs_sha256`, and integer `rootfs_size` from one byte through 1 GiB. No arbitrary artifact path or URL is accepted. The only public rootfs artifact filename is `rootfs-<sha256>.squashfs`. A release ID is SHA-256 of canonical manifest bytes. Detached signatures are 64 raw Ed25519 bytes over those exact bytes. The deployment's public verification key is common public configuration; private signing keys and image binaries remain outside Git.
+## Signed artifact boundary
 
-The caller verifies the signature before trusting parsed fields, using the pinned OpenSSL Ed25519 verifier in both userspace and initramfs. Both reject a different boot ABI or public configuration hash before download/selection. Rootfs byte length and SHA-256 are verified before RAM mounting on every boot. Build records additionally retain the upstream input signature/checksum, package and Python inventories, file hashes, tool versions and public configuration bytes. The signed rootfs digest covers its embedded inventories. Boot ABI identifies the exact fixed kernel, modules, firmware/DTB set and staged bootstrap/mountroot logic; a userspace update cannot replace these components.
+The common bootstrap, central release authority, and build tooling share the standard-library `contracts.release.Release` format. Canonical manifest bytes are sorted compact UTF-8 JSON with one trailing newline and exactly six fields: `schema=1`, a clean 40-character Git `revision`, SHA-256 `boot_abi`, `configuration_sha256`, `rootfs_sha256`, and bounded integer `rootfs_size`. The public artifact name is derived as `rootfs-<sha256>.squashfs`; manifests cannot choose paths, commands, or URLs. Release ID is the SHA-256 of canonical manifest bytes. A detached Ed25519 signature covers those exact bytes.
 
-The updater operates only within an existing Photo Wall-owned state directory under an exclusive lock. It stores two complete release slots plus at most one bounded incoming candidate. It never formats storage or evicts Player cache pins. Check free space for the full incoming rootfs and a 64 MiB safety margin before transfer; an insufficient-space result preserves both complete slots. Reject symlinks, nonregular files, oversized manifests/signatures/images and partial/hash-mismatched/signature-mismatched downloads. Private atomic writes and directory fsync protect metadata. Interrupted incoming files can be cleaned only under the updater's owned paths.
+The selected bootstrap/kernel/module/firmware set defines the fixed boot ABI. Both central registration and bootstrap verification reject another boot ABI or public-configuration digest. The bootstrap verifies signature before interpreting the manifest, then verifies the downloaded rootfs length and SHA-256 before mounting it. The same verified bytes are copied into RAM, mounted read-only, and given a bounded tmpfs overlay. Running userspace and rollback require no local image slots.
 
-State distinguishes the last validated active slot from a pending trial slot. Staging a verified candidate fills the inactive slot and writes a pending record atomically. Before attempting the candidate, the bootstrap durably consumes its single trial attempt. A reboot before explicit health acceptance selects the previous active slot. Candidate verification/startup failure selects the previous validated slot. Mark-good changes the active slot only for the release selected during this boot, after state persistence, native initialization and central authority reconciliation remain healthy for the configured trial interval. A stale health report cannot validate another release or another boot. No old execution authorization is restored by rollback; Player startup always obtains a new enrollment epoch.
+## Central authority and durable records
 
-The same verified rootfs bytes are copied into RAM and mounted read-only with a bounded writable tmpfs overlay; updates do not mutate the running filesystem. Persistent storage holds generated identity/cache/update artifacts only. A device without usable owned state may boot the signed common network release and register its volatile storage fault, but cannot perform durable A/B updates or playback. The bootstrap and original network release remain available independently of per-device state.
+PostgreSQL is the sole durable release authority. It stores:
 
-Tests must exercise corrupt signature/hash, different ABI/config, truncated download, disk pressure, interrupted state writes, failed trial/reboot, stale health acceptance and identity/cache preservation. A generic VM boot of the same rootfs is userspace/bootstrap evidence only; exact Pi PXE/HDMI qualification still requires the physical bench.
+- immutable signed release metadata;
+- the operator-selected default accepted release;
+- each centrally recognized equipment record's accepted and optional candidate release;
+- boot attempts and their current status;
+- consumed equipment/release trials;
+- the Player/session epoch bound to the current boot ticket.
 
-## SlotStore API and durable layout
+Registering a release verifies its signature and compatibility before insertion. A release ID cannot later name different manifest or signature bytes. The operator sets the default only to a registered release. Newly observed equipment starts from that default; existing equipment retains its own accepted release and explicit candidate.
 
-`appliance.updates.SlotStore(state_root, public_key, boot_abi,
-configuration_sha256)` requires the existing regular `.photo-wall-state-v1`
-marker with exact `photo-wall-state-v1\n` contents. PWSTATE root must belong to
-uid 0 and have mode 0755 or0711; its marker is root-owned and read-only. The
-`updates/` directory is root-owned mode 0700, allowing the separate uid 10001
-Player to traverse to its own private subtree without accessing update state.
-The store owns only a private
-`updates/` subtree. Public `verify_release` is the common stdlib/OpenSSL verifier
-for bootstrap and userspace: bounded raw signature/manifest inputs, public PEM
-key, signature verification before canonical decoding and ABI/config checks.
+Staging a candidate is an explicit central operation. Staging the already accepted release is a no-op. A device cannot stage another unconsumed candidate over the current one, and a device/release trial can be consumed only once.
 
-The store serializes each operation with a nonblocking exclusive lock held over
-verification, staging or boot selection; concurrent attempts fail closed. A
-staged rootfs is streamed to a single incoming candidate, checking length before
-every write and hash before publication. After fsync it replaces only the
-inactive slot, and atomic metadata references the exact release ID. A crash
-between slot publication and metadata leaves no new execution authority.
+## Boot selection and enrollment binding
 
-`select_boot(boot_id)` consumes a trial durably before returning
-`BootSelection(release, path, slot, trial, boot_id)`. Repeated selection in the same
-boot is idempotent. `reject_boot(release_id, boot_id)` rejects only the current
-selection; bootstrap can then select the verified active slot within that same
-boot after a candidate copy/mount failure. Rejecting the active slot suppresses it
-for that boot and yields the common network fallback. New boots reverify active
-bytes. With no active release, an unsuccessful first trial returns no selection;
-it never promotes itself merely because no previous release exists.
+At each boot the common bootstrap derives a bounded equipment observation, obtains disciplined time on the trusted provisioning LAN, and sends `device_id`, Linux `boot_id`, and a random `request_id` to central. Central serializes selection for that equipment and returns a `BootTicket` containing the exact signed release metadata.
 
-`mark_good` requires the current trial's exact release and boot identity. It
-authenticates that slot under the update lock, then runs an optional caller-owned
-`before_commit` guard before publishing the new active state. Public
-`accept_trial(store, release_id, *, boot_report, health_report)` additionally
-observes `/run/photo-wall/player/service-health.json` continuously for 30
-seconds, using the actual Linux boot ID and monotonic time. It requires fresh,
-increasing samples with durable persistence, healthy state, a stable Player ID
-and current positive authority epoch. Invalid/missing/stale/unhealthy samples or
-identity changes reset that interval. It verifies the root-owned successful
-trial report before observation and again immediately before promotion; a boot
-change or report replacement cannot bypass that binding. Health age is rechecked
-after those final reads; a slow read cannot promote from a now-stale sample. The low-level local
-`mark_good` API stays available to the bootstrap/test harness. Both automatic
-and explicit CLI acceptance delegate to the same `accept_trial` gate.
+Selection is idempotent for the same equipment, boot, and request tuple. A conflicting reuse fails closed. If an unconsumed candidate exists, central inserts the boot attempt and consumed-trial record in the same PostgreSQL transaction before returning the candidate ticket. Otherwise it selects the equipment's accepted release. Issuing a newer boot attempt supersedes an earlier ordinary attempt and marks an unaccepted earlier trial failed.
 
-`accept_current(state_root, config_dir=/etc/photo-wall, *, boot_report,
-health_report)` uses `BootConfig.load` to validate the embedded public files,
-configuration digest and boot ABI. It reads the actual Linux boot ID and the
-root-owned report to obtain this boot's release ID, constructs the matching
-SlotStore, and calls `accept_trial` for a trial boot. On an ordinary accepted
-restart, a valid non-trial report must match the current accepted selection,
-active slot, release and boot ID; the command then succeeds without polling
-health or changing state. The lower-level trial gate remains trial-only.
-It never selects or stages a release. There is no baked release ID in the
-rootfs and no alternate health policy.
+The bootstrap verifies that ticket, request, equipment, boot, manifest, release ID, signature, compatibility, rootfs length, and digest all agree. Before it downloads candidate bytes, trusted initramfs code must open a kernel watchdog and set its bounded timeout. Candidate boot fails closed when no watchdog device is available. The bootstrap then writes a protected RAM-only `/run/photo-wall/boot.json` for the selected userspace and mounts the verified root. Nothing from this selection survives locally across reboot.
 
-`rollback_current_allowed(state_root, config_dir=/etc/photo-wall, *, boot_report)`
-is the bounded predicate used by the trial-failure recovery unit. Under the
-updater lock it rechecks the actual Linux boot ID and protected durable trial
-report, requires the selected record to be an unaccepted consumed trial, and
-authenticates a distinct active fallback slot. The mounted trial's stored bytes
-are not revalidated here because the protected report binds the already verified
-boot; a corrupt later trial copy must not block fallback. It never
-selects, rejects or promotes a release. A common/fallback boot, volatile or
-missing state, a first trial without an active release, an accepted or stale
-trial, and invalid/corrupt state all return a non-success condition; none can
-request a reboot. The recovery unit is scoped to the acceptance service's
-failure path; operator acceptance or manual recovery must coordinate with that
-unit rather than racing its predicate and reboot action.
+Enrollment proves a fresh process key together with the ticket, equipment observation, and Linux boot. In the enrollment transaction central binds the current boot attempt to the resulting Player ID and new authority epoch. A stale ticket or an earlier session cannot report health or regain execution authority.
 
+## Promotion and automatic rollback
 
-The updater's fixed internal paths are `updates/{A,B}/manifest.json`,
-`manifest.sig` and `rootfs.squashfs`, plus a private JSON state file and lock.
-Internal slot names never come from a manifest. `incoming/` contains at most one
-rootfs and the two bounded metadata files. A verified staged candidate replaces
-only the inactive slot before metadata publishes its exact release ID. Staging
-refuses to replace a selected, unaccepted trial, so bootstrap's returned path
-remains protected until acceptance or explicit rejection. Unknown files,
-symlinks, nonregular files and hardlinked files fail closed; cleanup never ranges
-outside those owned names. Updates do not modify `player/` identity or cache. Staging the exact already-active
-release is idempotent after re-verifying its cached bytes; it does not create
-ambiguous trials with the same release ID in both slots. That no-op preserves any
-different pending release; it does not act as cancellation.
+While a selected release remains unaccepted, the Player sends health to `/v1/player/boot-health`. Central checks all of the following inside its transaction:
 
-OpenSSL receives only bounded private temporary files and fixed arguments. The
-common public key must be an Ed25519 SubjectPublicKeyInfo PEM; a different key
-algorithm is rejected. Verification has a 10-second subprocess bound. The
-production executable is `/usr/bin/openssl`; no command, path, URL or executable
-from a signed manifest is evaluated. The verifier authenticates bytes before
-calling the shared canonical parser.
+- the Player exists, is not retired, and still owns the supplied authority epoch;
+- the ticket is the equipment's current boot attempt;
+- the boot attempt remains in a health-eligible state;
+- the equipment row is still bound to that Player/session;
+- the observation is fresh, ordered, and continuously healthy within the configured sample-gap bound.
 
-The CLI is `python3 -m appliance.updates`. Existing commands require `--state-root`,
-`--public-key`, `--boot-abi` and `--configuration-sha256` arguments. `stage` takes
-local `--manifest`, `--signature` and `--rootfs` files. `select` emits a JSON
-selection using the actual Linux boot ID; `reject --release-id` releases only the
-matching selected boot. `mark-good --release-id` requires the bootstrap's
-root-owned mode 0600 `/run/photo-wall/boot.json` under a root-owned parent to identify that same successful,
-durable trial with no boot fault, before observing service health. Its poll
-interval is 250 ms, maximum sample age/gap is2 seconds, acceptance interval is30 seconds
-and the health waiting bound is180 seconds. Full-slot verification happens
-first, with its own 300-second deadline, under the same exclusive update lock
-held through health observation and promotion. No second image hash runs after
-the final fresh health sample. A common fallback, previous boot report,
-volatile registration or stale healthy file cannot accept the candidate.
+The default promotion interval is 30 seconds and health samples may be at most two seconds old. A stale, duplicate, unhealthy, wrong-ticket, wrong-boot, or wrong-session report cannot promote a release. Once continuous health meets the interval, central marks the attempt healthy. For a candidate trial it atomically changes the equipment's accepted release and clears the candidate.
 
-The automatic systemd adapter invokes `python3.12 -I -m appliance.updates
---state-root /var/lib/photo-wall accept-current --config-dir /etc/photo-wall`.
-This command derives the key, ABI and configuration digest from those public
-configuration files and rejects explicit overrides. Missing state/report,
-common or active fallback, volatile persistence and any boot fault fail closed.
-The [appliance builder](module-appliance-builder.md) owns its root systemd unit;
-the updater owns report validation, health timing and the durable promotion.
-The acceptance service has a 510-second cap covering verification, the unchanged
-health interval and overhead. Recovery separately authenticates the fallback
-within 300 seconds, with a 310-second command and 320-second unit cap. These
-bounds do not extend the 180-second health deadline or relax sample freshness.
+Trusted bootstrap arms the hardware watchdog before entering a candidate root. Watchdog drivers are fixed to nowayout mode by the boot command line; systemd takes over with a 30-second runtime watchdog. This covers bootstrap-to-userspace handoff and userspace-manager failure. Signature, download, verification, or mount failure returns to the initramfs hook, which requests an immediate reboot.
 
-## Executed evidence
+`appliance.updates.TrialWatchdog` is deliberately volatile. It reads the protected current boot report and the Player's current health file, which includes central's release-acceptance acknowledgment. A nontrial boot needs no trial-watchdog action. If a trial is acknowledged as accepted, the trial watchdog finishes while systemd continues the ordinary machine watchdog. If the trial timeout expires first, it records a bounded RAM-only reboot request and fails its systemd unit; the service's `OnFailure` path owns the actual reboot. The watchdog never chooses a release and never keeps a rollback record.
 
-On 2026-09-05, `.venv/bin/python -m pytest tests/test_updates.py tests/test_release.py -q`
-passed **62 tests** (41 updater and 21 shared release checks); scoped Ruff and
-relative-document-link checks passed. The tests exercise real Ed25519 signatures,
-canonical parsing order, ABI/config mismatch, selected-trial protection, same-boot
-rejection and next-boot fallback, no-active first trial, truncated/corrupt/oversized
-streams, disk pressure, concurrent attempts, interrupted state publication,
-symlink rejection, identity/cache preservation, boot-report identity and sampled
-health success/failure. Tests on macOS explicitly substitute the synthetic
-fixture owner for production uid 0 and use the installed OpenSSL 3.6.0 because
-macOS's `/usr/bin/openssl` is LibreSSL; production defaults remain unchanged.
+On the next PXE boot, central sees that the candidate trial was already consumed. If it was not promoted, the equipment's accepted release remains unchanged and is selected automatically. Rollback therefore means a real reboot followed by a fresh centrally selected, reverified, RAM-loaded root and a fresh Player session. It never restores old credentials, plans, commitments, cache pins, or execution journal state.
 
-The subsequent automatic acceptance integration passed **83 tests** (62 updater
-and 21 shared release checks) with `.venv/bin/python -m pytest -q --noconftest
-tests/test_updates.py tests/test_release.py`, plus scoped Ruff. This standalone
-invocation avoids the unrelated PostgreSQL fixture import during host memory
-pressure. New tests exercise real signed-slot/current-configuration integration,
-the automatic and compatible explicit CLIs, ineligible/missing/stale reports,
-missing/changing/unhealthy service samples, configuration and boot changes, the
-180-second timeout, and delayed final validation resetting the health interval.
+## Failure behavior
 
-The final `accept-current` source also passed a separate real Linux CLI smoke on
-Python 3.12.3/AArch64 with uid 0 and OpenSSL 3.0.13. It used the actual Linux boot
-ID, root-owned report/state, generated signing keys and a thread publishing
-current health samples. Four fallback/volatile/faulted/old-boot reports were
-rejected; the valid signed synthetic trial was promoted after **30.232 seconds**
-of real elapsed time. The process was capped at 128 MiB and 0.25 CPU, with no
-network or host mounts. The exercised `appliance/updates.py` SHA-256 was
-`cec15c9f018edb02e20f3a2069c6ac96ff94b178d0e929662c46df3ac056bd05`.
-Health and rootfs bytes were synthetic; this does not establish actual native
-health, systemd startup, SquashFS boot or physical rollback.
+Missing central release policy, trusted time, ticket service, rootfs service, or verification inputs fails cold boot closed. There is no offline boot fallback or device-local accepted-release copy. A failed central transaction cannot leak a candidate ticket whose trial was not consumed. Retrying a successfully committed request returns the same ticket. Central restart preserves release, boot-attempt, and trial state in PostgreSQL.
 
-A separate isolated Ubuntu arm64 container smoke exercised the current stdlib
-updater with actual uid 0-owned state and `/usr/bin/openssl` **OpenSSL 3.0.13**. It
-generated temporary Ed25519 keys, signed and staged a base/candidate, consumed a
-trial, accepted the base, rejected the next trial and selected the validated base
-within the same boot. The container had no network or host mounts. This verifies
-the production verifier path and Linux filesystem/locking calls, using synthetic
-payload bytes; it is not a SquashFS mount, real image boot, forced power cut or
-physical update/rollback result. Those remain the [platform build and boot
-acceptance gates](module-appliance-platform.md).
+An optional Player cache is outside this release protocol. It may reuse independently verified media files after the fresh session reconciles assignments, but its presence, absence, or corruption cannot influence release selection or promotion.
 
-On 2026-09-06, the [actual systemd adapter suite](evidence/2026-09-06-systemd-updates.md)
-passed five scenarios using the installed acceptance and recovery units:
-30-second healthy promotion, the 180-second health failure and real `OnFailure`
-transition, plus three recovery-condition skips. Only the reboot action was
-replaced with a verified marker command. This qualifies service wiring and
-persistent-state preservation with synthetic health/rootfs bytes; actual image
-rollback and physical health remain separate.
+The fixed boot ABI restriction remains. Updating the kernel, firmware, EEPROM, or bootstrap requires a separately qualified verified-boot fallback design.
 
-The subsequent [native-health adapter fixture](evidence/2026-09-06-native-health.md)
-used health generated by the real initialized NativeRenderer/PlayerService
-and promoted a signed synthetic trial after 30.437s. This closes the
-native-capacity-to-health-to-acceptance adapter gap with synthetic authority
-samples and rootfs bytes; it does not qualify full-image native acceptance
-or physical rollback.
+## Interfaces and operational configuration
 
+`central.releases.ReleaseAuthority` owns release registration, default policy, per-device staging, boot selection, enrollment/session binding, health evaluation, promotion, and inventory. Central exposes the ticket, rootfs, and authenticated health operations through its application API when release configuration is present.
 
-### Trial completion evidence
+`appliance.bootstrap.boot` is the stateless initramfs operation. Its public configuration contains the central release origin, controlled time server, fixed boot ABI, public configuration digest, and Ed25519 public key. `appliance.updates.verify_release` is the bounded OpenSSL verifier shared by bootstrap tests; the remainder of that module contains only the volatile watchdog and its protected reboot-request adapter. There is no staging, selecting, marking-good, or local rollback CLI.
 
-The production `accept-current` command emits a small public JSON event only
-after its normal acceptance operation returns: `event` is
-`photo-wall-trial-acceptance`, `boot_id` identifies the current Linux boot, and
-`accepted` distinguishes a newly promoted trial from an already accepted boot.
-A failed health interval emits no successful event. Credentials, filesystem
-paths and health contents are excluded. The VM qualification gate binds a true
-event to its protected first-trial boot report, then requires the next actual
-boot to select the same accepted release and slot. This adds observability;
-the signed-state and continuous-health requirements are unchanged.
+The central database migration is `012_release_authority.sql`. Release rootfs bytes remain authoritative central blobs; PostgreSQL stores metadata and lifecycle records rather than the image contents.
 
-The CLI also emits bounded `photo-wall-trial-phase` diagnostics for `verifying`
-and `health`, bound to the current Linux boot ID. These events identify progress;
-only the final successful acceptance event and a subsequent accepted boot count
-as qualification. This separation follows the
-[hosted native-trial timeout](evidence/2026-09-05-github-image.md#native-trial-image-failure-at-afff7b1),
-whose older diagnostics could not identify the delayed phase.
+## Evidence and remaining acceptance
 
-The production `rollback-current-allowed` predicate similarly emits
-`photo-wall-rollback-allowed` with the current `boot_id` and `allowed: true`
-only after authenticating the failed durable trial and its accepted fallback.
-A skip or failure emits no successful event. The recovery service still owns
-the reboot; an event alone does not qualify rollback. The VM gate requires the
-subsequent actual boot to restore the expected accepted release and durable
-Player identity.
+Unit and PostgreSQL tests cover canonical release parsing/signatures, immutable registration, accepted/candidate policy, transactionally consumed trials, idempotent and conflicting boot requests, stale tickets/sessions/health, continuous-health promotion, central restart state, stateless bootstrap verification/copy/mount seams, mandatory candidate watchdog arming, and watchdog timeout/acceptance behavior. Dated local-slot and systemd-adapter evidence under [the evidence index](evidence/README.md) exercised useful signing, health, and failure seams but predates this central design and does not qualify it end to end.
+
+Acceptance still requires the exact built image to boot a candidate, fail health, invoke the real reboot path, receive the centrally accepted release on the next PXE boot, and re-enroll without local state. Physical Pi/PXE, power interruption, dual HDMI, and native sustained-health behavior remain separate gates in [validation](validation.md).

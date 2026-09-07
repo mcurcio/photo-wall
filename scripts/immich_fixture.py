@@ -138,9 +138,12 @@ class FixtureHost:
         return stdout or ""
 
     def build(self, *, base_image: str | None = None) -> None:
+        from scripts.container_build import daemon_compose_build, daemon_image_build
+
         if base_image is None:
-            self._command(["docker", "build", "--tag", self.project + "-base:local",
-                           "--file", str(ROOT / "Dockerfile"), str(ROOT)], timeout=600, capture=False)
+            self._command(daemon_image_build(
+                self.project + "-base:local", ROOT, dockerfile=ROOT / "Dockerfile"
+            ), timeout=600, capture=False)
         else:
             require(re.fullmatch(r"sha256:[a-f0-9]{64}", base_image) is not None,
                     "immutable_fixture_base_required")
@@ -151,7 +154,7 @@ class FixtureHost:
                           timeout=30, capture=False)
         # The parent is loaded in this Docker daemon. A selected docker-container
         # Buildx builder (as in GHA) cannot resolve that daemon-local FROM tag.
-        self.compose("build", "--builder", "default", "central-probe", timeout=600, capture=False)
+        self.compose(*daemon_compose_build("central-probe"), timeout=600, capture=False)
 
     def export_runtime(self) -> None:
         # Container state includes the fixture runtime key; target is private 0700.

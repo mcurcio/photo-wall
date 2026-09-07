@@ -8,15 +8,30 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
+
+if TYPE_CHECKING:
+    from central.execution_outcomes import ExecutionOutcome
 
 Target = Annotated[str, Field(pattern=r"^(frame|actuator):[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")]
 Seconds = Annotated[FiniteFloat, Field(ge=0)]
 PositiveSeconds = Annotated[FiniteFloat, Field(gt=0)]
 Identifier = Annotated[str, Field(min_length=1, max_length=160)]
 Unit = Annotated[FiniteFloat, Field(ge=0, le=1)]
+
+
+def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
+    """Own the lifecycle consequence of a reported execution fact.
+
+    Execution failures do not silently finish or cancel a logical Run. The
+    coordinator revokes affected execution while Runtime continues its authored
+    lifecycle. Observations are accepted as observations, not completion proof.
+    """
+    if outcome.kind == "observation":
+        return "record_observation"
+    return "preserve_lifecycle"
 
 
 class FrozenModel(BaseModel):

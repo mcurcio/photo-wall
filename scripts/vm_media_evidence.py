@@ -25,7 +25,11 @@ historical readiness decision. Both sequence numbers remain explicit in proof.
         plan = Plan.model_validate(record["plan"])
         config = PlayerConfiguration.model_validate(record["configuration"])
         feedback = Readiness.model_validate(record["readiness"])
-        observation = Observation.model_validate(record["observation"])
+        observation_payload = dict(record["observation"])
+        # Coordination records the central Runtime/Planner handling outcome beside
+        # the transport observation. Validate the observation itself strictly.
+        observation_payload.pop("handling", None)
+        observation = Observation.model_validate(observation_payload)
         variant = Variant.model_validate(record["variant"])
         commit = record["commit"]
         # The coordinator renews a valid row on later ticks. Preserve a real

@@ -54,9 +54,18 @@ RESULTS = {
 
 EVENT_FIELDS = {
     "event", "boot_id", "sample_index", "report_status", "healthy", "persistence",
-    "current_boot", "identity_valid", "sample_age", "services", "wayland_socket",
+    "current_boot", "identity_valid", "sample_age", "release_accepted", "clock",
+    "services", "wayland_socket",
 }
 SERVICE_FIELDS = {"active_state", "sub_state", "result", "exec_main_status"}
+CLOCK_FIELDS = {
+    "status", "rtt", "offset", "delay", "drift", "transport_drift", "apply_drift",
+    "mapping_age", "step", "uncertainty", "samples", "accepted", "rejected",
+}
+CLOCK_STATUSES = {
+    "healthy", "no_sample", "player_mismatch", "stale_epoch", "transport_time",
+    "transport_drift", "uncertainty", "apply_age", "apply_drift", "mapping_age", "clock_step",
+}
 PUBLIC_EVENT = "photo-wall-health-diagnostic"
 HEALTH_REASONS = {"healthy", "executor", "identity", "configuration", "clock",
                   "renderer_capacity", "disconnected"}
@@ -126,14 +135,40 @@ def _valid_reason(healthy: Any, reason: Any) -> bool:
             and healthy == (reason == "healthy"))
 
 
+def _clock_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "status", "rtt", "central_offset", "apply_age", "drift", "transport_drift",
+        "apply_drift", "mapping_age", "step", "uncertainty", "samples", "accepted", "rejected",
+    }:
+        return None
+    measurements = {}
+    for public, source in {
+        "rtt": "rtt", "offset": "central_offset", "delay": "apply_age", "drift": "drift",
+        "transport_drift": "transport_drift", "apply_drift": "apply_drift",
+        "mapping_age": "mapping_age", "step": "step", "uncertainty": "uncertainty",
+    }.items():
+        item = value[source]
+        if item is not None and (type(item) not in (int, float) or not math.isfinite(item)
+                                 or not -86400 <= item <= 86400):
+            return None
+        measurements[public] = item
+    counts = {name: value[name] for name in ("samples", "accepted", "rejected")}
+    if (value["status"] not in CLOCK_STATUSES
+            or any(type(item) is not int or not 0 <= item <= 2**31 - 1 for item in counts.values())
+            or counts["accepted"] + counts["rejected"] != counts["samples"]):
+        return None
+    return {"status": value["status"], **measurements, **counts}
+
+
 def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float) -> dict[str, Any]:
     base = dict(report_status="missing", healthy=None, persistence="invalid",
-                current_boot=False, identity_valid=False, sample_age="missing")
+                current_boot=False, identity_valid=False, sample_age="missing",
+                release_accepted=None, clock=None)
     if value is None:
         return base
-    required = {"boot_id", "sampled_monotonic", "player_id", "authority_epoch", "persistence", "healthy"}
-    if (not isinstance(value, Mapping)
-            or set(value) not in (required, required | {"health_reason"})):
+    required = {"boot_id", "sampled_monotonic", "player_id", "authority_epoch", "persistence",
+                "healthy", "health_reason", "release_accepted", "clock"}
+    if not isinstance(value, Mapping) or set(value) != required:
         base["report_status"] = "invalid"
         base["sample_age"] = "invalid"
         return base
@@ -149,13 +184,13 @@ def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float
         valid_sample = False
     valid_identity = isinstance(identity, str) and PLAYER_ID_RE.fullmatch(identity) is not None
     valid_epoch = type(epoch) is int and epoch > 0
-    valid_persistence = (type(value["persistence"]) is str
-                         and value["persistence"] in {"durable", "volatile"})
+    valid_persistence = value["persistence"] == "volatile"
     valid_healthy = type(value["healthy"]) is bool
-    valid_reason = ("health_reason" not in value
-                    or _valid_reason(value["healthy"], value["health_reason"]))
+    valid_reason = _valid_reason(value["healthy"], value["health_reason"])
+    valid_release = type(value["release_accepted"]) is bool
+    clock = _clock_projection(value["clock"])
     if not all((valid_boot, valid_sample, valid_identity, valid_epoch,
-                valid_persistence, valid_healthy, valid_reason)):
+                valid_persistence, valid_healthy, valid_reason, valid_release, clock is not None)):
         base["report_status"] = "invalid"
         base["sample_age"] = "invalid"
         return base
@@ -163,9 +198,9 @@ def _report_projection(value: Mapping[str, Any] | None, boot_id: str, now: float
     base.update(report_status="present", healthy=value["healthy"],
                 persistence=value["persistence"], current_boot=report_boot == boot_id,
                 identity_valid=True,
-                sample_age="future" if age < 0 else "fresh" if age <= MAX_AGE else "stale")
-    if "health_reason" in value:
-        base["health_reason"] = value["health_reason"]
+                sample_age="future" if age < 0 else "fresh" if age <= MAX_AGE else "stale",
+                release_accepted=value["release_accepted"], clock=clock,
+                health_reason=value["health_reason"])
     return base
 
 
@@ -243,7 +278,7 @@ def validate_event(value: Any, boot_id: str) -> dict[str, Any] | None:
                 or not 1 <= value["sample_index"] <= SAMPLE_LIMIT
                 or value["report_status"] not in {"missing", "invalid", "present"}
                 or (value["healthy"] is not None and type(value["healthy"]) is not bool)
-                or value["persistence"] not in {"durable", "volatile", "invalid"}
+                or value["persistence"] not in {"volatile", "invalid"}
                 or type(value["current_boot"]) is not bool
                 or type(value["identity_valid"]) is not bool
                 or value["sample_age"] not in {"missing", "invalid", "future", "fresh", "stale"}
@@ -254,17 +289,26 @@ def validate_event(value: Any, boot_id: str) -> dict[str, Any] | None:
         if value["report_status"] == "missing":
             if (value["healthy"] is not None or value["persistence"] != "invalid"
                     or value["current_boot"] or value["identity_valid"]
-                    or value["sample_age"] != "missing"):
+                    or value["sample_age"] != "missing" or value["release_accepted"] is not None
+                    or value["clock"] is not None):
                 return None
         elif value["report_status"] == "invalid":
             if (value["healthy"] is not None or value["persistence"] != "invalid"
                     or value["current_boot"] or value["identity_valid"]
-                    or value["sample_age"] != "invalid"):
+                    or value["sample_age"] != "invalid" or value["release_accepted"] is not None
+                    or value["clock"] is not None):
                 return None
         elif (type(value["healthy"]) is not bool
-              or value["persistence"] not in {"durable", "volatile"}
+              or value["persistence"] != "volatile"
               or value["identity_valid"] is not True
-              or value["sample_age"] not in {"future", "fresh", "stale"}):
+              or value["sample_age"] not in {"future", "fresh", "stale"}
+              or type(value["release_accepted"]) is not bool
+              or not isinstance(value["clock"], dict) or set(value["clock"]) != CLOCK_FIELDS
+              or _clock_projection({
+                  "status": value["clock"]["status"], "rtt": value["clock"]["rtt"],
+                  "central_offset": value["clock"]["offset"], "apply_age": value["clock"]["delay"],
+                  **{name: value["clock"][name] for name in CLOCK_FIELDS - {"status", "rtt", "offset", "delay"}},
+              }) != value["clock"]):
             return None
         services: dict[str, dict[str, Any]] = {}
         for service in SERVICES:
@@ -304,7 +348,7 @@ def sample_once(sample_index: int, boot_id: str, now: float, *,
     projection = _report_projection(report, boot, now) if report is not None else {
         "report_status": "missing" if missing else "invalid", "healthy": None,
         "persistence": "invalid", "current_boot": False, "identity_valid": False,
-        "sample_age": "missing" if missing else "invalid",
+        "sample_age": "missing" if missing else "invalid", "release_accepted": None, "clock": None,
     }
     try:
         socket = socket_state()

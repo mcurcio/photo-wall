@@ -52,7 +52,7 @@ paths (`bundle`, `generic_boot`, and `deployment`) are absolute because the
 e2e harness consumes the manifest on the same runner before artifact upload.
 The deployment directory is separate from the upload tree and contains
 disposable CI TLS/signing material plus the signed rollback candidate bundle.
-Its path and public A/B metadata are recorded under `rollback_candidate`.
+Its path and public accepted/candidate release metadata are recorded under `rollback_candidate`.
 The workflow uploads the output tree and a
 sanitized e2e report; it never uploads that private directory.
 
@@ -156,8 +156,8 @@ already underway; superseded pending revisions are replaced according to
 [GitHub concurrency semantics](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency). It runs the root-owned
 `scripts/test_appliance_e2e.py` against the exact disk and generic boot
 directory recorded in `ci-image.json`. That test requires signed release
-identity, headless durable enrollment, restart identity continuity, central
-rejoin, and unchanged disk/protected boot evidence. It reports generic VM and
+identity, fresh-session enrollment, old-session rejection, central binding recovery,
+central rollback, and unchanged boot-disk/protected boot evidence. It reports generic VM and
 physical Pi/HDMI/PXE qualification separately; a passing workflow does not
 claim those hardware results. After e2e, the workflow compresses the raw disk
 in place and writes `UPLOAD-SHA256SUMS`; the raw disk is not uploaded, avoiding

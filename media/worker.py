@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import math
 import os
 import re
-import signal
 import stat
 import sys
 from collections.abc import Callable, Mapping
@@ -19,6 +17,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from central.catalog import CatalogSnapshot
 from central.db import Database
+from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository
 from central.media_store import MediaStore
 from central.registry import RegistryError
@@ -36,6 +35,7 @@ from media.models import (
     SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
+from media.task_queue import MediaTaskFailed, RetryableMediaTask, create_worker_app
 
 _FILE_LIMIT = 1024**2
 _PERMANENT = frozenset({
@@ -90,22 +90,9 @@ def load_connections(path: Path) -> dict[str, ConnectionConfig]:
 
 
 class WorkerLimits(Model):
-    poll_seconds: Positive = Field(default=1, le=60)
-    heartbeat_seconds: Positive = Field(default=10, le=30)
-    maintenance_seconds: Positive = Field(default=300, le=3600)
     refresh_seconds: Positive = Field(default=65, le=65)
     job_seconds: Positive = Field(default=330, le=330)
     close_seconds: Positive = Field(default=5, le=10)
-
-
-class WorkerReport(Model):
-    cycles: int = 0
-    refreshes: int = 0
-    jobs_ready: int = 0
-    jobs_failed: int = 0
-    pressure: int = 0
-    stopped: bool = False
-    last_error: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
 
 
 class SourceClient(Protocol):
@@ -164,11 +151,8 @@ class MediaWorker:
         self.client_factory = client_factory or (lambda config: ImmichClient(config, clock=self.clock,
             limits=MediaLimits(max_original_bytes=repository.limits.max_original_bytes)))
         self._clients: dict[str, SourceClient] = {}
-        self._counts = dict(cycles=0, refreshes=0, jobs_ready=0, jobs_failed=0, pressure=0)
         self._error: str | None = None
         self._recipe: str | None = None
-        self._needs_recovery = False
-        self._running = False
 
     @staticmethod
     def _code(error: BaseException) -> str:
@@ -200,16 +184,7 @@ class MediaWorker:
             await _blocking(self.repository.set_recipe, recipe)
             self._recipe = recipe
 
-    async def _heartbeat(self):
-        while True:
-            try:
-                self._utc()
-                await _blocking(self.repository.worker_status, self._error)
-            except Exception as error:
-                self._error = self._code(error)
-            await asyncio.sleep(self.limits.heartbeat_seconds)
-
-    async def _refresh_once(self) -> bool:
+    async def refresh_once(self) -> bool:
         lease = await _blocking(self.repository.begin_refresh)
         if lease is None:
             return False
@@ -229,56 +204,43 @@ class MediaWorker:
             result = RefreshResult(snapshot=CatalogSnapshot(source_ref=lease.source.source_ref,
                 refreshed_at=self._utc(), status=status), diagnostics=(Diagnostic(code=code),))
         await _blocking(self.repository.publish_refresh, lease, result)
-        self._counts["refreshes"] += 1
         if result.snapshot.status != "ok":
             self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
+        await _blocking(self.repository.worker_status, self._error)
         return True
 
-    async def _refresh_loop(self):
-        while True:
-            await asyncio.sleep(self.limits.poll_seconds)
-            try:
-                await self._refresh_once()
-            except Exception as error:
-                self._error = self._code(error)
-
-    async def _fail(self, lease: JobLease, code: str):
-        delay = (5, 15, 60)[min(lease.attempt - 1, 2)]
-        retry_at = None if code in _PERMANENT else self._utc() + delay
+    async def _fail(self, lease: JobLease, code: str, *, retry: bool = True):
         try:
-            await _blocking(self.store.fail, lease, code, retry_at=retry_at)
+            await _blocking(self.store.fail, lease, code,
+                            retry=code not in _PERMANENT and retry)
         except RegistryError as error:
             if error.code != "stale_job":
-                self._error, self._needs_recovery = self._code(error), True
+                self._error = self._code(error)
         except Exception as error:
-            self._error, self._needs_recovery = self._code(error), True
+            self._error = self._code(error)
 
-    async def _claim(self) -> JobLease | None:
-        async def claim():
-            operation = asyncio.create_task(_blocking(self.repository.claim_job))
-            try:
-                return await asyncio.shield(operation)
-            except asyncio.CancelledError:
-                claimed = await _drain(operation)
-                if claimed:
-                    await _drain(asyncio.create_task(self._fail(claimed, "worker_cancelled")))
-                raise
+    async def process_job(self, job_id: str, *, attempt: int) -> None:
+        """Execute the exact job selected by Procrastinate.
 
-        lease = await claim()
-        if lease is not None:
-            return lease
-        health = await _blocking(self.repository.health)
-        if health["worker_error"] == "storage_pressure":
-            reserve = self.repository.limits.max_original_bytes + max(
-                self.repository.limits.max_image_bytes, self.repository.limits.max_video_bytes)
-            await _blocking(self.store.collect, target_bytes=max(0, health["max_bytes"] - reserve))
-            lease = await claim()
+        Procrastinate owns dispatch and retry timing. The media journal retains
+        byte reservation and publication fencing only.
+        """
+        await self._register_recipe()
+        lease = await _blocking(self.repository.claim_job, job_id)
+        if lease is None:
+            health = await _blocking(self.repository.health)
+            if health["worker_error"] == "storage_pressure":
+                reserve = self.repository.limits.max_original_bytes + max(
+                    self.repository.limits.max_image_bytes,
+                    self.repository.limits.max_video_bytes,
+                )
+                await _blocking(
+                    self.store.collect,
+                    target_bytes=max(0, health["max_bytes"] - reserve),
+                )
+                lease = await _blocking(self.repository.claim_job, job_id)
             if lease is None:
-                self._counts["pressure"] += 1
-                self._error = "storage_pressure"
-        return lease
-
-    async def _job(self, lease: JobLease):
+                raise RetryableMediaTask("media_job_unavailable")
         try:
             async with asyncio.timeout(self.limits.job_seconds):
                 paths = await _blocking(self.store.staging, lease)
@@ -292,16 +254,24 @@ class MediaWorker:
                 if prepared.recipe_id != lease.recipe_id:
                     raise MediaError("recipe_changed")
                 await _blocking(self.store.publish, lease, prepared)
-            self._counts["jobs_ready"] += 1
             self._error = None
         except asyncio.CancelledError:
             self._error = "worker_cancelled"
-            await _drain(asyncio.create_task(self._fail(lease, "worker_cancelled")))
+            await _drain(asyncio.create_task(self._fail(lease, self._error, retry=attempt <= 3)))
             raise
         except Exception as error:
             self._error = self._code(error)
-            self._counts["jobs_failed"] += 1
-            await self._fail(lease, self._error)
+            retry = self._error not in _PERMANENT and attempt <= 3
+            await self._fail(lease, self._error, retry=retry)
+            if retry:
+                raise RetryableMediaTask(self._error) from None
+            raise MediaTaskFailed(self._error) from None
+        finally:
+            await _blocking(self.repository.worker_status, self._error)
+
+    async def maintain(self) -> None:
+        await _blocking(self.store.recover)
+        await _blocking(self.repository.worker_status, self._error)
 
     async def _close_clients(self):
         async def close(client):
@@ -313,94 +283,37 @@ class MediaWorker:
         await asyncio.gather(*(close(client) for client in self._clients.values()))
         self._clients.clear()
 
-    async def run(self, *, max_cycles: int | None = None, stop: asyncio.Event | None = None) -> WorkerReport:
-        if self._running or (max_cycles is not None and (type(max_cycles) is not int or not 1 <= max_cycles <= 1_000_000)):
-            raise MediaError("worker_config", "incompatible")
-        self._running = True
-        self._recipe = None
-        self._counts = dict(cycles=0, refreshes=0, jobs_ready=0, jobs_failed=0, pressure=0)
-        self._error = None
-        background: list[asyncio.Task] = []
-        stopped = False
-        try:
-            with self.store.worker_lock():
-                try:
-                    if stop is not None:
-                        current = asyncio.current_task()
-                        async def watch_stop():
-                            await stop.wait()
-                            current.cancel()
-                        background.append(asyncio.create_task(watch_stop()))
-                    await self._register_recipe()
-                    background.append(asyncio.create_task(self._heartbeat()))
-                    await self._refresh_once()
-                    background.append(asyncio.create_task(self._refresh_loop()))
-                    next_maintenance = self.clock.monotonic() + self.limits.maintenance_seconds
-                    while max_cycles is None or self._counts["cycles"] < max_cycles:
-                        self._utc()
-                        await self._register_recipe()
-                        now = self.clock.monotonic()
-                        if not math.isfinite(now):
-                            raise MediaError("clock_invalid")
-                        if self._needs_recovery or now >= next_maintenance:
-                            recovery = await _blocking(self.store.recover)
-                            self._needs_recovery = recovery.pending > 0
-                            next_maintenance = now + self.limits.maintenance_seconds
-                        lease = await self._claim()
-                        if lease:
-                            await self._job(lease)
-                        self._counts["cycles"] += 1
-                        self._utc()
-                        await _blocking(self.repository.worker_status, self._error)
-                        if max_cycles is None or self._counts["cycles"] < max_cycles:
-                            await asyncio.sleep(self.limits.poll_seconds)
-                except asyncio.CancelledError:
-                    stopped = True
-                    if stop is None or not stop.is_set():
-                        raise
-                finally:
-                    for task in background:
-                        task.cancel()
-                    async def finish():
-                        await asyncio.gather(*background, return_exceptions=True)
-                        await self._close_clients()
-                        try:
-                            self._utc()
-                            await _blocking(self.repository.worker_status, self._error)
-                        except Exception:
-                            pass
-                    await _drain(asyncio.create_task(finish()))
-        finally:
-            self._running = False
-        return WorkerReport(**self._counts, stopped=stopped, last_error=self._error)
-
-
-async def _entry(cycles):
+async def _entry():
     try:
         dsn, root, connection_file = (os.environ[name] for name in
             ("PHOTO_WALL_DATABASE_URL", "PHOTO_WALL_MEDIA_ROOT", "PHOTO_WALL_CONNECTIONS_FILE"))
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
     clock = SystemClock()
-    repository = MediaRepository(Database(dsn), clock)
+    queue = ProcrastinateMediaQueue(dsn)
+    repository = MediaRepository(Database(dsn), clock, queue=queue)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
     await _blocking(repository.db.migrate)
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(signum, stop.set)
-    report = await worker.run(max_cycles=cycles, stop=stop)
-    print(report.model_dump_json())
+    await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
+    app = create_worker_app(dsn)
+    try:
+        with worker.store.worker_lock():
+            await worker._register_recipe()
+            await worker.maintain()
+            await worker.refresh_once()
+            async with app.open_async():
+                await app.run_worker_async(
+                    queues=[MEDIA_QUEUE],
+                    concurrency=4,
+                    additional_context={"media_worker": worker},
+                )
+    finally:
+        await worker._close_clients()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the central Photo Wall media worker")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--once", action="store_true")
-    group.add_argument("--cycles", type=int)
-    arguments = parser.parse_args()
     try:
-        asyncio.run(_entry(1 if arguments.once else arguments.cycles))
+        asyncio.run(_entry())
         return 0
     except KeyboardInterrupt:
         return 130

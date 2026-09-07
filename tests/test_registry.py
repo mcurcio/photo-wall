@@ -1,6 +1,9 @@
 """Actual PostgreSQL integration, isolated in a fresh schema for every test."""
 
 import base64
+import hashlib
+import secrets
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -18,19 +21,26 @@ from central.registry import (
     enrollment_message,
 )
 from contracts.models import Calibration, FrameProfile
+from contracts.release import BootRequest
 
 ADMIN = "test-operator-" + "x" * 40
 
 
-def enroll(registry, key=None, count=2, persistence="durable"):
+def enroll(registry, key=None, count=2, device_id=None):
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
+    device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    boot_id = str(uuid.uuid4())
+    ticket = registry.release_authority.select_boot(BootRequest(
+        device_id=device_id, boot_id=boot_id, request_id=secrets.token_hex(24)
+    ))
     nonce = registry.challenge(public)["nonce"]
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs, persistence=persistence,
+    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
+                         device_id=device_id, boot_id=boot_id, ticket_id=ticket.ticket_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, persistence))).decode())
+                             nonce, outputs, device_id, boot_id, ticket.ticket_id))).decode())
     return registry.enroll(request), key, request
 
 
@@ -48,7 +58,7 @@ def test_registration_precedes_binding_proof_replay_and_token_rotation(registry)
     assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
     with pytest.raises(RegistryError, match="used_challenge"):
         registry.enroll(request)
-    rotated, _, _ = enroll(registry, key)
+    rotated, _, _ = enroll(registry, device_id=request.device_id)
     assert rotated["player_id"] == identity["player_id"]
     assert rotated["authority_epoch"] == identity["authority_epoch"] + 1
     with pytest.raises(RegistryError, match="unauthorized"):
@@ -56,41 +66,40 @@ def test_registration_precedes_binding_proof_replay_and_token_rotation(registry)
 
 
 def test_registration_without_panels_and_observation_removal(registry):
-    identity, key, _ = enroll(registry, count=0)
+    identity, _, first = enroll(registry, count=0)
     assert len(registry.inventory()["players"]) == 1
     assert registry.inventory()["outputs"] == []
-    enroll(registry, key, count=2)
-    enroll(registry, key, count=1)
+    enroll(registry, count=2, device_id=first.device_id)
+    enroll(registry, count=1, device_id=first.device_id)
     observations = {o["output_id"]: o["observation"] for o in registry.inventory()["outputs"]}
     assert observations["HDMI-A-1"]["connected"] is True
     assert observations["HDMI-A-2"]["connected"] is False
 
 
-def test_volatile_player_appears_with_storage_fault_but_cannot_be_bound(registry):
-    identity, _, _ = enroll(registry, persistence="volatile")
+def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(registry):
+    identity, _, first = enroll(registry)
     inventory = registry.inventory()
-    assert inventory["players"][0]["health"]["storage_fault"] is True
+    assert inventory["players"][0]["health"]["boot_id"] == first.boot_id
     assert len(inventory["outputs"]) == 2
-    frame(registry)
-    with pytest.raises(RegistryError, match="persistent_storage_required"):
-        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    assert registry.configuration_for(identity["player_id"], 1)["execution_bindings"] == []
-
-
-def test_loss_of_persistence_disables_existing_binding_and_signed_flag_cannot_be_forged(registry):
-    identity, key, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    restarted, _, _ = enroll(registry, device_id=first.device_id)
+    assert restarted["player_id"] == identity["player_id"]
+    assert restarted["authority_epoch"] == 2
+    assert len(registry.configuration_for(restarted["player_id"], 2)["execution_bindings"]) == 1
+
+
+def test_boot_context_is_signed_and_stale_ticket_cannot_reenroll(registry):
+    identity, _, request = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    forged = request.model_copy(update={"boot_id": str(uuid.uuid4())})
     with pytest.raises(RegistryError, match="invalid_proof"):
-        registry.enroll(request.model_copy(update={"persistence": "volatile"}))
-    identity, _, _ = enroll(registry, key, persistence="volatile")
-    config = registry.configuration_for(identity["player_id"], identity["authority_epoch"])
-    assert len(config["bindings"]) == 1
-    assert config["execution_bindings"] == []
-    identity, _, _ = enroll(registry, key)
-    config = registry.configuration_for(identity["player_id"], identity["authority_epoch"])
-    assert len(config["execution_bindings"]) == 1
+        registry.enroll(forged)
+    with pytest.raises(RegistryError, match="expired_or_used_challenge"):
+        registry.enroll(request)
 
 
 def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
@@ -98,8 +107,15 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     public = key.public_key().public_bytes_raw().hex()
     nonce = registry.challenge(public)["nonce"]
     outputs = (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),)
+    device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    boot_id = str(uuid.uuid4())
+    ticket = registry.release_authority.select_boot(BootRequest(
+        device_id=device_id, boot_id=boot_id, request_id=secrets.token_hex(24)
+    ))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         signature=base64.b64encode(key.sign(enrollment_message(nonce, outputs))).decode())
+                         device_id=device_id, boot_id=boot_id, ticket_id=ticket.ticket_id,
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, device_id, boot_id, ticket.ticket_id))).decode())
     bad = request.model_copy(update={"signature": base64.b64encode(b"x" * 64).decode()})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(bad)
@@ -110,7 +126,7 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
 
 
 def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(registry):
-    old, key, _ = enroll(registry)
+    old, _, old_enrollment = enroll(registry)
     new, _, _ = enroll(registry)
     frame(registry)
     first = registry.bind("portrait", old["player_id"], "HDMI-A-1", expected_generation=0)
@@ -121,7 +137,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(old["token"])
     with pytest.raises(RegistryError, match="retired"):
-        registry.challenge(key.public_key().public_bytes_raw().hex())
+        enroll(registry, device_id=old_enrollment.device_id)
     assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory()["frames"][0]

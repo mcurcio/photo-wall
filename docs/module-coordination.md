@@ -1,8 +1,10 @@
-# Persistent coordination
+# Central execution coordination
 
-Status: accepted implementation contract, 2026-09-05; integration under development.
+Status: accepted central implementation contract, revised for transaction-bound domain interfaces and typed outcome delivery.
 Extends [decision 0003](decisions/0003-coordination-and-player-execution.md).
-The orchestrator owns this module, all PostgreSQL schema and integration.
+The central application owns this module, its PostgreSQL schema, and integration. Players hold only current session state.
+
+`Coordinator` depends on the public `CoordinationMedia` port for authored candidates, offer pinning, grant acquisition, and expiry. It does not call media repository private methods or read/write media tables. The media implementation owns its SQL and locks. Installation/registry, Runtime, Planner, coordination, and media operations enter through named application operations with caller-bounded transactions; one domain does not reach into another domain's private storage.
 
 `RuntimeStore` restores the pure Runtime from a single PostgreSQL snapshot under a
 transaction advisory lock, applies one command/current-time advance, then persists
@@ -62,6 +64,15 @@ Failures invalidate prepared state and commitments, persist a bounded coded
 lifecycle event, and feed acquisition cooldown/replanning. Already executed output
 cannot be retroactively revoked; Players independently reject invalid readiness
 and use compatible fallback. Observations are evidence, not execution authority.
+
+Each observation is also normalized as a typed `ExecutionOutcome` carrying kind,
+time, Player/Plan/assignment identity, result, and bounded detail. An
+`ExecutionOutcomeRouter` delivers the same value to Runtime and Planner before the
+audit event is accepted. Runtime preserves logical lifecycle semantics when a
+physical execution fails; Planner requests replanning for preparation/execution
+failure without silently changing an already secured assignment. Success and
+ordinary observations preserve the existing plan. This handoff replaces private
+cross-module callbacks with an explicit application contract.
 
 Media references are inserted in the offer transaction before it becomes visible.
 The gateway rechecks epoch, binding and unexpired exact grants for every request,

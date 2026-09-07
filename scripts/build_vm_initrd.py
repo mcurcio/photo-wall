@@ -32,8 +32,8 @@ COMMAND_TIMEOUT = 300
 PRODUCTION_INITRD_SIZE = 64_614_282
 PRODUCTION_INITRD_SHA256 = "98435d9d6d785aea06676ceb9319284e61baeff99a78b1ef253006d9ff6d2d8e"
 REQUIRED_MODULES = ("virtio_pci", "virtio_blk", "virtio_net", "virtio_gpu", "9p", "9pnet",
-                    "9pnet_virtio", "loop", "squashfs", "overlay", "ext4", "vfat")
-PRELOAD_ROOTS = ("virtio_gpu", "9p", "9pnet", "9pnet_virtio")
+                    "9pnet_virtio", "sbsa_gwdt", "loop", "squashfs", "overlay", "ext4", "vfat")
+PRELOAD_ROOTS = ("virtio_gpu", "9p", "9pnet", "9pnet_virtio", "sbsa_gwdt")
 PROTECTED_PREFIXES = ("usr/bin/python3.12", "usr/lib/python3.12", "etc/photo-wall",
                       "scripts/photowall")
 HOOK_PATH = "scripts/init-bottom/photo-wall-evidence"
@@ -46,7 +46,7 @@ HOOK_BYTES = (
     b"report=/run/photo-wall/boot.json\n"
     b"if [ -f \"$report\" ]; then\n"
     b"    printf '%s\\n' 'photo-wall: boot report'\n"
-    b"    cat -- \"$report\"\n"
+    b'    /usr/bin/python3.12 -I -c \'import hashlib,json; from pathlib import Path; v=json.loads(Path("/run/photo-wall/boot.json").read_bytes()); v["ticket_sha256"]=hashlib.sha256(v.pop("ticket_id").encode()).hexdigest(); print(json.dumps(v))\'\n'
     b"fi\n"
     b"ci=/run/photo-wall-ci\n"
     b"mkdir -p -- \"$ci\"\n"
@@ -68,7 +68,6 @@ HOOK_BYTES = (
     b"ProtectSystem=strict\n"
     b"ProtectHome=yes\n"
     b"PrivateTmp=yes\n"
-    b"ReadWritePaths=/var/lib/photo-wall\n"
     b"RestrictAddressFamilies=AF_UNIX\n"
     b"\n"
     b"[Install]\n"

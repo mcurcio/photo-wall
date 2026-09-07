@@ -39,48 +39,90 @@ def test_ci_rejects_non_commit_shaped_revision_before_creating_outputs(tmp_path)
 
 
 def test_disposable_deployment_has_valid_player_config_and_matching_tls(tmp_path):
-    version = subprocess.run(["openssl", "version"], capture_output=True, text=True, check=True).stdout
+    version = subprocess.run(
+        ["openssl", "version"], capture_output=True, text=True, check=True
+    ).stdout
     if not version.startswith("OpenSSL 3."):
         pytest.skip("CI fixture signing requires OpenSSL 3")
     deployment, key = _fixture_deployment(tmp_path / "deployment")
     config = PlayerConfig.model_validate_json((deployment / "public/public.json").read_bytes())
-    assert config.state_dir == "/var/lib/photo-wall/player"
+    assert config.cache_dir == "/run/photo-wall/player/cache"
+    assert config.boot_context_file == "/run/photo-wall/boot.json"
     assert config.ca_file == "/etc/photo-wall/ca.pem"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(deployment / "private/server.pem", deployment / "private/server.key.pem")
-    subprocess.run(["openssl", "verify", "-CAfile", str(deployment / "public/ca.pem"),
-                    "-verify_hostname", "photo-wall.test", str(deployment / "private/server.pem")],
-                   capture_output=True, check=True)
+    context.load_cert_chain(
+        deployment / "private/server.pem", deployment / "private/server.key.pem"
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "verify",
+            "-CAfile",
+            str(deployment / "public/ca.pem"),
+            "-verify_hostname",
+            "photo-wall.test",
+            str(deployment / "private/server.pem"),
+        ],
+        capture_output=True,
+        check=True,
+    )
     assert key.is_file() and stat.S_IMODE(key.stat().st_mode) == 0o600
     assert not (deployment / "private/ca.key.pem").exists()
     assert not (deployment / "private/server.csr").exists()
     assert {p.name for p in (deployment / "public").iterdir()} == {
-        "public.json", "bootstrap.json", "ca.pem", "release.pub.pem"}
-    assert json.loads((deployment / "public/bootstrap.json").read_bytes())["time_server"] == "photo-wall.test"
+        "public.json",
+        "bootstrap.json",
+        "ca.pem",
+        "release.pub.pem",
+    }
+    assert (
+        json.loads((deployment / "public/bootstrap.json").read_bytes())["time_server"]
+        == "photo-wall.test"
+    )
 
 
 def test_shared_release_signer_produces_verifiable_ed25519_signature(tmp_path, monkeypatch):
-    version = subprocess.run(["openssl", "version"], capture_output=True, text=True, check=True).stdout
+    version = subprocess.run(
+        ["openssl", "version"], capture_output=True, text=True, check=True
+    ).stdout
     if not version.startswith("OpenSSL 3."):
         pytest.skip("CI fixture signing requires OpenSSL 3")
     monkeypatch.setattr("appliance.updates.OPENSSL", shutil.which("openssl"))
     deployment, key = _fixture_deployment(tmp_path / "deployment")
     public = deployment / "public"
-    config = configuration_digest({name: (public / name).read_bytes()
-                                   for name in ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")})
+    config = configuration_digest(
+        {
+            name: (public / name).read_bytes()
+            for name in ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
+        }
+    )
     manifest = tmp_path / "release.json"
-    release = Release(revision="a" * 40, boot_abi="b" * 64,
-                      configuration_sha256=config,
-                      rootfs_sha256="c" * 64, rootfs_size=1)
+    release = Release(
+        revision="a" * 40,
+        boot_abi="b" * 64,
+        configuration_sha256=config,
+        rootfs_sha256="c" * 64,
+        rootfs_size=1,
+    )
     manifest.write_bytes(release.encode())
     signature = tmp_path / "release.sig"
     record = _sign_release(key, manifest, signature)
     assert record["size"] == 64
-    assert verify_release(manifest.read_bytes(), signature.read_bytes(), public / "release.pub.pem",
-                          release.boot_abi, config) == release
+    assert (
+        verify_release(
+            manifest.read_bytes(),
+            signature.read_bytes(),
+            public / "release.pub.pem",
+            release.boot_abi,
+            config,
+        )
+        == release
+    )
 
 
-def test_rollback_candidate_orchestration_keeps_private_path_and_signs_after_prepare(tmp_path, monkeypatch):
+def test_rollback_candidate_orchestration_keeps_private_path_and_signs_after_prepare(
+    tmp_path, monkeypatch
+):
     from scripts import build_ci_image as ci
 
     root, bundle, deployment = (tmp_path / name for name in ("root", "bundle", "deployment"))
@@ -105,7 +147,9 @@ def test_rollback_candidate_orchestration_keeps_private_path_and_signs_after_pre
 
     monkeypatch.setattr(ci.build_rollback_candidate, "prepare", prepare)
     monkeypatch.setattr(ci, "_sign_release", sign)
-    path, metadata, signature = _prepare_and_sign_rollback_candidate(root, bundle, deployment, signing_key)
+    path, metadata, signature = _prepare_and_sign_rollback_candidate(
+        root, bundle, deployment, signing_key
+    )
 
     assert path == deployment / "rollback-candidate"
     assert metadata["kind"] == "ci-rollback-candidate"
@@ -155,8 +199,11 @@ def test_build_failure_removes_owned_fixture_and_workspace(tmp_path, monkeypatch
 
     monkeypatch.setattr(ci, "_fixture_deployment", fixture)
     monkeypatch.setattr(ci, "_preflight_space", lambda path: ci.MIN_FREE_BYTES)
-    monkeypatch.setattr(ci.tempfile if failure == "workspace" else ci.appliance,
-                        "mkdtemp" if failure == "workspace" else "run", fail)
+    monkeypatch.setattr(
+        ci.tempfile if failure == "workspace" else ci.appliance,
+        "mkdtemp" if failure == "workspace" else "run",
+        fail,
+    )
     with pytest.raises(BuildError, match="injected_failure"):
         ci.build(Path.cwd(), "a" * 40, tmp_path / "output", deployment=deployment)
     assert not deployment.exists()

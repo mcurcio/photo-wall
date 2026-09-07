@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
-import os
-import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -90,7 +87,6 @@ class Executor:
         renderer: Renderer,
         clock: Clock,
         mapping: TimeMapping,
-        state_path: Path,
         prepare_lead: float = 5,
     ):
         if not math.isfinite(prepare_lead) or prepare_lead <= 0:
@@ -98,7 +94,6 @@ class Executor:
         self.player_id = player_id
         self.cache, self.renderer = cache, renderer
         self.clock, self.mapping = clock, mapping
-        self.state_path = Path(state_path)
         self.prepare_lead = prepare_lead
         self._lock = RLock()
         self._cache_work = RLock()
@@ -124,70 +119,9 @@ class Executor:
         self._frame_generations: dict[str, int] = {}
         self._anchor: tuple[float, float] | None = None
         self._capacity_ok = False
-        self._durable_ok = True
         self._renderer_releases: set[str] = set()
         self._renderer_residents: set[str] = set()
         self._retired_outputs: dict[str, OutputBinding] = {}
-        self._load_reconciliation()
-
-    def _load_reconciliation(self) -> None:
-        if not self.state_path.exists():
-            return
-        if self.state_path.is_symlink():
-            raise ValueError("execution state cannot be a symlink")
-        # A corrupt authority journal fails closed; silently discarding it could
-        # permit the same retired process epoch to execute after a cold restart.
-        data = json.loads(self.state_path.read_text())
-        if data.get("version") != 1 or data.get("player_id") != self.player_id:
-            raise ValueError("execution state identity/version mismatch")
-        epoch = data["authority_epoch"]
-        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
-            raise ValueError("invalid persisted authority epoch")
-        self._last_epoch = epoch
-        self._pin_intents = dict(data["pin_intents"])
-        for owner, digest in self._pin_intents.items():
-            if (not isinstance(owner, str) or len(owner) > 512
-                    or not owner.startswith((f"pwexec:{self.player_id}:", f"pwretain:{self.player_id}:"))
-                    or not isinstance(digest, str) or len(digest) != 64
-                    or any(character not in "abcdef0123456789" for character in digest)):
-                raise ValueError("invalid persisted pin ownership")
-        self._frame_generations = dict(data.get("frame_generations", {}))
-        # Other persisted fields support central reconciliation, never replay.
-
-    def _persist(self) -> None:
-        data = {
-            "version": 1,
-            "player_id": self.player_id,
-            "authority_epoch": self._last_epoch,
-            "configuration_revision": self._last_configuration_revision,
-            "plan_id": self._last_plan_id,
-            "plan_revision": self._last_revision,
-            "revocation_sequence": self._last_revocation_sequence,
-            "plan": self._plan.model_dump(mode="json") if self._plan else None,
-            "cancelled": sorted(self._cancelled),
-            "pin_intents": self._pin_intents,
-            "frame_generations": self._frame_generations,
-        }
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".executor-", dir=self.state_path.parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                json.dump(data, stream, separators=(",", ":"), sort_keys=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.state_path)
-            directory = os.open(self.state_path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except BaseException:
-            self._durable_ok = False
-            raise
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        self._durable_ok = True
 
     def _now(self) -> float:
         if self.mapping.healthy():
@@ -205,7 +139,7 @@ class Executor:
     def _current_authority(self, assignment: _Assignment) -> bool:
         binding = self._binding(assignment.layer.output_id)
         return bool(
-            self._durable_ok and binding and assignment.layer.assignment_id not in self._cancelled
+            binding and assignment.layer.assignment_id not in self._cancelled
             and self._config and binding.output_id in self._config.enabled_outputs
             and (binding.frame_id, binding.generation) == (
                 assignment.layer.frame_id, assignment.layer.binding_generation
@@ -274,7 +208,6 @@ class Executor:
                     self._retired_outputs[output_id] = composition.binding
                     del self._current[output_id]
             self._capacity_ok = False
-            self._persist()
             return True
 
     def accept_plan(self, plan: Plan) -> bool:
@@ -332,13 +265,32 @@ class Executor:
             self._last_revocation_sequence = 0
             self._capacity_ok = False
             self._reported.clear()
-            self._persist()
             return True
 
     def acquire(self, assignment_id: str, chunks: Iterable[bytes]) -> bool:
         """Worker-only acquisition; streaming never owns the execution lock."""
         with self._cache_work:
             return self._acquire(assignment_id, chunks)
+
+    def resolve_cached(self, assignment_id: str) -> bool:
+        """Secure already-present exact bytes without starting a network request."""
+        with self._cache_work:
+            with self._lock:
+                assignment = self._assignments.get(assignment_id)
+                if not assignment or not self._current_authority(assignment):
+                    return False
+                variant = assignment.layer.variant
+                if variant is None:
+                    return True
+                owner = assignment.owner
+            try:
+                path = self.cache.path_for(variant)
+                if path is None:
+                    return False
+                self.cache.pin(variant.sha256, owner)
+            except (CacheError, OSError):
+                return False
+            return self._accept_acquired_path(assignment_id, assignment, path)
 
     def _acquire(self, assignment_id: str, chunks: Iterable[bytes]) -> bool:
         with self._lock:
@@ -351,7 +303,6 @@ class Executor:
                 return True
             assignment.acquiring = True
             self._pin_intents[assignment.owner] = assignment.layer.variant.sha256
-            self._persist()
         try:
             path = self.cache.secure(assignment.layer.variant, chunks, assignment.owner)
         except Exception as error:
@@ -361,21 +312,25 @@ class Executor:
                     assignment.secured = False
                     self._lose_preparation(assignment)
                     assignment.failure = "capacity" if isinstance(error, CacheCapacityError) else "download"
-                    self._persist()
             return False
+        return self._accept_acquired_path(assignment_id, assignment, path)
+
+    def _accept_acquired_path(
+        self, assignment_id: str, assignment: _Assignment, path: Path
+    ) -> bool:
         with self._lock:
             assignment.acquiring = False
             assignment.path = path
             assignment.secured = True
-            if (self._assignments.get(assignment_id) is not assignment
-                    or not self._current_authority(assignment)
-                    or not self._plan or self._now() >= min(
-                        assignment.layer.end, self._plan.valid_until
-                    )):
-                # Pin remains journaled for the worker's deferred reconciliation.
+            if (
+                self._assignments.get(assignment_id) is not assignment
+                or not self._current_authority(assignment)
+                or not self._plan
+                or self._now() >= min(assignment.layer.end, self._plan.valid_until)
+            ):
                 return False
             assignment.failure = None
-            self._persist()
+            self._pin_intents[assignment.owner] = assignment.layer.variant.sha256
             return True
 
     def verify_secured(self) -> None:
@@ -422,9 +377,6 @@ class Executor:
                     if self._retained.get(output_id) is retained:
                         del self._retained[output_id]
                     self._current.pop(output_id, None)
-        with self._lock:
-            self._persist()
-
     def maintain_cache(self) -> None:
         """Worker: pin retained pictures before releasing superseded ownership.
 
@@ -437,7 +389,6 @@ class Executor:
 
     def _maintain_cache(self) -> None:
         with self._lock:
-            # Until fresh configuration arrives, all recovered owners are uncertain.
             if self._config is None:
                 return
             retained = tuple(self._retained.values())
@@ -461,9 +412,6 @@ class Executor:
                 # Assignment owners are epoch-scoped and never revived after cancel.
                 if owner not in self._desired_owners():
                     self._pin_intents.pop(owner, None)
-        with self._lock:
-            self._persist()
-
     def _desired_owners(self) -> set[str]:
         now = self._now()
         desired = {a.owner for a in self._assignments.values() if a.acquiring or (
@@ -639,7 +587,6 @@ class Executor:
             for assignment in assignments:
                 assignment.committed = True
                 self._invalidated.discard(assignment.layer.assignment_id)
-            self._persist()
             return changed
 
     def cancel(self, assignment_ids: Iterable[str]) -> None:
@@ -649,7 +596,6 @@ class Executor:
                 self._assignments.pop(key, None)
                 self._inactive.pop(key, None)
                 self._renderer_releases.add(key)
-            self._persist()
 
     def release(self, assignment_ids: Iterable[str]) -> None:
         self.cancel(assignment_ids)
@@ -663,7 +609,6 @@ class Executor:
                     self._lose_preparation(assignment)
                     assignment.execution_layer = None
                     self._invalidated.add(key)
-            self._persist()
 
     def accept_revocation(self, revocation: Revocation) -> bool:
         """Authenticated, revision-bound and idempotent external invalidation."""
@@ -680,7 +625,6 @@ class Executor:
             else:
                 self.invalidate(revocation.assignment_ids)
             self._last_revocation_sequence = revocation.sequence
-            self._persist()
             return True
 
     def _drain_renderer_releases(self) -> None:
@@ -714,7 +658,7 @@ class Executor:
     def _valid_current(self, local: LocalLayer, composition: OutputComposition, now: float) -> bool:
         binding = self._binding(composition.binding.output_id)
         return bool(
-            self._durable_ok and self._plan and binding
+            self._plan and binding
             and self._config and binding.output_id in self._config.enabled_outputs
             and local.layer.assignment_id not in self._cancelled
             and local.layer.assignment_id not in self._invalidated
@@ -924,5 +868,4 @@ class Executor:
                                 "decode" if failed else "expired",
                             ))
             self._release_unused_renderer(now)
-            self._persist()
             return tuple(observations)

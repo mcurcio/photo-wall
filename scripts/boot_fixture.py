@@ -30,7 +30,7 @@ POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d372
 PUBLIC = ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
 SOURCES = ("scripts/boot_gateway.py", "scripts/boot_time_fixture.py", "appliance/__init__.py",
            "appliance/bootstrap.py", "appliance/updates.py", "contracts/release.py",
-           "scripts/vm_media_evidence.py", "scripts/vm_media_probe.py")
+           "scripts/vm_media_evidence.py", "scripts/vm_media_probe.py", "scripts/vm_release_probe.py")
 MAX_JSON = 1024**2
 MAX_ENV = 4096
 PROBE_MEMORY_BYTES = 384 * 1024**2
@@ -41,7 +41,7 @@ DOCKER_NETWORK_ID_PATTERN = re.compile(r"[a-f0-9]{64}")
 
 # Only this public helper and the allowlisted source files enter the derived image.
 RUNTIME = r'''
-import json, os, socket, ssl, stat, struct, sys, tempfile, time, urllib.error, urllib.request
+import json, os, re, socket, ssl, stat, struct, sys, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 from appliance.bootstrap import BootConfig, Fetcher, copy_verified, read_regular
 from boot_gateway import BootBundle
@@ -111,7 +111,8 @@ def initialize():
         raise ValueError('unexpected private volume')
     bundle = BootBundle.load(Path('/bundle'), Path('/public'))
     expected(bundle)
-    if {p.name for p in Path('/bundle').iterdir()} != {'release.json','release.sig',bundle.release.rootfs_name}:
+    if any(p.name not in {'release.json','release.sig'} and not re.fullmatch(r'rootfs-[a-f0-9]{64}\.squashfs',p.name)
+           for p in Path('/bundle').iterdir()):
         raise ValueError('unexpected bundle files')
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain('/tls/server.pem', '/tls/server.key.pem')
@@ -451,7 +452,8 @@ class BootFixture:
 
     @classmethod
     def prepare(cls, state: Path, bundle: Path, deployment: Path, central_image: str, *,
-                media: dict | None = None, connections_file: Path | None = None):
+                media: dict | None = None, connections_file: Path | None = None,
+                candidate_bundle: Path | None = None):
         from scripts.boot_gateway import BootBundle
 
         media = media_spec(media)
@@ -464,6 +466,9 @@ class BootFixture:
         require(not any((path/".git").exists() for path in (resolved,*resolved.parents)), "state_inside_git")
         require(not deployment.is_symlink() and not (deployment/"private").is_symlink(), "deployment_symlink")
         loaded = BootBundle.load(bundle,deployment/"public")
+        candidate = BootBundle.load(candidate_bundle, deployment/"public") if candidate_bundle else None
+        if candidate:
+            candidate.release.require_compatible(loaded.release.boot_abi, loaded.release.configuration_sha256)
         public = read_json(deployment/"public/public.json")
         boot = read_json(deployment/"public/bootstrap.json")
         require(public.get("central_origin") in ("https://photo-wall.test","https://photo-wall.test:443")
@@ -483,6 +488,9 @@ class BootFixture:
             for name, bound in (("release.json",8192),("release.sig",64),
                                 (loaded.release.rootfs_name,loaded.release.rootfs_size)):
                 copy_file(bundle/name,state/"bundle"/name,bound,0o600)
+            if candidate and candidate.release.rootfs_name != loaded.release.rootfs_name:
+                name = candidate.release.rootfs_name
+                copy_file(candidate.directory/name, state/"bundle"/name, candidate.release.rootfs_size, 0o600)
             for name in PUBLIC:
                 copy_file(deployment/"public"/name,state/"public"/name,MAX_JSON,0o600)
             for name in ("server.pem","server.key.pem"):
@@ -492,7 +500,7 @@ class BootFixture:
             release = BootBundle.load(state/"bundle",state/"public").release
             copied = {}
             for name in SOURCES:
-                target_name = name if name.startswith("scripts/vm_media_") else name.removeprefix("scripts/")
+                target_name = name if name.startswith("scripts/vm_") else name.removeprefix("scripts/")
                 target = state/"context"/target_name
                 target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
                 copy_file(ROOT/name,target,MAX_JSON,0o600)
@@ -716,9 +724,10 @@ class BootFixture:
                 if self.exists("image",image["name"]):
                     self.check(image)
                 else:
-                    self.run(["docker","build","--network","none","--label",LABEL+"="+self.project,
-                              "--label",SOURCE_LABEL+"="+self.marker["source_sha256"],
-                              "-t",image["name"],str(self.state/"context")],timeout=180)
+                    from scripts.container_build import daemon_image_build
+                    self.run(daemon_image_build(image["name"], self.state / "context", network="none",
+                              labels=((LABEL, self.project),
+                                      (SOURCE_LABEL, self.marker["source_sha256"]))), timeout=180)
             self.check(image)
             for name in ("front","database"):
                 self.create_resource("network",name)

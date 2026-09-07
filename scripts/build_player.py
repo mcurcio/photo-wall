@@ -37,8 +37,8 @@ from packaging.version import Version
 
 ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography"})
 FORBIDDEN = frozenset({
-    "central", "media", "fastapi", "psycopg", "psycopg-binary", "pillow", "pil",
-    "uvicorn", "hatchling", "packaging", "pytest", "ruff",
+    "central", "media", "fastapi", "psycopg", "psycopg-binary", "psycopg-pool",
+    "procrastinate", "pillow", "pil", "uvicorn", "hatchling", "packaging", "pytest", "ruff",
 })
 TARGET = {
     "implementation_name": "cpython", "implementation_version": "3.12.3",

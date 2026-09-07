@@ -7,7 +7,9 @@ Normal central database/admin settings remain private fixture configuration.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from fastapi import HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 
 from appliance.bootstrap import read_regular
@@ -88,10 +91,37 @@ def install_media_denial(app, control: Path):
         return await call_next(request)
 
 
+def install_delivery_observer(app):
+    """Fixture evidence correlates successful media requests with session epochs."""
+    @app.middleware("http")
+    async def delivery(request, call_next):
+        response = await call_next(request)
+        match = re.fullmatch(r"/v1/media/([a-f0-9]{64})", request.url.path)
+        if request.method == "GET" and match and response.status_code == 200:
+            authorization = request.headers.get("Authorization", "")
+            if authorization.startswith("Bearer "):
+                try:
+                    session = await run_in_threadpool(app.state.registry.authenticate, authorization[7:])
+                except ValueError:
+                    pass
+                else:
+                    print(json.dumps(dict(event="photo-wall-fixture-media-delivery", sha256=match[1],
+                        player_id=session["id"], authority_epoch=session["authority_epoch"])), flush=True)
+        return response
+
+
 def create_app():
     bundle = BootBundle.load(Path(os.environ["PHOTO_WALL_APPLIANCE_BUNDLE"]),
                              Path(os.environ["PHOTO_WALL_BOOT_PUBLIC_CONFIG"]))
+    public = Path(os.environ["PHOTO_WALL_BOOT_PUBLIC_CONFIG"])
+    os.environ.update(PHOTO_WALL_RELEASE_PUBLIC_KEY=str(public / "release.pub.pem"),
+                      PHOTO_WALL_RELEASE_BOOT_ABI=bundle.release.boot_abi,
+                      PHOTO_WALL_RELEASE_CONFIGURATION_SHA256=bundle.release.configuration_sha256,
+                      PHOTO_WALL_RELEASE_ROOT=str(bundle.directory),
+                      PHOTO_WALL_INITIAL_RELEASE_MANIFEST=str(bundle.directory / "release.json"),
+                      PHOTO_WALL_INITIAL_RELEASE_SIGNATURE=str(bundle.directory / "release.sig"))
     app = create_central_app()
+    install_delivery_observer(app)
     control = os.environ.get("PHOTO_WALL_FIXTURE_MEDIA_CONTROL")
     if control is not None:
         if control != "/fixture-control":

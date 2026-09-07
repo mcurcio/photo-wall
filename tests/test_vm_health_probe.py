@@ -14,7 +14,11 @@ BOOT = "11111111-2222-3333-4444-555555555555"
 
 def report(**changes):
     return dict(boot_id=BOOT, sampled_monotonic=100.0, player_id="secret-player-id",
-                authority_epoch=4, persistence="durable", healthy=True) | changes
+                authority_epoch=4, persistence="volatile", healthy=True, health_reason="healthy",
+                release_accepted=False, clock=dict(
+                    status="healthy", rtt=.02, central_offset=.003, apply_age=.004, drift=.001,
+                    transport_drift=.001, apply_drift=.0005, mapping_age=.5, step=.0002,
+                    uncertainty=.013, samples=2, accepted=2, rejected=0)) | changes
 
 
 def runner(argv, *, timeout):
@@ -35,8 +39,14 @@ def test_valid_sample_is_a_bounded_public_projection():
     value = sample(report_reader=lambda: report())
     assert value == {
         "event": "photo-wall-health-diagnostic", "boot_id": BOOT, "sample_index": 1,
-        "report_status": "present", "healthy": True, "persistence": "durable",
+        "report_status": "present", "healthy": True, "persistence": "volatile",
         "current_boot": True, "identity_valid": True, "sample_age": "fresh",
+        "release_accepted": False,
+        "clock": {"status": "healthy", "rtt": .02, "offset": .003, "delay": .004,
+                  "drift": .001, "transport_drift": .001, "apply_drift": .0005,
+                  "mapping_age": .5, "step": .0002, "uncertainty": .013,
+                  "samples": 2, "accepted": 2, "rejected": 0},
+        "health_reason": "healthy",
         "wayland_socket": "present",
         "services": {
             service: {"active_state": "active", "sub_state": "running", "result": "success",
@@ -69,7 +79,7 @@ def test_invalid_or_contradictory_reason_is_never_exported(reason, healthy):
     assert value["healthy"] is None
     assert "health_reason" not in value
     assert "private-secret" not in json.dumps(value)
-    event = sample(report_reader=lambda: report(healthy=healthy)) | {"health_reason": reason}
+    event = sample(report_reader=lambda: report()) | {"health_reason": reason, "healthy": healthy}
     assert probe.validate_event(event, BOOT) is None
 
 
@@ -86,10 +96,13 @@ def test_missing_or_invalid_health_cannot_claim_a_component_reason():
     {"authority_epoch": True},
     {"player_id": None},
     {"sampled_monotonic": float("nan")},
+    {"persistence": "durable"},
     {"persistence": "other"},
     {"persistence": []},
     {"persistence": {"secret": "do-not-export"}},
     {"boot_id": "old"},
+    {"release_accepted": None},
+    {"clock": {"status": "healthy"}},
 ])
 def test_malformed_or_unknown_health_is_invalid_without_report_values(changes):
     value = sample(report_reader=lambda: report(**changes))
@@ -183,14 +196,16 @@ def test_validate_event_rejects_extra_fields_bad_boot_and_unbounded_samples():
 @pytest.mark.parametrize("changes", [
     {"report_status": "missing", "healthy": True, "persistence": "invalid",
      "current_boot": False, "identity_valid": False, "sample_age": "missing"},
-    {"report_status": "invalid", "healthy": None, "persistence": "durable",
+    {"report_status": "invalid", "healthy": None, "persistence": "volatile",
      "current_boot": False, "identity_valid": False, "sample_age": "invalid"},
-    {"report_status": "present", "healthy": None, "persistence": "durable",
+    {"report_status": "present", "healthy": None, "persistence": "volatile",
      "current_boot": True, "identity_valid": True, "sample_age": "fresh"},
-    {"report_status": "present", "healthy": True, "persistence": "durable",
+    {"report_status": "present", "healthy": True, "persistence": "volatile",
      "current_boot": True, "identity_valid": False, "sample_age": "fresh"},
-    {"report_status": "present", "healthy": True, "persistence": "durable",
+    {"report_status": "present", "healthy": True, "persistence": "volatile",
      "current_boot": True, "identity_valid": True, "sample_age": "invalid"},
+    {"report_status": "present", "healthy": True, "persistence": "volatile",
+     "current_boot": True, "identity_valid": True, "sample_age": "fresh", "clock": None},
 ])
 def test_validate_event_rejects_cross_field_contradictions(changes):
     value = sample(report_reader=lambda: report()) | changes

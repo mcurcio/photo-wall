@@ -8,10 +8,12 @@ import time
 from uuid import UUID
 
 import pytest
+from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
 from test_registry import enroll, frame
 
 from central.coordination import Coordinator
+from central.execution_repository import PostgresExecutionRepository
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore, MediaStoreError
 from central.registry import RegistryError
@@ -27,9 +29,14 @@ VARIANT = b"public synthetic prepared bytes"
 @pytest.fixture
 def storage(registry, tmp_path):
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
-        max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000))
+        max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
+        queue=RecordingMediaQueue())
     repository.set_recipe(RECIPE)
-    return MediaStore(repository, tmp_path / "media")
+    return MediaStore(
+        repository,
+        tmp_path / "media",
+        execution=PostgresExecutionRepository(),
+    )
 
 
 def queued(storage, number=1, *, original=ORIGINAL):
@@ -218,7 +225,7 @@ def test_failed_unlink_preserves_reservation_until_real_cleanup(storage, monkeyp
             real_unlink(path)
         monkeypatch.setattr(storage, "_unlink", refuse)
         with pytest.raises(MediaStoreError, match="media_cleanup"):
-            storage.fail(lease, "fixture_failure", retry_at=1005)
+            storage.fail(lease, "fixture_failure", retry=True)
         assert paths.original.is_file()
         job = row(storage, "media_jobs", "id", lease.job_id)
         assert job["state"] == "cleanup" and job["cleanup_state"] == "retry"
@@ -227,6 +234,7 @@ def test_failed_unlink_preserves_reservation_until_real_cleanup(storage, monkeyp
         storage.recover()
         assert not paths.directory.exists()
         assert row(storage, "media_jobs", "id", lease.job_id)["state"] == "retry"
+        assert row(storage, "media_jobs", "id", lease.job_id)["retry_at"] == 0
         assert storage.repository.health()["accounted_bytes"] == 0
 
 
@@ -279,7 +287,11 @@ def test_exact_authorized_read_holds_transfer_pin_and_releases_on_completion(sto
     with storage.worker_lock():
         _, _, prepared = ready(storage)
         player, _, _ = grant(storage, registry, prepared.variant, secured=secured)
-        reader = MediaStore(storage.repository, storage.root).open_read(player["token"], prepared.variant.sha256)
+        reader = MediaStore(
+            storage.repository,
+            storage.root,
+            execution=PostgresExecutionRepository(),
+        ).open_read(player["token"], prepared.variant.sha256)
         with storage.db.transaction() as conn:
             transfer = conn.execute("SELECT * FROM media_references WHERE owner LIKE 'transfer:%'").fetchone()
         assert transfer["expires_at"] == 1150
@@ -330,7 +342,11 @@ def test_quota_reduction_and_corrupt_restart_preserve_secured_logical_pin(storag
         assert storage.collect(target_bytes=0).pressure
         canonical = storage.root / "blobs" / prepared.variant.sha256
         canonical.write_bytes(b"corrupt public bytes")
-    restarted = MediaStore(storage.repository, storage.root)
+    restarted = MediaStore(
+        storage.repository,
+        storage.root,
+        execution=PostgresExecutionRepository(),
+    )
     with restarted.worker_lock():
         assert row(storage, "media_blobs", "digest", prepared.variant.sha256)["state"] == "corrupt"
         assert storage.repository.health()["accounted_bytes"] == len(VARIANT)

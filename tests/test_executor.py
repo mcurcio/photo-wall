@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import stat
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -181,9 +179,8 @@ class Rig:
         self.mapping.establish(.01)
         self.cache = Cache(directory / "cache", cache_bytes)
         self.renderer = RecordingRenderer(capacity)
-        self.state_path = directory / "executor.json"
         self.executor = Executor("player1", self.cache, self.renderer, self.clock,
-                                 self.mapping, self.state_path)
+                                 self.mapping)
         self.configuration = PlayerConfiguration(
             player_id="player1", authority_epoch=epoch, configuration_revision=1,
             bindings=bindings or (binding(), binding("hdmi2", "frame2")),
@@ -546,32 +543,27 @@ def test_rebinding_and_disabled_configuration_remove_old_retained_authority(tmp_
         rig.executor.accept_plan(rig.plan.model_copy(update={"revision": 2}))
 
 
-def test_restart_keeps_uncertain_pins_but_requires_fresh_reconciliation(tmp_path):
+def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
     rig = Rig(tmp_path)
     rig.play(layer(retain_on_expiry=True))
     rig.executor.maintain_cache()
-    assert stat.S_IMODE(rig.state_path.stat().st_mode) == 0o600
-    state = json.loads(rig.state_path.read_text())
-    assert state["authority_epoch"] == 1
-    assert state["plan"]["plan_id"] == "stable"
-    assert state["pin_intents"]
+    rig.cache.close()
+    cache = Cache(tmp_path / "cache", 4096)
     restarted_renderer = RecordingRenderer()
-    restarted = Executor("player1", rig.cache, restarted_renderer, rig.clock, rig.mapping, rig.state_path)
+    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.mapping)
     restarted.maintain_cache()
-    assert rig.cache.stats()["pinned_bytes"] > 0
+    assert cache.stats()["pinned_bytes"] == 0
     assert restarted.tick() == ()
     assert restarted_renderer.outputs == {}
-    with pytest.raises(AuthorityError):
-        restarted.accept_configuration(rig.configuration)
-    with pytest.raises(AuthorityError):
-        restarted.accept_plan(rig.plan)
     new = rig.configuration.model_copy(update={"authority_epoch": 2})
     restarted.accept_configuration(new)
+    with pytest.raises(AuthorityError):
+        restarted.accept_plan(rig.plan)
+    with pytest.raises(AuthorityError):
+        restarted.accept_commit(rig.commit("picture"))
     restarted.tick()
     assert restarted_renderer.outputs["hdmi1"].fallback
     assert restarted_renderer.outputs["hdmi1"].layers == ()
-    restarted.maintain_cache()
-    assert rig.cache.stats()["pinned_bytes"] == 0
 
 
 def test_new_authority_epoch_rejects_old_commits_and_clears_old_output(tmp_path):
@@ -742,12 +734,11 @@ def test_retention_created_during_worker_pass_keeps_original_pin(tmp_path, monke
         rig.advance(2)
         resume.set()
         maintenance.result(timeout=3)
-    count = rig.cache._db.execute("SELECT COUNT(*) FROM pins WHERE sha256=?", (media().sha256,)).fetchone()[0]
-    assert count > 0
+    assert any(media().sha256 in digests for digests in rig.cache._pins.values())
     monkeypatch.setattr(rig.cache, "pin", original_pin)
     rig.executor.maintain_cache()
-    owners = [row[0] for row in rig.cache._db.execute("SELECT owner FROM pins WHERE sha256=?", (media().sha256,))]
-    assert any(owner.startswith("pwretain:") for owner in owners)
+    assert any(owner.startswith("pwretain:") and media().sha256 in digests
+               for owner, digests in rig.cache._pins.items())
 
 
 def test_expired_sequential_decode_resources_are_released(tmp_path):
@@ -789,34 +780,13 @@ def test_capacity_loss_at_intended_start_skips_previously_committed_work(tmp_pat
     assert not rig.renderer.outputs["hdmi1"].fallback
 
 
-def test_pin_intent_is_durable_before_stream_and_failed_replace_keeps_old_journal(tmp_path, monkeypatch):
-    import player.executor as executor_module
-
+def test_executor_never_writes_an_authority_journal(tmp_path):
     rig = Rig(tmp_path)
     rig.offer(layer())
-
-    def chunks():
-        state = json.loads(rig.state_path.read_text())
-        assert media().sha256 in state["pin_intents"].values()
-        yield b"picture"
-
-    assert rig.executor.acquire("picture", chunks())
-    before = rig.state_path.read_bytes()
-    original_replace = executor_module.os.replace
-
-    def fail_replace(_source, _destination):
-        raise OSError("simulated interrupted state publication")
-
-    monkeypatch.setattr(executor_module.os, "replace", fail_replace)
-    with pytest.raises(OSError):
-        rig.offer(layer(), revision=2)
-    assert rig.state_path.read_bytes() == before
+    assert rig.executor.acquire("picture", [b"picture"])
+    rig.offer(layer(), revision=2)
+    assert {path.name for path in tmp_path.iterdir()} == {"cache"}
     assert not list(tmp_path.glob(".executor-*"))
-    assert rig.executor.readiness().secured == ()
-    monkeypatch.setattr(executor_module.os, "replace", original_replace)
-    restarted = Executor("player1", rig.cache, RecordingRenderer(), rig.clock, rig.mapping, rig.state_path)
-    with pytest.raises(AuthorityError):
-        restarted.accept_configuration(rig.configuration)
 
 
 def test_plan_omission_revokes_execution_but_preserves_secured_lease(tmp_path):

@@ -6,12 +6,16 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from contracts.models import FrameProfile, Layer, Model, OutputBinding
+
+if TYPE_CHECKING:
+    from central.execution_outcomes import ExecutionOutcome
 
 
 class PlanningError(ValueError):
@@ -20,6 +24,17 @@ class PlanningError(ValueError):
 
 class PlanningBudgetExceeded(PlanningError):
     """No partial plan is returned after an explicit planning limit is exceeded."""
+
+
+def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
+    """Own the next-planning consequence without changing secured content."""
+    return {
+        "group_skipped": "preserve_selection",
+        "observation": "record_observation",
+        "offer_backpressure": "await_capacity",
+        "offer_unavailable": "await_media",
+        "readiness_lost": "replan",
+    }[outcome.kind]
 
 
 class PlannerLimits(Model):

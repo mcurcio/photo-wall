@@ -9,6 +9,8 @@ Evidence classes are separate:
 
 Real Immich, native Linux and hosted generic-VM integration have executed evidence; physical Pi/PXE evidence remains pending. Container images for central services are not the required Pi appliance artifact. Keep binary artifacts and private deployment data outside Git. Detailed dated records identify revisions, executed commands, failures and limits; the [delivery checklist](../implementation-checklist.md) tracks remaining acceptance.
 
+[Decision 0006](../decisions/0006-central-authority-and-stateless-players.md) supersedes the earlier durable Player, `PWSTATE`, local A/B, and custom-worker scheduling designs. The records below are intentionally preserved for the exact revisions they exercised. None of those older results qualifies the replacement architecture; current acceptance requires new final-revision evidence.
+
 - [2026-09-05 foundation](2026-09-05-foundation.md): clean-checkout central launch and 94 passing portable/PostgreSQL tests.
 - [2026-09-05 core benchmark](2026-09-05-core-benchmark.md): 494 core tests, real Immich isolation, pinned Linux conversion, native two-output routing and released Player service integration; appliance and physical gates remain open.
 - [2026-09-05 packaging and update store](2026-09-05-package-and-update.md): offline Player-only ARM64 install, 64 package tests, and 62 updater/Release tests with Linux signature/staging/fallback smoke; complete image/boot integration remains open.
@@ -20,6 +22,7 @@ Real Immich, native Linux and hosted generic-VM integration have executed eviden
 - [2026-09-05 CI cache checks](2026-09-05-ci-cache.md): verified metadata-preserving base and container caches; measured warm assembly at 11m11s versus 22m15s cold.
 - [2026-09-06 Player clock sampling](2026-09-06-player-clock.md): local parsing no longer inflates transport uncertainty; 72 offline service tests and a before/after mutation check pass, with one explicit database skip. Hosted qualification remains pending.
 - [2026-09-06 Frame and calendar acceptance](2026-09-06-core-acceptance.md): independent 146-test PostgreSQL review and a repeatable nested-calendar RecordingActuator trace; physical and whole-MVP acceptance remain separate.
+- [2026-09-07 central authority/stateless Player review](../reviews/central-stateless-review.md): independent working-tree architecture/correctness review, material-finding fixes, and verification boundaries; final-revision image and physical acceptance remain pending.
 - [2026-09-06 exact-VM media preparation](2026-09-06-vm-media.md): real media-enabled boot services, production worker source refresh, read-only tiny-filesystem cache probes and strict presentation-evidence joins; full-image photo/rollback qualification remains pending.
 - [2026-09-06 systemd updates](2026-09-06-systemd-updates.md): five actual Linux acceptance/recovery adapter scenarios passed with a recorded recovery action; actual image rollback and native/physical qualification remain unqualified.
 - [2026-09-06 central health](2026-09-06-central-health.md): scheduler errors and stale coordination now affect service health; 840 PostgreSQL-backed tests passed.

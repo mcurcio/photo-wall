@@ -1,7 +1,9 @@
 # Native Renderer
 
-Status: implemented and tested with native software rendering on 2026-09-05;
-Pi, DRM/HDMI, physical continuity and capacity qualification remain pending. Policy belongs to [decision 0005](decisions/0005-native-platform-and-registration-fallback.md).
+Status: implemented and tested with native software rendering on 2026-09-05. A
+GStreamer GL integration trial was rejected on 2026-09-06; the existing renderer
+remains selected. Pi, DRM/HDMI, physical continuity and capacity qualification
+remain pending. Policy belongs to [decision 0005](decisions/0005-native-platform-and-registration-fallback.md).
 This module implements the [Renderer boundary](module-player-execution.md) inside
 the single Player process. It does not select media, retrieve files, authenticate
 control messages or operate the compositor service.
@@ -165,6 +167,57 @@ measurement, thermal performance, hardware decode or qualified four-decoder
 capacity is established here. Native decode and upload are explicit initial CPU
 and memory costs. The [appliance design](module-appliance-platform.md) owns those
 remaining build and hardware gates.
+
+## GStreamer GL integration trial
+
+The trial considered replacing the CPU RGBA map and `glTexSubImage2D` upload seam
+with this bounded decoder tail while keeping `NativeRenderer` and its public
+`Renderer` operations unchanged:
+
+```text
+decoder -> glupload -> glcolorconvert
+        -> video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D -> appsink
+```
+
+GStreamer documents `glupload` as accepting system memory and DMABuf and producing
+GL textures, while `glcolorconvert` performs format and colour conversion with GL
+shaders. `GstGLMemory` exposes a texture only within a negotiated GL context;
+elements propagate a `GstGLDisplay` through `GstContext`. A Player adapter would
+therefore have to share each GTK3 `GLArea` context with the decoder pipeline and
+retain each `GstSample` until the GL draw and synchronization metadata complete.
+Merely selecting `gtkglsink` cannot replace the existing application compositor:
+it accepts one RGBA GL stream and does not provide the required arbitrary layer
+ordering, projective aperture, crop, per-layer alpha, calibrated linear-light
+composition, atomic candidate/front swap or exact draw acknowledgment.
+[glupload](https://gstreamer.freedesktop.org/documentation/opengl/glupload.html),
+[glcolorconvert](https://gstreamer.freedesktop.org/documentation/opengl/glcolorconvert.html),
+[GstGLMemory](https://gstreamer.freedesktop.org/documentation/gl/gstglmemory.html),
+[GstGLDisplay](https://gstreamer.freedesktop.org/documentation/gl/gstgldisplay.html),
+[gtkglsink](https://gstreamer.freedesktop.org/documentation/gtk/gtkglsink.html).
+
+The exact committed native fixture image named above was inspected without
+network access. Its GI runtime provided `GstGL` and `GST_MAP_GL`, but GStreamer
+reported no factories for `glupload`, `glcolorconvert`, `glsinkbin` or
+`gtkglsink`; only the existing `appsink` factory was present. Noble supplies the
+missing GL elements in the separate
+[`gstreamer1.0-gl`](https://packages.ubuntu.com/en/noble/libs/gstreamer1.0-gl)
+package, which is outside the tested fixture and appliance package closure. The
+unchanged baseline smoke was rerun and passed its two-Output JPEG/PNG/H.264,
+12-to-32-second seek/reveal, calibration, exact acknowledgment, failed-stream
+continuity and cleanup checks. It reported software OpenGL ES 3.2, GStreamer
+1.24.2, one final resident decoder and 2,469,888 estimated texture bytes.
+
+No experimental adapter remains in `player/native.py`. Unit tests cannot prove
+GTK/GStreamer EGL context sharing, GL texture lifetime and synchronization,
+generation-safe samples after a flush seek, or retention of the previous front
+buffer after a candidate GL pipeline failure. More decisively, there is no paired
+measurement on the target physical Pi, using the same immutable release and
+two-Output workload, that shows the GLMemory path reduces Player CPU time or
+memory traffic while preserving decoder count, draw latency, dropped/late frames,
+temperature, composition pixels, calibration, seek position, acknowledgment and
+running-process continuity. That paired target-Pi improvement measurement is the
+unproven adoption gate. Until it passes, `qualified=False` remains correct and the
+current bounded `appsink`/GTK3 `GLArea` renderer remains the selected path.
 
 ## Native health acceptance adapter
 

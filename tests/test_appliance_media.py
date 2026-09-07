@@ -1,7 +1,5 @@
 """Resource and source boundaries of the VM media extension."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from scripts.appliance_media import ApplianceMedia
@@ -12,7 +10,7 @@ from scripts.vm_media_probe import ProbeError, configure
 class Operator:
     def __init__(self):
         self.calls = []
-        self.player = dict(id="p1", authority_epoch=1, retired_at=None, health={"persistence": "durable"})
+        self.player = dict(id="p1", authority_epoch=1, retired_at=None, health={"persistence": "volatile"})
         self.outputs = [dict(player_id="p1", output_id="Virtual-1",
                              observation=dict(connected=True, width_px=1280, height_px=720))]
 
@@ -49,41 +47,20 @@ def test_invalid_capture_cannot_broaden_fixture_query(begin, end):
     assert operator.calls == []
 
 
-@pytest.mark.parametrize("fault", ["epoch", "retired", "volatile", "missing_output"])
-def test_no_configuration_writes_without_current_durable_player(fault):
+@pytest.mark.parametrize("fault", ["epoch", "retired", "durable", "missing_output"])
+def test_no_configuration_writes_without_current_stateless_player(fault):
     operator = Operator()
     if fault == "epoch":
         operator.player["authority_epoch"] = 2
     elif fault == "retired":
         operator.player["retired_at"] = 100
-    elif fault == "volatile":
-        operator.player["health"]["persistence"] = "volatile"
+    elif fault == "durable":
+        operator.player["health"]["persistence"] = "durable"
     else:
         operator.outputs = []
     with pytest.raises(ProbeError):
         configure(operator, player_id="p1", epoch=1, captured_from=100, captured_until=101)
     assert all(method == "GET" for method, _, _ in operator.calls)
-
-
-def test_replaced_probe_never_prevents_independent_upstream_cleanup():
-    media = ApplianceMedia(SimpleNamespace(), "sha256:" + "a" * 64)
-    removed = []
-    media.upstream = SimpleNamespace(cleanup=lambda: removed.append("upstream"))
-
-    def replaced():
-        raise FixtureError("cache_probe_identity_changed")
-
-    media.cleanup_probe = replaced
-    with pytest.raises(FixtureError, match="media_resource_cleanup_failed"):
-        media.down()
-    assert removed == ["upstream"]
-
-
-def test_cache_probe_refuses_running_vm_before_creating_any_resource():
-    harness = SimpleNamespace(checked_vm=lambda: {"Running": True})
-    media = ApplianceMedia(harness, "sha256:" + "a" * 64)
-    with pytest.raises(FixtureError, match="cache_probe_requires_stopped_vm"):
-        media.verify_cache("before_restart")
 
 
 def test_worker_image_mismatch_fails_before_state_creation(tmp_path):
@@ -130,68 +107,34 @@ def test_upstream_rejects_changed_image_before_tagging(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("erase_restart,erase_rollback", [(False, False), (True, False), (False, True)])
-def test_cache_qualification_cannot_reacquire_lost_bytes(tmp_path, monkeypatch, erase_restart, erase_rollback):
-    from scripts import test_appliance_e2e as e2e
 
-    platform = dict(running=True, epoch=0, cached=False, acquisitions=0, blocked=False)
-    harness = object.__new__(e2e.ApplianceE2E)
-    harness.state, harness.name, harness.central_image = tmp_path, "vm", "image"
-    harness.inputs = dict(bundle=tmp_path, deployment=tmp_path)
-    harness.report = dict(boots=[], checks={}, qualification=e2e.unqualified())
-    def player():
-        return dict(player_id="p-" + "b" * 32, authority_epoch=platform["epoch"], persistence="durable", retired=False)
-    harness.inventory = lambda: [player()] if platform["epoch"] else []
-    def enroll(previous=None):
-        platform["epoch"] += 1
-        harness.report["boots"].append(dict(slot="A", trial=False))
-        return player()
-    harness.wait_enrollment = enroll
-    harness.checked_vm = lambda: dict(Running=platform["running"])
+
+@pytest.mark.parametrize('delivered', [False, True])
+def test_native_rehydration_requires_delivery_from_the_current_boot(delivered):
+    from types import SimpleNamespace
+
+    from scripts.vm_cache_evidence import CacheEvidenceError
+
+    digest = 'a'*64
+    before = dict(player_id='p', authority_epoch=1, sha256=digest, size=100)
+    after = before | dict(authority_epoch=2)
+    boot = dict(boot_id='old', device_id='device-'+'b'*64, persistence='volatile')
+    calls = []
     def run(args, **kwargs):
-        if args[:2] == ["docker", "stop"] and args[-1] == "vm":
-            platform["running"] = False
-        if args[:2] == ["docker", "start"] and args[-1] == "vm":
-            platform["running"] = True
-            if erase_restart:
-                platform["cached"] = False
-        return b""
-    harness.run = run
-    harness.fixture_central = lambda: "central"
-    harness.start_vm = harness.wait_trial_acceptance = lambda: None
-    harness.wait_player_requests = lambda _: None
-    def rollback(previous):
-        if erase_rollback:
-            platform["cached"] = False
-        harness.report["fallback_enrollment"] = enroll(previous)
-    harness.exercise_rollback = rollback
-    class Media:
-        def prepare(self):
-            return {}, tmp_path / "connections"
-        def network_denial(self, label):
-            pass
-        def configure(self, player):
-            pass
-        def wait_presentation(self, label, player):
-            if not platform["cached"]:
-                if platform["blocked"]:
-                    raise FixtureError("native_photo_presentation_timeout")
-                platform["acquisitions"] += 1
-                platform["cached"] = True
-        def verify_cache(self, label):
-            assert not platform["running"] and platform["cached"]
-        def block_delivery(self):
-            assert not platform["running"]
-            platform["blocked"] = True
-    harness.media = Media()
-    monkeypatch.setattr(e2e.BootFixture, "prepare", lambda *a, **kw: SimpleNamespace(up=lambda: None))
-    monkeypatch.setattr(e2e.time, "sleep", lambda _: None)
-    if erase_restart or erase_rollback:
-        with pytest.raises(FixtureError, match="native_photo_presentation_timeout"):
-            harness.execute()
-        assert not any(harness.report["qualification"].values())
-        assert "populated_cache_survives_restart_and_rollback" not in harness.report["checks"]
+        import json
+
+        calls.append(args)
+        return json.dumps(dict(event='photo-wall-fixture-media-delivery', sha256=digest,
+                               player_id='p', authority_epoch=2 if delivered else 1)).encode()
+    harness = SimpleNamespace(report=dict(media=dict(presentations={'fresh': before}, rehydration={}),
+        boots=[boot, boot | dict(boot_id='new')]), run=run, boot_started_at='current-boot-start',
+        fixture_central=lambda: 'central')
+    media = ApplianceMedia(harness, 'sha256:'+'a'*64)
+    if delivered:
+        media.verify_rehydration('after_restart', after)
+        assert harness.report['media']['rehydration']['after_restart']['delivery_observed']
     else:
-        harness.execute()
-        assert harness.report["checks"]["populated_cache_survives_restart_and_rollback"] is True
-    assert platform["acquisitions"] == 1
+        with pytest.raises(CacheEvidenceError, match='media_rehydration_unproven'):
+            media.verify_rehydration('after_restart', after)
+        assert not harness.report['media']['rehydration']
+    assert calls[0][2:4] == ['--since', 'current-boot-start']

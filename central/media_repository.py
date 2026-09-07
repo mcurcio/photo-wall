@@ -16,6 +16,7 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
+from central.media_queue import AcquisitionQueue
 from central.planner import AcquisitionRequest, eligible
 from central.registry import RegistryError
 from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
@@ -55,8 +56,10 @@ class JobLease(Model):
 
 
 class MediaRepository:
-    def __init__(self, db: Database, clock: Clock, limits: StoreLimits | None = None):
+    def __init__(self, db: Database, clock: Clock, limits: StoreLimits | None = None,
+                 *, queue: AcquisitionQueue | None = None):
         self.db, self.clock, self.limits = db, clock, limits or StoreLimits()
+        self.queue = queue
 
     @contextmanager
     def transaction(self):
@@ -156,7 +159,7 @@ class MediaRepository:
                          (now + self.limits.refresh_seconds, result.snapshot.status == "ok", now,
                           result.snapshot.status, Jsonb([d.model_dump(mode="json") for d in result.diagnostics]),
                           Jsonb(result.counts.model_dump(mode="json")), lease.source.source_ref))
-            self._refresh_catalog(conn, lease.source.source_ref, now, result.snapshot.status)
+            self.refresh_catalog_in(conn, lease.source.source_ref, now, result.snapshot.status)
             return True
 
     @staticmethod
@@ -196,7 +199,8 @@ class MediaRepository:
             }))
         return tuple(hydrated)
 
-    def _refresh_catalog(self, conn, source_ref, now, status):
+    def refresh_catalog_in(self, conn, source_ref, now, status):
+        """Rebuild one source snapshot inside a media-owned transaction."""
         candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), now)
         snapshot = CatalogSnapshot(source_ref=source_ref, refreshed_at=now, status=status, candidates=tuple(candidates))
         conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s) ON CONFLICT(source_ref) "
@@ -222,7 +226,8 @@ class MediaRepository:
                     "candidates": [candidate.model_dump(mode="json") for candidate in candidates]}
 
     @staticmethod
-    def _authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:
+    def authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:
+        """Read authored candidates in a caller-owned transaction."""
         rows = conn.execute("SELECT asset_id,candidate FROM authored_candidates WHERE asset_id=ANY(%s)",
                             (list(asset_ids),)).fetchall()
         return {row["asset_id"]: Candidate.model_validate(row["candidate"]) for row in rows}
@@ -237,11 +242,12 @@ class MediaRepository:
     def author_authored_candidates(self, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
         """Persist immutable, centrally derived references from current membership."""
         with self.transaction() as conn:
-            return self._author_authored_candidates_in(conn, source_ref, asset_ids)
+            return self.author_candidates_in(conn, source_ref, asset_ids)
 
-    def _author_authored_candidates_in(self, conn, source_ref: str,
-                                       asset_ids: tuple[str, ...]) -> dict:
-        """Author refs on a caller-owned transaction already holding MEDIA_LOCK."""
+    def author_candidates_in(self, conn, source_ref: str,
+                             asset_ids: tuple[str, ...]) -> dict:
+        """Author refs on a caller-owned transaction."""
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
         if not 1 <= len(asset_ids) <= 1000 or len(asset_ids) != len(set(asset_ids)):
             raise RegistryError("invalid_authored_candidates", 422)
         source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
@@ -284,6 +290,33 @@ class MediaRepository:
                           source_ref, self.clock.utc()))
         return {"asset_refs": list(asset_ids), "created": len(new)}
 
+    def pin_variants_in(self, conn, pins, *, require_ready: bool) -> None:
+        """Validate and pin exact variants in a caller-owned transaction."""
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+        pins = tuple(pins)
+        variants = {pin.variant.sha256: pin.variant for pin in pins}
+        if require_ready:
+            # Validate the complete batch before writing any authorization.
+            for digest, variant in variants.items():
+                blob = conn.execute(
+                    "SELECT variant FROM media_blobs WHERE digest=%s AND state='ready'",
+                    (digest,),
+                ).fetchone()
+                if not blob or blob["variant"] != variant.model_dump(mode="json"):
+                    raise RegistryError("media_unavailable")
+        for pin in pins:
+            conn.execute(
+                "INSERT INTO media_references VALUES(%s,%s,%s) "
+                "ON CONFLICT(owner,digest) DO UPDATE SET expires_at=EXCLUDED.expires_at",
+                (pin.owner, pin.variant.sha256, pin.expires_at),
+            )
+
+    @staticmethod
+    def expire_pins_in(conn, now: float) -> None:
+        """Expire transfer authorization in a caller-owned transaction."""
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+        conn.execute("DELETE FROM media_references WHERE expires_at<=%s", (now,))
+
     def set_recipe(self, recipe_id: str):
         # Validate through the shared digest field without introducing a second wire definition.
         if len(recipe_id) != 64 or any(c not in "0123456789abcdef" for c in recipe_id):
@@ -293,8 +326,11 @@ class MediaRepository:
             conn.execute("UPDATE media_settings SET recipe_id=%s,worker_seen=%s,worker_error=NULL WHERE singleton",
                          (recipe_id, self.clock.utc()))
             if old != recipe_id:
+                conn.execute("UPDATE media_jobs SET state='failed',failure_code='recipe_changed',"
+                             "retry_at=0,updated_at=%s WHERE recipe_id<>%s "
+                             "AND state IN ('queued','retry')", (self.clock.utc(), recipe_id))
                 for source in conn.execute("SELECT source_ref,status FROM media_sources").fetchall():
-                    self._refresh_catalog(conn, source["source_ref"], self.clock.utc(), source["status"])
+                    self.refresh_catalog_in(conn, source["source_ref"], self.clock.utc(), source["status"])
 
     def worker_status(self, code: str | None = None):
         if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,64}", code)):
@@ -316,11 +352,14 @@ class MediaRepository:
                                    (request.asset_id, recipe)).fetchone()
                 if old:
                     if old["state"] == "evicted":
+                        if self.queue is None:
+                            raise RegistryError("media_queue_unconfigured", 503)
                         if self._active_jobs(conn) >= self.limits.max_jobs:
                             raise RegistryError("job_capacity")
                         conn.execute("UPDATE media_jobs SET state='queued',retry_at=0,failure_code=NULL,"
                                      "earliest_start=%s,updated_at=%s WHERE id=%s",
                                      (request.earliest_start, now, old["id"]))
+                        self.queue.enqueue_in(conn, old["id"])
                         inserted += 1
                         continue
                     conn.execute("UPDATE media_jobs SET earliest_start=LEAST(earliest_start,%s) WHERE id=%s",
@@ -328,9 +367,12 @@ class MediaRepository:
                     continue
                 if self._active_jobs(conn) >= self.limits.max_jobs:
                     raise RegistryError("job_capacity")
+                if self.queue is None:
+                    raise RegistryError("media_queue_unconfigured", 503)
                 job_id = "job-" + hashlib.sha256((request.asset_id + ":" + recipe).encode()).hexdigest()[:48]
                 conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,updated_at) "
                              "VALUES(%s,%s,%s,'queued',%s,%s)", (job_id, request.asset_id, recipe, request.earliest_start, now))
+                self.queue.enqueue_in(conn, job_id)
                 inserted += 1
         return inserted
 
@@ -345,13 +387,17 @@ class MediaRepository:
                             "(SELECT COALESCE(sum(reserved_bytes),0) FROM media_jobs) + "
                             "(SELECT COALESCE(sum(size),0) FROM media_orphans) AS total").fetchone()["total"]
 
-    def claim_job(self) -> JobLease | None:
+    def claim_job(self, job_id: str | None = None) -> JobLease | None:
         now = self.clock.utc()
         with self.transaction() as conn:
+            job_filter = "" if job_id is None else "AND j.id=%s "
+            parameters = (now,) if job_id is None else (now, job_id)
             row = conn.execute("SELECT j.*,a.metadata FROM media_jobs j JOIN asset_revisions a ON a.asset_id=j.asset_id "
                                "WHERE j.state IN ('queued','retry') AND j.retry_at<=%s AND j.reserved_bytes=0 "
+                               + job_filter +
                                "AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
-                               "ORDER BY j.earliest_start,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED", (now,)).fetchone()
+                               "ORDER BY j.earliest_start,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
+                               parameters).fetchone()
             if row is None:
                 return None
             asset = OriginalAsset.model_validate(row["metadata"])

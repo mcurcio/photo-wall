@@ -4,11 +4,13 @@ import ast
 import copy
 import hashlib
 import json
+import re
 import stat
 import sys
 
 import pytest
 
+from scripts.container_build import daemon_image_build
 from scripts.demo_wall import (
     CORE_IMAGES,
     PLAYER_REVISION,
@@ -33,6 +35,18 @@ from scripts.demo_wall import (
 )
 
 
+def test_daemon_image_build_explicitly_selects_and_loads_default_builder(tmp_path):
+    assert daemon_image_build("wall:local", tmp_path) == [
+        "docker", "buildx", "build", "--builder", "default", "--load",
+        "--tag", "wall:local", str(tmp_path),
+    ]
+    assert daemon_image_build("boot:local", tmp_path, network="none",
+                              labels=(("fixture", "one"),)) == [
+        "docker", "buildx", "build", "--builder", "default", "--load",
+        "--tag", "boot:local", "--network", "none", "--label", "fixture=one", str(tmp_path),
+    ]
+
+
 @pytest.mark.parametrize("scenario,count", [("baseline", 1), ("full", 2)])
 def test_role_topology_has_no_player_upstream_or_private_material(scenario, count):
     document = composition("pw-wall-demo-123456abcdef", "pw-immich-fixture-123456abcdef", scenario)
@@ -41,9 +55,10 @@ def test_role_topology_has_no_player_upstream_or_private_material(scenario, coun
     assert len(players) == count
     for name, service in players.items():
         assert service["networks"] == ["wall"]
-        assert service["volumes"] == [dict(type="volume", source=name, target="/state",
-            read_only=False, volume=dict(nocopy=True))]
-        assert "environment" not in service
+        assert service.get("volumes", []) == []
+        assert service["tmpfs"] == ["/tmp", "/state:uid=10001,gid=10001,mode=0700"]
+        assert set(service["environment"]) == {"PHOTO_WALL_DEMO_DEVICE_ID"}
+        assert re.fullmatch(r"device-[a-f0-9]{64}", service["environment"]["PHOTO_WALL_DEMO_DEVICE_ID"])
         assert service["read_only"] and service["cap_drop"] == ["ALL"]
     central = document["services"]["central"]
     assert central["sysctls"]["net.ipv4.ip_forward"] == "0"
@@ -107,7 +122,7 @@ def example():
     jobs = [dict(state="ready", variant=dict(sha256=digest, media_type=kind))
             for digest, kind in (("a"*64, "image/jpeg"), ("b"*64, "video/mp4"))]
     events = [dict(output_id="HDMI-A-1", layers=[dict(job["variant"])]) for job in jobs]
-    return dict(jobs=jobs, observations=[{}], groups=[dict(status="committed", members={"assignment": ["player-one"]})]), {"player-one": dict(persistence="durable",
+    return dict(jobs=jobs, observations=[{}], groups=[dict(status="committed", members={"assignment": ["player-one"]})]), {"player-one": dict(persistence="volatile", release_accepted=True,
         forbidden_imports_absent=True, commit_checks=2, commit_failures=[], outputs=1, events=events)}
 
 

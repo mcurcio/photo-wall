@@ -219,7 +219,13 @@ def test_offer_bound_applies_backpressure_without_stopping_runtime(registry):
     assert coordinator.delivery(player["player_id"], 1)["plan"] == original
     assert coordinator.runtime.read().export_state()["now"] == registry.clock.utc()
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM execution_events WHERE kind='offer_backpressure'").fetchone()["n"] == 1
+        event = conn.execute(
+            "SELECT detail FROM execution_events WHERE kind='offer_backpressure'"
+        ).fetchone()
+        assert event["detail"]["handling"] == {
+            "runtime": "preserve_lifecycle",
+            "planner": "await_capacity",
+        }
 
 
 def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(registry):

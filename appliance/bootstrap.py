@@ -1,13 +1,17 @@
-"""Bounded stdlib initramfs bootstrap; mounts only existing owned Player state."""
+"""Stateless initramfs: central selects a signed immutable root copied into RAM."""
 
 from __future__ import annotations
 
 import argparse
+import array
+import base64
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import signal
 import ssl
 import stat
@@ -20,13 +24,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from contracts.release import MAX_MANIFEST_BYTES, MAX_ROOTFS_BYTES, Release, configuration_digest
+from contracts.release import (
+    MAX_MANIFEST_BYTES,
+    MAX_ROOTFS_BYTES,
+    BootRequest,
+    BootTicket,
+    Release,
+    configuration_digest,
+)
 
-MARKER = b"photo-wall-state-v1\n"
 CHUNK = 64 * 1024
 PLAYER_UID = 10001
 PLAYER_GID = 10001
 ROOT_UID = 0
+WDIOC_SETTIMEOUT = 0xC0045706
+TRIAL_WATCHDOG_SECONDS = 210
 
 
 class BootstrapError(ValueError):
@@ -154,18 +166,16 @@ class Fetcher:
             signal.setitimer(signal.ITIMER_REAL, *old_timer)
             signal.signal(signal.SIGALRM, previous)
 
-    def chunks(self, name: str, maximum: int):
-        if (name not in ("release.json", "release.sig")
-                and not re.fullmatch(r"rootfs-[a-f0-9]{64}\.squashfs", name)):
-            raise BootstrapError("boot_artifact_name")
+    def _chunks(self, path: str, maximum: int, body: bytes | None = None):
         if type(maximum) is not int or not 0 < maximum <= MAX_ROOTFS_BYTES:
             raise BootstrapError("boot_limit")
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
             raise BootstrapError("boot_deadline")
         request = urllib.request.Request(self.config.release_origin.rstrip("/")
-                                         + "/appliance/" + name,
-                                         headers={"Accept-Encoding": "identity"})
+                                         + path, data=body,
+                                         headers={"Accept-Encoding": "identity",
+                                                  "Content-Type": "application/json"})
         total = 0
         try:
             with self._deadline(), self.opener.open(request, timeout=min(10, remaining)) as response:
@@ -191,12 +201,34 @@ class Fetcher:
         except (OSError, urllib.error.URLError, ValueError):
             raise BootstrapError("boot_network") from None
 
+    def chunks(self, name: str, maximum: int):
+        if (name not in ("release.json", "release.sig")
+                and not re.fullmatch(r"rootfs-[a-f0-9]{64}\.squashfs", name)):
+            raise BootstrapError("boot_artifact_name")
+        yield from self._chunks("/appliance/" + name, maximum)
+
+    def ticket(self, request: BootRequest) -> BootTicket:
+        # A lost HTTP response must replay the same once-only trial consumption.
+        for attempt in range(3):
+            try:
+                payload = b"".join(self._chunks("/v1/bootstrap/boot", 2 * MAX_MANIFEST_BYTES,
+                                               request.encode()))
+                ticket = BootTicket.decode(payload)
+                if (ticket.device_id, ticket.boot_id, ticket.request_id) != (
+                        request.device_id, request.boot_id, request.request_id):
+                    raise BootstrapError("boot_ticket_mismatch")
+                return ticket
+            except BootstrapError as error:
+                if error.args[0] not in ("boot_network", "boot_truncated") or attempt == 2:
+                    raise
+        raise BootstrapError("boot_network")
+
     def read(self, name: str, maximum: int) -> bytes:
         return b"".join(self.chunks(name, maximum))
 
 
 def copy_verified(chunks, release: Release, destination: Path) -> None:
-    """Reverify the exact RAM copy, even when the slot already verified its source."""
+    """Verify the exact immutable root while copying it into this boot's RAM."""
     total, digest = 0, hashlib.sha256()
     created = False
     try:
@@ -235,13 +267,10 @@ def file_chunks(path: Path):
 class LinuxOps:
     """Linux mount/device operations, injectable for portable state/fault tests."""
 
-    def __init__(self, run_root: Path = Path("/run/photo-wall"), *,
-                 state_mount: Path = Path("/run/photo-wall-state")):
+    def __init__(self, run_root: Path = Path("/run/photo-wall")):
         self.run_root = run_root
-        self.state_mount = state_mount
-        # Keep the root-written boot report protected by its parent directory;
-        # the Player publishes health below the separate player-owned child.
         self.run_root.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self._watchdog_fd: int | None = None
 
     def command(self, *argv: str, timeout: int = 30) -> bytes:
         with tempfile.TemporaryFile() as output:
@@ -266,100 +295,20 @@ class LinuxOps:
             raise BootstrapError("boot_identity")
         return value
 
-    def devices(self, label: str) -> list[str]:
-        try:
-            values = self.command("blkid", "-t", "LABEL=" + label, "-o", "device").decode().splitlines()
-        except BootstrapError:
-            return []
-        if len(values) > 32 or any(not re.fullmatch(r"/dev/[A-Za-z0-9_./-]{1,120}", value)
-                                   or ".." in value.split("/") for value in values):
-            raise BootstrapError("boot_devices")
-        return sorted(set(values))
-
-    def state(self) -> Path | None:
-        valid = []
-        for index, device in enumerate(self.devices("PWSTATE")):
-            probe = self.run_root / ("probe-" + str(index))
-            probe.mkdir(mode=0o700)
-            mounted = False
+    def device_id(self) -> str:
+        # Pi firmware serial; DMI UUID is the equivalent fixed VM identifier.
+        # Neither MAC/IP nor a freshly generated session key is equipment identity.
+        for kind, name in (("pi", "/sys/firmware/devicetree/base/serial-number"),
+                           ("dmi", "/sys/class/dmi/id/product_uuid")):
             try:
-                self.command("mount", "-t", "ext4", "-o", "ro,noload,nodev,nosuid,noexec", device, str(probe))
-                mounted = True
-                marker = probe / ".photo-wall-state-v1"
-                marker_info = marker.lstat()
-                if (read_regular(marker, len(MARKER)) == MARKER and marker_info.st_uid == ROOT_UID
-                        and not stat.S_IMODE(marker_info.st_mode) & 0o222):
-                    valid.append(device)
-            except (OSError, BootstrapError):
-                pass
-            finally:
-                if mounted:
-                    self.command("umount", str(probe))
-                probe.rmdir()
-        if len(valid) > 1:
-            raise BootstrapError("state_ambiguous")
-        if not valid:
-            return None
-        state = self.state_mount
-        state.mkdir(mode=0o755, exist_ok=True)
-        self.command("mount", "-t", "ext4", "-o", "rw,nodev,nosuid,noexec", valid[0], str(state))
-        try:
-            marker = state / ".photo-wall-state-v1"
-            marker_info = marker.lstat()
-            if (read_regular(marker, len(MARKER)) != MARKER or marker_info.st_uid != ROOT_UID
-                    or stat.S_IMODE(marker_info.st_mode) & 0o222):
-                raise BootstrapError("state_marker")
-            root_info = state.stat()
-            if root_info.st_uid != ROOT_UID or stat.S_IMODE(root_info.st_mode) not in (0o755, 0o711):
-                raise BootstrapError("state_permissions")
-            player = state / "player"
-            if not player.exists() and not player.is_symlink():
-                # Publish only a fully configured directory. A crash before rename
-                # leaves a private empty temporary directory, never a wrong-owner
-                # player directory that would disable persistence on every retry.
-                pending = Path(tempfile.mkdtemp(prefix=".player-", dir=state))
-                try:
-                    fd = os.open(pending, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
-                        os.fchown(fd, PLAYER_UID, PLAYER_GID)
-                        os.fchmod(fd, 0o700)
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                    pending.rename(player)
-                    fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                finally:
-                    if pending.exists():
-                        pending.rmdir()
-            info = player.lstat()
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != PLAYER_UID
-                    or info.st_gid != PLAYER_GID or stat.S_IMODE(info.st_mode) != 0o700):
-                raise BootstrapError("state_permissions")
-            # A failed fsync/write must not be misreported as durable persistence.
-            with tempfile.TemporaryFile(dir=state) as probe:
-                probe.write(b"state-check\n")
-                probe.flush()
-                os.fsync(probe.fileno())
-            return state
-        except BaseException:
-            self.command("umount", str(state))
-            raise
-
-    def common(self) -> Path | None:
-        devices = self.devices("PWBOOT")
-        if len(devices) != 1:
-            return None
-        path = self.run_root / "common"
-        path.mkdir(mode=0o700)
-        try:
-            self.command("mount", "-t", "vfat", "-o", "ro,nodev,nosuid,noexec", devices[0], str(path))
-            return path / "appliance"
-        except BootstrapError:
-            return None
+                with Path(name).open("rb") as stream:
+                    raw = stream.read(257).strip(b"\x00\r\n ").lower()
+                if not raw or len(raw) > 256 or not re.fullmatch(rb"[a-z0-9-]+", raw):
+                    continue
+                return "device-" + hashlib.sha256(kind.encode() + b":" + raw).hexdigest()
+            except OSError:
+                continue
+        raise BootstrapError("boot_equipment_identity")
 
     def time_ready(self, server: str) -> None:
         Path("/run/chrony").mkdir(mode=0o755, exist_ok=True)
@@ -374,6 +323,32 @@ class LinuxOps:
         self.command("mount", "-t", "tmpfs", "-o", "mode=0700,size=1100M,nodev,nosuid", "tmpfs", str(path))
         return path
 
+    def arm_trial_watchdog(self) -> None:
+        """Start the kernel watchdog before any candidate bytes are trusted.
+
+        The boot command line forces watchdog drivers into nowayout mode.  We
+        deliberately keep the descriptor open until bootstrap exits; systemd
+        then opens the same device and becomes its userspace keeper.
+        """
+        for path in ("/dev/watchdog0", "/dev/watchdog"):
+            fd = None
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                info = os.fstat(fd)
+                if not stat.S_ISCHR(info.st_mode):
+                    os.close(fd)
+                    continue
+                timeout = array.array("i", [TRIAL_WATCHDOG_SECONDS])
+                fcntl.ioctl(fd, WDIOC_SETTIMEOUT, timeout, True)
+                os.write(fd, b"\0")
+                self._watchdog_fd = fd
+                return
+            except OSError:
+                if fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+        raise BootstrapError("boot_watchdog")
+
     def _prepare_root(self, rootmnt: Path) -> None:
         """Make the merged root traversable, and verify its protected owner."""
         rootmnt.chmod(0o755)
@@ -382,7 +357,7 @@ class LinuxOps:
                 or (os.geteuid() == ROOT_UID and info.st_uid != ROOT_UID)):
             raise BootstrapError("root_permissions")
 
-    def mount_root(self, image: Path, rootmnt: Path, state: Path | None) -> None:
+    def mount_root(self, image: Path, rootmnt: Path) -> None:
         lower, writable = self.run_root / "lower", self.run_root / "overlay"
         lower.mkdir(mode=0o755, exist_ok=True)
         writable.mkdir(mode=0o700, exist_ok=True)
@@ -406,10 +381,6 @@ class LinuxOps:
             self.command("mount", "-t", "overlay", "-o", options, "overlay", str(rootmnt))
             mounted.append(rootmnt)
             self._prepare_root(rootmnt)
-            if state is not None:
-                target = rootmnt / "var/lib/photo-wall"
-                target.mkdir(mode=0o755, parents=True, exist_ok=True)
-                self.command("mount", "--bind", str(state), str(target))
         except BaseException:
             clean = True
             for path in reversed(mounted):
@@ -422,98 +393,46 @@ class LinuxOps:
             raise
 
 
-def boot(config: BootConfig, rootmnt: Path, *, ops=None, store_factory=None,
+def boot(config: BootConfig, rootmnt: Path, *, ops=None,
          fetcher_factory=Fetcher, verify=None) -> dict:
-    from appliance.updates import SlotStore, UpdateError, verify_release
+    from appliance.updates import verify_release
 
-    ops = ops or LinuxOps()
-    store_factory, verify = store_factory or SlotStore, verify or verify_release
-    boot_id = ops.boot_id()
-    state, store, fault = None, None, None
-    try:
-        state = ops.state()
-        if state is not None:
-            store = store_factory(state, config.directory / "release.pub.pem", config.boot_abi,
-                                  config.configuration_sha256)
-        else:
-            fault = "state_missing"
-    except UpdateError:
-        fault, store = "update_storage", None
-    except (OSError, ValueError):
-        fault, state = "state_unusable", None
+    ops, verify = ops or LinuxOps(), verify or verify_release
+    request = BootRequest(ops.device_id(), ops.boot_id(), secrets.token_hex(24))
+    ops.time_ready(config.time_server)
+    fetcher = fetcher_factory(config)
+    ticket = fetcher.ticket(request)
+    if (ticket.device_id, ticket.boot_id, ticket.request_id) != (
+            request.device_id, request.boot_id, request.request_id):
+        raise BootstrapError("boot_ticket_mismatch")
+    if ticket.trial:
+        # Trial consumption is already durable centrally. Never enter a
+        # candidate root unless the trusted initramfs has established the
+        # reboot backstop that systemd will take over.
+        ops.arm_trial_watchdog()
+    release = verify(ticket.manifest.encode(), base64.b64decode(ticket.signature, validate=True),
+                     config.directory / "release.pub.pem", config.boot_abi,
+                     config.configuration_sha256)
+    if release.release_id != ticket.release_id:
+        raise BootstrapError("boot_release_mismatch")
     ram = ops.ram()
-
-    def mount(release, chunks=None, selection=None):
-        image = ram / release.rootfs_name
-        if chunks is not None:
-            copy_verified(chunks, release, image)
-        report = dict(schema=1, boot_id=boot_id, release_id=release.release_id,
-                      slot=selection.slot if selection else None,
-                      trial=selection.trial if selection else False,
-                      persistence="durable" if state is not None else "volatile", fault=fault)
-        report_path = ops.run_root / "boot.json"
+    image = ram / release.rootfs_name
+    copy_verified(fetcher.chunks(release.rootfs_name, release.rootfs_size), release, image)
+    report = dict(schema=2, boot_id=request.boot_id, device_id=request.device_id,
+                  ticket_id=ticket.ticket_id, release_id=release.release_id,
+                  trial=ticket.trial, persistence="volatile", fault=None)
+    report_path = ops.run_root / "boot.json"
+    try:
         report_path.write_bytes((json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode())
-        report_path.chmod(0o600)
-        try:
-            ops.mount_root(image, rootmnt, state)
-        except BaseException:
-            image.unlink(missing_ok=True)
-            report_path.unlink(missing_ok=True)
-            raise
-        return report
-
-    if store is not None:
-        for _ in range(2):
-            try:
-                selection = store.select_boot(boot_id)
-            except (UpdateError, OSError, ValueError):
-                fault, store = "update_storage", None
-                break
-            if selection is None:
-                break
-            try:
-                return mount(selection.release, file_chunks(selection.path), selection)
-            except (OSError, ValueError):
-                try:
-                    store.reject_boot(selection.release.release_id, boot_id)
-                except (UpdateError, OSError, ValueError):
-                    fault, store = "update_storage", None
-                    break
-    common, release = ops.common(), None
-    for source in ("disk", "network"):
-        if source == "disk" and common is None:
-            continue
-        try:
-            if source == "disk":
-                payload = read_regular(common / "release.json", MAX_MANIFEST_BYTES)
-                signature = read_regular(common / "release.sig", 64)
-            else:
-                ops.time_ready(config.time_server)
-                fetcher = fetcher_factory(config)
-                payload = fetcher.read("release.json", MAX_MANIFEST_BYTES)
-                signature = fetcher.read("release.sig", 64)
-            candidate = verify(payload, signature, config.directory / "release.pub.pem",
-                               config.boot_abi, config.configuration_sha256)
-            chunks = (file_chunks(common / candidate.rootfs_name) if source == "disk"
-                      else fetcher.chunks(candidate.rootfs_name, candidate.rootfs_size))
-            copy_verified(chunks, candidate, ram / candidate.rootfs_name)
-            release = candidate
-            break
-        except (UpdateError, OSError, ValueError):
-            if source == "network":
-                raise
-    if release is None:
-        raise BootstrapError("boot_common")
-    selection = None
-    if store is not None:
-        try:
-            store.stage(payload, signature, file_chunks(ram / release.rootfs_name))
-            selection = store.select_boot(boot_id)
-            if selection is None or selection.release != release:
-                raise BootstrapError("boot_selection")
-        except (UpdateError, OSError, ValueError):
-            fault, selection = "update_storage", None
-    return mount(release, selection=selection)
+        if os.geteuid() == ROOT_UID:
+            os.chown(report_path, ROOT_UID, PLAYER_GID)
+        report_path.chmod(0o640)
+        ops.mount_root(image, rootmnt)
+    except BaseException:
+        image.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
+    return report
 
 
 def main():

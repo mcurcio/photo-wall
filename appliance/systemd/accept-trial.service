@@ -1,5 +1,5 @@
 [Unit]
-Description=Accept the current Photo Wall trial after sustained Player health
+Description=Watch the current stateless Photo Wall trial for sustained Player health
 Wants=photo-wall-player.service
 After=photo-wall-player.service
 OnFailure=photo-wall-trial-recovery.service
@@ -8,14 +8,14 @@ OnFailure=photo-wall-trial-recovery.service
 Type=oneshot
 User=root
 Group=root
-ExecStart=/usr/bin/python3.12 -I -m appliance.updates --state-root /var/lib/photo-wall accept-current --config-dir /etc/photo-wall
-TimeoutStartSec=510
+ExecStart=/usr/bin/python3.12 -I -m appliance.updates watch-current
+TimeoutStartSec=200
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/photo-wall
+ReadWritePaths=/run/photo-wall
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

@@ -5,11 +5,17 @@ import uuid
 
 import psycopg
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg.conninfo import make_conninfo
 
 from central.db import Database
 from central.registry import Registry
+from central.releases import ReleaseAuthority
+from contracts.release import Release
 from contracts.time import ManualClock
+
+BOOT_ABI = "a" * 64
+CONFIGURATION = "b" * 64
 
 
 @pytest.fixture
@@ -23,7 +29,24 @@ def registry():
     try:
         db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
         db.migrate()
-        yield Registry(db, ManualClock(1000))
+        clock = ManualClock(1000)
+        signing_key = Ed25519PrivateKey.generate()
+        authority = ReleaseAuthority(
+            db, clock, signing_key.public_key(), BOOT_ABI, CONFIGURATION
+        )
+        release = Release(
+            revision="c" * 40,
+            boot_abi=BOOT_ABI,
+            configuration_sha256=CONFIGURATION,
+            rootfs_sha256="d" * 64,
+            rootfs_size=1024,
+        )
+        manifest = release.encode()
+        authority.register(manifest, signing_key.sign(manifest))
+        authority.set_default(release.release_id)
+        yield Registry(db, clock, authority)
     finally:
+        if "db" in locals():
+            db.close()
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))

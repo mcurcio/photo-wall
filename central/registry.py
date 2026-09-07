@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -18,6 +19,9 @@ from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.models import Calibration, FrameProfile, Identifier, Model, OutputBinding
 from contracts.time import Clock
+
+if TYPE_CHECKING:
+    from central.releases import ReleaseAuthority
 
 
 class RegistryError(Exception):
@@ -44,8 +48,9 @@ class FrameCreate(Model):
 
 
 class Registry:
-    def __init__(self, db: Database, clock: Clock):
-        self.db, self.clock = db, clock
+    def __init__(self, db: Database, clock: Clock,
+                 release_authority: ReleaseAuthority | None = None):
+        self.db, self.clock, self.release_authority = db, clock, release_authority
 
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
@@ -68,10 +73,6 @@ class Registry:
         now, nonce = self.clock.utc(), secrets.token_hex(32)
         with self.db.transaction() as conn:
             conn.execute("SELECT pg_advisory_xact_lock(734118322)")
-            retired = conn.execute("SELECT retired_at FROM players WHERE public_key=%s",
-                                   (public_key,)).fetchone()
-            if retired and retired["retired_at"] is not None:
-                raise RegistryError("retired_player", 403)
             conn.execute("DELETE FROM enrollment_nonces WHERE expires_at <= %s", (now,))
             # A bounded outstanding challenge per key avoids unbounded growth on ordinary retry.
             conn.execute("DELETE FROM enrollment_nonces WHERE public_key=%s", (public_key,))
@@ -82,17 +83,20 @@ class Registry:
         return {"nonce": nonce, "expires_at": now + 60}
 
     def enroll(self, request: Enrollment) -> dict:
+        if self.release_authority is None:
+            raise RegistryError("release_authority_unavailable", 503)
         try:
             signature = base64.b64decode(request.signature, validate=True)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(request.public_key)).verify(
-                signature, enrollment_message(request.nonce, request.outputs, request.persistence)
+                signature, enrollment_message(request.nonce, request.outputs, request.device_id,
+                                              request.boot_id, request.ticket_id)
             )
         except (ValueError, InvalidSignature) as exc:
             raise RegistryError("invalid_proof", 403) from exc
         now = self.clock.utc()
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        player_id = "p-" + hashlib.sha256(bytes.fromhex(request.public_key)).hexdigest()[:32]
+        player_id = "p-" + hashlib.sha256(request.device_id.encode()).hexdigest()[:32]
         with self.db.transaction() as conn:
             conn.execute("SELECT pg_advisory_xact_lock(734118322)")
             challenge = conn.execute("DELETE FROM enrollment_nonces WHERE nonce=%s "
@@ -100,17 +104,19 @@ class Registry:
                                      (request.nonce, request.public_key, now)).fetchone()
             if not challenge:
                 raise RegistryError("expired_or_used_challenge", 403)
-            old = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
+            old = conn.execute("SELECT * FROM players WHERE device_id=%s FOR UPDATE",
+                               (request.device_id,)).fetchone()
             if old and old["retired_at"] is not None:
                 raise RegistryError("retired_player", 403)
             if old:
-                conn.execute("UPDATE players SET token_hash=%s,last_seen=%s,"
+                conn.execute("UPDATE players SET public_key=%s,token_hash=%s,last_seen=%s,"
                              "authority_epoch=authority_epoch+1 WHERE id=%s",
-                             (token_hash, now, player_id))
+                             (request.public_key, token_hash, now, player_id))
             else:
-                conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen) "
-                             "VALUES(%s,%s,%s,%s,%s)",
-                             (player_id, request.public_key, token_hash, now, now))
+                conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,device_id) "
+                             "VALUES(%s,%s,%s,%s,%s,%s)",
+                             (player_id, request.public_key, token_hash, now, now,
+                              request.device_id))
             conn.execute("UPDATE outputs SET observation=jsonb_set(observation,'{connected}','false') "
                          "WHERE player_id=%s", (player_id,))
             for output in request.outputs:
@@ -119,9 +125,12 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
+            self.release_authority.bind_session_in(
+                conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
+            )
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
-                         (Jsonb({"persistence": request.persistence,
-                                 "storage_fault": request.persistence == "volatile"}), player_id))
+                         (Jsonb({"boot_id": request.boot_id, "ticket_id": request.ticket_id}),
+                          player_id))
             self._audit(conn, "player_enrolled", player_id)
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
 
@@ -169,12 +178,10 @@ class Registry:
         try:
             with self.db.transaction() as conn:
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
-                player = conn.execute("SELECT retired_at,health FROM players WHERE id=%s FOR UPDATE",
+                player = conn.execute("SELECT retired_at FROM players WHERE id=%s FOR UPDATE",
                                       (player_id,)).fetchone()
                 if not player or player["retired_at"] is not None:
                     raise RegistryError("unknown_or_retired_player", 404)
-                if player["health"].get("persistence") == "volatile":
-                    raise RegistryError("persistent_storage_required")
                 frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                      (frame_id,)).fetchone()
                 if not frame:
@@ -263,7 +270,7 @@ class Registry:
 
     def configuration_in(self, conn, player_id: str, epoch: int) -> dict[str, list[OutputBinding]]:
         """Hold registry authority through the caller's offer/configuration transaction."""
-        player = conn.execute("SELECT health FROM players WHERE id=%s AND authority_epoch=%s "
+        player = conn.execute("SELECT 1 FROM players WHERE id=%s AND authority_epoch=%s "
                               "AND retired_at IS NULL FOR SHARE", (player_id, epoch)).fetchone()
         if not player:
             raise RegistryError("stale_authority", 403)
@@ -279,8 +286,7 @@ class Registry:
                               preview_expires=r["preview_expires"])
                 for r in rows]
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
-                zip(bindings, rows, strict=True) if row["calibration_valid"] and
-                player["health"].get("persistence") != "volatile"]}
+                zip(bindings, rows, strict=True) if row["calibration_valid"]]}
 
     def inventory(self) -> dict:
         with self.db.transaction() as conn:

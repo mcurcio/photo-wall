@@ -60,7 +60,7 @@ def configure(operator, *, player_id: str, epoch: int, captured_from: float,
     inventory = operator.request("GET", "/v1/operator/inventory")
     owners = [p for p in inventory["players"] if p["id"] == player_id
               and p["authority_epoch"] == epoch and p["retired_at"] is None]
-    if len(owners) != 1 or owners[0]["health"].get("persistence") != "durable":
+    if len(owners) != 1 or owners[0]["health"].get("persistence") != "volatile":
         raise ProbeError("media_player_authority")
     outputs = sorted((o for o in inventory["outputs"] if o["player_id"] == player_id
                       and o["observation"]["connected"]), key=lambda o: o["output_id"])

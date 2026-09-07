@@ -29,6 +29,8 @@ CORE_IMAGES = {
 CORE_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
+DEMO_BOOT_ABI = "a" * 64
+DEMO_CONFIGURATION_SHA256 = "b" * 64
 
 # This is the ONLY benchmark application code copied into the Player image.
 # It imports source-neutral Player/contracts and stdlib; no host harness follows.
@@ -39,17 +41,21 @@ import importlib.util
 import json
 import os
 import queue
+import secrets
 import signal
 import sys
 import threading
 import time
+import urllib.request
+import uuid
 from concurrent.futures import Future
 from pathlib import Path
 
 from contracts.enrollment import OutputReport
+from contracts.release import BootRequest
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
-from player.service import PlayerConfig, PlayerService
+from player.service import BootContext, PlayerConfig, PlayerService
 
 class Recorder(RecordingRenderer):
     def __init__(self):
@@ -119,7 +125,7 @@ class AuditedService(PlayerService):
                     self.reports.popitem(last=False)
         return await super().request(method, path, body=body, authenticated=authenticated)
 
-    def _apply_state(self, state, sample=None):
+    def _apply_state(self, state):
         for commit in state.commits:
             key = (commit.authority_epoch, commit.plan_id, commit.revision, commit.readiness_sequence)
             identity = (*key, commit.assignment_ids)
@@ -134,7 +140,7 @@ class AuditedService(PlayerService):
                 self.commit_checks += 1
                 if len(self.commits_checked) > 4096:
                     raise RuntimeError('fixture_commit_bound')
-        return super()._apply_state(state, sample)
+        return super()._apply_state(state)
 
 count = int(sys.argv[1])
 assert count in (1, 2)
@@ -143,9 +149,22 @@ outputs = tuple(OutputReport(output_id='HDMI-A-' + str(i+1), width_px=1920,
                             height_px=1080) for i in range(count))
 renderer, dispatcher = Recorder(), Dispatch()
 config = PlayerConfig(central_origin='http://central:8000', allow_http=True,
-                      state_dir=str(state), cache_bytes=32*1024**2)
-service = AuditedService(config, load_identity(state), outputs, renderer, dispatcher,
-                         health_path=None)
+                      cache_dir='/tmp/cache', cache_bytes=32*1024**2)
+device_id = os.environ['PHOTO_WALL_DEMO_DEVICE_ID']
+boot_request = BootRequest(device_id, str(uuid.uuid4()), secrets.token_hex(24))
+request = urllib.request.Request('http://central:8000/v1/bootstrap/boot',
+    data=json.dumps(boot_request.__dict__, separators=(',', ':')).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+with urllib.request.urlopen(request, timeout=15) as response:
+    assert response.status == 200
+    ticket = json.load(response)
+boot_context = BootContext.model_validate({
+    'schema': 2, 'ticket_id': ticket['ticket_id'], 'device_id': device_id,
+    'boot_id': boot_request.boot_id, 'release_id': ticket['release_id'],
+    'trial': ticket['trial'], 'persistence': 'volatile', 'fault': None,
+})
+service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
+                         health_path=None, boot_context=boot_context)
 stopping = [False]
 def stop(*_):
     stopping[0] = True
@@ -172,7 +191,8 @@ while not (stopping[0] and service.stopped):
         report = dict(schema=1, scope='simulated_actuation', utc=time.time(),
             monotonic=start, player_id=registration.player_id if registration else None,
             authority_epoch=registration.authority_epoch if registration else None,
-            persistence=service.identity.persistence, fault=service.last_fault,
+            persistence='volatile', release_accepted=service.release_accepted,
+            fault=service.last_fault,
             outputs=count, events=list(renderer.events), recent_readiness=readiness_samples, commit_checks=checks,
             commit_failures=failures,
             forbidden_imports_absent=all(importlib.util.find_spec(name) is None
@@ -296,7 +316,12 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
                              interval="2s", timeout="3s", retries=30), restart="no", mem_limit="192m", cpus=1),
         "central": dict(app, environment=dict(PHOTO_WALL_DATABASE_URL=dsn,
             PHOTO_WALL_ADMIN_TOKEN="${DEMO_ADMIN_TOKEN}", PHOTO_WALL_MEDIA_ROOT="/media",
-            PHOTO_WALL_HORIZON_SECONDS="15"), volumes=["media:/media:ro"], networks=["wall", "backend"],
+            PHOTO_WALL_HORIZON_SECONDS="15", PHOTO_WALL_RELEASE_PUBLIC_KEY="/release/release.pub.pem",
+            PHOTO_WALL_RELEASE_BOOT_ABI=DEMO_BOOT_ABI,
+            PHOTO_WALL_RELEASE_CONFIGURATION_SHA256=DEMO_CONFIGURATION_SHA256,
+            PHOTO_WALL_INITIAL_RELEASE_MANIFEST="/release/release.json",
+            PHOTO_WALL_INITIAL_RELEASE_SIGNATURE="/release/release.sig",
+            PHOTO_WALL_RELEASE_ROOT="/release"), volumes=["media:/media:ro"], networks=["wall", "backend"],
             sysctls={"net.ipv4.ip_forward": "0"}, mem_limit="384m", depends_on={"database": {"condition": "service_healthy"}}),
         "worker": dict(common, image=project + "-worker:local", user="10001:10001",
             environment=dict(PHOTO_WALL_DATABASE_URL=dsn, PHOTO_WALL_MEDIA_ROOT="/media",
@@ -314,14 +339,17 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             networks=["upstream"], mem_limit="256m"),
         "init": dict(image=project + "-worker:local", profiles=["tools"], user="0:0",
             entrypoint=["python", "/harness/demo_wall.py", "init"], network_mode="none", mem_limit="128m", cpus=.5,
-            volumes=[f"{name}:/{name}" for name in ("media", "private", "setup", "control", "player-one", "player-two")]),
+            volumes=[f"{name}:/{name}" for name in ("media", "private", "setup", "control")]),
         "player-one": dict(common, image=project + "-player:local", user="10001:10001",
             command=["python", "/opt/player/runner.py", "1" if scenario == "baseline" else "2"],
-            volumes=["player-one:/state"], networks=["wall"], mem_limit="192m", cpus=1, stop_grace_period="40s"),
+            environment={"PHOTO_WALL_DEMO_DEVICE_ID": "device-" + hashlib.sha256(b"demo-player-one").hexdigest()},
+            tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"], networks=["wall"],
+            mem_limit="192m", cpus=1, stop_grace_period="40s"),
     }
     if scenario == "full":
         services["player-two"] = dict(services["player-one"], command=["python", "/opt/player/runner.py", "1"],
-                                     volumes=["player-two:/state"])
+            environment={"PHOTO_WALL_DEMO_DEVICE_ID": "device-" + hashlib.sha256(b"demo-player-two").hexdigest()},
+            tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"])
     for service_name, service in services.items():
         if service_name == "database":
             continue
@@ -334,7 +362,7 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             service["volumes"] = mounted
     return dict(services=services, networks=dict(wall=dict(internal=True), backend=dict(internal=True),
         upstream=dict(external=True, name=fixture_project + "_upstream_net")),
-        volumes={**{name: {} for name in ("database", "media", "private", "setup", "control", "player-one", "player-two")},
+        volumes={**{name: {} for name in ("database", "media", "private", "setup", "control")},
                  "fixture_setup": dict(external=True, name=fixture_project + "_setup")})
 
 
@@ -409,6 +437,8 @@ class DemoHost:
         return json.loads(output)
 
     def build(self):
+        from scripts.container_build import daemon_image_build
+
         context = self.state / "contexts"
         context.mkdir(mode=0o700)
         for role, identifier in self.core_images.items():
@@ -418,10 +448,28 @@ class DemoHost:
         helper.mkdir()
         shutil.copyfile(ROOT / "scripts/demo_wall.py", helper / "demo_wall.py")
         shutil.copyfile(ROOT / "scripts/immich_fixture.py", helper / "immich_fixture.py")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        from contracts.release import Release
+
+        release_root = helper / "release"
+        release_root.mkdir()
+        rootfs = b"photo-wall stateless demo release\n"
+        release = Release(self.revision, DEMO_BOOT_ABI, DEMO_CONFIGURATION_SHA256,
+            hashlib.sha256(rootfs).hexdigest(), len(rootfs))
+        signing_key = Ed25519PrivateKey.generate()
+        manifest = release.encode()
+        (release_root / "release.json").write_bytes(manifest)
+        (release_root / "release.sig").write_bytes(signing_key.sign(manifest))
+        (release_root / "release.pub.pem").write_bytes(signing_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        (release_root / release.rootfs_name).write_bytes(rootfs)
         for role in ("central", "worker"):
+            release_copy = "COPY release /release/\n" if role == "central" else ""
             (helper / "Dockerfile").write_text(f"FROM {self.project}-core-{role}:local\n"
-                "COPY demo_wall.py immich_fixture.py /harness/\n")
-            self.command(["docker", "build", "-t", f"{self.project}-{role}:local", str(helper)], 120, False)
+                "COPY demo_wall.py immich_fixture.py /harness/\n" + release_copy)
+            self.command(daemon_image_build(f"{self.project}-{role}:local", helper), 120, False)
         player = context / "player"
         player.mkdir()
         wheelhouse = Path(self.marker["wheelhouse"])
@@ -433,7 +481,7 @@ class DemoHost:
             "RUN python -m pip install --no-index --find-links /wheelhouse/wheels --require-hashes -r /wheelhouse/requirements.txt "
             "&& useradd --system --uid 10001 wall && install -d -o wall -g wall -m0700 /state\n"
             "COPY runner.py /opt/player/runner.py\nWORKDIR /opt/player\nUSER 10001:10001\nENV PYTHONUNBUFFERED=1\n")
-        self.command(["docker", "build", "-t", self.project + "-player:local", str(player)], 180, False)
+        self.command(daemon_image_build(self.project + "-player:local", player), 180, False)
 
     @property
     def players(self):
@@ -459,8 +507,8 @@ class DemoHost:
             require(not item["HostConfig"]["PortBindings"], "host_port_exposed")
             if name.startswith("player-"):
                 require(networks == [self.project + "_wall"], "player_network_leak")
-                require(all(mount["Name"] == self.project + "_" + name for mount in item["Mounts"]
-                            if mount["Type"] == "volume"), "player_volume_leak")
+                require(not any(mount["Type"] == "volume" for mount in item["Mounts"]),
+                        "player_volume_leak")
                 require(not any(any(word in variable.upper() for word in ("TOKEN", "PASSWORD", "IMMICH", "DATABASE"))
                                 for variable in item["Config"]["Env"]), "player_environment_leak")
             if name == "central":
@@ -473,7 +521,7 @@ class DemoHost:
     def byte_audit(self):
         code = """import hashlib,json,pathlib
 result=[]
-for path in sorted(pathlib.Path('/state/cache').glob('*.blob')):
+for path in sorted(pathlib.Path('/tmp/cache').glob('*.blob')):
     if len(result)>=32: raise RuntimeError('audit_bound')
     digest=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
     assert digest == path.stem
@@ -522,7 +570,7 @@ print(json.dumps(dict(files=files,core_inventory_sha256=hashlib.sha256(
 
 
 def initialize_volumes():
-    for name in ("media", "private", "setup", "control", "player-one", "player-two"):
+    for name in ("media", "private", "setup", "control"):
         path = Path("/" + name)
         path.mkdir(exist_ok=True)
         os.chown(path, 10001, 10001)
@@ -728,7 +776,8 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
     variants = {job["variant"]["sha256"] for job in ready}
     seen_types = set()
     for report in players.values():
-        require(report["persistence"] == "durable" and report["forbidden_imports_absent"], "player_boundary")
+        require(report["persistence"] == "volatile" and report["release_accepted"]
+                and report["forbidden_imports_absent"], "player_boundary")
         require(report["commit_checks"] > 0 and not report["commit_failures"], "readiness_commit_proof")
         drawn = [event for event in report["events"] if event["layers"]]
         require(len({event["output_id"] for event in drawn}) == report["outputs"], "output_not_drawn")
@@ -988,8 +1037,12 @@ def full_sequence(host, evidence, save):
         reports["player-one"]["authority_epoch"] > old["authority_epoch"] and
         all(event["utc"] > rejoined_at and event["layers"] and not event["fallback"]
             for event in current_outputs(reports["player-one"])), "player_rejoin_timeout", 60)
-    require(reports["player-one"]["persistence"] == "durable", "rejoin_not_durable")
-    record("player_rejoined", snapshot, reports, cache_before=cache_before, cache_after=host.byte_audit()["player-one"])
+    cache_after = host.byte_audit()["player-one"]
+    require(reports["player-one"]["persistence"] == "volatile", "rejoin_not_stateless")
+    require(reports["player-one"]["release_accepted"], "release_not_centrally_accepted")
+    require(bool(cache_after), "cache_not_rebuilt")
+    record("player_rejoined", snapshot, reports, cache_before=cache_before, cache_after=cache_after,
+           cache_rebuilt_after_restart=True)
     require(time.time() < evidence["run"]["program"]["ends_at"], "run_ended_before_faults_completed")
     phases["network_final"] = host.probe()
     phases["final_checks"] = baseline_checks(snapshot, reports)

@@ -42,7 +42,6 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadWritePaths=/run/photo-wall/player
-ReadWritePaths=-/var/lib/photo-wall/player
 MemoryMax=2G
 
 [Install]

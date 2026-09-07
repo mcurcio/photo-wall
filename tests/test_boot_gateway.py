@@ -14,8 +14,13 @@ from scripts.boot_gateway import BootBundle
 
 
 @pytest.fixture
-def bundle(tmp_path):
-    private = Ed25519PrivateKey.generate()
+def signing_key():
+    return Ed25519PrivateKey.generate()
+
+
+@pytest.fixture
+def bundle(tmp_path, signing_key):
+    private = signing_key
     public, root = tmp_path / "public", tmp_path / "bundle"
     public.mkdir()
     root.mkdir()
@@ -128,3 +133,81 @@ def test_invalid_or_unreadable_fault_marker_keeps_delivery_denied(tmp_path, monk
         monkeypatch.setattr(boot_gateway.os, "lstat", denied)
         response = client.get("/v1/media/" + "a" * 64)
         assert response.status_code == 503 and "private-path" not in response.text
+
+
+def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back(
+        registry, bundle, signing_key, monkeypatch):
+    import base64
+    import uuid
+
+    from central.app import create_app as central_app
+    from scripts import boot_gateway
+    from scripts.vm_release_probe import evidence
+
+    root, public, accepted, _ = bundle
+    candidate_bytes = b'failed candidate root'
+    candidate = Release('e'*40, accepted.boot_abi, accepted.configuration_sha256,
+                        hashlib.sha256(candidate_bytes).hexdigest(), len(candidate_bytes))
+    (root / candidate.rootfs_name).write_bytes(candidate_bytes)
+    monkeypatch.setenv('PHOTO_WALL_APPLIANCE_BUNDLE', str(root))
+    monkeypatch.setenv('PHOTO_WALL_BOOT_PUBLIC_CONFIG', str(public))
+    for name in ('PHOTO_WALL_RELEASE_PUBLIC_KEY', 'PHOTO_WALL_RELEASE_BOOT_ABI',
+                 'PHOTO_WALL_RELEASE_CONFIGURATION_SHA256', 'PHOTO_WALL_RELEASE_ROOT',
+                 'PHOTO_WALL_INITIAL_RELEASE_MANIFEST', 'PHOTO_WALL_INITIAL_RELEASE_SIGNATURE'):
+        monkeypatch.setenv(name, '')  # Record restoration before gateway configures its public inputs.
+    monkeypatch.setattr(boot_gateway, 'create_central_app', lambda: central_app(
+        db=registry.db, clock=registry.clock, admin_token='fixture-admin-token-'+'x'*32, run_scheduler=False))
+    with registry.db.transaction() as conn:
+        conn.execute('DELETE FROM appliance_release_policy')
+    app = boot_gateway.create_app()
+    with TestClient(app) as client:
+        request = dict(device_id='device-'+'d'*64, boot_id=str(uuid.uuid4()), request_id='f'*48)
+        first = client.post('/v1/bootstrap/boot', json=request)
+        assert first.status_code == 200
+        assert first.json()['release_id'] == accepted.release_id
+        assert first.json()['trial'] is False
+        assert client.get('/appliance/'+candidate.rootfs_name).status_code == 404
+        admin = {'Authorization': 'Bearer fixture-admin-token-'+'x'*32}
+        registered = client.post('/v1/operator/releases', headers=admin, json=dict(
+            manifest=candidate.encode().decode(), signature=base64.b64encode(signing_key.sign(candidate.encode())).decode()))
+        assert registered.status_code == 201
+        assert client.get('/appliance/'+candidate.rootfs_name).content == candidate_bytes
+        assert client.put(f'/v1/operator/equipment/{request["device_id"]}/candidate/{candidate.release_id}',
+                          headers=admin).json() == {'staged': True}
+        trial_request = request | dict(boot_id=str(uuid.uuid4()), request_id='e'*48)
+        trial = client.post('/v1/bootstrap/boot', json=trial_request).json()
+        assert trial['trial'] and trial['release_id'] == candidate.release_id
+        assert client.post('/v1/bootstrap/boot', json=trial_request).json() == trial
+        following = client.post('/v1/bootstrap/boot', json=request | dict(
+            boot_id=str(uuid.uuid4()), request_id='d'*48)).json()
+        assert not following['trial'] and following['release_id'] == accepted.release_id
+        with registry.db.transaction() as conn:
+            proof = evidence(conn, request['device_id'], trial_request['boot_id'])
+        assert proof['status'] == 'failed' and not proof['current']
+        assert proof['ticket_sha256'] == hashlib.sha256(trial['ticket_id'].encode()).hexdigest()
+        assert 'ticket_id' not in proof
+
+
+def test_delivery_evidence_names_current_epoch_without_exposing_bearer(capsys):
+    from types import SimpleNamespace
+
+    from scripts.boot_gateway import install_delivery_observer
+
+    app = FastAPI()
+    token = 'private-fixture-bearer-'+'x'*32
+    authenticated = []
+    def authenticate(value):
+        authenticated.append(value)
+        return dict(id='p-fixture', authority_epoch=2)
+    app.state.registry = SimpleNamespace(authenticate=authenticate)
+    @app.get('/v1/media/{digest}')
+    def image(digest):
+        return {'fixture': 'synthetic media'}
+    install_delivery_observer(app)
+    with TestClient(app) as client:
+        assert client.get('/v1/media/'+'a'*64, headers={'Authorization':'Bearer '+token}).status_code == 200
+    import json
+    output = capsys.readouterr().out
+    assert json.loads(output) == dict(event='photo-wall-fixture-media-delivery', sha256='a'*64,
+                                      player_id='p-fixture', authority_epoch=2)
+    assert token not in output and authenticated == [token]

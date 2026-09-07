@@ -28,7 +28,6 @@ BASE_BYTES = 1_257_196_128
 MAX_RAW_BYTES = 12 * 1024**3
 MIB = 1024**2
 SECTOR = 512
-STATE_MARKER = b"photo-wall-state-v1\n"
 RUNTIME_PACKAGES = (
     "python3.12", "python3.12-venv", "python3-gi", "python3-gst-1.0",
     "python3-opengl", "gir1.2-gtk-3.0", "gir1.2-gst-plugins-base-1.0",
@@ -234,12 +233,11 @@ def decompress_base(source: Path, destination: Path) -> None:
         raise
 
 
-def create_disk(boot_tree: Path, destination: Path, *, state_mib: int = 4096,
+def create_disk(boot_tree: Path, destination: Path, *,
                 fat_mib: int = 1536, source_epoch: int) -> dict:
     """Generate only a new regular image; never accept an existing device/path."""
     outside_git(destination)
     if (type(source_epoch) is not int or not 315532800 <= source_epoch <= 2**31 - 1
-            or type(state_mib) is not int or not 64 <= state_mib <= 16_384
             or type(fat_mib) is not int or not 64 <= fat_mib <= 2048):
         raise BuildError("disk_limits")
     tree = inventory(boot_tree, maximum_files=10_000, maximum_bytes=fat_mib * MIB)
@@ -252,7 +250,6 @@ def create_disk(boot_tree: Path, destination: Path, *, state_mib: int = 4096,
     if os.geteuid() != 0:
         raise BuildError("disk_owner_required")
     boot = Partition(0x0C, 2048, fat_mib * MIB // SECTOR)
-    state = Partition(0x83, boot.start + boot.sectors, state_mib * MIB // SECTOR)
     disk_id = hashlib.sha256(canonical(tree)).digest()[:4]
     environment = dict(os.environ, SOURCE_DATE_EPOCH=str(source_epoch),
                        E2FSPROGS_FAKE_TIME=str(source_epoch), TZ="UTC")
@@ -260,40 +257,31 @@ def create_disk(boot_tree: Path, destination: Path, *, state_mib: int = 4096,
     try:
         with tempfile.TemporaryDirectory(prefix=".disk-", dir=destination.parent) as scratch:
             temp = Path(scratch)
-            fat, ext4, owned = temp / "boot.fat", temp / "state.ext4", temp / "owned"
-            owned.mkdir(mode=0o755)
-            (owned / ".photo-wall-state-v1").write_bytes(STATE_MARKER)
-            (owned / ".photo-wall-state-v1").chmod(0o444)
+            fat = temp / "boot.fat"
             with fat.open("xb") as stream:
                 stream.truncate(boot.sectors * SECTOR)
-            with ext4.open("xb") as stream:
-                stream.truncate(state.sectors * SECTOR)
             run(["mkfs.vfat", "--invariant", "-F", "32", "-n", "PWBOOT", str(fat)], env=environment)
             # mcopy recursion includes boot subdirectories, but shell expansion is never used.
             for path in sorted(boot_tree.iterdir()):
                 run(["mcopy", "-s", "-p", "-m", "-i", str(fat), str(path), "::/"], env=environment)
-            run(["mkfs.ext4", "-F", "-q", "-L", "PWSTATE", "-m", "0", "-U",
-                 "63bc55cb-f0c5-4ae5-b2d4-9e290ce1b265", "-E",
-                 "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", "-d", str(owned), str(ext4)],
-                env=environment)
             with destination.open("xb") as target:
                 created = True
-                target.truncate((state.start + state.sectors) * SECTOR)
-                target.write(mbr((boot, state), disk_id))
-                for partition, file in ((boot, fat), (state, ext4)):
+                target.truncate((boot.start + boot.sectors) * SECTOR)
+                target.write(mbr((boot,), disk_id))
+                for partition, file in ((boot, fat),):
                     target.seek(partition.start * SECTOR)
                     with file.open("rb") as source:
                         shutil.copyfileobj(source, target, MIB)
                 target.flush()
                 os.fsync(target.fileno())
-            if read_mbr(destination) != (boot, state):
+            if read_mbr(destination) != (boot,):
                 raise BuildError("disk_verify")
             # Reopen the completed disk through a read-only file-backed appliance.
             # A child process bounds QEMU and all descendants by one deadline.
             run([sys.executable, "-m", "appliance.build", "verify-disk", str(destination), str(boot_tree)],
                 timeout=600)
             return dict(checked_file(destination, 20 * 1024**3),
-                        partitions=[vars(boot), vars(state)])
+                        partitions=[vars(boot)])
     except BaseException:
         if created:
             destination.unlink(missing_ok=True)
@@ -363,7 +351,7 @@ def verify_release_boot(rootfs: Path, boot_tree: Path, revision: str) -> None:
 
 
 def verify_disk(image: Path, boot_tree: Path) -> None:
-    """Reopen exact FAT bytes and the empty owned ext4 state of a generated disk."""
+    """Reopen the exact read-only boot partition; there is no local state volume."""
     import guestfs
 
     read_mbr(image)
@@ -375,22 +363,12 @@ def verify_disk(image: Path, boot_tree: Path) -> None:
         guest.launch()
         filesystems = guest.list_filesystems()
         boots = [device for device, kind in filesystems.items() if kind == "vfat"]
-        states = [device for device, kind in filesystems.items() if kind == "ext4"]
-        if len(boots) != 1 or len(states) != 1:
+        if len(boots) != 1 or len(filesystems) != 1:
             raise BuildError("disk_verify")
         guest.mount_ro(boots[0], "/")
         if _guest_inventory(guest, "/") != expected:
             raise BuildError("disk_boot_mismatch")
         guest.umount_all()
-        guest.mount_ro(states[0], "/")
-        if set(guest.ls("/")) != {"lost+found", ".photo-wall-state-v1"}:
-            raise BuildError("disk_state_not_empty")
-        root, marker = guest.lstatns("/"), guest.lstatns("/.photo-wall-state-v1")
-        if (root["st_uid"] != 0 or root["st_gid"] != 0 or stat.S_IMODE(root["st_mode"]) != 0o755
-                or marker["st_uid"] != 0 or marker["st_gid"] != 0
-                or not stat.S_ISREG(marker["st_mode"]) or stat.S_IMODE(marker["st_mode"]) != 0o444
-                or guest.read_file("/.photo-wall-state-v1") != STATE_MARKER):
-            raise BuildError("disk_state_marker")
         guest.shutdown()
     finally:
         guest.close()
@@ -618,6 +596,10 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
         wants.parent.mkdir(parents=True, exist_ok=True)
         wants.unlink(missing_ok=True)
         wants.symlink_to("/etc/systemd/system/" + target.name)
+    manager = root / "etc/systemd/system.conf.d/20-photo-wall-watchdog.conf"
+    manager.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / "appliance/systemd/watchdog.conf", manager)
+    manager.chmod(0o644)
     weston = root / "etc/xdg/weston"
     weston.mkdir(parents=True, exist_ok=True)
     # Generate compositor routing through the same canonical Player helper used
@@ -644,7 +626,7 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
         "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n"
         "    wired:\n      match:\n        name: 'e*'\n      dhcp4: true\n      optional: true\n")
     (netplan / "10-photo-wall.yaml").chmod(0o600)
-    (root / "etc/fstab").write_text("# Verified RAM root and owned state are mounted by Photo Wall initramfs.\n")
+    (root / "etc/fstab").write_text("# Verified RAM root is mounted by Photo Wall initramfs.\n")
     (root / "etc/hostname").write_text("photo-wall\n")
     (root / "etc/machine-id").write_bytes(b"")
     resolver = root / "etc/resolv.conf"
@@ -659,9 +641,8 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
     journal = root / "etc/systemd/journald.conf.d"
     journal.mkdir(exist_ok=True)
     (journal / "photo-wall.conf").write_text("[Journal]\nStorage=volatile\nRuntimeMaxUse=32M\n")
-    persistent = root / "var/lib/photo-wall"
-    persistent.mkdir(mode=0o755, exist_ok=True)
-    if list(persistent.iterdir()):
+    obsolete_state = root / "var/lib/photo-wall"
+    if obsolete_state.exists() and list(obsolete_state.iterdir()):
         raise BuildError("common_state_not_empty")
     return config_hash
 
@@ -933,7 +914,8 @@ def prepare(root: Path, source: Path, wheelhouse: Path, public: Path,
         "dtparam=audio=off\nenable_uart=0\n")
     (firmware / "cmdline.txt").write_text(
         "boot=photowall ip=dhcp root=/dev/ram0 rw console=tty3 quiet loglevel=3 "
-        "vt.global_cursor_default=0 logo.nologo panic=10\n")
+        "vt.global_cursor_default=0 logo.nologo panic=10 watchdog_core.nowayout=1 "
+        "bcm2835_wdt.nowayout=1\n")
     abi, abi_inventory = boot_abi(root, firmware, kernel)
     policy = dict(schema=1, boot_abi=abi, configuration_sha256=config_hash)
     (root / "etc/photo-wall/boot-policy.json").write_bytes(canonical(policy))

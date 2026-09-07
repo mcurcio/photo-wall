@@ -1,74 +1,38 @@
 # Full media path demo
 
-Status: implemented harness with a passed full integration benchmark. It joins the [real Immich fixture](module-immich-fixture.md), [media worker](module-media-worker.md), [gateway](module-media-gateway.md) and [Player service](module-player-service.md). Media conversion, PostgreSQL, HTTP/WebSocket traffic and cache bytes are real; `RecordingRenderer` supplies simulated actuation. See the [dated evidence](evidence/2026-09-05-full-wall.md) for results and limits.
+Status: the harness has been refactored for central release authority and stateless Players. Its 57 focused tests pass. The earlier two-Player/three-Output result remains historical evidence for the MVP shape; the full scenario has not yet been rerun from a committed final refactor revision.
 
-## Contract and isolation
+The demo joins the real Immich fixture, central PostgreSQL application, Procrastinate media worker, media gateway, two Player processes, and three simulated Outputs. Media conversion, queueing, HTTP/WebSocket traffic, exact bytes, session epochs, cache validation, readiness, commitments, and observations are real. `RecordingRenderer` supplies simulated display actuation, so native GTK/GStreamer and physical HDMI remain separate gates.
 
-The harness creates a new marked, private state directory and a dedicated `pw-wall-demo-<random>` project. Its internal wall network contains only Players and central; a separate internal backend contains central, PostgreSQL, worker and operator. Only the worker joins the retained fixture's upstream network. Central forwarding is disabled. No service publishes a host port, and Docker uses copied contexts and named volumes with `nocopy`, avoiding host bind mounts.
+## Isolation and authority
 
-An upstream-only helper creates a separate read-only API key and synthetic assets in a unique past capture interval. It verifies extracted timestamps before enabling the source. Only the worker receives the private connection file. The Player image contains the locked Player-only wheel closure and a source-neutral recorder runner; it receives no upstream key, operator credential, central/media module or complete harness. Temporary diagnostic processes separately verify denied DNS and numeric TCP access to Immich while central remains reachable.
+The harness creates a marked private state directory and dedicated Compose project. Players can reach central only. The media worker alone reaches the retained Immich fixture and holds its private connection file. Central alone receives PostgreSQL, operator, release, and queue configuration.
 
-The baseline uses one Player and one Output. The full scenario uses two Outputs on one Player and a third on another, eight-second cycles, a 15-second preparation horizon and real UTC within a ten-minute scenario ceiling. Live uploads and favorite changes affect future assignments; secured exact bytes remain locked. Faults affect only this demo's key, worker connection, central container and Player container. The retained fixture and main deployment are preserved.
+Each Player obtains a central boot ticket, creates fresh enrollment credentials, receives a new authority epoch, and stores only volatile session state. Player containers have only tmpfs for reports and cache; no writable volume is attached. Reports must state `persistence: volatile`, prove the selected release was accepted centrally, and show that central, media, appliance, database, queue, and SQLite modules are absent from the Player image.
 
-## Reproducing the checkpoint
+The full scenario is wired for two Outputs on one Player and a third on another, exact secured assignments, live source evolution, deletion after security, Player restart, central restart, and per-Output behavior. Its current restart step proves a higher authority epoch and reacquisition after disposable tmpfs loss. Focused Player tests separately prove valid-file reuse without a media request, deletion/corruption reacquisition, and rejection of old-session state. The health probe now exports bounded RTT, offset, delay, drift, and rejection counters from the authenticated `/v1/player/time` path. These paths remain unqualified at demo/image level until the final-revision runs record them.
 
-The historical benchmark defaults to core revision `dda8e98c5c54dc8ca9c007599f8a919eadbd5248`. First prepare the [real Immich fixture](module-immich-fixture.md) and build the [Player-only wheelhouse](module-player-package.md) at the selected revision. Pass `--revision` with exactly 40 lowercase hexadecimal characters to reproduce another complete demo from a checkout at that revision. The preflight requires a valid commit, a clean core source checkout at that exact revision, and a wheelhouse whose inventory names that revision; nonhistorical revisions additionally require paired immutable central and worker image IDs. It completes before creating demo state or building images. The selected revision is recorded in the plan, marker, evidence, and provenance. Older markers without a revision continue to mean the historical default.
+## Reproducing the current checkpoint
 
-Build central and worker from that checkout, then pass their exact image IDs. The optional overrides must be supplied together. Defaults retain the original benchmark's local IDs; overriding them lets a clean machine use its own equivalent builds without editing source.
+Build a Player-only wheelhouse, central image, and media-worker image from the same clean committed revision. Image construction explicitly uses the daemon `default` builder with `--load`, allowing derived fixtures to reuse locally loaded parent images.
 
 ```sh
-docker build --target central -t photo-wall-demo-core-central .
-docker build --target media-worker -t photo-wall-demo-core-worker .
-demo_central_id=$(docker image inspect --format '{{.Id}}' photo-wall-demo-core-central)
-demo_worker_id=$(docker image inspect --format '{{.Id}}' photo-wall-demo-core-worker)
 .venv/bin/python scripts/demo_wall.py run \
   --state-dir /absolute/new-wall-demo \
   --immich-state /absolute/retained-immich-fixture \
   --wheelhouse /absolute/player-wheelhouse \
-  --revision dda8e98c5c54dc8ca9c007599f8a919eadbd5248 \
-  --central-image "$demo_central_id" --worker-image "$demo_worker_id" \
+  --revision <final-40-character-revision> \
+  --central-image sha256:<exact-central-image-id> \
+  --worker-image sha256:<exact-worker-image-id> \
   --scenario full --keep
 ```
 
-Replace the three absolute paths with prepared inputs and a new output directory. Use `--scenario baseline` for the first slice. Both image source inventories and their copied harness hashes are verified at runtime. The immutable image IDs, source hashes, wheel inventory, media hashes, observations and fault phases are recorded in private evidence. Configure Docker's normal client environment for the host; this task's Desktop uses an isolated public client configuration and its explicit socket.
+Preflight rejects a dirty source tree, revision mismatch, Player inventory mismatch, mutable image tag, missing paired image ID, reused state directory, or unverified fixture. This means an uncommitted workspace cannot produce final evidence. The selected revision, image IDs, source inventory, wheel inventory, media hashes, session epochs, observations, and phase results are retained in the private report.
 
-`status --state-dir ABS` reads a marked run. `cleanup --state-dir ABS` removes only that run's journaled assets/key and deployment resources, preserving evidence. Omitting `--keep` attempts cleanup automatically; an upstream cleanup failure preserves the journal for a scoped retry. Retained demo assets share the synthetic account, so clean those demos before rerunning the original fixture's exact all-favorites membership verifier.
+`status --state-dir ABS` reads a marked run. `cleanup --state-dir ABS` removes only resources journaled by that run. Omitting `--keep` attempts scoped cleanup automatically and preserves evidence if cleanup cannot complete.
 
-## Resource and test boundaries
+## Qualification limits
 
-The full configuration caps worker at 768 MiB, central at 384 MiB, PostgreSQL at 192 MiB and each Player at 192 MiB, each with one CPU. Operator and upstream helpers have separate 128 and 256 MiB ceilings and run sequentially. These are fixture limits, not qualified Pi capacity. The strict 100 ms clock gate remains active; shared-host CPU contention produced correctly rejected samples in earlier attempts.
+The full configuration has explicit CPU, memory, transfer, and time bounds. A passing run qualifies the central/worker/Player network integration with simulated actuation. It does not qualify the rebuilt Pi image, native rendering, PXE, replacement, dual HDMI, thermal behavior, or visible coordination. Those results must be recorded separately and tied to the same final revision.
 
-The full passing run used a 70-second live-presentation wait. The harness now allows 120 seconds for that phase to accommodate held assignments, a four-member rotation and a safely skipped cue; the exact-byte, complete-group and clock predicates are unchanged. That budget change has focused coverage and is not described as another full run. A transient connection refusal while central restarts is retried within the phase deadline; authority, schema and unknown failures are not hidden as startup retries.
-
-The live-evolution phase now journals a pre-mutation central/Player snapshot
-under `evolved_pre_change` before invoking `upstream-tools: evolve`, and
-records `evolved_change.invoked_utc`, `evolved_change.completed_utc`, and
-`evolved_change.result` before any membership wait and lock preservation checks.
-A failed mutation records `failed_utc` and a sanitized error. This keeps mutation timing and output even if later checks time out.
-
-The secured-deletion phase saves its pre-delete central/Player snapshot and exact
-future assignment identities and validity times under `deleted_secured_pre_delete`.
-It then records the invocation/completion times and mutation result under
-`deleted_secured_delete` before the presentation wait. A timeout retains this
-evidence alongside the last sampled central/Player state, allowing a missed
-presentation to be investigated without guessing which assignment the test
-selected. The 45-second wait requires one of those exact selected assignments
-to be presented after deletion completes and within its start/end/validity
-window. The proof binds Player identity and authority epoch, Output, assignment,
-Run and exact Variant SHA; a later assignment with the same bytes cannot pass.
-Player reports are indexed by their authenticated identity independently of
-container role names. The recorder logs only successful presentations, and the
-matched tuple and event UTC are saved as `deleted_secured.checks.selected_presentation`.
-The 100 ms clock gate remains unchanged.
-
-Standalone checks run with `.venv/bin/python -m pytest --noconftest tests/test_wall_demo.py -q`. They need no PostgreSQL fixture and cover role containment, complete-group evidence, lock preservation, per-Output outage/recovery, retry classification, immutable image overrides and complete source inventories. Native GTK/GStreamer/HDMI and accelerated calendar/nested-Scene tests remain separate evidence classes.
-
-The central-recovery wait is now 120 seconds. The Player's documented
-1/5/15/60-second reconnect policy can consume the former entire 60-second
-window before bounded state/readiness requests and the next eight-second
-cue. This is a fixture budget correction, not a production-policy change.
-Every Output must still show fresh nonfallback content; the same Run and
-100 ms clock requirements remain. `central_restart` records the restart
-return time and allowed window before waiting; a passing `central_recovered`
-phase records monotonic elapsed seconds. The earlier timeout remains a failed
-run in the dated evidence, and is not reclassified by this change.
+Standalone harness checks run with `.venv/bin/python -m pytest --noconftest tests/test_wall_demo.py -q`.

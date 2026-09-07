@@ -67,5 +67,17 @@ they are not passing evidence.
 The root's separate observer/host suite passed **97 tests**, and bounded
 consumer review found no actionable issue in the closed reason schema or
 private-value handling. Ruff, documentation and whitespace checks passed.
-Full hosted CI remains required for the new production code, including the
-PostgreSQL/real HTTP session skipped in the offline container.
+
+### Hosted checks at `0425717`
+
+[Run 34035767855](https://github.com/mcurcio/photo-wall/actions/runs/34035767855)
+passed on the pushed correction: **1,038 tests passed / 56 skipped / four
+warnings in 62.77s**, plus **55 Linux media tests passed in 158.97s**. The
+PostgreSQL/real HTTP checks ran in the hosted integration environment. The
+parallel workflow completed in **3m17s** (13:19:57–13:23:14 UTC); this is an
+observed wall-clock result, not a guarantee or a measurement of runner cost.
+
+The separate exact-image build and boot run is
+[34035767954](https://github.com/mcurcio/photo-wall/actions/runs/34035767954).
+Passing service checks alone do not qualify its sustained-health, photo,
+cache-reboot or rollback scenarios.

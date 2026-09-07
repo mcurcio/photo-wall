@@ -34,17 +34,24 @@ def _schedule_media(coordinator, starts=1010):
 
 def _feedback(coordinator, player, plan, *, secured=(), prepared=(), capacity_ok=True, sequence=1):
     return Readiness(
-        plan_id=plan.plan_id, revision=plan.revision,
-        authority_epoch=player["authority_epoch"], sequence=sequence,
-        secured=tuple(secured), prepared=tuple(prepared), capacity_ok=capacity_ok,
-        clock_uncertainty=.01, observed_at=coordinator.clock.utc(),
+        plan_id=plan.plan_id,
+        revision=plan.revision,
+        authority_epoch=player["authority_epoch"],
+        sequence=sequence,
+        secured=tuple(secured),
+        prepared=tuple(prepared),
+        capacity_ok=capacity_ok,
+        clock_uncertainty=0.01,
+        observed_at=coordinator.clock.utc(),
     )
 
 
 @pytest.mark.parametrize("feedback_kind", ["offered", "secured", "committed"])
 @pytest.mark.parametrize("catalog_change", ["changed", "empty"])
 def test_same_key_reenrollment_retains_unexpired_content_but_requires_fresh_epoch_feedback(
-    registry, feedback_kind, catalog_change,
+    registry,
+    feedback_kind,
+    catalog_change,
 ):
     player, key, _ = _player_with_frame(registry)
     original = _publish_catalog(registry)
@@ -57,13 +64,18 @@ def test_same_key_reenrollment_retains_unexpired_content_but_requires_fresh_epoc
     registry.clock.advance(6)  # The scheduled assignment is now imminent.
     if feedback_kind != "offered":
         old_feedback = _feedback(
-            coordinator, player, old_plan, secured=(old_layer.assignment_id,),
+            coordinator,
+            player,
+            old_plan,
+            secured=(old_layer.assignment_id,),
             prepared=(old_layer.assignment_id,) if feedback_kind == "committed" else (),
             capacity_ok=feedback_kind == "committed",
         )
         assert coordinator.readiness(player["player_id"], old_feedback)
         with registry.db.transaction() as conn:
-            old_commits = conn.execute("SELECT count(*) AS n FROM execution_commits").fetchone()["n"]
+            old_commits = conn.execute("SELECT count(*) AS n FROM execution_commits").fetchone()[
+                "n"
+            ]
             assert bool(old_commits) == (feedback_kind == "committed")
 
     if catalog_change == "changed":
@@ -75,7 +87,7 @@ def test_same_key_reenrollment_retains_unexpired_content_but_requires_fresh_epoc
     assert fresh["player_id"] == player["player_id"]
     assert fresh["authority_epoch"] == 2
     with pytest.raises(RegistryError, match="unauthorized"):
-        coordinator.registry.authenticate(old_token)
+        registry.authenticate(old_token)
     with pytest.raises(RegistryError, match="stale_authority"):
         coordinator.delivery(player["player_id"], 1)
     stale = _feedback(coordinator, player, old_plan, secured=(old_layer.assignment_id,))
@@ -92,7 +104,10 @@ def test_same_key_reenrollment_retains_unexpired_content_but_requires_fresh_epoc
 
     fresh_layer = new_plan.layers[0]
     fresh_feedback = _feedback(
-        coordinator, fresh, new_plan, secured=(fresh_layer.assignment_id,),
+        coordinator,
+        fresh,
+        new_plan,
+        secured=(fresh_layer.assignment_id,),
         prepared=(fresh_layer.assignment_id,),
     )
     assert coordinator.readiness(fresh["player_id"], fresh_feedback)
@@ -103,8 +118,7 @@ def test_same_key_reenrollment_retains_unexpired_content_but_requires_fresh_epoc
 def test_old_epoch_offer_does_not_consume_current_epoch_offer_budget(registry):
     player, key, _ = _player_with_frame(registry)
     old_variant = _publish_catalog(registry)
-    coordinator = Coordinator(registry.db, registry.clock,
-                               CoordinationLimits(max_offers=1))
+    coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(max_offers=1))
     _schedule_media(coordinator)
     old_plan = coordinator.delivery(player["player_id"], 1)["plan"]
 

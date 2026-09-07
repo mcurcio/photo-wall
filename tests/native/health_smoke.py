@@ -1,10 +1,7 @@
-"""Opt-in native health and release acceptance smoke fixture.
+"""Opt-in native health plus real central trial acceptance on disposable Linux.
 
-This is deliberately a fixture, rather than a qualification test.  It runs as
-root on a disposable Linux/Xvfb host and uses temporary paths only.  The
-central authority, rootfs, and physical display are synthetic; the native
-adapter, Player health generation, signed SlotStore, and 30 second acceptance
-gate are real production objects.
+Requires Xvfb, root, and PHOTO_WALL_TEST_DATABASE_URL. Synthetic root bytes and
+clock samples do not qualify an image, Pi firmware, HDMI, or visible timing.
 """
 
 from __future__ import annotations
@@ -17,7 +14,6 @@ import os
 import re
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -48,230 +44,137 @@ def _wait_native_capacity(renderer, timeout: float = 15.0) -> bool:
     return False
 
 
-def _write_boot_report(path: Path, *, boot_id: str, release_id: str, slot: str) -> None:
-    # The bootstrap report is the protected root-owned fixture input.  The
-    # healthy report below is always produced by PlayerService._write_health.
-    payload = {
-        "boot_id": boot_id,
-        "fault": None,
-        "persistence": "durable",
-        "release_id": release_id,
-        "schema": 1,
-        "slot": slot,
-        "trial": True,
-    }
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+@contextlib.contextmanager
+def _release_database():
+    """Own one random schema, leaving the supplied disposable database intact."""
+    import uuid
+
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    from central.db import Database
+
+    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("disposable_postgresql_required")
+    schema = "pw_native_" + uuid.uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
+    db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as stream:
-            fd = -1
-            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        db.migrate()
+        yield db
     finally:
-        if fd >= 0:
-            os.close(fd)
+        db.close()
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
 
 
 def _build_fixture(report_path: Path | None) -> dict:
-    if sys.platform != "linux":
-        raise RuntimeError("linux_required")
-    if os.geteuid() != 0:
-        raise RuntimeError("root_required")
-    if not os.environ.get("DISPLAY"):
-        raise RuntimeError("xvfb_display_required")
+    if sys.platform != "linux" or os.geteuid() != 0 or not os.environ.get("DISPLAY"):
+        raise RuntimeError("disposable_linux_root_xvfb_required")
+    import uuid
 
-    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from appliance import updates
+    from appliance.updates import TrialWatchdog, _linux_boot_id
+    from central.registry import Registry
+    from central.releases import ReleaseAuthority
     from contracts.enrollment import OutputReport
     from contracts.models import FrameProfile, OutputBinding, PlayerConfiguration
-    from contracts.release import Release
+    from contracts.release import BootRequest, Release
+    from contracts.time import SystemClock
     from player.cache import Cache
     from player.executor import Executor
     from player.identity import load_identity
     from player.native import NativeOutput, NativeRenderer
-    from player.service import PlayerConfig, PlayerService, Registration
+    from player.service import BootContext, PlayerConfig, PlayerService, Registration
 
     started = time.monotonic()
-    renderer = None
-    cache = None
-    accept_thread = None
-    accept_result: dict[str, object] = {}
-    # ExitStack closes the worker, cache, and GTK resources before the
-    # TemporaryDirectory removes their backing paths.  The acceptance thread
-    # is joined even on a failed assertion so no background writer survives.
-    with tempfile.TemporaryDirectory(prefix="photo-wall-native-health-") as directory, \
+    with _release_database() as db, tempfile.TemporaryDirectory(prefix="photo-wall-native-health-") as directory, \
             contextlib.ExitStack() as cleanup:
         root = Path(directory)
-        state_root = root / "appliance-state"
-        state_root.mkdir(mode=0o755)
-        (state_root / ".photo-wall-state-v1").write_bytes(updates.MARKER)
-        os.chmod(state_root / ".photo-wall-state-v1", 0o444)
-        service_state = root / "player-state"
-        service_state.mkdir(mode=0o700)
-        runtime = root / "player-runtime"
-        runtime.mkdir(mode=0o700)
-        health_path = runtime / "service-health.json"
-        boot_report = root / "boot.json"
-        public_key_path = root / "release.pub.pem"
-        ca_path = root / "synthetic-ca.pem"
-        ca_path.write_bytes(b"synthetic central; no network is used\n")
-
-        signing_key = Ed25519PrivateKey.generate()
-        public_key_path.write_bytes(signing_key.public_key().public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
-        os.chmod(public_key_path, 0o644)
-        rootfs = b"synthetic rootfs fixture\n"
-        boot_abi = "a" * 64
-        configuration_sha256 = "b" * 64
-        release = Release(
-            revision="c" * 40,
-            boot_abi=boot_abi,
-            configuration_sha256=configuration_sha256,
-            rootfs_sha256=hashlib.sha256(rootfs).hexdigest(),
-            rootfs_size=len(rootfs),
-        )
-        manifest = release.encode()
-        signature = signing_key.sign(manifest)
-        store = updates.SlotStore(state_root, public_key_path, boot_abi, configuration_sha256)
-        staged = store.stage(manifest, signature, (rootfs,))
-        boot_id = updates._linux_boot_id()
-        selection = store.select_boot(boot_id)
-        if selection is None or selection.release.release_id != staged.release_id:
-            raise RuntimeError("trial_selection_failed")
-        _write_boot_report(boot_report, boot_id=boot_id,
-                           release_id=release.release_id, slot=selection.slot)
-
-        native_outputs = (
-            NativeOutput("health-output-1", "org.photowall.health1", 320, 240),
-            NativeOutput("health-output-2", "org.photowall.health2", 320, 240),
-        )
-        renderer = NativeRenderer(native_outputs, decoder_limit=2,
-                                  texture_budget=32 * 1024**2)
+        health_path = root / "service-health.json"
+        clock = SystemClock()
+        key = Ed25519PrivateKey.generate()
+        authority = ReleaseAuthority(db, clock, key.public_key(), "a" * 64, "b" * 64)
+        releases = []
+        for content in (b"accepted synthetic root", b"candidate synthetic root"):
+            release = Release("c" * 40, "a" * 64, "b" * 64, hashlib.sha256(content).hexdigest(), len(content))
+            authority.register(release.encode(), key.sign(release.encode()))
+            releases.append(release)
+        authority.initialize_default(releases[0].release_id)
+        device_id = "device-" + "d" * 64
+        authority.select_boot(BootRequest(device_id, str(uuid.uuid4()), os.urandom(24).hex()))
+        authority.stage(device_id, releases[1].release_id)
+        boot_id = _linux_boot_id()
+        ticket = authority.select_boot(BootRequest(device_id, boot_id, os.urandom(24).hex()))
+        context = BootContext.model_validate(dict(schema=2, boot_id=boot_id, device_id=device_id,
+            ticket_id=ticket.ticket_id, release_id=ticket.release_id, trial=True, persistence="volatile", fault=None))
+        native_outputs = (NativeOutput("health-output-1", "org.photowall.health1", 320, 240),
+                          NativeOutput("health-output-2", "org.photowall.health2", 320, 240))
+        renderer = NativeRenderer(native_outputs, decoder_limit=2, texture_budget=32 * 1024**2)
         cleanup.callback(renderer.close)
         native_capacity_before = renderer.capacity(()).available
         if native_capacity_before:
             raise RuntimeError("native_capacity_started_initialized")
-
-        identity = load_identity(service_state)
-        player_id = "p-" + hashlib.sha256(bytes.fromhex(identity.public_key)).hexdigest()[:32]
-        outputs = tuple(OutputReport(output_id=output.output_id,
-                                     width_px=output.width, height_px=output.height)
-                        for output in native_outputs)
-        config = PlayerConfig(
-            central_origin="https://synthetic.invalid",
-            ca_file=str(ca_path),
-            state_dir=str(service_state),
-            cache_bytes=8 * 1024**2,
-            decoder_limit=2,
-            texture_budget=32 * 1024**2,
-        )
+        identity = load_identity()
+        outputs = tuple(OutputReport(output_id=o.output_id, width_px=o.width, height_px=o.height) for o in native_outputs)
+        registry = Registry(db, clock, authority)
+        challenge = registry.challenge(identity.public_key)
+        registration = registry.enroll(identity.enrollment(challenge["nonce"], outputs,
+            device_id=device_id, boot_id=boot_id, ticket_id=ticket.ticket_id))
+        player_id = registration["player_id"]
+        config = PlayerConfig(central_origin="http://synthetic.invalid", allow_http=True,
+                              cache_bytes=8 * 1024**2, decoder_limit=2, texture_budget=32 * 1024**2)
         service = PlayerService(config, identity, outputs, renderer, lambda callback: None,
-                                health_path=health_path)
-        service.registration = Registration(player_id=player_id,
-                                            token="synthetic-authority-token-" + "x" * 16,
-                                            authority_epoch=1)
-        cache = Cache(service_state / "cache", config.cache_bytes)
+                                health_path=health_path, boot_context=context, clock=clock)
+        cleanup.callback(service._worker.shutdown, wait=True, cancel_futures=True)
+        service.registration = Registration.model_validate(registration)
+        cache = Cache(root / "cache", config.cache_bytes)
         cleanup.callback(cache.close)
         service.cache = cache
-        service.executor = Executor(player_id, cache, renderer, service.clock,
-                                    service.mapping, service_state / "execution.json")
-        cleanup.callback(service._worker.shutdown, wait=True, cancel_futures=True)
-        bindings = tuple(
-            OutputBinding(output_id=output.output_id, frame_id=f"health-frame-{index}",
-                          generation=1,
-                          profile=FrameProfile(width_px=output.width, height_px=output.height,
-                                               diagonal_inches=20))
-            for index, output in enumerate(native_outputs, 1)
-        )
-        configuration = PlayerConfiguration(
-            player_id=player_id, authority_epoch=1, configuration_revision=1,
-            bindings=bindings, enabled_outputs=tuple(binding.output_id for binding in bindings),
-        )
+        service.executor = Executor(player_id, cache, renderer, clock, service.mapping)
+        bindings = tuple(OutputBinding(output_id=o.output_id, frame_id=f"health-frame-{i}", generation=1,
+            profile=FrameProfile(width_px=o.width, height_px=o.height, diagonal_inches=20))
+            for i, o in enumerate(native_outputs, 1))
+        configuration = PlayerConfiguration(player_id=player_id, authority_epoch=1, configuration_revision=1,
+            bindings=bindings, enabled_outputs=tuple(b.output_id for b in bindings))
         service.executor.accept_configuration(configuration)
         service._configuration = configuration
-        # Establish the same bounded clock mapping the production service
-        # receives from its authority before checking native capacity.  This
-        # makes the first false health result specifically exercise the native
-        # gate, rather than an uninitialized clock.
         service.mapping.establish(.01)
-        if not service.mapping.healthy():
-            raise RuntimeError("synthetic_clock_not_healthy")
         health_before_native = service._health()
-        service._write_health(health_before_native)
         if health_before_native:
             raise RuntimeError("uninitialized_health_started_healthy")
-
         if not _wait_native_capacity(renderer):
             raise RuntimeError("native_capacity_timeout")
-        native_capacity_after = renderer.capacity(()).available
-        health_after_mapping = service._health()
-        if not (native_capacity_after and health_after_mapping):
-            raise RuntimeError("initialized_health_not_healthy")
-
-        def accept() -> None:
-            try:
-                accept_result["accepted"] = updates.accept_trial(
-                    store, release.release_id, boot_report=boot_report,
-                    health_report=health_path)
-            except Exception as error:  # public result is deliberately sanitized
-                accept_result["error"] = type(error).__name__
-
-        accept_thread = threading.Thread(target=accept, name="native-health-accept")
-        accept_started = time.monotonic()
-        accept_thread.start()
-        cleanup.callback(accept_thread.join)
-        while accept_thread.is_alive():
+        signals = []
+        accepted_started = clock.monotonic()
+        watchdog = TrialWatchdog(boot_id, trial=True, started=accepted_started, signal_reboot=signals.append)
+        while not watchdog.finished:
             _pump_glib()
-            # Synthetic authority samples keep the normal mapping fresh;
-            # health itself still comes from the production native adapter.
             service.mapping.establish(.01)
             healthy = service._health()
+            response = authority.health(ticket.ticket_id, player_id, 1, healthy=healthy, observed_at=clock.utc())
+            service.release_accepted = response["accepted"]
             service._write_health(healthy)
-            time.sleep(.1)
-            if time.monotonic() - accept_started > 185:
+            watchdog.observe(json.loads(health_path.read_bytes()), clock.monotonic())
+            if clock.monotonic() - accepted_started > 185:
                 raise RuntimeError("acceptance_timeout")
-        accept_thread.join()
-        acceptance_elapsed = time.monotonic() - accept_started
-        if acceptance_elapsed < 30:
-            raise RuntimeError("acceptance_interval_shortened")
-        if accept_result.get("accepted") is not True:
-            raise RuntimeError("trial_not_accepted")
-        state = store._state()
-        selected_after = state.get("selected")
-        if (not state.get("active") or state["active"]["release_id"] != release.release_id
-                or not selected_after or not selected_after.get("accepted")):
-            raise RuntimeError("accepted_state_missing")
-
-        result = {
-            "schema": 1,
-            "result": "passed",
-            "elapsed_seconds": round(time.monotonic() - started, 3),
-            "acceptance_elapsed_seconds": round(acceptance_elapsed, 3),
-            "boot_id": boot_id,
-            "release_id": release.release_id,
-            "native_capacity_before": native_capacity_before,
-            "native_capacity_after": native_capacity_after,
-            "health_before_native_initialization": health_before_native,
-            "health_after_native_initialization": health_after_mapping,
-            "qualification": {
-                "production_native_adapter": True,
-                "central": "synthetic",
-                "rootfs": "synthetic",
-                "physical": False,
-            },
-        }
+            time.sleep(.1)
+        elapsed = clock.monotonic() - accepted_started
+        if signals or elapsed < 30 or authority.inventory()[0]["accepted_release_id"] != ticket.release_id:
+            raise RuntimeError("central_trial_not_accepted")
+        result = dict(schema=2, result="passed", elapsed_seconds=round(time.monotonic() - started, 3),
+            acceptance_elapsed_seconds=round(elapsed, 3), boot_id=boot_id, release_id=ticket.release_id,
+            native_capacity_before=native_capacity_before, native_capacity_after=renderer.capacity(()).available,
+            health_before_native_initialization=health_before_native, health_after_native_initialization=service._health(),
+            qualification=dict(production_native_adapter=True, central="real PostgreSQL release domain",
+                transport="in-process fixture", rootfs="synthetic", physical=False))
         if report_path is not None:
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
         return result
-
-    # Kept outside the TemporaryDirectory scope only to make cleanup explicit
-    # in the face of an acceptance thread or native constructor failure.
 
 
 def main() -> int:

@@ -1,212 +1,50 @@
 # Runnable MVP delivery checklist
 
-Objective: one review-ready PR against `mcurcio/photo-wall`; do not merge. [Draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) is open from `feat/runnable-mvp` to `main` and will receive verified benchmark updates. All requirements remain authoritative. Unchecked means incomplete or unverified.
+Objective: make [draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) reviewable without merging it. Unchecked items remain required acceptance gates.
 
-## Current state (2026-09-06 integration benchmarks)
+## Stateless-Player refactor
 
-- [x] Read repository guidance and all canonical documents; main clean at `ae44c77`.
-- [x] Fetch origin and isolate `feat/runnable-mvp` worktree; preserve original checkout.
-- [x] Resolve initial time/outage/reboot semantics before schemas/storage in [decision 0001](decisions/0001-mvp-time-recovery-and-module-contracts.md).
-- [x] Integrate initial independent requirements, contract and registry reviews; fix scoped material findings. Full architecture/integrated correctness reviews remain required.
-- [x] Versioned contracts and initial deterministic clock/cache/Runtime/Planner fault tests.
-- [x] Clean-checkout dependency install, central/worker/database image builds and healthy startup; complete 494-test suite on committed `dda8e98`.
-- [x] PostgreSQL migrations, central application/media worker, clean-checkout launch, operator configuration and health; authenticated browser walkthrough remains separate.
-- [x] Network enrollment, separate admin authority, persistent Frames/Outputs/retirement; automatic physical PXE discovery remains below.
-- [x] Preview/commit/revert calibration, two Outputs and a second Player are covered by service and demo integration; physical display qualification remains separate.
-- [x] Runtime nested Scenes, fixed roles, independent overlay/calendar boundary, current position reveal, recording Actuators.
-- [x] Pure rolling Planner, hard compatibility, locked exact assets, readiness/capacity/commit separation, with PostgreSQL/recording-Player integration.
-- [x] Pinned real Immich/query, evolving candidates during ongoing Run, bounded preparation/delivery; full two-Player/three-Output network demo passed with simulated actuation.
-- [x] Single-process Python Player networking, cache/sync/execution, embedded GStreamer/GTK integration and ordinary continuity; native full-image and physical rendering remain separate.
-- [x] Restart/download/deletion/cache/outage/rejoin fault matrix and scoped update/rollback contracts are tested, including actual Linux systemd acceptance/recovery scenarios; actual image rollback remains pending.
-- [x] Common Pi 5 image and PXE tree built; revision/config/package manifest/checksum retained outside Git.
-- [x] Boot-test the checksum-identified appliance artifact in the generic ARM64 VM: hosted enrollment, power-cycle identity and central recovery passed at `1eb16ef` and the later hosted exact-image run; physical/native gates remain separate.
-- [ ] Authenticated operator browser walkthrough, including configuration and calibration.
-- [ ] Native initialization and sustained-health acceptance on the exact hosted image; committed native media and actual automatic image rollback.
-- [ ] Physical fresh PXE registration, replacement, dual Output rendering, continuity, visible coordination.
-- [x] Real Immich v2.5.6 adapter fixture with Player-to-Immich DNS and numeric access blocked. Complete worker-to-renderer integration remains a separate gate.
-- [x] Reproducible CI and full-media demo workflows with retained setup/build/run/test/recovery instructions; standard checks for `3f88b33` passed. Hosted native/rollback qualification remains incomplete.
-- [ ] Final independent correctness review and verification on final code revision.
-- [ ] Publish/update single PR and acceptance evidence; keep draft until gates pass.
+- [x] Preserve earlier evidence and the latest failed-clock report as dated historical records.
+- [x] Make PostgreSQL, release records, equipment bindings, and queue state central-only.
+- [x] Add transaction-bound Installation and Media interfaces; remove coordination cross-domain table access and private-method calls.
+- [x] Add shared typed release, enrollment, time, and execution-outcome models.
+- [x] Use Psycopg connection pooling and Import Linter contracts.
+- [x] Exclude central, media, appliance, PostgreSQL, Procrastinate, and SQLite dependencies from the Player package.
+- [x] Replace retained Player identity, database, execution journal, update slots, and persistent health gates with fresh-session enrollment and central epochs.
+- [x] Make the cache a bounded in-memory index over optional temporary files; validate complete size and digest before reuse.
+- [x] Preserve central secured selections across Player restart while requiring fresh-session readiness and commitments.
+- [x] Move immutable release, accepted/candidate, boot attempt, trial consumption, health, promotion, and rollback selection authority into PostgreSQL.
+- [x] Remove the local A/B/PWSTATE implementation and emit a boot-only disk plus PXE tree.
+- [x] Replace the custom worker dispatcher, retry timing, polling, and heartbeat loops with Procrastinate 3.9.0 using caller-owned PostgreSQL transactions.
+- [x] Separate authenticated `/v1/player/time` probes from state delivery and expose RTT, offset, delay, drift, and rejection diagnostics.
+- [x] Centralize container build policy and explicitly select the daemon `default` builder with `--load` for locally loaded parents.
+- [x] Trial GStreamer GL behind the Renderer boundary. Required GL factories are absent from the current image closure, so retain the existing GTK3/appsink renderer pending physical evidence.
+- [x] Add [decision 0006](decisions/0006-central-authority-and-stateless-players.md) and update current architecture, execution, Player, provisioning, release, queue, demo, validation, and runbook documents.
 
-## External dependencies requested early
+## Automated verification on the working tree
 
-Asked user for two Pi 5 Players, two panels on one Pi, control of a PXE LAN, remote execution and visual capture; no bench details available yet. Docker Desktop runs the central/worker/PostgreSQL and isolated real Immich fixture. Public image pulls use an isolated empty Docker client configuration without changing saved credentials. An isolated external scratch directory has sufficient space for image construction. GitHub authentication works; explicit user authorization resolved the automatic push-approval gate, and draft PR #2 is open. Feature-branch pushes and PR updates are authorized; main is protected and merging requires the owner. Repository license and security-reporting contact remain owner decisions before a code release.
+- [x] Full PostgreSQL-backed suite: 982 passed, 11 explicit platform skips, four dependency deprecation warnings.
+- [x] Demo harness suite: 57 passed.
+- [x] Ruff, Import Linter, documentation-link validation, bytecode compilation, and diff integrity pass.
+- [x] Release tests cover immutable registration, default/candidate selection, transactional once-only trials, duplicate request idempotency, central restart, stale health rejection, session binding, promotion, and accepted fallback.
+- [x] Player tests cover empty cache, valid survivor reuse, deletion/corruption recovery, fresh credentials, higher epochs, old-session rejection, control outage continuity, clock gates, and exact media delivery.
+- [x] Queue tests cover atomic domain-request/defer commit and rollback, bounded Procrastinate retries, publication recovery, reservations, and stale-attempt fencing.
+- [x] Image harness tests require a boot-only disk, central tickets, volatile health, candidate watchdog reboot, and centrally selected fallback.
+- [x] Candidate bootstrap requires an initramfs-armed nowayout hardware watchdog; systemd takes it over and pre-root failures force reboot.
 
-Earlier bounded Spark work, including the full-demo evidence review, remains valid. Spark is not listed by the current collaboration runtime, and an earlier Spark initialization remains pending. Current bounded leaves use the disclosed Luna fallback; this is not a quota report. Keep integrated design and correctness with a capable owner until it is available again.
+## Final-revision acceptance
 
-## Verified core benchmark
+- [ ] Commit the final refactor revision and build its exact Player wheelhouse, central image, worker image, signed appliance image, and PXE tree.
+- [ ] Rerun the complete two-Player/three-Output demo on that revision. The current harness refuses uncommitted or mismatched inputs.
+- [ ] Complete the authenticated operator-browser walkthrough, including binding and calibration.
+- [ ] Boot the exact image without a writable Player volume and with an empty cache; recover recognized equipment bindings, acquire assets, and render committed content.
+- [ ] Restart the Player process and machine; prove fresh epochs, old-session rejection, current authority reconstruction, and valid-file reuse without a media request.
+- [ ] Delete and corrupt cached files; prove reacquisition without reenrollment or a changed centrally secured selection.
+- [ ] Prove duplicate boot request handling, failed-candidate automatic reboot, consumed trial evidence, and centrally selected accepted fallback on the exact image.
+- [ ] Qualify physical Pi PXE enrollment, recognized-equipment recovery, explicit replacement binding, dual HDMI, running-process continuity, resource use, and visible coordination.
+- [ ] Complete independent final architecture/correctness review and publish evidence tied to the final revision.
+- [ ] Keep PR #2 draft until every required acceptance item above passes.
 
-- 494 core tests passed together, including real PostgreSQL and a loopback TCP HTTP/WebSocket Player session. Active appliance implementation files were excluded explicitly. Four dependency deprecation warnings remain.
-- Central and media worker launch together with healthy PostgreSQL, persistent media storage and private upstream configuration. Operator Source/Scene/Program/Run forms and worker/source health are implemented; API workflow tests pass. Full authenticated browser walkthrough remains pending explicit approval after automatic approval review rejected the disposable localhost token.
-- Runtime snapshot recovery, nested Scenes, Program rollover, current-state recording Actuator reveal, required cue membership/deadlines, exact secured assets and current-authority readiness/commit/revocation have regression coverage.
-- Single-process Player networking, identity, cache integrity/reacquisition, bounded transfers, clock gating, actual draw acknowledgments and outage/rejoin are integrated with a RecordingRenderer. Native Linux smoke separately verifies JPEG/PNG/H.264, seek, composition/calibration and two distinct Weston outputs. Physical DRM/HDMI and live hotplug remain unqualified.
-- Real Immich fixture verifies evolving query results, eight EXIF orientations, permission loss, deletion, outage/recovery, exact originals and network isolation. All 55 preparation tests also pass inside the pinned Trixie Linux worker image, including rotated video and Linux resource limits.
-- Signed upstream Ubuntu base download is verified. Player-only offline packaging and the signed A/B slot store now have separate tested benchmarks: 64 packaging tests plus an actual ARM64 install, and 62 updater/Release tests plus a root-owned Linux staging/fallback smoke. The final signed image and common PXE tree have verified checksums; subsequent hosted exact-image evidence records generic-VM boot qualification for the later image line, while physical qualification remains pending.
+## Evidence policy
 
-See [the core benchmark evidence](evidence/2026-09-05-core-benchmark.md) for its commands, identities and limits.
-
-## Current acceptance checkpoints
-
-The [full wall evidence](evidence/2026-09-05-full-wall.md) records the current
-core/Player revision `1ec354e` full-media pass with **410 final
-Readiness-to-Commit checks**. Exact secured deletion is now bound to the
-selected Player, epoch, Output, assignment, Run and variant bytes. The command
-uses simulated actuation and Outputs; native full-image and physical rendering
-remain separate gates. The latest corrected harness validation recorded
-**865 passed / 15 explicit skips / 4 dependency warnings** at the latest
-`387d2e2` harness revision; detailed historical
-attempts and limits remain in the dated evidence.
-
-The signed checkpoint at source `073f57d` has a matching Player-only bundle,
-authenticated image/PXE identities and **138 actual Linux appliance checks**;
-see [appliance image evidence](evidence/2026-09-05-appliance-image.md). Hosted
-run 34020566014 then built and booted the exact signed image from the later
-`d9f656b` source line: assembly took **10m13s versus 22m33s cold**, and generic
-VM enrollment, power-cycle identity and central rejoin passed. See the
-[hosted image evidence](evidence/2026-09-05-github-image.md#second-hosted-exact-image-boot-pass).
-
-Run 34023366287 built, reopened and boot-tested the exact signed image for
-`1ec354e` after **9m18s** assembly, about **59% less** than the recorded 22m33s
-cold assembly, and published the image and e2e report artifacts. All five
-generic-VM checks passed; healthy-trial acceptance, native rendering, physical
-Pi/PXE, HDMI and automatic rollback remain false. Standard checks run
-34024871867 for `387d2e2` also passed **824 tests / 56 explicit skips / 4
-warnings**, followed by **55 pinned Linux media tests**. Its redundant image
-run 34024871863 was canceled after the native-trial revision queued; that change
-contained only demo/evidence files. It supplies no image qualification.
-
-Five actual Linux systemd acceptance/recovery scenarios pass with production
-30/180-second health timing and a recorded recovery action. Actual image
-rollback, native healthy-trial acceptance and physical qualification remain
-separate; see [update-service evidence](evidence/2026-09-06-systemd-updates.md)
-and [health evidence](evidence/2026-09-06-central-health.md).
-
-The remaining acceptance gates are an authenticated operator browser
-walkthrough, full-image native health, actual image rollback, fresh physical
-Pi PXE/registration/replacement, dual HDMI continuity and visible
-coordination, final independent review, and release-owner decisions. The PR
-remains draft.
-
-## Evidence rules
-
-Put dated command/revision/result records in `docs/evidence/`. Label each simulated, integration, or physical. A test filename or manifest is not proof it ran. No physical Pi image/boot result exists yet. Never commit credentials, private media, binary images, or unsanitized private server responses.
-
-## Subsequent review and native-health checkpoint
-
-The final integrated core review found a Player-restart content-lock defect:
-epoch rotation could reroll secured bytes after a source change. The
-[correction](evidence/2026-09-06-restart-content.md) preserves exact historical
-content under unchanged binding authority while requiring fresh-epoch
-readiness/commitments; 22 focused coordination checks passed and independent
-review found no residual issue in that scope. The older full-media pass is
-not relabeled as a pass for this new core revision.
-
-A [native-health adapter run](evidence/2026-09-06-native-health.md) passed
-production 30-second trial acceptance after 30.437s using real GTK/GStreamer
-capacity and Player-generated health, with synthetic authority and rootfs.
-Full-image native acceptance, actual rollback, authenticated browser QA and
-physical qualification remain open.
-
-
-## Virtual graphics and native trial gate under verification
-
-The next image gate uses a real virtual DRM device, stock Player connector
-integration, and generic GPU modules loaded before entering the signed root.
-The production acceptance CLI emits a boot-bound event only after its normal
-health gate. A pass now also requires that promotion to survive the real VM
-power cycle as the same accepted, non-trial slot A. Native media presentation,
-automatic rollback and physical fields remain false.
-
-Local validation passed **883 tests / 15 explicit platform or opt-in skips /
-four dependency warnings in 104.48 seconds**, including the preceding 112
-focused updater/VM checks (one Linux-root-only skip). The retained Linux builder
-confirmed the real `6.8.0-139-generic` GPU closure (`virtio_gpu`,
-`virtio_dma_buf`) and QEMU's `max_outputs` option. These are preparation checks;
-no hosted native-trial pass is claimed. The ownership-separated connector and
-module changes received bounded independent review. Full final review remains
-required after hosted verification.
-
-Standard CI at `afff7b1` (run 34025872485) passed **842 tests / 56 skips /
-four warnings in 58.15 seconds**, plus **55 Linux media tests in 164.89 seconds**.
-Its image run 34025872502 completed cold assembly in **21m20s**, enrolled its
-Player and then failed native acceptance at the service time limit. No
-native-trial pass is claimed. A subsequent four-boot rollback gate
-reuses the prepared root for one signed failed
-candidate, stages through the production CLI, and requires the production
-recovery service's actual fallback reboot. Hosted rollback remains unqualified.
-The [rollback preparation checkpoint](evidence/2026-09-06-vm-rollback.md) passed
-924 PostgreSQL-backed tests (15 skips/four warnings) and 160 final focused tests
-(one Linux-root skip), with bounded independent reviews. The candidate adds
-one compression pass while reusing extraction, packages and Player packaging.
-
-Run 34027456271 then built both signed roots in **11m57s**, with a verified
-7.68-second base-cache restoration and 155.535-second candidate preparation.
-It was canceled after assembly because the superseded acceptance code could
-promote stale health after a slow verification. A regression reproduced that
-defect against the old source. The corrected ordering verifies first and then
-observes fresh health under the same lock; **930 tests / 15 skips / four warnings**
-and **131 focused tests / six platform or opt-in skips** pass. Separate
-verification limits and public phase diagnostics preserve the original
-30-second continuous-health and 180-second health-deadline requirements.
-Current hosted acceptance and rollback remain pending.
-The corrected source also passed all five actual Linux/systemd adapter scenarios
-in 216.70 seconds and bounded independent updater review. The recovery action
-was a marker; it does not close the actual image-reboot gate.
-
-## Media-gate and CI decomposition checkpoint
-
-Checkpoint `4ed7a95` makes the exact-image gate require a real Immich photo,
-committed native drawing, and preserved converted bytes after restart and
-rollback. Its [local preparation evidence](evidence/2026-09-06-vm-media.md)
-records 1,001 PostgreSQL-backed tests, final 51 focused checks, real HTTPS
-operator/worker preparation with a simulated Player, and read-only tiny
-filesystem checks. None qualifies a native full-image drawing.
-
-[Standard CI 34031354659](https://github.com/mcurcio/photo-wall/actions/runs/34031354659)
-passed **963 tests / 56 explicit skips / four warnings in 64.10s** plus **55
-Linux media tests in 153.80s**. The parallel jobs started at 11:49:53 UTC and
-finished at 11:51:58 and 11:53:13 UTC: 3m20s elapsed. The preceding parallel
-benchmark was 3m05s versus 5m12s serial. Separate caches and loaded-image reuse
-remain active; every revision still runs both suites.
-
-The [26ee139 hosted failure](evidence/2026-09-06-vm-rollback.md#hosted-acceptance-failure-at-26ee139)
-enrolled durably, then failed native trial acceptance. Hosted native/rollback
-qualification remains open. The current media-gate image run is independent
-and has not yet qualified.
-
-## Current fixture and cache-evidence checkpoint
-
-At `c5e6073`, [standard checks](https://github.com/mcurcio/photo-wall/actions/runs/34032886077)
-passed **1,004 tests / 56 explicit skips / four warnings**, plus **55 Linux media
-tests**, in 3m23s overall. The [current image run](https://github.com/mcurcio/photo-wall/actions/runs/34032885905)
-assembled both signed roots in **11m09s** and began exact-artifact e2e; its
-qualification remains pending at this checkpoint.
-
-[Independent media-gate review](evidence/2026-09-06-vm-media.md#independent-cache-gate-correction)
-closed a P2 by preventing media re-download from hiding cache loss after restart
-or rollback. The fixture also explicitly uses the daemon builder for its loaded
-parent image. The [latest bounded native bridge](evidence/2026-09-06-vm-media.md#bounded-native-and-central-bridge)
-reported healthy capacity and a central grant but obtained no joined native
-presentation. Full-image rendering/rollback, authenticated operator QA,
-physical qualification and final independent acceptance remain unchecked.
-
-An [independent current-source acceptance audit](evidence/2026-09-06-core-acceptance.md) of Frame/calibration/replacement
-and nested/calendar behavior passed **146 tests with actual PostgreSQL, no skips
-and one dependency warning** in 12.34s. It found no concrete implementation
-defect in those scopes. The combined Runtime scenario crosses January 1 under
-an independently activated nested portrait overlay, preserves fixed roles and
-reveals the January Run at position 25; a recording Actuator trace yields
-`0 → 0.8 → 25/60 → 0.5` without projection effects or hidden-cue replay.
-Separate Executor tests cover video reveal at position 32. These are software
-checks and do not establish physical presentation or real Actuator hardware.
-
-The `c5e6073` image subsequently failed sustained-health acceptance after
-fixture setup and durable enrollment passed. Fresh reports alternated healthy
-and unhealthy while Player/Weston stayed active; the [completed result](evidence/2026-09-06-vm-media.md#completed-c5e6073-image-result)
-retains exact identity and all qualification flags false. The subsequent
-[clock-sampling correction](evidence/2026-09-06-player-clock.md) removes
-reproduced local-processing inflation from transport uncertainty and adds a
-fixed health reason without relaxing thresholds. Its offline service suite
-passed 72 tests with one database skip; observer/host checks passed 97 tests.
-Both local-processing regressions fail against the old timing method. Current
-hosted regression and exact-image qualification remain required.
+Earlier dated A/B, durable-identity, and reboot-cache results remain valid only for the revisions and designs they actually exercised. They do not qualify this replacement architecture. New evidence must record the exact revision and artifact hashes, distinguish simulated/VM/physical results, preserve failed attempts, and exclude credentials, private media, raw images, and unbounded private service output.

@@ -40,6 +40,10 @@ def proof(record, **kwargs):
 
 
 def test_exact_photo_has_separate_current_and_commit_readiness_sequences(record):
+    record["observation"]["handling"] = {
+        "planner": "record_observation",
+        "runtime": "record_observation",
+    }
     result = proof(record)
     assert result["sha256"] == "a" * 64
     assert result["readiness_sequence"] == 4

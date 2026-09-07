@@ -353,25 +353,17 @@ linux_tools = pytest.mark.skipif(
 
 
 @linux_tools
-def test_real_fat_ext4_image_and_squashfs_reopen(tmp_path):
+def test_real_stateless_fat_image_and_squashfs_reopen(tmp_path):
     boot = tmp_path / "boot"
     boot.mkdir()
     (boot / "config.txt").write_bytes(b"generated boot configuration\n")
     (boot / "nested").mkdir()
     (boot / "nested/data").write_bytes(b"exact nested bytes")
     output = tmp_path / "common.img"
-    report = create_disk(boot, output, state_mib=64, fat_mib=64, source_epoch=1_700_000_000)
-    assert report["size"] == 129 * MIB
-    first, second = read_mbr(output)
+    report = create_disk(boot, output, fat_mib=64, source_epoch=1_700_000_000)
+    assert report["size"] == 65 * MIB
+    (first,) = read_mbr(output)
     assert run(["mtype", "-i", f"{output}@@{first.start * 512}", "::nested/data"]) == b"exact nested bytes"
-    filesystem = tmp_path / "state.ext4"
-    with output.open("rb") as image, filesystem.open("wb") as fs:
-        image.seek(second.start * 512)
-        fs.write(image.read(second.sectors * 512))
-    marker = run(["debugfs", "-R", "cat /.photo-wall-state-v1", str(filesystem)])
-    assert marker.endswith(b"photo-wall-state-v1\n")
-    listing = run(["debugfs", "-R", "ls -l /", str(filesystem)])
-    assert b"player" not in listing and b"updates" not in listing and b"identity" not in listing
     root = tmp_path / "root"
     root.mkdir()
     (root / "data").write_bytes(b"fixture root content")

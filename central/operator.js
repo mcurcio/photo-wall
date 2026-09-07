@@ -7,7 +7,6 @@ const authored = {source: '', candidates: new Map(), selections: new Map(), inva
 let refreshing = false;
 const errors = {
   unauthorized: 'The token was not accepted. Reconnect with your operator token.',
-  persistent_storage_required: 'This Player needs working persistent storage before binding.',
   source_revision_immutable: 'Use a new source name or revision to change this query.',
   binding_generation_conflict: 'This Frame changed. Refresh and review its binding.',
   calibration_revision_conflict: 'Calibration changed. Refresh and review the saved values.',
@@ -88,7 +87,7 @@ async function refresh() {
   $('players').replaceChildren(table(['Player', 'Outputs', 'State'], state.players.map(player => [
     player.id, state.outputs.filter(output => output.player_id === player.id)
       .map(output => output.output_id + (output.observation.connected ? '' : ' (disconnected)')).join(', '),
-    player.retired_at !== null ? 'Retired' : player.health.storage_fault ? 'Storage fault · unbound only' : 'Registered',
+    player.retired_at !== null ? 'Retired' : 'Registered',
   ])));
   $('frames').replaceChildren(table(['Frame', 'Output', 'Generation', 'Calibration'], state.frames.map(frame => [
     frame.id, frame.player_id ? frame.player_id + ' / ' + frame.output_id : 'Unbound', frame.generation,
@@ -99,7 +98,7 @@ async function refresh() {
   const players = state.players.filter(player => player.retired_at === null);
   options('retire-player', players.map(player => [player.id, player.id]));
   options('bind-output', state.outputs.filter(output => players.some(player =>
-    player.id === output.player_id && !player.health.storage_fault)).map(output => [
+    player.id === output.player_id)).map(output => [
     JSON.stringify([output.player_id, output.output_id]), output.player_id + ' / ' + output.output_id,
   ]));
   loadCalibration();
@@ -124,7 +123,7 @@ async function refreshContent() {
     const health = media.health;
     $('media-health').textContent = 'Stored/reserved: ' + (health.accounted_bytes / 1024 ** 2).toFixed(1) +
       ' MiB · Quota: ' + (health.max_bytes / 1024 ** 2).toFixed(0) + ' MiB · Worker: ' +
-      (health.worker_seen ? date(health.worker_seen) : 'Awaiting first heartbeat') +
+      (health.worker_seen ? 'initialized ' + date(health.worker_seen) : 'Awaiting initialization') +
       (health.worker_error ? ' · ' + health.worker_error : '');
     $('sources').replaceChildren(table(['Source', 'Status', 'Valid assets', 'Last success', 'Details'], media.sources.map(source => [
       source.source_ref, source.status, source.counts.valid || 0,

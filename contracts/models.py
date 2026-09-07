@@ -135,6 +135,15 @@ class PlayerConfiguration(Model):
         return self
 
 
+class PlayerTime(Model):
+    """Small authenticated clock sample, independent of control-state delivery."""
+
+    protocol: Literal[1] = 1
+    player_id: Identifier
+    authority_epoch: int = Field(ge=1)
+    server_time: Instant
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier

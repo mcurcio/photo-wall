@@ -1,65 +1,22 @@
 """Real upstream/native-media extension of the exact-artifact VM gate.
 
 Boot and update authority remain in ApplianceE2E. This module owns only its
-disposable upstream fixture, operator photo scenario and offline cache probes.
+disposable upstream fixture, operator photo scenario and current-session reacquisition evidence.
 """
 
 from __future__ import annotations
 
 import datetime
-import hashlib
 import json
 import re
 import time
 from pathlib import Path
 
-from appliance.bootstrap import MARKER
 from media.worker import load_connections
 from scripts.boot_fixture import FixtureError, read_file, require, write_json
 from scripts.immich_fixture import FixtureHost
 
 MEDIA_TIMEOUT = 420
-CACHE_TIMEOUT = 300
-DELIVERY_MARKER = r'''
-import os, stat, sys
-path = '/fixture-control/media-blocked'
-expected = b'photo-wall-ci-media-blocked-v1\n'
-if sys.argv[1] == 'create':
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        os.write(fd, expected)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    fd = os.open('/fixture-control', os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-try:
-    info = os.fstat(fd)
-    if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == 10001
-            and stat.S_IMODE(info.st_mode) == 0o600 and os.read(fd, 128) == expected):
-        raise ValueError('media_marker_invalid')
-finally:
-    os.close(fd)
-print('media-blocked')
-'''
-DELIVERY_PROBE = r'''
-import ssl, sys, urllib.error, urllib.request
-client = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-    urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile='/public/ca.pem')))
-try:
-    client.open('https://photo-wall.test/v1/media/' + sys.argv[1], timeout=5)
-except urllib.error.HTTPError as error:
-    if not (error.code == 503 and error.headers.get('X-Photo-Wall-Fixture') == 'media-blocked'
-            and error.read(128) == b'{"error":"fixture_media_blocked"}'):
-        raise ValueError('media_denial_invalid')
-else:
-    raise RuntimeError('media_delivery_open')
-print('media-blocked')
-'''
 DENIAL_PROBE = """
 import json, socket, sys
 try:
@@ -84,7 +41,6 @@ class ApplianceMedia:
         self.upstream = None
         self.setup = None
         self.photo = None
-        self.cache_probe = None
 
     def prepare(self) -> tuple[dict, Path]:
         h = self.harness
@@ -123,28 +79,10 @@ class ApplianceMedia:
         require(re.fullmatch(r"[a-f0-9]{64}", network_id) is not None, "upstream_network_identity")
         self.upstream_ip = upstream_ip
         h.report["media"] = dict(worker_image=self.worker_image, upstream=initialized,
-                                  upstream_inventory=inventory, presentations={}, cache={})
+                                  upstream_inventory=inventory, presentations={}, rehydration={})
         h.report["media_setup_phase"] = "ready"
         return dict(worker_image=self.worker_image, upstream_project=self.upstream.project,
                     upstream_network_id=network_id, delivery_control=True), private
-
-    def _delivery_denial(self, create: bool):
-        h = self.harness
-        central = h.fixture_central()
-        worker = h.fixture.project + "-worker"
-        h.fixture.check(h.fixture.resources["container:" + worker])
-        h.fixture.check(h.fixture.resources["volume:" + h.fixture.project + "-media-control"])
-        require(h.run(["docker", "exec", worker, "python", "-c", DELIVERY_MARKER,
-                       "create" if create else "verify"], timeout=15).strip() == b"media-blocked",
-                "media_delivery_marker_invalid")
-        digest = h.report["media"]["presentations"]["fresh"]["sha256"]
-        require(h.run(["docker", "exec", central, "python", "-c", DELIVERY_PROBE, digest],
-                      timeout=15).strip() == b"media-blocked", "media_delivery_not_blocked")
-
-    def block_delivery(self):
-        require(not self.harness.checked_vm()["Running"], "media_block_requires_stopped_vm")
-        self._delivery_denial(True)
-        self.harness.report["media"]["delivery_blocked_after_first_acquisition"] = True
 
     def probe(self, action: str, player: dict, *args: str) -> dict:
         h = self.harness
@@ -164,8 +102,6 @@ class ApplianceMedia:
 
     def wait_presentation(self, label: str, player: dict):
         h = self.harness
-        if label != "fresh":
-            self._delivery_denial(False)
         deadline = time.monotonic() + MEDIA_TIMEOUT
         expected = h.report["media"]["presentations"].get("fresh", {}).get("sha256")
         args = ["--output-id", self.setup["output_id"], "--original-sha256", self.photo["sha256"]]
@@ -198,18 +134,10 @@ class ApplianceMedia:
                         and (expected is None or proof["sha256"] == expected), "media_evidence_mismatch")
                 h.report["media"]["presentations"][label] = proof
                 if label != "fresh":
-                    self._delivery_denial(False)
+                    self.verify_rehydration(label, proof)
                 return proof
             time.sleep(2)
         raise FixtureError("native_photo_presentation_timeout")
-
-    def _probe_identity(self):
-        h = self.harness
-        record = self.cache_probe
-        result = h.run(["docker", "inspect", "--format",
-            '{{.Id}}\n{{.Image}}\n{{index .Config.Labels "org.photo-wall.cache-evidence"}}',
-            record["name"]], timeout=20).decode().splitlines()
-        require(result == [record["id"], h.builder_image, h.name], "cache_probe_identity_changed")
 
     def network_denial(self, label: str):
         """Test the VM's outer egress namespace, without giving upstream data to its Player."""
@@ -231,55 +159,23 @@ class ApplianceMedia:
         require(result == dict(dns_denied=True, numeric_tcp_denied=True), "vm_egress_reaches_upstream")
         h.report["media"].setdefault("vm_egress_namespace_denial", {})[label] = result
 
-    def cleanup_probe(self):
-        if self.cache_probe is not None:
-            self._probe_identity()
-            self.harness.run(["docker", "rm", "-f", self.cache_probe["id"]], timeout=30)
-            self.cache_probe = None
+    def verify_rehydration(self, label: str, proof: dict):
+        from scripts.test_appliance_e2e import serial_records
+        from scripts.vm_cache_evidence import rehydration
 
-    def verify_cache(self, label: str):
         h = self.harness
-        require(not h.checked_vm()["Running"], "cache_probe_requires_stopped_vm")
-        proof = h.report["media"]["presentations"]["fresh"]
-        directory = h.state / "vm"
-        source = read_file(Path(__file__).with_name("vm_cache_evidence.py"), 65536)
-        helper = directory / "cache-evidence.py"
-        if not helper.exists():
-            with helper.open("xb") as stream:
-                stream.write(source)
-            helper.chmod(0o400)
-        require(read_file(helper, 65536) == source, "cache_probe_source_changed")
-        name = h.name + "-cache"
-        args = ["docker", "create", "--name", name,
-            "--label", "org.photo-wall.cache-evidence=" + h.name,
-            "--network", "none", "--read-only", "--cap-drop", "ALL",
-            "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE",
-            "--security-opt", "no-new-privileges:true", "--memory", "2g", "--cpus", "1",
-            "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g",
-            "--tmpfs", "/var/tmp:rw,nosuid,nodev,size=1g",
-            "--env", "LIBGUESTFS_CACHEDIR=/tmp", "--env", "LIBGUESTFS_TMPDIR=/tmp",
-            "--env", "TMPDIR=/tmp",
-            "--mount", f"type=bind,src={h.inputs['disk']},dst=/input.img,readonly",
-            "--mount", f"type=bind,src={directory},dst=/vm,readonly",
-            h.builder_image, "python3.12", "/vm/cache-evidence.py",
-            "--overlay", "/vm/disk.qcow2", "--sha256", proof["sha256"], "--size", str(proof["size"]),
-            "--state-marker-hex", MARKER.hex()]
-        identifier = h.run(args, timeout=30).decode().strip()
-        self.cache_probe = dict(name=name, id=identifier)
-        write_json(h.state / "cache-probe-resource.json", self.cache_probe)
-        try:
-            self._probe_identity()
-            result = json.loads(h.run(["docker", "start", "-a", identifier], timeout=CACHE_TIMEOUT))
-            require(result == dict(schema=1, sha256=proof["sha256"], size=proof["size"], verified=True),
-                    "cache_evidence_mismatch")
-            h.report["media"]["cache"][label] = dict(result,
-                probe_sha256=hashlib.sha256(source).hexdigest())
-        finally:
-            self.cleanup_probe()
+        logs = h.run(["docker", "logs", "--since", h.boot_started_at, "--tail", "10000",
+                      h.fixture_central()], timeout=20).decode(errors="replace")
+        expected = dict(event="photo-wall-fixture-media-delivery", sha256=proof["sha256"],
+                        player_id=proof["player_id"], authority_epoch=proof["authority_epoch"])
+        delivered = any(value == expected for value in serial_records(logs))
+        value = rehydration(h.report["media"]["presentations"]["fresh"], proof,
+                            h.report["boots"][0], h.report["boots"][-1], delivery_observed=delivered)
+        h.report["media"]["rehydration"][label] = value
 
     def down(self):
         errors = []
-        for callback in (self.cleanup_probe, self.upstream.cleanup if self.upstream else None):
+        for callback in (self.upstream.cleanup if self.upstream else None,):
             if callback is not None:
                 try:
                     callback()

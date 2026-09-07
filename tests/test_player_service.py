@@ -6,21 +6,22 @@ import contextlib
 import hashlib
 import inspect
 import json
+import math
 import stat
 from concurrent.futures import Future
-from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
 from test_executor import binding, layer
 
 from contracts.enrollment import Enrollment, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
-from contracts.time import ManualClock
+from contracts.release import BootRequest
+from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.output_discovery import (
     CONFIGURED_OUTPUT_IDS,
@@ -31,6 +32,7 @@ from player.output_discovery import (
 from player.rendering import CapacityResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
+    BootContext,
     GLibDispatcher,
     PlayerConfig,
     PlayerService,
@@ -57,47 +59,31 @@ def private_dir(path):
     return path
 
 
-def test_identity_is_durable_private_and_signed_without_storing_token(tmp_path):
+def boot_context() -> BootContext:
+    return BootContext.model_validate({
+        "schema": 2,
+        "ticket_id": "a" * 48,
+        "device_id": "device-" + "b" * 64,
+        "boot_id": "12345678-1234-1234-1234-123456789abc",
+        "release_id": "c" * 64,
+        "trial": False,
+        "persistence": "volatile",
+        "fault": None,
+    })
+
+
+def test_identity_is_fresh_signed_and_never_written(tmp_path):
     state = private_dir(tmp_path / "state")
-    first, second = load_identity(state), load_identity(state)
-    assert first.persistence == second.persistence == "durable"
-    assert first.public_key == second.public_key
-    assert stat.S_IMODE((state / "identity.key").stat().st_mode) == 0o600
-    assert len((state / "identity.key").read_bytes()) == 32
-    proof = first.enrollment("f" * 64, ())
+    first, second = load_identity(), load_identity()
+    assert first.public_key != second.public_key
+    context = boot_context()
+    fields = dict(device_id=context.device_id, boot_id=context.boot_id,
+                  ticket_id=context.ticket_id)
+    proof = first.enrollment("f" * 64, (), **fields)
     Ed25519PublicKey.from_public_bytes(bytes.fromhex(first.public_key)).verify(
-        base64.b64decode(proof.signature), enrollment_message(proof.nonce, (), "durable"))
-    assert sorted(p.name for p in state.iterdir()) == ["identity.key"]
+        base64.b64decode(proof.signature), enrollment_message(proof.nonce, (), **fields))
+    assert not list(state.iterdir())
     assert "_key=" not in repr(first)
-
-
-@pytest.mark.parametrize("fault", ["missing", "directory_mode", "key_mode", "corrupt", "symlink", "directory_symlink"])
-def test_identity_storage_failure_preserves_existing_key(tmp_path, fault):
-    state = private_dir(tmp_path / "state")
-    key = state / "identity.key"
-    if fault == "missing":
-        state.rmdir()
-    elif fault == "directory_mode":
-        state.chmod(0o755)
-    elif fault in ("key_mode", "corrupt"):
-        key.write_bytes(b"bad" if fault == "corrupt" else b"x" * 32)
-        key.chmod(0o600 if fault == "corrupt" else 0o644)
-    elif fault == "symlink":
-        target = tmp_path / "target"
-        target.write_bytes(b"unchanged")
-        key.symlink_to(target)
-    else:
-        link = tmp_path / "link"
-        link.symlink_to(state, target_is_directory=True)
-        state = link
-    before = key.read_bytes() if key.exists() else None
-    identity = load_identity(state)
-    assert identity.persistence == "volatile" and identity.fault == "identity_storage"
-    assert identity.enrollment("a" * 64, ()).persistence == "volatile"
-    if before is not None:
-        assert key.read_bytes() == before
-    else:
-        assert not key.exists()
 
 
 @pytest.mark.parametrize("origin", ["http://central", "https://user:secret@central", "https://central/path",
@@ -105,17 +91,17 @@ def test_identity_storage_failure_preserves_existing_key(tmp_path, fault):
     "https://central:bad", "https://central:0", "https://central\n"])
 def test_config_rejects_untrusted_or_non_origin_urls(tmp_path, origin):
     with pytest.raises(ValidationError):
-        PlayerConfig(central_origin=origin, state_dir=str(tmp_path))
+        PlayerConfig(central_origin=origin)
 
 
 def test_config_is_strict_bounded_public_json(tmp_path):
     path = tmp_path / "public.json"
     path.write_text(json.dumps({"schema": 1, "central_origin": "https://central:8443/",
-                              "state_dir": str(tmp_path), "cache_bytes": 1048576}))
+                              "cache_dir": str(tmp_path), "cache_bytes": 1048576}))
     assert load_config(path).central_origin == "https://central:8443/"
     for data in ({"unexpected": True}, {"cache_bytes": "1048576"}, {"allow_http": "false"}):
         with pytest.raises(ValidationError):
-            PlayerConfig.model_validate({"central_origin": "https://central", "state_dir": str(tmp_path), **data})
+            PlayerConfig.model_validate({"central_origin": "https://central", **data})
     path.write_bytes(b" " * (MAX_JSON + 1))
     with pytest.raises(ServiceError, match="body_limit"):
         load_config(path)
@@ -198,6 +184,8 @@ class Server:
         self.state = None
         self.data = b"picture"
         self.media_response = None
+        self.time_epoch = None
+        self.time_offset = 0
 
     def __call__(self, request):
         self.requests.append(request)
@@ -208,13 +196,23 @@ class Server:
             proof = Enrollment.model_validate_json(request.content)
             self.proofs.append(proof)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(proof.public_key)).verify(
-                base64.b64decode(proof.signature), enrollment_message(proof.nonce, proof.outputs, proof.persistence))
+                base64.b64decode(proof.signature), enrollment_message(
+                    proof.nonce, proof.outputs, proof.device_id, proof.boot_id, proof.ticket_id
+                ))
             self.epoch += 1
-            self.player_id = "p-" + hashlib.sha256(bytes.fromhex(proof.public_key)).hexdigest()[:32]
+            self.player_id = "p-" + hashlib.sha256(proof.device_id.encode()).hexdigest()[:32]
             return httpx.Response(200, json={"player_id": self.player_id,
                 "authority_epoch": self.epoch, "token": str(self.epoch) * 32})
+        if path == "/v1/player/time":
+            return httpx.Response(200, json={
+                "player_id": self.player_id,
+                "authority_epoch": self.time_epoch or self.epoch,
+                "server_time": self.clock.utc() + self.time_offset,
+            })
         if path == "/v1/player/state":
             return httpx.Response(200, json=self.state.model_dump(mode="json"))
+        if path == "/v1/player/boot-health":
+            return httpx.Response(200, json={"accepted": True, "release_id": "c" * 64})
         if path.startswith("/v1/media/"):
             return self.media_response or httpx.Response(200, content=self.data,
                 headers={"Content-Type": "image/png", "Content-Length": str(len(self.data))})
@@ -228,29 +226,33 @@ class Server:
             valid_until=300, bindings=configuration.bindings,
             layers=(layer(data=self.data),) if layers is None else layers)
         self.state = State(configuration=configuration, plan=None if absent else plan,
-            commits=commits, revocations=revocations, server_time=self.clock.utc())
+            commits=commits, revocations=revocations)
         return self.state
 
 
-async def rig(tmp_path, *, volatile=False, server=None):
-    directory = private_dir(tmp_path / "state")
-    if volatile:
-        directory.chmod(0o755)
+async def rig(tmp_path, *, server=None):
+    directory = tmp_path / "cache"
+    directory.mkdir(mode=0o700, exist_ok=True)
     clock = ManualClock(100)
     server = server or Server(clock)
-    config = PlayerConfig(central_origin="http://central", allow_http=True, state_dir=str(directory),
+    config = PlayerConfig(central_origin="http://central", allow_http=True, cache_dir=str(directory),
                           cache_bytes=1024**2)
     client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-    service = PlayerService(config, load_identity(directory), (), RecordingRenderer(), immediate,
-        clock=clock, client=client, websocket_connect=False, health_path=None)
+    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+        clock=clock, client=client, time_client=client, websocket_connect=False,
+        health_path=None, boot_context=boot_context())
     await service.enroll()
+    await service.probe_time()
     server.offer()
     await service.poll_state()
     return service, server
 
 
 async def close(service):
-    await service.client.aclose()
+    if service.time_client is not None and service.time_client is not service.client:
+        await service.time_client.aclose()
+    if service.client is not None:
+        await service.client.aclose()
     if service.cache:
         service.cache.close()
     service._worker.shutdown(wait=True, cancel_futures=True)
@@ -286,15 +288,39 @@ def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path
     asyncio.run(check())
 
 
-def test_volatile_registration_never_constructs_cache_or_accepts_execution(tmp_path):
+def test_valid_surviving_cache_is_verified_before_any_media_request(tmp_path):
     async def check():
-        service, server = await rig(tmp_path, volatile=True)
+        first, server = await rig(tmp_path)
+        first_key = first.identity.public_key
+        old_state = server.state
+        first._feedback()
+        assert await first.download(first._jobs[0])
+        await close(first)
+
+        restarted, server = await rig(tmp_path, server=server)
         try:
-            assert server.proofs[0].persistence == "volatile"
-            assert service.executor is service.cache is None
-            assert not (Path(service.config.state_dir) / "cache").exists()
-            assert service._feedback() == (None, ())
-            assert not service._health()
+            assert restarted.identity.public_key != first_key
+            assert restarted.registration.authority_epoch == 2
+            with pytest.raises(ServiceError, match="state_authority"):
+                restarted._apply_state(old_state)
+            restarted._feedback()
+            server.requests.clear()
+            assert await restarted.download(restarted._jobs[0])
+            assert all(not request.url.path.startswith("/v1/media/")
+                       for request in server.requests)
+            assert restarted._feedback()[0].secured == ("picture",)
+        finally:
+            await close(restarted)
+    asyncio.run(check())
+
+
+def test_volatile_registration_constructs_only_disposable_execution_state(tmp_path):
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            assert service.executor is not None and service.cache is not None
+            assert server.proofs[0].device_id == boot_context().device_id
+            assert {path.name for path in tmp_path.iterdir()} == {"cache"}
         finally:
             await close(service)
     asyncio.run(check())
@@ -306,15 +332,38 @@ def test_same_key_reenrollment_rotates_authority_and_rejects_old_jobs(tmp_path):
         try:
             service._feedback()
             old_job, old_state = service._jobs[0], server.state
+            service.release_accepted = True
             await service.enroll()
             server.offer()
             await service.poll_state()
             assert server.proofs[0].public_key == server.proofs[1].public_key
             assert service.registration.authority_epoch == 2
+            assert service.release_accepted is False
             assert not service._authorized(old_job)
             with pytest.raises(ServiceError, match="state_authority"):
                 service._apply_state(old_state)
         finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_boot_health_ack_must_match_boot_release(tmp_path):
+    async def check():
+        service, server = await rig(tmp_path)
+        old_client = service.client
+
+        def wrong_release(request):
+            if request.url.path == "/v1/player/boot-health":
+                return httpx.Response(200, json={"accepted": True, "release_id": "d" * 64})
+            return server(request)
+
+        service.client = httpx.AsyncClient(transport=httpx.MockTransport(wrong_release))
+        try:
+            with pytest.raises(ServiceError, match="release_mismatch"):
+                await service._report_boot_health(True)
+            assert service.release_accepted is False
+        finally:
+            await old_client.aclose()
             await close(service)
     asyncio.run(check())
 
@@ -448,13 +497,13 @@ def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
         try:
             service._feedback()
             assert await service.download(service._jobs[0])
-            server.state = server.state.model_copy(update={"server_time": 110})
-            await service.poll_state()
+            server.time_offset = 10
+            assert not await service.probe_time()
             readiness, _ = service._feedback()
             assert not readiness.prepared and not service._health()
-            assert readiness.clock_uncertainty == 10
-            server.offer()
-            await service.poll_state()
+            assert service.mapping.diagnostics.status == "uncertainty"
+            server.time_offset = 0
+            assert await service.probe_time()
             assert service.mapping.healthy()
         finally:
             await close(service)
@@ -462,9 +511,9 @@ def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
 
 
 @pytest.mark.parametrize("stage", ["json", "schema"])
-@pytest.mark.parametrize("delay,healthy", [(.2, True), (1.1, False)])
-def test_clock_transport_sample_excludes_local_parsing_but_bounds_its_age(
-        tmp_path, monkeypatch, stage, delay, healthy):
+@pytest.mark.parametrize("delay", [.2, 1.1])
+def test_slow_state_parsing_does_not_change_independent_clock_mapping(
+        tmp_path, monkeypatch, stage, delay):
     async def check():
         from player import service as module
         service, _ = await rig(tmp_path)
@@ -477,8 +526,8 @@ def test_clock_transport_sample_excludes_local_parsing_but_bounds_its_age(
                 return parsed
             monkeypatch.setattr(owner, attribute, delayed)
             await service.poll_state()
-            assert service.mapping.healthy() is healthy
-            assert service.mapping.uncertainty == (0 if healthy else 86400)
+            assert service.mapping.healthy()
+            assert service.mapping.uncertainty == 0
         finally:
             await close(service)
     asyncio.run(check())
@@ -489,19 +538,21 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
         service, server = await rig(tmp_path)
         class DelayedBody(httpx.AsyncByteStream):
             async def __aiter__(self):
-                body = server.state.model_dump_json().encode()
+                body = json.dumps({"player_id": server.player_id,
+                                   "authority_epoch": 1, "server_time": 100}).encode()
                 yield body[:20]
                 service.clock.advance(.2)
                 yield body[20:]
         def respond(request):
-            assert request.method == "GET" and request.url.path == "/v1/player/state"
+            assert request.method == "GET" and request.url.path == "/v1/player/time"
             return httpx.Response(200, headers={"Content-Type": "application/json"},
                                   stream=DelayedBody())
         try:
-            await service.client.aclose()
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-            await service.poll_state()
-            assert service.mapping.uncertainty == pytest.approx(.2)
+            service.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            assert not await service.probe_time()
+            assert service.mapping.uncertainty == math.inf
+            assert service.mapping.diagnostics.uncertainty == pytest.approx(.2)
+            assert service.mapping.diagnostics.status == "uncertainty"
             assert not service.mapping.healthy()
         finally:
             await close(service)
@@ -527,12 +578,52 @@ def test_clock_receipt_sample_rejects_stale_dispatch_and_post_receipt_step(tmp_p
                     service.clock.step_utc(.02)
                     return parsed
                 monkeypatch.setattr(module, "_json", parse)
-            await service.poll_state()
-            assert service.mapping.uncertainty == 86400
+            await service.probe_time()
+            assert service.mapping.uncertainty == math.inf
             assert not service.mapping.healthy()
+            assert service.mapping.diagnostics.status == {
+                "dispatch_delay": "apply_age", "parse_clock_step": "apply_drift"
+            }[fault]
         finally:
             await close(service)
     asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    ("reason", "changes"),
+    [
+        ("player_mismatch", {"sample_player_id": "wrong"}),
+        ("stale_epoch", {"sample_epoch": 2}),
+        ("transport_time", {"received_monotonic": -1}),
+        ("transport_drift", {"received_utc": 100.02}),
+        ("uncertainty", {"server_time": 101}),
+        ("apply_age", {"applied_utc": 102, "applied_monotonic": 2}),
+        ("apply_drift", {"applied_utc": 100.02}),
+    ],
+)
+def test_clock_probe_rejection_reasons_are_exact(reason, changes):
+    clock = ManualClock(100)
+    mapping = TimeMapping(clock)
+    values = dict(sample_epoch=1, authority_epoch=1, server_time=100,
+                  sent_utc=100, sent_monotonic=0, received_utc=100,
+                  received_monotonic=0, applied_utc=100, applied_monotonic=0)
+    values.update(changes)
+    assert not mapping.apply_probe(**values)
+    assert mapping.diagnostics.status == reason
+    assert mapping.diagnostics.samples == mapping.diagnostics.rejected == 1
+
+
+@pytest.mark.parametrize("reason", ["mapping_age", "clock_step"])
+def test_established_mapping_reports_runtime_rejection(reason):
+    clock = ManualClock(100)
+    mapping = TimeMapping(clock)
+    mapping.establish(0)
+    if reason == "mapping_age":
+        clock.advance(31)
+    else:
+        clock.step_utc(.3)
+    assert not mapping.healthy()
+    assert mapping.diagnostics.status == reason
 
 
 def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
@@ -565,6 +656,8 @@ def test_health_has_boot_authority_and_no_secrets(tmp_path):
             assert body["healthy"] and body["authority_epoch"] == 1
             assert body["health_reason"] == "healthy"
             assert body["sampled_monotonic"] == 0 and body["boot_id"] == service.boot_id
+            assert body["persistence"] == "volatile"
+            assert body["clock"]["status"] == "healthy"
             assert "token" not in body and "public_key" not in body
             assert stat.S_IMODE(service.health_path.stat().st_mode) == 0o600
             service._write_health(False)
@@ -579,7 +672,7 @@ def test_health_has_boot_authority_and_no_secrets(tmp_path):
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("reason", ["executor", "identity", "configuration", "clock",
+@pytest.mark.parametrize("reason", ["executor", "configuration", "clock",
                                     "renderer_capacity", "healthy"])
 def test_health_reason_preserves_gate_order_and_single_evaluation(tmp_path, monkeypatch, reason):
     async def check():
@@ -596,12 +689,10 @@ def test_health_reason_preserves_gate_order_and_single_evaluation(tmp_path, monk
             monkeypatch.setattr(service.renderer, "capacity", capacity)
             if reason == "executor":
                 service.executor = None
-            if reason in {"executor", "identity"}:
-                service.identity = replace(service.identity, persistence="volatile")
-            if reason in {"executor", "identity", "configuration"}:
+            if reason in {"executor", "configuration"}:
                 service._configuration = None
             assert service._health_status() == (reason == "healthy", reason)
-            expected = ([] if reason in {"executor", "identity", "configuration"}
+            expected = ([] if reason in {"executor", "configuration"}
                         else ["clock"] if reason == "clock" else ["clock", "renderer_capacity"])
             assert calls == expected
             calls.clear()
@@ -629,8 +720,8 @@ def test_health_writer_rejects_inconsistent_or_unbounded_reasons(tmp_path, healt
 
 
 @pytest.mark.parametrize("reason", ["healthy", "clock"])
-def test_control_writes_one_consistent_health_sample_consumed_by_vm_probe(tmp_path, monkeypatch, reason):
-    from scripts.vm_health_probe import sample_once
+def test_control_writes_one_consistent_health_sample_with_clock_diagnostics(
+        tmp_path, monkeypatch, reason):
     async def check():
         service, _ = await rig(tmp_path)
         try:
@@ -647,14 +738,12 @@ def test_control_writes_one_consistent_health_sample_consumed_by_vm_probe(tmp_pa
             monkeypatch.setattr(service, "_health_status", status)
             await service._control_loop()
             assert calls == [reason]
-            value = sample_once(1, service.boot_id, service.clock.monotonic(),
-                report_reader=lambda: json.loads(service.health_path.read_text()),
-                systemctl_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
-                socket_state=lambda: "present")
-            assert value["report_status"] == "present"
+            value = json.loads(service.health_path.read_text())
             assert value["health_reason"] == reason
             assert value["healthy"] is (reason == "healthy")
-            assert value["identity_valid"] and value["current_boot"] and value["sample_age"] == "fresh"
+            assert value["persistence"] == "volatile"
+            assert value["clock"]["status"] == "healthy"
+            assert value["clock"]["accepted"] >= 1
         finally:
             await close(service)
     asyncio.run(check())
@@ -665,53 +754,23 @@ def test_health_default_is_player_private_path():
     assert default == Path("/run/photo-wall/player/service-health.json")
 
 
-def test_existing_identity_on_unwritable_volume_reuses_key_but_reports_volatile(tmp_path, monkeypatch):
-    directory = private_dir(tmp_path / "state")
-    first = load_identity(directory)
-    original = (directory / "identity.key").read_bytes()
-    def fail(_):
-        raise OSError("read-only filesystem")
-    monkeypatch.setattr("player.identity._probe_storage", fail)
-    second = load_identity(directory)
-    assert second.public_key == first.public_key
-    assert second.persistence == "volatile"
-    assert (directory / "identity.key").read_bytes() == original
-
-
-def test_cache_initialization_failure_reenrolls_same_key_as_volatile(tmp_path):
+def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_path):
     async def check():
         directory = private_dir(tmp_path / "state")
         clock = ManualClock(100)
         server = Server(clock)
         def fail(*_):
             raise OSError("full volume")
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server))
         service = PlayerService(PlayerConfig(central_origin="http://central", allow_http=True,
-            state_dir=str(directory)), load_identity(directory), (), RecordingRenderer(), immediate,
-            clock=clock, client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
-            cache_factory=fail, health_path=None)
+            cache_dir=str(directory)), load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, cache_factory=fail, health_path=None,
+            boot_context=boot_context())
         try:
-            with pytest.raises(ServiceError, match="identity_storage"):
+            with pytest.raises(ServiceError, match="player_initialization"):
                 await service.enroll()
             assert service.cache is service.executor is service.registration is None
-            await service.enroll()
-            assert [proof.persistence for proof in server.proofs] == ["durable", "volatile"]
-            assert server.proofs[0].public_key == server.proofs[1].public_key
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_delayed_glib_clock_sample_is_unhealthy(tmp_path):
-    async def check():
-        service, server = await rig(tmp_path)
-        try:
-            sample = (.01, service.clock.utc(), service.clock.monotonic())
-            service.clock.advance(2)
-            service._apply_state(server.state, sample)
-            assert not service.mapping.healthy()
-            server.offer(revision=2)
-            await service.poll_state()
-            assert service.mapping.healthy()
+            assert len(server.proofs) == 1
         finally:
             await close(service)
     asyncio.run(check())
@@ -803,6 +862,7 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
             return result
         await service.client.aclose()
         service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.time_client = service.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -830,6 +890,7 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
             return httpx.Response(403, json={"error": "retired_player"})
         await service.client.aclose()
         service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.time_client = service.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -899,7 +960,8 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     from media.models import SourceSpec
 
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
-        max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000))
+        max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
+        queue=RecordingMediaQueue())
     repository.set_recipe(RECIPE)
     storage = MediaStore(repository, tmp_path / "central-media")
     with storage.worker_lock():
@@ -909,7 +971,13 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             conn.execute("UPDATE media_sources SET status='ok'")
             conn.execute("INSERT INTO source_members VALUES('library:1',%s)", (lease.asset.asset_id,))
         storage.publish(lease, prepared)
-    app = create_app(registry.db, registry.clock, ADMIN, media_root=storage.root)
+    app = create_app(
+        registry.db,
+        registry.clock,
+        ADMIN,
+        media_root=storage.root,
+        release_authority=registry.release_authority,
+    )
     unavailable = False
 
     @app.middleware("http")
@@ -932,16 +1000,28 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
 
     async def check():
         nonlocal unavailable
-        state_dir = private_dir(tmp_path / "player-state")
+        cache_dir = private_dir(tmp_path / "player-cache")
+        boot_id = "12345678-1234-1234-1234-123456789abc"
+        device_id = "device-" + "d" * 64
+        ticket = registry.release_authority.select_boot(
+            BootRequest(device_id, boot_id, "a" * 48)
+        )
+        context = BootContext.model_validate({
+            "schema": 2, "device_id": device_id, "boot_id": boot_id,
+            "ticket_id": ticket.ticket_id, "release_id": ticket.release_id,
+            "trial": ticket.trial, "persistence": "volatile", "fault": None,
+        })
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
         service = PlayerService(PlayerConfig(central_origin=origin, allow_http=True,
-            state_dir=str(state_dir)), load_identity(state_dir),
+            cache_dir=str(cache_dir)), load_identity(),
             (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
-            RecordingRenderer(), immediate, clock=registry.clock, client=client, health_path=None)
+            RecordingRenderer(), immediate, clock=registry.clock, client=client,
+            time_client=client, health_path=None, boot_context=context)
         socket_task = None
         try:
             await service.enroll()
             registered = service.registration
+            await service.probe_time()
             await service.poll_state()
             assert service._plan is None
             frame(registry, "portrait")

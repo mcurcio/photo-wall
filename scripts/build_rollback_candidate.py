@@ -159,7 +159,7 @@ def _write_exclusive(path: Path, payload: bytes, mode: int = 0o644) -> None:
 
 
 def prepare(root: Path, base_bundle: Path, destination: Path) -> dict:
-    """Create a private A/B rollback candidate from a prepared configured root."""
+    """Create a private rollback candidate from a prepared configured root."""
     root = Path(root)
     base_bundle = Path(base_bundle)
     destination = Path(destination)
@@ -235,11 +235,11 @@ def prepare(root: Path, base_bundle: Path, destination: Path) -> dict:
             "configuration_sha256": config,
             "fault_path": FAULT_PATH,
             "content_sha256": fault_hash,
-            "slots": {
-                "A": {"release_id": base.release_id,
+            "releases": {
+                "accepted": {"release_id": base.release_id,
                       "rootfs_sha256": base.rootfs_sha256,
                       "rootfs_size": base.rootfs_size},
-                "B": {"release_id": candidate.release_id,
+                "candidate": {"release_id": candidate.release_id,
                       "rootfs_sha256": candidate.rootfs_sha256,
                       "rootfs_size": candidate.rootfs_size},
             },

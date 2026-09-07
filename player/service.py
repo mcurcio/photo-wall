@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import math
@@ -18,7 +17,7 @@ import tempfile
 import threading
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urlsplit
@@ -29,12 +28,14 @@ from pydantic import ConfigDict, Field, model_validator
 from contracts.enrollment import OutputReport
 from contracts.models import (
     Commit,
+    Digest,
     Instant,
     Layer,
     Model,
     Observation,
     Plan,
     PlayerConfiguration,
+    PlayerTime,
     Revocation,
 )
 from contracts.time import Clock, SystemClock, TimeMapping
@@ -67,7 +68,10 @@ class PlayerConfig(Model):
     schema_version: Literal[1] = Field(default=1, alias="schema")
     central_origin: str = Field(max_length=2048)
     ca_file: str | None = Field(default=None, max_length=4096)
-    state_dir: str = Field(max_length=4096)
+    cache_dir: str | None = Field(default=None, max_length=4096)
+    boot_context_file: str = Field(
+        default="/run/photo-wall/boot.json", min_length=1, max_length=4096
+    )
     cache_bytes: int = Field(default=512 * 1024**2, ge=1024**2, le=1024**4)
     decoder_limit: int = Field(default=4, ge=1, le=16)
     texture_budget: int = Field(default=512 * 1024**2, ge=1024**2, le=4 * 1024**3)
@@ -86,8 +90,10 @@ class PlayerConfig(Model):
             valid = False
         if not valid or (parsed.scheme == "http" and not self.allow_http):
             raise ValueError("one trusted HTTPS origin required")
-        if not Path(self.state_dir).is_absolute():
-            raise ValueError("absolute state directory required")
+        if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
+            raise ValueError("absolute cache directory required")
+        if not Path(self.boot_context_file).is_absolute():
+            raise ValueError("absolute boot context path required")
         if self.ca_file is not None and not Path(self.ca_file).is_absolute():
             raise ValueError("absolute public CA path required")
         return self
@@ -125,7 +131,29 @@ class State(Model):
     plan: Plan | None
     commits: tuple[Commit, ...] = Field(max_length=1024)
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
-    server_time: Instant
+
+
+class BootContext(Model):
+    schema_version: Literal[2] = Field(alias="schema")
+    ticket_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    device_id: str = Field(pattern=r"^device-[a-f0-9]{64}$")
+    boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
+    release_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    trial: bool
+    persistence: Literal["volatile"]
+    fault: None = None
+
+
+class BootHealthResponse(Model):
+    accepted: bool
+    release_id: Digest | None = None
+    reason: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
+
+    @model_validator(mode="after")
+    def accepted_release(self):
+        if self.accepted and self.release_id is None:
+            raise ValueError("accepted health requires a release")
+        return self
 
 
 class Registration(Model):
@@ -137,6 +165,11 @@ class Registration(Model):
 class Challenge(Model):
     nonce: str = Field(pattern=r"^[a-f0-9]{64}$")
     expires_at: Instant
+
+
+def load_boot_context(path: Path) -> BootContext:
+    with path.open("rb") as stream:
+        return BootContext.model_validate(_json(stream.read(MAX_JSON + 1)))
 
 
 @dataclass(frozen=True)
@@ -208,14 +241,17 @@ class PlayerService:
     def __init__(self, config: PlayerConfig, identity: Identity,
                  outputs: tuple[OutputReport, ...], renderer: Renderer, dispatcher: Callable,
                  *, clock: Clock | None = None, client: httpx.AsyncClient | None = None,
+                 time_client: httpx.AsyncClient | None = None,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
-                 boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id")):
+                 boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
+                 boot_context: BootContext | None = None):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.client = client
+        self.time_client = time_client
         self.websocket_connect = websocket_connect
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
         self.health_path = health_path
@@ -225,9 +261,11 @@ class PlayerService:
             self.boot_id = boot_id if re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", boot_id) else None
         except OSError:
             self.boot_id = None
+        self.boot_context = boot_context
         self.cache = None
         self.executor = None
         self.registration: Registration | None = None
+        self.release_accepted = False
         self._owner = threading.get_ident()
         self._lock = threading.RLock()
         self._plan: Plan | None = None
@@ -244,7 +282,7 @@ class PlayerService:
         self._thread = None
         self._loop = None
         self._task = None
-        self.last_fault: str | None = identity.fault
+        self.last_fault: str | None = None
 
     def fault(self, code: str):
         if self.last_fault != code:
@@ -275,9 +313,12 @@ class PlayerService:
         return value
 
     async def _request_with_receipt(self, method: str, path: str, *, body=None,
-                                    authenticated=True) -> tuple[dict, tuple[float, float]]:
+                                    authenticated=True, client=None) -> tuple[dict, tuple[float, float]]:
+        selected_client = client or self.client
+        if selected_client is None:
+            raise ServiceError("client_unavailable")
         async with asyncio.timeout(15):
-            async with self.client.stream(method, self.origin + path, json=body,
+            async with selected_client.stream(method, self.origin + path, json=body,
                     headers=self._headers(authenticated), follow_redirects=False) as response:
                 self._status(response)
                 if response.headers.get("content-encoding", "identity") != "identity":
@@ -317,53 +358,53 @@ class PlayerService:
         return length
 
     async def enroll(self):
+        if self.boot_context is None:
+            raise ServiceError("boot_context")
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
-        enrollment = self.identity.enrollment(challenge.nonce, self.outputs)
+        enrollment = self.identity.enrollment(
+            challenge.nonce,
+            self.outputs,
+            device_id=self.boot_context.device_id,
+            boot_id=self.boot_context.boot_id,
+            ticket_id=self.boot_context.ticket_id,
+        )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
-        expected = "p-" + hashlib.sha256(bytes.fromhex(self.identity.public_key)).hexdigest()[:32]
-        if registered.player_id != expected:
-            raise ServiceError("registration_identity")
         self.registration = registered
+        self.release_accepted = False
         with self._lock:
             self._offered = False
             self._jobs = ()
         self._outgoing.clear()
-        if self.identity.persistence == "durable" and self.executor is None:
+        if self.executor is None:
             try:
                 self.cache = await asyncio.get_running_loop().run_in_executor(self._worker,
-                    lambda: self.cache_factory(Path(self.config.state_dir) / "cache", self.config.cache_bytes))
+                    lambda: self.cache_factory(
+                        Path(self.config.cache_dir) if self.config.cache_dir else None,
+                        self.config.cache_bytes,
+                    ))
 
                 def create():
                     self._main()
                     self.executor = self.executor_factory(registered.player_id, self.cache,
-                        self.renderer, self.clock, self.mapping,
-                        Path(self.config.state_dir) / "execution.json")
+                        self.renderer, self.clock, self.mapping)
 
                 await self.dispatch(create)
             except Exception as error:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
                 self.cache = self.executor = None
-                # Preserve the same proven public identity; the next enrollment
-                # explicitly withdraws durable storage capability at central.
-                self.identity = replace(self.identity, persistence="volatile", fault="identity_storage")
                 self.registration = None
-                raise ServiceError("identity_storage") from error
+                raise ServiceError("player_initialization") from error
 
-    def _apply_state(self, state: State, sample=None):
+    def _apply_state(self, state: State):
         self._main()
         if self.registration is None or (
             state.configuration.player_id != self.registration.player_id
             or state.configuration.authority_epoch != self.registration.authority_epoch
         ):
             raise ServiceError("state_authority")
-        if sample is not None:
-            uncertainty, utc, mono = sample
-            drift = abs((self.clock.utc() - utc) - (self.clock.monotonic() - mono))
-            age = self.clock.monotonic() - mono
-            self.mapping.establish(uncertainty if drift <= .01 and 0 <= age <= 1 else 86400)
         if self.executor is None:
             return
         with self._lock:
@@ -445,8 +486,6 @@ class PlayerService:
         self._main()
         if self.executor is None:
             return False, "executor"
-        if self.identity.persistence != "durable":
-            return False, "identity"
         if self._configuration is None:
             return False, "configuration"
         if not self.mapping.healthy():
@@ -469,7 +508,9 @@ class PlayerService:
         body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
                     player_id=self.registration.player_id if self.registration else None,
                     authority_epoch=self.registration.authority_epoch if self.registration else None,
-                    persistence=self.identity.persistence, healthy=bool(healthy), health_reason=reason)
+                    persistence="volatile", healthy=bool(healthy), health_reason=reason,
+                    release_accepted=self.release_accepted,
+                    clock=asdict(self.mapping.diagnostics))
         temporary = None
         try:
             # The root-owned /run/photo-wall parent protects boot.json; this
@@ -502,6 +543,15 @@ class PlayerService:
     async def download(self, job: Download) -> bool:
         if not self._authorized(job):
             return False
+        if self.executor is None:
+            return False
+        # Validate reusable local bytes before opening an HTTP stream. The cache has
+        # no durable index, so this check always hashes the exact candidate.
+        cached = await asyncio.get_running_loop().run_in_executor(
+            self._worker, self.executor.resolve_cached, job.layer.assignment_id
+        )
+        if cached:
+            return True
         bridge = _ChunkBridge(lambda: self._authorized(job))
         worker = asyncio.get_running_loop().run_in_executor(self._worker,
             self.executor.acquire, job.layer.assignment_id, bridge.chunks())
@@ -568,22 +618,78 @@ class PlayerService:
             await asyncio.sleep(.1)
 
     async def poll_state(self):
-        before_utc, before_mono = self.clock.utc(), self.clock.monotonic()
-        body, (after_utc, after_mono) = await self._request_with_receipt("GET", "/v1/player/state")
+        body, _ = await self._request_with_receipt("GET", "/v1/player/state")
         state = State.model_validate(body)
-        elapsed = after_mono - before_mono
-        uncertainty = (elapsed / 2 + abs(state.server_time - (before_utc + elapsed / 2)))
-        if (elapsed < 0 or not math.isfinite(uncertainty)
-                or abs((after_utc - before_utc) - elapsed) > .01):
-            uncertainty = 86400
-        await self.dispatch(lambda: self._apply_state(state, (uncertainty, after_utc, after_mono)))
+        await self.dispatch(lambda: self._apply_state(state))
+
+    async def probe_time(self) -> bool:
+        if self.registration is None:
+            raise Unauthorized("not_registered")
+        sent_utc, sent_monotonic = self.clock.utc(), self.clock.monotonic()
+        body, (received_utc, received_monotonic) = await self._request_with_receipt(
+            "GET", "/v1/player/time", client=self.time_client or self.client
+        )
+        sample = PlayerTime.model_validate(body)
+
+        def apply() -> bool:
+            self._main()
+            if self.registration is None:
+                return False
+            return self.mapping.apply_probe(
+                sample_epoch=sample.authority_epoch,
+                authority_epoch=self.registration.authority_epoch,
+                sample_player_id=sample.player_id,
+                player_id=self.registration.player_id,
+                server_time=sample.server_time,
+                sent_utc=sent_utc,
+                sent_monotonic=sent_monotonic,
+                received_utc=received_utc,
+                received_monotonic=received_monotonic,
+                applied_utc=self.clock.utc(),
+                applied_monotonic=self.clock.monotonic(),
+            )
+
+        return await self.dispatch(apply)
+
+    async def _time_loop(self):
+        while not self._stop.is_set():
+            started = asyncio.get_running_loop().time()
+            try:
+                await self.probe_time()
+            except Unauthorized:
+                raise
+            except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
+                self.fault("clock_probe")
+            await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
+
+    async def _report_boot_health(self, healthy: bool) -> None:
+        if self.boot_context is None:
+            raise ServiceError("boot_context")
+        result = BootHealthResponse.model_validate(await self.request(
+            "POST",
+            "/v1/player/boot-health",
+            body={
+                "ticket_id": self.boot_context.ticket_id,
+                "healthy": healthy,
+                "observed_at": self.clock.utc(),
+            },
+        ))
+        if result.accepted:
+            if result.release_id != self.boot_context.release_id:
+                raise ServiceError("release_mismatch")
+            # An unhealthy local sample can never disarm the trial watchdog,
+            # even if the central response were malformed or stale.
+            self.release_accepted = healthy
 
     async def _control_loop(self):
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             await self.poll_state()
             readiness, observations = await self.dispatch(self._feedback)
-            self._write_health(*await self.dispatch(self._health_status))
+            healthy, reason = await self.dispatch(self._health_status)
+            if not self.release_accepted:
+                await self._report_boot_health(healthy)
+            self._write_health(healthy, reason)
             if readiness is not None:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
@@ -633,10 +739,19 @@ class PlayerService:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
         owns_client = self.client is None
+        owns_time_client = self.time_client is None
         if owns_client:
             self.client = httpx.AsyncClient(verify=ssl.create_default_context(cafile=self.config.ca_file),
                 follow_redirects=False, trust_env=False, timeout=15,
                 limits=httpx.Limits(max_connections=4, max_keepalive_connections=2))
+        if owns_time_client:
+            self.time_client = httpx.AsyncClient(
+                verify=ssl.create_default_context(cafile=self.config.ca_file),
+                follow_redirects=False,
+                trust_env=False,
+                timeout=15,
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            )
         attempt = 0
         try:
             while not self._stop.is_set():
@@ -646,9 +761,11 @@ class PlayerService:
                     if self.registration is None:
                         await self.enroll()
                     # Reconnection reconciles authority before any download work.
+                    await self.probe_time()
                     await self.poll_state()
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
+                             asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
                              asyncio.create_task(self._observation_loop())]
                     if self.websocket_connect is not False:
@@ -681,6 +798,8 @@ class PlayerService:
         finally:
             if owns_client:
                 await self.client.aclose()
+            if owns_time_client:
+                await self.time_client.aclose()
             if self.cache is not None:
                 await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
             self._worker.shutdown(wait=True, cancel_futures=True)
@@ -727,7 +846,8 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_config(args.config)
-    identity = load_identity(Path(config.state_dir))
+    identity = load_identity()
+    boot_context = load_boot_context(Path(config.boot_context_file))
     discovery = discover_outputs()
     import gi
     gi.require_version("Gtk", "3.0")
@@ -738,7 +858,7 @@ def main():
     renderer = UnavailableRenderer()
     native_fault = None
     connected_outputs = tuple(output for output in discovery.outputs if output.connected)
-    if identity.persistence == "durable" and connected_outputs:
+    if connected_outputs:
         try:
             renderer = NativeRenderer(tuple(NativeOutput(output.output_id,
                 output_app_id(output.output_id), output.width_px or 1920,
@@ -746,8 +866,15 @@ def main():
                 decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
         except Exception:
             native_fault = "native_initialization"
-    service = PlayerService(config, identity, discovery.outputs, renderer, GLibDispatcher(GLib))
-    for fault in (discovery.fault, native_fault, identity.fault):
+    service = PlayerService(
+        config,
+        identity,
+        discovery.outputs,
+        renderer,
+        GLibDispatcher(GLib),
+        boot_context=boot_context,
+    )
+    for fault in (discovery.fault, native_fault):
         if fault:
             service.fault(fault)
     loop = GLib.MainLoop()

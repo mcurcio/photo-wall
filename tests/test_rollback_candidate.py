@@ -92,9 +92,9 @@ def test_prepare_binds_distinct_ab_candidate_and_restores_root(tmp_path, fake_sq
     assert result["source_revision"] == REVISION
     assert result["source_epoch"] == EPOCH
     assert result["configuration_sha256"] == config
-    assert result["slots"]["A"]["release_id"] == base.release_id
-    assert result["slots"]["B"]["release_id"] != base.release_id
-    assert result["slots"]["B"]["rootfs_sha256"] != base.rootfs_sha256
+    assert result["releases"]["accepted"]["release_id"] == base.release_id
+    assert result["releases"]["candidate"]["release_id"] != base.release_id
+    assert result["releases"]["candidate"]["rootfs_sha256"] != base.rootfs_sha256
     assert (destination / "release.json").is_file()
     assert (destination / "candidate.json").is_file()
     assert not (root / candidate.FAULT_PATH).exists()

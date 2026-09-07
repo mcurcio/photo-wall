@@ -3,9 +3,11 @@
 import uuid
 
 import pytest
+from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
 
 from central.catalog import CatalogSnapshot
+from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
@@ -23,8 +25,9 @@ def result(spec, *assets, status="ok"):
         status=status, candidates=tuple(a.candidate for a in assets)), assets=assets)
 
 
-def setup_repository(registry, *, limits=None, count=1):
-    repo = MediaRepository(registry.db, registry.clock, limits)
+def setup_repository(registry, *, limits=None, count=1, queue=None):
+    repo = MediaRepository(registry.db, registry.clock, limits,
+                           queue=queue or RecordingMediaQueue())
     spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
     repo.configure_source(spec)
     lease = repo.begin_refresh()
@@ -109,6 +112,28 @@ def test_queue_idempotency_limit_and_reservation_pressure_are_transactional(regi
     assert repo.claim_job() is None
     assert repo.health()["accounted_bytes"] == 30
     assert repo.health()["worker_error"] == "storage_pressure"
+
+
+def test_procrastinate_enqueue_rolls_back_with_domain_request(registry):
+    queue = ProcrastinateMediaQueue(registry.db.dsn)
+    queue.apply_schema(registry.db.dsn)
+    limits = StoreLimits(max_jobs=1)
+    repo, _, originals = setup_repository(registry, limits=limits, count=2, queue=queue)
+
+    with pytest.raises(RegistryError, match="job_capacity"):
+        repo.request_acquisitions((request(originals[0]), request(originals[1])))
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM procrastinate_jobs").fetchone()["n"] == 0
+
+    assert repo.request_acquisitions((request(originals[0]),)) == 1
+    with registry.db.transaction() as conn:
+        queued = conn.execute(
+            "SELECT task_name,args FROM procrastinate_jobs"
+        ).fetchone()
+        domain = conn.execute("SELECT id,state FROM media_jobs").fetchone()
+    assert queued == {"task_name": PREPARE_MEDIA_TASK, "args": {"job_id": domain["id"]}}
+    assert domain["state"] == "queued"
 
 
 def test_failed_unsecured_candidate_cooldown_is_not_misreported_as_empty_upstream(registry):

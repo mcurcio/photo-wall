@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
 
 from central.app import create_app
@@ -34,7 +35,7 @@ def refresh(spec, *assets):
 
 
 def setup_source(registry, count=1, *, limits=None, assets=None):
-    repo = MediaRepository(registry.db, registry.clock, limits)
+    repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue())
     spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
     repo.configure_source(spec)
     lease = repo.begin_refresh()
@@ -113,7 +114,7 @@ def test_authored_limit_and_immutable_snapshot(registry):
             conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,1000,1000)",
                          (second.asset_id, Jsonb(second.model_dump(mode="json"))))
             conn.execute("INSERT INTO source_members VALUES(%s,%s)", (spec.source_ref, second.asset_id))
-            repo._refresh_catalog(conn, spec.source_ref, 1000, "ok")
+            repo.refresh_catalog_in(conn, spec.source_ref, 1000, "ok")
         assert client.post("/v1/operator/authored-candidates", headers=headers,
                            json={"source_ref": spec.source_ref, "asset_ids": [second.asset_id]}).json() == {
             "error": "authored_candidate_limit"}

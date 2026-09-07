@@ -16,6 +16,18 @@ Players must be completely Immich-unaware. The central show system supplies all 
 
 This boundary applies to Player software, configuration, protocols, and network access. It does not require stripping embedded metadata from the supplied media bytes.
 
+## Central authority and stateless Players
+
+[Decision 0006](decisions/0006-central-authority-and-stateless-players.md) records the accepted implementation consequences of this boundary.
+
+All durable Photo Wall state belongs to central components. PostgreSQL owns Installation intent, equipment records and bindings, authored/runtime/planning state, secured assignments, execution coordination, media lifecycle and references, and provisioning/release trials. The central task queue is also a PostgreSQL dependency. Player packages must exclude central persistence and queue dependencies.
+
+Players must operate without retained identity, database, execution journal, update slots, or authoritative cache metadata. Each startup creates fresh session credentials; central issues a new authority epoch and sends current configuration and assignments. Old-session grants must be rejected. A cache is optional, bounded, disposable, and untrusted until exact bytes are validated. Cache loss may delay readiness but must not change centrally secured content or equipment enrollment.
+
+On the trusted provisioning LAN, central may use serial/MAC and similar observations to recognize returning equipment. These observations are operational matching data, not cryptographic identity and not permission to overwrite operator intent. Recognized equipment automatically recovers its centrally assigned Frames through fresh enrollment. Unknown equipment remains unbound. Replacement requires an explicit central binding change.
+
+Cold boot requires reachable trusted time, provisioning/release, enrollment, control, and media services. A running Player should preserve already authorized output through a temporary outage within its current authority lease. No playback guarantee applies after a cold reboot without central connectivity.
+
 ## Views and responsibilities
 
 Three complementary views describe the system:
@@ -80,9 +92,9 @@ Scene target groups contain the outputs they affect: Frames and Actuators. Senso
 
 ### Player provisioning
 
-Players must be plug-and-play. In a centrally prepared deployment providing PXE, service discovery, and enrollment trust, a suitable network-boot-capable device receives the common appliance image over PXE, boots, connects automatically, registers, and becomes visible in the central Control Plane. No manual per-device step may be required before that initial appearance. After imaging, the Player needs no local endpoint or credential entry, SSH session, configuration-file edit, or other device-local setup.
+Players must be plug-and-play. In a centrally prepared deployment providing PXE, service discovery, and enrollment trust, a suitable network-boot-capable device receives the common bootstrap over PXE, obtains its centrally selected signed root image, boots it in RAM, creates fresh session credentials, registers, and becomes visible in the central Control Plane. No writable persistent Player volume or manual per-device step may be required before that appearance. The Player needs no local endpoint or credential entry, SSH session, configuration-file edit, or other device-local setup.
 
-Automatic registration and visibility precede Frame binding. They do not require automatic Frame assignment or playback on an unknown device; authorization to serve Frames remains separate. Discovery and trust mechanisms, image construction, and local-versus-network runtime storage remain implementation choices within this automatic provisioning path.
+Automatic registration and visibility precede Frame binding for unknown equipment. Recognized returning equipment receives its existing centrally assigned Frames; an unknown or replacement device receives no automatic Frame authority. Release selection, trial consumption, promotion, and rollback records remain central.
 
 ## Experience model
 
@@ -148,7 +160,7 @@ The central scheduler continually projects upcoming media, Frame assignments, an
 
 Future plans remain revisable. Once an assignment is scheduled and secured by its responsible Players, its content is locked for that execution. If upstream media disappears before acquisition, the scheduler attempts a suitable replacement. A dynamic slideshow can choose another eligible asset; spatially authored behavior needs an appropriate authored alternative or its configured fallback.
 
-Players may retain previously used content for reuse and outage fallback. Cache retention is separate from the preparation horizon, and a long-lived Run does not pin every asset it has used. During central or media-source outages, the system should continue according to explicit local fallback policy. Outage duration and recovery behavior remain open design decisions.
+Players may reuse surviving content-addressed files only after validating them against a current central assignment. Cache retention is separate from the preparation horizon, and a long-lived Run does not pin every asset it has used. Cache loss invalidates readiness and triggers reacquisition without rerolling secured content. During a running-process outage, already authorized output may continue within its lease; cold-boot recovery depends on central services.
 
 ## Run behavior
 
@@ -187,7 +199,7 @@ Fading to black differs from fading out an overlay. Opaque black continues cover
 
 ## Operations and scope
 
-Operational state—including maintenance, blanking, display power, rebooting, and updates—remains distinct from authored content state. Equipment configuration is centrally managed. Players should boot and recover unattended, avoid exposing operating-system UI on Frames, report health, and follow explicit fallback behavior.
+Operational state—including maintenance, blanking, display power, rebooting, and releases—remains distinct from authored content state. Equipment configuration and accepted/candidate release policy are centrally managed. Candidate trials must be consumed before ticket issue, promoted only by fresh health from the matching boot/session, and automatically reboot to a subsequent centrally selected accepted release after failure. Players should recover unattended, avoid exposing operating-system UI on Frames, and report health including clock-probe diagnostics.
 
 Home Assistant/MQTT provides an integration boundary for requests and state. The central wall system remains authoritative for its installation configuration and experience.
 

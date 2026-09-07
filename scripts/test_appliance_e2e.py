@@ -1,21 +1,23 @@
 """Boot the CI-built Pi disk with an explicitly substituted generic ARM64 kernel.
 
-The signed disk is read-only. A private qcow2 overlay is reused across a power
+The signed disk is read-only. All root and cache writes use RAM on every power
 cycle; only the stock Player enrolls. No guest credentials or test Player are
 injected. Native trial acceptance uses the stock Player with virtual DRM;
 the optional real-media fixture also requires native photo presentation and
-populated cache preservation. This cannot qualify Pi firmware or HDMI.
+fresh-session photo reacquisition. This cannot qualify Pi firmware or HDMI.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import hashlib
 import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 from scripts.boot_fixture import (
@@ -38,12 +40,11 @@ BOOT_TIMEOUT = 900
 RECOVERY_TIMEOUT = 120
 TRIAL_TIMEOUT = 540
 STAGE_TIMEOUT = 930
-# Cover the 510s acceptance unit plus 320s recovery unit and observation margin.
+# Cover the 180s watchdog, reboot, and observation margin.
 ROLLBACK_TIMEOUT = 870
 VM_PROCESS_TIMEOUT = 3 * BOOT_TIMEOUT + RECOVERY_TIMEOUT + STAGE_TIMEOUT + ROLLBACK_TIMEOUT + 480
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
-PUBLIC_EVENTS = {"photo-wall-trial-acceptance", "photo-wall-trial-phase",
-                 "photo-wall-stage-trial", "photo-wall-rollback-allowed",
+PUBLIC_EVENTS = {"photo-wall-trial-reboot-requested", "photo-wall-trial-reboot-required",
                  "photo-wall-health-diagnostic"}
 
 # Executed inside the fixture's existing central container. Its credential stays
@@ -60,23 +61,21 @@ with opener.open(request, timeout=5) as response:
     if len(data)>1048576: raise ValueError('inventory_limit')
     body = json.loads(data)
 print(json.dumps([dict(player_id=p['id'],authority_epoch=p['authority_epoch'],
-    persistence=p['health'].get('persistence'),retired=p['retired_at'] is not None)
+    persistence=p['health'].get('persistence'),device_id=p['device_id'],retired=p['retired_at'] is not None)
     for p in body['players']]))
 '''
 
 LAUNCHER = """#!/bin/sh
 set -eu
 umask 077
-if [ ! -e /vm/disk.qcow2 ]; then
-    qemu-img create -f qcow2 -F raw -b /input.img /vm/disk.qcow2
-fi
 exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aarch64 \\
-    -machine virt -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
+    -machine virt -uuid __DEVICE_UUID__ -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
-    -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 systemd.journald.forward_to_console=1' \\
-    -drive file=/vm/disk.qcow2,if=none,format=qcow2,id=state \\
-    -device virtio-blk-pci,drive=state \\
+    -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 watchdog_core.nowayout=1 sbsa_gwdt.nowayout=1 systemd.journald.forward_to_console=1' \\
+    -drive file=/input.img,if=none,format=raw,readonly=on,id=bootstrap \\
+    -device virtio-blk-pci,drive=bootstrap \\
     -device virtio-gpu-pci,max_outputs=2 \\
+    -device sbsa-gwdt \\
     -fsdev local,id=ci,path=/vm/share,security_model=none,readonly=on \\
     -device virtio-9p-pci,fsdev=ci,mount_tag=photo-wall-ci \\
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile= \\
@@ -90,7 +89,7 @@ def timestamp() -> str:
 
 def unqualified() -> dict:
     return dict(generic_vm=False, physical_pi=False, pxe_lan=False,
-                native_rendering=False, healthy_trial=False, automatic_rollback=False)
+                native_rendering=False, central_health=False, healthy_trial=False, automatic_rollback=False)
 
 
 def absolute(path: str) -> Path:
@@ -151,9 +150,9 @@ def checked_inputs(manifest: Path) -> dict:
             and metadata.get("fault_path") == FAULT_PATH
             and metadata.get("content_sha256") == hashlib.sha256(FAULT_CONTENT).hexdigest()
             and candidate.release_id != release.release_id, "candidate_identity_mismatch")
-    for slot, selected in (("A", release), ("B", candidate)):
-        require(metadata["slots"][slot] == dict(release_id=selected.release_id,
-            rootfs_sha256=selected.rootfs_sha256, rootfs_size=selected.rootfs_size), "candidate_slot_mismatch")
+    for role, selected in (("accepted", release), ("candidate", candidate)):
+        require(metadata["releases"][role] == dict(release_id=selected.release_id,
+            rootfs_sha256=selected.rootfs_sha256, rootfs_size=selected.rootfs_size), "candidate_release_mismatch")
     runtime_images = ({name: image_id(data[name + "_image"]) for name in ("central", "builder", "worker")}
                       if data.get("worker_image") else None)
     return dict(source_commit=data["source_commit"], disk=path, disk_record=disk,
@@ -185,15 +184,19 @@ def boot_reports(serial: str, release_id: str | set[str]) -> list[dict]:
             continue
         if report.get("event") in PUBLIC_EVENTS:
             continue
-        require(type(report.get("schema")) is int and report.get("schema") == 1
+        fields = {"schema", "boot_id", "device_id", "ticket_sha256", "release_id", "persistence", "fault", "trial"}
+        require(set(report) == fields and type(report.get("schema")) is int and report["schema"] == 2
                 and report.get("release_id") in releases
-                and report.get("persistence") == "durable" and report.get("fault") is None
-                and report.get("slot") in {"A", "B"} and type(report.get("trial")) is bool
+                and report.get("persistence") == "volatile" and report.get("fault") is None
+                and type(report.get("trial")) is bool
+                and re.fullmatch(r"device-[a-f0-9]{64}", report.get("device_id", "")) is not None
+                and re.fullmatch(r"[a-f0-9]{64}", report.get("ticket_sha256", "")) is not None
                 and re.fullmatch(BOOT_ID, report.get("boot_id", "")) is not None,
                 "guest_boot_report_invalid")
-        if not any(old["boot_id"] == report["boot_id"] for old in result):
-            result.append({key: report[key] for key in
-                           ("schema", "boot_id", "release_id", "persistence", "fault", "slot", "trial")})
+        matching = next((old for old in result if old["boot_id"] == report["boot_id"]), None)
+        require(matching is None or matching == report, "conflicting_boot_report")
+        if matching is None:
+            result.append(report)
     return result
 
 
@@ -209,31 +212,6 @@ def rollback_event(serial: str, expected: dict) -> dict | None:
     return None
 
 
-def trial_acceptance(serial: str, boot_id: str) -> dict | None:
-    """Read only the stock acceptance CLI's bounded, boot-bound public event."""
-    for value in serial_records(serial):
-        if (value.get("event") != "photo-wall-trial-acceptance"
-                or value.get("boot_id") != boot_id):
-            continue
-        require(set(value) == {"event", "boot_id", "accepted"}
-                and type(value["accepted"]) is bool, "invalid_trial_acceptance_event")
-        if value["accepted"]:
-            return value
-    return None
-
-
-def trial_phases(serial: str, boot_id: str) -> list[str]:
-    result = []
-    for value in serial_records(serial):
-        if value.get("event") != "photo-wall-trial-phase" or value.get("boot_id") != boot_id:
-            continue
-        require(set(value) == {"event", "boot_id", "phase"}
-                and value["phase"] in {"verifying", "health"}, "invalid_trial_phase_event")
-        if value["phase"] not in result:
-            result.append(value["phase"])
-    return result
-
-
 def _service_prefix(service: str) -> str:
     return r"(?<![A-Za-z0-9_.@-])" + re.escape(service + ".service") + r": "
 
@@ -244,7 +222,6 @@ def namespace_diagnostics(plain: str, services: tuple[str, ...]) -> dict:
         ("root", "/"), ("home", "/home"), ("root_home", "/root"),
         ("user_runtime", "/run/user"), ("wall_runtime", "/run/user/10001"),
         ("boot_runtime", "/run/photo-wall"), ("player_runtime", "/run/photo-wall/player"),
-        ("state", "/var/lib/photo-wall"), ("player_state", "/var/lib/photo-wall/player"),
         ("tmp", "/tmp"), ("var_tmp", "/var/tmp"), ("modules", "/usr/lib/modules"),
         ("proc", "/proc"), ("proc_sys", "/proc/sys"), ("sys", "/sys"),
         ("cgroup", "/sys/fs/cgroup"),
@@ -308,11 +285,13 @@ def enrollment(rows: list, previous: dict | None = None) -> dict | None:
     require(len(rows) == 1, "unexpected_player_count")
     row = rows[0]
     require(re.fullmatch(r"p-[a-f0-9]{32}", row.get("player_id", "")) is not None
-            and row.get("persistence") == "durable" and row.get("retired") is False
+            and row.get("persistence") == "volatile" and row.get("retired") is False
+            and re.fullmatch(r"device-[a-f0-9]{64}", row.get("device_id", "")) is not None
             and type(row.get("authority_epoch")) is int and row["authority_epoch"] >= 1,
             "invalid_guest_enrollment")
     if previous is not None:
-        require(row["player_id"] == previous["player_id"], "durable_identity_changed")
+        require(row["player_id"] == previous["player_id"] and row["device_id"] == previous["device_id"],
+                "equipment_identity_changed")
         if row["authority_epoch"] <= previous["authority_epoch"]:
             return None
     return row
@@ -334,6 +313,7 @@ class ApplianceE2E:
         self.fixture = None
         self.container_id = None
         self.name = "pw-vm-" + os.urandom(8).hex()
+        self.device_uuid = str(uuid.uuid4())
         self.report = dict(schema=1, status="running", started_at=timestamp(),
             source_commit=inputs["source_commit"], image_sha256=inputs["disk_record"]["sha256"],
             image_size=inputs["disk_record"]["size"], release_id=inputs["release"].release_id,
@@ -351,9 +331,9 @@ class ApplianceE2E:
             qualification=unqualified())
         self.media = None
         if worker_image is not None:
-            from scripts.appliance_media import CACHE_TIMEOUT, MEDIA_TIMEOUT, ApplianceMedia
+            from scripts.appliance_media import MEDIA_TIMEOUT, ApplianceMedia
             self.media = ApplianceMedia(self, worker_image)
-            self.report["deadlines_seconds"].update(media=MEDIA_TIMEOUT, cache=CACHE_TIMEOUT,
+            self.report["deadlines_seconds"].update(media=MEDIA_TIMEOUT,
                 vm_process=VM_PROCESS_TIMEOUT + 2 * MEDIA_TIMEOUT + 60)
 
     def checked_vm(self):
@@ -384,7 +364,6 @@ class ApplianceE2E:
         directory.mkdir(mode=0o700)
         share = directory / "share"
         share.mkdir(mode=0o700)
-        (share / "candidate").mkdir(mode=0o700)
         controller = Path(__file__).with_name("vm_rollback_control.py")
         payload = read_file(controller, 64 * 1024)
         (share / controller.name).write_bytes(payload)
@@ -397,7 +376,7 @@ class ApplianceE2E:
         self.report["health_probe_sha256"] = hashlib.sha256(payload).hexdigest()
         launcher = directory / "launch.sh"
         launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
-                           str(self.report["deadlines_seconds"]["vm_process"])))
+                           str(self.report["deadlines_seconds"]["vm_process"])).replace("__DEVICE_UUID__", self.device_uuid))
         launcher.chmod(0o555)
         args = ["docker", "create", "--name", self.name, "--label", LABEL+"="+self.name,
             "--user", f"{os.geteuid()}:{os.getegid()}", "--read-only", "--cap-drop", "ALL",
@@ -408,7 +387,6 @@ class ApplianceE2E:
             "--mount", f"type=bind,src={self.inputs['disk']},dst=/input.img,readonly",
             "--mount", f"type=bind,src={self.inputs['generic']},dst=/generic,readonly",
             "--mount", f"type=bind,src={directory},dst=/vm",
-            "--mount", f"type=bind,src={self.inputs['candidate_dir']},dst=/vm/share/candidate,readonly",
             "--workdir", "/vm", self.builder_image, "/bin/sh", "/vm/launch.sh"]
         require(all("," not in str(p) for p in (self.inputs["disk"], self.inputs["generic"],
                                                self.inputs["candidate_dir"], directory)),
@@ -417,6 +395,7 @@ class ApplianceE2E:
         write_json(self.state / "vm-resource.json", dict(name=self.name, id=self.container_id,
                                                         image=self.builder_image, label=LABEL))
         self.checked_vm()
+        self.boot_started_at = timestamp()
         self.run(["docker", "start", self.name], timeout=30)
 
     def observe_serial(self, serial: str) -> list[dict]:
@@ -431,26 +410,19 @@ class ApplianceE2E:
                 observed.append(report)
         require(len(observed) <= 4, "unexpected_boot_count")
         self.record_trial_events(serial, observed)
-        accepted = self.report["trial_acceptances"]
         if "candidate" in self.inputs:
-            sequence = ((self.inputs["release"].release_id, "A", True),
-                        (self.inputs["release"].release_id, "A", False),
-                        (self.inputs["candidate"].release_id, "B", True),
-                        (self.inputs["release"].release_id, "A", False))
+            sequence = ((self.inputs["release"].release_id, False),
+                        (self.inputs["release"].release_id, False),
+                        (self.inputs["candidate"].release_id, True),
+                        (self.inputs["release"].release_id, False))
             for boot, expected in zip(observed, sequence):
-                require((boot["release_id"], boot["slot"], boot["trial"]) == expected,
-                        "unexpected_boot_sequence")
-            if len(observed) >= 2:
-                event = rollback_event(serial, dict(event="photo-wall-stage-trial",
-                    boot_id=observed[1]["boot_id"], current_release_id=self.inputs["release"].release_id,
-                    candidate_release_id=self.inputs["candidate"].release_id, slot="B"))
-                if event:
-                    self.report["stage_event"] = event
+                require((boot["release_id"], boot["trial"]) == expected, "unexpected_boot_sequence")
+            require(len({boot["device_id"] for boot in observed}) <= 1, "equipment_identity_changed")
             if len(observed) >= 3:
-                failed_boot = observed[2]["boot_id"]
-                require(failed_boot not in accepted, "failed_candidate_accepted")
-                event = rollback_event(serial, dict(event="photo-wall-rollback-allowed",
-                                                     boot_id=failed_boot, allowed=True))
+                failed = observed[2]
+                event = rollback_event(serial, dict(event="photo-wall-trial-reboot-required",
+                    boot_id=failed["boot_id"], ticket_sha256=failed["ticket_sha256"],
+                    release_id=failed["release_id"], reason="trial_health_timeout"))
                 if event:
                     self.report["recovery_event"] = event
         return observed
@@ -458,15 +430,7 @@ class ApplianceE2E:
     def record_trial_events(self, serial: str, boots: list[dict]):
         from scripts.vm_health_probe import validate_event
 
-        accepted = self.report.setdefault("trial_acceptances", {})
         for boot in boots:
-            event = trial_acceptance(serial, boot["boot_id"])
-            if event:
-                accepted[boot["boot_id"]] = event
-            phases = self.report.setdefault("trial_phases", {}).setdefault(boot["boot_id"], [])
-            for phase in trial_phases(serial, boot["boot_id"]):
-                if phase not in {item["phase"] for item in phases}:
-                    phases.append(dict(phase=phase, observed_at=timestamp()))
             samples = self.report.setdefault("health_diagnostics", {}).setdefault(boot["boot_id"], [])
             seen = {sample["sample_index"] for sample in samples}
             for value in serial_records(serial):
@@ -499,25 +463,34 @@ class ApplianceE2E:
             time.sleep(5)
         raise FixtureError("guest_enrollment_timeout")
 
-    def wait_trial_acceptance(self):
-        boot = self.report["boots"][0]
-        require(boot["slot"] == "A" and boot["trial"] is True, "fresh_boot_not_trial")
+    def release_probe(self, action: str, boot: dict, *extra: str):
+        raw = self.run(["docker", "exec", self.fixture_central(), "python", "-m",
+                       "scripts.vm_release_probe", action, "--device-id", boot["device_id"],
+                       "--boot-id", boot["boot_id"], *extra], timeout=30)
+        value = json.loads(raw)
+        require(value is None or isinstance(value, dict) and "error" not in value, "release_probe_failed")
+        return value
+
+    def boot_evidence(self, boot: dict) -> dict | None:
+        value = self.release_probe("evidence", boot)
+        if value is not None:
+            require(all(value.get(k) == boot[k] for k in
+                    ("boot_id", "device_id", "ticket_sha256", "release_id", "trial")), "central_boot_mismatch")
+        return value
+
+    def wait_central_health(self):
+        boot = self.report["boots"][-1]
         deadline = time.monotonic() + TRIAL_TIMEOUT
         while time.monotonic() < deadline:
-            require(self.checked_vm()["Running"], "vm_stopped_during_trial")
-            serial = self.serial()
-            self.record_trial_events(serial, [boot])
-            event = self.report["trial_acceptances"].get(boot["boot_id"])
-            if event:
-                self.report.setdefault("trial_acceptances", {})[boot["boot_id"]] = event
-                self.report["checks"]["native_healthy_trial_promoted"] = True
+            require(self.checked_vm()["Running"], "vm_stopped_during_health")
+            value = self.boot_evidence(boot)
+            if value and value["current"] and value["status"] == "healthy":
+                require(value["accepted_release_id"] == boot["release_id"], "central_release_not_accepted")
+                self.report.setdefault("central_health", {})[boot["boot_id"]] = value
+                self.report["checks"]["native_healthy_boot_accepted"] = True
                 return
-            # This is the first A boot only. A terminal acceptance-service
-            # failure cannot become success by waiting out the host deadline.
-            require("photo-wall-accept-trial" not in serial_diagnostics(serial)["failed_services"],
-                    "native_trial_service_failed")
             time.sleep(3)
-        raise FixtureError("native_trial_acceptance_timeout")
+        raise FixtureError("native_central_health_timeout")
 
     def wait_player_requests(self, since: str):
         deadline = time.monotonic() + RECOVERY_TIMEOUT
@@ -550,34 +523,40 @@ class ApplianceE2E:
     def exercise_rollback(self, previous: dict):
         require(len(self.report["boots"]) == 2, "rollback_requires_accepted_restart")
         boot = self.report["boots"][1]
-        require(boot["slot"] == "A" and boot["trial"] is False, "rollback_requires_accepted_restart")
-        print(json.dumps({"phase": "signed_candidate_stage", "status": "started"}), flush=True)
-        control = dict(schema=1, action="stage-trial", current={key: boot[key] for key in
-                       ("boot_id", "release_id", "slot")},
-                       candidate=dict(release_id=self.inputs["candidate"].release_id))
+        require(boot["trial"] is False, "rollback_requires_accepted_restart")
+        candidate = self.inputs["candidate"]
+        manifest = read_file(self.inputs["candidate_dir"] / "release.json", MAX_MANIFEST_BYTES)
+        signature = read_file(self.inputs["candidate_dir"] / "release.sig", 64)
+        staged = self.release_probe("stage", boot, "--manifest", base64.b64encode(manifest).decode(),
+                                    "--signature", base64.b64encode(signature).decode())
+        require(staged == dict(staged=True, release_id=candidate.release_id), "candidate_stage_mismatch")
+        self.report["checks"]["signed_candidate_staged_centrally"] = True
+        control = dict(schema=2, action="reboot-for-trial", current={key: boot[key] for key in
+                       ("boot_id", "device_id", "ticket_sha256", "release_id")},
+                       candidate=dict(release_id=candidate.release_id))
+        self.boot_started_at = timestamp()
         write_json(self.state / "vm/share/control.json", control)
-        self.wait_rollback_evidence(lambda: "stage_event" in self.report,
-                                   timeout=STAGE_TIMEOUT, failure="candidate_staging_timeout")
-        self.report["checks"]["signed_candidate_staged"] = True
-        print(json.dumps({"phase": "signed_candidate_stage", "status": "passed"}), flush=True)
         self.wait_rollback_evidence(lambda: len(self.report["observed_boot_reports"]) >= 3,
                                    timeout=BOOT_TIMEOUT, failure="candidate_boot_timeout")
-        self.report["boots"].append(self.report["observed_boot_reports"][2])
+        trial = self.report["observed_boot_reports"][2]
+        self.report["boots"].append(trial)
         self.report["checks"]["signed_candidate_trial_booted"] = True
-        print(json.dumps({"phase": "production_rollback", "status": "started"}), flush=True)
         self.wait_rollback_evidence(lambda: "recovery_event" in self.report,
                                    timeout=ROLLBACK_TIMEOUT, failure="production_recovery_timeout")
-        # One deadline covers both fallback boot evidence and its enrollment.
-        # A2/B/A3 share one QEMU process budget covering all three boot waits,
-        # staging and recovery, with extra media waits and command margin.
         restored = self.wait_enrollment(previous)
         require(len(self.report["observed_boot_reports"]) == 4
                 and self.report["boots"][-1] == self.report["observed_boot_reports"][3],
                 "fallback_enrollment_boot_mismatch")
+        failed = self.boot_evidence(trial)
+        fallback = self.boot_evidence(self.report["boots"][-1])
+        require(failed is not None and failed["status"] == "failed" and not failed["current"]
+                and fallback is not None and fallback["current"]
+                and fallback["accepted_release_id"] == self.inputs["release"].release_id,
+                "central_rollback_unproven")
+        self.report["central_failed_trial"] = failed
         self.report["fallback_enrollment"] = restored
         self.report["checks"]["production_automatic_rollback"] = True
-        self.report["checks"]["identity_survives_rollback"] = True
-        print(json.dumps({"phase": "production_rollback", "status": "passed"}), flush=True)
+        self.report["checks"]["equipment_reenrolls_after_rollback"] = True
 
     def execute(self):
         print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
@@ -587,7 +566,8 @@ class ApplianceE2E:
             specification, connections = media.prepare()
             options = dict(media=specification, connections_file=connections)
         self.fixture = BootFixture.prepare(self.state / "services", self.inputs["bundle"],
-                                          self.inputs["deployment"], self.central_image, **options)
+                                          self.inputs["deployment"], self.central_image,
+                                          candidate_bundle=self.inputs["candidate_dir"], **options)
         self.fixture.up()
         self.report["checks"]["signed_https_dns_ntp"] = True
         require(self.inventory() == [], "fixture_not_empty")
@@ -595,10 +575,10 @@ class ApplianceE2E:
         self.start_vm()
         first = self.wait_enrollment()
         self.report["first_enrollment"] = first
-        self.report["checks"]["fresh_durable_enrollment"] = True
+        self.report["checks"]["fresh_stateless_enrollment"] = True
         print(json.dumps({"phase": "fresh_boot", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "native_trial", "status": "started"}), flush=True)
-        self.wait_trial_acceptance()
+        self.wait_central_health()
         print(json.dumps({"phase": "native_trial", "status": "passed"}), flush=True)
         if media:
             print(json.dumps({"phase": "native_photo", "status": "started"}), flush=True)
@@ -610,16 +590,13 @@ class ApplianceE2E:
         self.checked_vm()
         self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
         require(not self.checked_vm()["Running"], "vm_stop_failed")
-        if media:
-            media.verify_cache("before_restart")
-            media.block_delivery()
+        self.boot_started_at = timestamp()
         self.run(["docker", "start", self.name], timeout=30)
         second = self.wait_enrollment(first)
-        require(self.report["boots"][-1]["slot"] == "A"
-                and self.report["boots"][-1]["trial"] is False, "accepted_trial_not_durable")
+        require(self.report["boots"][-1]["trial"] is False, "accepted_release_not_reselected")
         self.report["second_enrollment"] = second
-        self.report["checks"]["identity_survives_power_cycle"] = True
-        self.report["checks"]["accepted_slot_survives_power_cycle"] = True
+        self.report["checks"]["equipment_reenrolls_after_power_cycle"] = True
+        self.report["checks"]["accepted_release_reselected"] = True
         print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
         if media:
             media.wait_presentation("after_restart", second)
@@ -642,12 +619,12 @@ class ApplianceE2E:
             media.network_denial("after")
             self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
             require(not self.checked_vm()["Running"], "vm_stop_failed")
-            media.verify_cache("after_rollback")
             self.report["checks"]["native_committed_photo"] = True
-            self.report["checks"]["populated_cache_survives_restart_and_rollback"] = True
+            self.report["checks"]["photos_reacquired_after_restart_and_rollback"] = True
             self.report["qualification"]["native_rendering"] = True
         self.report["qualification"]["generic_vm"] = True
-        self.report["qualification"]["healthy_trial"] = True
+        self.report["qualification"]["central_health"] = True
+        self.report["pending"] = ["healthy candidate image promotion", "physical Pi PXE and dual HDMI"]
         self.report["qualification"]["automatic_rollback"] = True
 
     def cleanup(self):

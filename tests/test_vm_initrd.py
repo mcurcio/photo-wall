@@ -73,6 +73,9 @@ def test_hook_is_read_only_share_guarded_and_ordered_before_existing_entries():
     assert b"Restart=no" in build_vm_initrd.HOOK_BYTES
     assert b"After=photo-wall-accept-trial.service" in build_vm_initrd.HOOK_BYTES
     assert build_vm_initrd.ORDER_ADDITION.startswith(b"/scripts/init-bottom/photo-wall-evidence")
+    assert b"ticket_sha256" in build_vm_initrd.HOOK_BYTES
+    assert b'pop("ticket_id")' in build_vm_initrd.HOOK_BYTES
+    assert b"ReadWritePaths=" not in build_vm_initrd.HOOK_BYTES
 
 
 def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
@@ -91,9 +94,15 @@ def test_module_preload_additions_are_exact_and_idempotent(tmp_path):
     assert build_vm_initrd._configured_modules([segment]) == {"virtio_gpu", "drm"}
 
 
-def test_required_preloads_include_qemu_gpu_and_9p_transport():
-    assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"} <= set(build_vm_initrd.REQUIRED_MODULES)
-    assert set(build_vm_initrd.PRELOAD_ROOTS) == {"virtio_gpu", "9p", "9pnet", "9pnet_virtio"}
+def test_required_preloads_include_qemu_gpu_9p_and_trusted_watchdog():
+    assert {"virtio_gpu", "9p", "9pnet", "9pnet_virtio", "sbsa_gwdt"} <= set(
+        build_vm_initrd.REQUIRED_MODULES)
+    assert set(build_vm_initrd.PRELOAD_ROOTS) == {
+        "virtio_gpu", "9p", "9pnet", "9pnet_virtio", "sbsa_gwdt",
+    }
+    from scripts.test_appliance_e2e import LAUNCHER
+    assert "-device sbsa-gwdt" in LAUNCHER
+    assert "sbsa_gwdt.nowayout=1" in LAUNCHER
 
 
 def test_health_observer_is_independent_read_only_and_shell_valid():
