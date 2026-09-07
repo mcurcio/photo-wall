@@ -79,6 +79,7 @@ def test_registration_without_panels_and_observation_removal(registry):
 def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(registry):
     identity, _, first = enroll(registry)
     inventory = registry.inventory()
+    assert inventory["players"][0]["device_id"] == first.device_id
     assert inventory["players"][0]["health"]["boot_id"] == first.boot_id
     assert len(inventory["outputs"]) == 2
     frame(registry)

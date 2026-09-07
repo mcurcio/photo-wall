@@ -291,7 +291,7 @@ class Registry:
     def inventory(self) -> dict:
         with self.db.transaction() as conn:
             self._expire_previews(conn)
-            players = conn.execute("SELECT id,authority_epoch,registered_at,last_seen,retired_at,health "
+            players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
                                    "FROM players ORDER BY registered_at,id").fetchall()
             outputs = conn.execute("SELECT * FROM outputs ORDER BY player_id,output_id").fetchall()
             frames = conn.execute("SELECT f.*,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
