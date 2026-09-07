@@ -90,3 +90,21 @@ def test_worker_app_registers_only_domain_work_and_maintenance_tasks():
         app.tasks[PREPARE_MEDIA_TASK].retry_strategy,
         procrastinate.BaseRetryStrategy,
     )
+
+
+def test_periodic_schedules_use_croniter_seconds_last_semantics():
+    app = create_worker_app("postgresql:///unused")
+    schedules = {
+        task.task.name: task for task in app.periodic_registry.periodic_tasks.values()
+    }
+    base = datetime(2026, 9, 7, 18, 28, 19, tzinfo=timezone.utc).timestamp()
+
+    refresh = schedules["photo_wall.media.refresh"].croniter.get_next(
+        ret_type=float, start_time=base
+    )
+    maintenance = schedules["photo_wall.media.maintenance"].croniter.get_next(
+        ret_type=float, start_time=base
+    )
+
+    assert refresh - base == 11
+    assert maintenance - base == 101

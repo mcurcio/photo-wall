@@ -8,6 +8,9 @@ import procrastinate
 
 from central.media_queue import MEDIA_QUEUE, MEDIA_STORAGE_LOCK, PREPARE_MEDIA_TASK
 
+REFRESH_CRON = "* * * * * */30"
+MAINTENANCE_CRON = "*/5 * * * * 0"
+
 
 class MediaTaskFailed(RuntimeError):
     """A bounded media failure safe to expose to the queue journal."""
@@ -46,14 +49,17 @@ def create_worker_app(dsn: str) -> procrastinate.App:
         worker = context.additional_context["media_worker"]
         await worker.process_job(job_id, attempt=max(1, context.job.attempts))
 
-    @app.periodic(cron="*/30 * * * * *")
+    # croniter places seconds last in a six-field expression.  Keeping that
+    # explicit matters here: a conventional seconds-first expression silently
+    # turns this into a 30-minute schedule.
+    @app.periodic(cron=REFRESH_CRON)
     @app.task(name="photo_wall.media.refresh", queue=MEDIA_QUEUE, pass_context=True,
               queueing_lock="media-refresh")
     async def refresh_media(context, timestamp: int):
         del timestamp
         await context.additional_context["media_worker"].refresh_once()
 
-    @app.periodic(cron="0 */5 * * * *")
+    @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,
               lock=MEDIA_STORAGE_LOCK, queueing_lock="media-maintenance")
     async def maintain_media(context, timestamp: int):
