@@ -202,7 +202,9 @@ class MediaWorker:
                 refreshed_at=self._utc(), status=status), diagnostics=(Diagnostic(code=code),))
         if not await _blocking(self.repository.publish_refresh, lease, result):
             raise RetryableMediaTask("stale_refresh")
-        if result.snapshot.status != "ok":
+        if result.snapshot.status == "ok":
+            self._error = None
+        else:
             self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
         await _blocking(self.repository.worker_status, self._error)
 

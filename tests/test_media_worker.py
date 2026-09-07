@@ -104,6 +104,7 @@ class FakeSource:
         self.clock, self.assets = clock, assets
         self.refreshes, self.downloads, self.closed = 0, 0, False
         self.fault = None
+        self.refresh_fault = None
         self.gate = None
         self.refresh_gate = None
         self.refresh_entered = asyncio.Event()
@@ -115,6 +116,8 @@ class FakeSource:
         self.refresh_entered.set()
         if self.refresh_gate:
             await self.refresh_gate.wait()
+        if self.refresh_fault:
+            raise self.refresh_fault
         return RefreshResult(snapshot=CatalogSnapshot(source_ref=spec.source_ref,
             refreshed_at=self.clock.utc(), candidates=tuple(a.candidate for a in self.assets)),
             assets=self.assets)
@@ -209,6 +212,31 @@ def test_periodic_refresh_task_discovers_assets_without_enqueuing_job(worker_sto
         assert conn.execute("SELECT count(*) AS n FROM asset_revisions").fetchone()["n"] == 1
         assert conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"] == 0
     assert source.closed
+
+
+def test_successful_exact_refresh_clears_prior_worker_error(worker_storage):
+    configure_source(worker_storage)
+    source = FakeSource(worker_storage.clock, (original(),))
+    source.refresh_fault = MediaError("upstream_permission", "permission")
+    instance = worker(worker_storage, source)
+
+    async def exercise():
+        try:
+            first = worker_storage.repository.request_refresh("library:1")
+            await instance.refresh_source("library:1")
+            failed_health = worker_storage.repository.health()
+            source.refresh_fault = None
+            second = worker_storage.repository.request_refresh("library:1")
+            await instance.refresh_source("library:1")
+            return first, second, failed_health
+        finally:
+            await close(instance)
+
+    first, second, failed_health = asyncio.run(exercise())
+    assert (first.requested_revision, second.requested_revision) == (1, 2)
+    assert failed_health["worker_error"] == "upstream_permission"
+    assert worker_storage.repository.refresh_revisions("library:1") == (2, 2)
+    assert worker_storage.repository.health()["worker_error"] is None
 
 
 def test_source_task_catches_up_request_arriving_during_active_refresh(worker_storage):

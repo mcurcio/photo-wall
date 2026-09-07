@@ -56,6 +56,11 @@ class FakeCoordinator:
 
 def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
     monkeypatch.setattr(central_app, "Coordinator", lambda *_args, **_kwargs: fake_coordinator)
+    monkeypatch.setattr(
+        central_app,
+        "MediaRepository",
+        lambda *_args, **_kwargs: fake_coordinator.media,
+    )
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
 
