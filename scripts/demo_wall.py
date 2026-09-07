@@ -827,6 +827,15 @@ def outage_checks(reports, expiry):
                 "outage_lease_overrun")
 
 
+def rejoined_player_ready(old, report, rejoined_at):
+    """A replacement process is ready only after Central accepts its fresh session health."""
+    return (report["player_id"] == old["player_id"]
+            and report["authority_epoch"] > old["authority_epoch"]
+            and report["release_accepted"]
+            and all(event["utc"] > rejoined_at and event["layers"] and not event["fallback"]
+                    for event in current_outputs(report)))
+
+
 def journal_upstream_mutation(host, evidence, save, before, reports, action, pre_key, change_key, pre=None):
     """Persist exact pre-mutation evidence and mutation lifecycle around one upstream action."""
     pre_mutation = dict(
@@ -1033,10 +1042,13 @@ def full_sequence(host, evidence, save):
     cache_before = host.byte_audit()["player-one"]
     rejoined_at = time.time()
     host.compose("restart", "player-one", timeout=60, capture=False)
-    snapshot, reports = await_state(lambda snapshot, reports: reports["player-one"]["player_id"] == old["player_id"] and
-        reports["player-one"]["authority_epoch"] > old["authority_epoch"] and
-        all(event["utc"] > rejoined_at and event["layers"] and not event["fallback"]
-            for event in current_outputs(reports["player-one"])), "player_rejoin_timeout", 60)
+    snapshot, reports = await_state(
+        lambda snapshot, reports: rejoined_player_ready(
+            old, reports["player-one"], rejoined_at
+        ),
+        "player_rejoin_timeout",
+        60,
+    )
     cache_after = host.byte_audit()["player-one"]
     require(reports["player-one"]["persistence"] == "volatile", "rejoin_not_stateless")
     require(reports["player-one"]["release_accepted"], "release_not_centrally_accepted")

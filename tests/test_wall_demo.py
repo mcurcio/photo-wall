@@ -27,6 +27,7 @@ from scripts.demo_wall import (
     operator_action,
     outage_checks,
     preserved_locks,
+    rejoined_player_ready,
     retryable_operator_error,
     run_demo,
     selected_secured_presentation,
@@ -458,6 +459,21 @@ def test_selected_secured_presentation_uses_earlier_valid_until_boundary():
     assert selected_secured_presentation(before, reports, lock["sha256"], 109.0)
     event["utc"] = 112.0
     assert selected_secured_presentation(before, reports, lock["sha256"], 109.0) is None
+
+
+def test_rejoined_player_waits_for_central_release_acceptance():
+    old = {"player_id": "p-player-one", "authority_epoch": 1}
+    report = {
+        "player_id": "p-player-one",
+        "authority_epoch": 2,
+        "release_accepted": False,
+        "outputs": 1,
+        "events": [{"output_id": "HDMI-A-1", "utc": 101.0, "layers": [{}], "fallback": False}],
+    }
+
+    assert not rejoined_player_ready(old, report, 100.0)
+    report["release_accepted"] = True
+    assert rejoined_player_ready(old, report, 100.0)
 
 
 def test_delete_secured_original_refuses_empty_selection_without_mutation():
