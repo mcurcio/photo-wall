@@ -21,22 +21,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from appliance.os_packages import BASE_BYTES, BASE_SHA256, RUNTIME_PACKAGES, SNAPSHOT
 from contracts.release import MAX_ROOTFS_BYTES, Release, configuration_digest
 
-BASE_SHA256 = "790652faeb4f61ce7bb12f5cb61734595c61d3cd882915b8b5f9918106c80d37"
-BASE_BYTES = 1_257_196_128
 MAX_RAW_BYTES = 12 * 1024**3
 MIB = 1024**2
 SECTOR = 512
-RUNTIME_PACKAGES = (
-    "python3.12", "python3.12-venv", "python3-gi", "python3-gst-1.0",
-    "python3-opengl", "gir1.2-gtk-3.0", "gir1.2-gst-plugins-base-1.0",
-    "gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good",
-    "gstreamer1.0-plugins-bad", "gstreamer1.0-libav", "libgl1-mesa-dri",
-    "libegl1", "weston", "chrony", "ca-certificates", "openssl",
-    "initramfs-tools", "busybox-initramfs", "iproute2", "kmod",
-)
-SNAPSHOT = "20260905T000000Z"
 
 
 class BuildError(ValueError):
@@ -308,9 +298,10 @@ def _guest_inventory(guest, directory: str) -> dict:
 
 
 def execution_inventory() -> dict:
-    modules = {"appliance/build.py": Path(__file__)}
+    modules = {"appliance/build.py": Path(__file__),
+               "appliance/os_definition.json": Path(__file__).with_name("os_definition.json")}
     for name in ("appliance", "appliance.bootstrap", "appliance.updates", "contracts",
-                 "contracts.release", "scripts.ci_apt_cache"):
+                 "contracts.release", "scripts.ci_apt_cache", "appliance.os_packages"):
         module = importlib.import_module(name)
         relative = name.replace(".", "/") + ("/__init__.py" if hasattr(module, "__path__") else ".py")
         modules[relative] = Path(module.__file__)
@@ -519,12 +510,12 @@ def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> 
         )
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
+    (evidence / "apt-download-plan.txt").write_bytes(plan)
     cache_record = {"requested": False}
     archives = root / "var/cache/apt/archives"
     cache_plan = None
     if archive_cache is not None:
         cache_plan = archive_cache.plan(plan)
-        (evidence / "apt-download-plan.txt").write_bytes(plan)
         cache_record = {**archive_cache.restore(archives, cache_plan), "publish": None}
     try:
         in_root(root, "apt-get", "--download-only", "install", "-y", "--no-install-recommends",

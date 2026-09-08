@@ -113,6 +113,15 @@ def test_player_distribution_excludes_central_persistence_and_queue_packages():
     assert {"psycopg", "psycopg-binary", "psycopg-pool", "procrastinate"} <= package.FORBIDDEN
 
 
+def test_application_development_tool_lock_does_not_change_builder_contract(inputs):
+    project, lock = inputs
+    expected = package.locked_runtime(project, lock)
+    lock["package"][-1]["version"] = "0.0"
+    assert package.locked_runtime(project, lock) == expected
+    lock["package"].pop()
+    assert package.locked_runtime(project, lock) == expected
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -202,7 +211,6 @@ def test_dependency_markers_are_target_specific_and_traversal_is_closed(inputs):
     [
         "format",
         "python",
-        "tool",
         "duplicate",
         "source",
         "missing_hash",
@@ -232,8 +240,6 @@ def test_invalid_locks_fail_closed(inputs, fault):
         lock["revision"] = 99
     elif fault == "python":
         lock["requires-python"] = ">=3.13"
-    elif fault == "tool":
-        lock["package"][-1]["version"] = "0.0"
     elif fault == "duplicate":
         lock["package"].append(copy.deepcopy(first))
     elif fault == "source":
@@ -417,6 +423,52 @@ def test_failure_and_concurrent_build_never_publish_partial_output(committed_rep
         package.build(repo, revision, output, failing_fetch)
     assert not output.exists()
     assert sorted(path.name for path in tmp_path.iterdir()) == ["repo"]
+
+
+def test_prepared_package_restores_without_network(committed_repo, tmp_path, monkeypatch):
+    repo, revision = committed_repo
+    supplied = tmp_path / "supplied"
+    expected = package.build(repo, revision, supplied, lambda _: iter([PAYLOAD]))
+
+    def no_network(*args, **kwargs):
+        pytest.fail("prepared application must not contact a package server")
+
+    monkeypatch.setattr(package.urllib.request, "urlopen", no_network)
+    result = package.restore(repo, revision, supplied, tmp_path / "restored")
+    assert result == expected
+    assert (tmp_path / "restored/requirements.txt").read_bytes() == (
+        supplied / "requirements.txt"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize("mutation", ["wheel", "application", "requirements", "inventory", "extra", "symlink"])
+def test_prepared_package_is_bound_to_commit_and_locked_bytes(
+    committed_repo, tmp_path, mutation
+):
+    repo, revision = committed_repo
+    supplied, output = tmp_path / "supplied", tmp_path / "restored"
+    package.build(repo, revision, supplied, lambda _: iter([PAYLOAD]))
+    if mutation == "wheel":
+        next(p for p in (supplied / "wheels").iterdir()
+             if not p.name.startswith("photo_wall")).write_bytes(b"bad dependency")
+    elif mutation == "application":
+        next((supplied / "wheels").glob("photo_wall*.whl")).write_bytes(b"other application")
+    elif mutation == "requirements":
+        (supplied / "requirements.txt").write_text("unlocked-package\n")
+    elif mutation == "inventory":
+        inventory = json.loads((supplied / "inventory.json").read_bytes())
+        inventory["revision"] = "0" * 40
+        (supplied / "inventory.json").write_text(json.dumps(inventory))
+    elif mutation == "extra":
+        (supplied / "wheels/unrequested.whl").write_bytes(b"extra")
+    else:
+        original = supplied / "requirements.txt"
+        saved = tmp_path / "requirements.txt"
+        original.rename(saved)
+        original.symlink_to(saved)
+    with pytest.raises((package.BuildError, OSError)):
+        package.restore(repo, revision, supplied, output)
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("target", ["inside", "other_repo", "existing", "symlink", "relative"])

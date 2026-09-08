@@ -18,10 +18,8 @@ RUN rm -f /etc/apt/sources.list.d/ubuntu.sources && \
     dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /tool-packages.tsv
 RUN apt-get install -y --no-install-recommends python3-pytest && \
     dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /tool-packages.tsv
-# build_player.py is a host-side tool, and its locked source requires the
-# exact Packaging version recorded in uv.lock rather than Noble's apt version.
-COPY uv.lock /tmp/photo-wall-tools.lock
-RUN python3.12 -c 'import tomllib; p=next(p for p in tomllib.load(open("/tmp/photo-wall-tools.lock","rb"))["package"] if p["name"]=="packaging"); w=next(w for w in p["wheels"] if w["url"].endswith("-py3-none-any.whl")); print("packaging @ " + w["url"] + " --hash=" + w["hash"])' > /tmp/photo-wall-build-tools.txt
+# Build tooling has its own lock; application dependency changes reuse this image.
+COPY appliance/build-tools.txt /tmp/photo-wall-build-tools.txt
 RUN python3.12 -m pip install --target /opt/photo-wall-build-tools --no-cache-dir --no-deps --require-hashes \
       -r /tmp/photo-wall-build-tools.txt
 ENV PYTHONPATH=/opt/photo-wall-build-tools

@@ -6,6 +6,10 @@ Accepted implementation decisions: [0001 — time/recovery/module contracts](dec
 
 ## Initial implementation
 
+[0007 — reusable OS base](decisions/0007-reusable-os-base.md) separates native
+dependency preparation from offline application image assembly. It retains
+signed-image deployment and the final boot acceptance gate.
+
 | ID | Decision | Starting point and evidence needed | Resolve before |
 |---|---|---|---|
 | D01 | Delivery scope and operating envelope | Select initial scenarios, expected fleet size, panel modes, network conditions, and equipment. Use the [validation plan](validation.md) to define release criteria; its numerical budgets are candidates. | Initial bench/slice scope before S0 ends; release thresholds before completion claims. |

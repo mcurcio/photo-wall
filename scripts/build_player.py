@@ -13,6 +13,7 @@ import os
 import re
 import selectors
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -96,9 +97,9 @@ def locked_runtime(project: dict, lock: dict) -> tuple[LockedWheel, ...]:
         if name in packages:
             raise BuildError(f"ambiguous locked package: {name}")
         packages[name] = package
-    tool = packages.get("packaging", {})
-    if tool.get("version") != packaging.__version__:
-        raise BuildError("build-host packaging version must equal archived lock")
+    # Build tooling is pinned separately in appliance/build-tools.txt. The
+    # application's lock may change a development tool without changing the
+    # native OS or the package-builder image. Its actual version is inventoried.
     direct = {}
     for line in project["project"]["dependencies"]:
         requirement = Requirement(line)
@@ -425,6 +426,61 @@ def build(repository: Path, revision: str, output: Path,
         if temporary is not None:
             shutil.rmtree(temporary)
         lock_path.rmdir()
+
+
+def restore(repository: Path, revision: str, package: Path, output: Path) -> dict:
+    """Revalidate a prepared wheelhouse against Git and the lock, without network.
+
+    Reuse the canonical package builder with a local-only wheel supplier. This
+    reconstructs the exact application wheel and dependency plan from the
+    requested commit rather than trusting the supplied inventory as authority.
+    Only a byte-for-byte matching package is admitted for offline installation.
+    """
+    package = package.absolute()
+    if package.is_symlink() or not package.is_dir():
+        raise BuildError("prepared package missing")
+    wheels = package / "wheels"
+    if wheels.is_symlink() or not wheels.is_dir():
+        raise BuildError("prepared wheelhouse invalid")
+
+    def read(path: Path, maximum: int) -> bytes:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= maximum:
+                raise BuildError("prepared package file invalid")
+            with os.fdopen(fd, "rb", closefd=False) as source:
+                data = source.read(maximum + 1)
+            after = os.fstat(fd)
+            if (len(data) != info.st_size or after.st_size != info.st_size
+                    or after.st_mtime_ns != info.st_mtime_ns):
+                raise BuildError("prepared package file changed")
+            return data
+        finally:
+            os.close(fd)
+
+    def local_wheel(wheel: LockedWheel) -> Iterable[bytes]:
+        yield read(wheels / wheel.filename, MAX_WHEEL)
+
+    # build owns its new output and cleans it on failure. Once it returns, this
+    # function owns that output until the supplied package is fully validated.
+    result = build(repository, revision, output, fetch=local_wheel)
+    try:
+        if {p.name for p in package.iterdir()} != {
+            "source.tar", "requirements.txt", "inventory.json", "wheels"
+        } or {p.name for p in wheels.iterdir()} != {w["filename"] for w in result["wheels"]}:
+            raise BuildError("prepared package members mismatch")
+        expected_files = {"source.tar": MAX_SOURCE, "requirements.txt": MAX_SOURCE}
+        expected_files.update({"wheels/" + w["filename"]: MAX_WHEEL for w in result["wheels"]})
+        for name, maximum in expected_files.items():
+            if read(package / name, maximum) != (output / name).read_bytes():
+                raise BuildError("prepared package content mismatch")
+        if json.loads(read(package / "inventory.json", MAX_SOURCE)) != result:
+            raise BuildError("prepared package inventory mismatch")
+    except BaseException:
+        shutil.rmtree(output, ignore_errors=True)
+        raise
+    return result
 
 
 def main() -> None:

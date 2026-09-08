@@ -42,19 +42,21 @@ def test_upload_compression_uses_available_cpus_after_exact_artifact_acceptance(
     assert "compression-level: 0" in workflow
 
 
-def test_apt_cache_is_qualified_and_only_complete_receipts_get_the_stable_key():
+def test_os_candidates_are_published_only_after_offline_assembly_and_boot():
     workflow = WORKFLOW.read_text()
-
-    qualification = workflow.index("- name: Qualify signed APT cache admission")
-    restore = workflow.index("- name: Restore authenticated-plan APT archive candidates")
-    ready = workflow.index("- name: Make bounded APT archive candidates readable")
-    complete = workflow.index("- name: Save the completed APT archive cache")
-    progress = workflow.index("- name: Save bounded APT acquisition progress")
-    assert qualification < restore < ready < complete < progress
-    assert '--network none' in workflow[qualification:restore]
-    assert '"${{ steps.builder.outputs.imageid }}"' in workflow[qualification:restore]
-    assert "continue-on-error: true" in workflow[restore:ready]
-    assert "continue-on-error: true" in workflow[ready:complete]
-    assert "--verify-completion-receipt" in workflow[ready:complete]
-    assert "steps.apt-cache-ready.outputs.complete == 'true'" in workflow[complete:progress]
-    assert "steps.apt-cache-ready.outputs.complete != 'true'" in workflow[progress:]
+    prepare = workflow.index("- name: Pull the matching OS base")
+    package = workflow.index("- name: Build the Player package")
+    assemble = workflow.index("- name: Assemble the signed image")
+    acceptance = workflow.index("- name: Boot the exact artifact")
+    publish = workflow.index("- name: Retain the newly qualified OS definition")
+    assert prepare < package < assemble < acceptance < publish
+    assembly = workflow[assemble:acceptance]
+    assert "--network none" in assembly
+    assert '--os-base "$RUNNER_TEMP/photo-wall-os-base"' in assembly
+    assert '--player-package "$RUNNER_TEMP/photo-wall-player-package"' in assembly
+    assert "actions/cache/restore" not in workflow
+    assert "--apt-archive-cache" not in assembly
+    assert "--extracted-base-cache" not in assembly
+    assert "steps.os-base.outputs.built == 'true' && env.CAN_PUBLISH == 'true'" in workflow
+    assert "appliance-required:" in workflow
+    assert "needs: [select-definition, build-and-boot]" in workflow

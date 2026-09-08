@@ -6,7 +6,7 @@ This module turns one explicit committed Git revision into the stateless Player 
 
 `scripts/build_player.py --revision <40-character commit> --output <new directory outside Git>` reads only `git archive` at that exact commit for `player/`, `contracts/`, `pyproject.toml`, and `uv.lock`. The working checkout may contain concurrent work; none enters the archive. Archive members must be regular Python files in those two packages or the two exact metadata files. Symlinks, unexpected files and oversized archives fail closed. Git stdout is streamed into a bounded temporary file, with an 8 MiB archive limit and a 30-second subprocess deadline; overflow and timeout kill and reap the child before returning.
 
-The separate `photo-wall-player` distribution contains only `player`, neutral Pydantic `contracts`, and its own wheel metadata. Its version is the archived project version plus `+g<full commit>`. A deterministic standard-library wheel writer emits PEP 427 metadata and a complete SHA-256 `RECORD`. It avoids introducing a separately resolved backend dependency tree. The build host uses Python 3.12 and the `packaging` version pinned in the archived lock solely for standard marker, version and wheel-tag parsing; that build tool is excluded from the runtime wheelhouse.
+The separate `photo-wall-player` distribution contains only `player`, neutral Pydantic `contracts`, and its own wheel metadata. Its version is the archived project version plus `+g<full commit>`. A deterministic standard-library wheel writer emits PEP 427 metadata and a complete SHA-256 `RECORD`. It avoids introducing a separately resolved backend dependency tree. The build host uses Python 3.12 and the `packaging` version pinned in `appliance/build-tools.txt` solely for standard marker, version and wheel-tag parsing; that build tool is excluded from the runtime wheelhouse.
 
 The runtime roots are exactly `pydantic`, `httpx`, `websockets`, and `cryptography`, using their exact archived project pins. Their dependency graph, markers, versions, wheel URLs, sizes and SHA-256 hashes come only from the archived lock. This allowlist is also the enforcement point that keeps central persistence and queue clients out of the Player. Selection targets CPython 3.12.3 on Linux AArch64 with glibc 2.39 (Ubuntu Noble); compatible older manylinux and CPython stable-ABI wheels and universal Python wheels are permitted. Unspecified platform-release markers, ambiguous package variants, extras, source distributions, missing compatible wheels and missing hashes fail closed. No resolver or package-index search is invoked. All selected wheel URLs must be HTTPS on `files.pythonhosted.org`; download size and hash are checked before use.
 
@@ -24,7 +24,21 @@ The output is published only after all artifacts validate:
 
 `requirements.txt` pins and hashes every runtime package including the locally built Player wheel. The appliance builder installs it with `python -m pip install --no-index --find-links <output>/wheels --require-hashes -r <output>/requirements.txt`. `inventory.json` records the full commit and tree, source archive hash, each packaged source hash, every wheel hash/size and upstream URL, target environment, build-tool version and builder script hash. The caller supplies an unused output path outside every Git tree. A private staging directory in its parent is removed on handled failure; a per-output reservation prevents concurrent builders from publishing to the same path. Publication uses one directory rename. An uncatchable process termination can leave the reservation/staging directory; an operator must establish that the builder stopped before removing those exact artifacts. No unrelated paths are copied.
 
-## Acceptance and evidence
+## Prepared input for offline image assembly
+
+CI builds this wheelhouse before entering its network-disabled final assembly
+container. `build_player.restore` accepts the prepared directory, exact Git
+revision, and a new external destination. It reuses the canonical builder with
+a local-only dependency supplier, verifies every dependency against the
+committed lock, and compares the reconstructed application wheel, source
+archive, requirements, and inventory to the supplied package. Missing, changed,
+additional, or symlinked inputs are rejected. No package server is contacted.
+
+The [reusable OS base decision](decisions/0007-reusable-os-base.md) describes the
+separate native dependency artifact. The existing offline pip installation
+contract is unchanged.
+
+## Package qualification
 
 Unit checks cover package boundaries and metadata, deterministic output and `RECORD`, dependency markers and target tags, invalid or ambiguous locks, hash failures, unsafe archives and output paths. A real build must also be installed with pip into a clean CPython 3.12 Linux ARM64 environment, using only the emitted wheelhouse and hash-locked requirements. Successful installation is package evidence; it does not establish Pi boot or physical rendering behavior.
 

@@ -1,35 +1,36 @@
 # CI appliance image and VM gate
 
-The ARM64 workflow builds the Raspberry Pi appliance from the exact checked out
-commit on `ubuntu-24.04-arm`. It first checks the Player service sandbox, then
-builds or restores the central image and
-pinned Linux appliance builder through separate BuildKit caches, then runs `scripts/build_ci_image.py` inside that
-builder. The orchestration calls the existing package, Ubuntu input,
-appliance, signing, finalization, and generic-initramfs builders; it does not
-reimplement any image format or boot logic.
+The ARM64 workflow builds the Raspberry Pi appliance from the exact checked-out
+commit on `ubuntu-24.04-arm`. An always-running routing job selects the retained
+builder and installed OS base by definition. Application-only changes reuse
+those inputs. A changed definition or explicit preparation request can build a
+missing candidate. Registry failures and incompatible inputs stop the job.
 
-APT runs only while constructing the staged Ubuntu filesystem in CI. It supplies
-the OS dependencies before the immutable root is packaged and signed; it is not
-an appliance delivery or update mechanism. PXE and the RAM-root bootstrap fetch
-and verify the centrally selected release. Application updates select a new
-signed release and reboot. Image configuration removes unattended upgrades,
-masks APT's daily timers, and clears package caches before signing. Any package
-download cache described here belongs to the image builder, never the Player.
+The [reusable OS base decision](decisions/0007-reusable-os-base.md) owns this
+separation. APT runs during builder/base preparation. Final assembly restores
+verified inputs and runs in a container with `--network none`. PXE and the RAM
+bootstrap still deliver signed releases; Players never update through APT.
 
-The command is:
+The prepared-input assembly command, run inside the selected builder, is:
 
 ```sh
-python3 scripts/build_ci_image.py \
+python3 -m scripts.build_ci_image \
   --repository /workspace/photo-wall \
   --revision <40-character-commit> \
   --output-dir /work/photo-wall-artifact \
   --deployment-dir /work/photo-wall-deployment \
-  --base-cache /work/photo-wall-base-cache \
-  --extracted-base-cache /work/photo-wall-extracted-base \
-  --apt-archive-cache /work/photo-wall-apt-archives \
+  --os-base /work/photo-wall-os-base \
+  --os-base-builder-image ghcr.io/mcurcio/photo-wall-builder@sha256:<digest> \
+  --os-base-image ghcr.io/mcurcio/photo-wall-os-base@sha256:<digest> \
+  --player-package /work/photo-wall-player \
   --central-image sha256:<central-image-id> \
   --builder-image sha256:<builder-image-id>
 ```
+
+The OS base and Player package must be prepared before entering the offline
+container. The builder's registry digest identifies its published content;
+`--builder-image` retains the local Docker image ID used by the existing VM
+harness. A local candidate can omit `--os-base-image` until publication.
 
 On the disposable Linux runner, the workflow runs the Player unit preflight
 immediately after checkout, before container builds and image assembly:
@@ -92,91 +93,55 @@ cleanup and the runner's available workspace.
 
 ## Reusable build inputs
 
-The first hosted build spent about 12 minutes extracting Ubuntu, 5 minutes
-installing runtime packages and 3–4 minutes preparing the builder container.
-The workflow targets the repeated container layers and Ubuntu extraction.
-The first completed warm assembly took 11m11s compared with 22m15s cold;
-a subsequent assembly took 10m13s after a 19s cache-restoration step, versus
-22m33s for the preceding cold build;
-the [dated evidence](evidence/2026-09-05-ci-cache.md) separates those phase
-measurements from image boot qualification and the preceding download timeout.
+`scripts/os_base.py` owns the installed baseline format: `manifest.json`, a
+metadata-preserving `root.tar`, and `evidence.tar`. It validates the definition,
+archive hashes, bounded archive structure, native package inventory, and boot
+files before admitting a root. Restoration preserves ownership, permissions,
+hardlinks, symlinks, xattrs, ACLs and device nodes. Configured Photo Wall roots
+and private material are rejected. A failure never triggers a cold fallback.
 
-- Central, production media worker and builder images use separate ARM64
-  [BuildKit GitHub cache scopes](https://docs.docker.com/build/ci/github-actions/cache/).
-  Images are loaded locally and their immutable image IDs still bind the
-  image build and VM test. No registry write credentials are required.
-  Runtime dependencies are installed before application source is copied, so
-  ordinary code edits retain the dependency layer.
-- The standard `MVP checks` workflow runs database/application checks and
-  isolated Linux media conversion in independent jobs. The application job
-  builds the worker first, reusing and publishing the existing AMD64 checks
-  cache, then loads central on the same builder and starts Compose with
-  `COMPOSE_PROJECT_NAME=photo-wall-ci` and `--no-build`. The loaded image names
-  are consequently `photo-wall-ci-central` and `photo-wall-ci-worker`.
-  The media job builds `photo-wall-media-test:ci` from the same checkout and
-  runs conversion without network access. It imports both the checks cache
-  and its own media-test cache, but publishes only to the latter. Separate
-  [cache destinations](https://docs.docker.com/build/cache/backends/gha/#scope)
-  prevent the concurrent builds from overwriting each other's cache objects.
-  Neither job depends on the other; failures and reruns are isolated. This
-  trades a second runner's setup and shared-layer download for overlapping
-  execution; hosted elapsed time must establish the actual benefit.
-  Cache upload failure remains an accelerator failure and does not
-  change the checks' source or runtime validation.
-  FFmpeg installs in a source-free stage. The worker copies the application
-  and locked environment from the shared runtime at the same `/app` path;
-  application edits therefore retain the FFmpeg layer without adding those
-  system packages to central or duplicating application installation logic.
-- The extracted-base cache contains a metadata-preserving archive of pristine
-  Ubuntu and a bounded integrity manifest. Its exact key includes the runner
-  architecture, pinned base and extraction/build-input implementation hashes.
-  Changed inputs miss the cache. Restore verifies the expected fingerprint,
-  archive size/hash and safe archive structure before materializing a new root.
-  File ownership, hardlinks, permissions, xattrs and ACLs must survive reuse.
-  Invalid entries or failed restoration are recorded as misses and use the
-  fresh path; interrupted restores remove their temporary root and propagate
-  cancellation. Cache publication failure leaves the fresh extracted root usable.
-- The cache is produced before runtime package installation or Photo Wall
-  configuration. It contains no deployment trust keys, Player identity,
-  configured appliance root or signed output. The completed cache is saved
-  before e2e, including when a later image phase fails. Cache service upload
-  failures do not turn a valid image into a failed build.
-- The optional package-archive cache reuses download bytes only. Every build
-  first refreshes the pinned signed Ubuntu package indexes with any acquisition
-  error treated as a failure. APT resolves the requested packages against an
-  empty archive directory and emits a SHA-256 acquisition plan. Cache filenames
-  and metadata cannot authorize packages: only complete regular files matching
-  that current plan's sizes and hashes enter APT's real archive directory. The
-  ordinary download and installation stages still run, and package evidence is
-  retained. Source entries request package indexes without translation or
-  desktop metadata indexes.
-- Completed, plan-verified archives survive an interrupted download through a
-  separate CI cache entry for that attempt. A later attempt can restore this
-  progress, authenticate its own current plan, and download the missing bytes.
-  Successful assembly publishes the complete cache under the primary key;
-  partial entries never occupy that immutable key. Cache publication failure
-  preserves the underlying build result. This cache contains neither configured
-  roots nor deployment keys and never enters the Player runtime. The
-  [acquisition failure record](evidence/2026-09-08-ci-package-acquisition.md)
-  preserves the motivating attempts and their exact diagnostic hashes.
+`appliance/os_definition.json` is authoritative for Ubuntu image pins,
+architecture, snapshot and requested native packages. OS preparation code and
+builder recipe/tool inputs participate in its fingerprint. Application source,
+Python runtime locks, deployment configuration and final assembly changes do
+not. Boot scripts and release contracts are applied downstream and regenerate
+boot compatibility evidence independently of the native dependency identity.
 
-Cache reuse follows [GitHub's branch access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching):
-a PR's cache remains scoped to that PR and is unavailable to the base branch.
-The cache is a CI acceleration input; final source/configuration binding,
-signing, disk reopening, generic initramfs generation and e2e still run for
-every revision. Build and boot share one runner so the raw disk and private
-disposable fixture do not need an intermediate artifact transfer. Standard
-checks run on PRs and main pushes, avoiding duplicate feature-push/PR runs.
+`scripts/ci_images.py` owns registry selection. Definition tags locate an
+artifact; the job resolves the tag once and uses its immutable registry digest.
+Candidates are prepared only for changed definitions or an explicit preparation
+request and are published after the appliance gate passes. Fork candidates
+remain local to the job. GitHub Container Registry is the durable source;
+BuildKit/GHA caches remain optional accelerators. Registry authorization or
+transport errors are not interpreted as artifact absence.
 
-`--base-cache` retains the small signed-input download set plus the compressed
-base; it is distinct from `--extracted-base-cache`, which skips download,
-decompression and libguestfs extraction on a verified hit. Both are optional;
-without them the original fresh build remains available.
-Each build phase emits elapsed seconds and a collapsed GitHub log group, so
-subsequent cold/warm comparisons can distinguish restoration, installation,
-assembly and test costs. See the [optimization checks](evidence/2026-09-05-ci-cache.md).
+The application wheelhouse is built from the current Git commit before final
+assembly. Its [offline admission](module-player-package.md#prepared-input-for-offline-image-assembly)
+reconstructs the expected package using only supplied dependency bytes and
+compares the complete result to the committed source and lock. The final
+container has no network, so unexpected dependency acquisition cannot succeed.
+The final `ci-image.json` retains the OS baseline manifest and optional registry
+reference alongside the application revision and release identities.
 
-The workflow has `contents: read`, pinned action commit SHAs, push-to-main,
+Central and worker builds retain their existing independent BuildKit scopes.
+The builder instead uses its own definition and `appliance/build-tools.txt`,
+which avoids invalidating the image when the application `uv.lock` changes.
+The OS carrier image contains the prepared archives under `/os-base`; Docker
+transports the files, while the canonical archive restore preserves the Pi
+filesystem's metadata.
+
+Legacy local cold-build options (`--base-cache`, `--extracted-base-cache`,
+`--apt-archive-cache`) remain available for diagnostics and explicit preparation.
+They cannot be combined with prepared-input mode and are not used by ordinary
+GHA final assembly. Earlier [cache measurements](evidence/2026-09-05-ci-cache.md)
+and [APT failures](evidence/2026-09-08-ci-package-acquisition.md) describe the
+preceding implementation, not measured performance of this replacement.
+
+Every final assembly still binds current source/configuration, generates and
+signs boot artifacts, reopens the disk, and runs the exact-artifact boot gate.
+Build and boot share one runner so private disposable fixtures need no transfer.
+
+The workflow uses scoped package publication permissions, pinned action commit SHAs, push-to-main,
 pull-request, and manual triggers. Push and pull-request runs always select the
 `smoke` scope. A manual dispatch presents an explicit `scope` choice, defaulting
 to `smoke`; selecting `full` conditionally builds and loads the production ARM64
@@ -208,7 +173,7 @@ The builder image installs `git`, `gnupg`, `initramfs-tools-core`, and
 and initramfs tooling. It then installs the exact locked Packaging 26.3 wheel
 with its SHA-256 for the package builder only; this tool environment is never
 copied into the appliance runtime. Ubuntu package resolution remains pinned to the dated snapshot in
-`appliance/build.py` and the builder Dockerfile. No repository private key,
+`appliance/os_definition.json` and the builder Dockerfile. No repository private key,
 operator credential, or upstream connection secret enters the build context.
 
 The derived upstream fixture explicitly uses the daemon's default builder for

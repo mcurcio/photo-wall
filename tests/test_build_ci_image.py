@@ -38,6 +38,54 @@ def test_ci_rejects_non_commit_shaped_revision_before_creating_outputs(tmp_path)
     assert not output.exists()
 
 
+@pytest.mark.parametrize("inputs", [
+    {"prepared_base": Path("/base")},
+    {"player_package": Path("/player")},
+    {"os_base_builder_image": "ghcr.io/example/builder@sha256:" + "a" * 64},
+    {"os_base_image": "ghcr.io/example/base@sha256:" + "a" * 64},
+])
+def test_offline_assembly_requires_complete_prepared_inputs(tmp_path, inputs):
+    with pytest.raises(BuildError, match="prepared_inputs_incomplete"):
+        build(Path.cwd(), "a" * 40, tmp_path / "output", **inputs)
+    assert not (tmp_path / "output").exists()
+
+
+def test_offline_assembly_cannot_enable_legacy_apt_fallback(tmp_path):
+    with pytest.raises(BuildError, match="prepared_inputs_conflict"):
+        build(
+            Path.cwd(), "a" * 40, tmp_path / "output", prepared_base=Path("/base"),
+            player_package=Path("/package"), os_base_builder_image="builder",
+            apt_archive_cache=Path("/cache"),
+        )
+
+
+def test_prepared_input_failure_never_fetches_or_installs_os_packages(tmp_path, monkeypatch):
+    from scripts import build_ci_image as ci
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("offline assembly attempted dependency acquisition")
+
+    def missing(*args):
+        raise ValueError("baseline_missing")
+
+    monkeypatch.setattr(ci.appliance, "install_runtime_packages", forbidden)
+    monkeypatch.setattr(ci, "_prepare_base_root", forbidden)
+    monkeypatch.setattr(ci.build_player, "build", forbidden)
+    monkeypatch.setattr(ci.os_base, "restore", missing)
+    monkeypatch.setattr(ci.os_base, "definition", lambda _: {})
+    with pytest.raises(ValueError, match="baseline_missing"):
+        ci._prepared_inputs(Path.cwd(), "a" * 40, tmp_path, Path("/base"), Path("/package"), "builder")
+
+
+def test_prepared_base_cannot_change_builder_without_requalification(tmp_path, monkeypatch):
+    from scripts import build_ci_image as ci
+
+    monkeypatch.setattr(ci.os_base, "restore", lambda *args: {"builder_image": "other-builder"})
+    monkeypatch.setattr(ci.os_base, "definition", lambda _: {})
+    with pytest.raises(BuildError, match="os_base_builder_mismatch"):
+        ci._prepared_inputs(Path.cwd(), "a" * 40, tmp_path, Path("/base"), Path("/package"), "builder")
+
+
 def test_disposable_deployment_has_valid_player_config_and_matching_tls(tmp_path):
     version = subprocess.run(
         ["openssl", "version"], capture_output=True, text=True, check=True

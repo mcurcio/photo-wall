@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      prepare_base:
+        description: Prepare a missing builder or OS base for the current definition
+        required: false
+        default: false
+        type: boolean
       scope:
         description: Appliance qualification scope
         required: true
@@ -24,12 +29,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select-definition:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      qualify: ${{ steps.definition.outputs.qualify }}
+      builder_key: ${{ steps.definition.outputs.builder_key }}
+      base_key: ${{ steps.definition.outputs.base_key }}
+      prepare_builder: ${{ steps.definition.outputs.prepare_builder }}
+      prepare_base: ${{ steps.definition.outputs.prepare_base }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare declared image inputs with the previous revision
+        id: definition
+        env:
+          COMPARE_REVISION: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          FORCE_PREPARE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_base || false }}
+        run: |
+          force_args=()
+          if [[ "$FORCE_PREPARE" == "true" ]]; then force_args=(--force); fi
+          python3 -m scripts.ci_images plan --compare "$COMPARE_REVISION" "${force_args[@]}"
+      - name: Check documentation links and structure
+        run: python3 scripts/check_docs.py
+
   build-and-boot:
+    if: always() && (needs.select-definition.result != 'success' || needs.select-definition.outputs.qualify == 'true')
+    needs: select-definition
+    permissions:
+      contents: read
+      packages: write
+    # A builder identity is also an OS definition input. Serialize its candidate
+    # publication so concurrent PRs cannot replace the same definition tag.
+    concurrency:
+      group: appliance-definition-${{ needs.select-definition.outputs.builder_key }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
       APPLIANCE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'smoke' }}
+      CAN_PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      BUILDER_KEY: ${{ needs.select-definition.outputs.builder_key }}
+      BASE_KEY: ${{ needs.select-definition.outputs.base_key }}
+      PREPARE_BUILDER: ${{ needs.select-definition.outputs.prepare_builder }}
+      PREPARE_BASE: ${{ needs.select-definition.outputs.prepare_base }}
     steps:
+      - name: Require a valid image definition selection
+        env:
+          SELECTION: ${{ needs.select-definition.result }}
+        run: test "$SELECTION" = success
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -68,17 +118,19 @@ jobs:
             type=gha,scope=photo-wall-worker-arm64-v1
           cache-to: type=gha,scope=photo-wall-worker-arm64-v1,mode=max,ignore-error=true
 
-      - name: Build or restore the pinned appliance builder
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull the exact builder or prepare a changed definition
         id: builder
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: .
-          file: appliance/Dockerfile.builder
-          platforms: linux/arm64
-          load: true
-          tags: photo-wall-appliance-builder:ci
-          cache-from: type=gha,scope=photo-wall-appliance-builder-arm64-v1
-          cache-to: type=gha,scope=photo-wall-appliance-builder-arm64-v1,mode=max,ignore-error=true
+        run: |
+          args=()
+          if [[ "$PREPARE_BUILDER" == "true" ]]; then args+=(--allow-build); fi
+          if [[ "$CAN_PUBLISH" == "true" ]]; then args+=(--publish); fi
+          python3 -m scripts.ci_images builder \
+            --namespace "${GITHUB_REPOSITORY,,}" --key "$BUILDER_KEY" "${args[@]}"
 
       - name: Qualify signed APT cache admission in the pinned builder
         run: >-
@@ -89,24 +141,34 @@ jobs:
           python3.12 -m pytest --noconftest -q -p no:cacheprovider
           tests/test_apt_cache_linux.py
 
-      - name: Restore the verified Ubuntu extraction
-        id: base-cache
-        continue-on-error: true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: ${{ runner.temp }}/photo-wall-extracted-base
-          # Exact keys only: changes to the base or its extraction invalidate it.
-          key: pw-base-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'appliance/Dockerfile.builder', 'contracts/release.py', 'scripts/fetch_ubuntu.py', 'scripts/ci_base_cache.py') }}
+      - name: Pull the matching OS base or prepare a changed definition
+        id: os-base
+        env:
+          BUILDER_IMAGE: ${{ steps.builder.outputs.image }}
+          BUILDER_CONFIG: ${{ steps.builder.outputs.imageid }}
+        run: |
+          args=()
+          if [[ "$PREPARE_BASE" == "true" ]]; then args+=(--allow-build); fi
+          python3 -m scripts.ci_images base \
+            --namespace "${GITHUB_REPOSITORY,,}" --key "$BASE_KEY" \
+            --output "$RUNNER_TEMP/photo-wall-os-base" \
+            --builder-image "$BUILDER_IMAGE" --builder-config "$BUILDER_CONFIG" "${args[@]}"
 
-      - name: Restore authenticated-plan APT archive candidates
-        id: apt-cache
-        continue-on-error: true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: ${{ runner.temp }}/photo-wall-apt-archives
-          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}
-          restore-keys: |
-            pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}-progress-
+      - name: Build the Player package from the current application revision
+        env:
+          BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+        run: |
+          docker run --rm --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            "$BUILDER_IMAGE" python3.12 -m scripts.build_player \
+              --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
+              --output "$RUNNER_TEMP/photo-wall-player-package"
 
       - name: Pull the pinned PostgreSQL fixture image
         run: docker pull postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94
@@ -116,6 +178,8 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+          OS_BASE_IMAGE: ${{ steps.os-base.outputs.image }}
+          OS_BASE_BUILDER_IMAGE: ${{ steps.builder.outputs.image }}
           WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
@@ -125,7 +189,7 @@ jobs:
             test -n "$WORKER_IMAGE"
             worker_args=(--worker-image "$WORKER_IMAGE")
           fi
-          docker run --rm --platform linux/arm64 \
+          docker run --rm --platform linux/arm64 --network none \
             --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
             --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
             --workdir "$GITHUB_WORKSPACE" \
@@ -140,61 +204,14 @@ jobs:
               --revision "$GITHUB_SHA" \
               --output-dir "$ci_root/output" \
               --deployment-dir "$ci_root/deployment" \
-              --extracted-base-cache "$RUNNER_TEMP/photo-wall-extracted-base" \
-              --apt-archive-cache "$RUNNER_TEMP/photo-wall-apt-archives" \
+              --os-base "$RUNNER_TEMP/photo-wall-os-base" \
+              --player-package "$RUNNER_TEMP/photo-wall-player-package" \
+              --os-base-builder-image "$OS_BASE_BUILDER_IMAGE" \
+              --os-base-image "$OS_BASE_IMAGE" \
               --central-image "$CENTRAL_IMAGE" \
               --builder-image "$BUILDER_IMAGE" \
               "${worker_args[@]}"
           sudo chown -R "$(id -u):$(id -g)" "$ci_root/output" "$ci_root/deployment"
-
-      - name: Make bounded APT archive candidates readable
-        id: apt-cache-ready
-        if: always()
-        continue-on-error: true
-        run: |
-          cache="$RUNNER_TEMP/photo-wall-apt-archives"
-          if [ ! -L "$cache" ] && sudo test -d "$cache/objects" && sudo test -f "$cache/manifest.json"; then
-            sudo chown -R --no-dereference "$(id -u):$(id -g)" "$cache"
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-            receipt="$RUNNER_TEMP/photo-wall-ci/output/ci-image.json"
-            if sudo python3 -m scripts.ci_apt_cache --verify-completion-receipt "$receipt"; then
-              echo 'complete=true' >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
-      - name: Save the completed APT archive cache
-        if: always() && steps.assemble.outcome == 'success' && steps.apt-cache-ready.outputs.complete == 'true' && steps.apt-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: ${{ runner.temp }}/photo-wall-apt-archives
-          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}
-
-      - name: Save bounded APT acquisition progress
-        if: always() && steps.apt-cache-ready.outputs.ready == 'true' && steps.apt-cache-ready.outputs.complete != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: ${{ runner.temp }}/photo-wall-apt-archives
-          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}-progress-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Make completed base cache readable
-        id: base-cache-ready
-        if: always() && steps.base-cache.outputs.cache-hit != 'true'
-        run: |
-          base_cache="$RUNNER_TEMP/photo-wall-extracted-base"
-          if [ ! -L "$base_cache" ] && sudo test -f "$base_cache/manifest.json"; then
-            sudo chown -R --no-dereference "$(id -u):$(id -g)" "$base_cache"
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Save the reusable Ubuntu extraction
-        if: always() && steps.base-cache-ready.outputs.ready == 'true'
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: ${{ runner.temp }}/photo-wall-extracted-base
-          key: ${{ steps.base-cache.outputs.cache-primary-key }}
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -227,6 +244,28 @@ jobs:
             --builder-image "$BUILDER_IMAGE" \
             --scope "$APPLIANCE_SCOPE" \
             "${worker_args[@]}"
+
+      - name: Retain the newly qualified OS definition in the registry
+        if: steps.os-base.outputs.built == 'true' && env.CAN_PUBLISH == 'true'
+        id: publish-base
+        run: |
+          python3 -m scripts.ci_images publish-base \
+            --namespace "${GITHUB_REPOSITORY,,}" --key "$BASE_KEY" \
+            --output "$RUNNER_TEMP/photo-wall-os-base"
+
+      - name: Record the published OS base reference
+        if: steps.publish-base.outputs.image != ''
+        env:
+          PUBLISHED_BASE: ${{ steps.publish-base.outputs.image }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'photo-wall-ci/output/ci-image.json'
+          record = json.loads(path.read_text())
+          record['os_base']['image'] = os.environ['PUBLISHED_BASE']
+          path.write_text(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\n')
+          PY
 
       - name: Compress the disk for artifact upload
         run: |
@@ -268,6 +307,10 @@ jobs:
         if: always()
         run: |
           diagnostics="$RUNNER_TEMP/photo-wall-ci/diagnostics"
+          if [ -d "$RUNNER_TEMP/diagnostics" ]; then
+            install -d "$diagnostics"
+            sudo cp -a "$RUNNER_TEMP/diagnostics/." "$diagnostics/"
+          fi
           if [ -d "$diagnostics" ]; then
             sudo chown -R "$(id -u):$(id -g)" "$diagnostics"
           fi
@@ -280,3 +323,18 @@ jobs:
           path: ${{ runner.temp }}/photo-wall-ci/diagnostics
           if-no-files-found: ignore
           retention-days: 7
+
+  appliance-required:
+    if: always()
+    needs: [select-definition, build-and-boot]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 2
+    steps:
+      - name: Require completed image qualification
+        env:
+          SELECTION: ${{ needs.select-definition.result }}
+          QUALIFICATION: ${{ needs.build-and-boot.result }}
+          REQUIRED: ${{ needs.select-definition.outputs.qualify }}
+        run: |
+          test "$SELECTION" = success
+          if [[ "$REQUIRED" != "false" ]]; then test "$QUALIFICATION" = success; fi

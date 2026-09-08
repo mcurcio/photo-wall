@@ -30,6 +30,7 @@ from scripts import (
     ci_apt_cache,
     ci_base_cache,
     fetch_ubuntu,
+    os_base,
 )
 
 # Include the additional bounded rollback rootfs retained in the private fixture.
@@ -372,6 +373,24 @@ def _prepare_base_root(
     return root, cache_record
 
 
+def _prepared_inputs(
+    repository: Path, revision: str, temporary: Path, baseline: Path,
+    package: Path, builder_reference: str,
+) -> tuple[Path, Path, dict, dict]:
+    """Restore exact inputs for offline assembly; never fall back to acquisition."""
+    root, evidence, player = (temporary / name for name in ("root", "package-evidence", "player"))
+    base_manifest = phase(
+        "os_base_restore", os_base.restore, baseline, root, evidence,
+        os_base.definition(repository),
+    )
+    if base_manifest["builder_image"] != builder_reference:
+        raise appliance.BuildError("os_base_builder_mismatch")
+    player_inventory = phase(
+        "player_package_restore", build_player.restore, repository, revision, package, player,
+    )
+    return root, player, base_manifest, player_inventory
+
+
 def build(
     repository: Path,
     revision: str,
@@ -384,7 +403,12 @@ def build(
     worker_image: str | None = None,
     extracted_base_cache: Path | None = None,
     apt_archive_cache: Path | None = None,
+    prepared_base: Path | None = None,
+    player_package: Path | None = None,
+    os_base_image: str | None = None,
+    os_base_builder_image: str | None = None,
 ) -> dict:
+    os_base_image = os_base_image or None
     if (
         not isinstance(revision, str)
         or len(revision) != 40
@@ -397,6 +421,16 @@ def build(
         or any(c not in "0123456789abcdef" for c in worker_image[7:])
     ):
         raise appliance.BuildError("worker_image_invalid")
+    prepared = (prepared_base is not None, player_package is not None,
+                os_base_builder_image is not None)
+    if any(prepared) and not all(prepared):
+        raise appliance.BuildError("prepared_inputs_incomplete")
+    if prepared_base is not None and any(
+        path is not None for path in (base_cache, extracted_base_cache, apt_archive_cache)
+    ):
+        raise appliance.BuildError("prepared_inputs_conflict")
+    if os_base_image is not None and prepared_base is None:
+        raise appliance.BuildError("prepared_inputs_incomplete")
     repository = repository.resolve(strict=True)
     output = output.absolute()
     appliance.outside_git(output)
@@ -413,20 +447,27 @@ def build(
         deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
         temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
         appliance.outside_git(temporary)
-        root, extracted_cache_record = _prepare_base_root(
-            temporary,
-            repository,
-            diagnostics,
-            base_cache=base_cache,
-            extracted_base_cache=extracted_base_cache,
-        )
         evidence = temporary / "package-evidence"
-        cache = None if apt_archive_cache is None else ci_apt_cache.AptArchiveCache(apt_archive_cache)
-        apt_cache_record = phase(
-            "runtime_packages", appliance.install_runtime_packages, root, evidence, cache
-        )
-        player = temporary / "player"
-        player_inventory = phase("player_package", build_player.build, repository, revision, player)
+        base_record = None
+        if prepared_base is not None:
+            root, player, base_manifest, player_inventory = _prepared_inputs(
+                repository, revision, temporary, prepared_base, player_package,
+                os_base_builder_image,
+            )
+            base_record = {"image": os_base_image, "manifest": base_manifest}
+            extracted_cache_record = {"requested": False}
+            apt_cache_record = {"requested": False}
+        else:
+            root, extracted_cache_record = _prepare_base_root(
+                temporary, repository, diagnostics, base_cache=base_cache,
+                extracted_base_cache=extracted_base_cache,
+            )
+            cache = None if apt_archive_cache is None else ci_apt_cache.AptArchiveCache(apt_archive_cache)
+            apt_cache_record = phase(
+                "runtime_packages", appliance.install_runtime_packages, root, evidence, cache
+            )
+            player = temporary / "player"
+            player_inventory = phase("player_package", build_player.build, repository, revision, player)
         source = temporary / "source"
         phase("source_export", appliance.export_source, repository, source, revision)
         bundle = temporary / "bundle"
@@ -490,6 +531,7 @@ def build(
             "worker_image": worker_image,
             "extracted_base_cache": extracted_cache_record,
             "apt_archive_cache": apt_cache_record,
+            "os_base": base_record,
             "disk": {"path": str(image_path), **_record(image_path, 16 * 1024**3)},
             # These three paths intentionally remain absolute: the VM harness
             # runs on the same CI host before the output directory is uploaded.
@@ -565,6 +607,10 @@ def main() -> None:
     parser.add_argument("--builder-image")
     parser.add_argument("--central-image")
     parser.add_argument("--worker-image")
+    parser.add_argument("--os-base", type=Path)
+    parser.add_argument("--player-package", type=Path)
+    parser.add_argument("--os-base-image")
+    parser.add_argument("--os-base-builder-image")
     args = parser.parse_args()
     if not args.revision:
         parser.error("--revision or GITHUB_SHA is required")
@@ -580,6 +626,10 @@ def main() -> None:
             worker_image=args.worker_image,
             extracted_base_cache=args.extracted_base_cache,
             apt_archive_cache=args.apt_archive_cache,
+            prepared_base=args.os_base,
+            player_package=args.player_package,
+            os_base_image=args.os_base_image,
+            os_base_builder_image=args.os_base_builder_image,
         )
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f"CI appliance build failed: {exc}\n")

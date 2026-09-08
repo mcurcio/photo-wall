@@ -160,7 +160,8 @@ def _member_name(name: str) -> str:
     return "." if not parts else "/".join(parts)
 
 
-def _validate_archive(path: Path) -> None:
+def _validate_archive(path: Path, *, forbidden_roots: tuple[str, ...] = FORBIDDEN_ROOTS,
+                      reject_private: bool = False) -> None:
     names: dict[str, tarfile.TarInfo] = {}
     total = 0
     try:
@@ -170,7 +171,7 @@ def _validate_archive(path: Path) -> None:
                     raise CacheError("cache_member_limit")
                 name = _member_name(member.name)
                 if any(name == forbidden or name.startswith(forbidden + "/")
-                       for forbidden in FORBIDDEN_ROOTS):
+                       for forbidden in forbidden_roots):
                     raise CacheError("cache_configured_root")
                 if name in names:
                     raise CacheError("cache_member_duplicate")
@@ -189,6 +190,8 @@ def _validate_archive(path: Path) -> None:
                     pass
                 else:
                     raise CacheError("cache_member_type")
+                if reject_private:
+                    _reject_private_member(name, member, archive)
                 names[name] = member
     except CacheError:
         raise
@@ -208,6 +211,46 @@ def _validate_archive(path: Path) -> None:
             parent = parent.parent
         if member.islnk() and member.linkname not in regulars:
             raise CacheError("cache_hardlink_target")
+
+
+def _reject_private_member(name: str, member: tarfile.TarInfo, archive: tarfile.TarFile) -> None:
+    """Reject deployment secrets and image-generated host keys before extraction."""
+    parts = PurePosixPath(name).parts
+    secret_path = (any(part in {".ssh", ".gnupg"} for part in parts)
+                   or any(name == prefix or name.startswith(prefix + "/")
+                          for prefix in ("etc/ssl/private", "private", "deployment")))
+    if secret_path and not member.isdir():
+        raise CacheError("archive_private_material")
+    if member.isreg():
+        if PurePosixPath(name).name.startswith("ssh_host_"):
+            raise CacheError("archive_private_material")
+        stream = archive.extractfile(member)
+        if stream is not None:
+            with stream:
+                prefix = stream.read(4096).lstrip()
+            if prefix.startswith(b"-----BEGIN ") and b"PRIVATE KEY-----" in prefix:
+                raise CacheError("archive_private_material")
+
+
+def create_archive(root: Path, archive: Path, *,
+                   forbidden_roots: tuple[str, ...] = FORBIDDEN_ROOTS,
+                   reject_private: bool = False) -> dict:
+    """Create one bounded metadata-preserving archive and validate its topology."""
+    if root.is_symlink() or not root.is_dir() or archive.exists() or archive.is_symlink():
+        raise CacheError("cache_root_invalid")
+    appliance.run(["tar", "--numeric-owner", "--xattrs", "--xattrs-include=*", "--acls",
+                   "--create", "--file", str(archive), "--directory", str(root), "."],
+                  timeout=900)
+    record = _checked_archive(archive)
+    _validate_archive(archive, forbidden_roots=forbidden_roots, reject_private=reject_private)
+    return record
+
+
+def extract_archive(archive: Path, destination: Path) -> None:
+    """Extract a previously validated archive to an owned empty directory."""
+    appliance.run(["tar", "--numeric-owner", "--same-owner", "--same-permissions",
+                   "--xattrs", "--xattrs-include=*", "--acls", "--extract", "--file",
+                   str(archive), "--directory", str(destination)], timeout=900)
 
 
 def _reject_configured_root(root: Path) -> None:
@@ -233,11 +276,7 @@ def publish(root: Path, cache: Path, expected: dict) -> dict:
     temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-base-cache-", dir=cache.parent))
     try:
         archive = temporary / ARCHIVE_NAME
-        appliance.run(["tar", "--numeric-owner", "--xattrs", "--xattrs-include=*", "--acls",
-                       "--create", "--file", str(archive), "--directory", str(root), "."],
-                      timeout=900)
-        archive_record = _checked_archive(archive)
-        _validate_archive(archive)
+        archive_record = create_archive(root, archive)
         manifest = {"schema": SCHEMA, "kind": KIND, "fingerprint": expected,
                     "archive": {"name": ARCHIVE_NAME, **archive_record}}
         (temporary / MANIFEST_NAME).write_bytes(_manifest_bytes(manifest))
@@ -271,9 +310,7 @@ def restore(cache: Path, destination: Path, expected: dict) -> dict:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-base-restore-", dir=destination.parent))
     try:
-        appliance.run(["tar", "--numeric-owner", "--same-owner", "--same-permissions",
-                       "--xattrs", "--xattrs-include=*", "--acls", "--extract", "--file",
-                       str(archive), "--directory", str(temporary)], timeout=900)
+        extract_archive(archive, temporary)
         os.replace(temporary, destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
