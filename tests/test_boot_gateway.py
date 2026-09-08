@@ -225,8 +225,8 @@ def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back
                                  (other_device, request['device_id']))
 
         harness = object.__new__(ApplianceE2E)
-        container = 'pw-boot-' + 'a' * 16 + '-central'
-        harness.fixture_central = lambda: container
+        container = 'pw-boot-' + 'a' * 16 + '-observer'
+        harness.fixture_observer = lambda: container
         harness.inputs = dict(candidate=candidate, release=accepted)
         harness.report = dict(checks={})
         monkeypatch.setenv('PHOTO_WALL_DATABASE_URL', 'isolated-test-database')
@@ -262,7 +262,7 @@ def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back
                 harness.verify_central_rollback(boot(trial), boot(following), restored)
             assert not harness.report['checks'].get('central_trial_consumed')
             assert harness.report['release_probe_failures'] == [dict(
-                schema_version=1, kind='release-failure', role='central', action='evidence',
+                schema_version=1, kind='release-failure', role='observer', action='evidence',
                 stage='result', code='release_probe_evidence_invalid')]
         else:
             harness.verify_central_rollback(boot(trial), boot(following), restored)

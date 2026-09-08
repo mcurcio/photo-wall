@@ -85,7 +85,7 @@ class ReleaseStageResult(StrictModel):
 class ReleaseFailureResult(StrictModel):
     schema_version: Annotated[int, Field(ge=1, le=1)]
     kind: Literal["release-failure"]
-    role: Literal["central"]
+    role: Literal["observer"]
     action: Literal["evidence", "stage"]
     stage: Literal["input", "query", "result", "stage"]
     code: Literal[tuple(FAILURE_STAGES)]
@@ -101,9 +101,9 @@ class ReleaseFailureResult(StrictModel):
 
 
 def release_helper_identity(args: list[str]) -> tuple[str, str] | None:
-    """Recognize only the pinned helper's complete central exec shape."""
+    """Recognize only the pinned helper's complete observer exec shape."""
     if (len(args) not in (11, 15) or args[:2] != ["docker", "exec"]
-            or not re.fullmatch(r"pw-boot-[a-f0-9]{16}-central", args[2])
+            or not re.fullmatch(r"pw-boot-[a-f0-9]{16}-observer", args[2])
             or args[3:6] != ["python", "-m", "scripts.vm_release_probe"]
             or args[7] != "--device-id" or not re.fullmatch(r"device-[a-f0-9]{64}", args[8])
             or args[9] != "--boot-id"

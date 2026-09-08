@@ -358,8 +358,13 @@ class ApplianceE2E:
         self.fixture.check(self.fixture.resources["container:" + name])
         return name
 
+    def fixture_observer(self):
+        name = self.fixture.project + "-observer"
+        self.fixture.check(self.fixture.resources["container:" + name])
+        return name
+
     def inventory(self) -> tuple[EquipmentSessionObservation, ...]:
-        payload = self.run(["docker", "exec", self.fixture_central(),
+        payload = self.run(["docker", "exec", self.fixture_observer(),
                             "python", "-m", "scripts.vm_inventory_probe"], timeout=15)
         return TypeAdapter(tuple[EquipmentSessionObservation, ...]).validate_json(payload)
 
@@ -542,7 +547,7 @@ class ApplianceE2E:
         raise FixtureError("player_session_replacement_timeout")
 
     def release_probe(self, action: str, boot: dict, *extra: str):
-        args = ["docker", "exec", self.fixture_central(), "python", "-m",
+        args = ["docker", "exec", self.fixture_observer(), "python", "-m",
                        "scripts.vm_release_probe", action, "--device-id", boot["device_id"],
                        "--boot-id", boot["boot_id"], *extra]
         try:
@@ -581,6 +586,7 @@ class ApplianceE2E:
         while time.monotonic() < deadline:
             require(self.checked_vm()["Running"], "vm_stopped_during_health")
             value = self.boot_evidence(boot)
+            self.report["last_central_health"] = value.model_dump(mode="json") if value else None
             if value and value.current and value.status == "healthy":
                 require(value.accepted_release_id == boot["release_id"], "central_release_not_accepted")
                 self.report.setdefault("central_health", {})[boot["boot_id"]] = value.model_dump(mode="json")

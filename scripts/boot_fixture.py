@@ -50,9 +50,6 @@ DOCKER_NETWORK_ID_PATTERN = re.compile(r"[a-f0-9]{64}")
 RUNTIME = r'''
 import json, os, re, socket, ssl, stat, struct, sys, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
-from appliance.bootstrap import BootConfig, Fetcher, copy_verified, read_regular
-from boot_gateway import BootBundle
-from boot_time_fixture import ntp_timestamp, NTP_EPOCH
 
 def identity(bundle):
     release = bundle.release
@@ -64,6 +61,8 @@ def expected(bundle):
         raise ValueError('fixture release changed')
 
 def initialize():
+    from boot_gateway import BootBundle
+
     if os.geteuid() != 0:
         raise ValueError('root initialization required')
     media_mode = len(sys.argv) == 4 and sys.argv[3] in ('media', 'media-control')
@@ -147,6 +146,10 @@ def healthy():
     return health
 
 def probe():
+    from appliance.bootstrap import BootConfig, Fetcher, copy_verified, read_regular
+    from boot_gateway import BootBundle
+    from boot_time_fixture import ntp_timestamp, NTP_EPOCH
+
     bundle = BootBundle.load(Path('/bundle'), Path('/public'))
     expected(bundle)
     addresses = sorted({item[4][0] for item in socket.getaddrinfo('photo-wall.test', 443, type=socket.SOCK_STREAM)})
@@ -366,6 +369,17 @@ def composition(project: str, media: dict | None = None) -> dict:
             depends_on={"database":{"condition":"service_healthy"}},
             healthcheck=dict(test=["CMD","python","/opt/boot-fixture/runtime.py","health"],
                              interval="3s",timeout="7s",retries=40,start_period="10s")),
+        # Repeated Python/schema/DB observer startup must not consume the
+        # measured Central service's CPU quota or memory allowance.
+        "observer": dict(common, container_name=project+"-observer", mem_limit="192m", pids_limit=64,
+            command=["sleep", "infinity"],
+            tmpfs=["/tmp:rw,nosuid,nodev,noexec,size=32m"],
+            environment=dict(PHOTO_WALL_DATABASE_URL="postgresql://wall:${BOOT_DB_PASSWORD}@database:5432/wall",
+                             PHOTO_WALL_ADMIN_TOKEN="${BOOT_ADMIN_TOKEN:?missing fixture secret}"),
+            volumes=[volume(project, "public", "/public")],
+            networks={"front": {}, "database": {}},
+            sysctls={"net.ipv4.ip_forward": "0"},
+            depends_on={"central": {"condition": "service_healthy"}}),
         "ntp": dict(common, container_name=project+"-ntp", mem_limit="64m", cpus=.25,
             command=["python","/opt/boot-fixture/boot_time_fixture.py","--bind","0.0.0.0","--port","123"],
             network_mode="service:central", depends_on={"central":{"condition":"service_healthy"}}),
@@ -578,7 +592,7 @@ class BootFixture:
             os.close(fd)
 
     def inspect(self, kind, name):
-        template = ("{{json .Config.Labels}}\n{{.Id}}" if kind in ("container","image")
+        template = ('{{json (index .Config "Labels")}}\n{{.Id}}' if kind in ("container","image")
                     else "{{json .Labels}}\n{{.Id}}" if kind == "network"
                     else "{{json .Labels}}\n{{.Name}}@{{.CreatedAt}}")
         result = self.run(["docker",kind,"inspect","--format",template,name],timeout=30).decode().splitlines()
@@ -605,7 +619,7 @@ class BootFixture:
         allowed = {"image":{self.project+":local",self.project+"-base:local"},
                    "network":{self.project+"-"+n for n in ("front","database")},
                    "volume":{self.project+"-"+n for n in ("database","bundle","public","tls","probe")},
-                   "container":{self.project+"-"+n for n in ("central","database","ntp","seed","probe")}}
+                   "container":{self.project+"-"+n for n in ("central","observer","database","ntp","seed","probe")}}
         if self.media is not None:
             allowed["volume"].update({self.project+"-"+n for n in ("media", "private")})
             allowed["container"].add(self.project+"-worker")
@@ -786,7 +800,7 @@ class BootFixture:
                     self.remove(seed)
             for record in list(self.resources.values()):
                 self.check(record,missing_ok=True)
-            service_names = ("database","central","ntp","worker") if self.media is not None else ("database","central","ntp")
+            service_names = ("database","central","observer","ntp","worker") if self.media is not None else ("database","central","observer","ntp")
             containers = [self.remember("container",self.project+"-"+name) for name in service_names]
             try:
                 self.run([*self.base,"up","-d","--wait","--wait-timeout","150"],timeout=180)

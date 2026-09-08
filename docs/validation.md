@@ -21,6 +21,8 @@ This specification maps [requirements](requirements.md) to ownership, evidence, 
 
 ## Qualification procedures
 
+When an appliance run exposes a failure outside hardware or operating-system integration, first reproduce it in an ordinary automated integration test at the owning subsystem boundary, running outside the appliance OS. Fix and verify it there before rerunning the image; reserve image runs for operating-system, native boot, and rendering integration and final exact-artifact qualification.
+
 ### Portable execution checks
 
 Use controllable time, simulated Players, and a recording Actuator adapter. Trace activation IDs, Run epochs, authored/plan revisions, assignments, binding generations, intended times, and observed execution. Keep checks runnable without Pi hardware; follow [CONTRIBUTING](../CONTRIBUTING.md).

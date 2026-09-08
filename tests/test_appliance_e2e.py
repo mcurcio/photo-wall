@@ -468,6 +468,22 @@ def test_inventory_transport_soak_uses_authenticated_fixture_probe():
     assert harness.report["checks"]["central_inventory_pre_vm"] is True
 
 
+def test_inventory_exec_uses_the_checked_observer_container():
+    harness = object.__new__(ApplianceE2E)
+    name = "pw-boot-" + "a" * 16 + "-observer"
+    resource = dict(kind="container", name=name, id="pinned-container-id")
+    checks, calls = [], []
+    harness.fixture = SimpleNamespace(project="pw-boot-" + "a" * 16,
+        resources={"container:" + name: resource}, check=lambda value: checks.append(value))
+    def run(args, **kwargs):
+        calls.append(args)
+        return b"[]"
+    harness.run = run
+    assert harness.inventory() == ()
+    assert checks == [resource]
+    assert calls == [["docker", "exec", name, "python", "-m", "scripts.vm_inventory_probe"]]
+
+
 def test_boot_report_is_a_distinct_gate_before_player_enrollment(monkeypatch):
     from scripts import test_appliance_e2e as e2e
 
@@ -553,6 +569,29 @@ def test_current_ticket_is_required_for_central_boot_evidence():
         evidence=central_evidence(ticket_sha256='f' * 64))
     with pytest.raises(FixtureError, match='central_boot_mismatch'):
         harness.boot_evidence(report())
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_health_timeout_retains_only_last_validated_central_observation(monkeypatch, present):
+    from scripts import test_appliance_e2e as e2e
+
+    harness = object.__new__(ApplianceE2E)
+    harness.report = {"boots": [report()], "checks": {}}
+    harness.checked_vm = lambda: {"Running": True}
+    pending = central_evidence() if present else None
+    harness.boot_evidence = lambda _: pending
+    ticks = iter([100, 101, 641])
+    monkeypatch.setattr(e2e.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(e2e.time, "sleep", lambda _: None)
+    with pytest.raises(FixtureError, match="native_central_health_timeout"):
+        harness.wait_central_health()
+    assert harness.report["last_central_health"] == (pending.model_dump(mode="json") if pending else None)
+    if present:
+        saved = harness.report["last_central_health"]
+        assert saved["status"] == "booting" and saved["current"] is True
+        assert saved["ticket_sha256"] == report()["ticket_sha256"]
+        assert "ticket_id" not in saved and "token" not in saved
+    assert harness.report["checks"] == {}
 
 
 @pytest.mark.parametrize('fault', [None, 'trial_status', 'trial_candidate', 'trial_release',

@@ -207,8 +207,9 @@ def test_media_probe_consumes_the_typed_equipment_session():
     def run(args, **kwargs):
         calls.append(args)
         return json.dumps({'ok': True, 'value': {'presentations': [], 'grants': []}}).encode()
-    harness = SimpleNamespace(run=run, fixture_central=lambda: 'central', report={})
+    harness = SimpleNamespace(run=run, fixture_observer=lambda: 'observer', report={})
     assert ApplianceMedia(harness, 'image').probe('evidence', player) == dict(presentations=[], grants=[])
+    assert calls[0][:6] == ['docker', 'exec', 'observer', 'python', '-m', 'scripts.vm_media_probe']
     assert calls[0][-4:] == ['--player-id', player.player_id, '--epoch', '2']
 
 

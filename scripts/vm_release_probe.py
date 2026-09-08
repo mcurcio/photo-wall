@@ -1,6 +1,6 @@
 """Fixture-only operator staging and read-only central boot evidence.
 
-Credentials and boot ticket capabilities stay inside the fixture's central.
+Credentials and boot ticket capabilities stay inside the fixture's observer.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def main():
     except Exception as exc:
         if args.action == "evidence" and isinstance(exc, ValidationError):
             code = "release_probe_evidence_invalid"
-        failure = ReleaseFailureResult(schema_version=1, kind="release-failure", role="central",
+        failure = ReleaseFailureResult(schema_version=1, kind="release-failure", role="observer",
             action=args.action, stage=FAILURE_STAGES[code], code=code)
         print(failure.model_dump_json())
         raise SystemExit(1) from None

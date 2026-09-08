@@ -91,7 +91,7 @@ class ApplianceMedia:
         h = self.harness
         require(action in ("configure", "evidence", "stale"), "media_probe_action_invalid")
         h.report["media_probe"] = dict(action=action, status="started")
-        payload = h.run(["docker", "exec", h.fixture_central(), "python", "-m",
+        payload = h.run(["docker", "exec", h.fixture_observer(), "python", "-m",
             "scripts.vm_media_probe", action, "--player-id", player.player_id,
             "--epoch", str(player.authority_epoch), *args], timeout=30)
         try:
@@ -227,6 +227,7 @@ class ApplianceMedia:
         expected = {
             h.name: {h.fixture.project + "-front"},
             h.fixture_central(): {h.fixture.project + "-front", h.fixture.project + "-database"},
+            h.fixture_observer(): {h.fixture.project + "-front", h.fixture.project + "-database"},
             worker: {h.fixture.project + "-database", self.upstream.project + "_upstream_net"},
         }
         for name, networks in expected.items():

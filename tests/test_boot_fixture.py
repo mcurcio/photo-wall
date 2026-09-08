@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,6 +148,62 @@ def test_composition_contract_has_isolated_dns_and_networks():
 
     for name in ("database", "bundle", "public", "tls", "probe"):
         assert document["volumes"][name]["external"] is True
+
+
+@pytest.mark.parametrize("media", [None, media_spec()])
+def test_observer_has_its_own_bound_and_no_private_or_media_mounts(media):
+    services = composition("pw-boot-" + "0" * 16, media)["services"]
+    central, observer = services["central"], services["observer"]
+    assert central["cpus"] == observer["cpus"] == .5
+    assert central["mem_limit"] == "384m" and observer["mem_limit"] == "192m"
+    assert observer["image"] == central["image"]
+    assert observer["pids_limit"] == 64 and observer["user"] == "10001:10001"
+    assert observer["read_only"] is True and observer["cap_drop"] == ["ALL"]
+    assert observer["security_opt"] == ["no-new-privileges:true"]
+    assert observer["tmpfs"] == ["/tmp:rw,nosuid,nodev,noexec,size=32m"]
+    assert observer["networks"] == {"front": {}, "database": {}}
+    assert observer["sysctls"] == {"net.ipv4.ip_forward": "0"}
+    assert observer["volumes"] == [dict(type="volume", source="public", target="/public",
+        read_only=True, volume=dict(nocopy=True))]
+    assert set(observer["environment"]) == {"PHOTO_WALL_DATABASE_URL", "PHOTO_WALL_ADMIN_TOKEN"}
+    assert observer["depends_on"] == {"central": {"condition": "service_healthy"}}
+    assert central["healthcheck"]["interval"] == "3s"
+
+
+HEALTH_RUNTIME_CHECK = r'''
+import json, runpy, sys
+runtime = runpy.run_path(sys.argv[1])
+class Response:
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def read(self, maximum):
+        assert maximum == 4097
+        return b'{"status":"ok","database":true}'
+class Client:
+    def open(self, url, timeout):
+        assert url == 'https://photo-wall.test/healthz' and timeout == 5
+        return Response()
+runtime['healthy'].__globals__['client'] = Client
+assert runtime['healthy']() == {'status':'ok','database':True}
+assert not {'central', 'appliance', 'boot_gateway', 'pydantic'} & sys.modules.keys()
+for phase in ('initialize', 'probe'):
+    try: runtime[phase]()
+    except ModuleNotFoundError: pass
+    else: raise AssertionError('artifact phase lost its mandatory imports')
+print(json.dumps({'health':'passed','artifact_imports_required':True}))
+'''
+
+
+def test_health_runtime_loads_without_application_or_artifact_imports(tmp_path):
+    helper = tmp_path / "runtime.py"
+    helper.write_text(RUNTIME)
+    # -I -S removes project/site-package imports in a fresh interpreter. The
+    # same runtime used by Docker healthchecks must still validate health.
+
+    completed = subprocess.run([sys.executable, "-I", "-S", "-c", HEALTH_RUNTIME_CHECK, str(helper)],
+        capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(completed.stdout) == dict(health="passed", artifact_imports_required=True)
 
 
 def test_media_composition_isolated_and_public_marker_excludes_secret(tmp_path):
@@ -459,8 +516,9 @@ def test_boot_command_drops_partial_secret_line_at_diagnostic_tail(tmp_path, mon
 
 
 @pytest.mark.parametrize("initialized", [True, False])
-def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
-    fixture = prepared_fixture(tmp_path)
+@pytest.mark.parametrize("media", [True, False])
+def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized, media):
+    fixture = prepared_media_fixture(tmp_path) if media else prepared_fixture(tmp_path)
     project = fixture.project
     fixture.marker["initialized"] = initialized
     fixture.resources = {
@@ -472,6 +530,7 @@ def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
     fixture.check_inputs = lambda: None
     fixture.check = lambda *_args, **_kwargs: None
     fixture.create_resource = lambda *_args, **_kwargs: None
+    fixture._check_borrowed_network = lambda: None
     copied = []
 
     def exists(kind, name):
@@ -480,7 +539,7 @@ def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
 
     def run(args, **_kwargs):
         if args[:3] == ["docker", "image", "inspect"]:
-            return (CENTRAL_IMAGE + "\n").encode()
+            return ((WORKER_IMAGE if args[-1] == WORKER_IMAGE else CENTRAL_IMAGE) + "\n").encode()
         if len(args) > 1 and args[1] == "cp":
             copied.append(args)
         return b""
@@ -489,7 +548,8 @@ def test_up_reseeds_when_a_seed_volume_is_missing(tmp_path, initialized):
     fixture.run = run
     fixture._probe = lambda: {"reseeded": True}
     assert fixture.up() == {"reseeded": True}
-    assert len(copied) == 3
+    assert len(copied) == (4 if media else 3)
+    assert "container:" + project + "-observer" in read_json(fixture.state / "resources.json")
     assert read_json(fixture.state / "fixture.json")["initialized"] is True
     assert read_json(fixture.state / "resources.json")["volume:" + project + "-bundle"]["id"] is None
 
@@ -558,6 +618,7 @@ def test_down_removes_only_recorded_resources_in_kind_order(tmp_path):
     fixture.resources = {
         "container:" + project + "-database": dict(kind="container", name=project + "-database", id=None),
         "container:" + project + "-central": dict(kind="container", name=project + "-central", id=None),
+        "container:" + project + "-observer": dict(kind="container", name=project + "-observer", id=None),
         "network:" + project + "-front": dict(kind="network", name=project + "-front", id=None),
         "network:" + project + "-database": dict(kind="network", name=project + "-database", id=None),
         "volume:" + project + "-bundle": dict(kind="volume", name=project + "-bundle", id=None),
@@ -590,6 +651,7 @@ def test_down_removes_only_recorded_resources_in_kind_order(tmp_path):
     assert max(position["volume"]) < min(position["image"])
     assert read_json(fixture.state / "resources.json") == {}
     assert read_json(fixture.state / "fixture.json")["initialized"] is False
+    assert ["docker", "container", "rm", "-f", project + "-observer-id"] in fake.calls
 
 
 def test_check_rejects_database_using_replaced_image(tmp_path):
@@ -599,6 +661,28 @@ def test_check_rejects_database_using_replaced_image(tmp_path):
     fixture.run = fake
     with pytest.raises(FixtureError, match="database_image_changed"):
         fixture.check({"kind": "container", "name": fixture.project + "-database", "id": None})
+
+
+@pytest.mark.parametrize("fault", ["label", "id", "image"])
+def test_observer_replacement_stops_cleanup_before_removal(tmp_path, fault):
+    fixture = prepared_fixture(tmp_path)
+    name = fixture.project + "-observer"
+    fixture.resources = {
+        "container:" + name: dict(kind="container", name=name, id="expected-id"),
+        "image:" + fixture.project + ":local": dict(kind="image", name=fixture.project + ":local", id="image-id"),
+    }
+    write_json(fixture.state / "resources.json", fixture.resources)
+    fixture.inspect = lambda *_: ({LABEL: "foreign" if fault == "label" else fixture.project},
+                                  "other-id" if fault == "id" else "expected-id")
+    fixture.exists = lambda *_: True
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        return b"wrong-image\n"
+    fixture.run = run
+    with pytest.raises(FixtureError, match="resource_identity_changed|container_image_changed"):
+        fixture.down()
+    assert not any("rm" in call for call in calls)
 
 
 def test_check_refuses_unowned_resource_identity(tmp_path):
@@ -631,6 +715,22 @@ def test_shared_base_tag_is_checked_by_exact_identity_without_relabeling(tmp_pat
     fixture.inspect = lambda *_: ({}, "sha256:" + "1" * 64)
     with pytest.raises(FixtureError, match="base_image_changed"):
         fixture.check(record)
+
+
+def test_absent_base_image_labels_do_not_bypass_owned_resource_labels(tmp_path):
+    fixture = prepared_fixture(tmp_path)
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        assert args[4] == '{{json (index .Config "Labels")}}\n{{.Id}}'
+        return ("null\n" + CENTRAL_IMAGE + "\n").encode()
+    fixture.run = run
+    base = fixture.remember("image", fixture.project + "-base:local")
+    assert fixture.check(base) == CENTRAL_IMAGE
+    observer = fixture.remember("container", fixture.project + "-observer")
+    with pytest.raises(FixtureError, match="resource_identity_changed"):
+        fixture.check(observer)
+    assert len(calls) == 2
 
 
 def test_media_control_has_separate_owned_persistent_volume(tmp_path):

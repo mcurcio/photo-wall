@@ -20,6 +20,8 @@ The harness waits explicitly for `ready` and a non-null session matching the boo
 
 The [release probe](../scripts/vm_release_probe.py) and host consume the same [strict release-evidence contract](../scripts/vm_release_contract.py), pinned into the fixture helper closure. Both validate versioned evidence and staging results, required nullable fields, exact types and bounds, and reject unknown fields. The evidence query is read-only: a candidate's consumed trial must retain the hash of that exact boot ticket. A failed boot status alone cannot establish consumption. Rollback separately records the failed, noncurrent candidate attempt and the current, nontrial accepted fallback, retaining the centrally selected candidate and accepted release identities. The fallback must match the restored Equipment, Player, and current authority epoch. Reports contain ticket hashes and separate central trial/fallback evidence; they expose no ticket capability and infer no historical session from the Equipment's current session fields.
 
+Inventory, release and media helper processes run in the [fixture observer](module-boot-fixture.md), outside Central's CPU and memory allowance. Central remains the source of all authorization and release decisions. Finite release-failure metadata requires the explicit observer role, exact helper command/action and current fixture container identity. Central logs, delivery tracing and restart actions continue to target the actual server. The full network audit includes the observer's front/database membership.
+
 ## Routine appliance smoke sequence
 
 1. Start with an empty central database and no writable Player volume. Central registers the signed accepted release.

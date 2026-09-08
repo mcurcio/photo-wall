@@ -108,7 +108,7 @@ def test_host_preserves_probe_failure_phase_without_accepting_unknown_codes(inva
     envelope = {"ok": False, "error": "operator_response_invalid", "phase": "binding"}
     if invalid:
         envelope["error"] = "Authorization: Bearer private-test-token"
-    harness = SimpleNamespace(report={}, fixture_central=lambda: "central",
+    harness = SimpleNamespace(report={}, fixture_observer=lambda: "observer",
         run=lambda *args, **kwargs: json.dumps(envelope).encode())
     error = "media_probe_contract_invalid" if invalid else "operator_response_invalid"
     with pytest.raises(FixtureError, match=error):
@@ -154,7 +154,7 @@ def configuration_value():
 def configured_host(value):
     player = EquipmentSessionObservation(player_id="p-" + "a" * 32,
         device_id="device-" + "b" * 64, authority_epoch=1, retired=False)
-    harness = SimpleNamespace(report={"media": {}}, fixture_central=lambda: "central",
+    harness = SimpleNamespace(report={"media": {}}, fixture_observer=lambda: "observer",
         run=lambda *args, **kwargs: json.dumps(dict(ok=True, value=value)).encode())
     media = ApplianceMedia(harness, "image")
     media.photo = {"captured": "1970-01-01T00:01:40Z"}
@@ -278,13 +278,13 @@ def test_discovered_unknown_output_configures_real_authenticated_central_and_hos
         monkeypatch.setattr(probe, "Operator", lambda: operator)
         serialized = []
         def execute(args, **kwargs):
-            assert args[:6] == ["docker", "exec", "central", "python", "-m", "scripts.vm_media_probe"]
+            assert args[:6] == ["docker", "exec", "observer", "python", "-m", "scripts.vm_media_probe"]
             capsys.readouterr()
             probe.main(args[6:])
             payload = capsys.readouterr().out.encode()
             serialized.append(payload)
             return payload
-        harness = SimpleNamespace(report={"media": {}}, fixture_central=lambda: "central", run=execute)
+        harness = SimpleNamespace(report={"media": {}}, fixture_observer=lambda: "observer", run=execute)
         media = ApplianceMedia(harness, "worker-image")
         media.photo = {"captured": "1970-01-01T00:01:40Z"}
         media.configure(current)

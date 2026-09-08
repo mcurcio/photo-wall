@@ -1,6 +1,6 @@
-"""Operator actions and read-only evidence inside the isolated boot central.
+"""Operator actions and read-only evidence inside the isolated boot observer.
 
-The admin credential stays in the central environment. Only public identifiers,
+The admin credential stays in the observer environment. Only public identifiers,
 the synthetic query interval, and bounded presentation evidence cross the CLI.
 """
 

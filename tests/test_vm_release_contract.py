@@ -113,13 +113,13 @@ def test_accepted_release_may_retain_an_earlier_promoted_trial_consumption():
 
 
 def failure(**changes):
-    return dict(schema_version=1, kind="release-failure", role="central", action="evidence",
+    return dict(schema_version=1, kind="release-failure", role="observer", action="evidence",
         stage="result", code="release_probe_evidence_invalid") | changes
 
 
 def probe_args():
     boot = evidence()
-    return ["docker", "exec", "pw-boot-" + "a" * 16 + "-central", "python", "-m",
+    return ["docker", "exec", "pw-boot-" + "a" * 16 + "-observer", "python", "-m",
         "scripts.vm_release_probe", "evidence", "--device-id", boot["device_id"], "--boot-id", boot["boot_id"]]
 
 
@@ -137,14 +137,14 @@ def test_failure_envelope_requires_every_field_and_never_counts_as_success():
 
 
 @pytest.mark.parametrize("changes", [dict(schema_version=True), dict(kind="untrusted"),
-    dict(role="worker"), dict(action="stage"), dict(stage="query"), dict(code="private-failure"),
+    dict(role="worker"), dict(role="central"), dict(action="stage"), dict(stage="query"), dict(code="private-failure"),
     dict(detail="private diagnostic"), dict(schema_version=2)])
 def test_malformed_failure_metadata_is_discarded(changes):
     assert trusted_release_failure(probe_args(), encoded(failure(**changes))) is None
 
 
 @pytest.mark.parametrize("change", ["unrelated_command", "unrelated_container", "other_role",
-    "other_module", "other_action", "extra_arg", "bad_device", "bad_boot"])
+    "old_central", "other_module", "other_action", "extra_arg", "bad_device", "bad_boot"])
 def test_unrelated_command_cannot_supply_failure_metadata(change):
     args = probe_args()
     if change == "unrelated_command":
@@ -152,7 +152,9 @@ def test_unrelated_command_cannot_supply_failure_metadata(change):
     elif change == "unrelated_container":
         args[2] = "unrelated-central"
     elif change == "other_role":
-        args[2] = args[2].replace("central", "worker")
+        args[2] = args[2].replace("observer", "worker")
+    elif change == "old_central":
+        args[2] = args[2].replace("observer", "central")
     elif change == "other_module":
         args[5] = "scripts.vm_inventory_probe"
     elif change == "other_action":
@@ -197,7 +199,7 @@ def test_host_journals_only_failure_for_its_exact_command(source):
     changed = args.copy()
     value = failure()
     if source == "other_fixture":
-        changed[2] = "pw-boot-" + "b" * 16 + "-central"
+        changed[2] = "pw-boot-" + "b" * 16 + "-observer"
     elif source == "other_boot":
         changed[10] = "11234567-89ab-cdef-0123-456789abcdef"
     elif source == "other_action":
@@ -208,7 +210,7 @@ def test_host_journals_only_failure_for_its_exact_command(source):
     assert cause is not None
     harness = object.__new__(ApplianceE2E)
     harness.report = {}
-    harness.fixture_central = lambda: args[2]
+    harness.fixture_observer = lambda: args[2]
     def run(actual, **kwargs):
         assert actual == args
         raise FixtureError("release_probe_failed") from cause
