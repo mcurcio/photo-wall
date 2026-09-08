@@ -309,7 +309,8 @@ def _guest_inventory(guest, directory: str) -> dict:
 
 def execution_inventory() -> dict:
     modules = {"appliance/build.py": Path(__file__)}
-    for name in ("appliance", "appliance.bootstrap", "appliance.updates", "contracts", "contracts.release"):
+    for name in ("appliance", "appliance.bootstrap", "appliance.updates", "contracts",
+                 "contracts.release", "scripts.ci_apt_cache"):
         module = importlib.import_module(name)
         relative = name.replace(".", "/") + ("/__init__.py" if hasattr(module, "__path__") else ".py")
         modules[relative] = Path(module.__file__)
@@ -449,7 +450,7 @@ def in_root(root: Path, *argv: str, timeout: int = 900, log: Path | None = None)
                env=dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8"))
 
 
-def install_runtime_packages(root: Path, evidence: Path) -> None:
+def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> dict:
     """Resolve and retain the snapshot package closure inside the owned root."""
     root = _root(root)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -485,7 +486,7 @@ def install_runtime_packages(root: Path, evidence: Path) -> None:
         'Acquire::https::Timeout "30";\n')
     apt_config.chmod(0o644)
     (apt / "sources.list").write_text("".join(
-        f"deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] "
+        f"deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg target=Packages] "
         f"https://snapshot.ubuntu.com/ubuntu/{SNAPSHOT} {suite} main universe restricted multiverse\n"
         for suite in ("noble", "noble-updates", "noble-security")))
     if not (evidence / "base-packages.tsv").exists():
@@ -497,13 +498,47 @@ def install_runtime_packages(root: Path, evidence: Path) -> None:
     if not held:
         raise BuildError("kernel_missing")
     in_root(root, "apt-mark", "hold", *held)
-    in_root(root, "apt-get", "update", log=evidence / "apt-update.log")
+    in_root(root, "apt-get", "-o", "APT::Update::Error-Mode=any", "update",
+            log=evidence / "apt-update.log")
     remove = sorted(names & {"cloud-init", "snapd", "openssh-server", "unattended-upgrades",
                              "landscape-common", "ubuntu-server", "ubuntu-server-raspi"})
     if remove:
         in_root(root, "apt-get", "purge", "-y", *remove, log=evidence / "apt-purge.log")
-    in_root(root, "apt-get", "--download-only", "install", "-y", "--no-install-recommends",
-            *RUNTIME_PACKAGES, log=evidence / "apt-download.log")
+    # Never let the extracted base or an untrusted accelerator populate APT's
+    # final archive directory without matching the fresh authenticated plan.
+    in_root(root, "apt-get", "clean")
+    plan_dir = root / "tmp/photo-wall-apt-plan"
+    if plan_dir.exists() or plan_dir.is_symlink():
+        raise BuildError("apt_plan_exists")
+    (plan_dir / "partial").mkdir(mode=0o700, parents=True)
+    try:
+        plan = in_root(
+            root, "apt-get", "-o", "Dir::Cache::archives=/tmp/photo-wall-apt-plan",
+            "-o", "Acquire::ForceHash=SHA256", "--print-uris", "--download-only",
+            "--quiet=2", "install", "-y", "--no-install-recommends", *RUNTIME_PACKAGES,
+        )
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+    cache_record = {"requested": False}
+    archives = root / "var/cache/apt/archives"
+    cache_plan = None
+    if archive_cache is not None:
+        cache_plan = archive_cache.plan(plan)
+        (evidence / "apt-download-plan.txt").write_bytes(plan)
+        cache_record = {**archive_cache.restore(archives, cache_plan), "publish": None}
+    try:
+        in_root(root, "apt-get", "--download-only", "install", "-y", "--no-install-recommends",
+                *RUNTIME_PACKAGES, log=evidence / "apt-download.log")
+    finally:
+        if archive_cache is not None:
+            try:
+                cache_record["publish"] = archive_cache.publish(archives, cache_plan)
+            except Exception:
+                # A cache accelerator cannot replace or mask APT's outcome.
+                cache_record["publish"] = {
+                    "requested": True, "published": False, "objects": 0,
+                    "complete": False, "reason": "cache_publish_failed",
+                }
     debs = evidence / "debs"
     debs.mkdir(mode=0o700, exist_ok=True)
     for package in sorted((root / "var/cache/apt/archives").glob("*.deb")):
@@ -517,6 +552,7 @@ def install_runtime_packages(root: Path, evidence: Path) -> None:
     if (evidence / "package-state.txt").stat().st_size:
         raise BuildError("package_incomplete")
     shutil.copytree(root / "var/lib/apt/lists", evidence / "apt-lists", dirs_exist_ok=True)
+    return cache_record
 
 
 def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,

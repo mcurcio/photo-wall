@@ -257,7 +257,7 @@ def test_runtime_package_apt_transport_config_is_root_scoped_and_written_first(t
 
     def fake_in_root(_root, *argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv[:2] == ("apt-get", "update"):
+        if argv[:1] == ("apt-get",) and argv[-1:] == ("update",):
             seen_at_update.append(config.read_text())
         if argv[:1] == ("dpkg-query",):
             if (evidence / "base-packages.tsv").exists():
@@ -275,8 +275,19 @@ def test_runtime_package_apt_transport_config_is_root_scoped_and_written_first(t
     assert config.read_text() == expected_config
     assert config.stat().st_mode & 0o777 == 0o644
     assert seen_at_update == [expected_config]
+    sources = (root / "etc/apt/sources.list").read_text().splitlines()
+    assert len(sources) == 3
+    assert all("signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg target=Packages" in line
+               for line in sources)
     apt_calls = [argv for argv, _kwargs in calls if argv[:1] == ("apt-get",)]
-    assert [argv[1] for argv in apt_calls] == ["update", "purge", "--download-only", "install"]
+    assert apt_calls[0][:4] == ("apt-get", "-o", "APT::Update::Error-Mode=any", "update")
+    assert apt_calls[1][1] == "purge"
+    assert apt_calls[2] == ("apt-get", "clean")
+    assert "Dir::Cache::archives=/tmp/photo-wall-apt-plan" in apt_calls[3]
+    assert "Acquire::ForceHash=SHA256" in apt_calls[3]
+    assert "--print-uris" in apt_calls[3]
+    assert apt_calls[4][1:3] == ("--download-only", "install")
+    assert apt_calls[5][1] == "install"
 
 
 def test_executing_builder_and_helpers_must_match_exported_source():

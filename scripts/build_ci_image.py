@@ -27,6 +27,7 @@ from scripts import (
     build_player,
     build_rollback_candidate,
     build_vm_initrd,
+    ci_apt_cache,
     ci_base_cache,
     fetch_ubuntu,
 )
@@ -382,6 +383,7 @@ def build(
     central_image: str | None = None,
     worker_image: str | None = None,
     extracted_base_cache: Path | None = None,
+    apt_archive_cache: Path | None = None,
 ) -> dict:
     if (
         not isinstance(revision, str)
@@ -419,7 +421,10 @@ def build(
             extracted_base_cache=extracted_base_cache,
         )
         evidence = temporary / "package-evidence"
-        phase("runtime_packages", appliance.install_runtime_packages, root, evidence)
+        cache = None if apt_archive_cache is None else ci_apt_cache.AptArchiveCache(apt_archive_cache)
+        apt_cache_record = phase(
+            "runtime_packages", appliance.install_runtime_packages, root, evidence, cache
+        )
         player = temporary / "player"
         player_inventory = phase("player_package", build_player.build, repository, revision, player)
         source = temporary / "source"
@@ -484,6 +489,7 @@ def build(
             "central_image": central_image,
             "worker_image": worker_image,
             "extracted_base_cache": extracted_cache_record,
+            "apt_archive_cache": apt_cache_record,
             "disk": {"path": str(image_path), **_record(image_path, 16 * 1024**3)},
             # These three paths intentionally remain absolute: the VM harness
             # runs on the same CI host before the output directory is uploaded.
@@ -527,6 +533,7 @@ def build(
                     "apt-update.log",
                     "apt-purge.log",
                     "apt-download.log",
+                    "apt-download-plan.txt",
                     "apt-install.log",
                     "initramfs-build.log",
                     "pip-install.log",
@@ -554,6 +561,7 @@ def main() -> None:
     parser.add_argument("--deployment-dir", type=Path)
     parser.add_argument("--base-cache", type=Path)
     parser.add_argument("--extracted-base-cache", type=Path)
+    parser.add_argument("--apt-archive-cache", type=Path)
     parser.add_argument("--builder-image")
     parser.add_argument("--central-image")
     parser.add_argument("--worker-image")
@@ -571,6 +579,7 @@ def main() -> None:
             central_image=args.central_image,
             worker_image=args.worker_image,
             extracted_base_cache=args.extracted_base_cache,
+            apt_archive_cache=args.apt_archive_cache,
         )
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f"CI appliance build failed: {exc}\n")

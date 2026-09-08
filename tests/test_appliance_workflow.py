@@ -40,3 +40,21 @@ def test_upload_compression_uses_available_cpus_after_exact_artifact_acceptance(
     assert 'xz -T0 -6 "$disk"' in workflow[compression:]
     assert 'sha256sum "$(basename "$disk").xz" ci-image.json artifact.json > UPLOAD-SHA256SUMS' in workflow
     assert "compression-level: 0" in workflow
+
+
+def test_apt_cache_is_qualified_and_only_complete_receipts_get_the_stable_key():
+    workflow = WORKFLOW.read_text()
+
+    qualification = workflow.index("- name: Qualify signed APT cache admission")
+    restore = workflow.index("- name: Restore authenticated-plan APT archive candidates")
+    ready = workflow.index("- name: Make bounded APT archive candidates readable")
+    complete = workflow.index("- name: Save the completed APT archive cache")
+    progress = workflow.index("- name: Save bounded APT acquisition progress")
+    assert qualification < restore < ready < complete < progress
+    assert '--network none' in workflow[qualification:restore]
+    assert '"${{ steps.builder.outputs.imageid }}"' in workflow[qualification:restore]
+    assert "continue-on-error: true" in workflow[restore:ready]
+    assert "continue-on-error: true" in workflow[ready:complete]
+    assert "--verify-completion-receipt" in workflow[ready:complete]
+    assert "steps.apt-cache-ready.outputs.complete == 'true'" in workflow[complete:progress]
+    assert "steps.apt-cache-ready.outputs.complete != 'true'" in workflow[progress:]

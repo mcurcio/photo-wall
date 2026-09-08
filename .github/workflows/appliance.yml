@@ -80,6 +80,15 @@ jobs:
           cache-from: type=gha,scope=photo-wall-appliance-builder-arm64-v1
           cache-to: type=gha,scope=photo-wall-appliance-builder-arm64-v1,mode=max,ignore-error=true
 
+      - name: Qualify signed APT cache admission in the pinned builder
+        run: >-
+          docker run --rm --platform linux/arm64 --network none
+          --volume "$GITHUB_WORKSPACE:/work:ro" --workdir /work
+          --env PHOTO_WALL_APT_CACHE_TESTS=1
+          "${{ steps.builder.outputs.imageid }}"
+          python3.12 -m pytest --noconftest -q -p no:cacheprovider
+          tests/test_apt_cache_linux.py
+
       - name: Restore the verified Ubuntu extraction
         id: base-cache
         continue-on-error: true
@@ -89,10 +98,21 @@ jobs:
           # Exact keys only: changes to the base or its extraction invalidate it.
           key: pw-base-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'appliance/Dockerfile.builder', 'contracts/release.py', 'scripts/fetch_ubuntu.py', 'scripts/ci_base_cache.py') }}
 
+      - name: Restore authenticated-plan APT archive candidates
+        id: apt-cache
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/photo-wall-apt-archives
+          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}
+          restore-keys: |
+            pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}-progress-
+
       - name: Pull the pinned PostgreSQL fixture image
         run: docker pull postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94
 
       - name: Assemble the signed image and generic boot artifact
+        id: assemble
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
@@ -121,10 +141,42 @@ jobs:
               --output-dir "$ci_root/output" \
               --deployment-dir "$ci_root/deployment" \
               --extracted-base-cache "$RUNNER_TEMP/photo-wall-extracted-base" \
+              --apt-archive-cache "$RUNNER_TEMP/photo-wall-apt-archives" \
               --central-image "$CENTRAL_IMAGE" \
               --builder-image "$BUILDER_IMAGE" \
               "${worker_args[@]}"
           sudo chown -R "$(id -u):$(id -g)" "$ci_root/output" "$ci_root/deployment"
+
+      - name: Make bounded APT archive candidates readable
+        id: apt-cache-ready
+        if: always()
+        continue-on-error: true
+        run: |
+          cache="$RUNNER_TEMP/photo-wall-apt-archives"
+          if [ ! -L "$cache" ] && sudo test -d "$cache/objects" && sudo test -f "$cache/manifest.json"; then
+            sudo chown -R --no-dereference "$(id -u):$(id -g)" "$cache"
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+            receipt="$RUNNER_TEMP/photo-wall-ci/output/ci-image.json"
+            if sudo python3 -m scripts.ci_apt_cache --verify-completion-receipt "$receipt"; then
+              echo 'complete=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Save the completed APT archive cache
+        if: always() && steps.assemble.outcome == 'success' && steps.apt-cache-ready.outputs.complete == 'true' && steps.apt-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/photo-wall-apt-archives
+          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}
+
+      - name: Save bounded APT acquisition progress
+        if: always() && steps.apt-cache-ready.outputs.ready == 'true' && steps.apt-cache-ready.outputs.complete != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/photo-wall-apt-archives
+          key: pw-apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliance/build.py', 'scripts/ci_apt_cache.py') }}-progress-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Make completed base cache readable
         id: base-cache-ready

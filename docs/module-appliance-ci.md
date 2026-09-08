@@ -8,6 +8,14 @@ builder. The orchestration calls the existing package, Ubuntu input,
 appliance, signing, finalization, and generic-initramfs builders; it does not
 reimplement any image format or boot logic.
 
+APT runs only while constructing the staged Ubuntu filesystem in CI. It supplies
+the OS dependencies before the immutable root is packaged and signed; it is not
+an appliance delivery or update mechanism. PXE and the RAM-root bootstrap fetch
+and verify the centrally selected release. Application updates select a new
+signed release and reboot. Image configuration removes unattended upgrades,
+masks APT's daily timers, and clears package caches before signing. Any package
+download cache described here belongs to the image builder, never the Player.
+
 The command is:
 
 ```sh
@@ -18,6 +26,7 @@ python3 scripts/build_ci_image.py \
   --deployment-dir /work/photo-wall-deployment \
   --base-cache /work/photo-wall-base-cache \
   --extracted-base-cache /work/photo-wall-extracted-base \
+  --apt-archive-cache /work/photo-wall-apt-archives \
   --central-image sha256:<central-image-id> \
   --builder-image sha256:<builder-image-id>
 ```
@@ -132,6 +141,24 @@ measurements from image boot qualification and the preceding download timeout.
   configured appliance root or signed output. The completed cache is saved
   before e2e, including when a later image phase fails. Cache service upload
   failures do not turn a valid image into a failed build.
+- The optional package-archive cache reuses download bytes only. Every build
+  first refreshes the pinned signed Ubuntu package indexes with any acquisition
+  error treated as a failure. APT resolves the requested packages against an
+  empty archive directory and emits a SHA-256 acquisition plan. Cache filenames
+  and metadata cannot authorize packages: only complete regular files matching
+  that current plan's sizes and hashes enter APT's real archive directory. The
+  ordinary download and installation stages still run, and package evidence is
+  retained. Source entries request package indexes without translation or
+  desktop metadata indexes.
+- Completed, plan-verified archives survive an interrupted download through a
+  separate CI cache entry for that attempt. A later attempt can restore this
+  progress, authenticate its own current plan, and download the missing bytes.
+  Successful assembly publishes the complete cache under the primary key;
+  partial entries never occupy that immutable key. Cache publication failure
+  preserves the underlying build result. This cache contains neither configured
+  roots nor deployment keys and never enters the Player runtime. The
+  [acquisition failure record](evidence/2026-09-08-ci-package-acquisition.md)
+  preserves the motivating attempts and their exact diagnostic hashes.
 
 Cache reuse follows [GitHub's branch access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching):
 a PR's cache remains scoped to that PR and is unavailable to the base branch.
