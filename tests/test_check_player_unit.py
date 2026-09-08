@@ -145,10 +145,6 @@ def test_run_orders_creation_start_and_cleanup_and_leaves_no_owned_files(tmp_pat
     monkeypatch.setattr(check, "_SocketListener", FakeListener)
 
     def command(args, **_kwargs):
-        if args[1] == "stop":
-            leaf = paths.wall_run / "player" / "leafhealth"
-            leaf.unlink()
-            (paths.wall_run / "player").rmdir()
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(check, "_command", command)

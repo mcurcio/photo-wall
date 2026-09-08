@@ -500,11 +500,20 @@ class Preflight:
 
     def _cleanup(self) -> bool:
         clean = True
+        runtime_player = None
         if self.started:
             clean = _try_command(["systemctl", "stop", self.unit_name], timeout=20) and clean
             runtime_player = self.paths.wall_run / "player"
-            if runtime_player.exists() or runtime_player.is_symlink():
+            try:
+                mode = runtime_player.lstat().st_mode
+            except OSError:
                 clean = False
+            else:
+                # RuntimeDirectoryPreserve=yes must keep this RAM-backed cache
+                # directory across a service stop. The preflight owns the
+                # otherwise-empty /run/photo-wall tree and removes it below.
+                if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+                    clean = False
         if self.listener is not None:
             self.listener.close()
         if self.created.unit is not None:
@@ -525,6 +534,7 @@ class Preflight:
             clean = _unlink(path, socket_ok=path == self.created.socket_path) and clean
         directories = [self.created.state, self.created.user_run]
         if self.created.wall_run is not None:
+            directories.append(runtime_player)
             directories.append(self.created.wall_run)
         for path in directories:
             if path is None:
