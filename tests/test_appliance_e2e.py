@@ -9,6 +9,11 @@ import pytest
 from central.installation_models import EnrollmentObservation, EquipmentSessionObservation
 from scripts.boot_fixture import FixtureError
 from scripts.test_appliance_e2e import ApplianceE2E, boot_reports, checked_inputs, enrollment
+from scripts.vm_release_contract import (
+    CentralBootEvidence,
+    ReleaseEvidenceResult,
+    ReleaseStageResult,
+)
 
 RELEASE = "a" * 64
 CANDIDATE = "c" * 64
@@ -24,6 +29,15 @@ def report(**changes):
 
 def row(**changes):
     return EquipmentSessionObservation(**(dict(player_id=PLAYER, device_id=DEVICE, authority_epoch=1, retired=False) | changes))
+
+
+def central_evidence(boot=None, **changes):
+    boot = boot or report()
+    return CentralBootEvidence(**({key: boot[key] for key in
+        ("boot_id", "device_id", "ticket_sha256", "release_id", "trial")} | dict(
+        status="booting", current=True, accepted_release_id=RELEASE, candidate_release_id=None,
+        current_player_id=PLAYER, current_authority_epoch=1,
+        trial_ticket_sha256=boot["ticket_sha256"] if boot["trial"] else None) | changes))
 
 
 @pytest.mark.parametrize("invalid_json", [False, True])
@@ -525,8 +539,7 @@ def test_serial_health_does_not_promote_central_acceptance(monkeypatch):
     harness = object.__new__(ApplianceE2E)
     harness.report = dict(boots=[report()], checks={})
     harness.checked_vm = lambda: dict(Running=True)
-    observations = iter([dict(current=True, status='booting'),
-                         dict(current=True, status='healthy', accepted_release_id=RELEASE)])
+    observations = iter([central_evidence(), central_evidence(status='healthy')])
     harness.boot_evidence = lambda boot: next(observations)
     monkeypatch.setattr(e2e.time, 'sleep', lambda _: None)
     harness.wait_central_health()
@@ -536,13 +549,16 @@ def test_serial_health_does_not_promote_central_acceptance(monkeypatch):
 
 def test_current_ticket_is_required_for_central_boot_evidence():
     harness = object.__new__(ApplianceE2E)
-    harness.release_probe = lambda *_: report(ticket_sha256='f' * 64)
+    harness.release_probe = lambda *_: ReleaseEvidenceResult(schema_version=1, kind='release-evidence',
+        evidence=central_evidence(ticket_sha256='f' * 64))
     with pytest.raises(FixtureError, match='central_boot_mismatch'):
         harness.boot_evidence(report())
 
 
-@pytest.mark.parametrize('failed_status', ['failed', 'healthy'])
-def test_rollback_requires_consumed_failed_trial_and_central_fallback(tmp_path, failed_status):
+@pytest.mark.parametrize('fault', [None, 'trial_status', 'trial_candidate', 'trial_release',
+    'trial_accepted', 'fallback_candidate', 'fallback_release', 'fallback_trial',
+    'fallback_session', 'fallback_epoch', 'fallback_device'])
+def test_rollback_requires_consumed_failed_trial_and_central_fallback(tmp_path, fault):
     harness = object.__new__(ApplianceE2E)
     share = tmp_path / 'vm/share'
     share.mkdir(parents=True)
@@ -555,24 +571,51 @@ def test_rollback_requires_consumed_failed_trial_and_central_fallback(tmp_path, 
     harness.inputs = dict(candidate=SimpleNamespace(release_id=CANDIDATE), candidate_dir=tmp_path,
                           release=SimpleNamespace(release_id=RELEASE))
     harness.report = dict(boots=boots[:2], observed_boot_reports=boots, checks={}, recovery_event={})
-    harness.release_probe = lambda *args: dict(staged=True, release_id=CANDIDATE)
+    harness.release_probe = lambda *args: ReleaseStageResult(schema_version=1, kind='release-staged',
+        staged=True, release_id=CANDIDATE)
     harness.wait_rollback_evidence = lambda predicate, **kwargs: None if predicate() else pytest.fail('missing evidence')
     def enroll(previous):
         harness.report['boots'].append(boots[3])
         return row(authority_epoch=3)
     harness.wait_enrollment = enroll
-    harness.boot_evidence = lambda boot: dict(status=failed_status if boot['trial'] else 'booting',
-                                              current=not boot['trial'], accepted_release_id=RELEASE)
-    if failed_status != 'failed':
+    failed = dict(status='failed', current=False, candidate_release_id=CANDIDATE)
+    fallback = dict(current=True, candidate_release_id=CANDIDATE, current_authority_epoch=3)
+    if fault == 'trial_status':
+        failed['status'] = 'healthy'
+    elif fault == 'trial_candidate':
+        failed['candidate_release_id'] = None
+    elif fault == 'trial_release':
+        failed['release_id'] = 'f' * 64
+    elif fault == 'trial_accepted':
+        failed['accepted_release_id'] = 'f' * 64
+    elif fault == 'fallback_candidate':
+        fallback['candidate_release_id'] = None
+    elif fault == 'fallback_release':
+        fallback['release_id'] = 'f' * 64
+    elif fault == 'fallback_trial':
+        fallback.update(trial=True, trial_ticket_sha256=boots[3]['ticket_sha256'])
+    elif fault == 'fallback_session':
+        fallback['current_player_id'] = 'p-' + 'f' * 32
+    elif fault == 'fallback_epoch':
+        fallback['current_authority_epoch'] = 2
+    elif fault == 'fallback_device':
+        fallback['device_id'] = 'device-' + 'f' * 64
+    harness.boot_evidence = lambda boot: central_evidence(boot, **(failed if boot['trial'] else fallback))
+    if fault is not None:
         with pytest.raises(FixtureError, match='central_rollback_unproven'):
             harness.exercise_rollback(row(authority_epoch=2))
         assert not harness.report['checks'].get('production_automatic_rollback')
+        assert not harness.report['checks'].get('central_trial_consumed')
     else:
         harness.exercise_rollback(row(authority_epoch=2))
         control = json.loads((share / 'control.json').read_bytes())
         assert control['action'] == 'reboot-for-trial' and control['schema'] == 2
         assert 'ticket_id' not in control['current']
         assert harness.report['checks']['production_automatic_rollback']
+        assert harness.report['checks']['central_trial_consumed']
+        assert harness.report['central_failed_trial']['trial_ticket_sha256'] == boots[2]['ticket_sha256']
+        assert harness.report['central_fallback']['current_authority_epoch'] == 3
+        assert harness.report['central_fallback']['release_id'] == RELEASE
 
 
 def test_wait_enrollment_keeps_empty_and_prior_epoch_pending_and_serializes_ready(monkeypatch):

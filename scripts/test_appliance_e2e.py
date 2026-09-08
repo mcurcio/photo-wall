@@ -38,6 +38,13 @@ from scripts.boot_fixture import (
     write_json,
 )
 from scripts.build_vm_initrd import MAX_MANIFEST_BYTES
+from scripts.vm_release_contract import (
+    CentralBootEvidence,
+    ReleaseEvidenceResult,
+    ReleaseProbeFailure,
+    ReleaseStageResult,
+    decode_release_result,
+)
 
 LABEL = "org.photo-wall.appliance-e2e"
 MAX_DISK = 8 * 1024**3
@@ -535,17 +542,30 @@ class ApplianceE2E:
         raise FixtureError("player_session_replacement_timeout")
 
     def release_probe(self, action: str, boot: dict, *extra: str):
-        raw = self.run(["docker", "exec", self.fixture_central(), "python", "-m",
+        args = ["docker", "exec", self.fixture_central(), "python", "-m",
                        "scripts.vm_release_probe", action, "--device-id", boot["device_id"],
-                       "--boot-id", boot["boot_id"], *extra], timeout=30)
-        value = json.loads(raw)
-        require(value is None or isinstance(value, dict) and "error" not in value, "release_probe_failed")
-        return value
+                       "--boot-id", boot["boot_id"], *extra]
+        try:
+            raw = self.run(args, timeout=30)
+        except FixtureError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, ReleaseProbeFailure) and cause.command == tuple(args):
+                failures = self.report.setdefault("release_probe_failures", [])
+                if len(failures) < 16:
+                    failures.append(cause.failure.model_dump(mode="json"))
+                raise FixtureError(cause.failure.code) from None
+            raise
+        try:
+            return decode_release_result(action, raw)
+        except ValueError:
+            raise FixtureError("release_probe_failed") from None
 
-    def boot_evidence(self, boot: dict) -> dict | None:
-        value = self.release_probe("evidence", boot)
+    def boot_evidence(self, boot: dict) -> CentralBootEvidence | None:
+        result = self.release_probe("evidence", boot)
+        require(isinstance(result, ReleaseEvidenceResult), "release_probe_failed")
+        value = result.evidence
         if value is not None:
-            require(all(value.get(k) == boot[k] for k in
+            require(all(getattr(value, k) == boot[k] for k in
                     ("boot_id", "device_id", "ticket_sha256", "release_id", "trial")), "central_boot_mismatch")
         return value
 
@@ -561,9 +581,9 @@ class ApplianceE2E:
         while time.monotonic() < deadline:
             require(self.checked_vm()["Running"], "vm_stopped_during_health")
             value = self.boot_evidence(boot)
-            if value and value["current"] and value["status"] == "healthy":
-                require(value["accepted_release_id"] == boot["release_id"], "central_release_not_accepted")
-                self.report.setdefault("central_health", {})[boot["boot_id"]] = value
+            if value and value.current and value.status == "healthy":
+                require(value.accepted_release_id == boot["release_id"], "central_release_not_accepted")
+                self.report.setdefault("central_health", {})[boot["boot_id"]] = value.model_dump(mode="json")
                 self.report["checks"]["native_healthy_boot_accepted"] = True
                 return
             time.sleep(3)
@@ -606,7 +626,8 @@ class ApplianceE2E:
         signature = read_file(self.inputs["candidate_dir"] / "release.sig", 64)
         staged = self.release_probe("stage", boot, "--manifest", base64.b64encode(manifest).decode(),
                                     "--signature", base64.b64encode(signature).decode())
-        require(staged == dict(staged=True, release_id=candidate.release_id), "candidate_stage_mismatch")
+        require(isinstance(staged, ReleaseStageResult) and staged.release_id == candidate.release_id,
+                "candidate_stage_mismatch")
         self.report["checks"]["signed_candidate_staged_centrally"] = True
         control = dict(schema=2, action="reboot-for-trial", current={key: boot[key] for key in
                        ("boot_id", "device_id", "ticket_sha256", "release_id")},
@@ -624,17 +645,33 @@ class ApplianceE2E:
         require(len(self.report["observed_boot_reports"]) == 4
                 and self.report["boots"][-1] == self.report["observed_boot_reports"][3],
                 "fallback_enrollment_boot_mismatch")
-        failed = self.boot_evidence(trial)
-        fallback = self.boot_evidence(self.report["boots"][-1])
-        require(failed is not None and failed["status"] == "failed" and not failed["current"]
-                and fallback is not None and fallback["current"]
-                and fallback["accepted_release_id"] == self.inputs["release"].release_id,
-                "central_rollback_unproven")
-        self.report["central_failed_trial"] = failed
+        self.verify_central_rollback(trial, self.report["boots"][-1], restored)
         self.report["fallback_enrollment"] = restored.model_dump(mode="json")
         self.report["checks"]["production_automatic_rollback"] = True
         self.report["checks"]["equipment_reenrolls_after_rollback"] = True
         return restored
+
+    def verify_central_rollback(self, trial: dict, fallback_boot: dict,
+                                restored: EquipmentSessionObservation):
+        """Require central's durable consumed trial and the exact fallback session."""
+        failed = self.boot_evidence(trial)
+        fallback = self.boot_evidence(fallback_boot)
+        candidate_id = self.inputs["candidate"].release_id
+        accepted_id = self.inputs["release"].release_id
+        require(failed is not None and failed.trial and failed.status == "failed" and not failed.current
+                and failed.release_id == failed.candidate_release_id == candidate_id
+                and failed.trial_ticket_sha256 == trial["ticket_sha256"]
+                and failed.accepted_release_id == accepted_id
+                and fallback is not None and fallback.current and not fallback.trial
+                and fallback.release_id == fallback.accepted_release_id == accepted_id
+                and fallback.candidate_release_id == candidate_id
+                and fallback.device_id == failed.device_id == restored.device_id
+                and (fallback.current_player_id, fallback.current_authority_epoch) ==
+                    (restored.player_id, restored.authority_epoch),
+                "central_rollback_unproven")
+        self.report["central_failed_trial"] = failed.model_dump(mode="json")
+        self.report["central_fallback"] = fallback.model_dump(mode="json")
+        self.report["checks"]["central_trial_consumed"] = True
 
     def execute_smoke(self):
         """Prove the signed image boots and starts the production Player."""

@@ -36,7 +36,8 @@ PUBLIC = ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
 SOURCES = ("scripts/boot_gateway.py", "scripts/boot_time_fixture.py", "appliance/__init__.py",
            "appliance/bootstrap.py", "appliance/updates.py", "contracts/release.py",
            "scripts/vm_inventory_probe.py", "scripts/vm_media_evidence.py",
-           "scripts/vm_media_probe.py", "scripts/vm_release_probe.py")
+           "scripts/vm_media_probe.py", "scripts/vm_release_contract.py",
+           "scripts/vm_release_probe.py")
 MAX_JSON = 1024**2
 MAX_ENV = 4096
 PROBE_MEMORY_BYTES = 384 * 1024**2
@@ -430,6 +431,10 @@ def command(args: list[str], timeout=180) -> bytes:
                 # partial first line before redacting credential-shaped output.
                 record_docker_debug(args, code, b"stderr:\n" + bytes(stderr)
                                     + b"\nstdout:\n" + bytes(stdout))
+                from scripts.vm_release_contract import trusted_release_failure
+                failure = trusted_release_failure(args, bytes(stdout))
+                if failure is not None:
+                    raise FixtureError("release_probe_failed") from failure
                 raise FixtureError("docker_command_failed")
             return bytes(stdout)
     finally:

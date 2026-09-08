@@ -136,14 +136,20 @@ def test_invalid_or_unreadable_fault_marker_keeps_delivery_denied(tmp_path, monk
         assert response.status_code == 503 and "private-path" not in response.text
 
 
+@pytest.mark.parametrize('consumption_fault', [None, 'missing', 'wrong_ticket', 'wrong_release', 'wrong_device'])
 def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back(
-        registry, bundle, signing_key, monkeypatch):
+        registry, bundle, signing_key, monkeypatch, capsys, consumption_fault):
     import base64
+    import sys
     import uuid
 
     from central.app import create_app as central_app
-    from scripts import boot_gateway
-    from scripts.vm_release_probe import evidence
+    from central.installation_models import EquipmentSessionObservation
+    from contracts.enrollment import OutputReport, enrollment_message
+    from scripts import boot_gateway, vm_release_probe
+    from scripts.boot_fixture import FixtureError
+    from scripts.test_appliance_e2e import ApplianceE2E
+    from scripts.vm_release_contract import trusted_release_failure
 
     root, public, accepted, _ = bundle
     candidate_bytes = b'failed candidate root'
@@ -182,11 +188,94 @@ def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back
         following = client.post('/v1/bootstrap/boot', json=request | dict(
             boot_id=str(uuid.uuid4()), request_id='d'*48)).json()
         assert not following['trial'] and following['release_id'] == accepted.release_id
-        with registry.db.transaction() as conn:
-            proof = evidence(conn, request['device_id'], trial_request['boot_id'])
-        assert proof['status'] == 'failed' and not proof['current']
-        assert proof['ticket_sha256'] == hashlib.sha256(trial['ticket_id'].encode()).hexdigest()
-        assert 'ticket_id' not in proof
+        player_key = Ed25519PrivateKey.generate()
+        public_key = player_key.public_key().public_bytes_raw().hex()
+        nonce = client.post('/v1/enrollment/challenge', json=dict(public_key=public_key)).json()['nonce']
+        outputs = (OutputReport(output_id='HDMI-A-1', width_px=1920, height_px=1080),)
+        identity = client.post('/v1/enrollment/register', json=dict(
+            public_key=public_key, nonce=nonce,
+            signature=base64.b64encode(player_key.sign(enrollment_message(nonce, outputs,
+                following['device_id'], following['boot_id'], following['ticket_id']))).decode(),
+            outputs=[output.model_dump(mode='json') for output in outputs],
+            **{key: following[key] for key in ('device_id', 'boot_id', 'ticket_id')}))
+        assert identity.status_code == 200
+        session = identity.json()
+        restored = EquipmentSessionObservation(player_id=session['player_id'],
+            authority_epoch=session['authority_epoch'], device_id=following['device_id'], retired=False)
+
+        # Start from actual authority transactions, then corrupt only the trial
+        # relation. Existing failed/current attempt facts must not hide this gap.
+        if consumption_fault is not None:
+            other_device = 'device-' + 'a' * 64
+            if consumption_fault == 'wrong_device':
+                other = client.post('/v1/bootstrap/boot', json=request | dict(
+                    device_id=other_device, boot_id=str(uuid.uuid4()))).json()
+                assert other['device_id'] == other_device
+            with registry.db.transaction() as conn:
+                if consumption_fault == 'missing':
+                    conn.execute('DELETE FROM appliance_release_trials WHERE device_id=%s', (request['device_id'],))
+                elif consumption_fault == 'wrong_ticket':
+                    conn.execute('UPDATE appliance_release_trials SET ticket_id=%s WHERE device_id=%s',
+                                 (following['ticket_id'], request['device_id']))
+                elif consumption_fault == 'wrong_release':
+                    conn.execute('UPDATE appliance_release_trials SET release_id=%s WHERE device_id=%s',
+                                 (accepted.release_id, request['device_id']))
+                else:
+                    conn.execute('UPDATE appliance_release_trials SET device_id=%s WHERE device_id=%s',
+                                 (other_device, request['device_id']))
+
+        harness = object.__new__(ApplianceE2E)
+        container = 'pw-boot-' + 'a' * 16 + '-central'
+        harness.fixture_central = lambda: container
+        harness.inputs = dict(candidate=candidate, release=accepted)
+        harness.report = dict(checks={})
+        monkeypatch.setenv('PHOTO_WALL_DATABASE_URL', 'isolated-test-database')
+        monkeypatch.setattr(vm_release_probe, 'Database', lambda _: registry.db)
+        serialized = []
+
+        def execute_probe(args, **kwargs):
+            assert args[:6] == ['docker', 'exec', container, 'python', '-m', 'scripts.vm_release_probe']
+            monkeypatch.setattr(sys, 'argv', args[5:])
+            capsys.readouterr()
+            failed = False
+            try:
+                vm_release_probe.main()
+            except SystemExit as exc:
+                assert exc.code == 1
+                failed = True
+            output = capsys.readouterr().out.encode()
+            serialized.append(output)
+            # Preserve the real nonzero boundary while feeding exact producer
+            # CLI bytes through the same decoder used by the Docker adapter.
+            if failed:
+                failure = trusted_release_failure(args, output)
+                assert failure is not None
+                raise FixtureError('release_probe_failed') from failure
+            return output
+
+        harness.run = execute_probe
+        def boot(ticket):
+            return {key: ticket[key] for key in ('device_id', 'boot_id', 'release_id', 'trial')} | dict(
+                ticket_sha256=hashlib.sha256(ticket['ticket_id'].encode()).hexdigest())
+        if consumption_fault is not None:
+            with pytest.raises(FixtureError, match='release_probe_evidence_invalid'):
+                harness.verify_central_rollback(boot(trial), boot(following), restored)
+            assert not harness.report['checks'].get('central_trial_consumed')
+            assert harness.report['release_probe_failures'] == [dict(
+                schema_version=1, kind='release-failure', role='central', action='evidence',
+                stage='result', code='release_probe_evidence_invalid')]
+        else:
+            harness.verify_central_rollback(boot(trial), boot(following), restored)
+            proof = harness.report['central_failed_trial']
+            assert proof['status'] == 'failed' and not proof['current']
+            assert proof['trial_ticket_sha256'] == proof['ticket_sha256'] == boot(trial)['ticket_sha256']
+            assert proof['candidate_release_id'] == candidate.release_id
+            assert harness.report['central_fallback']['current_player_id'] == session['player_id']
+            assert harness.report['central_fallback']['current_authority_epoch'] == session['authority_epoch']
+            assert harness.report['checks']['central_trial_consumed'] is True
+        assert all(ticket['ticket_id'].encode() not in output
+                   for output in serialized for ticket in (trial, following))
+        assert all(session['token'].encode() not in output for output in serialized)
 
 
 def test_delivery_evidence_names_current_epoch_without_exposing_bearer(capsys):
