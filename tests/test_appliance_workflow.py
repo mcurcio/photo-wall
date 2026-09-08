@@ -30,3 +30,13 @@ def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
     assert "name: Upload Docker failure diagnostics" in workflow
     assert "if: failure()" in workflow
     assert "photo-wall-software-e2e/docker-debug.log" in workflow
+
+
+def test_upload_compression_uses_available_cpus_after_exact_artifact_acceptance():
+    workflow = WORKFLOW.read_text()
+    acceptance = workflow.index("- name: Boot the exact artifact and launch the production Player")
+    compression = workflow.index("- name: Compress the disk for artifact upload")
+    assert acceptance < compression
+    assert 'xz -T0 -6 "$disk"' in workflow[compression:]
+    assert 'sha256sum "$(basename "$disk").xz" ci-image.json artifact.json > UPLOAD-SHA256SUMS' in workflow
+    assert "compression-level: 0" in workflow

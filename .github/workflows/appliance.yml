@@ -180,7 +180,8 @@ jobs:
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
           disk=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["disk"]["path"])' "$ci_root/output/ci-image.json")
-          xz -T2 -6 "$disk"
+          # Compression wraps the verified disk; use the runner's available CPUs.
+          xz -T0 -6 "$disk"
           cd "$ci_root/output"
           sha256sum "$(basename "$disk").xz" ci-image.json artifact.json > UPLOAD-SHA256SUMS
 
