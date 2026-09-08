@@ -37,6 +37,8 @@ Build a Player-only wheelhouse, central image, and media-worker image from the s
 
 Preflight rejects a dirty source tree, revision mismatch, Player inventory mismatch, mutable image tag, missing paired image ID, reused state directory, or unverified fixture. This means an uncommitted workspace cannot produce final evidence. The selected revision, image IDs, source inventory, wheel inventory, media hashes, session epochs, observations, and phase results are retained in the private report.
 
+The wall helper is assembled from an explicit dependency bundle that preserves Python import layout and records every copied file digest. Its container-side Immich client does not import the host Docker driver or diagnostic recorder. Setup journals `running`, `passed`, or `failed` before and after each image-build, volume, upstream, Central, Source, refresh, and runtime operation. A failure retains a bounded schema with `phase`, `role`, `action`, and `code`; cleanup has its own failure field and cannot erase the primary operation. The same safe envelope is printed by failing helper roles, while credentials and arbitrary exception text remain private.
+
 `status --state-dir ABS` reads a marked run. `cleanup --state-dir ABS` removes only resources journaled by that run. Omitting `--keep` attempts scoped cleanup automatically and preserves evidence if cleanup cannot complete.
 
 ## Qualification limits

@@ -6,7 +6,9 @@ import hashlib
 import json
 import re
 import stat
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,7 @@ from scripts.demo_wall import (
     PLAYER_RUNNER,
     DemoError,
     DemoHost,
+    OperationFailure,
     baseline_checks,
     composition,
     core_image_mapping,
@@ -27,14 +30,18 @@ from scripts.demo_wall import (
     operator_action,
     outage_checks,
     preserved_locks,
+    public_failure,
     rejoined_player_ready,
     retryable_operator_error,
+    role_operation,
     run_demo,
     selected_secured_presentation,
+    setup_operation,
     source_refresh_completed,
     validate_selected_revision,
     write_json,
 )
+from scripts.harness_bundle import IMMICH_RUNTIME_BUNDLE, WALL_HELPER_BUNDLE
 
 
 def test_daemon_image_build_explicitly_selects_and_loads_default_builder(tmp_path):
@@ -84,6 +91,142 @@ def test_player_runner_imports_only_stdlib_and_source_neutral_packages():
     import sys
     assert imports <= sys.stdlib_module_names | {"player", "contracts"}
     assert "RecordingRenderer" in PLAYER_RUNNER and "simulated_actuation" in PLAYER_RUNNER
+
+
+def test_wall_helper_bundle_is_import_closed_without_host_orchestration(tmp_path):
+    files = WALL_HELPER_BUNDLE.stage(Path(__file__).parents[1], tmp_path)
+    assert set(files) == {
+        "demo_wall.py", "scripts/harness_failure.py", "scripts/immich_actions.py",
+    }
+    assert not (tmp_path / "scripts/immich_fixture.py").exists()
+    assert not (tmp_path / "scripts/docker_diagnostics.py").exists()
+    result = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); "
+         "import demo_wall, scripts.immich_actions; print('closed')", str(tmp_path)],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "closed\n"
+
+
+def test_immich_runtime_bundle_excludes_host_process_control(tmp_path):
+    files = IMMICH_RUNTIME_BUNDLE.stage(Path(__file__).parents[1], tmp_path)
+    assert set(files) == {
+        "scripts/harness_failure.py", "scripts/immich_actions.py", "scripts/immich_runtime.py",
+    }
+    assert not (tmp_path / "scripts/immich_fixture.py").exists()
+    assert not (tmp_path / "scripts/docker_diagnostics.py").exists()
+    result = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import scripts.immich_runtime; "
+         "print('closed')", str(tmp_path)],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "closed\n"
+    compose = (Path(__file__).parent / "integration/compose.immich.yml").read_text()
+    assert ("COPY scripts/harness_failure.py scripts/immich_actions.py "
+            "scripts/immich_runtime.py /app/scripts/") in compose
+    assert "COPY scripts/immich_fixture.py" not in compose
+    assert "COPY scripts/docker_diagnostics.py" not in compose
+    assert compose.count("entrypoint: [python, -m, scripts.immich_runtime]") == 2
+
+
+def test_setup_operation_persists_typed_phase_failure_without_private_text():
+    evidence = {"phases": {}}
+    saved = []
+
+    def save():
+        saved.append(copy.deepcopy(evidence))
+
+    with pytest.raises(OperationFailure) as caught:
+        setup_operation(evidence, save, "setup_upstream", "upstream-tools", "initialize",
+                        lambda: (_ for _ in ()).throw(RuntimeError("private token abc")))
+
+    assert caught.value.envelope() == {
+        "type": "photo_wall_helper_failure", "schema": 1,
+        "phase": "setup_upstream", "role": "upstream-tools",
+        "action": "initialize", "code": "demo_failed",
+    }
+    assert saved[0]["phases"]["setup_upstream"]["status"] == "running"
+    assert saved[-1]["phases"]["setup_upstream"]["status"] == "failed"
+    assert saved[-1]["phases"]["setup_upstream"]["code"] == "demo_failed"
+    assert "private" not in json.dumps(saved[-1])
+
+
+def test_setup_operation_preserves_bounded_domain_code_and_success_identity():
+    evidence = {"phases": {}}
+    with pytest.raises(OperationFailure) as caught:
+        setup_operation(evidence, lambda: None, "setup_refresh", "operator",
+                        "request_refresh",
+                        lambda: (_ for _ in ()).throw(DemoError("operator_http_503")))
+    assert caught.value.code == "operator_http_503"
+
+    result = setup_operation(evidence, lambda: None, "setup_source", "operator",
+                             "configure_source", lambda: {"source_ref": "demo:1"})
+    assert result == {"source_ref": "demo:1"}
+    assert evidence["phases"]["setup_source"]["status"] == "passed"
+
+
+def test_container_role_failure_has_stable_role_and_action_envelope():
+    with pytest.raises(OperationFailure) as caught:
+        role_operation("upstream-tools", "initialize",
+                       lambda: (_ for _ in ()).throw(ModuleNotFoundError("private path")))
+    assert caught.value.envelope() == {
+        "type": "photo_wall_helper_failure", "schema": 1,
+        "phase": "role_action", "role": "upstream-tools",
+        "action": "initialize", "code": "demo_failed",
+    }
+
+
+def test_code_shaped_unknown_exceptions_and_demo_errors_are_not_public_codes():
+    secret = "lowercasesecrettoken"
+    assert public_failure(RuntimeError(secret)) == {"error": "demo_failed"}
+    assert str(DemoError(secret)) == "demo_failed"
+    with pytest.raises(OperationFailure) as caught:
+        role_operation("upstream-tools", "initialize",
+                       lambda: (_ for _ in ()).throw(DemoError(secret)))
+    assert caught.value.code.value == "demo_failed"
+    invalid_action = OperationFailure(
+        "role_action", "operator", secret, "operator_http_503"
+    )
+    assert invalid_action.envelope()["action"] == "unknown"
+    assert invalid_action.code.value == "demo_failed"
+    assert secret not in json.dumps(invalid_action.envelope())
+
+
+def test_immich_runtime_provenance_is_derived_from_complete_bundle():
+    from scripts.immich_fixture import fixture_provenance_paths
+
+    runtime, host = fixture_provenance_paths()
+    assert {item.target for item in IMMICH_RUNTIME_BUNDLE.files} <= set(runtime)
+    assert {item.source for item in IMMICH_RUNTIME_BUNDLE.files} <= set(host)
+    assert "scripts/harness_failure.py" in runtime
+    assert "scripts/harness_failure.py" in host
+
+
+@pytest.mark.parametrize("code", [
+    "active_before_outage_timeout", "central_recovery_timeout", "deleted_refresh_timeout",
+    "new_media_not_presented", "permission_not_reported", "permission_recovery_timeout",
+    "player_rejoin_timeout", "upstream_outage_not_reported", "upstream_recovery_timeout",
+    "fixture_http_400", "fixture_http_401", "fixture_http_403", "fixture_http_404",
+    "fixture_http_409", "fixture_http_422", "fixture_http_429", "fixture_http_500",
+    "fixture_http_502", "fixture_http_503", "fixture_http_504",
+])
+def test_indirect_bounded_failure_codes_remain_in_closed_vocabulary(code):
+    assert str(DemoError(code)) == code
+
+
+def test_code_shaped_unknown_exception_cannot_escape_as_public_failure():
+    secret = "lowercase_secret_token_12345678"
+    assert public_failure(RuntimeError(secret)) == {"error": "demo_failed"}
+    evidence = {"phases": {}}
+    with pytest.raises(OperationFailure) as caught:
+        setup_operation(evidence, lambda: None, "setup_upstream", "upstream-tools",
+                        "initialize", lambda: (_ for _ in ()).throw(RuntimeError(secret)))
+    assert caught.value.code == "demo_failed"
+    assert secret not in json.dumps(evidence)
 
 
 def test_player_runner_recorder_logs_only_successful_presentations():
@@ -595,6 +738,22 @@ def test_journaled_upstream_mutation_preserves_error_timepoint_and_result_fields
     assert saved[-1]["phases"]["evolved_change"]["error"] == "operator_http_503"
 
 
+def test_journaled_mutation_does_not_promote_code_shaped_unknown_exception():
+    evidence = {"phases": {}}
+
+    class Host:
+        def role(self, role, action):
+            raise RuntimeError("lowercasesecrettoken")
+
+    with pytest.raises(RuntimeError, match="lowercasesecrettoken"):
+        journal_upstream_mutation(
+            Host(), evidence, lambda: None, {"locks": []}, {}, "evolve",
+            pre_key="evolved_pre_change", change_key="evolved_change",
+        )
+    assert evidence["phases"]["evolved_change"]["error"] == "demo_failed"
+    assert "lowercasesecrettoken" not in json.dumps(evidence)
+
+
 def test_journaled_mutation_records_refresh_request_failure_after_upstream_success():
     evidence = {"phases": {}}
 
@@ -634,6 +793,8 @@ def _mock_audit_host(tmp_path, monkeypatch, mutation=None):
     (state / "contexts/helper").mkdir(parents=True)
     harness = state / "contexts/helper/demo_wall.py"
     harness.write_bytes(b"copied harness")
+    bundle = {"schema": 1, "files": {"demo_wall.py": "a" * 64}}
+    write_json(state / "contexts/helper/bundle.json", bundle)
     wheelhouse = tmp_path / "wheelhouse"
     (wheelhouse).mkdir()
     write_json(wheelhouse / "inventory.json", {})
@@ -653,7 +814,8 @@ def _mock_audit_host(tmp_path, monkeypatch, mutation=None):
                                json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                            "adapter_sha256": files["media/immich.py"],
                            "preparer_sha256": files["media/prepare.py"],
-                           "harness_sha256": harness_sha})
+                           "harness_sha256": harness_sha,
+                           "helper_bundle": bundle})
 
     monkeypatch.setattr(host, "compose", compose)
     return host

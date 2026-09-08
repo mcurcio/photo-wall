@@ -46,12 +46,11 @@ services:
       dockerfile_inline: |
         FROM ${FIXTURE_BASE_IMAGE:-photo-wall-fixture-base:local}
         USER root
-        COPY scripts/immich_fixture.py /fixture/immich_fixture.py
-        COPY scripts/docker_diagnostics.py /app/scripts/docker_diagnostics.py
+        COPY scripts/harness_failure.py scripts/immich_actions.py scripts/immich_runtime.py /app/scripts/
         RUN mkdir -p /runtime /setup && chown 10001:10001 /runtime /setup
         USER 10001:10001
     user: "10001:10001"
-    entrypoint: [python, /fixture/immich_fixture.py]
+    entrypoint: [python, -m, scripts.immich_runtime]
     command: [serve]
     environment: {PYTHONPATH: /app}
     volumes:
@@ -67,7 +66,7 @@ services:
     image: ${FIXTURE_IMAGE:?harness image required}
     profiles: [tools]
     user: "10001:10001"
-    entrypoint: [python, /fixture/immich_fixture.py]
+    entrypoint: [python, -m, scripts.immich_runtime]
     environment: {PYTHONPATH: /app}
     volumes:
       - setup:/setup

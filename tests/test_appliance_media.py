@@ -10,14 +10,16 @@ from scripts.vm_media_probe import ProbeError, configure
 class Operator:
     def __init__(self):
         self.calls = []
-        self.player = dict(id="p1", authority_epoch=1, retired_at=None, health={"persistence": "volatile"})
+        self.player = dict(id="p1", device_id="device1", authority_epoch=1,
+                           registered_at=100, last_seen=100, retired_at=None, health={})
         self.outputs = [dict(player_id="p1", output_id="Virtual-1",
-                             observation=dict(connected=True, width_px=1280, height_px=720))]
+                             observation=dict(output_id="Virtual-1", connected=True,
+                                              width_px=1280, height_px=720))]
 
     def request(self, method, path, body=None):
         self.calls.append((method, path, body))
         if method == "GET":
-            return dict(players=[self.player], outputs=self.outputs)
+            return dict(players=[self.player], outputs=self.outputs, frames=[])
         return {}
 
 
@@ -47,20 +49,36 @@ def test_invalid_capture_cannot_broaden_fixture_query(begin, end):
     assert operator.calls == []
 
 
-@pytest.mark.parametrize("fault", ["epoch", "retired", "durable", "missing_output"])
-def test_no_configuration_writes_without_current_stateless_player(fault):
+@pytest.mark.parametrize("fault", ["epoch", "retired", "wrong_player", "missing_output", "other_owner"])
+def test_no_configuration_writes_without_current_session_and_owned_output(fault):
     operator = Operator()
     if fault == "epoch":
         operator.player["authority_epoch"] = 2
     elif fault == "retired":
         operator.player["retired_at"] = 100
-    elif fault == "durable":
-        operator.player["health"]["persistence"] = "durable"
+    elif fault == "wrong_player":
+        operator.player["id"] = "another-player"
+    elif fault == "other_owner":
+        operator.outputs[0]["player_id"] = "another-player"
     else:
         operator.outputs = []
     with pytest.raises(ProbeError):
         configure(operator, player_id="p1", epoch=1, captured_from=100, captured_until=101)
     assert all(method == "GET" for method, _, _ in operator.calls)
+
+
+@pytest.mark.parametrize("health", [
+    {}, {"boot_id": "current-boot", "ticket_id": "current-ticket"},
+    {"persistence": "durable", "healthy": False, "authority_epoch": 0},
+    {"persistence": "volatile", "healthy": False, "sampled_monotonic": 0},
+])
+def test_current_session_configuration_is_independent_of_observational_health(health):
+    operator = Operator()
+    operator.player["health"] = health
+    result = configure(operator, player_id="p1", epoch=1, captured_from=100,
+                       captured_until=101, now=lambda: 200)
+    assert result["player_id"] == "p1" and result["authority_epoch"] == 1
+    assert operator.calls[-1][1] == "/v1/operator/programs/vm-photo"
 
 
 def test_worker_image_mismatch_fails_before_state_creation(tmp_path):
@@ -162,8 +180,8 @@ def test_media_probe_consumes_the_typed_equipment_session():
     calls = []
     def run(args, **kwargs):
         calls.append(args)
-        return json.dumps({'presentations': [], 'grants': []}).encode()
-    harness = SimpleNamespace(run=run, fixture_central=lambda: 'central')
+        return json.dumps({'ok': True, 'value': {'presentations': [], 'grants': []}}).encode()
+    harness = SimpleNamespace(run=run, fixture_central=lambda: 'central', report={})
     assert ApplianceMedia(harness, 'image').probe('evidence', player) == dict(presentations=[], grants=[])
     assert calls[0][-4:] == ['--player-id', player.player_id, '--epoch', '2']
 

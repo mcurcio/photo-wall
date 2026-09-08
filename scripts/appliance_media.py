@@ -16,6 +16,7 @@ from central.installation_models import EquipmentSessionObservation
 from media.worker import load_connections
 from scripts.boot_fixture import FixtureError, read_file, require, write_json
 from scripts.immich_fixture import FixtureHost
+from scripts.vm_media_probe import ProbeFailure, decode_result
 
 MEDIA_TIMEOUT = 420
 DENIAL_PROBE = """
@@ -88,11 +89,21 @@ class ApplianceMedia:
 
     def probe(self, action: str, player: EquipmentSessionObservation, *args: str) -> dict:
         h = self.harness
-        value = json.loads(h.run(["docker", "exec", h.fixture_central(), "python", "-m",
+        require(action in ("configure", "evidence", "stale"), "media_probe_action_invalid")
+        h.report["media_probe"] = dict(action=action, status="started")
+        payload = h.run(["docker", "exec", h.fixture_central(), "python", "-m",
             "scripts.vm_media_probe", action, "--player-id", player.player_id,
-            "--epoch", str(player.authority_epoch), *args], timeout=30))
-        require(isinstance(value, dict) and "error" not in value, "media_probe_failed")
-        return value
+            "--epoch", str(player.authority_epoch), *args], timeout=30)
+        try:
+            result = decode_result(payload)
+        except ValueError:
+            h.report["media_probe"] = dict(action=action, status="invalid_response")
+            raise FixtureError("media_probe_contract_invalid") from None
+        if isinstance(result, ProbeFailure):
+            h.report["media_probe"] = dict(action=action, **result.model_dump(mode="json"))
+            raise FixtureError(result.error)
+        h.report["media_probe"] = dict(action=action, status="completed")
+        return result.value
 
     def configure(self, player: EquipmentSessionObservation):
         captured = datetime.datetime.fromisoformat(self.photo["captured"].replace("Z", "+00:00")).timestamp()

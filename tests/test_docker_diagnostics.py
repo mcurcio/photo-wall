@@ -1,5 +1,6 @@
 """Docker failure evidence is useful without exporting fixture credentials."""
 
+import json
 import os
 
 import pytest
@@ -9,6 +10,8 @@ from scripts.docker_diagnostics import (
     bounded_diagnostic,
     sanitize_docker_output,
 )
+from scripts.harness_failure import FailureEnvelope
+from scripts.immich_actions import ActionError
 from scripts.immich_fixture import MAX_STREAM_BYTES, FixtureHost, HarnessError, _Tail
 
 
@@ -128,3 +131,56 @@ def test_drain_timeout_cannot_mask_primary_failure():
     stdout, stderr = _Tail(32), _Tail(32)
     FixtureHost._drain(StuckPipe(), stdout, stderr)
     assert stdout.data == stderr.data == b""
+
+
+def helper_failure(**changes):
+    failure = FailureEnvelope.create(
+        "role_action", "operator", "health", "operator_http_503"
+    ).public_payload()
+    failure["failure"].update(changes)
+    return failure
+
+
+def failed_docker(tmp_path, monkeypatch, payload, args):
+    docker_script(tmp_path, "printf '%s\\n' '" + json.dumps(payload) + "' >&2\nexit 17\n")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    with pytest.raises(HarnessError) as caught:
+        FixtureHost._command(args, timeout=10, capture=False)
+    return str(caught.value)
+
+
+def test_generic_docker_command_cannot_promote_forged_helper_failure(tmp_path, monkeypatch):
+    assert failed_docker(
+        tmp_path, monkeypatch, helper_failure(), ["docker", "compose", "build"]
+    ) == "docker_command_failed"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda value: value.update(error="lowercasesecrettoken", failure={"code": "lowercasesecrettoken"}),
+    lambda value: value["failure"].update(role="upstream-tools"),
+    lambda value: value["failure"].update(action="snapshot"),
+    lambda value: value["failure"].update(schema=2),
+    lambda value: value["failure"].update(schema=True),
+    lambda value: value["failure"].update(extra="operator_http_503"),
+    lambda value: value.update(extra="operator_http_503"),
+    lambda value: value.update(error="operator_http_502"),
+])
+def test_known_helper_rejects_forged_malformed_or_mismatched_envelope(
+        tmp_path, monkeypatch, mutate):
+    payload = helper_failure()
+    mutate(payload)
+    assert failed_docker(
+        tmp_path, monkeypatch, payload,
+        ["docker", "compose", "run", "--rm", "--no-deps", "operator", "health"],
+    ) == "docker_command_failed"
+
+
+def test_known_helper_promotes_only_exact_typed_envelope(tmp_path, monkeypatch):
+    assert failed_docker(
+        tmp_path, monkeypatch, helper_failure(),
+        ["docker", "compose", "run", "--rm", "--no-deps", "operator", "health"],
+    ) == "operator_http_503"
+
+
+def test_action_error_maps_arbitrary_code_shaped_text_to_generic():
+    assert str(ActionError("lowercasesecrettoken")) == "demo_failed"

@@ -18,6 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.harness_failure import (  # noqa: E402
+    CodedFailure,
+    FailureCode,
+    FailureEnvelope,
+)
+
 PLAYER_REVISION = "dda8e98c5c54dc8ca9c007599f8a919eadbd5248"
 PYTHON_IMAGE = "python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f"
 POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94"
@@ -230,13 +237,63 @@ sys.exit(0 if all(result.values()) else 1)
 '''
 
 
-class DemoError(ValueError):
+class DemoError(CodedFailure):
     pass
+
+
+class OperationFailure(DemoError):
+    def __init__(self, phase: str, role: str, action: str, code: str):
+        self.failure = FailureEnvelope.create(phase, role, action, code)
+        super().__init__(self.failure.code)
+        self.phase = self.failure.phase.value
+        self.role = self.failure.role.value
+        self.action = self.failure.action.value
+
+    def envelope(self) -> dict:
+        return self.failure.as_dict()
 
 
 def require(condition, code):
     if not condition:
         raise DemoError(code)
+
+
+def failure_code(error: Exception) -> str:
+    return error.code.value if isinstance(error, CodedFailure) else FailureCode.DEMO_FAILED.value
+
+
+def role_operation(role: str, action: str, function):
+    try:
+        return function()
+    except Exception as error:
+        raise OperationFailure("role_action", role, action, failure_code(error)) from None
+
+
+def public_failure(error: Exception) -> dict:
+    code = failure_code(error)
+    result = {"error": code}
+    if isinstance(error, OperationFailure):
+        result["failure"] = error.envelope()
+    return result
+
+
+def setup_operation(evidence: dict, save, phase: str, role: str, action: str, function):
+    """Journal a bounded setup operation before it can affect external state."""
+    record = {"schema": 1, "status": "running", "role": role, "action": action,
+              "started_utc": datetime.now(timezone.utc).isoformat()}
+    evidence["phases"][phase] = record
+    save()
+    try:
+        result = function()
+    except Exception as error:
+        code = failure_code(error)
+        record.update(status="failed", code=code,
+                      finished_utc=datetime.now(timezone.utc).isoformat())
+        save()
+        raise OperationFailure(phase, role, action, code) from None
+    record.update(status="passed", finished_utc=datetime.now(timezone.utc).isoformat())
+    save()
+    return result
 
 
 def core_image_mapping(central_image=None, worker_image=None):
@@ -427,7 +484,14 @@ class DemoHost:
         return cls(state)
 
     def command(self, args, timeout=120, capture=True):
-        return self.fixture._command(args, timeout=timeout, capture=capture)
+        from scripts.immich_fixture import HarnessError
+
+        try:
+            return self.fixture._command(args, timeout=timeout, capture=capture)
+        except HarnessError as error:
+            # FixtureHost constructs HarnessError only from its fixed codes or
+            # the validated bounded error field of an isolated helper role.
+            raise DemoError(str(error)) from None
 
     def compose(self, *args, timeout=120, capture=True):
         return self.command([*self.base, *args], timeout, capture)
@@ -438,6 +502,7 @@ class DemoHost:
 
     def build(self):
         from scripts.container_build import daemon_image_build
+        from scripts.harness_bundle import WALL_HELPER_BUNDLE
 
         context = self.state / "contexts"
         context.mkdir(mode=0o700)
@@ -446,8 +511,8 @@ class DemoHost:
             self.command(["docker", "tag", identifier, self.project + "-core-" + role + ":local"], 30, False)
         helper = context / "helper"
         helper.mkdir()
-        shutil.copyfile(ROOT / "scripts/demo_wall.py", helper / "demo_wall.py")
-        shutil.copyfile(ROOT / "scripts/immich_fixture.py", helper / "immich_fixture.py")
+        bundle_files = WALL_HELPER_BUNDLE.stage(ROOT, helper)
+        write_json(helper / "bundle.json", {"schema": 1, "files": bundle_files})
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -468,7 +533,8 @@ class DemoHost:
         for role in ("central", "worker"):
             release_copy = "COPY release /release/\n" if role == "central" else ""
             (helper / "Dockerfile").write_text(f"FROM {self.project}-core-{role}:local\n"
-                "COPY demo_wall.py immich_fixture.py /harness/\n" + release_copy)
+                "COPY demo_wall.py bundle.json /harness/\n"
+                "COPY scripts /harness/scripts/\n" + release_copy)
             self.command(daemon_image_build(f"{self.project}-{role}:local", helper), 120, False)
         player = context / "player"
         player.mkdir()
@@ -540,8 +606,10 @@ files={str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest()
 print(json.dumps(dict(files=files,core_inventory_sha256=hashlib.sha256(
     json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
     adapter_sha256=files['media/immich.py'],preparer_sha256=files['media/prepare.py'],
-    harness_sha256=hashlib.sha256(Path('/harness/demo_wall.py').read_bytes()).hexdigest())))"""
+            harness_sha256=hashlib.sha256(Path('/harness/demo_wall.py').read_bytes()).hexdigest(),
+            helper_bundle=json.loads(Path('/harness/bundle.json').read_text())))"""
         expected_files = local_source_inventory()
+        expected_bundle = read_json(self.state / "contexts/helper/bundle.json")
         role_audits = {}
         copied_harness_sha256 = hashlib.sha256(
             (self.state / "contexts/helper/demo_wall.py").read_bytes()).hexdigest()
@@ -549,6 +617,7 @@ print(json.dumps(dict(files=files,core_inventory_sha256=hashlib.sha256(
             role_audit = json.loads(self.compose("exec", "-T", role, "python", "-c", code))
             require(role_audit["files"] == expected_files, "core_image_source_mismatch")
             require(role_audit["harness_sha256"] == copied_harness_sha256, "harness_image_mismatch")
+            require(role_audit["helper_bundle"] == expected_bundle, "harness_bundle_mismatch")
             role_audits[role] = role_audit
         # Keep the historical worker-shaped fields at the top level for readers
         # of existing runtime-provenance.json files.
@@ -583,7 +652,8 @@ def initialize_volumes():
 
 def upstream_action(action: str):
     """Only the dedicated role has the retained admin session and mutation rights."""
-    from immich_fixture import PERMISSIONS, UpstreamFixture
+    from scripts.immich_actions import PERMISSIONS, ActionError, UpstreamFixture
+
     fixture = UpstreamFixture()
     fixture.client.headers["Authorization"] = "Bearer " + read_json(
         Path("/fixture-session/session.json"))["token"]
@@ -624,44 +694,55 @@ def upstream_action(action: str):
             size=len(data), favorite=True, deleted=False, kind="video", captured=stamp(30))
         write_json(path, state)
 
-    if action == "initialize":
-        require(not path.exists(), "upstream_already_initialized")
-        owner = fixture.request("GET", "/users/me")
-        key = fixture.request("POST", "/api-keys", (201,), json={"name": project, "permissions": PERMISSIONS})
-        state["key_id"] = key["apiKey"]["id"]
-        write_json(path, state)
-        write_json(Path("/private/connections.json"), {"schema": 1, "connections": [{
-            "connection_id": "demo-library", "base_url": "http://immich:2283/api",
-            "owner_id": owner["id"], "api_key": key["secret"], "allow_http": True}]})
-        image("landscape", (160, 96), 10)
-        image("portrait", (96, 160), 20)
-        video()
-    elif action == "evolve":
-        require(not any(item["label"] == "older-live" for item in state["assets"].values()), "already_evolved")
-        image("older-live", (144, 96), 5)
-        image("newer-live", (152, 96), 40)
-        selected = next(item for item in state["assets"].values() if item["label"] == "landscape")
-        fixture.request("PUT", "/assets/" + selected["upstream_id"], json={"isFavorite": False})
-        selected["favorite"] = False
-    elif action == "delete":
-        selected = next(item for item in state["assets"].values() if item["label"] == "portrait")
-        require(not selected["deleted"], "already_deleted")
-        fixture.request("DELETE", "/assets", (204,), json={"ids": [selected["upstream_id"]], "force": True})
-        selected["deleted"] = True
-    elif action in ("deny", "restore"):
-        fixture.request("PUT", "/api-keys/" + state["key_id"],
-                        json={"permissions": ["user.read"] if action == "deny" else PERMISSIONS})
-    elif action == "cleanup":
-        ids = [item["upstream_id"] for item in state["assets"].values() if not item["deleted"]]
-        if ids:
-            fixture.request("DELETE", "/assets", (204,), json={"ids": ids, "force": True})
-        if state["key_id"]:
-            fixture.request("DELETE", "/api-keys/" + state["key_id"], (204,))
-        for item in state["assets"].values():
-            item["deleted"] = True
-        state["key_id"] = None
-    elif action != "status":
-        raise DemoError("unknown_upstream_action")
+    try:
+        if action == "initialize":
+            require(not path.exists(), "upstream_already_initialized")
+            owner = fixture.request("GET", "/users/me")
+            key = fixture.request("POST", "/api-keys", (201,),
+                                  json={"name": project, "permissions": PERMISSIONS})
+            state["key_id"] = key["apiKey"]["id"]
+            write_json(path, state)
+            write_json(Path("/private/connections.json"), {"schema": 1, "connections": [{
+                "connection_id": "demo-library", "base_url": "http://immich:2283/api",
+                "owner_id": owner["id"], "api_key": key["secret"], "allow_http": True}]})
+            image("landscape", (160, 96), 10)
+            image("portrait", (96, 160), 20)
+            video()
+        elif action == "evolve":
+            require(not any(item["label"] == "older-live" for item in state["assets"].values()),
+                    "already_evolved")
+            image("older-live", (144, 96), 5)
+            image("newer-live", (152, 96), 40)
+            selected = next(item for item in state["assets"].values()
+                            if item["label"] == "landscape")
+            fixture.request("PUT", "/assets/" + selected["upstream_id"],
+                            json={"isFavorite": False})
+            selected["favorite"] = False
+        elif action == "delete":
+            selected = next(item for item in state["assets"].values()
+                            if item["label"] == "portrait")
+            require(not selected["deleted"], "already_deleted")
+            fixture.request("DELETE", "/assets", (204,),
+                            json={"ids": [selected["upstream_id"]], "force": True})
+            selected["deleted"] = True
+        elif action in ("deny", "restore"):
+            fixture.request("PUT", "/api-keys/" + state["key_id"], json={
+                "permissions": ["user.read"] if action == "deny" else PERMISSIONS,
+            })
+        elif action == "cleanup":
+            ids = [item["upstream_id"] for item in state["assets"].values()
+                   if not item["deleted"]]
+            if ids:
+                fixture.request("DELETE", "/assets", (204,), json={"ids": ids, "force": True})
+            if state["key_id"]:
+                fixture.request("DELETE", "/api-keys/" + state["key_id"], (204,))
+            for item in state["assets"].values():
+                item["deleted"] = True
+            state["key_id"] = None
+        elif action != "status":
+            raise DemoError("unknown_upstream_action")
+    except ActionError as error:
+        raise DemoError(str(error)) from None
     if action in ("initialize", "evolve"):
         deadline = time.monotonic() + 60
         while True:
@@ -871,7 +952,7 @@ def journal_upstream_mutation(host, evidence, save, before, reports, action, pre
         change["refresh"] = host.role("operator", "refresh")
     except Exception as error:
         change["failed_utc"] = time.time()
-        change["error"] = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
+        change["error"] = failure_code(error)
         save()
         raise
     save()
@@ -1107,7 +1188,7 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
         write_json(host.state / "evidence.json", evidence)
     save()
     try:
-        host.build()
+        setup_operation(evidence, save, "setup_build", "host", "build_images", host.build)
         evidence["provenance"] = dict(harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             player_inventory=read_json(wheelhouse / "inventory.json"),
             core_images=host.core_images, core_revision=revision,
@@ -1115,12 +1196,18 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
             core_dirty=host.command(["git", "diff", "--name-only", revision, "--", *CORE_SOURCE_PATHS]).splitlines())
         require(not evidence["provenance"]["core_dirty"], "core_dirty")
         save()
-        host.compose("run", "--rm", "--no-deps", "init", timeout=60)
+        setup_operation(evidence, save, "setup_volumes", "init", "initialize",
+                        lambda: host.compose("run", "--rm", "--no-deps", "init", timeout=60))
         evidence["volumes_initialized"] = True
         save()
-        evidence["upstream"] = host.role("upstream-tools", "initialize")
+        evidence["upstream"] = setup_operation(
+            evidence, save, "setup_upstream", "upstream-tools", "initialize",
+            lambda: host.role("upstream-tools", "initialize"),
+        )
         save()
-        host.compose("up", "-d", "database", "central", timeout=120, capture=False)
+        setup_operation(evidence, save, "setup_central", "docker-compose", "start_central",
+                        lambda: host.compose("up", "-d", "database", "central",
+                                             timeout=120, capture=False))
         deadline = time.monotonic() + 90
         while True:
             try:
@@ -1129,9 +1216,16 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
             except Exception:
                 require(time.monotonic() < deadline, "central_startup_timeout")
                 time.sleep(1)
-        host.role("operator", "source")
-        initial_refresh = host.role("operator", "refresh")
-        host.compose("up", "-d", "worker", *host.players, timeout=120, capture=False)
+        source = setup_operation(evidence, save, "setup_source", "operator", "configure_source",
+                                 lambda: host.role("operator", "source"))
+        require(source["source_ref"] == "demo:1", "source_configuration_invalid")
+        initial_refresh = setup_operation(
+            evidence, save, "setup_refresh", "operator", "request_refresh",
+            lambda: host.role("operator", "refresh"),
+        )
+        setup_operation(evidence, save, "setup_runtime", "docker-compose", "start_runtime",
+                        lambda: host.compose("up", "-d", "worker", *host.players,
+                                             timeout=120, capture=False))
         deadline = time.monotonic() + 120
         while True:
             try:
@@ -1180,20 +1274,32 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
         return {"status": "passed", "scenario": scenario, "revision": revision,
                 "state_dir": str(host.state), "checks": checks}
     except Exception as error:
-        code = str(error) if re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
+        code = failure_code(error)
         evidence["status"], evidence["error"] = "failed", code
+        if isinstance(error, OperationFailure):
+            evidence["failure"] = error.envelope()
+        else:
+            evidence["failure"] = {"schema": 1, "phase": "demo", "role": "harness",
+                                   "action": "run", "code": code}
         save()
+        if isinstance(error, OperationFailure):
+            raise
         raise DemoError(code) from None
     finally:
         if not keep:
             try:
                 host.cleanup()
                 evidence["cleanup"] = "completed"
-            except Exception:
+            except Exception as cleanup_error:
                 evidence["cleanup"] = "failed_preserved_for_retry"
+                evidence["cleanup_failure"] = {
+                    "schema": 1, "phase": "cleanup", "role": "host",
+                    "action": "cleanup", "code": failure_code(cleanup_error),
+                }
                 if evidence["status"] == "passed":
                     evidence["status"] = "failed"
                     evidence["error"] = "cleanup_failed"
+                    evidence["failure"] = dict(evidence["cleanup_failure"])
                     raise DemoError("cleanup_failed") from None
             finally:
                 save()
@@ -1213,11 +1319,13 @@ def main():
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
     if args.command == "init":
-        result = initialize_volumes()
+        result = role_operation("init", "initialize", initialize_volumes)
     elif args.command == "upstream":
-        result = upstream_action(args.action)
+        result = role_operation("upstream-tools", args.action or "missing",
+                                lambda: upstream_action(args.action))
     elif args.command == "operator":
-        result = operator_action(args.action)
+        result = role_operation("operator", args.action or "missing",
+                                lambda: operator_action(args.action))
     elif args.command == "plan":
         require(REVISION_PATTERN.fullmatch(args.revision) is not None, "exact_revision_required")
         result = dict(schema=1, scenarios=["baseline", "full"], revision=args.revision,
@@ -1244,6 +1352,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        code = str(error) if isinstance(error, DemoError) and re.fullmatch(r"[a-z0-9_]{1,100}", str(error)) else "demo_failed"
-        print(json.dumps({"error": code}), file=sys.stderr)
+        print(json.dumps(public_failure(error)), file=sys.stderr)
         raise SystemExit(1) from None
