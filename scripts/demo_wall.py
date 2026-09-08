@@ -277,6 +277,26 @@ def public_failure(error: Exception) -> dict:
     return result
 
 
+def source_configuration_receipt(value: object):
+    """Validate the shared operator response without exposing validation details."""
+    from pydantic import ValidationError
+
+    from central.media_ports import SourceConfigurationReceipt
+
+    try:
+        return SourceConfigurationReceipt.model_validate(value, strict=True)
+    except ValidationError:
+        raise DemoError("source_configuration_invalid") from None
+
+
+def configure_demo_source(host):
+    """Configure and validate the demo source inside the setup phase."""
+    receipt = source_configuration_receipt(host.role("operator", "source"))
+    require(receipt.source_ref == "demo:1" and receipt.created,
+            "source_configuration_invalid")
+    return receipt.model_dump(mode="json")
+
+
 def setup_operation(evidence: dict, save, phase: str, role: str, action: str, function):
     """Journal a bounded setup operation before it can affect external state."""
     record = {"schema": 1, "status": "running", "role": role, "action": action,
@@ -498,7 +518,12 @@ class DemoHost:
 
     def role(self, role: str, action: str):
         output = self.compose("run", "--rm", "--no-deps", role, action, timeout=180)
-        return json.loads(output)
+        try:
+            result = json.loads(output)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise DemoError("invalid_role_result") from None
+        require(isinstance(result, dict), "invalid_role_result")
+        return result
 
     def build(self):
         from scripts.container_build import daemon_image_build
@@ -789,9 +814,10 @@ def operator_action(action: str):
         return request("GET", "/healthz")
     if action == "source":
         start = int(os.environ["DEMO_CAPTURE_START"])
-        return request("PUT", "/v1/operator/sources/demo:1", {"schema": 1, "source_ref": "demo:1",
+        result = request("PUT", "/v1/operator/sources/demo:1", {"schema": 1, "source_ref": "demo:1",
             "connection_ref": "demo-library", "favorites": True, "captured_from": start,
             "captured_until": start + 60, "media_types": ["image", "video"]})
+        return source_configuration_receipt(result).model_dump(mode="json")
     if action == "refresh":
         return request("POST", "/v1/operator/sources/demo:1/refresh")
     if action == "start":
@@ -1216,9 +1242,8 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
             except Exception:
                 require(time.monotonic() < deadline, "central_startup_timeout")
                 time.sleep(1)
-        source = setup_operation(evidence, save, "setup_source", "operator", "configure_source",
-                                 lambda: host.role("operator", "source"))
-        require(source["source_ref"] == "demo:1", "source_configuration_invalid")
+        setup_operation(evidence, save, "setup_source", "operator", "configure_source",
+                        lambda: configure_demo_source(host))
         initial_refresh = setup_operation(
             evidence, save, "setup_refresh", "operator", "request_refresh",
             lambda: host.role("operator", "refresh"),

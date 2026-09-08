@@ -9,6 +9,7 @@ from test_coordination import setup_players
 from test_registry import ADMIN
 
 from central.app import create_app
+from central.media_ports import SourceConfigurationReceipt
 from contracts.models import PlayerConfiguration, Readiness
 
 
@@ -19,7 +20,12 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
     appliance = {"Authorization": "Bearer " + player["token"]}
     with TestClient(app) as client:
         source = {"schema": 1, "source_ref": "source:1", "connection_ref": "library", "favorites": True}
-        assert client.put("/v1/operator/sources/source:1", json=source, headers=operator).json() == {"created": True}
+        configured = client.put(
+            "/v1/operator/sources/source:1", json=source, headers=operator,
+        ).json()
+        assert SourceConfigurationReceipt.model_validate(configured, strict=True).model_dump() == {
+            "source_ref": "source:1", "created": True,
+        }
         assert client.put("/v1/operator/sources/source:1", json={**source, "favorites": False}, headers=operator).status_code == 409
         scene = {"scene_id": "night", "loop": True, "cycle_seconds": 30,
                  "contributions": [{"target": "frame:frame-0", "kind": "black"}]}

@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.planner import AcquisitionRequest
@@ -36,6 +36,13 @@ class RefreshReceipt(Model):
         if self.completed_revision >= self.requested_revision:
             raise ValueError("completed_revision must precede requested_revision")
         return self
+
+
+class SourceConfigurationReceipt(Model):
+    """Exact operator transport result for a configured source."""
+
+    source_ref: Identifier
+    created: StrictBool
 
 
 class CoordinationMedia(Protocol):

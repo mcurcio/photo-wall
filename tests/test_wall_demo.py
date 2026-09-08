@@ -22,6 +22,7 @@ from scripts.demo_wall import (
     OperationFailure,
     baseline_checks,
     composition,
+    configure_demo_source,
     core_image_mapping,
     delete_secured_original,
     journal_upstream_mutation,
@@ -37,6 +38,7 @@ from scripts.demo_wall import (
     run_demo,
     selected_secured_presentation,
     setup_operation,
+    source_configuration_receipt,
     source_refresh_completed,
     validate_selected_revision,
     write_json,
@@ -167,6 +169,71 @@ def test_setup_operation_preserves_bounded_domain_code_and_success_identity():
                              "configure_source", lambda: {"source_ref": "demo:1"})
     assert result == {"source_ref": "demo:1"}
     assert evidence["phases"]["setup_source"]["status"] == "passed"
+
+
+def test_source_configuration_uses_shared_api_receipt_and_phase_postcondition():
+    class Host:
+        def role(self, role, action):
+            assert (role, action) == ("operator", "source")
+            return {"source_ref": "demo:1", "created": True}
+
+    evidence = {"phases": {}}
+    result = setup_operation(
+        evidence, lambda: None, "setup_source", "operator", "configure_source",
+        lambda: configure_demo_source(Host()),
+    )
+    assert result == {"source_ref": "demo:1", "created": True}
+    phase = evidence["phases"]["setup_source"]
+    assert (phase["status"], phase["role"], phase["action"]) == (
+        "passed", "operator", "configure_source",
+    )
+
+
+@pytest.mark.parametrize("response", [
+    {"created": True},
+    {"source_ref": "demo:1"},
+    {"source_ref": "demo:1", "created": True, "extra": "value"},
+    {"source_ref": "demo:1", "created": 1},
+    {"source_ref": "other:1", "created": True},
+    {"source_ref": "demo:1", "created": False},
+    ["demo:1", True],
+])
+def test_source_configuration_contract_failures_are_typed_in_setup_phase(response):
+    class Host:
+        def role(self, role, action):
+            return response
+
+    evidence = {"phases": {}}
+    with pytest.raises(OperationFailure) as caught:
+        setup_operation(
+            evidence, lambda: None, "setup_source", "operator", "configure_source",
+            lambda: configure_demo_source(Host()),
+    )
+    assert caught.value.code.value == "source_configuration_invalid"
+    phase = evidence["phases"]["setup_source"]
+    assert (phase["status"], phase["role"], phase["action"], phase["code"]) == (
+        "failed", "operator", "configure_source", "source_configuration_invalid",
+    )
+
+
+def test_shared_source_configuration_receipt_rejects_wrong_types_and_extra_fields():
+    assert source_configuration_receipt({
+        "source_ref": "demo:1", "created": True,
+    }).model_dump(mode="json") == {"source_ref": "demo:1", "created": True}
+    for response in (
+        {"source_ref": "demo:1", "created": 1},
+        {"source_ref": "demo:1", "created": True, "extra": False},
+    ):
+        with pytest.raises(DemoError, match="^source_configuration_invalid$"):
+            source_configuration_receipt(response)
+
+
+@pytest.mark.parametrize("output", ["not-json", "[]", '"scalar"', "null"])
+def test_role_result_json_boundary_rejects_malformed_or_non_object_payloads(output):
+    host = object.__new__(DemoHost)
+    host.compose = lambda *args, **kwargs: output
+    with pytest.raises(DemoError, match="^invalid_role_result$"):
+        host.role("operator", "source")
 
 
 def test_container_role_failure_has_stable_role_and_action_envelope():

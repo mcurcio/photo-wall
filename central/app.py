@@ -25,7 +25,7 @@ from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
 from central.media_gateway import MediaGateway
-from central.media_ports import MediaApplication, RefreshReceipt
+from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigurationReceipt
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
@@ -573,11 +573,18 @@ def create_app(
     def media_state():
         return {"sources": media_application.sources(), "health": media_application.health()}
 
-    @app.put("/v1/operator/sources/{source_ref}", dependencies=[Depends(admin)])
+    @app.put(
+        "/v1/operator/sources/{source_ref}",
+        dependencies=[Depends(admin)],
+        response_model=SourceConfigurationReceipt,
+    )
     def configure_source(source_ref: Identifier, source: SourceSpec):
         if source.source_ref != source_ref:
             raise ValueError("Source identity mismatch")
-        return {"created": media_application.configure_source(source)}
+        return SourceConfigurationReceipt(
+            source_ref=source_ref,
+            created=media_application.configure_source(source),
+        )
 
     @app.post(
         "/v1/operator/sources/{source_ref}/refresh",
