@@ -10,10 +10,11 @@ MAX_DOCKER_DEBUG_LOG = 512 * 1024
 MAX_DOCKER_DEBUG_ENTRY = 64 * 1024
 
 _SECRET = re.compile(
-    rb"(?i)((?:password|token|secret|authorization|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)"
+    rb"(?i)((?:password|token|secret|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)"
     rb"[^\s,\"']+"
 )
 _BEARER = re.compile(rb"(?i)bearer\s+[A-Za-z0-9._~+\-/=]{8,}")
+_AUTHORIZATION = re.compile(rb"(?im)(authorization[\"']?\s*[:=]\s*)[^\r\n]*")
 
 
 def docker_debug_args(args: list[str]) -> list[str]:
@@ -24,8 +25,23 @@ def docker_debug_args(args: list[str]) -> list[str]:
 
 def sanitize_docker_output(data: bytes) -> bytes:
     data = data.replace(b"\x00", b"?")
-    data = _SECRET.sub(rb"\1<redacted>", data)
-    return _BEARER.sub(b"Bearer <redacted>", data)
+    # Bearer must run first: generic Authorization redaction would otherwise
+    # consume only the word "Bearer" and leave its credential behind.
+    data = _BEARER.sub(b"Bearer <redacted>", data)
+    data = _AUTHORIZATION.sub(rb"\1<redacted>", data)
+    return _SECRET.sub(rb"\1<redacted>", data)
+
+
+def bounded_diagnostic(data: bytes, *, truncated: bool = False) -> bytes:
+    if len(data) <= MAX_DOCKER_DEBUG_ENTRY and not truncated:
+        return sanitize_docker_output(data)
+    tail = data[-MAX_DOCKER_DEBUG_ENTRY:]
+    # Never expose a suffix whose sensitive key or Bearer prefix was discarded.
+    # Start only at the next complete line; a line longer than the whole bound is
+    # represented by a fixed marker.
+    newline = tail.find(b"\n")
+    tail = tail[newline + 1:] if newline >= 0 else b"[truncated line]\n"
+    return b"[truncated]\n" + sanitize_docker_output(tail)
 
 
 def record_docker_debug(args: list[str], code: int, data: bytes) -> None:
@@ -37,7 +53,7 @@ def record_docker_debug(args: list[str], code: int, data: bytes) -> None:
     if not path.is_absolute() or path.is_symlink():
         return
     operation = args[1] if len(args) > 1 and re.fullmatch(r"[a-z-]{1,32}", args[1]) else "unknown"
-    diagnostic = sanitize_docker_output(data[-MAX_DOCKER_DEBUG_ENTRY:])
+    diagnostic = bounded_diagnostic(data)
     payload = f"docker operation={operation} exit={code}\n".encode() + diagnostic + b"\n"
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

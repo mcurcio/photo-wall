@@ -406,10 +406,10 @@ def test_probe_records_bounded_failure_diagnostics(tmp_path):
 
 def test_docker_debug_flag_and_bounded_failure_log(tmp_path, monkeypatch):
     from scripts.boot_fixture import (
-        MAX_DOCKER_DEBUG_ENTRY,
         docker_debug_args,
         record_docker_debug,
     )
+    from scripts.docker_diagnostics import MAX_DOCKER_DEBUG_ENTRY
 
     path = tmp_path / "docker-debug.log"
     monkeypatch.setenv("PHOTO_WALL_DOCKER_DEBUG", "1")
@@ -432,6 +432,30 @@ def test_command_keeps_debug_stderr_out_of_structured_stdout():
     result = command([sys.executable, "-c",
         "import sys; sys.stderr.write('debug noise\\n'); sys.stdout.write('{\"ok\":true}\\n')"])
     assert json.loads(result) == {"ok": True}
+
+
+def test_boot_command_drops_partial_secret_line_at_diagnostic_tail(tmp_path, monkeypatch):
+    from scripts.boot_fixture import FixtureError, command
+
+    executable = tmp_path / "docker"
+    secret = "private-boundary-suffix"
+    executable.write_text("#!/bin/sh\npython3 - <<'PY'\n"
+        "import sys\n"
+        f"sys.stderr.write('Authorization: Bearer ' + 'x' * 70000 + '{secret}\\n')\n"
+        "sys.stderr.write('complete diagnostic\\n')\n"
+        "raise SystemExit(17)\nPY\n")
+    executable.chmod(0o755)
+    log = tmp_path / "docker-debug.log"
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PHOTO_WALL_DOCKER_DEBUG_LOG", str(log))
+
+    with pytest.raises(FixtureError, match="docker_command_failed"):
+        command(["docker", "compose", "up"], timeout=10)
+
+    diagnostic = log.read_bytes()
+    assert secret.encode() not in diagnostic
+    assert b"x" * 32 not in diagnostic
+    assert b"complete diagnostic" in diagnostic
 
 
 @pytest.mark.parametrize("initialized", [True, False])

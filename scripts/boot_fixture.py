@@ -25,7 +25,6 @@ if __package__ in (None, "") and str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.docker_diagnostics import (  # noqa: E402
-    MAX_DOCKER_DEBUG_ENTRY,
     docker_debug_args,
     record_docker_debug,
 )
@@ -427,9 +426,10 @@ def command(args: list[str], timeout=180) -> bytes:
             except subprocess.TimeoutExpired:
                 raise FixtureError("docker_timeout") from None
             if code != 0:
-                half = MAX_DOCKER_DEBUG_ENTRY // 2
-                record_docker_debug(args, code, b"stderr:\n" + bytes(stderr[-half:])
-                                    + b"\nstdout:\n" + bytes(stdout[-half:]))
+                # The shared recorder owns tail selection so it can discard a
+                # partial first line before redacting credential-shaped output.
+                record_docker_debug(args, code, b"stderr:\n" + bytes(stderr)
+                                    + b"\nstdout:\n" + bytes(stdout))
                 raise FixtureError("docker_command_failed")
             return bytes(stdout)
     finally:

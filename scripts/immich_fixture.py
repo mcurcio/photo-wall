@@ -14,10 +14,10 @@ import json
 import os
 import re
 import secrets
+import selectors
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -29,12 +29,32 @@ if __package__ in (None, "") and str(ROOT) not in sys.path:
 
 from scripts.docker_diagnostics import (  # noqa: E402
     MAX_DOCKER_DEBUG_ENTRY,
+    bounded_diagnostic,
     docker_debug_args,
     record_docker_debug,
 )
 
 PERMISSIONS = ["user.read", "asset.read", "asset.download"]
 UPSTREAM = "http://immich:2283/api"
+MAX_CAPTURE_BYTES = 2 * 1024 * 1024
+MAX_STREAM_BYTES = 16 * 1024 * 1024
+TERMINATE_GRACE = 5.0
+
+
+class _Tail:
+    def __init__(self, maximum: int):
+        self.maximum = maximum
+        self.data = bytearray()
+        self.truncated = False
+
+    def add(self, block: bytes) -> None:
+        self.data.extend(block)
+        if len(self.data) > self.maximum:
+            self.truncated = True
+            del self.data[:-self.maximum]
+
+    def diagnostic(self) -> bytes:
+        return bounded_diagnostic(bytes(self.data), truncated=self.truncated)
 
 # This isolated negative probe is test-driver code, never Player application code
 # or configuration. It deliberately knows the denied target supplied by the host.
@@ -122,54 +142,122 @@ class FixtureHost:
     @staticmethod
     def _command(args: list[str], *, timeout: int, capture: bool) -> str:
         launched = docker_debug_args(args)
-        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-            with subprocess.Popen(launched, cwd=ROOT, start_new_session=True,
-                                  stdout=stdout_file, stderr=stderr_file) as process:
-                try:
-                    process.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGTERM)
+        process = subprocess.Popen(launched, cwd=ROOT, start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout = bytearray()
+        stdout_tail = _Tail(MAX_DOCKER_DEBUG_ENTRY // 2)
+        stderr_tail = _Tail(MAX_DOCKER_DEBUG_ENTRY // 2)
+        total, deadline, failure = 0, time.monotonic() + timeout, None
+        try:
+            with selectors.DefaultSelector() as poll:
+                poll.register(process.stdout, selectors.EVENT_READ, (stdout_tail, capture))
+                poll.register(process.stderr, selectors.EVENT_READ, (stderr_tail, False))
+                while poll.get_map():
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        failure = "docker_command_timeout"
+                        break
+                    for key, _ in poll.select(min(left, .2)):
+                        block = os.read(key.fileobj.fileno(), 65536)
+                        if not block:
+                            poll.unregister(key.fileobj)
+                            continue
+                        total += len(block)
+                        if total > MAX_STREAM_BYTES:
+                            failure = "docker_output_limit"
+                            break
+                        tail, collect = key.data
+                        tail.add(block)
+                        if collect:
+                            if len(stdout) + len(block) > MAX_CAPTURE_BYTES:
+                                failure = "docker_output_limit"
+                                break
+                            stdout.extend(block)
+                    if failure:
+                        break
+            if failure:
+                FixtureHost._terminate(process)
+                FixtureHost._drain(process, stdout_tail, stderr_tail)
+                FixtureHost._record_failure(args, -1, stdout_tail, stderr_tail)
+                raise HarnessError(failure)
+            try:
+                code = process.wait(timeout=max(.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                FixtureHost._terminate(process)
+                FixtureHost._drain(process, stdout_tail, stderr_tail)
+                FixtureHost._record_failure(args, -1, stdout_tail, stderr_tail)
+                raise HarnessError("docker_command_timeout") from None
+            if code:
+                FixtureHost._record_failure(args, code, stdout_tail, stderr_tail)
+                for line in bytes(stderr_tail.data).decode(errors="replace").splitlines():
                     try:
-                        process.communicate(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate()
-                    FixtureHost._record_failure(args, -1, stdout_file, stderr_file)
-                    raise HarnessError("docker_command_timeout") from None
-            if process.returncode:
-                FixtureHost._record_failure(args, process.returncode, stdout_file, stderr_file)
-                stderr = FixtureHost._tail_output(stderr_file, MAX_DOCKER_DEBUG_ENTRY)
-                for line in stderr.decode(errors="replace").splitlines():
-                    try:
-                        code = json.loads(line).get("error", "")
-                        if re.fullmatch(r"[a-z0-9_-]{1,128}", code):
-                            raise HarnessError(code)
+                        value = json.loads(line).get("error", "")
+                        if re.fullmatch(r"[a-z0-9_-]{1,128}", value):
+                            raise HarnessError(value)
                     except (ValueError, AttributeError):
                         pass
                 raise HarnessError("docker_command_failed")
-            stdout = FixtureHost._read_output(stdout_file, 2 * 1024 * 1024 if capture else 0)
-        return stdout.decode(errors="strict") if capture else ""
+            return bytes(stdout).decode(errors="strict") if capture else ""
+        finally:
+            if process.poll() is None:
+                FixtureHost._terminate(process)
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
     @staticmethod
-    def _read_output(stream, maximum: int) -> bytes:
-        size = stream.seek(0, os.SEEK_END)
-        if maximum == 0:
-            return b""
-        require(size <= maximum, "docker_output_limit")
-        stream.seek(0)
-        return stream.read(maximum + 1)
+    def _terminate(process) -> None:
+        group = process.pid
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            process.wait()
+            return
+        except PermissionError:
+            # Some sandboxed test hosts deny group signals. Preserve the primary
+            # harness failure while still terminating the directly owned leader.
+            process.terminate()
+            try:
+                process.wait(timeout=TERMINATE_GRACE)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return
+        deadline = time.monotonic() + TERMINATE_GRACE
+        while time.monotonic() < deadline:
+            process.poll()  # Reap an exited leader; descendants may still own the pipes.
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                process.wait()
+                return
+            except PermissionError:
+                process.wait()
+                return
+            time.sleep(.05)
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
 
     @staticmethod
-    def _record_failure(args: list[str], code: int, stdout, stderr) -> None:
-        half = MAX_DOCKER_DEBUG_ENTRY // 2
-        record_docker_debug(args, code, b"stderr:\n" + FixtureHost._tail_output(stderr, half)
-                            + b"\nstdout:\n" + FixtureHost._tail_output(stdout, half))
+    def _drain(process, stdout_tail: _Tail, stderr_tail: _Tail) -> None:
+        try:
+            remaining_stdout, remaining_stderr = process.communicate(timeout=1)
+        except (subprocess.TimeoutExpired, OSError):
+            # Termination already forced the owned process group. Diagnostics
+            # must never replace the bounded harness failure if a foreign or
+            # uninterruptible writer still holds a duplicated pipe descriptor.
+            remaining_stdout, remaining_stderr = b"", b""
+        for tail, block in ((stdout_tail, remaining_stdout), (stderr_tail, remaining_stderr)):
+            tail.add(block or b"")
 
     @staticmethod
-    def _tail_output(stream, maximum: int) -> bytes:
-        size = stream.seek(0, os.SEEK_END)
-        stream.seek(max(0, size - maximum))
-        return stream.read(maximum)
+    def _record_failure(args: list[str], code: int,
+                        stdout_tail: _Tail, stderr_tail: _Tail) -> None:
+        record_docker_debug(args, code, b"stderr:\n" + stderr_tail.diagnostic()
+                            + b"\nstdout:\n" + stdout_tail.diagnostic())
 
     def build(self, *, base_image: str | None = None) -> None:
         from scripts.container_build import daemon_compose_build, daemon_image_build

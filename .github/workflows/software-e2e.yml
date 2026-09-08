@@ -17,9 +17,6 @@ jobs:
   two-players-three-outputs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
-    env:
-      PHOTO_WALL_DOCKER_DEBUG: '1'
-      PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -75,6 +72,8 @@ jobs:
       - name: Start a disposable real Immich fixture
         env:
           WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
           .venv/bin/python -m scripts.immich_fixture run \
             --state-dir "$RUNNER_TEMP/immich-fixture" \
@@ -85,6 +84,8 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
           .venv/bin/python -m scripts.demo_wall run \
             --state-dir "$RUNNER_TEMP/wall-demo" \
@@ -120,6 +121,9 @@ jobs:
 
       - name: Remove the disposable Immich fixture
         if: always()
+        env:
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
           if [ -f "$RUNNER_TEMP/immich-fixture/fixture.json" ]; then
             .venv/bin/python -m scripts.immich_fixture cleanup \

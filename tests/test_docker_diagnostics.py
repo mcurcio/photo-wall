@@ -4,8 +4,12 @@ import os
 
 import pytest
 
-from scripts.docker_diagnostics import MAX_DOCKER_DEBUG_ENTRY
-from scripts.immich_fixture import FixtureHost, HarnessError
+from scripts.docker_diagnostics import (
+    MAX_DOCKER_DEBUG_ENTRY,
+    bounded_diagnostic,
+    sanitize_docker_output,
+)
+from scripts.immich_fixture import MAX_STREAM_BYTES, FixtureHost, HarnessError, _Tail
 
 
 def docker_script(path, body):
@@ -45,3 +49,82 @@ def test_immich_success_keeps_debug_stderr_out_of_structured_result(tmp_path, mo
 
     assert FixtureHost._command(["docker", "compose", "ps"], timeout=10, capture=True) == '{"ok":true}\n'
     assert FixtureHost._command(["docker", "compose", "ps"], timeout=10, capture=False) == ""
+
+
+def test_bearer_is_redacted_before_generic_authorization_key():
+    result = sanitize_docker_output(b"Authorization: Bearer private-bearer-value\n")
+    assert b"private-bearer-value" not in result
+    assert result == b"Authorization: <redacted>\n"
+
+
+def test_truncated_tail_drops_partial_secret_line_and_keeps_complete_diagnostics():
+    secret = b"private-secret-suffix"
+    oversized = b"Authorization: Bearer " + b"x" * MAX_DOCKER_DEBUG_ENTRY + secret
+    result = bounded_diagnostic(oversized + b"\nnext complete diagnostic\n")
+    assert secret not in result
+    assert b"x" * 32 not in result
+    assert result.endswith(b"next complete diagnostic\n")
+
+
+def test_stream_limit_terminates_unbounded_producer_and_keeps_bounded_tail(tmp_path, monkeypatch):
+    docker_script(tmp_path,
+        "python3 -c 'import os; block=b\"x\"*65536; "
+        f"[os.write(1,block) for _ in range({MAX_STREAM_BYTES // 65536 + 4})]'\n")
+    log = tmp_path / "docker-debug.log"
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PHOTO_WALL_DOCKER_DEBUG_LOG", str(log))
+    with pytest.raises(HarnessError, match="docker_output_limit"):
+        FixtureHost._command(["docker", "compose", "build"], timeout=10, capture=False)
+    assert log.stat().st_size <= MAX_DOCKER_DEBUG_ENTRY + 64
+
+
+def test_timeout_preserves_harness_error_when_descendant_holds_pipe(tmp_path, monkeypatch):
+    from scripts import immich_fixture
+
+    pid_file = tmp_path / "child.pid"
+    docker_script(tmp_path,
+        "python3 -c 'import os,signal,sys,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "open(sys.argv[1],\"w\").write(str(os.getpid())); "
+        "os.write(2,b\"child-ready\\n\"); time.sleep(2)' \"$1\" &\nwait\n")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(immich_fixture, "TERMINATE_GRACE", .1)
+
+    with pytest.raises(HarnessError, match="docker_command_timeout"):
+        FixtureHost._command(["docker", str(pid_file)], timeout=.5, capture=False)
+
+    assert pid_file.is_file()
+
+
+def test_terminate_probes_group_after_leader_exit_then_forces_kill(monkeypatch):
+    from scripts import immich_fixture
+
+    class ExitedLeader:
+        pid = 1234
+        def poll(self):
+            return 0
+        def wait(self, timeout=None):
+            return 0
+
+    signals = []
+    moments = iter((0, 0, 1))
+    monkeypatch.setattr(immich_fixture, "TERMINATE_GRACE", .5)
+    monkeypatch.setattr(immich_fixture.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(immich_fixture.time, "sleep", lambda _: None)
+    monkeypatch.setattr(immich_fixture.os, "killpg",
+                        lambda group, selected: signals.append((group, selected)))
+
+    FixtureHost._terminate(ExitedLeader())
+
+    assert signals == [(1234, immich_fixture.signal.SIGTERM), (1234, 0),
+                       (1234, immich_fixture.signal.SIGKILL)]
+
+
+def test_drain_timeout_cannot_mask_primary_failure():
+    class StuckPipe:
+        def communicate(self, timeout):
+            raise __import__("subprocess").TimeoutExpired("docker", timeout)
+
+    stdout, stderr = _Tail(32), _Tail(32)
+    FixtureHost._drain(StuckPipe(), stdout, stderr)
+    assert stdout.data == stderr.data == b""
