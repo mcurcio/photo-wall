@@ -17,12 +17,22 @@ import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if __package__ in (None, "") and str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.docker_diagnostics import (  # noqa: E402
+    MAX_DOCKER_DEBUG_ENTRY,
+    docker_debug_args,
+    record_docker_debug,
+)
+
 PERMISSIONS = ["user.read", "asset.read", "asset.download"]
 UPSTREAM = "http://immich:2283/api"
 
@@ -111,31 +121,55 @@ class FixtureHost:
 
     @staticmethod
     def _command(args: list[str], *, timeout: int, capture: bool) -> str:
-        with subprocess.Popen(
-                args, cwd=ROOT, start_new_session=True,
-                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                stderr=subprocess.PIPE, text=True,
-        ) as process:
-            try:
-                stdout, stderr = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGTERM)
+        launched = docker_debug_args(args)
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            with subprocess.Popen(launched, cwd=ROOT, start_new_session=True,
+                                  stdout=stdout_file, stderr=stderr_file) as process:
                 try:
-                    process.communicate(timeout=5)
+                    process.communicate(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
-                raise HarnessError("docker_command_timeout") from None
-        if process.returncode:
-            for line in (stderr or "").splitlines():
-                try:
-                    code = json.loads(line).get("error", "")
-                    if re.fullmatch(r"[a-z0-9_-]{1,128}", code):
-                        raise HarnessError(code)
-                except (ValueError, AttributeError):
-                    pass
-            raise HarnessError("docker_command_failed")
-        return stdout or ""
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate()
+                    FixtureHost._record_failure(args, -1, stdout_file, stderr_file)
+                    raise HarnessError("docker_command_timeout") from None
+            if process.returncode:
+                FixtureHost._record_failure(args, process.returncode, stdout_file, stderr_file)
+                stderr = FixtureHost._tail_output(stderr_file, MAX_DOCKER_DEBUG_ENTRY)
+                for line in stderr.decode(errors="replace").splitlines():
+                    try:
+                        code = json.loads(line).get("error", "")
+                        if re.fullmatch(r"[a-z0-9_-]{1,128}", code):
+                            raise HarnessError(code)
+                    except (ValueError, AttributeError):
+                        pass
+                raise HarnessError("docker_command_failed")
+            stdout = FixtureHost._read_output(stdout_file, 2 * 1024 * 1024 if capture else 0)
+        return stdout.decode(errors="strict") if capture else ""
+
+    @staticmethod
+    def _read_output(stream, maximum: int) -> bytes:
+        size = stream.seek(0, os.SEEK_END)
+        if maximum == 0:
+            return b""
+        require(size <= maximum, "docker_output_limit")
+        stream.seek(0)
+        return stream.read(maximum + 1)
+
+    @staticmethod
+    def _record_failure(args: list[str], code: int, stdout, stderr) -> None:
+        half = MAX_DOCKER_DEBUG_ENTRY // 2
+        record_docker_debug(args, code, b"stderr:\n" + FixtureHost._tail_output(stderr, half)
+                            + b"\nstdout:\n" + FixtureHost._tail_output(stdout, half))
+
+    @staticmethod
+    def _tail_output(stream, maximum: int) -> bytes:
+        size = stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, size - maximum))
+        return stream.read(maximum)
 
     def build(self, *, base_image: str | None = None) -> None:
         from scripts.container_build import daemon_compose_build, daemon_image_build
@@ -484,7 +518,8 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
         ))
         evidence["harness_files"] = {
             relative: hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
-            for relative in ("scripts/immich_fixture.py", "tests/integration/compose.immich.yml")
+            for relative in ("scripts/docker_diagnostics.py", "scripts/immich_fixture.py",
+                             "tests/integration/compose.immich.yml")
         }
         evidence["checks"]["denial_before"] = host.probe(upstream_ip)
         for role, action in [("setup", "initialize"), ("central", "initial"),

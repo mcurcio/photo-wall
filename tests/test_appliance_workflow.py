@@ -17,3 +17,12 @@ def test_routine_appliance_runs_are_smoke_and_manual_full_binds_native_media():
     assert '--scope "$APPLIANCE_SCOPE"' in workflow
     assert "--scope smoke" not in workflow
 
+
+def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
+    workflow = (WORKFLOW.parent / "software-e2e.yml").read_text()
+
+    assert "PHOTO_WALL_DOCKER_DEBUG: '1'" in workflow
+    assert "PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log" in workflow
+    assert "name: Upload Docker failure diagnostics" in workflow
+    assert "if: failure()" in workflow
+    assert "photo-wall-software-e2e/docker-debug.log" in workflow

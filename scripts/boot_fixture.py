@@ -24,6 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.docker_diagnostics import (  # noqa: E402
+    MAX_DOCKER_DEBUG_ENTRY,
+    docker_debug_args,
+    record_docker_debug,
+)
+
 LABEL = "org.photo-wall.boot-fixture"
 SOURCE_LABEL = "org.photo-wall.boot-fixture-source"
 POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94"
@@ -34,8 +40,6 @@ SOURCES = ("scripts/boot_gateway.py", "scripts/boot_time_fixture.py", "appliance
            "scripts/vm_media_probe.py", "scripts/vm_release_probe.py")
 MAX_JSON = 1024**2
 MAX_ENV = 4096
-MAX_DOCKER_DEBUG_LOG = 512 * 1024
-MAX_DOCKER_DEBUG_ENTRY = 64 * 1024
 PROBE_MEMORY_BYTES = 384 * 1024**2
 MEDIA_KEYS = frozenset(("worker_image", "upstream_project", "upstream_network_id"))
 WORKER_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
@@ -396,38 +400,6 @@ def composition(project: str, media: dict | None = None) -> dict:
     if media is not None and media.get("delivery_control"):
         volumes["media-control"] = dict(external=True, name=project+"-media-control")
     return dict(services=services, networks=networks, volumes=volumes)
-
-
-def docker_debug_args(args: list[str]) -> list[str]:
-    if os.environ.get("PHOTO_WALL_DOCKER_DEBUG") == "1" and args and args[0] == "docker":
-        return ["docker", "--debug", *args[1:]]
-    return args
-
-
-def record_docker_debug(args: list[str], code: int, data: bytes) -> None:
-    """Append bounded failed-command output without recording command arguments."""
-    value = os.environ.get("PHOTO_WALL_DOCKER_DEBUG_LOG")
-    if not value or not args or args[0] != "docker":
-        return
-    path = Path(value)
-    if not path.is_absolute() or path.is_symlink():
-        return
-    operation = args[1] if len(args) > 1 and re.fullmatch(r"[a-z-]{1,32}", args[1]) else "unknown"
-    payload = (f"docker operation={operation} exit={code}\n".encode()
-               + data[-MAX_DOCKER_DEBUG_ENTRY:] + b"\n")
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        current = path.stat().st_size if path.exists() else 0
-        if current >= MAX_DOCKER_DEBUG_LOG:
-            return
-        payload = payload[:MAX_DOCKER_DEBUG_LOG - current]
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(descriptor, payload)
-        finally:
-            os.close(descriptor)
-    except OSError:
-        pass
 
 
 def command(args: list[str], timeout=180) -> bytes:

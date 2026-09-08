@@ -17,6 +17,9 @@ jobs:
   two-players-three-outputs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
+    env:
+      PHOTO_WALL_DOCKER_DEBUG: '1'
+      PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -103,6 +106,15 @@ jobs:
             ${{ runner.temp }}/wall-demo/last-central.json
             ${{ runner.temp }}/wall-demo/last-players.json
             ${{ runner.temp }}/wall-demo/runtime-provenance.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Docker failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-software-e2e-docker-debug-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
           if-no-files-found: warn
           retention-days: 7
 
