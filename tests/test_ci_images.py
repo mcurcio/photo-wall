@@ -239,3 +239,27 @@ def test_no_diff_and_bootstrap_require_qualification(definition_tree):
     current = git(definition_tree, "rev-parse", "HEAD")
     assert ci_images.qualification_required(definition_tree, current) is True
     assert ci_images.qualification_required(definition_tree, "0" * 40) is True
+
+
+
+def test_doc_followup_still_qualifies_unqualified_code_in_the_whole_pr(definition_tree):
+    base = git(definition_tree, "rev-parse", "HEAD")
+    player = definition_tree / "player"
+    player.mkdir()
+    (player / "new.py").write_text("# Substantive application change\n")
+    git(definition_tree, "add", ".")
+    git(definition_tree, "commit", "--quiet", "-m", "application change")
+    previous_head = git(definition_tree, "rev-parse", "HEAD")
+    (definition_tree / "README.md").write_text("Documentation follow-up\n")
+    git(definition_tree, "add", ".")
+    git(definition_tree, "commit", "--quiet", "-m", "documentation follow-up")
+    assert ci_images.qualification_required(definition_tree, previous_head) is False
+    result = ci_images.plan(definition_tree, previous_head, qualification_compare=base)
+    assert result["qualify"] == "true"
+    assert result["prepare_builder"] == result["prepare_base"] == "false"
+
+
+def test_qualification_compare_requires_an_explicit_commit(definition_tree):
+    current = git(definition_tree, "rev-parse", "HEAD")
+    with pytest.raises(ci_images.ImageError, match="qualification comparison"):
+        ci_images.plan(definition_tree, current, qualification_compare="main")

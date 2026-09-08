@@ -47,11 +47,14 @@ jobs:
         id: definition
         env:
           COMPARE_REVISION: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          # A doc-only follow-up must still qualify substantive changes in the PR.
+          QUALIFICATION_REVISION: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
           FORCE_PREPARE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_base || false }}
         run: |
           force_args=()
           if [[ "$FORCE_PREPARE" == "true" ]]; then force_args=(--force); fi
-          python3 -m scripts.ci_images plan --compare "$COMPARE_REVISION" "${force_args[@]}"
+          python3 -m scripts.ci_images plan --compare "$COMPARE_REVISION" \
+            --qualification-compare "$QUALIFICATION_REVISION" "${force_args[@]}"
       - name: Check documentation links and structure
         run: python3 scripts/check_docs.py
 

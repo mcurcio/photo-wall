@@ -88,6 +88,8 @@ def previous_identities(repository: Path, revision: str) -> dict[str, str] | Non
 
 def qualification_required(repository: Path, compare: str) -> bool:
     """Skip expensive builds only for an explicit, committed documentation diff."""
+    if not re.fullmatch(r"[a-f0-9]{40}", compare):
+        raise ImageError("qualification comparison must be a full Git commit")
     if compare == "0" * 40:
         return True
     changed = run(["git", "-C", str(repository), "diff", "--name-only", "-z",
@@ -98,12 +100,14 @@ def qualification_required(repository: Path, compare: str) -> bool:
                                                      and name.endswith(".md")) for name in names)
 
 
-def plan(repository: Path, compare: str, force: bool = False) -> dict[str, str]:
+def plan(repository: Path, compare: str, force: bool = False,
+         qualification_compare: str | None = None) -> dict[str, str]:
     current = identities(repository)
     previous = previous_identities(repository, compare)
     return {
         "builder_key": current["builder"], "base_key": current["base"],
-        "qualify": str(force or qualification_required(repository, compare)).lower(),
+        "qualify": str(force or qualification_required(
+            repository, qualification_compare or compare)).lower(),
         "prepare_builder": str(force or previous is None
                                or previous["builder"] != current["builder"]).lower(),
         "prepare_base": str(force or previous is None
@@ -252,6 +256,7 @@ def main() -> None:
     parser.add_argument("operation", choices=("plan", "builder", "base", "publish-base"))
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--compare")
+    parser.add_argument("--qualification-compare")
     parser.add_argument("--namespace")
     parser.add_argument("--key")
     parser.add_argument("--allow-build", action="store_true")
@@ -266,7 +271,7 @@ def main() -> None:
         if args.operation == "plan":
             if not args.compare:
                 raise ImageError("comparison commit required")
-            result = plan(repository, args.compare, args.force)
+            result = plan(repository, args.compare, args.force, args.qualification_compare)
         else:
             kind = "builder" if args.operation == "builder" else "base"
             ref = reference(args.namespace or "", kind, args.key or "")
