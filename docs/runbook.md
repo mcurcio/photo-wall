@@ -124,6 +124,15 @@ That wrapper reads local `.env` as data, never sources it as shell code. Each Po
 
 CI installs the locked dependencies, lints, checks local documentation links, builds/launches Compose, runs the PostgreSQL suite, and checks central HTTP health. It separately runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Passing CI does not establish physical Pi/PXE, real Immich, rendering or visible timing.
 
+All CI worker builds reuse the architecture-matched native media base through
+the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
+Application edits do not permit a missing OS dependency to be rebuilt. To
+prepare an unchanged missing definition explicitly, dispatch `checks.yml`,
+`software-e2e.yml`, or `appliance.yml` with `prepare_base=true`; select `scope=full`
+for appliance media qualification. Fork runs require the definition to have
+been published by a trusted run. Ordinary local Compose builds retain their
+explicit cold native target.
+
 A disposable operator fixture is available with `.venv/bin/python -m scripts.demo_registry` after starting the database. It listens on localhost:8010, prints a public fixture token, and registers two simulated Players (two Outputs and one Output) in its own temporary schema. Stop it with Ctrl-C to remove that schema. It is a registry demo only; it does not render or emulate PXE.
 
 The [real-browser registry walkthrough](../tests/browser/test_operator_browser.py) and [content walkthrough](../tests/browser/test_operator_content_browser.py) use the production operator HTML, JavaScript, and HTTP API against their own temporary PostgreSQL schemas. Install the locked development dependencies and their matching Chromium build, then run:
@@ -135,7 +144,18 @@ PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/brows
   --browser chromium --tracing retain-on-failure --output artifacts/operator-browser
 ```
 
-CI installs Chromium's Linux dependencies with `playwright install --with-deps chromium` and runs this explicitly; ordinary test runs skip browser checks unless opted in. Playwright 1.62.0 and pytest-playwright 0.9.0 are pinned in the development dependency group and `uv.lock`; neither enters production services or the Player package. See the official [pytest runner](https://playwright.dev/python/docs/intro) and [CI setup](https://playwright.dev/python/docs/ci-intro).
+CI runs these checks in the official Playwright Python 1.62.0 Noble container,
+pinned by digest in `checks.yml`. That image already contains Chromium and its
+Linux dependencies, so CI does not run a browser APT installation. A separate
+container environment installs the repository's frozen Python dependencies and
+connects to the job's local PostgreSQL fixture. Reports and failure traces are
+written to the existing artifact directory. Ordinary test runs skip browser
+checks unless opted in. Playwright 1.62.0 and pytest-playwright 0.9.0 are pinned
+in the development dependency group and `uv.lock`; neither enters production
+services or the Player package. Update the image and locked Playwright version
+together so the browser binaries match. See the official
+[container contract](https://playwright.dev/python/docs/docker) and
+[pytest runner](https://playwright.dev/python/docs/intro).
 
 The registry walkthrough proves rejected/accepted authentication, reconnection after a rejected token, rejection of delayed failures from an earlier login attempt even when the same token is reused, two-Player/three-Output inventory, Frame creation/binding, calibration preview/revert/commit, stale-tab conflict recovery, replacement/retirement, and persistence through a fresh server/connection pool. It checks preview expiry using controlled time. The content walkthrough creates a Source, saves live and per-Frame authored Scenes, checks compatible prepared-photo choices and current selection guidance, schedules and removes Programs using the browser's local time zone, and starts, ignores, queues, naturally finishes, and cancels Runs. Definitions, Programs, and Run history survive a fresh server/connection pool.
 

@@ -1,0 +1,56 @@
+name: Shared media OS dependency
+
+on:
+  workflow_call:
+    inputs:
+      architecture:
+        required: true
+        type: string
+      prepare_base:
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      image:
+        description: Exact published media OS image digest
+        value: ${{ jobs.prepare.outputs.image }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prepare:
+    # All callers share one publication queue per architecture. Recheck the
+    # registry after acquiring it, so a waiting caller only pulls the winner.
+    concurrency:
+      group: media-system-${{ inputs.architecture }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.base.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Reuse or prepare the declared media OS
+        id: base
+        env:
+          ARCHITECTURE: ${{ inputs.architecture }}
+          COMPARE_REVISION: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          FORCE_PREPARE: ${{ inputs.prepare_base }}
+          CAN_PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          args=(--require-published)
+          if [[ "$CAN_PUBLISH" == "true" ]]; then args+=(--publish); fi
+          if [[ "$FORCE_PREPARE" == "true" ]]; then args+=(--force); fi
+          python3 -m scripts.service_base \
+            --namespace "${GITHUB_REPOSITORY,,}" --architecture "$ARCHITECTURE" \
+            --compare "$COMPARE_REVISION" "${args[@]}"

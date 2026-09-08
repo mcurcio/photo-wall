@@ -118,7 +118,7 @@ def plan(repository: Path, compare: str, force: bool = False,
 def reference(namespace: str, kind: str, identity: str) -> str:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*", namespace):
         raise ImageError("expected a lowercase owner/repository registry namespace")
-    if kind not in ("builder", "base") or not re.fullmatch(r"[a-f0-9]{64}", identity):
+    if kind not in ("builder", "base", "media-system") or not re.fullmatch(r"[a-f0-9]{64}", identity):
         raise ImageError("invalid image identity")
     return f"ghcr.io/{namespace}/appliance-{kind}:definition-{identity}"
 
@@ -149,8 +149,10 @@ def select(ref: str, *, allow_build: bool) -> str | None:
     return resolved
 
 
-def pull(ref: str) -> str:
-    run(["docker", "pull", "--platform", "linux/arm64", ref], timeout=1200)
+def pull(ref: str, *, platform: str = "linux/arm64") -> str:
+    if platform not in ("linux/amd64", "linux/arm64"):
+        raise ImageError("unsupported CI image platform")
+    run(["docker", "pull", "--platform", platform, ref], timeout=1200)
     return image_id(ref)
 
 

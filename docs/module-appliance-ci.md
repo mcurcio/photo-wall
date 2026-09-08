@@ -123,7 +123,8 @@ container has no network, so unexpected dependency acquisition cannot succeed.
 The final `ci-image.json` retains the OS baseline manifest and optional registry
 reference alongside the application revision and release identities.
 
-Central and worker builds retain their existing independent BuildKit scopes.
+Central and worker application builds retain their independent BuildKit scopes;
+the worker's native dependency follows the shared preparation path below.
 The builder instead uses its own definition and `appliance/build-tools.txt`,
 which avoids invalidating the image when the application `uv.lock` changes.
 The OS carrier image contains the prepared archives under `/os-base`; Docker
@@ -180,3 +181,45 @@ The derived upstream fixture explicitly uses the daemon's default builder for
 its already-loaded central parent. A selected container-based Buildx builder
 cannot see that local parent tag. The isolated reproduction and cache-gate
 correction are recorded in [media evidence](evidence/2026-09-06-vm-media.md).
+
+## Shared service and test dependencies
+
+Only `appliance.yml` constructs the Pi OS and signed appliance. The
+[`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
+provides a separate retained FFmpeg environment for `checks.yml`,
+`software-e2e.yml`, and the appliance's manual `full` scope. The smoke scope
+skips that dependency. Both checks jobs share the AMD64 result; software E2E
+and full appliance qualification share the ARM64 definition.
+
+`scripts/service_base.py` reads the `media-os` recipe prefix ending at
+`# END MEDIA OS DEFINITION` in the root Dockerfile. The recipe and architecture
+determine the identity; application source, `pyproject.toml`, and `uv.lock` are
+downstream inputs. The helper uses the same strict registry operations as
+`scripts/ci_images.py`: resolve the definition tag, consume its digest, and
+permit construction only when the definition changed or preparation was
+explicitly requested. Registry errors do not authorize an APT fallback.
+Consumers pass that digest as `MEDIA_BASE_IMAGE` when building `media-worker`
+or `media-test`, so rebuilding application layers does not reconstruct FFmpeg.
+
+The small reusable preparation job serializes all callers by architecture,
+with `cancel-in-progress: false` and `queue: max`. It rechecks the registry
+after entering the queue, allowing later callers to reuse the first successful
+publication. [GitHub's extended concurrency queue](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)
+keeps waiting callers from replacing each other. Same-repository jobs may
+publish; fork jobs require an already published definition because a local
+Docker image cannot cross job runners. A missing fork definition fails clearly
+until a trusted run prepares it.
+
+Central's target contains no APT calls. The Immich and VM helpers inherit the
+already selected service images, and simulated Player helpers install local
+wheels; those derived builds do not rebuild an OS. The standalone
+`tests/native/Dockerfile` remains an explicit local cold integration fixture,
+not a GHA dependency or substitute for exact-appliance qualification. Browser
+checks use a prebuilt Playwright environment as described in the
+[runbook](runbook.md#tests-and-local-development).
+
+The first introduction of a definition permits preparation. An unchanged
+definition with no retained artifact fails until a manual dispatch supplies
+`prepare_base=true`; that input is available on all three caller workflows.
+These routes describe the implemented dependency contract, not measured hosted
+warm-build performance or completed qualification.

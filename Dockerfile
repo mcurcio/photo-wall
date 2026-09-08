@@ -1,22 +1,13 @@
-FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f AS deps
+# The standalone native definition ends at the marker below. Application inputs
+# must stay outside it so dependency updates cannot trigger another APT build.
+ARG MEDIA_BASE_IMAGE=media-os
+FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f AS python-system
 WORKDIR /app
-COPY --from=ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf /uv /usr/local/bin/uv
-COPY pyproject.toml uv.lock ./
-# Keep locked third-party dependencies reusable when application code changes.
-RUN uv sync --frozen --no-dev --no-install-project && useradd --system --uid 10001 --create-home wall \
-    && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+RUN useradd --system --uid 10001 --create-home wall \
+    && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
 
-FROM deps AS runtime
-COPY central ./central
-COPY contracts ./contracts
-COPY media ./media
-COPY player ./player
-RUN uv sync --frozen --no-dev
-USER wall
-
-# System media packages do not depend on application source changes.
-FROM deps AS media-system
+FROM python-system AS media-os
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
        'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260905T000000Z trixie main' \
@@ -34,7 +25,28 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' '{"schema":1,"connections":[]}' > /etc/photo-wall/private/connections.json \
     && chown wall:wall /etc/photo-wall/private/connections.json \
     && chmod 0600 /etc/photo-wall/private/connections.json \
+    && ffmpeg -version > /dev/null && ffprobe -version > /dev/null \
     && rm -rf /var/lib/apt/lists/*
+
+# END MEDIA OS DEFINITION
+
+FROM python-system AS deps
+COPY --from=ghcr.io/astral-sh/uv:0.7.8@sha256:0178a92d156b6f6dbe60e3b52b33b421021f46d634aa9f81f42b91445bb81cdf /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock ./
+# Keep locked third-party dependencies reusable when application code changes.
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM deps AS runtime
+COPY central ./central
+COPY contracts ./contracts
+COPY media ./media
+COPY player ./player
+RUN uv sync --frozen --no-dev
+USER wall
+
+# GHA passes an immutable retained native image; Compose can use the local target.
+FROM ${MEDIA_BASE_IMAGE} AS media-system
+COPY --from=deps /usr/local/bin/uv /usr/local/bin/uv
 
 FROM media-system AS media-worker
 # Both branches share the same Python base and absolute environment path.

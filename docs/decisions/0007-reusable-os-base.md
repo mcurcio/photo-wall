@@ -44,6 +44,22 @@ authorization and transport failures are errors, not evidence of a missing
 artifact. New bases are candidates until the final appliance passes its gate;
 publication must not replace another definition's selected content.
 
+The same separation applies to the appliance's media-worker dependency and the
+other CI consumers of that worker. A standalone `media-os` recipe in the root
+Dockerfile owns its Python OS parent, Debian snapshot, FFmpeg, native inventory,
+and service account. Its architecture-specific identity excludes application
+code and Python locks. One reusable workflow prepares and retains it for all
+callers; each worker or media-test build consumes the selected digest through
+`MEDIA_BASE_IMAGE`. Central has no APT installation and does not require this
+media base. The appliance smoke scope does not prepare a media worker.
+
+Cross-job dependencies require published registry artifacts: a fork can reuse
+an existing definition but cannot pass a locally built candidate to another
+runner. Missing fork definitions therefore fail until trusted preparation
+publishes them. Browser checks consume the official version- and digest-pinned
+Playwright image containing browsers and system dependencies, while installing
+the repository's locked Python test dependencies separately.
+
 ## Application packaging
 
 The existing Player-only wheelhouse remains the package format. It is prepared

@@ -58,9 +58,20 @@ jobs:
       - name: Check documentation links and structure
         run: python3 scripts/check_docs.py
 
+  service-base:
+    needs: select-definition
+    if: needs.select-definition.outputs.qualify == 'true' && github.event_name == 'workflow_dispatch' && inputs.scope == 'full'
+    uses: ./.github/workflows/service-base.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      architecture: arm64
+      prepare_base: ${{ inputs.prepare_base }}
+
   build-and-boot:
     if: always() && (needs.select-definition.result != 'success' || needs.select-definition.outputs.qualify == 'true')
-    needs: select-definition
+    needs: [select-definition, service-base]
     permissions:
       contents: read
       packages: write
@@ -69,6 +80,7 @@ jobs:
     concurrency:
       group: appliance-definition-${{ needs.select-definition.outputs.builder_key }}
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
@@ -82,7 +94,10 @@ jobs:
       - name: Require a valid image definition selection
         env:
           SELECTION: ${{ needs.select-definition.result }}
-        run: test "$SELECTION" = success
+          MEDIA_SELECTION: ${{ needs.service-base.result }}
+        run: |
+          test "$SELECTION" = success
+          if [[ "$APPLIANCE_SCOPE" == full ]]; then test "$MEDIA_SELECTION" = success; fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -90,6 +105,11 @@ jobs:
       - name: Check the Player service sandbox before image assembly
         timeout-minutes: 3
         run: sudo python3 scripts/check_player_unit.py
+
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
@@ -113,6 +133,7 @@ jobs:
         with:
           context: .
           target: media-worker
+          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
           platforms: linux/arm64
           load: true
           tags: photo-wall-appliance-worker:ci
@@ -120,11 +141,6 @@ jobs:
             type=gha,scope=photo-wall-central-arm64-v1
             type=gha,scope=photo-wall-worker-arm64-v1
           cache-to: type=gha,scope=photo-wall-worker-arm64-v1,mode=max,ignore-error=true
-
-      - name: Authenticate to the durable image registry
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Pull the exact builder or prepare a changed definition
         id: builder

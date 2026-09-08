@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      prepare_base:
+        description: Prepare a missing media OS dependency for its declared definition
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -14,10 +20,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  service-base:
+    uses: ./.github/workflows/service-base.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      architecture: arm64
+      prepare_base: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_base || false }}
+
   two-players-three-outputs:
+    needs: service-base
+    if: always()
+    permissions:
+      contents: read
+      packages: read
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
+      - name: Require media OS preparation
+        env:
+          PREPARATION: ${{ needs.service-base.result }}
+          MEDIA_BASE_IMAGE: ${{ needs.service-base.outputs.image }}
+        run: |
+          test "$PREPARATION" = success
+          test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -30,6 +57,11 @@ jobs:
         run: |
           python -m pip install uv==0.7.8
           uv sync --frozen
+
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
@@ -54,6 +86,7 @@ jobs:
         with:
           context: .
           target: media-worker
+          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
           platforms: linux/arm64
           load: true
           tags: photo-wall-software-e2e-worker:ci
