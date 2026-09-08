@@ -35,6 +35,7 @@ POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d372
 PUBLIC = ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
 SOURCES = ("scripts/boot_gateway.py", "scripts/boot_time_fixture.py", "appliance/__init__.py",
            "appliance/bootstrap.py", "appliance/updates.py", "contracts/release.py",
+           "central/release_models.py",
            "scripts/vm_inventory_probe.py", "scripts/vm_media_evidence.py",
            "scripts/vm_media_probe.py", "scripts/vm_release_contract.py",
            "scripts/vm_release_probe.py")
@@ -537,7 +538,10 @@ class BootFixture:
                 target_name = name if name.startswith("scripts/vm_") else name.removeprefix("scripts/")
                 target = state/"context"/target_name
                 target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-                copy_file(ROOT/name,target,MAX_JSON,0o600)
+                public_receipt = name == "central/release_models.py"
+                if public_receipt:
+                    target.parent.chmod(0o755)
+                copy_file(ROOT/name,target,MAX_JSON,0o644 if public_receipt else 0o600)
                 copied[target_name] = file_hash(target)
             (state/"context/runtime.py").write_text(RUNTIME)
             copied["runtime.py"] = file_hash(state/"context/runtime.py")
@@ -545,6 +549,7 @@ class BootFixture:
                 "COPY --chown=10001:10001 boot_gateway.py boot_time_fixture.py runtime.py /opt/boot-fixture/\n"
                 "COPY --chown=10001:10001 appliance/ /app/appliance/\n"
                 "COPY --chown=10001:10001 contracts/release.py /app/contracts/release.py\n"
+                "COPY --chown=10001:10001 --chmod=0644 central/release_models.py /app/central/release_models.py\n"
                 "RUN install -d -o 10001 -g 10001 -m 0700 /probe\n"
                 "ENV PYTHONPATH=/app:/opt/boot-fixture PYTHONDONTWRITEBYTECODE=1\nWORKDIR /app\n"
                 "USER 10001:10001\n")

@@ -29,6 +29,7 @@ from scripts.boot_fixture import (
     LABEL,
     RUNTIME,
     SOURCE_LABEL,
+    SOURCES,
     BootFixture,
     FixtureError,
     composition,
@@ -344,8 +345,13 @@ def test_prepare_rejects_invalid_state_markers(tmp_path, central_image, error):
         BootFixture.prepare(project_root / "state", bundle, deployment, CENTRAL_IMAGE)
 
 
-def test_prepare_records_private_state_and_source_identity(tmp_path):
-    fixture = prepared_fixture(tmp_path)
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_prepare_records_private_state_and_source_identity(tmp_path, umask):
+    previous = os.umask(umask)
+    try:
+        fixture = prepared_fixture(tmp_path)
+    finally:
+        os.umask(previous)
     marker = read_json(fixture.state / "fixture.json")
     assert stat.S_IMODE(fixture.state.stat().st_mode) == 0o700
     assert marker["schema"] == 1
@@ -357,8 +363,19 @@ def test_prepare_records_private_state_and_source_identity(tmp_path):
     context = fixture.state / "context"
     for name in ("boot_gateway.py", "boot_time_fixture.py", "runtime.py",
                  "appliance/__init__.py", "appliance/bootstrap.py", "appliance/updates.py",
-                 "contracts/release.py"):
+                 "contracts/release.py", "central/release_models.py"):
         assert stat.S_ISREG((context / name).stat().st_mode)
+    receipt = context / "central/release_models.py"
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o644
+    assert stat.S_IMODE(receipt.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(context.stat().st_mode) == 0o700
+    assert receipt.read_bytes() == (Path(__file__).resolve().parents[1] / "central/release_models.py").read_bytes()
+    expected_sources = {name if name.startswith("scripts/vm_") else name.removeprefix("scripts/")
+                        for name in SOURCES} | {"runtime.py", "Dockerfile"}
+    assert set(marker["source_files"]) == expected_sources
+    assert set(path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()) == expected_sources
+    assert marker["source_files"]["central/release_models.py"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+    assert "COPY --chown=10001:10001 --chmod=0644 central/release_models.py /app/central/release_models.py\n" in (context / "Dockerfile").read_text()
     assert (context / "Dockerfile").read_text().startswith("FROM " + marker["project"] + "-base:local")
     assert "RUN install -d -o 10001 -g 10001 -m 0700 /probe\n" in (context / "Dockerfile").read_text()
 

@@ -10,11 +10,13 @@ import hashlib
 import os
 import re
 import ssl
+from typing import TypeVar
 
 import httpx
 from pydantic import ValidationError
 
 from central.db import Database
+from central.release_models import ReleaseRegistrationReceipt, ReleaseStagingReceipt
 from contracts.release import Release
 from scripts.vm_release_contract import (
     FAILURE_STAGES,
@@ -23,6 +25,17 @@ from scripts.vm_release_contract import (
     ReleaseFailureResult,
     ReleaseStageResult,
 )
+
+Receipt = TypeVar("Receipt", ReleaseRegistrationReceipt, ReleaseStagingReceipt)
+
+
+def _receipt(response: httpx.Response, model: type[Receipt], status: int, code: str) -> Receipt:
+    if response.status_code != status:
+        raise ValueError(code)
+    try:
+        return model.model_validate(response.json(), strict=True)
+    except (TypeError, ValueError):
+        raise ValueError(code) from None
 
 
 def evidence(conn, device_id: str, boot_id: str) -> CentralBootEvidence | None:
@@ -53,10 +66,11 @@ def stage(device_id: str, manifest: str, signature: str) -> ReleaseStageResult:
             verify=ssl.create_default_context(cafile="/public/ca.pem"), timeout=15,
             headers={"Authorization": "Bearer " + os.environ["PHOTO_WALL_ADMIN_TOKEN"]}) as client:
         registered = client.post("/v1/operator/releases", json=dict(manifest=payload.decode(), signature=signature))
-        if registered.status_code != 201 or registered.json() != {"release_id": release.release_id}:
+        receipt = _receipt(registered, ReleaseRegistrationReceipt, 201, "release_registration_failed")
+        if receipt.release_id != release.release_id:
             raise ValueError("release_registration_failed")
         staged = client.put(f"/v1/operator/equipment/{device_id}/candidate/{release.release_id}")
-        if staged.status_code != 200 or staged.json() != {"staged": True}:
+        if _receipt(staged, ReleaseStagingReceipt, 200, "release_stage_failed").staged is not True:
             raise ValueError("release_stage_failed")
     return ReleaseStageResult(schema_version=1, kind="release-staged", staged=True, release_id=release.release_id)
 

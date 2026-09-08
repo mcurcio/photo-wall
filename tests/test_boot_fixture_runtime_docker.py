@@ -48,13 +48,35 @@ def test_actual_derived_health_helper_needs_no_application_imports(tmp_path):
         assert inspected["Config"]["Labels"][SOURCE_LABEL] == fixture.marker["source_sha256"]
         # Read the actual staged runtime inside the derived image. -I -S blocks
         # project/site imports while the same helper validates the health body.
-        result = subprocess.run(["docker", "run", "--rm", "-i", "--network", "none",
+        container = ["docker", "run", "--rm", "-i", "--network", "none",
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
             "--memory", "192m", "--cpus", "0.5", "--pids-limit", "64",
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m", "--entrypoint", "python",
-            inspected["Id"], "-I", "-S", "-", "/opt/boot-fixture/runtime.py"],
+            inspected["Id"]]
+        result = subprocess.run([*container, "-I", "-S", "-", "/opt/boot-fixture/runtime.py"],
             input=HEALTH_RUNTIME_CHECK, capture_output=True, text=True, check=True, timeout=30)
         assert json.loads(result.stdout) == dict(health="passed", artifact_imports_required=True)
+        # A cached base cannot supply a newly added operator receipt contract.
+        # Its exact checked overlay must remain readable by the observer's UID.
+        receipt_hash = fixture.marker["source_files"]["central/release_models.py"]
+        result = subprocess.run([*container, "-c", """
+import hashlib, json, os, stat, sys
+from pathlib import Path
+from central import release_models
+path = Path(release_models.__file__)
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+assert path == Path('/app/central/release_models.py') and digest == sys.argv[1]
+assert os.getuid() == 10001 and stat.S_IMODE(path.stat().st_mode) == 0o644
+assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+assert release_models.ReleaseStagingReceipt(staged=False).staged is False
+for invalid in (1, 1.0, 'true', None):
+    try: release_models.ReleaseStagingReceipt.model_validate({'staged': invalid}, strict=True)
+    except ValueError: pass
+    else: raise AssertionError('nonboolean receipt accepted')
+assert release_models.ReleaseRegistrationReceipt(release_id='a'*64).release_id == 'a'*64
+print(json.dumps({'receipts': 'passed', 'sha256': digest, 'uid': os.getuid()}))
+""", receipt_hash], input="", capture_output=True, text=True, check=True, timeout=30)
+        assert json.loads(result.stdout) == dict(receipts="passed", sha256=receipt_hash, uid=10001)
     finally:
         if built:
             docker("image", "rm", derived)

@@ -30,6 +30,7 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.registry import Enrollment, FrameCreate, Registry, RegistryError
+from central.release_models import ReleaseRegistrationReceipt, ReleaseStagingReceipt
 from central.releases import ReleaseAuthority, ReleaseError
 from central.runtime import Program, Scene
 from contracts.enrollment import BootTicketId
@@ -512,14 +513,15 @@ def create_app(
     def release_inventory():
         return releases().inventory()
 
-    @app.post("/v1/operator/releases", dependencies=[Depends(admin)], status_code=201)
+    @app.post("/v1/operator/releases", dependencies=[Depends(admin)], status_code=201,
+              response_model=ReleaseRegistrationReceipt)
     def register_release(request: ReleaseRegistration):
         try:
             signature = base64.b64decode(request.signature, validate=True)
         except ValueError:
             raise ReleaseError("invalid_release", 422) from None
         release = releases().register(request.manifest.encode(), signature)
-        return {"release_id": release.release_id}
+        return ReleaseRegistrationReceipt(release_id=release.release_id)
 
     @app.put("/v1/operator/releases/{release_id}/default", dependencies=[Depends(admin)])
     def set_default_release(release_id: str):
@@ -527,10 +529,11 @@ def create_app(
         return {"status": "configured"}
 
     @app.put(
-        "/v1/operator/equipment/{device_id}/candidate/{release_id}", dependencies=[Depends(admin)]
+        "/v1/operator/equipment/{device_id}/candidate/{release_id}", dependencies=[Depends(admin)],
+        response_model=ReleaseStagingReceipt,
     )
     def stage_release(device_id: str, release_id: str):
-        return {"staged": releases().stage(device_id, release_id)}
+        return ReleaseStagingReceipt(staged=releases().stage(device_id, release_id))
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
