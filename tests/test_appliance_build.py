@@ -20,6 +20,7 @@ from appliance.build import (
     create_disk,
     decompress_base,
     execution_inventory,
+    export_source,
     finalize,
     install_runtime_packages,
     inventory,
@@ -297,6 +298,34 @@ def test_executing_builder_and_helpers_must_match_exported_source():
         changed = dict(files, **{name: dict(files[name], sha256="0" * 64)})
         with pytest.raises(BuildError, match="executing_source_mismatch"):
             verify_executing_source({"files": changed})
+
+
+def test_committed_source_export_matches_executing_builder(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    project = Path(__file__).resolve().parents[1]
+    # Include the helper outside appliance/ that previously escaped the export.
+    paths = set(execution_inventory()) | {"appliance/systemd/player.service"}
+    for relative in paths:
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / relative, target)
+
+    def git(*args):
+        return run(["git", "-C", str(repository), *args]).decode().strip()
+
+    git("init", "--quiet")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Source fixture")
+    revision = git("rev-parse", "HEAD")
+    source = tmp_path / "source"
+    export_source(repository, source, revision)
+    record = json.loads((source / "source-inventory.json").read_text())
+    assert record["revision"] == revision
+    assert (source / "scripts/ci_apt_cache.py").read_bytes() == (
+        project / "scripts/ci_apt_cache.py").read_bytes()
+    verify_executing_source(record)
 
 
 def test_finalizer_rejects_entire_bundle_resigned_under_replaced_public_key(tmp_path):

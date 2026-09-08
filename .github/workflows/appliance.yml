@@ -327,7 +327,7 @@ jobs:
         run: |
           diagnostics="$RUNNER_TEMP/photo-wall-ci/diagnostics"
           if [ -d "$RUNNER_TEMP/diagnostics" ]; then
-            install -d "$diagnostics"
+            sudo install -d "$diagnostics"
             sudo cp -a "$RUNNER_TEMP/diagnostics/." "$diagnostics/"
           fi
           if [ -d "$diagnostics" ]; then

@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-08 CI source export](2026-09-08-ci-source-export.md): missing verified
+  helper in the committed source export and root-owned diagnostic collection,
+  with local regression and Linux ownership reproduction.
 - [2026-09-08 CI package acquisition](2026-09-08-ci-package-acquisition.md): two
   image-construction download timeouts, exact public diagnostic archive hashes,
   and the boundary between CI dependencies and immutable PXE delivery.

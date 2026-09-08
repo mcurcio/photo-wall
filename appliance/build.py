@@ -729,13 +729,15 @@ def export_source(repository: Path, destination: Path, revision: str) -> None:
     if destination.exists() or destination.is_symlink():
         raise BuildError("output_exists")
     destination.mkdir(mode=0o700)
-    paths = ["contracts/__init__.py", "contracts/release.py"]
+    # Export every input that preparation/finalization bind to executing code.
+    # Some helpers live outside appliance/, so keep one authoritative file set.
+    paths = set(execution_inventory())
     tracked = run(["git", "-C", str(repository), "ls-tree", "-r", "--name-only", revision,
                    "appliance"]).decode().splitlines()
-    paths.extend(tracked)
+    paths.update(tracked)
     if "appliance/bootstrap.py" not in paths or "appliance/systemd/player.service" not in paths:
         raise BuildError("source_incomplete")
-    for relative in paths:
+    for relative in sorted(paths):
         target = destination / relative
         target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         target.write_bytes(run(["git", "-C", str(repository), "show", revision + ":" + relative]))
