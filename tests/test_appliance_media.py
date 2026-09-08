@@ -4,7 +4,7 @@ import pytest
 
 from scripts.appliance_media import ApplianceMedia
 from scripts.boot_fixture import FixtureError
-from scripts.vm_media_probe import ProbeError, configure
+from scripts.vm_media_probe import VM_PHOTO_FRAME, ProbeError, configure
 
 
 class Operator:
@@ -23,21 +23,24 @@ class Operator:
         return {}
 
 
-@pytest.mark.parametrize("width,height", [(1280, 720), (720, 1280), (1080, 1080)])
-def test_configuration_uses_real_output_and_one_second_image_query(width, height):
+@pytest.mark.parametrize("width,height", [(0, 0), (1280, 720), (720, 1280), (1080, 1080), (0, 1080)])
+def test_configuration_authors_frame_independently_of_output_dimensions(width, height):
     from central.registry import FrameCreate
 
     operator = Operator()
     operator.outputs[0]["observation"].update(width_px=width, height_px=height)
     result = configure(operator, player_id="p1", epoch=1, captured_from=100,
                        captured_until=101, now=lambda: 200)
-    assert result["output_id"] == "Virtual-1" and result["starts_at"] == 290
+    assert result.output_id == "Virtual-1" and result.starts_at == 290
     source = operator.calls[1][2]
     assert source["connection_ref"] == "fixture-library" and source["media_types"] == ["image"]
     assert (source["captured_from"], source["captured_until"]) == (100, 101)
     frame = FrameCreate.model_validate(operator.calls[2][2])
-    assert frame.profile.width_px == width and frame.profile.height_px == height
-    assert frame.width_mm / frame.height_mm == pytest.approx(width / height)
+    assert frame == VM_PHOTO_FRAME == result.authored_frame
+    assert frame.profile.width_px == 1920 and frame.profile.height_px == 1080
+    assert frame.width_mm / frame.height_mm == pytest.approx(16 / 9)
+    assert result.observed_output.width_px == width and result.observed_output.height_px == height
+    assert operator.outputs[0]["observation"] == result.observed_output.model_dump(mode="json")
     assert operator.calls[-1][2]["starts_at"] > 200
 
 
@@ -49,7 +52,8 @@ def test_invalid_capture_cannot_broaden_fixture_query(begin, end):
     assert operator.calls == []
 
 
-@pytest.mark.parametrize("fault", ["epoch", "retired", "wrong_player", "missing_output", "other_owner"])
+@pytest.mark.parametrize("fault", ["epoch", "retired", "wrong_player", "missing_output", "other_owner",
+                                  "disconnected", "mismatched_output_identity"])
 def test_no_configuration_writes_without_current_session_and_owned_output(fault):
     operator = Operator()
     if fault == "epoch":
@@ -60,6 +64,10 @@ def test_no_configuration_writes_without_current_session_and_owned_output(fault)
         operator.player["id"] = "another-player"
     elif fault == "other_owner":
         operator.outputs[0]["player_id"] = "another-player"
+    elif fault == "disconnected":
+        operator.outputs[0]["observation"]["connected"] = False
+    elif fault == "mismatched_output_identity":
+        operator.outputs[0]["observation"]["output_id"] = "Virtual-2"
     else:
         operator.outputs = []
     with pytest.raises(ProbeError):
@@ -77,8 +85,26 @@ def test_current_session_configuration_is_independent_of_observational_health(he
     operator.player["health"] = health
     result = configure(operator, player_id="p1", epoch=1, captured_from=100,
                        captured_until=101, now=lambda: 200)
-    assert result["player_id"] == "p1" and result["authority_epoch"] == 1
+    assert result.player_id == "p1" and result.authority_epoch == 1
     assert operator.calls[-1][1] == "/v1/operator/programs/vm-photo"
+
+
+def test_configuration_binds_connected_owned_output_without_mode_preference():
+    operator = Operator()
+    operator.outputs[0]["observation"].update(width_px=0, height_px=0)
+    operator.outputs += [dict(player_id="p1", output_id="Virtual-2",
+        observation=dict(output_id="Virtual-2", connected=True, width_px=1920, height_px=1080)),
+        dict(player_id="another-player", output_id="HDMI-A-1",
+        observation=dict(output_id="HDMI-A-1", connected=True, width_px=3840, height_px=2160))]
+    result = configure(operator, player_id="p1", epoch=1, captured_from=100, captured_until=101)
+    assert result.output_id == "Virtual-1"
+    assert result.observed_output.width_px == result.observed_output.height_px == 0
+    operator = Operator()
+    operator.outputs[0]["observation"]["connected"] = False
+    operator.outputs += [dict(player_id="p1", output_id="Virtual-2",
+        observation=dict(output_id="Virtual-2", connected=True, width_px=0, height_px=0))]
+    result = configure(operator, player_id="p1", epoch=1, captured_from=100, captured_until=101)
+    assert result.output_id == "Virtual-2"
 
 
 def test_worker_image_mismatch_fails_before_state_creation(tmp_path):

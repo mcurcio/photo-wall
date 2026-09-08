@@ -12,20 +12,26 @@ import os
 import ssl
 import time
 from contextlib import contextmanager
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 import httpx
-from pydantic import Field, JsonValue, TypeAdapter, ValidationError, model_validator
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 
 from central.db import Database
 from central.installation_models import InstallationInventory
-from contracts.models import Digest, Identifier, Model
+from central.registry import FrameCreate
+from contracts.enrollment import OutputReport
+from contracts.models import Digest, FrameProfile, Identifier, Model
 from media.models import SourceSpec
 from scripts.vm_media_evidence import read_grants, read_presentations, stale_session
 
 SOURCE = "vm-photo:1"
 FRAME = "vm-photo-frame"
 SCENE = "vm-photo"
+# This is the fixture's authored presentation target, independent of connector
+# mode observations or GTK's actual framebuffer allocation. Unknown stays 0x0.
+VM_PHOTO_FRAME = FrameCreate(id=FRAME, width_mm=500, height_mm=281.25,
+    profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24, video=False))
 MAX_RESPONSE = 1024 * 1024
 ProbeCode = Literal[
     "fixture_capture_interval", "media_player_authority", "native_output_missing",
@@ -58,6 +64,52 @@ class ProbeFailure(ProbeEnvelope):
     ok: Literal[False] = False
     error: ProbeCode
     phase: ProbePhase
+
+
+class MediaConfigurationReceipt(Model):
+    """The authored fixture and unmodified equipment observation have distinct roles."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Annotated[int, Field(ge=1, le=1)]
+    kind: Literal["vm-photo-configured"]
+    frame_id: Literal[FRAME]
+    output_id: Identifier
+    source_ref: Literal[SOURCE]
+    player_id: Identifier
+    authority_epoch: Annotated[int, Field(ge=1)]
+    starts_at: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    authored_frame: FrameCreate
+    observed_output: OutputReport
+
+    @model_validator(mode="before")
+    @classmethod
+    def complete_nested_facts(cls, value):
+        if isinstance(value, dict):
+            for name, fields in (("authored_frame", FrameCreate.model_fields),
+                                 ("observed_output", OutputReport.model_fields)):
+                item = value.get(name)
+                if isinstance(item, dict) and set(item) != set(fields):
+                    raise ValueError("configuration_fact_fields")
+            authored = value.get("authored_frame")
+            if isinstance(authored, dict):
+                profile = authored.get("profile")
+                if isinstance(profile, dict) and set(profile) != set(FrameProfile.model_fields):
+                    raise ValueError("configuration_profile_fields")
+        return value
+
+    @model_validator(mode="after")
+    def matching_configuration(self) -> Self:
+        if self.authored_frame != VM_PHOTO_FRAME or self.authored_frame.id != self.frame_id:
+            raise ValueError("configuration_authored_frame")
+        if self.observed_output.output_id != self.output_id or not self.observed_output.connected:
+            raise ValueError("configuration_output_identity")
+        return self
+
+
+def decode_configuration(value: dict) -> MediaConfigurationReceipt:
+    """Require the exact configure receipt before the host consumes or journals it."""
+    return MediaConfigurationReceipt.model_validate(value, strict=True)
 
 
 PROBE_RESULT = TypeAdapter(Annotated[ProbeSuccess | ProbeFailure, Field(discriminator="ok")])
@@ -114,7 +166,7 @@ class Operator:
 
 
 def configure(operator, *, player_id: str, epoch: int, captured_from: float,
-              captured_until: float, now=time.time) -> dict:
+              captured_until: float, now=time.time) -> MediaConfigurationReceipt:
     with probe_phase("capture_interval"):
         source = SourceSpec(source_ref=SOURCE, connection_ref="fixture-library", favorites=True,
                             captured_from=captured_from, captured_until=captured_until, media_types=("image",))
@@ -135,16 +187,13 @@ def configure(operator, *, player_id: str, epoch: int, captured_from: float,
     if not outputs:
         raise ProbeError("native_output_missing", phase="output")
     output = outputs[0]
-    width, height = output.observation.width_px, output.observation.height_px
-    if width <= 0 or height <= 0:
-        raise ProbeError("native_output_mode", phase="output")
+    if output.output_id != output.observation.output_id:
+        raise ProbeError("probe_contract_invalid", phase="output")
     with probe_phase("source"):
         operator.request("PUT", "/v1/operator/sources/" + SOURCE, source.model_dump(mode="json", by_alias=True))
     with probe_phase("frame"):
         operator.request("POST", "/v1/operator/frames",
-            dict(id=FRAME, width_mm=500 * width / max(width, height),
-                 height_mm=500 * height / max(width, height),
-                 profile=dict(width_px=width, height_px=height, diagonal_inches=24, video=False)))
+                         VM_PHOTO_FRAME.model_dump(mode="json"))
     with probe_phase("binding"):
         operator.request("PUT", "/v1/operator/frames/" + FRAME + "/binding",
             dict(player_id=player_id, output_id=output.output_id, expected_generation=0))
@@ -159,8 +208,11 @@ def configure(operator, *, player_id: str, epoch: int, captured_from: float,
         started = now()
         operator.request("PUT", "/v1/operator/programs/" + SCENE,
             dict(program_id=SCENE, scene_id=SCENE, starts_at=started+90, ends_at=started+7200))
-    return dict(frame_id=FRAME, output_id=output.output_id, source_ref=SOURCE,
-                player_id=player_id, authority_epoch=epoch, starts_at=started+90)
+    with probe_phase("result"):
+        return MediaConfigurationReceipt(schema_version=1, kind="vm-photo-configured",
+            frame_id=FRAME, output_id=output.output_id, source_ref=SOURCE,
+            player_id=player_id, authority_epoch=epoch, starts_at=started+90,
+            authored_frame=VM_PHOTO_FRAME, observed_output=output.observation)
 
 
 def main(argv=None):
@@ -186,7 +238,7 @@ def main(argv=None):
                 operator = Operator()
             try:
                 result = configure(operator, player_id=args.player_id, epoch=args.epoch,
-                                   captured_from=args.captured_from, captured_until=args.captured_until)
+                    captured_from=args.captured_from, captured_until=args.captured_until).model_dump(mode="json")
             finally:
                 operator.close()
         elif args.action == "evidence":

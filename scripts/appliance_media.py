@@ -16,7 +16,7 @@ from central.installation_models import EquipmentSessionObservation
 from media.worker import load_connections
 from scripts.boot_fixture import FixtureError, read_file, require, write_json
 from scripts.immich_fixture import FixtureHost
-from scripts.vm_media_probe import ProbeFailure, decode_result
+from scripts.vm_media_probe import ProbeFailure, decode_configuration, decode_result
 
 MEDIA_TIMEOUT = 420
 DENIAL_PROBE = """
@@ -107,10 +107,15 @@ class ApplianceMedia:
 
     def configure(self, player: EquipmentSessionObservation):
         captured = datetime.datetime.fromisoformat(self.photo["captured"].replace("Z", "+00:00")).timestamp()
-        self.setup = self.probe("configure", player, "--captured-from", str(captured),
-                                "--captured-until", str(captured + 1))
-        require(set(self.setup) == {"frame_id", "output_id", "source_ref", "player_id", "authority_epoch",
-                                   "starts_at"}, "media_configuration_invalid")
+        value = self.probe("configure", player, "--captured-from", str(captured),
+                          "--captured-until", str(captured + 1))
+        try:
+            receipt = decode_configuration(value)
+        except ValueError:
+            raise FixtureError("media_configuration_invalid") from None
+        require(not player.retired and (receipt.player_id, receipt.authority_epoch) ==
+                (player.player_id, player.authority_epoch), "media_configuration_authority")
+        self.setup = receipt.model_dump(mode="json")
         self.harness.report["media"]["configuration"] = self.setup
 
     def wait_presentation(self, label: str, player: EquipmentSessionObservation,
