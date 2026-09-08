@@ -99,13 +99,15 @@ def test_wall_helper_bundle_is_import_closed_without_host_orchestration(tmp_path
     files = WALL_HELPER_BUNDLE.stage(Path(__file__).parents[1], tmp_path)
     assert set(files) == {
         "demo_wall.py", "scripts/harness_failure.py", "scripts/immich_actions.py",
+        "scripts/provenance_models.py", "scripts/runtime_provenance.py",
     }
     assert not (tmp_path / "scripts/immich_fixture.py").exists()
     assert not (tmp_path / "scripts/docker_diagnostics.py").exists()
     result = subprocess.run(
         [sys.executable, "-I", "-c",
          "import sys; sys.path.insert(0, sys.argv[1]); "
-         "import demo_wall, scripts.immich_actions; print('closed')", str(tmp_path)],
+         "import demo_wall, scripts.immich_actions, scripts.runtime_provenance; print('closed')",
+         str(tmp_path)],
         check=False, capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 0, result.stderr
@@ -860,7 +862,9 @@ def _mock_audit_host(tmp_path, monkeypatch, mutation=None):
     (state / "contexts/helper").mkdir(parents=True)
     harness = state / "contexts/helper/demo_wall.py"
     harness.write_bytes(b"copied harness")
-    bundle = {"schema": 1, "files": {"demo_wall.py": "a" * 64}}
+    bundle = {"schema": 1, "files": {
+        "demo_wall.py": hashlib.sha256(harness.read_bytes()).hexdigest(),
+    }}
     write_json(state / "contexts/helper/bundle.json", bundle)
     wheelhouse = tmp_path / "wheelhouse"
     (wheelhouse).mkdir()
@@ -873,10 +877,11 @@ def _mock_audit_host(tmp_path, monkeypatch, mutation=None):
 
     def compose(*args, **kwargs):
         role = args[2]
+        assert args == ("exec", "-T", role, "python", "/harness/scripts/runtime_provenance.py")
         files = dict(expected)
         if mutation and role == mutation[0]:
             mutation[1](files)
-        return json.dumps({"files": files,
+        return json.dumps({"schema": 1, "files": files,
                            "core_inventory_sha256": hashlib.sha256(
                                json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                            "adapter_sha256": files["media/immich.py"],
@@ -895,6 +900,7 @@ def test_source_audit_requires_exact_inventory_for_both_roles_and_retains_worker
     assert audit["files"] == audit["role_audits"]["worker"]["files"]
     assert audit["adapter_sha256"] == audit["role_audits"]["worker"]["adapter_sha256"]
     assert audit["harness_sha256"] == audit["role_audits"]["worker"]["harness_sha256"]
+    assert json.loads((tmp_path / "state/runtime-provenance.json").read_text()) == audit
 
 
 @pytest.mark.parametrize("role,mutate", [
@@ -906,3 +912,56 @@ def test_source_audit_rejects_stale_missing_or_extra_role_inventory(tmp_path, mo
     host = _mock_audit_host(tmp_path, monkeypatch, (role, mutate))
     with pytest.raises(DemoError, match="core_image_source_mismatch"):
         host.source_audit()
+
+
+@pytest.mark.parametrize("role", ["central", "worker"])
+@pytest.mark.parametrize("payload", ["not json", "null", "[]", '{"files": {}}'])
+def test_source_audit_rejects_malformed_role_results(tmp_path, monkeypatch, role, payload):
+    host = _mock_audit_host(tmp_path, monkeypatch)
+    original = host.compose
+    monkeypatch.setattr(host, "compose", lambda *args, **kwargs:
+        payload if args[2] == role else original(*args, **kwargs))
+    with pytest.raises(DemoError, match="^runtime_provenance_invalid$"):
+        host.source_audit()
+    assert not (host.state / "runtime-provenance.json").exists()
+
+
+@pytest.mark.parametrize("role", ["central", "worker"])
+@pytest.mark.parametrize("changed,error", [
+    ("harness", "harness_image_mismatch"), ("bundle", "harness_bundle_mismatch"),
+])
+def test_source_audit_compares_self_consistent_role_hashes_to_staged_host(
+        tmp_path, monkeypatch, role, changed, error):
+    host = _mock_audit_host(tmp_path, monkeypatch)
+    original = host.compose
+
+    def compose(*args, **kwargs):
+        value = json.loads(original(*args, **kwargs))
+        if args[2] == role:
+            if changed == "harness":
+                value["harness_sha256"] = "c" * 64
+                value["helper_bundle"]["files"]["demo_wall.py"] = "c" * 64
+            else:
+                value["helper_bundle"]["files"]["scripts/runtime_provenance.py"] = "c" * 64
+        return json.dumps(value)
+
+    monkeypatch.setattr(host, "compose", compose)
+    with pytest.raises(DemoError, match=error):
+        host.source_audit()
+    assert not (host.state / "runtime-provenance.json").exists()
+
+
+def test_source_audit_failure_is_journaled_with_a_fixed_phase():
+    evidence = {"phases": {}}
+    saved = []
+
+    def fail():
+        raise DemoError("runtime_provenance_invalid")
+
+    with pytest.raises(OperationFailure) as caught:
+        setup_operation(evidence, lambda: saved.append(copy.deepcopy(evidence)),
+                        "source_audit", "host", "source_audit", fail)
+    assert saved[0]["phases"]["source_audit"]["status"] == "running"
+    assert saved[-1]["phases"]["source_audit"]["status"] == "failed"
+    assert caught.value.envelope()["phase"] == "source_audit"
+    assert caught.value.envelope()["code"] == "runtime_provenance_invalid"

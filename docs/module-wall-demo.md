@@ -39,6 +39,8 @@ Preflight rejects a dirty source tree, revision mismatch, Player inventory misma
 
 The wall helper is assembled from an explicit dependency bundle that preserves Python import layout and records every copied file digest. Its container-side Immich client does not import the host Docker driver or diagnostic recorder. Setup journals `running`, `passed`, or `failed` before and after each image-build, volume, upstream, Central, Source, refresh, and runtime operation. A failure retains a bounded schema with `phase`, `role`, `action`, and `code`; cleanup has its own failure field and cannot erase the primary operation. The same safe envelope is printed by failing helper roles, while credentials and arbitrary exception text remain private.
 
+Runtime source collection executes a bundled Python module independently in both Central and worker containers. A shared strict result contract validates the application Python and SQL source inventory, its aggregate hash, and the adapter, preparer, and helper hashes before emission and again on the host. The collector hashes every declared helper file, including its own code and result model; changed, missing, undeclared, or unsafe helper sources fail the audit. The host compares both containers against the local source inventory and staged bundle. The `source_audit` phase journals collection or validation failures separately from runtime startup.
+
 `status --state-dir ABS` reads a marked run. `cleanup --state-dir ABS` removes only resources journaled by that run. Omitting `--keep` attempts scoped cleanup automatically and preserves evidence if cleanup cannot complete.
 
 ## Qualification limits

@@ -49,7 +49,7 @@ _CODES = (
     "portrait_not_secured", "readiness_commit_proof", "refresh_pending",
     "rejoin_not_stateless", "release_not_centrally_accepted", "restart_run_changed",
     "revision_requires_core_images", "run_ended_before_faults_completed",
-    "runtime_mutation_not_denied", "runtime_upload_not_denied", "secured_assignment_changed",
+    "runtime_mutation_not_denied", "runtime_provenance_invalid", "runtime_upload_not_denied", "secured_assignment_changed",
     "source_configuration_invalid", "source_limit_not_enforced",
     "source_or_player_startup_timeout", "state_path_must_be_absolute",
     "synthetic_metadata_convergence", "synthetic_video_failed", "unexpected_harness_failure",
@@ -69,12 +69,12 @@ FailureRole = StrEnum("FailureRole", {value.upper().replace("-", "_"): value for
 FailureAction = StrEnum("FailureAction", {value.upper().replace("-", "_"): value for value in (
     "run", "cleanup", "build_images", "initialize", "start_central", "configure_source",
     "request_refresh", "start_runtime", "health", "source", "refresh", "start", "snapshot",
-    "evolve", "delete", "deny", "restore", "status", "live", "initial", "deleted",
+    "evolve", "delete", "deny", "restore", "status", "live", "initial", "deleted", "source_audit",
     "outage", "recovered", "serve", "unknown",
 )})
 FailurePhase = StrEnum("FailurePhase", {value.upper(): value for value in (
     "role_action", "setup_build", "setup_volumes", "setup_upstream", "setup_central",
-    "setup_source", "setup_refresh", "setup_runtime", "demo", "cleanup",
+    "setup_source", "setup_refresh", "setup_runtime", "source_audit", "demo", "cleanup",
 )})
 
 

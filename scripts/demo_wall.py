@@ -359,9 +359,9 @@ def validate_selected_revision(revision: str, wheelhouse: Path, central_image=No
 
 
 def local_source_inventory():
-    paths = sorted(path for name in ("central", "media", "contracts", "player")
-                   for path in (ROOT / name).rglob("*") if path.suffix in (".py", ".sql"))
-    return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    from scripts.runtime_provenance import source_inventory
+
+    return source_inventory(ROOT)
 
 
 def read_json(path: Path):
@@ -622,28 +622,25 @@ print(json.dumps(result))"""
                 for name in self.players}
 
     def source_audit(self):
-        code = """import hashlib,json
-from pathlib import Path
-root=Path('/app')
-paths=sorted(path for name in ('central','media','contracts','player')
-             for path in (root/name).rglob('*') if path.suffix in ('.py','.sql'))
-files={str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-print(json.dumps(dict(files=files,core_inventory_sha256=hashlib.sha256(
-    json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
-    adapter_sha256=files['media/immich.py'],preparer_sha256=files['media/prepare.py'],
-            harness_sha256=hashlib.sha256(Path('/harness/demo_wall.py').read_bytes()).hexdigest(),
-            helper_bundle=json.loads(Path('/harness/bundle.json').read_text())))"""
+        from scripts.provenance_models import HelperBundleManifest, decode_provenance
+
         expected_files = local_source_inventory()
-        expected_bundle = read_json(self.state / "contexts/helper/bundle.json")
+        expected_bundle = HelperBundleManifest.model_validate(
+            read_json(self.state / "contexts/helper/bundle.json")
+        )
         role_audits = {}
         copied_harness_sha256 = hashlib.sha256(
             (self.state / "contexts/helper/demo_wall.py").read_bytes()).hexdigest()
         for role in ("central", "worker"):
-            role_audit = json.loads(self.compose("exec", "-T", role, "python", "-c", code))
-            require(role_audit["files"] == expected_files, "core_image_source_mismatch")
-            require(role_audit["harness_sha256"] == copied_harness_sha256, "harness_image_mismatch")
-            require(role_audit["helper_bundle"] == expected_bundle, "harness_bundle_mismatch")
-            role_audits[role] = role_audit
+            output = self.compose("exec", "-T", role, "python", "/harness/scripts/runtime_provenance.py")
+            try:
+                role_audit = decode_provenance(output)
+            except (TypeError, ValueError):
+                raise DemoError("runtime_provenance_invalid") from None
+            require(role_audit.files == expected_files, "core_image_source_mismatch")
+            require(role_audit.harness_sha256 == copied_harness_sha256, "harness_image_mismatch")
+            require(role_audit.helper_bundle == expected_bundle, "harness_bundle_mismatch")
+            role_audits[role] = role_audit.model_dump(mode="json", by_alias=True)
         # Keep the historical worker-shaped fields at the top level for readers
         # of existing runtime-provenance.json files.
         audit = dict(role_audits["worker"])
@@ -1264,7 +1261,9 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
                 require(time.monotonic() < deadline, "source_or_player_startup_timeout")
                 time.sleep(1)
         evidence["inventory"] = host.inventory()
-        evidence["runtime_provenance"] = host.source_audit()
+        evidence["runtime_provenance"] = setup_operation(
+            evidence, save, "source_audit", "host", "source_audit", host.source_audit
+        )
         evidence["phases"]["network_before"] = host.probe()
         evidence["run"] = host.role("operator", "start")
         evidence["benchmark_started_utc"] = datetime.now(timezone.utc).isoformat()
