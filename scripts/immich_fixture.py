@@ -154,6 +154,39 @@ def trusted_helper_failure(args: list[str], stderr: bytes) -> FailureEnvelope | 
     return None
 
 
+def provenance_helper_identity(args: list[str]) -> str | None:
+    """Only the fixed, unmodified runtime audit exec may supply its typed failure."""
+    if args[:2] != ["docker", "compose"]:
+        return None
+    position = 2
+    while position < len(args) and args[position] in (
+            "-p", "--project-name", "--env-file", "-f", "--file"):
+        if position + 1 >= len(args):
+            return None
+        position += 2
+    tail = args[position:]
+    if (len(tail) == 5 and tail[:2] == ["exec", "-T"]
+            and tail[2] in ("central", "worker")
+            and tail[3:] == ["python", "/harness/scripts/runtime_provenance.py"]):
+        return tail[2]
+    return None
+
+
+def trusted_provenance_failure(args: list[str], stderr: bytes):
+    from scripts.provenance_models import ProvenanceCollectionError, decode_provenance_failure
+
+    role = provenance_helper_identity(args)
+    if role is None:
+        return None
+    for line in stderr.splitlines():
+        try:
+            failure = decode_provenance_failure(line)
+        except (TypeError, ValueError):
+            continue
+        return ProvenanceCollectionError(failure, role)
+    return None
+
+
 def fixture_provenance_paths() -> tuple[tuple[str, ...], tuple[str, ...]]:
     runtime = tuple(item.target for item in IMMICH_RUNTIME_BUNDLE.files)
     audited = (
@@ -256,6 +289,9 @@ class FixtureHost:
                 raise HarnessError("docker_command_timeout") from None
             if code:
                 FixtureHost._record_failure(args, code, stdout_tail, stderr_tail)
+                provenance_failure = trusted_provenance_failure(args, bytes(stderr_tail.data))
+                if provenance_failure is not None:
+                    raise provenance_failure
                 failure = trusted_helper_failure(args, bytes(stderr_tail.data))
                 if failure is not None:
                     raise HarnessError(failure.code)

@@ -12,7 +12,70 @@ from scripts.docker_diagnostics import (
 )
 from scripts.harness_failure import FailureEnvelope
 from scripts.immich_actions import ActionError
-from scripts.immich_fixture import MAX_STREAM_BYTES, FixtureHost, HarnessError, _Tail
+from scripts.immich_fixture import (
+    MAX_STREAM_BYTES,
+    FixtureHost,
+    HarnessError,
+    _Tail,
+    trusted_provenance_failure,
+)
+from scripts.provenance_models import ProvenanceCollectionError
+
+
+@pytest.mark.parametrize("role", ["central", "worker"])
+def test_exact_runtime_provenance_exec_preserves_typed_failure(tmp_path, monkeypatch, role):
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+    payload = failure.model_dump_json(by_alias=True)
+    docker_script(tmp_path, f"echo '{payload}' >&2\nexit 1\n")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    with pytest.raises(ProvenanceCollectionError) as caught:
+        FixtureHost._command([
+            "docker", "compose", "-p", "private-project", "--env-file", "private-env",
+            "-f", "private-compose", "exec", "-T", role, "python",
+            "/harness/scripts/runtime_provenance.py",
+        ], timeout=10, capture=True)
+    assert caught.value.role == role
+    assert caught.value.failure == failure
+
+
+@pytest.mark.parametrize("tail", [
+    ["exec", "-T", "operator", "python", "/harness/scripts/runtime_provenance.py"],
+    ["exec", "-T", "central", "python", "-c", "arbitrary"],
+    ["exec", "-T", "central", "python", "/harness/scripts/runtime_provenance.py", "--app-root", "/other"],
+    ["exec", "-T", "central", "python", "/other/runtime_provenance.py"],
+    ["run", "-T", "central", "python", "/harness/scripts/runtime_provenance.py"],
+    ["exec", "--user", "0", "-T", "central", "python", "/harness/scripts/runtime_provenance.py"],
+])
+def test_nonmatching_command_cannot_supply_trusted_provenance_failure(tail):
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+    assert trusted_provenance_failure(
+        ["docker", "compose", *tail], failure.model_dump_json(by_alias=True).encode()
+    ) is None
+
+
+@pytest.mark.parametrize("change", [
+    {"schema": True}, {"stage": "bundle"}, {"code": "private-token"},
+    {"extra": "private-token"}, {"type": "other"},
+])
+def test_invalid_provenance_failure_envelope_is_untrusted(change):
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+    value = failure.model_dump(mode="json", by_alias=True)
+    value.update(change)
+    assert trusted_provenance_failure(
+        ["docker", "compose", "exec", "-T", "central", "python",
+         "/harness/scripts/runtime_provenance.py"], json.dumps(value).encode()
+    ) is None
+
+
+@pytest.mark.parametrize("field", ["type", "schema", "stage", "code"])
+def test_incomplete_provenance_failure_envelope_is_untrusted(field):
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+    value = failure.model_dump(mode="json", by_alias=True)
+    del value[field]
+    assert trusted_provenance_failure(
+        ["docker", "compose", "exec", "-T", "central", "python",
+         "/harness/scripts/runtime_provenance.py"], json.dumps(value).encode()
+    ) is None
 
 
 def docker_script(path, body):

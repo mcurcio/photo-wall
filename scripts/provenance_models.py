@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import PurePosixPath
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -15,6 +15,8 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
+
+from scripts.harness_failure import PROVENANCE_FAILURE_STAGES, CodedFailure
 
 MAX_PROVENANCE_BYTES = 1024 * 1024
 CORE_PACKAGES = ("central", "media", "contracts", "player")
@@ -45,6 +47,35 @@ def inventory_sha256(files: dict[str, str]) -> str:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class ProvenanceFailure(StrictModel):
+    type: Literal["photo_wall_provenance_failure"]
+    schema_version: Annotated[int, Field(alias="schema", ge=1, le=1)]
+    stage: Literal["manifest", "application", "bundle", "result", "internal"]
+    code: Literal[tuple(PROVENANCE_FAILURE_STAGES)]
+
+    @model_validator(mode="after")
+    def matching_stage(self) -> Self:
+        if PROVENANCE_FAILURE_STAGES[self.code] != self.stage:
+            raise ValueError("provenance_failure_stage")
+        return self
+
+
+class ProvenanceCollectionError(CodedFailure):
+    def __init__(self, failure: ProvenanceFailure, role: str | None = None):
+        super().__init__(failure.code)
+        if role not in (None, "central", "worker"):
+            raise ValueError("provenance_failure_role")
+        self.failure = failure
+        self.role = role
+
+    @classmethod
+    def from_code(cls, code: str) -> Self:
+        return cls(ProvenanceFailure.model_validate({
+            "type": "photo_wall_provenance_failure", "schema": 1,
+            "stage": PROVENANCE_FAILURE_STAGES[code], "code": code,
+        }))
 
 
 class HelperBundleManifest(StrictModel):
@@ -90,3 +121,9 @@ def bounded_json(data: str | bytes) -> object:
 
 def decode_provenance(data: str | bytes) -> RuntimeProvenance:
     return RuntimeProvenance.model_validate(bounded_json(data))
+
+
+def decode_provenance_failure(data: str | bytes) -> ProvenanceFailure:
+    if len(data) > 2048:
+        raise ValueError("provenance_failure_bound")
+    return ProvenanceFailure.model_validate(bounded_json(data))

@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def wall_helper_dockerfile(base_image: str, *, include_release: bool = False) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.:/@-]+", base_image) is None:
+        raise ValueError("harness_base_image")
+    return (
+        f"FROM {base_image}\n"
+        # Stage a traversable directory before copying files to explicit paths;
+        # chmod on a multi-source COPY can otherwise chmod the new directory.
+        "COPY scripts /harness/scripts/\n"
+        "COPY --chmod=0644 demo_wall.py /harness/demo_wall.py\n"
+        "COPY --chmod=0644 bundle.json /harness/bundle.json\n"
+        + ("COPY release /release/\n" if include_release else "")
+    )
 
 
 @dataclass(frozen=True)
@@ -29,7 +44,14 @@ class HarnessBundle:
             if not source.is_file() or source.is_symlink():
                 raise ValueError("harness_bundle_source")
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Public image helpers must remain readable/traversable under any
+            # host umask. Keep the enclosing private staging root unchanged.
+            parent = target.parent
+            while parent != target_root.resolve():
+                parent.chmod(0o755)
+                parent = parent.parent
             shutil.copyfile(source, target)
+            target.chmod(0o644)
             result[item.target] = hashlib.sha256(target.read_bytes()).hexdigest()
         return result
 

@@ -10,13 +10,54 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_bundle import WALL_HELPER_BUNDLE
+from scripts.demo_wall import write_json
+from scripts.harness_bundle import (
+    IMMICH_RUNTIME_BUNDLE,
+    WALL_HELPER_BUNDLE,
+    BundleFile,
+    HarnessBundle,
+    wall_helper_dockerfile,
+)
 from scripts.provenance_models import (
     MAX_PROVENANCE_BYTES,
+    ProvenanceCollectionError,
     decode_provenance,
+    decode_provenance_failure,
     inventory_sha256,
 )
-from scripts.runtime_provenance import collect_provenance
+from scripts.runtime_provenance import collect_provenance, provenance_stage
+
+
+@pytest.mark.parametrize("bundle", [
+    WALL_HELPER_BUNDLE, IMMICH_RUNTIME_BUNDLE,
+    HarnessBundle((BundleFile("scripts/demo_wall.py", "scripts/nested/demo_wall.py"),)),
+])
+def test_staged_public_members_have_deterministic_modes_under_restrictive_umask(tmp_path, bundle):
+    private_root = tmp_path / "private-context"
+    private_root.mkdir(mode=0o700)
+    previous_umask = os.umask(0o077)
+    try:
+        inventory = bundle.stage(Path(__file__).parents[1], private_root)
+    finally:
+        os.umask(previous_umask)
+    assert private_root.stat().st_mode & 0o777 == 0o700
+    for name, digest in inventory.items():
+        path = private_root / name
+        assert path.stat().st_mode & 0o777 == 0o644
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        for parent in path.parents:
+            if parent == private_root:
+                break
+            assert parent.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("field", ["type", "schema", "stage", "code"])
+def test_provenance_failure_requires_every_wire_field(field):
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+    value = failure.model_dump(mode="json", by_alias=True)
+    del value[field]
+    with pytest.raises(ValueError):
+        decode_provenance_failure(json.dumps(value))
 
 
 @pytest.fixture
@@ -34,7 +75,7 @@ def source_trees(tmp_path):
         files[name] = hashlib.sha256(data).hexdigest()
     (app / "central/unrelated.json").write_text("not source")
     bundle = WALL_HELPER_BUNDLE.stage(Path(__file__).parents[1], harness)
-    (harness / "bundle.json").write_text(json.dumps({"schema": 1, "files": bundle}))
+    write_json(harness / "bundle.json", {"schema": 1, "files": bundle})
     return app, harness, files, bundle
 
 
@@ -69,7 +110,7 @@ def test_collector_hashes_every_bundle_member_including_itself(source_trees, nam
     app, harness, _, _ = source_trees
     path = harness / name
     path.write_bytes(path.read_bytes() + b"\n# changed after manifest publication\n")
-    with pytest.raises(ValueError, match="provenance_bundle_mismatch"):
+    with pytest.raises(ValueError, match="provenance_bundle_changed"):
         collect_provenance(app, harness)
 
 
@@ -88,7 +129,10 @@ def test_collector_rejects_incomplete_or_unsafe_helper_tree(source_trees, mutati
     process = run_helper(app, harness)
     assert process.returncode == 1
     assert process.stdout == ""
-    assert process.stderr == '{"error":"runtime_provenance_invalid"}\n'
+    failure = decode_provenance_failure(process.stderr)
+    assert failure.stage == "bundle"
+    assert failure.code == ("provenance_bundle_closure" if mutation == "extra"
+                            else "provenance_bundle_invalid")
 
 
 @pytest.mark.parametrize("mutation", [
@@ -132,4 +176,32 @@ def test_duplicate_bundle_keys_are_not_silently_collapsed(source_trees):
     (harness / "bundle.json").write_text('{"schema":1,"schema":1,"files":{}}')
     process = run_helper(app, harness)
     assert process.returncode == 1
-    assert process.stderr == '{"error":"runtime_provenance_invalid"}\n'
+    failure = decode_provenance_failure(process.stderr)
+    assert failure.stage == "manifest"
+    assert failure.code == "provenance_manifest_invalid"
+
+
+def test_private_host_manifest_has_explicit_public_image_readability(source_trees):
+    _, harness, _, _ = source_trees
+    assert (harness / "bundle.json").stat().st_mode & 0o777 == 0o600
+    for include_release in (False, True):
+        recipe = wall_helper_dockerfile("sha256:" + "a" * 64, include_release=include_release)
+        assert "COPY --chmod=0644 demo_wall.py /harness/demo_wall.py\n" in recipe
+        assert "COPY --chmod=0644 bundle.json /harness/bundle.json\n" in recipe
+        assert "COPY scripts /harness/scripts/\n" in recipe
+        assert recipe.index("COPY scripts ") < recipe.index("COPY --chmod=0644")
+        assert ("COPY release /release/\n" in recipe) == include_release
+    assert (harness / "bundle.json").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("error,code", [
+    (PermissionError("private-path"), "provenance_manifest_unreadable"),
+    (ValueError("private-value"), "provenance_manifest_invalid"),
+    (RuntimeError("private-token"), "provenance_internal"),
+])
+def test_stage_boundary_emits_only_its_finite_safe_code(error, code):
+    with pytest.raises(ProvenanceCollectionError) as caught:
+        with provenance_stage("provenance_manifest_invalid", "provenance_manifest_unreadable"):
+            raise error
+    assert caught.value.failure.code == code
+    assert "private" not in caught.value.failure.model_dump_json()

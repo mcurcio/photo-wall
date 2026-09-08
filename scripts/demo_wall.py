@@ -299,6 +299,8 @@ def configure_demo_source(host):
 
 def setup_operation(evidence: dict, save, phase: str, role: str, action: str, function):
     """Journal a bounded setup operation before it can affect external state."""
+    from scripts.provenance_models import ProvenanceCollectionError
+
     record = {"schema": 1, "status": "running", "role": role, "action": action,
               "started_utc": datetime.now(timezone.utc).isoformat()}
     evidence["phases"][phase] = record
@@ -309,6 +311,9 @@ def setup_operation(evidence: dict, save, phase: str, role: str, action: str, fu
         code = failure_code(error)
         record.update(status="failed", code=code,
                       finished_utc=datetime.now(timezone.utc).isoformat())
+        if isinstance(error, ProvenanceCollectionError):
+            record["provenance_failure"] = error.failure.model_dump(mode="json", by_alias=True)
+            record["provenance_role"] = error.role
         save()
         raise OperationFailure(phase, role, action, code) from None
     record.update(status="passed", finished_utc=datetime.now(timezone.utc).isoformat())
@@ -527,7 +532,7 @@ class DemoHost:
 
     def build(self):
         from scripts.container_build import daemon_image_build
-        from scripts.harness_bundle import WALL_HELPER_BUNDLE
+        from scripts.harness_bundle import WALL_HELPER_BUNDLE, wall_helper_dockerfile
 
         context = self.state / "contexts"
         context.mkdir(mode=0o700)
@@ -556,10 +561,9 @@ class DemoHost:
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
         (release_root / release.rootfs_name).write_bytes(rootfs)
         for role in ("central", "worker"):
-            release_copy = "COPY release /release/\n" if role == "central" else ""
-            (helper / "Dockerfile").write_text(f"FROM {self.project}-core-{role}:local\n"
-                "COPY demo_wall.py bundle.json /harness/\n"
-                "COPY scripts /harness/scripts/\n" + release_copy)
+            (helper / "Dockerfile").write_text(wall_helper_dockerfile(
+                f"{self.project}-core-{role}:local", include_release=role == "central"
+            ))
             self.command(daemon_image_build(f"{self.project}-{role}:local", helper), 120, False)
         player = context / "player"
         player.mkdir()

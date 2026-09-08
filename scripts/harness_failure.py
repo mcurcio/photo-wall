@@ -8,7 +8,21 @@ from typing import Any, Self
 
 FAILURE_TYPE = "photo_wall_helper_failure"
 
+PROVENANCE_FAILURE_STAGES = {
+    "provenance_manifest_invalid": "manifest",
+    "provenance_manifest_unreadable": "manifest",
+    "provenance_application_invalid": "application",
+    "provenance_application_unreadable": "application",
+    "provenance_bundle_invalid": "bundle",
+    "provenance_bundle_unreadable": "bundle",
+    "provenance_bundle_changed": "bundle",
+    "provenance_bundle_closure": "bundle",
+    "provenance_result_invalid": "result",
+    "provenance_internal": "internal",
+}
+
 _CODES = (
+    *PROVENANCE_FAILURE_STAGES,
     "absolute_state_required", "active_before_outage_timeout", "already_deleted",
     "already_evolved", "baseline_timeout",
     "cache_not_rebuilt", "capture_time_mismatch", "central_observation_missing",

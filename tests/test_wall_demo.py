@@ -965,3 +965,19 @@ def test_source_audit_failure_is_journaled_with_a_fixed_phase():
     assert saved[-1]["phases"]["source_audit"]["status"] == "failed"
     assert caught.value.envelope()["phase"] == "source_audit"
     assert caught.value.envelope()["code"] == "runtime_provenance_invalid"
+
+
+def test_source_audit_journals_validated_container_failure_stage_and_role():
+    from scripts.provenance_models import ProvenanceCollectionError
+
+    evidence = {"phases": {}}
+    failure = ProvenanceCollectionError.from_code("provenance_manifest_unreadable").failure
+
+    def fail():
+        raise ProvenanceCollectionError(failure, "worker")
+
+    with pytest.raises(OperationFailure, match="provenance_manifest_unreadable"):
+        setup_operation(evidence, lambda: None, "source_audit", "host", "source_audit", fail)
+    record = evidence["phases"]["source_audit"]
+    assert record["provenance_role"] == "worker"
+    assert record["provenance_failure"] == failure.model_dump(mode="json", by_alias=True)
