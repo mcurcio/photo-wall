@@ -6,7 +6,6 @@ identity. It does not run an upstream server, conversion worker, or native GTK.
 
 import asyncio
 import contextlib
-import hashlib
 import io
 import json
 import socket
@@ -18,7 +17,6 @@ from types import SimpleNamespace
 import httpx
 import uvicorn
 from media_queue import RecordingMediaQueue
-from PIL import Image
 from test_player_service import close, immediate
 from test_registry import ADMIN
 
@@ -28,15 +26,14 @@ from central.installation_models import EquipmentSessionObservation
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore
 from contracts.enrollment import OutputReport
-from contracts.models import Variant
-from media.models import OriginalAsset, RefreshResult
-from media.prepare import BuildIdentity, PreparedMedia
+from media.models import RefreshResult
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
 from player.service import BootContext, PlayerConfig, PlayerService
 from scripts import boot_gateway
 from scripts import vm_media_probe as probe
 from scripts.appliance_media import ApplianceMedia
+from tests.public_media import public_photo, publish_photo
 
 
 def test_real_photo_presentation_reaches_exact_worker_original_host_evidence(
@@ -107,11 +104,8 @@ def test_real_photo_presentation_reaches_exact_worker_original_host_evidence(
         fixture_observer=lambda: "observer", fixture_central=lambda: "central",
         checked_vm=lambda: {"Running": True}, run=execute)
     media = ApplianceMedia(harness, "synthetic-worker-build")
-    original_buffer, variant_buffer = io.BytesIO(), io.BytesIO()
-    Image.new("RGB", (108, 192), (35, 93, 161)).save(original_buffer, format="JPEG", quality=95)
-    Image.new("RGB", (108, 192), (35, 93, 161)).save(variant_buffer, format="JPEG", quality=90)
-    original, derivative = original_buffer.getvalue(), variant_buffer.getvalue()
-    original_sha256 = hashlib.sha256(original).hexdigest()
+    photo = public_photo()
+    derivative, original_sha256 = photo.derivative, photo.original_sha256
     media.photo = {"captured": "1970-01-01T00:16:40Z", "sha256": original_sha256}
 
     async def check():
@@ -145,29 +139,12 @@ def test_real_photo_presentation_reaches_exact_worker_original_host_evidence(
             # The actual source refresh contract creates membership; publication
             # verifies both original and derivative bytes and records provenance.
             refresh = repository.begin_scheduled_refresh()
-            asset = OriginalAsset(connection_id="fixture-library", upstream_id=str(uuid.UUID(int=1)),
-                original_sha1=hashlib.sha1(original).hexdigest(), kind="image", raw_width=108,
-                raw_height=192, orientation=1, captured_at=1000, file_size=len(original))
+            asset = photo.asset
             assert repository.publish_refresh(refresh, RefreshResult(snapshot=CatalogSnapshot(
                 source_ref=probe.SOURCE, refreshed_at=clock.utc(), candidates=(asset.candidate,)), assets=(asset,)))
             projection = app.state.coordinator.advance()
             assert repository.request_acquisitions(projection.acquisitions) == 1
-            with storage.worker_lock():
-                lease = repository.claim_job()
-                assert lease is not None and lease.asset == asset
-                paths = storage.staging(lease)
-                paths.original.write_bytes(original)
-                paths.variant.write_bytes(derivative)
-                variant = Variant(sha256=hashlib.sha256(derivative).hexdigest(), size=len(derivative),
-                    media_type="image/jpeg", width=108, height=192)
-                build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
-                    ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
-                    python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
-                    jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
-                    memory_limit_enforced=False)
-                prepared = PreparedMedia(path=paths.variant, variant=variant,
-                    original_sha256=original_sha256, recipe_id="e" * 64, build=build)
-                assert storage.publish(lease, prepared) == variant
+            variant = publish_photo(storage, photo)
             clock.advance(media.setup["starts_at"] - 1 - clock.utc())
             app.state.coordinator.advance()
             assert await service.probe_time()

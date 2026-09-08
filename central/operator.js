@@ -184,6 +184,14 @@ function authoredStatus(text, error = false) {
   $('authored-status').classList.toggle('error', error);
 }
 
+function updateAuthoredChoiceGuidance() {
+  const missing = selectedSceneFrames().filter(frame => !authored.selections.has(frame));
+  authoredStatus(authored.invalid.size ?
+    'A previous choice is no longer eligible. Choose a replacement for each affected Frame.' :
+    (missing.length ? 'Choose one compatible photo or video for each Frame.' :
+      'Selections are compatible. Playback requires prepared media.'));
+}
+
 function updateAuthoredAvailability() {
   const source = mediaState.sources.find(item => item.source_ref === $('scene-source').value);
   const enabled = $('scene-authored').checked;
@@ -235,16 +243,13 @@ function renderAuthoredChoosers() {
       if (select.value) authored.selections.set(frame, select.value);
       else authored.selections.delete(frame);
       authored.invalid.delete(frame);
+      updateAuthoredChoiceGuidance();
       updateAuthoredAvailability();
     };
     container.append(label, select);
   }
   container.hidden = false;
-  const missing = frames.filter(frame => !authored.selections.has(frame));
-  authoredStatus(authored.invalid.size ?
-    'A previous choice is no longer eligible. Choose a replacement for each affected Frame.' :
-    (missing.length ? 'Choose one compatible photo or video for each Frame.' :
-      'Selections are compatible. Playback requires prepared media.'));
+  updateAuthoredChoiceGuidance();
   updateAuthoredAvailability();
 }
 

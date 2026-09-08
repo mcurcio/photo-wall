@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from test_registry import enroll
 
 CHECKS = {
     "test_authenticated_operator_registry_walkthrough_and_persistence": (
@@ -23,10 +24,27 @@ CHECKS = {
     "test_browser_same_token_reconnect_fences_delayed_rejection": (
         "same_token_reconnect", "delayed_rejection_fence", "current_generation_content_refresh",
     ),
+    "test_browser_sources_live_and_authored_scenes": (
+        "source_configuration_refresh", "live_scene_explicit_frames",
+        "compatible_per_frame_choices", "authored_scene_single_request_save",
+    ),
+    "test_browser_programs_run_controls_and_content_persistence": (
+        "program_local_time_authoring_removal", "immediate_activation_ignore_queue",
+        "natural_cycle_completion", "run_cancellation", "controlled_program_admission_completion",
+        "fresh_server_content_persistence",
+    ),
 }
 RESULTS = pytest.StashKey[dict]()
 BROWSERS = pytest.StashKey[set]()
 ERRORS = pytest.StashKey[list]()
+
+
+@pytest.fixture
+def installation(registry):
+    # Only simulated equipment setup bypasses the operator UI.
+    first, _, _ = enroll(registry, count=2)
+    second, _, _ = enroll(registry, count=1)
+    return registry, first["player_id"], second["player_id"]
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +114,7 @@ def pytest_sessionfinish(session, exitstatus):
                        "page_errors": result.get("page_errors", 0)})
     completed = all(check["status"] == "passed" for check in checks)
     document = {
-        "schema": 1, "scope": "operator_registry_browser",
+        "schema": 2, "scope": "operator_browser",
         "status": "passed" if completed and exitstatus == 0 else "failed" if exitstatus else "incomplete",
         "recorded_at": datetime.now(UTC).isoformat(),
         "source": source_identity(session.config.rootpath),
@@ -105,9 +123,13 @@ def pytest_sessionfinish(session, exitstatus):
                      for name, version in sorted(session.config.stash.get(BROWSERS, set()))],
         "environment": {"database": "real_postgresql_disposable_schema", "transport": "loopback_http",
                         "equipment": "simulated", "players": 2, "outputs": 3,
-                        "scheduler": False, "worker": False, "preview_clock": "controlled"},
+                        "scheduler": False, "worker": False, "preview_clock": "controlled",
+                        "runtime_advance": "controlled_production_owner",
+                        "media": "generated_public_jpeg_controlled_acquisition_production_publication",
+                        "preparation": "synthetic_recipe_and_build"},
         "checks": checks,
-        "qualification": {"authored_media": False, "scheduled_playback": False,
+        "qualification": {"authored_media_controls": completed, "program_controls": completed,
+                          "scheduled_playback": False,
                           "native_rendering": False, "pxe": False, "physical_outputs": False},
     }
     data = (json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n").encode()

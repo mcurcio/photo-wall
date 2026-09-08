@@ -39,6 +39,11 @@ Per-Frame candidate reads are advisory and may observe different refresh times.
 The atomic save validates all choices against current membership; stale or
 incompatible choices cannot gain durable authority through the form. This
 reuses the Planner's eligibility rule and preserves its final fail-closed check.
+The form updates its missing-choice, replacement, or compatible-choice guidance
+after each selection change without rebuilding the chooser controls. The
+[browser walkthrough](../tests/browser/test_operator_content_browser.py) checks
+real per-Frame choices, prepared-photo labels, guidance changes, and single-request authored saves
+using generated public photos and production publication transactions.
 
 Authored rows retain their immutable candidate snapshot after a source no
 longer contains the asset. New rows record nullable source provenance so

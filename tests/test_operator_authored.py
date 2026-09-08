@@ -142,7 +142,16 @@ const test = `(async () => {
   assert(choosers[0].children.some(option => option.textContent.includes('Ref …aaaaaaaa')),
     'candidate labels do not distinguish opaque asset references');
   assert(!choosers[1].children.some(option => option.value === 'asset-aaaaaaaa'), 'incompatible option offered on second Frame');
+  assert($('authored-status').textContent === 'Choose one compatible photo or video for each Frame.',
+    'empty authored choices do not show guidance');
   choosers[0].value = 'asset-aaaaaaaa'; choosers[1].value = 'asset-bbbbbbbb';
+  choosers[0].onchange(); choosers[1].onchange();
+  assert($('authored-status').textContent === 'Selections are compatible. Playback requires prepared media.',
+    'completed authored choices did not refresh guidance');
+  choosers[1].value = ''; choosers[1].onchange();
+  assert($('authored-status').textContent === 'Choose one compatible photo or video for each Frame.',
+    'clearing an authored choice did not restore missing-choice guidance');
+  choosers[1].value = 'asset-bbbbbbbb'; choosers[1].onchange();
   $('scene-id').value = 'scene-1'; $('scene-revision').value = '1'; $('cycle-seconds').value = '10'; $('scene-loop').value = 'true';
   control.calls.length = 0; await $('create-scene').onclick();
   assert(control.calls.length === 1 && control.calls[0].kind === 'AUTHORED', 'authored save must be one atomic request');

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import pytest
 import uvicorn
 from playwright.sync_api import expect
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN
 
 from central.app import create_app
 from central.db import Database
@@ -27,9 +27,10 @@ pytestmark = pytest.mark.skipif(
 
 
 @contextmanager
-def operator_server(db, clock):
+def operator_server(db, clock, *, media_root=None, media_queue=None):
     """Run the production app on an ephemeral loopback listener with real lifespan."""
-    app = create_app(db, clock, ADMIN, run_scheduler=False)
+    app = create_app(db, clock, ADMIN, run_scheduler=False,
+                     media_root=media_root, media_queue=media_queue)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -48,14 +49,6 @@ def operator_server(db, clock):
         thread.join(timeout=10)
         listener.close()
         assert not thread.is_alive(), "operator server did not stop"
-
-
-@pytest.fixture
-def installation(registry):
-    # Only equipment setup bypasses the UI; all operator mutations below use it.
-    first, _, _ = enroll(registry, count=2)
-    second, _, _ = enroll(registry, count=1)
-    return registry, first["player_id"], second["player_id"]
 
 
 def connect(page, origin, token=ADMIN):
