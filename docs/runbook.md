@@ -126,6 +126,21 @@ CI installs the locked dependencies, lints, checks local documentation links, bu
 
 A disposable operator fixture is available with `.venv/bin/python -m scripts.demo_registry` after starting the database. It listens on localhost:8010, prints a public fixture token, and registers two simulated Players (two Outputs and one Output) in its own temporary schema. Stop it with Ctrl-C to remove that schema. It is a registry demo only; it does not render or emulate PXE.
 
+The [real-browser registry walkthrough](../tests/browser/test_operator_browser.py) uses the production operator HTML, JavaScript, and HTTP API against its own temporary PostgreSQL schema. Install the locked development dependencies and their matching Chromium build, then run:
+
+```sh
+uv sync --frozen
+.venv/bin/python -m playwright install chromium
+PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser \
+  --browser chromium --tracing retain-on-failure --output artifacts/operator-browser
+```
+
+CI installs Chromium's Linux dependencies with `playwright install --with-deps chromium` and runs this explicitly; ordinary test runs skip browser checks unless opted in. Playwright 1.62.0 and pytest-playwright 0.9.0 are pinned in the development dependency group and `uv.lock`; neither enters production services or the Player package. See the official [pytest runner](https://playwright.dev/python/docs/intro) and [CI setup](https://playwright.dev/python/docs/ci-intro).
+
+The walkthrough proves rejected/accepted authentication, reconnection after a rejected token, rejection of delayed failures from an earlier login attempt even when the same token is reused, two-Player/three-Output inventory, Frame creation/binding, calibration preview/revert/commit, stale-tab conflict recovery, replacement/retirement, and persistence through a fresh server/connection pool. It checks preview expiry using controlled time and rejects uncaught JavaScript errors on every page. All operator mutations use browser controls; setup supplies only simulated equipment. The server binds an ephemeral loopback port, preserving the separate full demo's network isolation. This registry scope does not run a worker or scheduler and does not qualify authored media, timed Programs, rendering, PXE, or physical output.
+
+The bounded `operator-browser.json` report records named assertions, pass/failure status, browser version, PostgreSQL/fixture scope, checkout revision, dirty state, and GitHub event/SHA. CI always uploads available reports and retains traces only for failed tests. Pull-request runs identify the synthetic merge checkout; dispatching `MVP checks` on the PR branch records the dispatched commit instead. A dirty local run is diagnostic evidence, not final committed-revision acceptance. Reports and failure traces contain only the disposable fixture's public test token and synthetic records; keep unrelated deployment data out of the fixture.
+
 ## Recovery
 
 ```sh

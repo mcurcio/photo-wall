@@ -23,8 +23,8 @@ Objective: make [draft PR #2](https://github.com/mcurcio/photo-wall/pull/2) revi
 
 ## Automated verification on the working tree
 
-- [x] Full PostgreSQL-backed suite: 982 passed, 11 explicit platform skips, four dependency deprecation warnings.
-- [x] Demo harness suite: 57 passed.
+- [x] Full PostgreSQL-backed suite: 1,047 passed, 15 explicit platform or opt-in skips, four dependency deprecation warnings.
+- [x] Demo harness suite: 60 tests collected; its final-revision hosted run remains an acceptance gate below.
 - [x] Ruff, Import Linter, documentation-link validation, bytecode compilation, and diff integrity pass.
 - [x] Release tests cover immutable registration, default/candidate selection, transactional once-only trials, duplicate request idempotency, central restart, stale health rejection, session binding, promotion, and accepted fallback.
 - [x] Player tests cover empty cache, valid survivor reuse, deletion/corruption recovery, fresh credentials, higher epochs, old-session rejection, control outage continuity, clock gates, and exact media delivery.

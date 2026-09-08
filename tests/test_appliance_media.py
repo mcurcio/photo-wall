@@ -73,6 +73,16 @@ def test_worker_image_mismatch_fails_before_state_creation(tmp_path):
     assert not state.exists()
 
 
+def test_full_scope_requires_the_exact_media_worker_before_state_creation(tmp_path):
+    from scripts.test_appliance_e2e import ApplianceE2E
+
+    state = tmp_path / "state"
+    with pytest.raises(FixtureError, match="full_worker_required"):
+        ApplianceE2E({"worker_image": None}, state,
+                     "sha256:" + "c" * 64, "sha256:" + "d" * 64, scope="full")
+    assert not state.exists()
+
+
 def test_upstream_reuses_exact_loaded_image_instead_of_rebuilding(tmp_path, monkeypatch):
     from scripts.immich_fixture import FixtureHost
 
@@ -124,8 +134,9 @@ def test_native_rehydration_requires_delivery_from_the_current_boot(delivered):
         import json
 
         calls.append(args)
-        return json.dumps(dict(event='photo-wall-fixture-media-delivery', sha256=digest,
-                               player_id='p', authority_epoch=2 if delivered else 1)).encode()
+        return json.dumps(dict(event='photo-wall-fixture-media-attempt', sha256=digest,
+                               authenticated=True, player_id='p',
+                               authority_epoch=2 if delivered else 1, status_class='2xx')).encode()
     harness = SimpleNamespace(report=dict(media=dict(presentations={'fresh': before}, rehydration={}),
         boots=[boot, boot | dict(boot_id='new')]), run=run, boot_started_at='current-boot-start',
         fixture_central=lambda: 'central')
@@ -155,3 +166,90 @@ def test_media_probe_consumes_the_typed_equipment_session():
     harness = SimpleNamespace(run=run, fixture_central=lambda: 'central')
     assert ApplianceMedia(harness, 'image').probe('evidence', player) == dict(presentations=[], grants=[])
     assert calls[0][-4:] == ['--player-id', player.player_id, '--epoch', '2']
+
+
+def test_process_restart_records_exact_cache_and_authority_evidence(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from central.installation_models import EquipmentSessionObservation
+
+    before = EquipmentSessionObservation(player_id="p-" + "a" * 32,
+        device_id="device-" + "b" * 64, authority_epoch=1, retired=False)
+    after = before.model_copy(update={"authority_epoch": 2})
+    proof = dict(frame_id="frame", output_id="out", run_id="run", sha256="c" * 64, size=10,
+                 original_sha256="d" * 64, player_id=before.player_id, authority_epoch=2)
+    state = tmp_path / "state"
+    (state / "vm/share").mkdir(parents=True)
+    boot_id = "01234567-89ab-cdef-0123-456789abcdef"
+    harness = SimpleNamespace(state=state, report={"boots": [{"boot_id": boot_id}],
+        "media": {"presentations": {}, "rehydration": {}}},
+        wait_session_replacement=lambda previous: after)
+    media = ApplianceMedia(harness, "image")
+    monkeypatch.setattr(media, "wait_presentation", lambda *args, **kwargs: proof)
+    monkeypatch.setattr(media, "delivery_attempts", lambda since, value: [])
+    monkeypatch.setattr(media, "wait_control_event", lambda request: None)
+    monkeypatch.setattr(media, "probe", lambda *args: {"old_session_current": False, "valid_grants": 0})
+
+    assert media.restart_player("valid_reuse", before, proof, action="restart",
+                                delivery_expected=False) == after
+    request = json.loads((state / "vm/share/player-control.json").read_text())
+    assert request == dict(schema=1, revision=1, boot_id=boot_id, player_id=before.player_id,
+                           prior_epoch=1, action="restart", sha256=None)
+    assert harness.report["media"]["process_restarts"]["valid_reuse"]["old_session_rejected"]
+
+
+@pytest.mark.parametrize("attempts,changed_run,error", [
+    ([{"authenticated": True, "status_class": "4xx", "player_id": "p-" + "a" * 32,
+       "authority_epoch": 2}], False, "cache_delivery_expectation_failed"),
+    ([{"authenticated": True, "status_class": "2xx", "player_id": "p-" + "a" * 32,
+       "authority_epoch": 1}], False, "cache_delivery_expectation_failed"),
+    ([], True, "secured_selection_changed"),
+])
+def test_process_restart_rejects_missing_delivery_wrong_epoch_or_changed_run(
+        tmp_path, monkeypatch, attempts, changed_run, error):
+    from types import SimpleNamespace
+
+    from central.installation_models import EquipmentSessionObservation
+
+    before = EquipmentSessionObservation(player_id="p-" + "a" * 32,
+        device_id="device-" + "b" * 64, authority_epoch=1, retired=False)
+    after = before.model_copy(update={"authority_epoch": 2})
+    baseline = dict(frame_id="frame", output_id="out", run_id="run", sha256="c" * 64,
+                    size=10, original_sha256="d" * 64, player_id=before.player_id,
+                    authority_epoch=1)
+    proof = baseline | {"authority_epoch": 2, "run_id": "changed" if changed_run else "run"}
+    state = tmp_path / "state"
+    (state / "vm/share").mkdir(parents=True)
+    harness = SimpleNamespace(state=state, report={"boots": [{"boot_id":
+        "01234567-89ab-cdef-0123-456789abcdef"}], "media": {}},
+        wait_session_replacement=lambda previous: after)
+    media = ApplianceMedia(harness, "image")
+    monkeypatch.setattr(media, "wait_control_event", lambda request: None)
+    monkeypatch.setattr(media, "wait_presentation", lambda *args, **kwargs: proof)
+    monkeypatch.setattr(media, "delivery_attempts", lambda *args: attempts)
+    monkeypatch.setattr(media, "probe", lambda *args: {"old_session_current": False, "valid_grants": 0})
+    with pytest.raises(FixtureError, match=error):
+        media.restart_player("fault", before, baseline, action="delete", delivery_expected=True)
+
+
+def test_control_event_precedes_accepting_a_spontaneous_new_epoch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from central.installation_models import EquipmentSessionObservation
+
+    before = EquipmentSessionObservation(player_id="p-" + "a" * 32,
+        device_id="device-" + "b" * 64, authority_epoch=1, retired=False)
+    state = tmp_path / "state"
+    (state / "vm/share").mkdir(parents=True)
+    accepted = []
+    harness = SimpleNamespace(state=state, report={"boots": [{"boot_id":
+        "01234567-89ab-cdef-0123-456789abcdef"}]},
+        wait_session_replacement=lambda previous: accepted.append(previous))
+    media = ApplianceMedia(harness, "image")
+    monkeypatch.setattr(media, "wait_control_event",
+                        lambda request: (_ for _ in ()).throw(FixtureError("player_control_event_missing")))
+    with pytest.raises(FixtureError, match="player_control_event_missing"):
+        media.restart_player("reuse", before, {"sha256": "c" * 64},
+                             action="restart", delivery_expected=False)
+    assert accepted == []

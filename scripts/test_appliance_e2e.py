@@ -52,7 +52,8 @@ ROLLBACK_TIMEOUT = 870
 VM_PROCESS_TIMEOUT = 3 * BOOT_TIMEOUT + RECOVERY_TIMEOUT + STAGE_TIMEOUT + ROLLBACK_TIMEOUT + 480
 BOOT_ID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 PUBLIC_EVENTS = {"photo-wall-trial-reboot-requested", "photo-wall-trial-reboot-required",
-                 "photo-wall-health-diagnostic"}
+                 "photo-wall-health-diagnostic", "photo-wall-player-control",
+                 "photo-wall-fixture-media-attempt"}
 RETRYABLE_PROBE_ERRORS = {"docker_command_failed", "docker_timeout"}
 PROBE_ATTEMPTS = 4
 
@@ -295,6 +296,7 @@ class ApplianceE2E:
     def __init__(self, inputs: dict, state: Path, central_image: str, builder_image: str,
                  *, run=command, worker_image: str | None = None, scope: str = "full"):
         require(scope in ("smoke", "full"), "invalid_appliance_test_scope")
+        require(scope != "full" or worker_image is not None, "full_worker_required")
         require(scope == "full" or worker_image is None, "smoke_worker_not_allowed")
         require(worker_image == inputs.get("worker_image"), "worker_image_manifest_mismatch")
         if worker_image is not None:
@@ -332,7 +334,7 @@ class ApplianceE2E:
             from scripts.appliance_media import MEDIA_TIMEOUT, ApplianceMedia
             self.media = ApplianceMedia(self, worker_image)
             self.report["deadlines_seconds"].update(media=MEDIA_TIMEOUT,
-                vm_process=VM_PROCESS_TIMEOUT + 2 * MEDIA_TIMEOUT + 60)
+                vm_process=VM_PROCESS_TIMEOUT + 5 * MEDIA_TIMEOUT + 3 * RECOVERY_TIMEOUT + 60)
 
     def checked_vm(self):
         # Select only public identity/state fields; Docker configuration may hold secrets.
@@ -417,6 +419,11 @@ class ApplianceE2E:
             (share / health_probe.name).write_bytes(payload)
             (share / health_probe.name).chmod(0o400)
             self.report["health_probe_sha256"] = hashlib.sha256(payload).hexdigest()
+            player_control = Path(__file__).with_name("vm_player_control.py")
+            payload = read_file(player_control, 64 * 1024)
+            (share / player_control.name).write_bytes(payload)
+            (share / player_control.name).chmod(0o400)
+            self.report["player_control_sha256"] = hashlib.sha256(payload).hexdigest()
         launcher = directory / "launch.sh"
         launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
                            str(self.report["deadlines_seconds"]["vm_process"])).replace("__DEVICE_UUID__", self.device_uuid))
@@ -512,6 +519,20 @@ class ApplianceE2E:
                 return session
             time.sleep(5)
         raise FixtureError("guest_enrollment_timeout")
+
+    def wait_session_replacement(self, previous: EquipmentSessionObservation) -> EquipmentSessionObservation:
+        deadline = time.monotonic() + RECOVERY_TIMEOUT
+        while time.monotonic() < deadline:
+            require(self.checked_vm()["Running"], "vm_stopped_during_player_restart")
+            observation = enrollment(self.enrollment_probe("central_inventory", self.inventory), previous)
+            if observation.state == "ready":
+                session = observation.session
+                assert session is not None
+                require((session.player_id, session.device_id) ==
+                        (previous.player_id, previous.device_id), "equipment_identity_changed")
+                return session
+            time.sleep(2)
+        raise FixtureError("player_session_replacement_timeout")
 
     def release_probe(self, action: str, boot: dict, *extra: str):
         raw = self.run(["docker", "exec", self.fixture_central(), "python", "-m",
@@ -642,11 +663,10 @@ class ApplianceE2E:
             self.execute_smoke()
             return
         print(json.dumps({"phase": "signed_fixture", "status": "started"}), flush=True)
-        media = getattr(self, "media", None)
-        options = {}
-        if media:
-            specification, connections = media.prepare()
-            options = dict(media=specification, connections_file=connections)
+        media = self.media
+        require(media is not None, "full_media_required")
+        specification, connections = media.prepare()
+        options = dict(media=specification, connections_file=connections)
         self.fixture = BootFixture.prepare(self.state / "services", self.inputs["bundle"],
                                           self.inputs["deployment"], self.central_image,
                                           candidate_bundle=self.inputs["candidate_dir"], **options)
@@ -664,26 +684,42 @@ class ApplianceE2E:
         print(json.dumps({"phase": "native_trial", "status": "started"}), flush=True)
         self.wait_central_health()
         print(json.dumps({"phase": "native_trial", "status": "passed"}), flush=True)
-        if media:
-            print(json.dumps({"phase": "native_photo", "status": "started"}), flush=True)
-            media.network_denial("before")
-            media.configure(first)
-            media.wait_presentation("fresh", first)
-            print(json.dumps({"phase": "native_photo", "status": "passed"}), flush=True)
+        print(json.dumps({"phase": "native_photo", "status": "started"}), flush=True)
+        media.network_denial("before")
+        media.configure(first)
+        fresh = media.wait_presentation("fresh", first)
+        print(json.dumps({"phase": "native_photo", "status": "passed"}), flush=True)
+        print(json.dumps({"phase": "disposable_cache", "status": "started"}), flush=True)
+        current = media.restart_player("valid_reuse", first, fresh, action="restart",
+                                       delivery_expected=False)
+        current = media.restart_player("deleted_reacquisition", current, fresh, action="delete",
+                                       delivery_expected=True)
+        current = media.restart_player("corrupt_reacquisition", current, fresh, action="corrupt",
+                                       delivery_expected=True)
+        self.report["checks"]["player_process_session_replacement"] = True
+        self.report["checks"]["valid_cache_reused_without_delivery"] = True
+        self.report["checks"]["deleted_and_corrupt_cache_reacquired"] = True
+        print(json.dumps({"phase": "disposable_cache", "status": "passed"}), flush=True)
         print(json.dumps({"phase": "power_cycle", "status": "started"}), flush=True)
         self.checked_vm()
         self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
         require(not self.checked_vm()["Running"], "vm_stop_failed")
         self.boot_started_at = timestamp()
         self.run(["docker", "start", self.name], timeout=30)
-        second = self.wait_enrollment(first)
+        second = self.wait_enrollment(current)
         require(self.report["boots"][-1]["trial"] is False, "accepted_release_not_reselected")
+        stale = media.probe("stale", second, "--prior-epoch", str(current.authority_epoch))
+        require(stale == {"old_session_current": False, "valid_grants": 0},
+                "old_session_authority_retained_after_power_cycle")
         self.report["second_enrollment"] = second.model_dump(mode="json")
+        self.report["media"]["machine_restart"] = dict(
+            prior_epoch=current.authority_epoch, authority_epoch=second.authority_epoch,
+            old_session_rejected=True)
         self.report["checks"]["equipment_reenrolls_after_power_cycle"] = True
+        self.report["checks"]["old_session_rejected_after_power_cycle"] = True
         self.report["checks"]["accepted_release_reselected"] = True
         print(json.dumps({"phase": "power_cycle", "status": "passed"}), flush=True)
-        if media:
-            media.wait_presentation("after_restart", second)
+        media.wait_presentation("after_restart", second)
         print(json.dumps({"phase": "central_recovery", "status": "started"}), flush=True)
         central = self.fixture_central()
         self.run(["docker", "stop", "--time", "10", central], timeout=30)
@@ -698,14 +734,13 @@ class ApplianceE2E:
         self.report["checks"]["central_outage_rejoin"] = True
         print(json.dumps({"phase": "central_recovery", "status": "passed"}), flush=True)
         restored = self.exercise_rollback(second)
-        if media:
-            media.wait_presentation("after_rollback", restored)
-            media.network_denial("after")
-            self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
-            require(not self.checked_vm()["Running"], "vm_stop_failed")
-            self.report["checks"]["native_committed_photo"] = True
-            self.report["checks"]["photos_reacquired_after_restart_and_rollback"] = True
-            self.report["qualification"]["native_rendering"] = True
+        media.wait_presentation("after_rollback", restored)
+        media.network_denial("after")
+        self.run(["docker", "stop", "--time", "15", self.name], timeout=30)
+        require(not self.checked_vm()["Running"], "vm_stop_failed")
+        self.report["checks"]["native_committed_photo"] = True
+        self.report["checks"]["photos_reacquired_after_restart_and_rollback"] = True
+        self.report["qualification"]["native_rendering"] = True
         self.report["qualification"]["generic_vm"] = True
         self.report["qualification"]["central_health"] = True
         self.report["pending"] = ["healthy candidate image promotion", "physical Pi PXE and dual HDMI"]

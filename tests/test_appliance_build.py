@@ -225,6 +225,7 @@ def test_player_sandbox_keeps_wayland_runtime_visible():
     service = (Path(__file__).parents[1] / "appliance/systemd/player.service").read_text()
     assert "RuntimeDirectory=photo-wall/player" in service
     assert "RuntimeDirectoryMode=0700" in service
+    assert "RuntimeDirectoryPreserve=yes" in service
     assert "ExecStartPre=+/usr/bin/install -d" not in service
     assert "ProtectHome=read-only" in service
     assert "InaccessiblePaths=-/home -/root" in service

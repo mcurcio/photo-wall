@@ -15,7 +15,14 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==8.3.5", "ruff==0.11.9", "hypothesis==6.167.1", "import-linter==2.15"]
+dev = [
+    "pytest==8.3.5",
+    "ruff==0.11.9",
+    "hypothesis==6.167.1",
+    "import-linter==2.15",
+    "pytest-playwright==0.9.0",
+    "playwright==1.62.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["central", "contracts", "media", "player"]

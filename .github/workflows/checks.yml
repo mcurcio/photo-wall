@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -53,6 +54,22 @@ jobs:
           cache-from: type=gha,scope=photo-wall-checks-amd64-v1
       - run: docker compose up -d --no-build --wait
       - run: .venv/bin/python scripts/test_local.py -q --tb=short
+      - name: Install the locked operator test browser
+        run: .venv/bin/python -m playwright install --with-deps chromium
+      - name: Walk through the authenticated operator interface
+        env:
+          PHOTO_WALL_BROWSER_TESTS: "1"
+        run: >-
+          .venv/bin/python scripts/test_local.py -q tests/browser --browser chromium
+          --tracing retain-on-failure --output "${{ runner.temp }}/operator-browser" --tb=short
+      - name: Retain operator browser evidence and failed traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: operator-browser-${{ github.sha }}
+          path: ${{ runner.temp }}/operator-browser
+          if-no-files-found: ignore
+          retention-days: 7
       - run: curl --fail http://127.0.0.1:8000/healthz
       - name: Service diagnostics
         if: failure()

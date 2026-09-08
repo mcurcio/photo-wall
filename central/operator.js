@@ -2,9 +2,10 @@
 
 const $ = id => document.getElementById(id);
 let token = '', state = {frames: [], players: [], outputs: []}, mediaState = {sources: []};
+let authGeneration = 0;
 const authored = {source: '', candidates: new Map(), selections: new Map(), invalid: new Set(),
   status: 'off', request: 0, loading: false};
-let refreshing = false;
+let refreshing = null;
 const errors = {
   unauthorized: 'The token was not accepted. Reconnect with your operator token.',
   source_revision_immutable: 'Use a new source name or revision to change this query.',
@@ -25,13 +26,28 @@ function message(text, error = false) {
   $('message').classList.toggle('error', error);
 }
 
+class SupersededAuthentication extends Error {}
+function currentAuthentication(generation) {
+  if (generation !== authGeneration) throw new SupersededAuthentication();
+}
+
 async function api(path, method = 'GET', body) {
+  const generation = authGeneration;
   const response = await fetch(path, {
     method, signal: AbortSignal.timeout(15000),
     headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json();
+  currentAuthentication(generation);
+  if (response.status === 401) {
+    authGeneration += 1;
+    token = '';
+    $('token').value = '';
+    $('login').hidden = false;
+    $('controls').hidden = true;
+    $('token').focus();
+  }
   if (!response.ok) throw Error(errors[data.error] || data.error || 'Request failed');
   return data;
 }
@@ -114,11 +130,13 @@ function loadCalibration() {
   $('crop').value = JSON.stringify(calibration.crop);
 }
 
-async function refreshContent() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
+function refreshContent() {
+  const generation = authGeneration;
+  if (refreshing && refreshing.generation === generation) return refreshing.promise;
+  const refresh = {generation, promise: null};
+  refresh.promise = (async () => {
     const [media, runtime] = await Promise.all([api('/v1/operator/media'), api('/v1/operator/runtime')]);
+    currentAuthentication(generation);
     mediaState = media;
     const health = media.health;
     $('media-health').textContent = 'Stored/reserved: ' + (health.accounted_bytes / 1024 ** 2).toFixed(1) +
@@ -146,7 +164,9 @@ async function refreshContent() {
     options('control-run', runtime.current.runs.filter(run => ['body', 'outro'].includes(run.phase))
       .map(run => [run.run_id, run.scene_id + ' / ' + run.run_id]));
     await loadAuthoredCandidates();
-  } finally { refreshing = false; }
+  })().finally(() => { if (refreshing === refresh) refreshing = null; });
+  refreshing = refresh;
+  return refresh.promise;
 }
 
 function selectedSceneFrames() {
@@ -286,6 +306,7 @@ async function loadAuthoredCandidates() {
     authored.candidates = byFrame;
     renderAuthoredChoosers();
   } catch (error) {
+    if (error instanceof SupersededAuthentication) return;
     if (request !== authored.request) return;
     authored.loading = false;
     authored.status = 'error';
@@ -301,15 +322,17 @@ function action(id, command, saved = 'Saved.') {
       const result = await command();
       message(typeof saved === 'function' ? saved(result) : saved);
     }
-    catch (error) { message(error.message, true); }
+    catch (error) { if (!(error instanceof SupersededAuthentication)) message(error.message, true); }
     finally { $(id).disabled = false; if (id === 'create-scene') updateAuthoredAvailability(); }
   };
 }
 
 action('connect', async () => {
+  const generation = ++authGeneration;
   token = $('token').value;
   await refresh();
   await refreshContent();
+  currentAuthentication(generation);
   $('token').value = '';
   $('login').hidden = true;
   $('controls').hidden = false;
@@ -355,7 +378,7 @@ for (const button of document.querySelectorAll('[data-cal]')) button.onclick = a
     });
     await refresh();
     message(button.dataset.cal === 'preview' ? 'Preview active for 30 seconds.' : 'Calibration saved.');
-  } catch (error) { message(error.message, true); }
+  } catch (error) { if (!(error instanceof SupersededAuthentication)) message(error.message, true); }
   finally { button.disabled = false; }
 };
 action('create-source', async () => {

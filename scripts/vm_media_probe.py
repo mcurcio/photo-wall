@@ -18,7 +18,7 @@ from pydantic import TypeAdapter
 from central.db import Database
 from contracts.models import Digest, Identifier
 from media.models import SourceSpec
-from scripts.vm_media_evidence import read_grants, read_presentations
+from scripts.vm_media_evidence import read_grants, read_presentations, stale_session
 
 SOURCE = "vm-photo:1"
 FRAME = "vm-photo-frame"
@@ -91,7 +91,7 @@ def configure(operator, *, player_id: str, epoch: int, captured_from: float,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("configure", "evidence"))
+    parser.add_argument("action", choices=("configure", "evidence", "stale"))
     parser.add_argument("--player-id", required=True)
     parser.add_argument("--epoch", required=True, type=int)
     parser.add_argument("--output-id")
@@ -100,6 +100,7 @@ def main():
     parser.add_argument("--expected-sha256")
     parser.add_argument("--original-sha256")
     parser.add_argument("--prior-grants", default="[]")
+    parser.add_argument("--prior-epoch", type=int)
     args = parser.parse_args()
     try:
         TypeAdapter(Identifier).validate_python(args.player_id)
@@ -108,7 +109,7 @@ def main():
         if args.action == "configure":
             result = configure(Operator(), player_id=args.player_id, epoch=args.epoch,
                                captured_from=args.captured_from, captured_until=args.captured_until)
-        else:
+        elif args.action == "evidence":
             TypeAdapter(Identifier).validate_python(args.output_id)
             TypeAdapter(Digest).validate_python(args.original_sha256)
             if len(args.prior_grants) > 65536:
@@ -122,6 +123,12 @@ def main():
                     authority_epoch=args.epoch, frame_id=FRAME, output_id=args.output_id,
                     source_ref=SOURCE, expected_sha256=args.expected_sha256,
                     expected_original_sha256=args.original_sha256, prior_grants=tuple(prior)))
+        else:
+            if args.prior_epoch is None or not 0 < args.prior_epoch < args.epoch:
+                raise ProbeError("prior_epoch_invalid")
+            with Database(os.environ["PHOTO_WALL_DATABASE_URL"]).transaction() as connection:
+                result = stale_session(connection, player_id=args.player_id,
+                                       current_epoch=args.epoch, prior_epoch=args.prior_epoch)
         print(json.dumps(result, allow_nan=False, separators=(",", ":")))
     except Exception:
         # Neither HTTP error bodies nor DB/credential values are public evidence.

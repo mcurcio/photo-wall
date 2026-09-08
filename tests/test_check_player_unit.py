@@ -21,6 +21,7 @@ def test_render_unit_keeps_production_preflight_and_sandbox():
         "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only",
         "InaccessiblePaths=-/home -/root", "PrivateTmp=yes",
         "ReadWritePaths=/run/photo-wall/player",
+        "RuntimeDirectoryPreserve=yes",
     ):
         assert line in rendered
     assert "Wants=\nAfter=" in rendered

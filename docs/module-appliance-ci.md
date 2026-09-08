@@ -150,16 +150,26 @@ subsequent cold/warm comparisons can distinguish restoration, installation,
 assembly and test costs. See the [optimization checks](evidence/2026-09-05-ci-cache.md).
 
 The workflow has `contents: read`, pinned action commit SHAs, push-to-main,
-pull-request, and manual triggers. Each PR keeps one image run active and the
+pull-request, and manual triggers. Push and pull-request runs always select the
+`smoke` scope. A manual dispatch presents an explicit `scope` choice, defaulting
+to `smoke`; selecting `full` conditionally builds and loads the production ARM64
+media-worker image. Its immutable Docker image ID is recorded in `ci-image.json`
+and passed back to the VM harness. The full harness rejects a missing or changed
+worker identity before creating fixture state, so a requested native-media run
+cannot degrade into a non-media image test. Dispatch it for a specific revision with
+`gh workflow run appliance.yml --ref <revision> -f scope=full`; the resulting run
+must pass before its report is cited as full appliance evidence. Each PR keeps one image run active and the
 latest revision pending, so benchmark pushes do not cancel a costly build
 already underway; superseded pending revisions are replaced according to
 [GitHub concurrency semantics](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency). It runs the root-owned
 `scripts/test_appliance_e2e.py` against the exact disk and generic boot
-directory recorded in `ci-image.json`, using its explicit `--scope smoke` mode.
+directory recorded in `ci-image.json`, using the selected scope.
 That test requires signed accepted-release identity, a successful RAM-root boot,
 fresh-session production Player enrollment, and unchanged boot-disk/protected boot evidence.
 Controller, worker, and Player behavior runs in the separate full software E2E workflow;
-exact-image media, restart, and rollback qualification uses the harness's explicit full scope.
+the manual full appliance scope adds exact-image native media, machine restart, and
+central rollback qualification in the same job while its raw disk and private
+fixture artifacts remain available.
 The smoke report records generic VM and
 physical Pi/HDMI/PXE qualification separately; a passing workflow does not
 claim those hardware results. After e2e, the workflow compresses the raw disk

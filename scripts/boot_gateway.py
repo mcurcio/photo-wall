@@ -92,12 +92,14 @@ def install_media_denial(app, control: Path):
 
 
 def install_delivery_observer(app):
-    """Fixture evidence correlates successful media requests with session epochs."""
+    """Emit one bounded record for every exact-digest media GET attempt."""
     @app.middleware("http")
     async def delivery(request, call_next):
         response = await call_next(request)
         match = re.fullmatch(r"/v1/media/([a-f0-9]{64})", request.url.path)
-        if request.method == "GET" and match and response.status_code == 200:
+        if request.method == "GET" and match:
+            event = dict(event="photo-wall-fixture-media-attempt", sha256=match[1],
+                         authenticated=False, status_class=f"{response.status_code // 100}xx")
             authorization = request.headers.get("Authorization", "")
             if authorization.startswith("Bearer "):
                 try:
@@ -105,8 +107,9 @@ def install_delivery_observer(app):
                 except ValueError:
                     pass
                 else:
-                    print(json.dumps(dict(event="photo-wall-fixture-media-delivery", sha256=match[1],
-                        player_id=session["id"], authority_epoch=session["authority_epoch"])), flush=True)
+                    event.update(authenticated=True, player_id=session["id"],
+                                 authority_epoch=session["authority_epoch"])
+            print(json.dumps(event), flush=True)
         return response
 
 

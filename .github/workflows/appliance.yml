@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Appliance qualification scope
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
 
 permissions:
   contents: read
@@ -18,6 +27,8 @@ jobs:
   build-and-boot:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
+    env:
+      APPLIANCE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'smoke' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -41,6 +52,21 @@ jobs:
           tags: photo-wall-central:ci
           cache-from: type=gha,scope=photo-wall-central-arm64-v1
           cache-to: type=gha,scope=photo-wall-central-arm64-v1,mode=max,ignore-error=true
+
+      - name: Build or restore the media worker image
+        if: env.APPLIANCE_SCOPE == 'full'
+        id: worker
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-worker
+          platforms: linux/arm64
+          load: true
+          tags: photo-wall-appliance-worker:ci
+          cache-from: |
+            type=gha,scope=photo-wall-central-arm64-v1
+            type=gha,scope=photo-wall-worker-arm64-v1
+          cache-to: type=gha,scope=photo-wall-worker-arm64-v1,mode=max,ignore-error=true
 
       - name: Build or restore the pinned appliance builder
         id: builder
@@ -70,9 +96,15 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
           install -d -m 0700 "$ci_root"
+          worker_args=()
+          if [[ "$APPLIANCE_SCOPE" == "full" ]]; then
+            test -n "$WORKER_IMAGE"
+            worker_args=(--worker-image "$WORKER_IMAGE")
+          fi
           docker run --rm --platform linux/arm64 \
             --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
             --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
@@ -90,7 +122,8 @@ jobs:
               --deployment-dir "$ci_root/deployment" \
               --extracted-base-cache "$RUNNER_TEMP/photo-wall-extracted-base" \
               --central-image "$CENTRAL_IMAGE" \
-              --builder-image "$BUILDER_IMAGE"
+              --builder-image "$BUILDER_IMAGE" \
+              "${worker_args[@]}"
           sudo chown -R "$(id -u):$(id -g)" "$ci_root/output" "$ci_root/deployment"
 
       - name: Make completed base cache readable
@@ -124,17 +157,24 @@ jobs:
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
           PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-ci/docker-debug.log
         run: |
           ci_root="$RUNNER_TEMP/photo-wall-ci"
+          worker_args=()
+          if [[ "$APPLIANCE_SCOPE" == "full" ]]; then
+            test -n "$WORKER_IMAGE"
+            worker_args=(--worker-image "$WORKER_IMAGE")
+          fi
           .venv/bin/python -m scripts.test_appliance_e2e \
             --manifest "$ci_root/output/ci-image.json" \
             --state "$ci_root/e2e-state" \
             --report "$ci_root/e2e-report.json" \
             --central-image "$CENTRAL_IMAGE" \
             --builder-image "$BUILDER_IMAGE" \
-            --scope smoke
+            --scope "$APPLIANCE_SCOPE" \
+            "${worker_args[@]}"
 
       - name: Compress the disk for artifact upload
         run: |

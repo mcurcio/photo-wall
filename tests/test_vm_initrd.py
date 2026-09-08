@@ -70,12 +70,13 @@ def test_virtio_9p_preload_closure_proves_transitive_dependencies(tmp_path):
 def test_hook_is_read_only_share_guarded_and_ordered_before_existing_entries():
     assert b"mount -t 9p -o trans=virtio,version=9p2000.L,ro photo-wall-ci" in build_vm_initrd.HOOK_BYTES
     assert b"ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_rollback_control.py" in build_vm_initrd.HOOK_BYTES
+    assert b"ExecStart=/usr/bin/python3 -I /run/photo-wall-ci/vm_player_control.py" in build_vm_initrd.HOOK_BYTES
     assert b"Restart=no" in build_vm_initrd.HOOK_BYTES
     assert b"After=photo-wall-accept-trial.service" in build_vm_initrd.HOOK_BYTES
     assert build_vm_initrd.ORDER_ADDITION.startswith(b"/scripts/init-bottom/photo-wall-evidence")
     assert b"ticket_sha256" in build_vm_initrd.HOOK_BYTES
     assert b'pop("ticket_id")' in build_vm_initrd.HOOK_BYTES
-    assert b"ReadWritePaths=" not in build_vm_initrd.HOOK_BYTES
+    assert b"ReadWritePaths=/run/photo-wall/player" in build_vm_initrd.HOOK_BYTES
 
 
 def test_module_preload_additions_are_exact_and_idempotent(tmp_path):

@@ -235,6 +235,7 @@ def _source_text(source: pathlib.Path) -> str:
         "InaccessiblePaths=-/home -/root", "PrivateTmp=yes", "ProtectKernelTunables=yes",
         "ProtectKernelModules=yes", "ProtectControlGroups=yes", "RestrictSUIDSGID=yes",
         "ReadWritePaths=/run/photo-wall/player",
+        "RuntimeDirectoryPreserve=yes",
         "ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'",
     )
     if any(line not in text.splitlines() for line in required):

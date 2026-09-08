@@ -22,6 +22,9 @@ Environment=PYOPENGL_PLATFORM=egl
 # path present for ReadWritePaths during every ExecStartPre and ExecStart.
 RuntimeDirectory=photo-wall/player
 RuntimeDirectoryMode=0700
+# Retain validated disposable files across a service restart. /run remains RAM
+# backed and is rebuilt on every machine boot; authority metadata is in memory.
+RuntimeDirectoryPreserve=yes
 # Native failure must still allow network registration with unavailable capacity.
 ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
 ExecStart=/opt/photo-wall/venv/bin/python -m player.service --config /etc/photo-wall/public.json

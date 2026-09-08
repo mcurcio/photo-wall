@@ -697,14 +697,14 @@ def test_stalled_original_stream_times_out_and_removes_partial_file(tmp_path):
     assert stream.closed
 
 
-@pytest.mark.parametrize("base_url", [
+@pytest.mark.parametrize("unsafe_url", [
     "http://user:password@immich.test/api", "http://immich.test/api?key=secret",
     "http://immich.test/api#fragment", "file:///private/immich/api", "//immich.test/api",
     "http://immich.test/not-api",
 ])
-def test_connection_rejects_unsafe_base_urls(base_url):
+def test_connection_rejects_unsafe_base_urls(unsafe_url):
     with pytest.raises(ValueError):
-        connection(base_url=base_url)
+        connection(base_url=unsafe_url)
 
 
 def test_plain_http_requires_explicit_isolated_network_opt_in():

@@ -146,3 +146,16 @@ def read_grants(connection, *, player_id: str, authority_epoch: int) -> list[dic
         WHERE c.player_id=%s AND c.authority_epoch=%s AND c.valid
         ORDER BY c.committed_at DESC,c.assignment_id LIMIT 32
         """, (player_id, authority_epoch)).fetchall()
+
+
+def stale_session(connection, *, player_id: str, current_epoch: int, prior_epoch: int) -> dict:
+    row = connection.execute(
+        "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL", (player_id,)
+    ).fetchone()
+    grants = connection.execute(
+        "SELECT count(*) AS n FROM execution_commits c JOIN players p ON p.id=c.player_id "
+        "AND p.authority_epoch=c.authority_epoch WHERE c.player_id=%s "
+        "AND c.authority_epoch=%s AND c.valid", (player_id, prior_epoch)
+    ).fetchone()
+    return {"old_session_current": bool(row and row["authority_epoch"] == prior_epoch),
+            "valid_grants": grants["n"] if row and row["authority_epoch"] == current_epoch else -1}

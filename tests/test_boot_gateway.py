@@ -7,6 +7,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
+from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
 from contracts.release import Release, configuration_digest
@@ -208,6 +209,26 @@ def test_delivery_evidence_names_current_epoch_without_exposing_bearer(capsys):
         assert client.get('/v1/media/'+'a'*64, headers={'Authorization':'Bearer '+token}).status_code == 200
     import json
     output = capsys.readouterr().out
-    assert json.loads(output) == dict(event='photo-wall-fixture-media-delivery', sha256='a'*64,
+    assert json.loads(output) == dict(event='photo-wall-fixture-media-attempt', sha256='a'*64,
+                                      authenticated=True, status_class='2xx',
                                       player_id='p-fixture', authority_epoch=2)
     assert token not in output and authenticated == [token]
+
+
+def test_media_attempt_records_unauthenticated_failure_without_identity(capsys):
+    import json
+    from types import SimpleNamespace
+
+    from scripts.boot_gateway import install_delivery_observer
+
+    app = FastAPI()
+    app.state.registry = SimpleNamespace(authenticate=lambda _: (_ for _ in ()).throw(ValueError()))
+    @app.get('/v1/media/{digest}')
+    def image(digest):
+        return Response(status_code=503)
+    install_delivery_observer(app)
+    with TestClient(app) as client:
+        assert client.get('/v1/media/'+'b'*64, headers={'Authorization':'Bearer stale'}).status_code == 503
+    event = json.loads(capsys.readouterr().out)
+    assert event == dict(event='photo-wall-fixture-media-attempt', sha256='b'*64,
+                         authenticated=False, status_class='5xx')
