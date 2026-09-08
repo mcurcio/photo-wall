@@ -270,3 +270,21 @@ def test_cache_hit_path_skips_fetch_decompress_and_extract(tmp_path, monkeypatch
     assert result["hit"] is True
     assert (restored / "usr/bin/tool").read_bytes() == b"tool\n"
     assert calls == []
+
+
+def test_private_material_error_identifies_path_without_exposing_contents(tmp_path):
+    archive_path = tmp_path / 'private.tar'
+    name = 'tmp/unexpected\nkey.pem'
+    payload = b'-----BEGIN PRIVATE KEY-----\nDO_NOT_PRINT_KEY_BYTES'
+    with tarfile.open(archive_path, 'w') as output:
+        root = tarfile.TarInfo('.')
+        root.type = tarfile.DIRTYPE
+        output.addfile(root)
+        member = tarfile.TarInfo(name)
+        member.size = len(payload)
+        output.addfile(member, io.BytesIO(payload))
+    with pytest.raises(ci_base_cache.CacheError) as error:
+        ci_base_cache._validate_archive(archive_path, reject_private=True)
+    assert str(error.value) == f'archive_private_material:{name!r}'
+    assert 'DO_NOT_PRINT' not in str(error.value)
+    assert '\n' not in str(error.value)

@@ -223,3 +223,7 @@ definition with no retained artifact fails until a manual dispatch supplies
 `prepare_base=true`; that input is available on all three caller workflows.
 These routes describe the implemented dependency contract, not measured hosted
 warm-build performance or completed qualification.
+
+The [initial OS publication failure](evidence/2026-09-08-os-base-publication.md)
+records the packaged test-key fixture correction and distinguishes it from
+the successful shared-media and browser workflow checks.

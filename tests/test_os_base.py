@@ -41,6 +41,8 @@ def _inputs(tmp_path):
     for name in os_base.REQUIRED_EVIDENCE:
         (evidence / name).write_text("evidence\n")
     (evidence / "package-state.txt").write_text("")
+    (evidence / "os-sanitization.json").write_bytes(appliance.canonical({
+        "schema": 1, "removed_package_test_fixtures": []}))
     expected = os_base.definition(REPOSITORY)
     (evidence / "debs").mkdir()
     (evidence / "debs/package.deb").write_bytes(b"package bytes")
@@ -234,3 +236,132 @@ def test_failed_native_preparation_retains_only_bounded_public_logs(tmp_path, mo
     assert (tmp_path / "diagnostics/os-base-fetch-ubuntu.log").read_bytes() == (
         b"HTTP 503 public upstream failure\n")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["diagnostics"]
+
+
+@pytest.fixture
+def package_test_fixture(tmp_path, monkeypatch):
+    root = tmp_path / 'root'
+    (root / 'etc').mkdir(parents=True)
+    relative = next(iter(os_base.PACKAGE_TEST_FIXTURES))
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    # Deliberately synthetic bytes: no real private key is copied into tests.
+    content = b'-----BEGIN PRIVATE KEY-----\npublic synthetic fixture\n'
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(os_base, 'PACKAGE_TEST_FIXTURES', {relative: digest})
+    return root, path, {'path': relative, 'sha256': digest}
+
+
+def test_exact_packaged_fixture_is_removed_and_reported(package_test_fixture):
+    root, path, record = package_test_fixture
+    assert os_base._sanitize_host_state(root) == [record]
+    assert not path.exists()
+    assert os_base._sanitize_host_state(root) == []
+
+
+def test_changed_fixture_is_not_removed_or_admitted(package_test_fixture, tmp_path):
+    root, path, _ = package_test_fixture
+    path.write_bytes(b'-----BEGIN PRIVATE KEY-----\nunexpected deployment key\n')
+    with pytest.raises(os_base.BaseError, match='package_fixture_changed'):
+        os_base._sanitize_host_state(root)
+    assert path.exists()
+    archive_path = tmp_path / 'rejected.tar'
+    with tarfile.open(archive_path, 'w') as archive:
+        archive.add(root, arcname='.')
+    with pytest.raises(ci_base_cache.CacheError, match='archive_private_material'):
+        ci_base_cache._validate_archive(archive_path, reject_private=True)
+
+
+@pytest.mark.parametrize('location', ['file', 'ancestor'])
+def test_fixture_symlink_cannot_traverse_or_remove_external_files(package_test_fixture,
+                                                                tmp_path, location):
+    root, path, _ = package_test_fixture
+    outside = tmp_path / 'outside'
+    if location == 'file':
+        path.rename(outside)
+        path.symlink_to(outside)
+    else:
+        path.parent.rename(outside)
+        path.parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(os_base.BaseError, match='fixture_unsafe_path'):
+        os_base._sanitize_host_state(root)
+    assert outside.exists()
+    assert (outside if location == 'file' else outside / path.name).is_file()
+
+
+def test_unlisted_private_key_still_fails_after_sanitization(package_test_fixture, tmp_path):
+    root, path, _ = package_test_fixture
+    unknown = path.parent / 'unexpected.pem'
+    unknown.write_bytes(b'-----BEGIN PRIVATE KEY-----\nunknown material\n')
+    os_base._sanitize_host_state(root)
+    assert unknown.exists()
+    archive_path = tmp_path / 'unknown.tar'
+    with tarfile.open(archive_path, 'w') as archive:
+        archive.add(root, arcname='.')
+    with pytest.raises(ci_base_cache.CacheError, match='archive_private_material'):
+        ci_base_cache._validate_archive(archive_path, reject_private=True)
+
+
+@pytest.mark.parametrize('report', [
+    {'schema': 1, 'removed_package_test_fixtures': [{'path': 'unknown', 'sha256': 'a' * 64}]},
+    {'schema': True, 'removed_package_test_fixtures': []},
+    {'schema': 1, 'removed_package_test_fixtures': 'not a list'},
+])
+def test_invalid_sanitization_provenance_cannot_be_published(tmp_path, report):
+    root, evidence, expected = _inputs(tmp_path)
+    (evidence / 'os-sanitization.json').write_bytes(appliance.canonical(report))
+    with pytest.raises(os_base.BaseError, match='sanitization_invalid'):
+        os_base.publish(root, evidence, tmp_path / 'bundle', expected, builder_image=BUILDER)
+    assert not (tmp_path / 'bundle').exists()
+
+
+def test_report_cannot_claim_sanitization_while_fixture_remains(tmp_path):
+    root, evidence, expected = _inputs(tmp_path)
+    relative, digest = next(iter(os_base.PACKAGE_TEST_FIXTURES.items()))
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_text('remaining file')
+    (evidence / 'os-sanitization.json').write_bytes(appliance.canonical({
+        'schema': 1, 'removed_package_test_fixtures': [{'path': relative, 'sha256': digest}]}))
+    with pytest.raises(os_base.BaseError, match='package_fixture_remaining'):
+        os_base.publish(root, evidence, tmp_path / 'bundle', expected, builder_image=BUILDER)
+
+
+def test_build_records_sanitization_in_public_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(os_base.platform, 'system', lambda: 'Linux')
+    monkeypatch.setattr(os_base.platform, 'machine', lambda: 'aarch64')
+    relative = next(iter(os_base.PACKAGE_TEST_FIXTURES))
+    content = b'-----BEGIN PRIVATE KEY-----\npublic synthetic fixture\n'
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(os_base, 'PACKAGE_TEST_FIXTURES', {relative: digest})
+
+    def run(argv, *, timeout, log, **kwargs):
+        if argv[1].endswith('fetch_ubuntu.py'):
+            source = Path(argv[-1])
+            source.mkdir()
+            for name in ('verified-input.json', 'SHA256SUMS', 'SHA256SUMS.gpg', 'ubuntu-cdimage.asc'):
+                (source / name).write_bytes(b'public evidence')
+        else:
+            (Path(argv[-1]) / 'etc').mkdir(parents=True)
+        log.write_bytes(b'public build log')
+
+    def install(root, evidence):
+        fixture = root / relative
+        fixture.parent.mkdir(parents=True)
+        fixture.write_bytes(content)
+
+    def publish(root, evidence, destination, expected, *, builder_image):
+        assert not (root / relative).exists()
+        report = json.loads((evidence / 'os-sanitization.json').read_bytes())
+        os_base._validate_sanitization(root, evidence)
+        assert 'os-sanitization.json' in appliance.inventory(evidence)
+        return report
+
+    monkeypatch.setattr(appliance, 'run', run)
+    monkeypatch.setattr(appliance, 'decompress_base', lambda source, raw: raw.write_bytes(b'raw'))
+    monkeypatch.setattr(appliance, 'install_runtime_packages', install)
+    monkeypatch.setattr(os_base, 'publish', publish)
+    expected = {'schema': 1, 'removed_package_test_fixtures': [{'path': relative, 'sha256': digest}]}
+    assert os_base.build(REPOSITORY, tmp_path / 'bundle', builder_image=BUILDER) == expected
+    assert json.loads((tmp_path / 'diagnostics/os-base-os-sanitization.json').read_bytes()) == expected

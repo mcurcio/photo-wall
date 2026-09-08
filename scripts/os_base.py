@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -38,8 +39,14 @@ BUILDER_ID = re.compile(r"(?:[^\s]+@)?sha256:[0-9a-f]{64}\Z")
 REQUIRED_EVIDENCE = (
     "base-packages.tsv", "packages.tsv", "package-state.txt", "deb-hashes.json",
     "tool-binaries.json", "verified-input.json", "SHA256SUMS", "SHA256SUMS.gpg",
-    "ubuntu-cdimage.asc", "apt-download-plan.txt",
+    "ubuntu-cdimage.asc", "apt-download-plan.txt", "os-sanitization.json",
 )
+# Public python3-twisted 24.3.0-1ubuntu0.1 test data from the pinned Ubuntu
+# image. Remove only these exact bytes, never exempt paths from secret scanning.
+PACKAGE_TEST_FIXTURES = {
+    "usr/lib/python3/dist-packages/twisted/test/key.pem.no_trailing_newline":
+        "380626aa2b5e4a799153f2c8faf6f38f080765fe0b2ab59c7865bf6167f26604",
+}
 
 
 class BaseError(ValueError):
@@ -89,6 +96,7 @@ def _evidence(root: Path, evidence: Path, expected: dict) -> dict:
         path = evidence / name
         if path.is_symlink() or not path.is_file():
             raise BaseError("os_base_evidence_missing")
+    _validate_sanitization(root, evidence)
     if (evidence / "package-state.txt").stat().st_size:
         raise BaseError("os_base_package_incomplete")
     debs = appliance.inventory(evidence / "debs", maximum_bytes=8 * 1024**3)
@@ -216,8 +224,55 @@ def restore(bundle: Path, destination: Path, evidence_destination: Path, expecte
         raise
 
 
-def _sanitize_host_state(root: Path) -> None:
-    """Discard upstream machine identities before retaining the shared baseline."""
+def _package_fixture_path(root: Path, relative: str) -> Path | None:
+    """Resolve the declared fixture without traversing symlinked ancestors."""
+    path = root
+    if path.is_symlink() or not path.is_dir():
+        raise BaseError("os_base_fixture_unsafe_path")
+    parts = Path(relative).parts
+    for index, part in enumerate(parts):
+        path = path / part
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return None
+        expected_type = stat.S_ISREG if index == len(parts) - 1 else stat.S_ISDIR
+        if not expected_type(mode):
+            raise BaseError("os_base_fixture_unsafe_path")
+    return path
+
+
+def _validate_sanitization(root: Path, evidence: Path) -> None:
+    report = json.loads(archives._regular(evidence / "os-sanitization.json", 64 * 1024))
+    if (not isinstance(report, dict)
+            or set(report) != {"schema", "removed_package_test_fixtures"}
+            or type(report["schema"]) is not int or report["schema"] != 1
+            or not isinstance(report["removed_package_test_fixtures"], list)):
+        raise BaseError("os_base_sanitization_invalid")
+    seen = set()
+    for item in report["removed_package_test_fixtures"]:
+        if (not isinstance(item, dict) or set(item) != {"path", "sha256"}
+                or not isinstance(item["path"], str) or item["path"] in seen
+                or item["path"] not in PACKAGE_TEST_FIXTURES
+                or item["sha256"] != PACKAGE_TEST_FIXTURES[item["path"]]):
+            raise BaseError("os_base_sanitization_invalid")
+        seen.add(item["path"])
+    for relative in PACKAGE_TEST_FIXTURES:
+        if _package_fixture_path(root, relative) is not None:
+            raise BaseError("os_base_package_fixture_remaining")
+
+
+def _sanitize_host_state(root: Path) -> list[dict[str, str]]:
+    """Discard machine identities and exact public test fixtures before retention."""
+    removed = []
+    for relative, expected_hash in PACKAGE_TEST_FIXTURES.items():
+        path = _package_fixture_path(root, relative)
+        if path is None:
+            continue
+        if hashlib.sha256(archives._regular(path, 64 * 1024)).hexdigest() != expected_hash:
+            raise BaseError("os_base_package_fixture_changed")
+        path.unlink()
+        removed.append({"path": relative, "sha256": expected_hash})
     for directory in ("etc/ssl/private", "root/.ssh", "root/.gnupg", "home/ubuntu"):
         path = root / directory
         if path.is_symlink():
@@ -232,6 +287,7 @@ def _sanitize_host_state(root: Path) -> None:
         path.unlink(missing_ok=True)
     (root / "etc/machine-id").write_text("")
     (root / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
+    return removed
 
 
 def build(repository: Path, output: Path, *, builder_image: str) -> dict:
@@ -268,13 +324,15 @@ def build(repository: Path, output: Path, *, builder_image: str) -> dict:
                           env=dict(os.environ, PYTHONPATH=str(repository)))
             raw.unlink()
             appliance.install_runtime_packages(root, evidence)
-            _sanitize_host_state(root)
+            removed = _sanitize_host_state(root)
+            (evidence / "os-sanitization.json").write_bytes(appliance.canonical({
+                "schema": 1, "removed_package_test_fixtures": removed}))
             return publish(root, evidence, output, expected, builder_image=builder_image)
         finally:
             diagnostics = output.parent / "diagnostics"
             diagnostics.mkdir(mode=0o755, exist_ok=True)
             for name in ("fetch-ubuntu.log", "extract.log", "apt-update.log", "apt-purge.log",
-                         "apt-download.log", "apt-install.log"):
+                         "apt-download.log", "apt-install.log", "os-sanitization.json"):
                 path = evidence / name
                 if path.is_file() and not path.is_symlink():
                     data = path.read_bytes()

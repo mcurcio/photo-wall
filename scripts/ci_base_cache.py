@@ -220,16 +220,16 @@ def _reject_private_member(name: str, member: tarfile.TarInfo, archive: tarfile.
                    or any(name == prefix or name.startswith(prefix + "/")
                           for prefix in ("etc/ssl/private", "private", "deployment")))
     if secret_path and not member.isdir():
-        raise CacheError("archive_private_material")
+        raise CacheError(f"archive_private_material:{name!r}")
     if member.isreg():
         if PurePosixPath(name).name.startswith("ssh_host_"):
-            raise CacheError("archive_private_material")
+            raise CacheError(f"archive_private_material:{name!r}")
         stream = archive.extractfile(member)
         if stream is not None:
             with stream:
                 prefix = stream.read(4096).lstrip()
             if prefix.startswith(b"-----BEGIN ") and b"PRIVATE KEY-----" in prefix:
-                raise CacheError("archive_private_material")
+                raise CacheError(f"archive_private_material:{name!r}")
 
 
 def create_archive(root: Path, archive: Path, *,
