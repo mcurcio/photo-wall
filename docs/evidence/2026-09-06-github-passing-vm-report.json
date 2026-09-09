@@ -1,0 +1,132 @@
+{
+  "boots": [
+    {
+      "boot_id": "b99fa765-b7ea-4413-9f36-fa1522374a91",
+      "fault": null,
+      "persistence": "durable",
+      "release_id": "98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75",
+      "schema": 1,
+      "slot": "A",
+      "trial": true
+    },
+    {
+      "boot_id": "318a3992-28ac-4c27-a07a-4abaaffddfd2",
+      "fault": null,
+      "persistence": "durable",
+      "release_id": "98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75",
+      "schema": 1,
+      "slot": "A",
+      "trial": true
+    }
+  ],
+  "builder_image": "sha256:5730240d163aba338b8f0333001619c46b6bee94cf2c32c78a95d4e36850a5bc",
+  "central_image": "sha256:feb8934a0381b053ab0da382a33a70f4dc25917388b9c0d49a78f7f7feaa1464",
+  "checks": {
+    "central_outage_rejoin": true,
+    "fresh_durable_enrollment": true,
+    "identity_survives_power_cycle": true,
+    "signed_disk_unchanged": true,
+    "signed_https_dns_ntp": true
+  },
+  "cleanup_phases": {},
+  "configuration_sha256": "e0b13df206829ca149b3d041142fd5f54004060c23f08fc374485941fc388f44",
+  "finished_at": "2026-09-06T08:20:27.481770+00:00",
+  "first_enrollment": {
+    "authority_epoch": 1,
+    "persistence": "durable",
+    "player_id": "p-816b7a487c97f474e9c0448898bb4cfa",
+    "retired": false
+  },
+  "generic_initrd_sha256": "49d8ffc29e33f6c6ec20f1277415ab6eb2533abbe9132416cc62752fea5a9ee0",
+  "generic_kernel_sha256": "552e27f48eefa445d0d6bbc501e5972d1a43bf0e2cb78ea5345fed9e01736f58",
+  "image_sha256": "9b59a3a9a33810e539f4d1fe30428347ffd97c30c776344a0512bc9fce661100",
+  "image_size": 5906628608,
+  "last_inventory_count": 1,
+  "observed_boot_reports": [
+    {
+      "boot_id": "b99fa765-b7ea-4413-9f36-fa1522374a91",
+      "fault": null,
+      "persistence": "durable",
+      "release_id": "98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75",
+      "schema": 1,
+      "slot": "A",
+      "trial": true
+    },
+    {
+      "boot_id": "318a3992-28ac-4c27-a07a-4abaaffddfd2",
+      "fault": null,
+      "persistence": "durable",
+      "release_id": "98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75",
+      "schema": 1,
+      "slot": "A",
+      "trial": true
+    }
+  ],
+  "phase": "execution",
+  "qualification": {
+    "automatic_rollback": false,
+    "generic_vm": true,
+    "healthy_trial": false,
+    "native_rendering": false,
+    "physical_pi": false,
+    "pxe_lan": false
+  },
+  "release_id": "98d49084b3417b2e0cdd08bc5defab08507a220c8930dba4b285312b1ce7ce75",
+  "rootfs_sha256": "1c661b68cece6fa6cc576f2cbaf0e67d5130f00ad5182ff18a6811a1ce9aae28",
+  "schema": 1,
+  "second_enrollment": {
+    "authority_epoch": 2,
+    "persistence": "durable",
+    "player_id": "p-816b7a487c97f474e9c0448898bb4cfa",
+    "retired": false
+  },
+  "serial_diagnostics": {
+    "failed_services": [
+      "photo-wall-weston"
+    ],
+    "kernel_panic": false,
+    "namespace_failures": {},
+    "out_of_memory": false,
+    "python_errors": [],
+    "service_exit_status": {
+      "photo-wall-weston": [
+        {
+          "code": "exited",
+          "name": "FAILURE",
+          "status": 1
+        }
+      ]
+    },
+    "systemd_chdir_failure": false
+  },
+  "source_commit": "61b9950dde9e2d61e149ed7927abe974d306a88a",
+  "started_at": "2026-09-06T08:00:12.363347+00:00",
+  "status": "passed",
+  "substitutions": [
+    {
+      "kind": "kernel",
+      "release": "6.8.0-139-generic",
+      "replacement": "generic ARM64 Image"
+    },
+    {
+      "kind": "modules",
+      "removed_releases": [
+        "6.8.0-1047-raspi"
+      ],
+      "replacement_release": "6.8.0-139-generic",
+      "skipped_unsafe_links": []
+    },
+    {
+      "behavior": "print /run/photo-wall/boot.json to the serial console",
+      "kind": "observability-hook",
+      "order_addition": "/scripts/init-bottom/photo-wall-evidence \"$@\"\n",
+      "order_path": "/scripts/init-bottom/ORDER",
+      "path": "/scripts/init-bottom/photo-wall-evidence"
+    }
+  ],
+  "vm_exit_state": {
+    "ExitCode": 0,
+    "OOMKilled": false,
+    "Running": true
+  }
+}

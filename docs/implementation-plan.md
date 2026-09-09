@@ -1,6 +1,6 @@
 # Implementation plan
 
-Photo Wall is in the design stage, without a runnable application, appliance image, or measured hardware results. This proposed sequence implements the [architecture](architecture.md) and [requirements](requirements.md).
+Photo Wall is implementing this sequence; see the [durable checklist](implementation-checklist.md) and [evidence](evidence/README.md) for the actual verified state. Appliance and measured hardware results are still outstanding. The sequence implements the [architecture](architecture.md) and [requirements](requirements.md).
 
 Use the [validation matrix](validation.md#acceptance-matrix) for evidence and [design decisions](design-decisions.md) for open policies, release scope, and performance budgets. All slices follow [recursive development and agent orchestration](../CONTRIBUTING.md#recursive-development-and-agent-orchestration): design modules first, then integrate child implementations and evidence from the bottom up.
 

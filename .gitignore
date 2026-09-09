@@ -206,6 +206,17 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Runtime state and appliance artifacts stay outside source control.
+artifacts/
+*.img
+*.img.*
+*.qcow2
+*.iso
+*.blob
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # PyPI configuration file
 .pypirc
 

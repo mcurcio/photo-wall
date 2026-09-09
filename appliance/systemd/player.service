@@ -1,0 +1,51 @@
+[Unit]
+Description=Photo Wall single-process Player
+Wants=network-online.target photo-wall-weston.service
+After=network-online.target photo-wall-weston.service
+# Compositor restart loops must not repeatedly interrupt network enrollment.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=wall
+Group=wall
+SupplementaryGroups=render video
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=XDG_RUNTIME_DIR=/run/user/10001
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=GDK_BACKEND=wayland
+Environment=GDK_GL=gles
+Environment=PYOPENGL_PLATFORM=egl
+# systemd creates the parent (root:root, 0755) and child (wall:wall, 0700)
+# before applying this unit's mount namespace. This keeps the required writable
+# path present for ReadWritePaths during every ExecStartPre and ExecStart.
+RuntimeDirectory=photo-wall/player
+RuntimeDirectoryMode=0700
+# Retain validated disposable files across a service restart. /run remains RAM
+# backed and is rebuilt on every machine boot; authority metadata is in memory.
+RuntimeDirectoryPreserve=yes
+# Native failure must still allow network registration with unavailable capacity.
+ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
+ExecStart=/opt/photo-wall/venv/bin/python -m player.service --config /etc/photo-wall/public.json
+Restart=always
+RestartSec=2
+TimeoutStopSec=150
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Keep the logind/Wayland runtime directory visible for the compositor socket.
+# Hide the unrelated home trees explicitly instead of ProtectHome=yes, which
+# also hides /run/user and prevents the Player from reaching Wayland.
+ProtectHome=read-only
+InaccessiblePaths=-/home -/root
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/run/photo-wall/player
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

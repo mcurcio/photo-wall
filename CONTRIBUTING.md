@@ -1,6 +1,6 @@
 # Contributing to Photo Wall
 
-Photo Wall is at the design stage. Contributions should connect a bounded behavior to an implementation and evidence that it works. The [requirements](docs/requirements.md) define the product; the [implementation plan](docs/implementation-plan.md) identifies useful slices. Central simulation and physical Player qualification can proceed in parallel.
+Photo Wall is implementing its first MVP. Contributions should connect a bounded behavior to an implementation and evidence that it works. The [requirements](docs/requirements.md) define the product; the [implementation plan](docs/implementation-plan.md) identifies useful slices. Central simulation and physical Player qualification can proceed in parallel.
 
 ## Get oriented
 
@@ -9,7 +9,7 @@ git clone https://github.com/mcurcio/photo-wall.git
 cd photo-wall
 ```
 
-Read the [documentation guide](docs/README.md), then the requirements and documents relevant to the change. There are no application setup, launch, build, or test commands yet. The first implementation contribution should establish real commands with pinned dependencies and verify them from a clean checkout. Add configuration examples without secrets, and include storage and migration instructions when persistence is introduced.
+Read the [documentation guide](docs/README.md), then the requirements and documents relevant to the change. The [runbook](docs/runbook.md) owns the current setup, launch, test and recovery commands. Keep dependencies locked and verify clean-checkout commands with each delivery. Configuration examples must not contain secrets. Keep storage and migration instructions alongside the runnable implementation.
 
 ## Design principles
 
@@ -42,7 +42,7 @@ Update the owning documents as contracts and implementation evolve. Add verified
 
 ### Subagent model selection
 
-The requested project preference is **`codex-spark-5.3-flash`** for suitable lightweight subagent work. OpenAI documents Spark's model identifier as **`gpt-5.3-codex-spark`**; the documentation does not establish an alias mapping for the requested spelling. [OpenAI models](https://learn.chatgpt.com/docs/models).
+The requested project preference is **`gpt-5.3-codex-spark`** for suitable lightweight subagent work. Prefer it for clear, bounded implementation, focused tests, mechanical changes and documentation; keep ambiguous design and integrated correctness review on a model suited to those tasks. [Official subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
 Resolve the usable identifier from the actual subagent runtime's supported models before dispatch. Do not pass the requested spelling automatically or invent an unsupported name. Prefer available Spark for clear, bounded leaf implementation, mechanical refactors, focused tests, and documentation work. If Spark is unavailable, select a supported model suited to the task and disclose the fallback in the work report.
 

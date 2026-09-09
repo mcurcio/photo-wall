@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "architecture": "arm64",
+  "ubuntu_version": "24.04",
+  "base_sha256": "790652faeb4f61ce7bb12f5cb61734595c61d3cd882915b8b5f9918106c80d37",
+  "base_bytes": 1257196128,
+  "snapshot": "20260905T000000Z",
+  "runtime_packages": [
+    "python3.12",
+    "python3.12-venv",
+    "python3-gi",
+    "python3-gst-1.0",
+    "python3-opengl",
+    "gir1.2-gtk-3.0",
+    "gir1.2-gst-plugins-base-1.0",
+    "gstreamer1.0-plugins-base",
+    "gstreamer1.0-plugins-good",
+    "gstreamer1.0-plugins-bad",
+    "gstreamer1.0-libav",
+    "libgl1-mesa-dri",
+    "libegl1",
+    "weston",
+    "chrony",
+    "ca-certificates",
+    "openssl",
+    "initramfs-tools",
+    "busybox-initramfs",
+    "iproute2",
+    "kmod"
+  ]
+}

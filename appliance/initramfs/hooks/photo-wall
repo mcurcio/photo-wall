@@ -1,0 +1,37 @@
+#!/bin/sh
+# Installed as /etc/initramfs-tools/hooks/photo-wall inside the selected root.
+set -eu
+case "${1:-}" in prereqs) exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/bin/python3.12 /usr/bin/python3.12
+mkdir -p "${DESTDIR}/usr/lib/python3.12"
+# Extension modules need their dynamic dependencies as well as the .so itself.
+# copy_exec stops on an already-copied executable, so resolve dependencies first.
+for extension in /usr/lib/python3.12/lib-dynload/*.so; do
+    copy_exec "$extension" "$extension"
+done
+cp -a /usr/lib/python3.12/. "${DESTDIR}/usr/lib/python3.12/"
+for program in openssl chronyd mount umount blkid modprobe ip; do
+    executable=$(command -v "$program")
+    copy_exec "$executable" "$executable"
+done
+mkdir -p "${DESTDIR}/usr/lib/python3.12/appliance" "${DESTDIR}/usr/lib/python3.12/contracts"
+for module in __init__ bootstrap updates; do
+    copy_file config "/usr/lib/python3/dist-packages/appliance/$module.py" "/usr/lib/python3.12/appliance/$module.py"
+done
+for module in __init__ release; do
+    copy_file config "/usr/lib/python3/dist-packages/contracts/$module.py" "/usr/lib/python3.12/contracts/$module.py"
+done
+mkdir -p "${DESTDIR}/etc/photo-wall"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' > "${DESTDIR}/etc/passwd"
+printf '%s\n' 'root:x:0:' > "${DESTDIR}/etc/group"
+printf '%s\n' 'passwd: files' 'group: files' 'hosts: files dns' > "${DESTDIR}/etc/nsswitch.conf"
+printf '%s\n' '127.0.0.1 localhost' '::1 localhost' > "${DESTDIR}/etc/hosts"
+for input in public.json bootstrap.json ca.pem release.pub.pem boot-policy.json; do
+    copy_file config "/etc/photo-wall/$input"
+done
+for module in squashfs overlay loop ext4 vfat nls_cp437 nls_iso8859-1; do
+    manual_add_modules "$module"
+done
+# MODULES=most in the builder retains onboard/USB Ethernet and owned-state buses.

@@ -1,0 +1,96 @@
+# Dedicated synthetic fixture only; see docs/module-immich-fixture.md.
+services:
+  immich:
+    image: ghcr.io/immich-app/immich-server:v2.5.6@sha256:aa163d2e1cc2b16a9515dd1fef901e6f5231befad7024f093d7be1f2da14341a
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_DATABASE_NAME: immich
+      DB_PASSWORD: ${FIXTURE_DB_PASSWORD:?private fixture configuration required}
+      REDIS_HOSTNAME: redis
+      IMMICH_LOG_LEVEL: error
+    volumes:
+      - uploads:/data
+    networks: [upstream_net]
+    depends_on:
+      database: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck: {disable: false}
+    mem_limit: 3g
+    restart: "no"
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    environment:
+      POSTGRES_PASSWORD: ${FIXTURE_DB_PASSWORD:?private fixture configuration required}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes: [database:/var/lib/postgresql/data]
+    networks: [upstream_net]
+    shm_size: 128mb
+    healthcheck: {disable: false}
+    restart: "no"
+  redis:
+    image: docker.io/valkey/valkey:9@sha256:546304417feac0874c3dd576e0952c6bb8f06bb4093ea0c9ca303c73cf458f63
+    networks: [upstream_net]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+  central-probe:
+    image: ${FIXTURE_IMAGE:?harness image required}
+    build:
+      context: ../..
+      dockerfile_inline: |
+        FROM ${FIXTURE_BASE_IMAGE:-photo-wall-fixture-base:local}
+        USER root
+        COPY scripts/harness_failure.py scripts/immich_actions.py scripts/immich_runtime.py /app/scripts/
+        RUN mkdir -p /runtime /setup && chown 10001:10001 /runtime /setup
+        USER 10001:10001
+    user: "10001:10001"
+    entrypoint: [python, -m, scripts.immich_runtime]
+    command: [serve]
+    environment: {PYTHONPATH: /app}
+    volumes:
+      - runtime:/runtime
+    networks: [wall_net, upstream_net]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls: {net.ipv4.ip_forward: "0"}
+    read_only: true
+    tmpfs: [/tmp]
+    restart: "no"
+  setup:
+    image: ${FIXTURE_IMAGE:?harness image required}
+    profiles: [tools]
+    user: "10001:10001"
+    entrypoint: [python, -m, scripts.immich_runtime]
+    environment: {PYTHONPATH: /app}
+    volumes:
+      - setup:/setup
+      - runtime:/runtime
+    networks: [upstream_net]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+  player-probe:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    profiles: [tools]
+    user: "10001:10001"
+    entrypoint: [python, "-c"]
+    networks: [wall_net]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+networks:
+  wall_net: {internal: true}
+  upstream_net: {internal: true}
+volumes:
+  uploads:
+  database:
+  runtime:
+  setup:

@@ -1,0 +1,76 @@
+services:
+  database:
+    image: postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94
+    environment:
+      POSTGRES_DB: photo_wall
+      POSTGRES_USER: photo_wall
+      POSTGRES_PASSWORD: ${PHOTO_WALL_DB_PASSWORD:?Run python3 scripts/configure.py first}
+    ports:
+      - "127.0.0.1:${PHOTO_WALL_DB_PORT:-54329}:5432"
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks:
+      default:
+        aliases: [photo-wall-database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U photo_wall -d photo_wall"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  central:
+    build:
+      context: .
+      target: central
+    environment:
+      PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
+      PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
+      PHOTO_WALL_MEDIA_ROOT: /var/lib/photo-wall/media
+      PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
+    ports:
+      - "127.0.0.1:${PHOTO_WALL_PORT:-8000}:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - media:/var/lib/photo-wall/media:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  worker:
+    build:
+      context: .
+      target: media-worker
+    environment:
+      PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
+    volumes:
+      - media:/var/lib/photo-wall/media
+      - connections:/etc/photo-wall/private
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    cpus: 2
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; from central.db import Database; from central.media_repository import MediaRepository; from contracts.time import SystemClock; h=MediaRepository(Database(os.environ['PHOTO_WALL_DATABASE_URL']),SystemClock()).health(); raise SystemExit(0 if h['worker_seen'] and time.time()-h['worker_seen']<35 else 1)"]
+      interval: 10s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+volumes:
+  database:
+  media:
+  connections:

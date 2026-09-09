@@ -1,0 +1,27 @@
+[Unit]
+Description=Watch the current stateless Photo Wall trial for sustained Player health
+Wants=photo-wall-player.service
+After=photo-wall-player.service
+OnFailure=photo-wall-trial-recovery.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3.12 -I -m appliance.updates watch-current
+TimeoutStartSec=200
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/photo-wall
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# Transport only: the inner archive preserves Linux filesystem metadata.
+FROM scratch
+COPY root.tar /os-base/root.tar
+COPY evidence.tar /os-base/evidence.tar
+COPY manifest.json /os-base/manifest.json
