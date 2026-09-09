@@ -44,7 +44,12 @@ jobs:
         id: base
         env:
           ARCHITECTURE: ${{ inputs.architecture }}
-          COMPARE_REVISION: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          # On a pull_request event github.event.before is the PR branch's
+          # PREVIOUS head, not a base commit; preferring it compares the media
+          # OS definition against itself and wrongly assumes the artifact is
+          # already published. Pin the PR comparison to base.sha; push events
+          # (base.sha empty) fall through to before, comparing to prior main.
+          COMPARE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           FORCE_PREPARE: ${{ inputs.prepare_base }}
           CAN_PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |

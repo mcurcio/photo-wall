@@ -46,9 +46,16 @@ jobs:
       - name: Compare declared image inputs with the previous revision
         id: definition
         env:
-          COMPARE_REVISION: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          # Compare against the branch this change lands on, never against an
+          # earlier commit of this same PR. On a pull_request event
+          # github.event.before is the PR branch's PREVIOUS head, so preferring
+          # it compares a definition against itself and wrongly infers that a
+          # base/builder artifact is already published (then fails closed on the
+          # missing pull). Pin the PR comparison to base.sha; only push events
+          # (base.sha empty) fall through to before, comparing to prior main.
+          COMPARE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           # A doc-only follow-up must still qualify substantive changes in the PR.
-          QUALIFICATION_REVISION: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          QUALIFICATION_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           FORCE_PREPARE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_base || false }}
         run: |
           force_args=()
