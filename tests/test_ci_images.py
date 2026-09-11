@@ -14,6 +14,8 @@ CONFIG = "sha256:" + "a" * 64
 DIGEST = "sha256:" + "b" * 64
 TAG = "ghcr.io/example/wall/appliance-base:definition-" + "c" * 64
 REF = TAG.split(":")[0] + "@" + DIGEST
+CANDIDATE_TAG = "ghcr.io/example/wall/appliance-base:candidate-" + "c" * 64
+CANDIDATE_REF = CANDIDATE_TAG.split(":")[0] + "@" + DIGEST
 BUILDER = "ghcr.io/example/wall/appliance-builder@" + DIGEST
 
 
@@ -145,12 +147,14 @@ def test_base_hit_never_runs_os_preparation_and_checks_builder(monkeypatch, tmp_
     monkeypatch.setattr(ci_images, "restore_base", lambda ref, out: calls.append((ref, out)))
     monkeypatch.setattr(ci_images, "run", lambda *a, **k: pytest.fail("no OS preparation"))
     monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": BUILDER})
-    result = ci_images.prepare_base(REPOSITORY, TAG, output, BUILDER, CONFIG, allow_build=False)
+    result = ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, output, BUILDER, CONFIG,
+                                    allow_build=False, publish=False)
     assert calls == [(REF, output)]
     assert result == {"image": REF, "built": "false"}
     monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": CONFIG})
     with pytest.raises(ci_images.ImageError, match="different immutable builder"):
-        ci_images.prepare_base(REPOSITORY, TAG, output, BUILDER, CONFIG, allow_build=False)
+        ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, output, BUILDER, CONFIG,
+                               allow_build=False, publish=False)
 
 
 def test_new_base_uses_networked_preparation_only_when_authorized(monkeypatch, tmp_path):
@@ -158,13 +162,61 @@ def test_new_base_uses_networked_preparation_only_when_authorized(monkeypatch, t
     monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
     monkeypatch.setattr(ci_images, "run", lambda command, **kw: calls.append(command) or b"")
     monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": BUILDER})
-    result = ci_images.prepare_base(REPOSITORY, TAG, tmp_path / "base", BUILDER, CONFIG,
-                                    allow_build=True)
+    result = ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, tmp_path / "base", BUILDER,
+                                    CONFIG, allow_build=True, publish=False)
     assert result == {"image": "", "built": "true"}
     assert len(calls) == 1
     assert "scripts.os_base" in calls[0]
     assert calls[0][-2:] == ["--builder-image", BUILDER]
     assert "scripts.build_ci_image" not in calls[0]
+
+
+def test_new_base_restores_from_unqualified_candidate_before_rebuilding(monkeypatch, tmp_path):
+    """base_key is a content identity: a prior unqualified build of the same
+    key is safe and reproducible to restore instead of rebuilding (~17min)."""
+    output = tmp_path / "base"
+    calls = []
+    def resolve(ref):
+        if ref == TAG:
+            return None
+        assert ref == CANDIDATE_TAG
+        return CANDIDATE_REF
+    monkeypatch.setattr(ci_images, "resolve", resolve)
+    monkeypatch.setattr(ci_images, "restore_base", lambda ref, out: calls.append((ref, out)))
+    monkeypatch.setattr(ci_images, "run", lambda *a, **k: pytest.fail("no OS preparation"))
+    monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": BUILDER})
+    result = ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, output, BUILDER, CONFIG,
+                                    allow_build=True, publish=True)
+    assert calls == [(CANDIDATE_REF, output)]
+    # Restoring an unqualified candidate must never be reported as the
+    # qualified artifact; only a green-boot-gated publish sets "image".
+    assert result == {"image": "", "built": "true"}
+
+
+def test_fresh_base_build_retains_an_unqualified_candidate_when_authorized(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
+    monkeypatch.setattr(ci_images, "run", lambda command, **kw: calls.append(command) or b"")
+    monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": BUILDER})
+    result = ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, tmp_path / "base", BUILDER,
+                                    CONFIG, allow_build=True, publish=True)
+    assert result == {"image": "", "built": "true"}
+    assert [cmd[:3] for cmd in calls][:2] == [
+        ["docker", "run", "--rm"], ["docker", "buildx", "build"],
+    ]
+    assert calls[-1] == ["docker", "push", CANDIDATE_TAG]
+
+
+def test_fork_candidate_base_build_does_not_write_registry(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
+    monkeypatch.setattr(ci_images, "run", lambda command, **kw: calls.append(command) or b"")
+    monkeypatch.setattr(os_base, "verify", lambda *args: {"builder_image": BUILDER})
+    result = ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, tmp_path / "base", BUILDER,
+                                    CONFIG, allow_build=True, publish=False)
+    assert result == {"image": "", "built": "true"}
+    assert len(calls) == 1
+    assert all(cmd[:2] != ["docker", "push"] for cmd in calls)
 
 
 def test_corrupt_pulled_base_does_not_fall_back_to_rebuild(monkeypatch, tmp_path):
@@ -175,8 +227,8 @@ def test_corrupt_pulled_base_does_not_fall_back_to_rebuild(monkeypatch, tmp_path
         raise os_base.BaseError("os_base_archive_hash")
     monkeypatch.setattr(os_base, "verify", corrupt)
     with pytest.raises(os_base.BaseError, match="archive_hash"):
-        ci_images.prepare_base(REPOSITORY, TAG, tmp_path / "base", BUILDER, CONFIG,
-                               allow_build=True)
+        ci_images.prepare_base(REPOSITORY, TAG, CANDIDATE_TAG, tmp_path / "base", BUILDER, CONFIG,
+                               allow_build=True, publish=False)
 
 
 def test_existing_definition_cannot_be_republished(monkeypatch, tmp_path):

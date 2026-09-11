@@ -115,12 +115,14 @@ def plan(repository: Path, compare: str, force: bool = False,
     }
 
 
-def reference(namespace: str, kind: str, identity: str) -> str:
+def reference(namespace: str, kind: str, identity: str, *, stage: str = "definition") -> str:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*", namespace):
         raise ImageError("expected a lowercase owner/repository registry namespace")
     if kind not in ("builder", "base", "media-system") or not re.fullmatch(r"[a-f0-9]{64}", identity):
         raise ImageError("invalid image identity")
-    return f"ghcr.io/{namespace}/appliance-{kind}:definition-{identity}"
+    if stage not in ("definition", "candidate"):
+        raise ImageError("invalid image stage")
+    return f"ghcr.io/{namespace}/appliance-{kind}:{stage}-{identity}"
 
 
 def resolve(ref: str) -> str | None:
@@ -202,21 +204,49 @@ def restore_base(ref: str, output: Path) -> None:
         run(["docker", "image", "rm", ref], timeout=120)
 
 
-def prepare_base(repository: Path, ref: str, output: Path, builder: str,
-                 builder_config: str, *, allow_build: bool) -> dict[str, str]:
+def publish_candidate(repository: Path, ref: str, bundle: Path) -> None:
+    """Retain a freshly built OS base under an explicitly UNQUALIFIED tag.
+
+    Unlike publish_base, this is never gated on a green boot and it may
+    overwrite an existing candidate: base_key is the definition's content
+    identity (scripts/os_base.py:definition_id), so any build tagged with a
+    given key is safe and reproducible to reuse in place of another. The
+    authoritative definition-<key> tag remains published only by
+    publish_base, after boot qualification, exactly as before.
+    """
+    run(["docker", "buildx", "build", "--builder", "default", "--load",
+         "--platform", "linux/arm64", "--label",
+         "org.opencontainers.image.source=https://github.com/" + "/".join(ref.split("/")[1:3]),
+         "--file",
+         str(repository / "appliance/Dockerfile.os-base"), "--tag", ref,
+         str(bundle)], timeout=1200)
+    run(["docker", "push", ref], timeout=1200)
+
+
+def prepare_base(repository: Path, ref: str, candidate_ref: str, output: Path, builder: str,
+                 builder_config: str, *, allow_build: bool, publish: bool) -> dict[str, str]:
     from scripts import os_base
     selected = select(ref, allow_build=allow_build)
     if selected is not None:
         restore_base(selected, output)
     else:
-        # Only this container can access APT; ordinary assembly uses --network none.
-        run(["docker", "run", "--rm", "--platform", "linux/arm64",
-             "--volume", f"{repository}:{repository}:ro",
-             "--volume", f"{output.parent}:{output.parent}",
-             "--workdir", str(repository), "--env", "PYTHONDONTWRITEBYTECODE=1",
-             builder_config, "python3.12", "-m", "scripts.os_base", "build",
-             "--repository", str(repository), "--output", str(output),
-             "--builder-image", builder], timeout=5400)
+        # base_key already permitted a build (select only returns None when
+        # allow_build is set); check for a prior UNQUALIFIED build of this
+        # exact key before repeating the ~17-minute fetch/extract/install.
+        candidate = resolve(candidate_ref)
+        if candidate is not None:
+            restore_base(candidate, output)
+        else:
+            # Only this container can access APT; ordinary assembly uses --network none.
+            run(["docker", "run", "--rm", "--platform", "linux/arm64",
+                 "--volume", f"{repository}:{repository}:ro",
+                 "--volume", f"{output.parent}:{output.parent}",
+                 "--workdir", str(repository), "--env", "PYTHONDONTWRITEBYTECODE=1",
+                 builder_config, "python3.12", "-m", "scripts.os_base", "build",
+                 "--repository", str(repository), "--output", str(output),
+                 "--builder-image", builder], timeout=5400)
+            if publish:
+                publish_candidate(repository, candidate_ref, output)
     # Final assembly independently verifies the bundle before extracting it.
     manifest = os_base.verify(output, os_base.definition(repository))
     if manifest["builder_image"] != builder:
@@ -289,8 +319,11 @@ def main() -> None:
                 else:
                     if not args.builder_image or not args.builder_config:
                         raise ImageError("immutable builder identities required")
-                    result = prepare_base(repository, ref, args.output, args.builder_image,
-                                          args.builder_config, allow_build=args.allow_build)
+                    candidate_ref = reference(args.namespace or "", kind, args.key or "",
+                                              stage="candidate")
+                    result = prepare_base(repository, ref, candidate_ref, args.output,
+                                          args.builder_image, args.builder_config,
+                                          allow_build=args.allow_build, publish=args.publish)
         emit(result)
     except (ValueError, OSError) as error:
         parser.exit(1, f"CI image selection failed: {error}\n")
