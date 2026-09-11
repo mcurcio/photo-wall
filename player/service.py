@@ -40,6 +40,7 @@ from contracts.models import (
 )
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
+from player.discovery import CentralDiscovery, NoDiscovery
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.output_discovery import discover_outputs, output_app_id
@@ -63,10 +64,29 @@ class StaleFeedback(ServiceError):
     pass
 
 
+def _validate_origin(value: str, *, allow_http: bool) -> None:
+    """Shared origin well-formedness check, for both configured and discovered origins."""
+    try:
+        parsed = urlsplit(value)
+        valid = (parsed.scheme in ("https", "http") and parsed.hostname
+                 and parsed.port != 0 and not parsed.username and not parsed.password
+                 and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
+                 and not any(c.isspace() or ord(c) < 32 for c in value)
+                 and "\\" not in value
+                 and (parsed.scheme != "http" or allow_http))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("one trusted HTTPS origin required")
+
+
 class PlayerConfig(Model):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
     schema_version: Literal[1] = Field(default=1, alias="schema")
-    central_origin: str = Field(max_length=2048)
+    # Absent by default (the flash baseline, 0008): an unconfigured player
+    # resolves its origin from a discovery provider at run time instead.
+    # When present, it is explicit and always wins over discovery.
+    central_origin: str | None = Field(default=None, max_length=2048)
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
     boot_context_file: str = Field(
@@ -79,17 +99,8 @@ class PlayerConfig(Model):
 
     @model_validator(mode="after")
     def trusted_origin(self):
-        try:
-            parsed = urlsplit(self.central_origin)
-            valid = (parsed.scheme in ("https", "http") and parsed.hostname
-                     and parsed.port != 0 and not parsed.username and not parsed.password
-                     and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
-                     and not any(c.isspace() or ord(c) < 32 for c in self.central_origin)
-                     and "\\" not in self.central_origin)
-        except ValueError:
-            valid = False
-        if not valid or (parsed.scheme == "http" and not self.allow_http):
-            raise ValueError("one trusted HTTPS origin required")
+        if self.central_origin is not None:
+            _validate_origin(self.central_origin, allow_http=self.allow_http)
         if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
             raise ValueError("absolute cache directory required")
         if not Path(self.boot_context_file).is_absolute():
@@ -245,7 +256,8 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext | None = None):
+                 boot_context: BootContext | None = None,
+                 discovery: CentralDiscovery = NoDiscovery()):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
@@ -262,6 +274,8 @@ class PlayerService:
         except OSError:
             self.boot_id = None
         self.boot_context = boot_context
+        self.discovery = discovery
+        self._discovered_origin: str | None = None
         self.cache = None
         self.executor = None
         self.registration: Registration | None = None
@@ -298,7 +312,28 @@ class PlayerService:
 
     @property
     def origin(self):
-        return self.config.central_origin.rstrip("/")
+        value = self.config.central_origin or self._discovered_origin
+        if value is None:
+            raise ServiceError("central_origin_unavailable")
+        return value.rstrip("/")
+
+    async def resolve_origin(self) -> str:
+        """Resolve the effective origin: explicit config always wins over discovery.
+
+        Discovery is consulted only when `central_origin` is unset (0008
+        precedence, closing the silent-hijack gap). A discovered origin may be
+        plain HTTP (T0, trusted-LAN baseline); `allow_http` continues to gate
+        only an *explicit* HTTP origin, unweakened. Raises `ServiceError` (not
+        a silent default) when neither an explicit nor a discovered origin is
+        available.
+        """
+        if self.config.central_origin is None:
+            discovered = await self.discovery.discover()
+            if not discovered:
+                raise ServiceError("central_origin_unavailable")
+            _validate_origin(discovered, allow_http=True)
+            self._discovered_origin = discovered
+        return self.origin
 
     def _headers(self, authenticated=True):
         headers = {"Accept-Encoding": "identity"}
@@ -759,6 +794,7 @@ class PlayerService:
                 session_started = None
                 try:
                     if self.registration is None:
+                        await self.resolve_origin()
                         await self.enroll()
                     # Reconnection reconciles authority before any download work.
                     await self.probe_time()
