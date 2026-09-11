@@ -11,10 +11,12 @@ import math
 import os
 import queue
 import re
+import secrets
 import signal
 import ssl
 import tempfile
 import threading
+import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -26,6 +28,7 @@ import httpx
 from pydantic import ConfigDict, Field, model_validator
 
 from contracts.enrollment import OutputReport
+from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.models import (
     Commit,
     Digest,
@@ -152,7 +155,10 @@ class BootContext(Model):
     boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
     release_id: str = Field(pattern=r"^[a-f0-9]{64}$")
     trial: bool
-    persistence: Literal["volatile"]
+    # "volatile": netboot (D1), written by appliance/bootstrap.py boot().
+    # "persistent": flashed (D0), synthesized by hardware_boot_context()
+    # below when no netboot boot context file is present.
+    persistence: Literal["volatile", "persistent"]
     fault: None = None
 
 
@@ -182,6 +188,88 @@ class Challenge(Model):
 def load_boot_context(path: Path) -> BootContext:
     with path.open("rb") as stream:
         return BootContext.model_validate(_json(stream.read(MAX_JSON + 1)))
+
+
+PI_SERIAL_PATH = Path("/sys/firmware/devicetree/base/serial-number")
+CPUINFO_PATH = Path("/proc/cpuinfo")
+
+
+def read_pi_serial() -> bytes | None:
+    """Raw Pi hardware serial, preferring the devicetree file (present on all
+    current Pi kernels) and falling back to the `Serial` line `/proc/cpuinfo`
+    exposes when it is not. Returns None when neither source exists (dev
+    machines, CI, non-Pi hardware) so callers can raise a clear error instead
+    of fabricating an identity.
+    """
+    try:
+        with PI_SERIAL_PATH.open("rb") as stream:
+            raw = stream.read(READ_CAP)
+        if raw:
+            return raw
+    except OSError:
+        pass
+    try:
+        with CPUINFO_PATH.open("rb") as stream:
+            for line in stream:
+                label, sep, value = line.partition(b":")
+                if sep and label.strip().lower() == b"serial":
+                    return value
+    except OSError:
+        pass
+    return None
+
+
+def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
+    """Flashed/D0 fallback for when no netboot boot context file exists.
+
+    Derives `device_id` from the Pi hardware serial using the SAME kind+hash
+    scheme as the netboot bootstrap (appliance/bootstrap.py LinuxOps.device_id,
+    kind="pi", via the shared contracts.equipment.equipment_device_id), so one
+    Pi keeps one device_id across tiers (0008: device_id is the immutable
+    serial).
+
+    ticket_id/release_id have no netboot-ticket source at D0 (there is no
+    boot server to issue one), so schema-valid placeholders are used here.
+    They are NOT verified as-is: central's enroll (central/registry.py:134)
+    calls release_authority.bind_session_in, which looks up the device's
+    `appliance_devices` row by device_id (central/releases.py `_device`) and
+    raises `device_not_found` when none exists. A flashed player has never
+    gone through netboot bootstrap, so that row does not exist yet -- a D0
+    player therefore CANNOT enroll until central accepts a ticketless serial
+    enrollment (auto-creating an unbound/pending record instead of requiring
+    a prior boot ticket). That acceptance is a separate central bead (0008
+    baseline; docs/decisions/0008-generic-image-and-serial-identity.md), not
+    part of this change. Boot-health / OS-release tracking for D0 is
+    likewise out of scope here.
+    """
+    try:
+        raw = serial_reader()
+    except OSError as error:
+        raise ServiceError("boot_equipment_identity") from error
+    device_id = equipment_device_id("pi", raw) if raw is not None else None
+    if device_id is None:
+        raise ServiceError("boot_equipment_identity")
+    return BootContext(
+        schema=2,
+        ticket_id=secrets.token_hex(24),
+        device_id=device_id,
+        boot_id=str(uuid.uuid4()),
+        release_id=secrets.token_hex(32),
+        trial=False,
+        persistence="persistent",
+        fault=None,
+    )
+
+
+def resolve_boot_context(path: Path, *,
+                         serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
+    """D1 (netboot): the boot server writes `path` before handing off to the
+    player service; use it verbatim, unmodified. D0 (flashed): no such file
+    exists, so derive an equivalent boot context from the Pi hardware serial.
+    """
+    if path.exists():
+        return load_boot_context(path)
+    return hardware_boot_context(serial_reader)
 
 
 @dataclass(frozen=True)
@@ -884,7 +972,7 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_config(args.config)
     identity = load_identity()
-    boot_context = load_boot_context(Path(config.boot_context_file))
+    boot_context = resolve_boot_context(Path(config.boot_context_file))
     discovery = discover_outputs()
     import gi
     gi.require_version("Gtk", "3.0")

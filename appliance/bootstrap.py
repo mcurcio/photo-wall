@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.release import (
     MAX_MANIFEST_BYTES,
     MAX_ROOTFS_BYTES,
@@ -305,15 +306,18 @@ class LinuxOps:
         # Pi firmware serial; DMI UUID and the explicit QEMU fixture observation
         # are equivalent fixed equipment identifiers.
         # Neither MAC/IP nor a freshly generated session key is equipment identity.
+        # Normalization + hash live in contracts.equipment so the flashed-image
+        # fallback (player/service.py hardware_boot_context) derives the SAME
+        # device_id for the SAME Pi (0008: device_id is the immutable serial).
         for kind, name in self.equipment_observations:
             try:
                 with Path(name).open("rb") as stream:
-                    raw = stream.read(257).strip(b"\x00\r\n ").lower()
-                if not raw or len(raw) > 256 or not re.fullmatch(rb"[a-z0-9-]+", raw):
-                    continue
-                return "device-" + hashlib.sha256(kind.encode() + b":" + raw).hexdigest()
+                    raw = stream.read(READ_CAP)
             except OSError:
                 continue
+            candidate = equipment_device_id(kind, raw)
+            if candidate is not None:
+                return candidate
         raise BootstrapError("boot_equipment_identity")
 
     def time_ready(self, server: str) -> None:
