@@ -30,7 +30,7 @@ class Identity:
         *,
         device_id: Identifier,
         boot_id: Identifier,
-        ticket_id: BootTicketId,
+        ticket_id: BootTicketId | None,
     ) -> Enrollment:
         signature = self._key.sign(
             enrollment_message(nonce, outputs, device_id, boot_id, ticket_id)

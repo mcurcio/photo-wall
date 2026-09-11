@@ -131,9 +131,14 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
-            self.release_authority.bind_session_in(
-                conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
-            )
+            # D0 (ticketless/flashed, 0008): no boot server ever issued a
+            # ticket, so there is no `appliance_devices` row and no release
+            # to bind -- the player enrolls unbound (pending) by serial
+            # alone. D1 (netboot) is unchanged: bind the real boot session.
+            if request.ticket_id is not None:
+                self.release_authority.bind_session_in(
+                    conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
+                )
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id, "ticket_id": request.ticket_id}),
                           player_id))

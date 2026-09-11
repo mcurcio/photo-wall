@@ -229,18 +229,15 @@ def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_se
     serial).
 
     ticket_id/release_id have no netboot-ticket source at D0 (there is no
-    boot server to issue one), so schema-valid placeholders are used here.
-    They are NOT verified as-is: central's enroll (central/registry.py:134)
-    calls release_authority.bind_session_in, which looks up the device's
-    `appliance_devices` row by device_id (central/releases.py `_device`) and
-    raises `device_not_found` when none exists. A flashed player has never
-    gone through netboot bootstrap, so that row does not exist yet -- a D0
-    player therefore CANNOT enroll until central accepts a ticketless serial
-    enrollment (auto-creating an unbound/pending record instead of requiring
-    a prior boot ticket). That acceptance is a separate central bead (0008
-    baseline; docs/decisions/0008-generic-image-and-serial-identity.md), not
-    part of this change. Boot-health / OS-release tracking for D0 is
-    likewise out of scope here.
+    boot server to issue one), so schema-valid placeholders are synthesized
+    here for `BootContext`'s own schema, but this `ticket_id` is NEVER sent
+    to central as if it were a real one: `enroll()` sends `ticket_id=None`
+    instead whenever `persistence == "persistent"` (m3-central-d0-enroll),
+    which is the explicit D0 signal central's enroll (central/registry.py)
+    branches on -- it skips the netboot release-binding entirely and enrolls
+    the player unbound (pending) by serial alone, with no prior boot ticket
+    required. Boot-health / OS-release tracking still has no ticket to
+    report against at D0 and remains out of scope here.
     """
     try:
         raw = serial_reader()
@@ -486,17 +483,33 @@ class PlayerService:
             raise ServiceError("boot_context")
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
+        # D0 (flashed/persistent) has no netboot-issued ticket -- central's own
+        # `appliance_devices` row would not exist for it -- so the boot
+        # context's `persistence`, not the synthesized placeholder ticket_id,
+        # is what tells central this is a ticketless enroll (0008 baseline).
+        ticket_id = (None if self.boot_context.persistence == "persistent"
+                    else self.boot_context.ticket_id)
         enrollment = self.identity.enrollment(
             challenge.nonce,
             self.outputs,
             device_id=self.boot_context.device_id,
             boot_id=self.boot_context.boot_id,
-            ticket_id=self.boot_context.ticket_id,
+            ticket_id=ticket_id,
         )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
         self.registration = registered
-        self.release_accepted = False
+        # D0 (flashed/persistent) has no central-issued boot ticket and no
+        # signed-release trial to report against -- `ticket_id` above is
+        # None, and boot-health's ticket lookup (central/releases.py
+        # health()) would 403 `stale_boot_ticket` on a ticket central never
+        # recorded (the synthesized placeholder in hardware_boot_context()).
+        # Treat the release as locally accepted so `_control_loop` never
+        # calls `_report_boot_health` for D0, and the player proceeds
+        # straight to a sustained running session. D1 (netboot/volatile)
+        # is unaffected: it still starts unaccepted and only flips true
+        # after the full boot-health trial, exactly as before.
+        self.release_accepted = self.boot_context.persistence == "persistent"
         with self._lock:
             self._offered = False
             self._jobs = ()

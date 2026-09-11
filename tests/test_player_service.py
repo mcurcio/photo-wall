@@ -72,6 +72,14 @@ def boot_context() -> BootContext:
     })
 
 
+def d0_boot_context() -> BootContext:
+    """m3-central-d0-enroll: flashed/ticketless (persistence="persistent").
+    ticket_id/release_id are the schema-valid placeholders `hardware_boot_context`
+    synthesizes (player/service.py); enroll() must derive the D0 signal from
+    `persistence`, never send the placeholder ticket_id as a real one."""
+    return boot_context().model_copy(update={"persistence": "persistent"})
+
+
 def test_identity_is_fresh_signed_and_never_written(tmp_path):
     state = private_dir(tmp_path / "state")
     first, second = load_identity(), load_identity()
@@ -291,6 +299,128 @@ def test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted(tmp_p
             await service.enroll()
             assert all(request.url.host == "central" for request in server.requests)
         finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
+    """The player derives the D0 signal from `boot_context.persistence`, not
+    a config toggle, and never leaks the synthesized placeholder ticket_id
+    (player/service.py hardware_boot_context) to central as if it were real."""
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=False,
+            health_path=None, boot_context=d0_boot_context())
+        try:
+            await service.enroll()
+            assert server.proofs[-1].ticket_id is None
+            assert server.proofs[-1].device_id == d0_boot_context().device_id
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_volatile_boot_context_enrolls_with_its_real_ticket_id_unchanged(tmp_path):
+    """Netboot (persistence="volatile") is byte-unchanged: the real ticket_id
+    still reaches central, exactly as before this bead."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            assert server.proofs[-1].ticket_id == boot_context().ticket_id
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_loop(
+        tmp_path, monkeypatch):
+    """m3-central-d0-enroll FIX: a D0/flashed player has no central-issued boot
+    ticket to report against -- boot-health would 403 `stale_boot_ticket` on the
+    synthesized placeholder ticket_id central never recorded (hardware_boot_context),
+    and the uncaught error tears down every sibling task via run()'s
+    FIRST_COMPLETED wait, restarting forever (never rendering/downloading/opening
+    a websocket). Drive the actual control loop through run() and assert the
+    session SURVIVES: the boot-health endpoint is never called, the websocket
+    loop connects exactly once (never torn down and reconnected by a crash
+    restart), and the media loop reaches and completes a real download."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        boot_health_calls, media_calls, connect_calls = [], [], []
+
+        def handle(request):
+            if request.url.path == "/v1/player/boot-health":
+                boot_health_calls.append(request)
+                # Central never recorded the D0 placeholder ticket: a real
+                # central would 403 any boot-health call from a D0 player.
+                return httpx.Response(403, json={"error": "stale_boot_ticket"})
+            if request.url.path.startswith("/v1/media/"):
+                media_calls.append(request)
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            return result
+
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False)
+
+        class Socket:
+            async def __aenter__(self):
+                connect_calls.append(True)
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                # A real session websocket stays open with no message due;
+                # only cancellation (test teardown) ever unblocks this.
+                await asyncio.Event().wait()
+
+        def connect(uri, **options):
+            return Socket()
+
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=connect,
+            health_path=None, boot_context=d0_boot_context())
+        task = asyncio.create_task(service.run())
+        try:
+            async def connected():
+                while not connect_calls:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(connected(), 3)
+
+            async def downloaded():
+                while not media_calls:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(downloaded(), 3)
+
+            # Give the control loop several more 0.5s cadences to prove it
+            # keeps running rather than looping the 403 into a task teardown
+            # and restart (m3-central-d0-enroll's crash-loop).
+            await asyncio.sleep(.2)
+            assert service.registration is not None
+            assert service.release_accepted is True
+            assert not boot_health_calls
+            assert connect_calls == [True]
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 3)
             await close(service)
     asyncio.run(check())
 

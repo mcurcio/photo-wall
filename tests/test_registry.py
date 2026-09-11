@@ -51,6 +51,90 @@ def frame(registry, frame_id="portrait"):
                                                           diagonal_inches=24)))
 
 
+def enroll_d0(registry, key=None, count=2, device_id=None):
+    """m3-central-d0-enroll: a flashed/ticketless enroll (0008 baseline) --
+    unlike `enroll` above, this NEVER calls `select_boot`, so no
+    `appliance_devices` row exists for the device; `ticket_id=None` is the
+    explicit D0 signal (contracts/enrollment.py)."""
+    key = key or Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw().hex()
+    device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    boot_id = str(uuid.uuid4())
+    nonce = registry.challenge(public)["nonce"]
+    outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
+                    for i in range(count))
+    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
+                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, device_id, boot_id, None))).decode())
+    return registry.enroll(request), key, request
+
+
+def test_d0_ticketless_enroll_succeeds_and_creates_an_unbound_pending_record(registry):
+    identity, _, request = enroll_d0(registry)
+    assert request.ticket_id is None
+    assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
+    by_id = {p.id: p for p in registry.inventory().players}
+    assert by_id[identity["player_id"]].device_id == request.device_id
+    assert by_id[identity["player_id"]].is_bound is False
+    assert by_id[identity["player_id"]].retired_at is None
+    pending_ids = [p.id for p in registry.inventory().players if p.retired_at is None and not p.is_bound]
+    assert pending_ids == [identity["player_id"]]
+
+
+def test_d0_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
+    identity, _, request = enroll_d0(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    rebooted, _, _ = enroll_d0(registry, device_id=request.device_id)
+    assert rebooted["player_id"] == identity["player_id"]
+    assert rebooted["authority_epoch"] == identity["authority_epoch"] + 1
+    inventory = registry.inventory()
+    assert len(inventory.players) == 1
+    assert {p.id: p for p in inventory.players}[identity["player_id"]].is_bound is True
+    assert len(registry.configuration_for(rebooted["player_id"], rebooted["authority_epoch"])
+               ["execution_bindings"]) == 1
+
+
+def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(registry):
+    # A Frame already exists at enroll time, so the D0 branch has something
+    # it COULD (wrongly) auto-bind to -- the assertions below must catch that.
+    # Cross-player: a SECOND D0 player is bound to the Frame with a real,
+    # committed (calibration_valid) execution binding. Without this second
+    # player, an empty result is indistinguishable from a broken
+    # `configuration_in` scope (central/registry.py `WHERE b.player_id=%s`)
+    # that returns nothing for ANY player -- this bites that leak instead.
+    frame(registry)
+    identity, _, _ = enroll_d0(registry)
+    bound_identity, _, _ = enroll_d0(registry)
+    registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
+    assert len(bound_config["execution_bindings"]) == 1
+    assert registry.bindings_for(identity["player_id"], identity["authority_epoch"]) == []
+    config = registry.configuration_for(identity["player_id"], identity["authority_epoch"])
+    assert config["bindings"] == [] and config["execution_bindings"] == []
+
+
+def test_d0_retired_serial_is_refused_reenrollment(registry):
+    identity, _, request = enroll_d0(registry)
+    registry.retire(identity["player_id"])
+    with pytest.raises(RegistryError, match="retired"):
+        enroll_d0(registry, device_id=request.device_id)
+
+
+def test_d0_enroll_never_touches_appliance_devices(registry):
+    """Distinguishes the D0 branch from netboot: no boot-ticket bookkeeping
+    row is created for a serial that never went through select_boot."""
+    identity, _, request = enroll_d0(registry)
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT 1 FROM appliance_devices WHERE device_id=%s",
+                           (request.device_id,)).fetchone()
+    assert row is None
+    assert identity["player_id"]
+
+
 def test_registration_precedes_binding_proof_replay_and_token_rotation(registry):
     identity, key, request = enroll(registry)
     assert registry.inventory().frames == ()
