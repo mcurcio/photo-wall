@@ -18,7 +18,8 @@ Land loop per `~/.claude/skills/implementation-workflow/SKILL.md`: implement →
 | m3-hardware-serial | M3 flash image | player | medium | closed | ee0396d |
 | m3-central-d0-enroll | M3 flash image (tracer completion) | contracts+player+central | authz trust-boundary — reviewed | closed | ad876b5 |
 | m3-flash-image | M3 flash image | appliance | infra — CI/hardware gate | landed (CI pending) | 5241f6e |
-| baseline-docs | all | docs | low | open | — |
+| baseline-docs | all | docs | low | closed | 6374db8 |
+| ci-fixes-1 | integration | player+central+tests | boot-path | closed | a12a79d |
 
 Status values: open · in_progress · blocked (wip branch) · closed.
 
@@ -40,6 +41,15 @@ but it MUST land before the baseline PR merges (implementation-workflow §3.7).
   adversarial authz review clean; verifier confirmed 3 mutation probes bite +
   a session-survives-unbind regression test. Errata: 2 entries (epoch-vs-generation
   wording; `is_bound` defaulted non-required) — both benign, see `.claude/errata.md`.
+- **First CI run on PR #3 red on all three workflows; fixed in `a12a79d`.** (1) appliance
+  `prepare_image` smoke-test pulled `zeroconf` via a module-top import → made lazy; (2) mDNS
+  unit tests discovered the real compose central on CI's Docker bridge → unique per-test
+  service types; (3) e2e startup timed out because central awaited mDNS advertising before
+  readiness → moved to a background task. All local gates green (1538 passed); re-running CI.
+
+## Residuals (follow-up, not blocking)
+- Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
+  even for a D0/persistent player — telemetry-only inaccuracy; docs describe actual behavior.
 
 ## Errata
 Append-only spec contradictions found during implementation live in `.claude/errata.md`.
