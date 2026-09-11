@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_coordination import setup_players
-from test_registry import ADMIN
+from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.media_ports import SourceConfigurationReceipt
@@ -50,6 +50,29 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
             assert granted["commits"][0]["readiness_sequence"] == 1
             assert set(granted["commits"][0]["assignment_ids"]) == set(due)
         assert client.delete("/v1/operator/programs/evening", headers=operator).status_code == 200
+
+
+def test_operator_unbind_endpoint_reverses_binding_and_updates_pending_queue(registry):
+    player, _, _ = enroll(registry)
+    app = create_app(registry.db, registry.clock, ADMIN)
+    operator = {"Authorization": "Bearer " + ADMIN}
+    with TestClient(app) as client:
+        frame = {"id": "portrait", "width_mm": 300, "height_mm": 500,
+                 "profile": {"width_px": 1080, "height_px": 1920, "diagonal_inches": 24}}
+        assert client.post("/v1/operator/frames", json=frame, headers=operator).status_code == 201
+        binding = {"player_id": player["player_id"], "output_id": "HDMI-A-1", "expected_generation": 0}
+        assert client.put("/v1/operator/frames/portrait/binding", json=binding, headers=operator).status_code == 200
+        inventory = client.get("/v1/operator/inventory", headers=operator).json()
+        assert next(p for p in inventory["players"] if p["id"] == player["player_id"])["is_bound"] is True
+        response = client.request("DELETE", "/v1/operator/frames/portrait/binding",
+                                  json={"expected_generation": 1}, headers=operator)
+        assert response.status_code == 200 and response.json()["generation"] == 2
+        inventory = client.get("/v1/operator/inventory", headers=operator).json()
+        assert next(p for p in inventory["players"] if p["id"] == player["player_id"])["is_bound"] is False
+        assert inventory["frames"][0]["player_id"] is None
+        again = client.request("DELETE", "/v1/operator/frames/portrait/binding",
+                               json={"expected_generation": 2}, headers=operator)
+        assert again.status_code == 404 and again.json()["error"] == "not_bound"
 
 
 def test_live_session_rejects_retired_or_wrong_epoch_authority(registry):

@@ -60,6 +60,10 @@ class BindingRequest(Model):
     expected_generation: int = Field(ge=0)
 
 
+class UnbindRequest(Model):
+    expected_generation: int = Field(ge=0)
+
+
 class CalibrationRequest(Model):
     operation: Literal["preview", "commit", "revert"]
     expected_revision: int = Field(ge=1)
@@ -547,6 +551,10 @@ def create_app(
             binding.output_id,
             expected_generation=binding.expected_generation,
         )
+
+    @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
+    def unbind(frame_id: Identifier, request: UnbindRequest):
+        return registry.unbind(frame_id, expected_generation=request.expected_generation)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration", dependencies=[Depends(admin)])
     def calibrate(frame_id: Identifier, request: CalibrationRequest):
