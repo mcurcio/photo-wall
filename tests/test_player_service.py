@@ -493,16 +493,44 @@ def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypa
     async def check():
         discovery = LateDiscovery("http://central")
         service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        # Offer a real plan the instant the late-discovered enroll completes
+        # (mirrors the `server.offer()`-on-register idiom already used above
+        # at line ~392 and ~1128). Without this, poll_state() has nothing to
+        # serve, so run()'s per-iteration task list stays empty every cycle
+        # (poll_state() faults before the control/media/time/observation
+        # tasks are ever created) and the retry loop spins at
+        # BACKOFF[0]==.001s -- racing service.stop()'s scheduled
+        # `self._task.cancel()` against the loop's own cooperative
+        # `_stop.is_set()` recheck. When the loop's own recheck wins, run()
+        # exits its `while` normally (no CancelledError, so run()'s
+        # `except asyncio.CancelledError: pass` never engages) and proceeds
+        # into the *unguarded* shutdown `finally:` -- and the still-pending,
+        # already-scheduled `task.cancel()` can then land on the
+        # `run_in_executor(self._worker, self.cache.close)` await there,
+        # propagating an uncaught CancelledError out of the task. That is
+        # exactly what CI saw at `await asyncio.wait_for(task, 10)`, after
+        # faults `central_origin_unavailable` then `connection_failed` (the
+        # server had no state to hand back). Reaching the real, long-lived
+        # `asyncio.wait(tasks, FIRST_COMPLETED)` steady state -- the same
+        # single stable cancellation point every other run()-driven test in
+        # this file relies on -- removes the race instead of tolerating it.
+        steady = asyncio.Event()
+
+        def handle(request):
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            if request.url.path == "/v1/player/readiness":
+                # Only sent from `_control_loop`, i.e. only once run() has
+                # created the steady-state tasks and is blocked on them.
+                steady.set()
+            return result
+        await service.client.aclose()
+        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.time_client = service.client
         task = asyncio.create_task(service.run())
         try:
-            async def enrolled():
-                while service.registration is None:
-                    await asyncio.sleep(.01)
-            # More tolerant than this file's usual 3s bound: run() here
-            # drives 5 concurrent sub-loops through a real reconnect/re-
-            # enroll cycle, so teardown legitimately takes longer under
-            # host load than the simpler single-pass tests elsewhere.
-            await asyncio.wait_for(enrolled(), 10)
+            await asyncio.wait_for(steady.wait(), 10)
             assert discovery.calls >= 2
             assert service.registration is not None
             assert all(request.url.host == "central" for request in server.requests)
