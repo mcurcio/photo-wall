@@ -1062,7 +1062,7 @@ def verify_initramfs(contents: bytes) -> None:
     required = {"usr/bin/python3.12", "scripts/photowall", "etc/photo-wall/boot-policy.json"}
     prefix = "usr/lib/python3.12/"
     modules = {"appliance/__init__.py", "appliance/bootstrap.py", "appliance/updates.py",
-               "contracts/__init__.py", "contracts/release.py"}
+               "contracts/__init__.py", "contracts/release.py", "contracts/equipment.py"}
     required.update(prefix + name for name in modules)
     if not required <= paths:
         raise BuildError("initramfs_incomplete")
