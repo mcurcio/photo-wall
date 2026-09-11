@@ -2,6 +2,8 @@
 
 Status: bounded service contract and tftpd-hpa mapping implemented, 2026-09-05. This module supplies one public boot tree to every supported Player. It does not qualify a physical Raspberry Pi boot, a broadcast LAN, DHCP ownership, or EEPROM configuration.
 
+**This is the D1 netboot enhancement, not the baseline.** The [0008 baseline](decisions/0008-generic-image-and-serial-identity.md) is **D0**: flash the generic image to SD/USB and boot — no boot server, no TFTP, no DHCP changes required (see the [README](../README.md#provision-player-appliances) and the [flash-and-go runbook path](runbook.md#player-provisioning-flash-and-go)). Netboot trades that flash step for the boot-server infrastructure documented here, in exchange for stateless RAM-root delivery. Identity (hardware serial) and enrollment work the same way on both delivery tiers once the Player process starts; this module owns only how the OS itself reaches the Pi.
+
 ## Design
 
 ### Responsibility
