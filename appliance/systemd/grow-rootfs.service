@@ -1,0 +1,15 @@
+[Unit]
+Description=Grow the Photo Wall flash root filesystem to fill the SD/USB card (D0 first boot)
+After=local-fs.target
+Before=photo-wall-player.service
+ConditionPathExists=!/etc/photo-wall/.grown
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/photo-wall/grow-rootfs.sh
+TimeoutStartSec=120
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

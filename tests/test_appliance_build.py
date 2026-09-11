@@ -13,20 +13,25 @@ import pytest
 
 from appliance.build import (
     MIB,
+    SECTOR,
     BuildError,
     Partition,
     boot_abi,
     checked_file,
+    configure_root_generic,
     create_disk,
     decompress_base,
     execution_inventory,
     export_source,
     finalize,
+    flash_cmdline,
+    flash_fstab,
     install_runtime_packages,
     inventory,
     manifest,
     mbr,
     outside_git,
+    partuuid,
     profile_firmware,
     read_mbr,
     run,
@@ -388,6 +393,113 @@ def test_pi_firmware_profile_keeps_link_closure_and_records_removed_bytes(tmp_pa
         profile_firmware(root, evidence)
 
 
+def test_flash_partition_table_roundtrip_fat_boot_and_ext4_root(tmp_path):
+    boot = Partition(0x0C, 2048, 512 * MIB // SECTOR)
+    root = Partition(0x83, boot.start + boot.sectors, 2048 * MIB // SECTOR)
+    path = tmp_path / "flash.img"
+    with path.open("wb") as stream:
+        stream.write(mbr((boot, root), b"test"))
+        stream.truncate((root.start + root.sectors) * SECTOR)
+    assert read_mbr(path) == (boot, root)
+    assert [partition.kind for partition in read_mbr(path)] == [0x0C, 0x83]
+    assert boot.start + boot.sectors == root.start
+    # Deterministic: the same partitions + disk id always produce the same table.
+    assert mbr((boot, root), b"test") == mbr((boot, root), b"test")
+
+
+def test_flash_partition_table_rejects_single_partition_as_flash_layout(tmp_path):
+    # Mutation-probe control: a netboot-shaped single-FAT-partition table must
+    # NOT satisfy the flash (2-partition) expectation this suite checks above.
+    boot = Partition(0x0C, 2048, 512 * MIB // SECTOR)
+    path = tmp_path / "single.img"
+    with path.open("wb") as stream:
+        stream.write(mbr((boot,), b"test"))
+        stream.truncate((boot.start + boot.sectors) * SECTOR)
+    assert read_mbr(path) != (boot, Partition(0x83, boot.start + boot.sectors, 2048))
+    assert len(read_mbr(path)) == 1
+
+
+def test_partuuid_is_deterministic_little_endian_disk_signature():
+    disk_id = bytes.fromhex("deadbeef")
+    assert partuuid(disk_id, 1) == "efbeadde-01"
+    assert partuuid(disk_id, 2) == "efbeadde-02"
+    assert partuuid(disk_id, 2) == partuuid(disk_id, 2)
+    with pytest.raises(BuildError, match="partuuid_invalid"):
+        partuuid(disk_id, 5)
+    with pytest.raises(BuildError, match="partuuid_invalid"):
+        partuuid(b"short", 1)
+
+
+def test_flash_cmdline_references_partuuid_root_with_no_netboot_ram_hook():
+    cmdline = flash_cmdline("efbeadde-02").decode()
+    assert "root=PARTUUID=efbeadde-02" in cmdline
+    assert "rootfstype=ext4" in cmdline
+    assert "boot=photowall" not in cmdline
+    assert "root=/dev/ram0" not in cmdline
+    with pytest.raises(BuildError, match="partuuid_invalid"):
+        flash_cmdline("not-a-partuuid")
+
+
+def test_flash_fstab_mounts_root_and_boot_by_partuuid():
+    fstab = flash_fstab("efbeadde-02", "efbeadde-01").decode()
+    assert "PARTUUID=efbeadde-02  /               ext4" in fstab
+    assert "PARTUUID=efbeadde-01  /boot/firmware  vfat" in fstab
+    with pytest.raises(BuildError, match="partuuid_invalid"):
+        flash_fstab("bad", "efbeadde-01")
+
+
+def test_configure_root_generic_bakes_only_release_key_and_drops_netboot_wiring(tmp_path, monkeypatch):
+    project = Path(__file__).resolve().parents[1]
+    root = tmp_path / "root"
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/bin/python3.12").write_bytes(b"python")
+    (root / "etc").mkdir()
+    (root / "etc/os-release").write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    (root / "etc/passwd").write_text("root:x:0:0::/root:/bin/bash\n")
+    (root / "etc/group").write_text("video:x:44:\nrender:x:104:\ninput:x:105:\n")
+    (root / "etc/netplan").mkdir(parents=True)
+    (root / "etc/systemd/system").mkdir(parents=True)
+    (root / "tmp").mkdir()
+
+    wheelhouse = tmp_path / "wheelhouse"
+    (wheelhouse / "wheels").mkdir(parents=True)
+    (wheelhouse / "requirements.txt").write_bytes(b"")
+
+    release_pub = tmp_path / "release.pub.pem"
+    release_pub.write_bytes(b"-----BEGIN PUBLIC KEY-----\nfixture\n-----END PUBLIC KEY-----\n")
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    def fake_in_root(_root, *argv, **_kwargs):
+        if argv[:1] == ("/opt/photo-wall/venv/bin/python",) and "weston_ini" in argv[-1]:
+            return b"[core]\n"
+        return b"[]"
+
+    monkeypatch.setattr("appliance.build.in_root", fake_in_root)
+
+    configure_root_generic(root, project, wheelhouse, release_pub, evidence)
+
+    config_dir = root / "etc/photo-wall"
+    assert {path.name for path in config_dir.iterdir()} == {
+        "release.pub.pem", "public.json", "grow-rootfs.sh"}
+    assert config_dir.joinpath("release.pub.pem").read_bytes() == release_pub.read_bytes()
+    public = json.loads(config_dir.joinpath("public.json").read_bytes())
+    assert public == {"schema": 1}
+    assert "central_origin" not in public
+    assert "bootstrap.json" not in {path.name for path in config_dir.iterdir()}
+    assert "ca.pem" not in {path.name for path in config_dir.iterdir()}
+
+    units = {path.name for path in (root / "etc/systemd/system").iterdir() if path.is_file()}
+    assert units == {"photo-wall-weston.service", "photo-wall-player.service",
+                     "photo-wall-grow-rootfs.service"}
+    wants = {path.name for path in (root / "etc/systemd/system/multi-user.target.wants").iterdir()}
+    assert wants == units
+    assert "photo-wall-accept-trial.service" not in wants
+    assert "photo-wall-trial-recovery.service" not in wants
+    assert not (root / "etc/fstab").exists()
+
+
 linux_tools = pytest.mark.skipif(
     sys.platform != "linux" or os.environ.get("PHOTO_WALL_IMAGE_TOOL_TESTS") != "1",
     reason="explicit disposable Linux file-tooling fixture required")
@@ -461,3 +573,42 @@ def test_real_guestfs_metadata_preserving_extraction(tmp_path):
     assert os.getxattr(content, "user.photo-wall") == b"preserved"
     assert os.getxattr(content, "security.capability") == os.getxattr(file, "security.capability")
     shutil.rmtree(restored)
+
+
+@linux_tools
+def test_real_flash_two_partition_disk_assembly_and_verify(tmp_path):
+    """CI arm64 builder only -- UNVERIFIED on this host (no root, no
+    mkfs.vfat/mkfs.ext4/guestfs). Gated exactly like the real-build tests
+    above: skipped unless sys.platform == "linux" and
+    PHOTO_WALL_IMAGE_TOOL_TESTS=1, which only the CI job sets.
+
+    Exercises the real disk-assembly path `configure_root_generic` alone
+    cannot: `create_disk_flash`'s mkfs.vfat + mkfs.ext4 population of a real
+    2-partition MBR image, and `verify_disk_flash`'s guestfs reopen of both
+    partitions against the exact source trees.
+    """
+    from appliance.build import create_disk_flash, verify_disk_flash
+
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "config.txt").write_bytes(b"generated boot configuration\n")
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc/os-release").write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/bin/init").write_bytes(b"fixture init")
+    output = tmp_path / "flash.img"
+
+    report = create_disk_flash(boot, root, output, fat_mib=64, source_epoch=1_700_000_000)
+
+    assert [partition["kind"] for partition in report["partitions"]] == [0x0C, 0x83]
+    cmdline = (boot / "cmdline.txt").read_text()
+    assert cmdline.count("root=PARTUUID=") == 1
+    assert "boot=photowall" not in cmdline
+    fstab = (root / "etc/fstab").read_text()
+    assert report["root_partuuid"] in fstab
+    assert report["boot_partuuid"] in fstab
+    verify_disk_flash(output, boot, root)
+    (root / "usr/bin/init").write_bytes(b"changed outside the signed disk")
+    with pytest.raises(BuildError, match="disk_root_mismatch"):
+        verify_disk_flash(output, boot, root)

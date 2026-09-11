@@ -278,6 +278,140 @@ def create_disk(boot_tree: Path, destination: Path, *,
         raise
 
 
+def partuuid(disk_id: bytes, index: int) -> str:
+    """MBR PARTUUID string (`<little-endian disk signature hex>-<01..04>`),
+    exactly what Linux exposes for a DOS partition table entry. Deterministic
+    from the same `disk_id`/`index` used to write the MBR itself, so a flash
+    image's `cmdline.txt`/`fstab` can reference a partition before the device
+    exists.
+    """
+    if type(disk_id) is not bytes or len(disk_id) != 4 or type(index) is not int or not 1 <= index <= 4:
+        raise BuildError("partuuid_invalid")
+    return f"{struct.unpack('<I', disk_id)[0]:08x}-{index:02d}"
+
+
+_PARTUUID = re.compile(r"[0-9a-f]{8}-0[1-4]")
+
+
+def flash_cmdline(root_partuuid: str) -> bytes:
+    """Stock-initramfs kernel command line for the generic flash image (0008
+    decision 4): boots the populated ext4 root directly by PARTUUID. Unlike
+    the netboot `cmdline.txt` `prepare()` writes, there is no `boot=photowall`
+    hook, no RAM disk, and no bespoke initramfs to trigger it.
+    """
+    if type(root_partuuid) is not str or not _PARTUUID.fullmatch(root_partuuid):
+        raise BuildError("partuuid_invalid")
+    return (
+        f"ip=dhcp root=PARTUUID={root_partuuid} rootfstype=ext4 rootwait fsck.repair=yes rw "
+        "console=tty3 quiet loglevel=3 vt.global_cursor_default=0 logo.nologo panic=10 "
+        "watchdog_core.nowayout=1 bcm2835_wdt.nowayout=1\n"
+    ).encode()
+
+
+def flash_fstab(root_partuuid: str, boot_partuuid: str) -> bytes:
+    """Real `/etc/fstab` for the generic flash image: both partitions are
+    mounted by PARTUUID, matching `flash_cmdline`'s root reference. Replaces
+    the RAM-root placeholder comment `configure_root`/`configure_root_generic`
+    never write for this build (there is no netboot RAM root here).
+    """
+    if any(type(value) is not str or not _PARTUUID.fullmatch(value)
+           for value in (root_partuuid, boot_partuuid)):
+        raise BuildError("partuuid_invalid")
+    return (
+        "# Generated for the generic flash image (0008 D0). The root filesystem\n"
+        "# is grown to fill the card by photo-wall-grow-rootfs.service on first boot.\n"
+        f"PARTUUID={root_partuuid}  /               ext4  defaults,noatime  0  1\n"
+        f"PARTUUID={boot_partuuid}  /boot/firmware  vfat  defaults,umask=0077  0  2\n"
+    ).encode()
+
+
+def create_disk_flash(boot_tree: Path, root_tree: Path, destination: Path, *,
+                      fat_mib: int = 256, source_epoch: int) -> dict:
+    """Generate a 2-partition (FAT boot + ext4 root) generic flash `.img`.
+
+    Unlike `create_disk` (single FAT boot partition holding a squashfs root
+    fetched separately at boot), this writes the FULL customized root tree
+    onto its own ext4 partition: the flash baseline (0008 D0) has persistent
+    storage and boots straight from it, with no RAM-root indirection. Never
+    accepts an existing device/path -- only ever creates a new regular file,
+    mirroring `create_disk`'s discipline. Does not alter `create_disk` or its
+    behavior; netboot images are unaffected.
+
+    The disk signature (and so the PARTUUIDs baked into `cmdline.txt`/
+    `fstab`) is derived from every OTHER file's content, so writing those two
+    generated files afterward cannot change the identifier they reference.
+    """
+    outside_git(destination)
+    if (type(source_epoch) is not int or not 315532800 <= source_epoch <= 2**31 - 1
+            or type(fat_mib) is not int or not 64 <= fat_mib <= 2048):
+        raise BuildError("disk_limits")
+    boot_files = inventory(boot_tree, maximum_files=10_000, maximum_bytes=fat_mib * MIB)
+    if not boot_files or any("symlink" in value for value in boot_files.values()):
+        raise BuildError("boot_tree_invalid")
+    if sum(value["size"] for value in boot_files.values()) > fat_mib * MIB * 0.8:
+        raise BuildError("boot_partition_full")
+    root_files = inventory(root_tree, maximum_files=200_000, maximum_bytes=MAX_RAW_BYTES)
+    if not root_files:
+        raise BuildError("root_tree_invalid")
+    if destination.exists() or destination.is_symlink():
+        raise BuildError("output_exists")
+    if os.geteuid() != 0:
+        raise BuildError("disk_owner_required")
+    fingerprint = canonical({"boot": {k: v for k, v in boot_files.items() if k != "cmdline.txt"},
+                            "root": {k: v for k, v in root_files.items() if k != "etc/fstab"}})
+    disk_id = hashlib.sha256(fingerprint).digest()[:4]
+    boot_partuuid, root_partuuid = partuuid(disk_id, 1), partuuid(disk_id, 2)
+    (boot_tree / "cmdline.txt").write_bytes(flash_cmdline(root_partuuid))
+    (root_tree / "etc/fstab").parent.mkdir(parents=True, exist_ok=True)
+    (root_tree / "etc/fstab").write_bytes(flash_fstab(root_partuuid, boot_partuuid))
+    root_bytes = sum(value.get("size", 0) for value in root_files.values())
+    root_mib = max(1536, -(-root_bytes // MIB) + 512)
+    if root_mib > 12 * 1024:
+        raise BuildError("root_partition_too_large")
+    boot = Partition(0x0C, 2048, fat_mib * MIB // SECTOR)
+    root_partition = Partition(0x83, boot.start + boot.sectors, root_mib * MIB // SECTOR)
+    environment = dict(os.environ, SOURCE_DATE_EPOCH=str(source_epoch),
+                       E2FSPROGS_FAKE_TIME=str(source_epoch), TZ="UTC")
+    created = False
+    try:
+        with tempfile.TemporaryDirectory(prefix=".disk-", dir=destination.parent) as scratch:
+            temp = Path(scratch)
+            fat = temp / "boot.fat"
+            with fat.open("xb") as stream:
+                stream.truncate(boot.sectors * SECTOR)
+            run(["mkfs.vfat", "--invariant", "-F", "32", "-n", "PWBOOT", str(fat)], env=environment)
+            for path in sorted(boot_tree.iterdir()):
+                run(["mcopy", "-s", "-p", "-m", "-i", str(fat), str(path), "::/"], env=environment)
+            ext4 = temp / "root.ext4"
+            with ext4.open("xb") as stream:
+                stream.truncate(root_partition.sectors * SECTOR)
+            run(["mkfs.ext4", "-F", "-q", "-L", "photowall-root", "-U", "clear",
+                "-d", str(root_tree), str(ext4)], env=environment, timeout=1800)
+            with destination.open("xb") as target:
+                created = True
+                target.truncate((root_partition.start + root_partition.sectors) * SECTOR)
+                target.write(mbr((boot, root_partition), disk_id))
+                for partition, file in ((boot, fat), (root_partition, ext4)):
+                    target.seek(partition.start * SECTOR)
+                    with file.open("rb") as source:
+                        shutil.copyfileobj(source, target, MIB)
+                target.flush()
+                os.fsync(target.fileno())
+            if read_mbr(destination) != (boot, root_partition):
+                raise BuildError("disk_verify")
+            # Reopen the completed disk through a read-only file-backed appliance,
+            # bounded by one deadline, exactly as create_disk's self-verify does.
+            run([sys.executable, "-m", "appliance.build", "verify-disk-flash", str(destination),
+                str(boot_tree), str(root_tree)], timeout=1800)
+            return dict(checked_file(destination, 20 * 1024**3),
+                        partitions=[vars(boot), vars(root_partition)],
+                        boot_partuuid=boot_partuuid, root_partuuid=root_partuuid)
+    except BaseException:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
 def _guest_inventory(guest, directory: str) -> dict:
     actual, total = {}, 0
     entries = guest.find(directory)
@@ -360,6 +494,43 @@ def verify_disk(image: Path, boot_tree: Path) -> None:
         guest.mount_ro(boots[0], "/")
         if _guest_inventory(guest, "/") != expected:
             raise BuildError("disk_boot_mismatch")
+        guest.umount_all()
+        guest.shutdown()
+    finally:
+        guest.close()
+
+
+def verify_disk_flash(image: Path, boot_tree: Path, root_tree: Path) -> None:
+    """Reopen the exact flash boot+root partitions (FAT boot + ext4 root,
+    0008 D0). Unlike `verify_disk` (exactly one vfat partition and NO second
+    partition, unchanged by this function), a flash image is intentionally
+    two partitions and the ext4 one holds the full customized root tree, not
+    a squashfs fetched later.
+    """
+    import guestfs
+
+    partitions = read_mbr(image)
+    if len(partitions) != 2 or tuple(partition.kind for partition in partitions) != (0x0C, 0x83):
+        raise BuildError("disk_verify")
+    expected_boot = inventory(boot_tree, maximum_files=10_000, maximum_bytes=2 * 1024**3)
+    expected_root = inventory(root_tree, maximum_files=200_000, maximum_bytes=MAX_RAW_BYTES)
+    guest = guestfs.GuestFS(python_return_dict=True)
+    try:
+        guest.set_memsize(1024)
+        guest.add_drive_opts(str(image), readonly=True, format="raw")
+        guest.launch()
+        filesystems = guest.list_filesystems()
+        boots = [device for device, kind in filesystems.items() if kind == "vfat"]
+        roots = [device for device, kind in filesystems.items() if kind == "ext4"]
+        if len(boots) != 1 or len(roots) != 1 or len(filesystems) != 2:
+            raise BuildError("disk_verify")
+        guest.mount_ro(boots[0], "/")
+        if _guest_inventory(guest, "/") != expected_boot:
+            raise BuildError("disk_boot_mismatch")
+        guest.umount_all()
+        guest.mount_ro(roots[0], "/")
+        if _guest_inventory(guest, "/") != expected_root:
+            raise BuildError("disk_root_mismatch")
         guest.umount_all()
         guest.shutdown()
     finally:
@@ -672,6 +843,124 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
     if obsolete_state.exists() and list(obsolete_state.iterdir()):
         raise BuildError("common_state_not_empty")
     return config_hash
+
+
+def configure_root_generic(root: Path, source: Path, wheelhouse: Path, release_pub: Path,
+                           evidence: Path) -> None:
+    """Bake a fully generic flash root (0008 decision 4).
+
+    The ONLY project-wide customization is `release.pub.pem`, byte-identical
+    for every deployment and therefore not customization at all. NOTHING
+    deployment-specific is written: no `bootstrap.json`, no `ca.pem`, no
+    `central_origin` (`/etc/photo-wall/public.json` here is a FIXED,
+    deployment-independent default). A booted flash player therefore has no
+    `/run/photo-wall/boot.json` (netboot only writes one) -- it falls back to
+    `player.service.hardware_boot_context()` for hardware-serial identity --
+    and no configured origin, so it discovers central over mDNS (T0 HTTP)
+    unless an operator later adds an explicit boot-partition override (T2).
+
+    Also dropped, relative to `configure_root` (untouched, still used for
+    netboot): the trial-watchdog units `accept-trial`/`trial-recovery` (they
+    watch `/run/photo-wall/boot.json`, which never exists here) and any
+    `/etc/fstab` write -- `create_disk_flash` writes the real PARTUUID-based
+    `/etc/fstab` once the disk's partitions exist, never the RAM-root comment
+    `configure_root` writes. No deployment `chrony` server override either:
+    the image ships the distro's default (public NTP), since no time server
+    is baked in.
+    """
+    from appliance.bootstrap import read_regular
+
+    root = _root(root)
+    release_pub_bytes = read_regular(release_pub, MIB)
+    config_dir = root / "etc/photo-wall"
+    config_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    (config_dir / "release.pub.pem").write_bytes(release_pub_bytes)
+    (config_dir / "release.pub.pem").chmod(0o644)
+    # Fixed content, identical for every flashed image: schema-only, so
+    # PlayerConfig's central_origin/ca_file default to unset (0008 baseline).
+    (config_dir / "public.json").write_bytes(canonical({"schema": 1}))
+    (config_dir / "public.json").chmod(0o644)
+    wheel_inventory = inventory(wheelhouse, maximum_files=256, maximum_bytes=1024**3)
+    if ("requirements.txt" not in wheel_inventory or any("symlink" in value for value in wheel_inventory.values())
+            or any(not ((name.startswith("wheels/") and name.endswith(".whl"))
+                        or name in ("requirements.txt", "source.tar", "inventory.json"))
+                   for name in wheel_inventory)):
+        raise BuildError("wheelhouse_invalid")
+    wheel_stage = root / "tmp/photo-wall-wheels"
+    wheel_stage.mkdir(mode=0o700)
+    shutil.copyfile(wheelhouse / "requirements.txt", wheel_stage / "requirements.txt")
+    shutil.copytree(wheelhouse / "wheels", wheel_stage / "wheels")
+    in_root(root, "python3.12", "-m", "venv", "--system-site-packages", "/opt/photo-wall/venv")
+    in_root(root, "/opt/photo-wall/venv/bin/python", "-m", "pip", "install", "--no-index",
+            "--require-hashes", "--find-links", "/tmp/photo-wall-wheels/wheels", "-r",
+            "/tmp/photo-wall-wheels/requirements.txt", log=evidence / "pip-install.log")
+    shutil.rmtree(wheel_stage)
+    site = root / "opt/photo-wall/venv/lib/python3.12/site-packages"
+    if any((site / name).exists() for name in ("central", "media")):
+        raise BuildError("player_package_boundary")
+    (evidence / "python-packages.json").write_bytes(in_root(
+        root, "/opt/photo-wall/venv/bin/python", "-m", "pip", "list", "--format=json"))
+    in_root(root, "/opt/photo-wall/venv/bin/python", "-c",
+            "import player.service,gi,OpenGL;from pathlib import Path;"
+            "player.service.load_config(Path('/etc/photo-wall/public.json'));"
+            "gi.require_version('Gtk','3.0');"
+            "gi.require_version('Gst','1.0');from gi.repository import Gtk,Gst;"
+            "Gst.init(None);print('GTK',Gtk.get_major_version(),Gtk.get_minor_version());"
+            "print('GStreamer',Gst.version_string());"
+            "assert all(Gst.ElementFactory.find(n) for n in "
+            "('h264parse','avdec_h264','jpegdec','videoconvert','videoscale','appsink'))",
+            log=evidence / "native-import.log")
+    for name in ("weston.service", "player.service", "grow-rootfs.service"):
+        target = root / "etc/systemd/system" / ("photo-wall-" + name)
+        shutil.copyfile(source / "appliance/systemd" / name, target)
+        wants = root / "etc/systemd/system/multi-user.target.wants" / target.name
+        wants.parent.mkdir(parents=True, exist_ok=True)
+        wants.unlink(missing_ok=True)
+        wants.symlink_to("/etc/systemd/system/" + target.name)
+    script = config_dir / "grow-rootfs.sh"
+    shutil.copyfile(source / "appliance/systemd/grow-rootfs.sh", script)
+    script.chmod(0o755)
+    manager = root / "etc/systemd/system.conf.d/20-photo-wall-watchdog.conf"
+    manager.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / "appliance/systemd/watchdog.conf", manager)
+    manager.chmod(0o644)
+    weston = root / "etc/xdg/weston"
+    weston.mkdir(parents=True, exist_ok=True)
+    ini = in_root(root, "/opt/photo-wall/venv/bin/python", "-c",
+                  "from player.output_discovery import weston_ini;"
+                  "print(weston_ini(), end='')")
+    (weston / "weston.ini").write_bytes(ini)
+    passwd = (root / "etc/passwd").read_text()
+    if not any(line.startswith("wall:") for line in passwd.splitlines()):
+        in_root(root, "useradd", "--uid", "10001", "--user-group", "--no-create-home",
+                "--shell", "/usr/sbin/nologin", "wall")
+    for group in ("video", "render", "input"):
+        if any(line.startswith(group + ":") for line in (root / "etc/group").read_text().splitlines()):
+            in_root(root, "usermod", "-a", "-G", group, "wall")
+    netplan = root / "etc/netplan"
+    for path in netplan.glob("*.yaml"):
+        path.unlink()
+    (netplan / "10-photo-wall.yaml").write_text(
+        "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n"
+        "    wired:\n      match:\n        name: 'e*'\n      dhcp4: true\n      optional: true\n")
+    (netplan / "10-photo-wall.yaml").chmod(0o600)
+    (root / "etc/hostname").write_text("photo-wall\n")
+    (root / "etc/machine-id").write_bytes(b"")
+    resolver = root / "etc/resolv.conf"
+    resolver.unlink(missing_ok=True)
+    resolver.symlink_to("/run/systemd/resolve/stub-resolv.conf")
+    for name in ("getty@.service", "serial-getty@.service", "ssh.service", "ssh.socket",
+                 "cloud-init.service", "cloud-init-local.service", "cloud-config.service",
+                 "cloud-final.service", "apt-daily.timer", "apt-daily-upgrade.timer"):
+        path = root / "etc/systemd/system" / name
+        path.unlink(missing_ok=True)
+        path.symlink_to("/dev/null")
+    journal = root / "etc/systemd/journald.conf.d"
+    journal.mkdir(exist_ok=True)
+    (journal / "photo-wall.conf").write_text("[Journal]\nStorage=volatile\nRuntimeMaxUse=32M\n")
+    obsolete_state = root / "var/lib/photo-wall"
+    if obsolete_state.exists() and list(obsolete_state.iterdir()):
+        raise BuildError("common_state_not_empty")
 
 
 def boot_abi(root: Path, boot_tree: Path, kernel: str) -> tuple[str, dict]:
@@ -1039,6 +1328,15 @@ def main():
     verify_disk_parser = commands.add_parser("verify-disk")
     verify_disk_parser.add_argument("image", type=Path)
     verify_disk_parser.add_argument("boot_tree", type=Path)
+    disk_flash = commands.add_parser("disk-flash")
+    disk_flash.add_argument("boot_tree", type=Path)
+    disk_flash.add_argument("root_tree", type=Path)
+    disk_flash.add_argument("destination", type=Path)
+    disk_flash.add_argument("--source-epoch", type=int, required=True)
+    verify_disk_flash_parser = commands.add_parser("verify-disk-flash")
+    verify_disk_flash_parser.add_argument("image", type=Path)
+    verify_disk_flash_parser.add_argument("boot_tree", type=Path)
+    verify_disk_flash_parser.add_argument("root_tree", type=Path)
     verify_boot_parser = commands.add_parser("verify-release-boot")
     verify_boot_parser.add_argument("rootfs", type=Path)
     verify_boot_parser.add_argument("boot_tree", type=Path)
@@ -1069,6 +1367,12 @@ def main():
         result = {"authenticated_boot_verified": True}
     elif args.command == "verify-disk":
         verify_disk(args.image, args.boot_tree)
+        result = {"disk_verified": True}
+    elif args.command == "disk-flash":
+        result = create_disk_flash(args.boot_tree, args.root_tree, args.destination,
+                                   source_epoch=args.source_epoch)
+    elif args.command == "verify-disk-flash":
+        verify_disk_flash(args.image, args.boot_tree, args.root_tree)
         result = {"disk_verified": True}
     elif args.command == "extract":
         extract_base(args.image, args.destination)
