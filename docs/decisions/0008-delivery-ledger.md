@@ -16,8 +16,8 @@ Land loop per `~/.claude/skills/implementation-workflow/SKILL.md`: implement →
 | m2-mdns-browse | M2 discovery | player (+dep) | medium | closed | a8094ab |
 | m2-mdns-advertise | M2 discovery | central | low | closed | 58f2448 |
 | m3-hardware-serial | M3 flash image | player | medium | closed | ee0396d |
-| m3-central-d0-enroll | M3 flash image | central | authz — reviewed | open (re-cut) | — |
-| m3-flash-image | M3 flash image | appliance | infra — NOT CI-verifiable | open | — |
+| m3-central-d0-enroll | M3 flash image (tracer completion) | contracts+player+central | authz trust-boundary — reviewed | closed | ad876b5 |
+| m3-flash-image | M3 flash image | appliance | infra — CI/hardware gate | landed (CI pending) | 5241f6e |
 | baseline-docs | all | docs | low | open | — |
 
 Status values: open · in_progress · blocked (wip branch) · closed.
