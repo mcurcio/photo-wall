@@ -68,7 +68,7 @@ LAUNCHER = """#!/bin/sh
 set -eu
 umask 077
 exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aarch64 \\
-    -machine virt -uuid __DEVICE_UUID__ -cpu cortex-a72 -accel tcg -smp 2 -m 3072 \\
+    -machine virt -uuid __DEVICE_UUID__ __ACCEL__ -smp 2 -m 3072 \\
     -fw_cfg name=opt/photo-wall/equipment-id,string=__DEVICE_UUID__ \\
     -kernel /generic/Image -initrd /generic/initrd.img \\
     -append 'boot=photowall ip=dhcp root=/dev/ram0 rw console=ttyAMA0 loglevel=5 panic=10 watchdog_core.nowayout=1 i6300esb.nowayout=1 systemd.journald.forward_to_console=1' \\
@@ -81,6 +81,25 @@ exec timeout --signal=TERM --kill-after=10 __VM_PROCESS_TIMEOUT__ qemu-system-aa
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile= \\
     -display none -monitor none -serial stdio
 """
+# The guest is byte-for-byte identical either way; only host acceleration
+# changes. TCG remains the default and the only option on GitHub-hosted
+# arm64 runners, which do not expose /dev/kvm.
+ACCEL_TCG = "-cpu cortex-a72 -accel tcg"
+ACCEL_KVM = "-cpu host -accel kvm"
+
+
+def kvm_available() -> bool:
+    """Detect whether the host offers a usable /dev/kvm for QEMU acceleration.
+
+    Conservative by construction: existence and read/write access must both
+    hold, and any unexpected OS error (permission races, exotic filesystems)
+    falls back to False so the caller keeps the exact TCG path used today.
+    """
+    kvm = Path("/dev/kvm")
+    try:
+        return kvm.exists() and os.access(kvm, os.R_OK | os.W_OK)
+    except OSError:
+        return False
 
 
 def timestamp() -> str:
@@ -436,8 +455,13 @@ class ApplianceE2E:
             (share / player_control.name).write_bytes(payload)
             (share / player_control.name).chmod(0o400)
             self.report["player_control_sha256"] = hashlib.sha256(payload).hexdigest()
+        use_kvm = kvm_available()
+        print(f"[appliance-e2e] QEMU acceleration: {'kvm' if use_kvm else 'tcg'} "
+              f"(/dev/kvm {'usable' if use_kvm else 'unavailable'})")
+        self.report["qemu_accel"] = "kvm" if use_kvm else "tcg"
         launcher = directory / "launch.sh"
-        launcher.write_text(LAUNCHER.replace("__VM_PROCESS_TIMEOUT__",
+        launcher.write_text(LAUNCHER.replace("__ACCEL__", ACCEL_KVM if use_kvm else ACCEL_TCG)
+                           .replace("__VM_PROCESS_TIMEOUT__",
                            str(self.report["deadlines_seconds"]["vm_process"])).replace("__DEVICE_UUID__", self.device_uuid))
         launcher.chmod(0o555)
         args = ["docker", "create", "--name", self.name, "--label", LABEL+"="+self.name,
@@ -448,8 +472,12 @@ class ApplianceE2E:
             "--log-opt", "compress=false", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
             "--mount", f"type=bind,src={self.inputs['disk']},dst=/input.img,readonly",
             "--mount", f"type=bind,src={self.inputs['generic']},dst=/generic,readonly",
-            "--mount", f"type=bind,src={directory},dst=/vm",
-            "--workdir", "/vm", self.builder_image, "/bin/sh", "/vm/launch.sh"]
+            "--mount", f"type=bind,src={directory},dst=/vm"]
+        if use_kvm:
+            # Required for the container to reach the host's /dev/kvm; gated
+            # behind the same probe so hosts without it are unaffected.
+            args += ["--device", "/dev/kvm"]
+        args += ["--workdir", "/vm", self.builder_image, "/bin/sh", "/vm/launch.sh"]
         require(all("," not in str(p) for p in (self.inputs["disk"], self.inputs["generic"],
                                                self.inputs["candidate_dir"], directory)),
                 "mount_path_invalid")
