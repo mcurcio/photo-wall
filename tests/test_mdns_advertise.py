@@ -12,6 +12,8 @@ so they never depend on real multicast.
 from __future__ import annotations
 
 import asyncio
+import time
+from secrets import token_hex
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,6 +49,25 @@ class FakeCoordinator:
 
     def advance(self):
         return type("Projection", (), {"acquisitions": ()})()
+
+
+class SlowAdvertiser:
+    """Simulates a real-network registration that is slow (or hangs) -- the
+    failure mode found in CI's e2e: the compose central's mDNS registration
+    on a Docker bridge network delayed startup readiness, timing out
+    downstream source/player startup."""
+
+    def __init__(self, delay: float):
+        self._delay = delay
+        self.started = False
+        self.stopped = False
+
+    async def start(self):
+        await asyncio.sleep(self._delay)
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
 
 
 class RecordingAdvertiser:
@@ -99,14 +120,22 @@ def app_with(monkeypatch, **mdns_kwargs):
 
 def test_startup_registers_configured_port_and_player_discovers_http_origin(monkeypatch):
     """Criteria 1 + 4: the advertised port matches config, and the player's
-    real browser resolves it with the http scheme (no scheme TXT set)."""
-    advertiser = MdnsCentralAdvertiser(port=8321, host="127.0.0.1", name="mdns-interop-a")
+    real browser resolves it with the http scheme (no scheme TXT set).
+
+    Uses a unique per-test service type for both the advertiser and the
+    discovery under test, so a real `_photowall._tcp` responder elsewhere on
+    the network (e.g. CI's compose central on the Docker bridge) can't be
+    mistaken for this test's own advertisement."""
+    service_type = f"_pwtest{token_hex(4)}._tcp.local."
+    advertiser = MdnsCentralAdvertiser(
+        port=8321, host="127.0.0.1", name="mdns-interop-a", service_type=service_type
+    )
     app = app_with(monkeypatch, mdns_enabled=True, mdns_advertiser=advertiser)
     try:
         with TestClient(app):
 
             async def check():
-                return await MdnsCentralDiscovery(timeout=3.0).discover()
+                return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover()
 
             origin = asyncio.run(check())
     except OSError as error:
@@ -170,6 +199,23 @@ def test_enabled_advertising_starts_on_startup_and_stops_on_shutdown(monkeypatch
         assert recording.started is True
         assert recording.stopped is False
     assert recording.stopped is True
+
+
+def test_slow_advertising_does_not_delay_startup_readiness(monkeypatch):
+    """FAILURE 3 regression: a slow/hanging real-network mDNS registration
+    (e.g. a Docker bridge network's multicast join) must never delay central
+    becoming ready -- advertising runs in the background of the lifespan,
+    not awaited before startup is reported complete."""
+    advertiser = SlowAdvertiser(delay=5.0)
+    app = app_with(monkeypatch, mdns_enabled=True, mdns_advertiser=advertiser)
+    started = time.monotonic()
+    with TestClient(app) as client:
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0, f"startup blocked on mdns advertising: {elapsed}s elapsed"
+        response = client.get("/healthz")
+        assert response.status_code == 200
+        # Still in flight in the background -- proves readiness didn't wait for it.
+        assert advertiser.started is False
 
 
 def test_default_enabled_without_explicit_config(monkeypatch):

@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import stat
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -251,8 +251,18 @@ def create_app(
         _initialize_release_authority(release_authority)
         if isinstance(media_queue, ProcrastinateMediaQueue):
             media_queue.apply_schema(db.dsn)
-        if mdns_enabled and mdns_advertiser is not None:
-            await mdns_advertiser.start()
+        # Real network registration (join multicast group, register the
+        # service) can be slow -- or simply hang -- on a constrained Docker
+        # bridge network. Advertising is a convenience for discovery, never
+        # a serving requirement (mdns_advertiser.start() already treats
+        # registration failure as best-effort), so it must not delay
+        # central becoming ready: run it in the background instead of
+        # awaiting it before yield.
+        mdns_advertise_task = (
+            asyncio.create_task(mdns_advertiser.start())
+            if mdns_enabled and mdns_advertiser is not None
+            else None
+        )
         task = asyncio.create_task(scheduler()) if run_scheduler else None
         try:
             yield
@@ -264,6 +274,10 @@ def create_app(
                 except asyncio.CancelledError:
                     pass
             if mdns_enabled and mdns_advertiser is not None:
+                if mdns_advertise_task is not None and not mdns_advertise_task.done():
+                    mdns_advertise_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await mdns_advertise_task
                 await mdns_advertiser.stop()
             if owns_db:
                 db.close()

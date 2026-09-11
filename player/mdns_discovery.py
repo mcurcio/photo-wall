@@ -62,10 +62,15 @@ class MdnsCentralDiscovery:
 
     Deferred (per 0008, out of scope for this bead): remembering the last
     good origin across calls. Each cycle re-consults the LAN fresh.
+
+    `service_type` defaults to the production `SERVICE_TYPE`
+    (`_photowall._tcp.local.`); tests that need isolation from a real
+    responder on the network pass a unique type instead.
     """
 
-    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT, service_type: str = SERVICE_TYPE):
         self._timeout = timeout
+        self._service_type = service_type
 
     async def discover(self) -> str | None:
         try:
@@ -81,7 +86,9 @@ class MdnsCentralDiscovery:
                 found.add(name)
 
         async with AsyncZeroconf() as aiozc:
-            browser = AsyncServiceBrowser(aiozc.zeroconf, SERVICE_TYPE, handlers=[on_change])
+            browser = AsyncServiceBrowser(
+                aiozc.zeroconf, self._service_type, handlers=[on_change]
+            )
             try:
                 # Give responders a listening window before resolving what
                 # answered; the outer wait_for in discover() is the hard
@@ -91,7 +98,7 @@ class MdnsCentralDiscovery:
             finally:
                 await browser.async_cancel()
             for name in sorted(found):
-                info = AsyncServiceInfo(SERVICE_TYPE, name)
+                info = AsyncServiceInfo(self._service_type, name)
                 if await info.async_request(aiozc.zeroconf, 1000):
                     origin = _origin_from_info(info)
                     if origin is not None:

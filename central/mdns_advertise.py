@@ -58,12 +58,24 @@ class MdnsCentralAdvertiser:
     TXT records: none are set. The player's `MdnsCentralDiscovery` treats an
     absent (or non-`https`) `scheme` TXT key as `http`, which is exactly the
     T0 baseline transport this advertiser intends.
+
+    `service_type` defaults to the production `SERVICE_TYPE`
+    (`_photowall._tcp.local.`); tests that need isolation from a real
+    responder on the network pass a unique type instead.
     """
 
-    def __init__(self, *, port: int, host: str | None = None, name: str = "central"):
+    def __init__(
+        self,
+        *,
+        port: int,
+        host: str | None = None,
+        name: str = "central",
+        service_type: str = SERVICE_TYPE,
+    ):
         self._port = port
         self._host = host
         self._name = name
+        self._service_type = service_type
         self._aiozc: AsyncZeroconf | None = None
         self._info: AsyncServiceInfo | None = None
 
@@ -74,8 +86,8 @@ class MdnsCentralAdvertiser:
         try:
             address = self._host or _default_address()
             info = AsyncServiceInfo(
-                SERVICE_TYPE,
-                f"{self._name}.{SERVICE_TYPE}",
+                self._service_type,
+                f"{self._name}.{self._service_type}",
                 addresses=[socket.inet_aton(address)],
                 port=self._port,
             )
