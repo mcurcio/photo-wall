@@ -258,6 +258,121 @@ async def close(service):
     service._worker.shutdown(wait=True, cancel_futures=True)
 
 
+class FakeDiscovery:
+    def __init__(self, origin):
+        self.origin = origin
+        self.calls = 0
+
+    async def discover(self):
+        self.calls += 1
+        return self.origin
+
+
+async def discovery_rig(tmp_path, *, central_origin, discovery):
+    clock = ManualClock(100)
+    server = Server(clock)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+    config = PlayerConfig(central_origin=central_origin, allow_http=central_origin is not None)
+    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+        clock=clock, client=client, time_client=client, websocket_connect=False,
+        health_path=None, boot_context=boot_context(), discovery=discovery)
+    return service, server
+
+
+def test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://rogue")
+        service, server = await discovery_rig(tmp_path, central_origin="http://central",
+                                              discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            assert discovery.calls == 0
+            await service.enroll()
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_absent_origin_resolves_and_enrolls_against_discovered_origin(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://central")
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            assert discovery.calls == 1
+            await service.enroll()
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_absent_origin_with_no_discovery_result_fails_clearly_then_explicit_config_recovers(tmp_path):
+    async def check():
+        discovery = FakeDiscovery(None)
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            with pytest.raises(ServiceError, match="central_origin_unavailable"):
+                await service.resolve_origin()
+            assert service.registration is None
+            service.config = PlayerConfig(central_origin="http://central", allow_http=True)
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            await service.enroll()
+            assert service.registration is not None
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    class LateDiscovery(FakeDiscovery):
+        """Fails discovery once, then returns an origin on a later cycle."""
+
+        async def discover(self):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            return self.origin
+
+    async def check():
+        discovery = LateDiscovery("http://central")
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        task = asyncio.create_task(service.run())
+        try:
+            async def enrolled():
+                while service.registration is None:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(enrolled(), 3)
+            assert discovery.calls >= 2
+            assert service.registration is not None
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 3)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_discovered_http_origin_is_trusted_baseline_but_explicit_http_still_needs_allow_http(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://central")
+        service, _ = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+        finally:
+            await close(service)
+    asyncio.run(check())
+    with pytest.raises(ValidationError):
+        PlayerConfig(central_origin="http://central")
+
+
 def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
