@@ -5,18 +5,42 @@ Pi keeps one device_id across tiers (0008: device_id is the immutable
 serial).
 """
 
+import asyncio
 import json
 import re
+from concurrent.futures import Future
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 import player.service as player_service
 from appliance.bootstrap import LinuxOps
+from central.app import create_app
+from contracts.enrollment import OutputReport
 from contracts.equipment import equipment_device_id
-from player.service import BootContext, ServiceError, hardware_boot_context, resolve_boot_context
+from player.identity import load_identity
+from player.rendering import RecordingRenderer
+from player.service import (
+    BootContext,
+    PlayerConfig,
+    PlayerService,
+    ServiceError,
+    hardware_boot_context,
+    resolve_boot_context,
+)
 
 RAW_PI_SERIAL = b"10000000abcd1234\n"
+
+
+def _immediate(callback):
+    """Same-thread dispatcher stand-in: no GLib main loop in this test."""
+    future = Future()
+    try:
+        future.set_result(callback())
+    except Exception as error:
+        future.set_exception(error)
+    return future
 
 
 def netboot_written_context(**overrides) -> dict:
@@ -127,6 +151,45 @@ def test_read_pi_serial_reads_the_real_devicetree_path_and_matches_netboot_deriv
 
     assert read is not None
     assert equipment_device_id("pi", read) == expected_device_id
+
+
+def test_hardware_boot_context_now_enrolls_against_a_real_registry_pending_unbound(registry, tmp_path):
+    """m3-central-d0-enroll closes the tracer: `hardware_boot_context`'s own
+    docstring (player/service.py) said a flashed player "therefore CANNOT
+    enroll until central accepts a ticketless serial enrollment" -- this
+    drives the real flashed (D0) path, `PlayerService.enroll()`, against a
+    real Postgres-backed `Registry`, and the enroll now succeeds."""
+    context = hardware_boot_context(serial_reader=lambda: RAW_PI_SERIAL)
+    assert context.persistence == "persistent"
+    app = create_app(db=registry.db, clock=registry.clock, release_authority=registry.release_authority,
+                     admin_token="integration-only-admin-" + "x" * 32, run_scheduler=False)
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://central") as client:
+            service = PlayerService(
+                PlayerConfig(central_origin="http://central", allow_http=True, cache_dir=str(cache)),
+                load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
+                RecordingRenderer(), _immediate, clock=registry.clock, client=client,
+                time_client=client, boot_context=context, health_path=None,
+            )
+            try:
+                await service.enroll()
+                return service.registration
+            finally:
+                if service.cache is not None:
+                    service.cache.close()
+                service._worker.shutdown(wait=True, cancel_futures=True)
+
+    registration = asyncio.run(check())
+    assert registration is not None and registration.authority_epoch == 1
+    by_id = {p.id: p for p in registry.inventory().players}
+    player = by_id[registration.player_id]
+    assert player.device_id == context.device_id
+    assert player.is_bound is False
+    assert player.retired_at is None
 
 
 def test_long_raw_serial_near_the_shared_read_cap_still_matches_across_both_real_read_sites(
