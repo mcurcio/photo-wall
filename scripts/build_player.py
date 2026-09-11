@@ -36,7 +36,7 @@ from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
-ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography"})
+ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 FORBIDDEN = frozenset({
     "central", "media", "fastapi", "psycopg", "psycopg-binary", "psycopg-pool",
     "procrastinate", "pillow", "pil", "uvicorn", "hatchling", "packaging", "pytest", "ruff",

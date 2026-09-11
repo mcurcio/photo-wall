@@ -104,7 +104,7 @@ def test_player_wheel_is_deterministic_and_has_only_runtime_packages(inputs):
     }
     metadata = contents[f"photo_wall_player-{VERSION}.dist-info/METADATA"].decode()
     assert f"Version: {VERSION}" in metadata
-    assert metadata.count("Requires-Dist:") == 4
+    assert metadata.count("Requires-Dist:") == len(package.ROOTS)
     assert "Requires-Dist: cryptography==1.0" in metadata
     assert b"sha256=" in contents[f"photo_wall_player-{VERSION}.dist-info/RECORD"]
 
@@ -401,7 +401,7 @@ def test_build_uses_commit_ignores_dirty_private_source_and_inventories_hashes(
     for wheel in result["wheels"]:
         data = (output / "wheels" / wheel["filename"]).read_bytes()
         assert package.digest(data) == wheel["sha256"] and len(data) == wheel["size"]
-    assert len((output / "requirements.txt").read_text().splitlines()) == 5
+    assert len((output / "requirements.txt").read_text().splitlines()) == len(package.ROOTS) + 1
     assert json.loads((output / "inventory.json").read_text()) == result
     app = next((output / "wheels").glob("photo_wall_player*.whl"))
     assert wheel_files(app.read_bytes())["player/service.py"] == b"import httpx\n"
