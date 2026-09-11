@@ -8,6 +8,8 @@ import inspect
 import json
 import math
 import stat
+import subprocess
+import sys
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -78,6 +80,24 @@ def d0_boot_context() -> BootContext:
     synthesizes (player/service.py); enroll() must derive the D0 signal from
     `persistence`, never send the placeholder ticket_id as a real one."""
     return boot_context().model_copy(update={"persistence": "persistent"})
+
+
+def test_importing_service_never_pulls_in_zeroconf():
+    """The appliance chroot smoke-test does `import player.service,gi,OpenGL`
+    in a netboot venv that has no zeroconf -- 0008 D1 players use an explicit
+    `central_origin` and never need mDNS discovery. `MdnsCentralDiscovery` (and
+    its `zeroconf` dependency) must therefore be imported lazily, only on the
+    discovery branch in main(), never at `player.service` module import time.
+
+    Run in a subprocess (not just `sys.modules` in-process) so this doesn't
+    depend on whichever test happened to import zeroconf first in this
+    session, and so it doesn't poison `sys.modules` for later tests."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import player.service, sys; "
+            "assert 'zeroconf' not in sys.modules, sys.modules.keys()"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_identity_is_fresh_signed_and_never_written(tmp_path):
@@ -478,13 +498,17 @@ def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypa
             async def enrolled():
                 while service.registration is None:
                     await asyncio.sleep(.01)
-            await asyncio.wait_for(enrolled(), 3)
+            # More tolerant than this file's usual 3s bound: run() here
+            # drives 5 concurrent sub-loops through a real reconnect/re-
+            # enroll cycle, so teardown legitimately takes longer under
+            # host load than the simpler single-pass tests elsewhere.
+            await asyncio.wait_for(enrolled(), 10)
             assert discovery.calls >= 2
             assert service.registration is not None
             assert all(request.url.host == "central" for request in server.requests)
         finally:
             service.stop()
-            await asyncio.wait_for(task, 3)
+            await asyncio.wait_for(task, 10)
             await close(service)
     asyncio.run(check())
 
