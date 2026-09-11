@@ -167,6 +167,12 @@ jobs:
           python3.12 -m pytest --noconftest -q -p no:cacheprovider
           tests/test_apt_cache_linux.py
 
+      # A freshly built base is also retained under an unqualified
+      # candidate-<base_key> tag (with --publish) so a retry after a later
+      # failure (e.g. boot) restores it instead of rebuilding. base_key is
+      # the definition's content identity, so reuse is safe by construction.
+      # The authoritative definition-<base_key> tag is still published only
+      # after a green boot, unchanged, by the step below.
       - name: Pull the matching OS base or prepare a changed definition
         id: os-base
         env:
@@ -175,6 +181,7 @@ jobs:
         run: |
           args=()
           if [[ "$PREPARE_BASE" == "true" ]]; then args+=(--allow-build); fi
+          if [[ "$CAN_PUBLISH" == "true" ]]; then args+=(--publish); fi
           python3 -m scripts.ci_images base \
             --namespace "${GITHUB_REPOSITORY,,}" --key "$BASE_KEY" \
             --output "$RUNNER_TEMP/photo-wall-os-base" \
