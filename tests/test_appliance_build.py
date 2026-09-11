@@ -217,7 +217,7 @@ def test_initramfs_boundary_allows_kernel_media_drivers_but_only_minimal_python(
              "usr/lib/modules/raspi/kernel/drivers/media/v4l2-core/videodev.ko.zst"]
     paths.extend("usr/lib/python3.12/" + module for module in (
         "appliance/__init__.py", "appliance/bootstrap.py", "appliance/updates.py",
-        "contracts/__init__.py", "contracts/release.py"))
+        "contracts/__init__.py", "contracts/release.py", "contracts/equipment.py"))
     contents = ("\n".join(paths) + "\n").encode()
     verify_initramfs(contents)
     for forbidden in (b"media/worker.py", b"appliance/build.py", b"contracts/models.py", b"gi/__init__.py"):

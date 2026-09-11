@@ -20,7 +20,7 @@ mkdir -p "${DESTDIR}/usr/lib/python3.12/appliance" "${DESTDIR}/usr/lib/python3.1
 for module in __init__ bootstrap updates; do
     copy_file config "/usr/lib/python3/dist-packages/appliance/$module.py" "/usr/lib/python3.12/appliance/$module.py"
 done
-for module in __init__ release; do
+for module in __init__ release equipment; do
     copy_file config "/usr/lib/python3/dist-packages/contracts/$module.py" "/usr/lib/python3.12/contracts/$module.py"
 done
 mkdir -p "${DESTDIR}/etc/photo-wall"
