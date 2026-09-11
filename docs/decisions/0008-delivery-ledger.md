@@ -47,6 +47,23 @@ but it MUST land before the baseline PR merges (implementation-workflow §3.7).
   service types; (3) e2e startup timed out because central awaited mDNS advertising before
   readiness → moved to a background task. All local gates green (1538 passed); re-running CI.
 
+- **CI cycle 2 (`9eea67a`), root-caused from artifact data (no guessing).** Second CI run:
+  e2e went green (background-advertise fix); MVP had 1 residual flake; appliance still red at
+  `prepare_image`. Downloaded the failed run's `pip-install.log` diagnostics artifact →
+  proved the appliance wheelhouse omitted `zeroconf`/`ifaddr` (16 wheels, neither present):
+  `scripts/build_player.py` `ROOTS` allowlist was never updated for the new dep, so
+  `locked_runtime` silently dropped it. Fixed ROOTS. Made `appliance/build.py` `run()` emit
+  the failing tool's output tail (was swallowed) so future build failures are diagnosable in
+  the GHA log. Also made `test_late_discovery` deterministic (reproduced the shutdown race
+  offline; 30/30 green).
+
+- **CI cycle 3 (`9eea67a`→fix): MVP green, appliance root-caused via the new diagnostic.**
+  MVP checks passed (late-discovery + mDNS isolation fixed). The `run()` diagnostic printed the
+  real appliance error: `appliance/bootstrap.py` imports `contracts.equipment`, but the rootfs
+  copy allowlist (`build.py:763`) and the source inventory (`:440`) didn't include it → added
+  `equipment` to both. Same allowlist-not-updated class as the ROOTS bug. (e2e that cycle failed
+  on an unrelated infra hiccup — Immich fixture container `docker_command_failed` — retrigger.)
+
 ## Residuals (follow-up, not blocking)
 - Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
   even for a D0/persistent player — telemetry-only inaccuracy; docs describe actual behavior.

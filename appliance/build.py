@@ -438,7 +438,8 @@ def execution_inventory() -> dict:
     modules = {"appliance/build.py": Path(__file__),
                "appliance/os_definition.json": Path(__file__).with_name("os_definition.json")}
     for name in ("appliance", "appliance.bootstrap", "appliance.updates", "contracts",
-                 "contracts.release", "scripts.ci_apt_cache", "appliance.os_packages"):
+                 "contracts.release", "contracts.equipment", "scripts.ci_apt_cache",
+                 "appliance.os_packages"):
         module = importlib.import_module(name)
         relative = name.replace(".", "/") + ("/__init__.py" if hasattr(module, "__path__") else ".py")
         modules[relative] = Path(module.__file__)
@@ -760,7 +761,7 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
     (evidence / "python-packages.json").write_bytes(in_root(
         root, "/opt/photo-wall/venv/bin/python", "-m", "pip", "list", "--format=json"))
     for package, modules in (("appliance", ("__init__", "bootstrap", "updates")),
-                             ("contracts", ("__init__", "release"))):
+                             ("contracts", ("__init__", "release", "equipment"))):
         # The Player's complete wheel must precede these minimal distro modules.
         # The hook separately installs their initramfs-only stdlib copies.
         target = root / "usr/lib/python3/dist-packages" / package
