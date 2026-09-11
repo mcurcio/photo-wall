@@ -212,6 +212,27 @@ class Registry:
         except UniqueViolation as exc:
             raise RegistryError("output_already_bound") from exc
 
+    def unbind(self, frame_id: str, *, expected_generation: int) -> dict:
+        """Release a Frame's active binding, reversibly: unlike retire, the player record
+        (and its ability to be re-bound, to this or another Frame) is untouched."""
+        with self.db.transaction() as conn:
+            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            existing = conn.execute("SELECT * FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
+            if not existing:
+                raise RegistryError("not_bound", 404)
+            if frame["generation"] != expected_generation:
+                raise RegistryError("binding_generation_conflict")
+            conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
+            row = conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
+                               "configuration_revision=configuration_revision+1,"
+                               "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
+                               (frame_id,)).fetchone()
+            self._audit(conn, "frame_unbound", frame_id,
+                        {"player_id": existing["player_id"], "output_id": existing["output_id"], **row})
+            return {**row, "changed": True}
+
     def retire(self, player_id: str) -> None:
         with self.db.transaction() as conn:
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
@@ -309,8 +330,10 @@ class Registry:
                 if frame["preview_expires"] is not None and frame["preview_expires"] <= self.clock.utc():
                     frame["preview"] = None
                     frame["preview_expires"] = None
+            bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
             return InstallationInventory(
-                players=tuple(PlayerInventory.model_validate(row) for row in players),
+                players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
+                             for row in players),
                 outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
                 frames=tuple(FrameInventory.model_validate(row) for row in frames),
             )

@@ -150,6 +150,78 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert registry.bindings_for(new["player_id"], 1)[0].generation == 3
 
 
+def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(registry):
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+    assert len(registry.bindings_for(identity["player_id"], 1)) == 1
+    result = registry.unbind("portrait", expected_generation=1)
+    # The generation bump (mirroring bind/retire) is what a stale caller is fenced on below;
+    # deleting the binding row alone withdraws execution bindings regardless of generation.
+    assert result == {"generation": 2, "changed": True}
+    assert registry.bindings_for(identity["player_id"], 1) == []
+    assert registry.configuration_for(identity["player_id"], 1)["bindings"] == []
+    assert registry.inventory().frames[0].player_id is None
+    with pytest.raises(RegistryError, match="generation_conflict"):
+        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=1)
+    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+    assert rebound == {"generation": 3, "changed": True}
+
+
+def test_unbind_without_active_binding_or_unknown_frame_raises(registry):
+    frame(registry)
+    with pytest.raises(RegistryError, match="not_bound"):
+        registry.unbind("portrait", expected_generation=0)
+    with pytest.raises(RegistryError, match="unknown_frame"):
+        registry.unbind("nonexistent", expected_generation=0)
+
+
+def test_unbind_stays_reversible_while_retire_stays_permanent(registry):
+    identity, _, enrollment = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.unbind("portrait", expected_generation=1)
+    # Reversible: the player record survives and re-binds; nothing is retired.
+    assert registry.inventory().players[0].retired_at is None
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+    registry.retire(identity["player_id"])
+    with pytest.raises(RegistryError, match="unauthorized"):
+        registry.authenticate(identity["token"])
+    with pytest.raises(RegistryError, match="retired"):
+        enroll(registry, device_id=enrollment.device_id)
+
+
+def test_unbind_leaves_session_token_and_epoch_valid_unlike_retire(registry):
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.unbind("portrait", expected_generation=1)
+    # Unlike retire, unbind withdraws only the execution binding: the player's
+    # session token and authority_epoch survive, so the existing session keeps working.
+    authenticated = registry.authenticate(identity["token"])
+    assert authenticated["id"] == identity["player_id"]
+    assert authenticated["authority_epoch"] == identity["authority_epoch"]
+    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+    assert rebound == {"generation": 3, "changed": True}
+
+
+def test_pending_queue_lists_enrolled_unbound_non_retired_players_only(registry):
+    pending, _, _ = enroll(registry)
+    bound, _, _ = enroll(registry)
+    retired, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", bound["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.retire(retired["player_id"])
+    inventory = registry.inventory()
+    by_id = {p.id: p for p in inventory.players}
+    assert by_id[pending["player_id"]].is_bound is False
+    assert by_id[bound["player_id"]].is_bound is True
+    assert by_id[retired["player_id"]].is_bound is False
+    pending_ids = [p.id for p in inventory.players if p.retired_at is None and not p.is_bound]
+    assert pending_ids == [pending["player_id"]]
+
+
 def test_two_outputs_and_concurrent_conflicting_binding_are_atomic(registry):
     identity, _, _ = enroll(registry)
     frame(registry, "left")

@@ -18,6 +18,10 @@ class PlayerInventory(Model):
     last_seen: Instant
     retired_at: Instant | None = None
     health: dict[str, JsonValue]
+    # The operator's pending queue is retired_at is None and is_bound is False.
+    # Defaulted (not always present on the wire, e.g. older fixtures/probes) rather than
+    # required, so this addition does not break existing inventory consumers.
+    is_bound: bool = False
 
 
 class OutputInventory(Model):
