@@ -24,6 +24,7 @@ from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
+from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
 from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigurationReceipt
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
@@ -149,6 +150,9 @@ def create_app(
     release_authority: ReleaseAuthority | None = None,
     media_queue: MediaTaskQueue | None = None,
     release_root: Path | None = None,
+    mdns_enabled: bool | None = None,
+    mdns_port: int | None = None,
+    mdns_advertiser: MdnsCentralAdvertiser | None = None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     owns_db = db is None
@@ -192,6 +196,21 @@ def create_app(
         if media_root
         else None
     )
+    mdns_enabled = (
+        mdns_enabled
+        if mdns_enabled is not None
+        else os.environ.get("PHOTO_WALL_MDNS_ADVERTISE", "true").strip().lower()
+        not in ("false", "0")
+    )
+    # No PHOTO_WALL_HTTP_PORT precedent exists: today the listen port is only
+    # known to the `uvicorn --port` invocation outside this module (see
+    # Dockerfile), never passed into create_app(). Advertising needs it, so
+    # this introduces the one new config knob, defaulting to the port the
+    # shipped Dockerfile's uvicorn CMD already binds (8000).
+    mdns_port = mdns_port or int(os.environ.get("PHOTO_WALL_HTTP_PORT", "8000"))
+    mdns_advertiser = mdns_advertiser or (
+        MdnsCentralAdvertiser(port=mdns_port) if mdns_enabled else None
+    )
     scheduler_health = {
         "enabled": run_scheduler,
         "running": False,
@@ -232,6 +251,8 @@ def create_app(
         _initialize_release_authority(release_authority)
         if isinstance(media_queue, ProcrastinateMediaQueue):
             media_queue.apply_schema(db.dsn)
+        if mdns_enabled and mdns_advertiser is not None:
+            await mdns_advertiser.start()
         task = asyncio.create_task(scheduler()) if run_scheduler else None
         try:
             yield
@@ -242,6 +263,8 @@ def create_app(
                     await task
                 except asyncio.CancelledError:
                     pass
+            if mdns_enabled and mdns_advertiser is not None:
+                await mdns_advertiser.stop()
             if owns_db:
                 db.close()
 
@@ -256,6 +279,7 @@ def create_app(
     app.state.registry = registry
     app.state.coordinator = coordinator
     app.state.release_authority = release_authority
+    app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
 
     def admin(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
