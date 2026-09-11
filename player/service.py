@@ -43,6 +43,7 @@ from player.cache import Cache
 from player.discovery import CentralDiscovery, NoDiscovery
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
+from player.mdns_discovery import MdnsCentralDiscovery
 from player.output_discovery import discover_outputs, output_app_id
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
 
@@ -902,6 +903,10 @@ def main():
                 decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
         except Exception:
             native_fault = "native_initialization"
+    # Explicit config always wins over mDNS (0008 precedence); discovery is
+    # only ever consulted by resolve_origin() when central_origin is unset,
+    # so avoid standing up a browser at all when an explicit origin exists.
+    central_discovery = NoDiscovery() if config.central_origin else MdnsCentralDiscovery()
     service = PlayerService(
         config,
         identity,
@@ -909,6 +914,7 @@ def main():
         renderer,
         GLibDispatcher(GLib),
         boot_context=boot_context,
+        discovery=central_discovery,
     )
     for fault in (discovery.fault, native_fault):
         if fault:

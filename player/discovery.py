@@ -3,8 +3,9 @@
 The flash baseline (0008) lets a player boot with no configured
 `central_origin` and learn one from the LAN. This module defines only the
 seam: a `Protocol` a discovery mechanism must satisfy, and the no-op default
-used until one is wired in. The actual mDNS (`_photowall._tcp`) browse is a
-separate, later bead and adds no dependency here.
+used when discovery is disabled. The mDNS (`_photowall._tcp`) browse lives
+in `player.mdns_discovery.MdnsCentralDiscovery`, kept separate so this seam
+module adds no dependency.
 """
 
 from __future__ import annotations
