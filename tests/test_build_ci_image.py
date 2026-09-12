@@ -14,12 +14,21 @@ from appliance.updates import verify_release
 from contracts.release import Release
 from player.service import PlayerConfig
 from scripts.build_ci_image import (
+    _apply_persistent_signing_key,
     _fixture_deployment,
+    _load_persistent_signing_key,
     _new_directory,
     _prepare_and_sign_rollback_candidate,
     _sign_release,
     build,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_persistent_signing_key_env(monkeypatch):
+    """Keep the persistent-key path opt-in and hermetic across every test here."""
+    monkeypatch.delenv("PHOTO_WALL_RELEASE_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("PHOTO_WALL_RELEASE_SIGNING_KEY_FILE", raising=False)
 
 
 def test_ci_output_and_deployment_paths_must_be_new_and_outside_git(tmp_path):
@@ -158,6 +167,133 @@ def test_shared_release_signer_produces_verifiable_ed25519_signature(tmp_path, m
         )
         == release
     )
+
+
+def _generate_ed25519_key(path: Path) -> bytes:
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(path)],
+        capture_output=True,
+        check=True,
+    )
+    return path.read_bytes()
+
+
+def _skip_unless_openssl3():
+    version = subprocess.run(
+        ["openssl", "version"], capture_output=True, text=True, check=True
+    ).stdout
+    if not version.startswith("OpenSSL 3."):
+        pytest.skip("CI fixture signing requires OpenSSL 3")
+
+
+def test_persistent_signing_key_signs_with_supplied_key_and_derives_matching_public(
+    tmp_path, monkeypatch
+):
+    """The persistent path signs with, and derives its public half from, the same key."""
+    _skip_unless_openssl3()
+    monkeypatch.setattr("appliance.updates.OPENSSL", shutil.which("openssl"))
+    supplied = tmp_path / "supplied.key"
+    pem = _generate_ed25519_key(supplied)
+    expected_public = tmp_path / "supplied.pub.pem"
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(supplied), "-pubout", "-out", str(expected_public)],
+        capture_output=True,
+        check=True,
+    )
+
+    deployment, _disposable_key = _fixture_deployment(tmp_path / "deployment")
+    _apply_persistent_signing_key(deployment, pem)
+
+    signing_key = deployment / "private" / "release-signing.key"
+    release_pub = deployment / "public" / "release.pub.pem"
+    assert signing_key.read_bytes() == pem
+    assert release_pub.read_bytes() == expected_public.read_bytes()
+
+    manifest = tmp_path / "release.json"
+    release = Release(
+        revision="a" * 40, boot_abi="b" * 64, rootfs_sha256="c" * 64, rootfs_size=1,
+    )
+    manifest.write_bytes(release.encode())
+    signature = tmp_path / "release.sig"
+    _sign_release(signing_key, manifest, signature)
+    assert (
+        verify_release(
+            manifest.read_bytes(), signature.read_bytes(), release_pub, release.boot_abi,
+        )
+        == release
+    )
+
+
+def test_persistent_signing_key_absent_preserves_disposable_fallback(tmp_path):
+    """No secret supplied: `_load_persistent_signing_key` stays out of the build's way."""
+    assert _load_persistent_signing_key() is None
+
+
+def test_persistent_signing_key_read_from_inline_env_var(monkeypatch, tmp_path):
+    pem = b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY", pem.decode())
+    assert _load_persistent_signing_key() == pem
+
+
+def test_persistent_signing_key_read_from_file_env_var(monkeypatch, tmp_path):
+    pem = b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    key_file = tmp_path / "key.pem"
+    key_file.write_bytes(pem)
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY_FILE", str(key_file))
+    assert _load_persistent_signing_key() == pem
+
+
+def test_persistent_signing_key_rejects_ambiguous_dual_source(monkeypatch, tmp_path):
+    key_file = tmp_path / "key.pem"
+    key_file.write_bytes(b"fixture")
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY", "inline")
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY_FILE", str(key_file))
+    with pytest.raises(BuildError, match="release_signing_key_source_conflict"):
+        _load_persistent_signing_key()
+
+
+def test_persistent_signing_key_empty_inline_env_var_is_hard_error(monkeypatch):
+    """A blank secret must never be treated as 'unset' -> disposable-key fallback.
+
+    GitHub Actions interpolates a missing/unpopulated secret to an empty
+    string without failing the workflow, so silently falling back here would
+    ship a release signed with a throwaway key and throwaway trust anchor.
+    """
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY", "")
+    with pytest.raises(BuildError, match="release_signing_key_empty"):
+        _load_persistent_signing_key()
+
+
+def test_persistent_signing_key_whitespace_only_inline_env_var_is_hard_error(monkeypatch):
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY", "   \n\t  ")
+    with pytest.raises(BuildError, match="release_signing_key_empty"):
+        _load_persistent_signing_key()
+
+
+def test_persistent_signing_key_empty_file_env_var_is_hard_error(monkeypatch, tmp_path):
+    key_file = tmp_path / "key.pem"
+    key_file.write_text("   \n")
+    monkeypatch.setenv("PHOTO_WALL_RELEASE_SIGNING_KEY_FILE", str(key_file))
+    with pytest.raises(BuildError, match="release_signing_key_empty"):
+        _load_persistent_signing_key()
+
+
+def test_persistent_signing_key_never_appears_in_phase_output_or_other_files(tmp_path, capsys):
+    _skip_unless_openssl3()
+    from scripts import build_ci_image as ci
+
+    supplied = tmp_path / "supplied.key"
+    pem = _generate_ed25519_key(supplied)
+    deployment, _disposable_key = _fixture_deployment(tmp_path / "deployment")
+    capsys.readouterr()  # discard fixture_deployment's own phase output
+    ci.phase("release_signing_key_persistent", _apply_persistent_signing_key, deployment, pem)
+    captured = capsys.readouterr()
+    assert pem not in captured.out.encode()
+    assert pem not in captured.err.encode()
+    signing_key = deployment / "private" / "release-signing.key"
+    for path in deployment.rglob("*"):
+        if path.is_file() and path != signing_key:
+            assert pem not in path.read_bytes()
 
 
 def test_rollback_candidate_orchestration_keeps_private_path_and_signs_after_prepare(

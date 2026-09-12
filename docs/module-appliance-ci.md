@@ -73,6 +73,24 @@ public origin, CA and release trust anchor; no production signing secret is
 made available to pull-request code. The [boot gate](module-appliance-e2e.md)
 defines the scenarios and their limits.
 
+`scripts/build_ci_image.py` can sign a build with a persistent project key
+instead of the disposable per-build one above. Setting
+`PHOTO_WALL_RELEASE_SIGNING_KEY` to the Ed25519 private key PEM contents (the
+natural shape for a GitHub Actions secret exposed as an env var), or
+`PHOTO_WALL_RELEASE_SIGNING_KEY_FILE` to a path holding the same PEM bytes
+(for a secret mounted as a file instead), replaces the disposable fixture
+signer before assembly. `release.pub.pem` is always re-derived from that
+exact key at build time, so the baked trust anchor can never drift from a
+separately committed public key; there is no such file to keep in sync.
+Supplying neither variable — every current e2e/PR run and local build —
+keeps today's disposable-key behavior unchanged, and supplying both is
+rejected as an ambiguous source. The key is written to the same
+mode-0600, never-uploaded private deployment path as the disposable key and
+is deleted with it at the end of the build; it is never echoed, logged, or
+copied into any emitted artifact. This build capability exists ahead of the
+release workflow that will supply the secret; wiring a production signing
+secret into `appliance.yml` is a separate change.
+
 The build phases remove the compressed Ubuntu input after decompression unless
 `--base-cache` is supplied, then remove the raw base image, extracted root,
 source export, player wheelhouse, and package staging after each consuming

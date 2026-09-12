@@ -88,6 +88,62 @@ def _openssl(*argv: str) -> None:
     appliance.run(["openssl", *argv], timeout=30)
 
 
+# Persistent release signing key contract: set PHOTO_WALL_RELEASE_SIGNING_KEY
+# to the Ed25519 private key PEM contents directly (the usual shape for a
+# GitHub Actions secret exposed as an env var). If a caller instead prefers
+# to mount the secret as a file, PHOTO_WALL_RELEASE_SIGNING_KEY_FILE names
+# that path. Exactly one of the two may be set; supplying neither preserves
+# today's disposable per-build key so existing CI/local runs need no secret.
+_PERSISTENT_KEY_ENV = "PHOTO_WALL_RELEASE_SIGNING_KEY"
+_PERSISTENT_KEY_FILE_ENV = "PHOTO_WALL_RELEASE_SIGNING_KEY_FILE"
+
+
+def _load_persistent_signing_key() -> bytes | None:
+    """Read the optional persistent Ed25519 release signing key, if supplied.
+
+    Returns the raw PEM bytes, or None when neither env var is set at all
+    (the disposable per-build key fallback then applies unchanged). A
+    variable that is *set but empty/whitespace-only* -- which is how GitHub
+    Actions renders a missing or unpopulated secret, without failing the
+    workflow -- is a misconfiguration, not "unset": it raises
+    ``BuildError("release_signing_key_empty")`` rather than silently falling
+    back to the disposable key. Never logs or echoes the key material.
+    """
+    inline = os.environ.get(_PERSISTENT_KEY_ENV)
+    file_path = os.environ.get(_PERSISTENT_KEY_FILE_ENV)
+    if inline and file_path:
+        raise appliance.BuildError("release_signing_key_source_conflict")
+    if file_path is not None:
+        if not file_path.strip():
+            raise appliance.BuildError("release_signing_key_empty")
+        contents = Path(file_path).read_bytes()
+        if not contents.strip():
+            raise appliance.BuildError("release_signing_key_empty")
+        return contents
+    if inline is not None:
+        if not inline.strip():
+            raise appliance.BuildError("release_signing_key_empty")
+        return inline.encode()
+    return None
+
+
+def _apply_persistent_signing_key(deployment: Path, pem: bytes) -> None:
+    """Replace the disposable fixture signer with the supplied persistent key.
+
+    `release.pub.pem` is re-derived from this exact key so the baked trust
+    anchor always matches whichever key signs the release -- there is no
+    separately committed public key to fall out of sync. The key bytes are
+    written with a closed permission window and never appear in tool output.
+    """
+    signing_key = deployment / "private" / "release-signing.key"
+    release_pub = deployment / "public" / "release.pub.pem"
+    fd = os.open(signing_key, os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(pem)
+    _openssl("pkey", "-in", str(signing_key), "-pubout", "-out", str(release_pub))
+    release_pub.chmod(0o600)
+
+
 def _sign_release(signing_key: Path, manifest: Path, signature: Path) -> dict:
     """Create and size-check one raw Ed25519 release signature."""
     appliance.run(
@@ -445,6 +501,14 @@ def build(
     completed = False
     try:
         deployment, signing_key = phase("fixture_deployment", _fixture_deployment, deployment)
+        persistent_signing_key = _load_persistent_signing_key()
+        if persistent_signing_key is not None:
+            phase(
+                "release_signing_key_persistent",
+                _apply_persistent_signing_key,
+                deployment,
+                persistent_signing_key,
+            )
         temporary = Path(tempfile.mkdtemp(prefix=".photo-wall-ci-work-", dir=output.parent))
         appliance.outside_git(temporary)
         evidence = temporary / "package-evidence"
