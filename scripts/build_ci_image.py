@@ -544,7 +544,6 @@ def build(
                     (output / "pxe/appliance/release.json").read_bytes()
                 ).hexdigest(),
                 "rootfs_sha256": release["rootfs_sha256"],
-                "configuration_sha256": release["configuration_sha256"],
                 "boot_abi": release["boot_abi"],
                 "generic_initrd_sha256": generic_manifest["outputs"]["initrd"]["sha256"],
                 "generic_kernel_sha256": generic_manifest["outputs"]["kernel"]["sha256"],

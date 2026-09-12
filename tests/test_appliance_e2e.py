@@ -182,11 +182,11 @@ def inputs(tmp_path, monkeypatch):
     candidate_dir = tmp_path / "deployment/rollback-candidate"
     candidate_dir.mkdir()
     releases = {slot: SimpleNamespace(revision="f" * 40, release_id=identity,
-                boot_abi="b" * 64, configuration_sha256="d" * 64,
+                boot_abi="b" * 64,
                 rootfs_sha256=identity, rootfs_size=123) for slot, identity in
                 (("accepted", RELEASE), ("candidate", CANDIDATE))}
     metadata = dict(schema=1, kind="ci-rollback-candidate", source_revision="f" * 40,
-                    boot_abi="b" * 64, configuration_sha256="d" * 64,
+                    boot_abi="b" * 64,
                     fault_path=FAULT_PATH, content_sha256=hashlib.sha256(FAULT_CONTENT).hexdigest(),
                     releases={slot: {key: getattr(value, key) for key in
                            ("release_id", "rootfs_sha256", "rootfs_size")} for slot, value in releases.items()})

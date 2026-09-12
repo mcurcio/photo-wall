@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from appliance.bootstrap import read_regular
 from central.app import create_app as create_central_app
-from contracts.release import MAX_MANIFEST_BYTES, Release, configuration_digest
+from contracts.release import MAX_MANIFEST_BYTES, Release
 
 
 @dataclass(frozen=True)
@@ -44,8 +44,6 @@ class BootBundle:
             raise ValueError("invalid boot fixture signing key or signature")
         key.verify(signature, payload)
         release = Release.decode(payload)
-        if release.configuration_sha256 != configuration_digest(files):
-            raise ValueError("boot fixture configuration mismatch")
         descriptor = os.open(directory / release.rootfs_name,
                              os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -119,7 +117,6 @@ def create_app():
     public = Path(os.environ["PHOTO_WALL_BOOT_PUBLIC_CONFIG"])
     os.environ.update(PHOTO_WALL_RELEASE_PUBLIC_KEY=str(public / "release.pub.pem"),
                       PHOTO_WALL_RELEASE_BOOT_ABI=bundle.release.boot_abi,
-                      PHOTO_WALL_RELEASE_CONFIGURATION_SHA256=bundle.release.configuration_sha256,
                       PHOTO_WALL_RELEASE_ROOT=str(bundle.directory),
                       PHOTO_WALL_INITIAL_RELEASE_MANIFEST=str(bundle.directory / "release.json"),
                       PHOTO_WALL_INITIAL_RELEASE_SIGNATURE=str(bundle.directory / "release.sig"))

@@ -35,7 +35,6 @@ class ReleaseAuthority:
         clock: Clock,
         public_key: Ed25519PublicKey,
         boot_abi: str,
-        configuration_sha256: str,
         *,
         health_seconds: float = 30,
         health_max_age: float = 2,
@@ -50,7 +49,7 @@ class ReleaseAuthority:
         ):
             raise ValueError("invalid_release_policy")
         self.db, self.clock, self.public_key = db, clock, public_key
-        self.boot_abi, self.configuration_sha256 = boot_abi, configuration_sha256
+        self.boot_abi = boot_abi
         self.health_seconds, self.health_max_age = health_seconds, health_max_age
         self.installation = installation or PostgresInstallationRepository(clock)
 
@@ -65,7 +64,7 @@ class ReleaseAuthority:
         try:
             self.public_key.verify(signature, manifest)
             release = Release.decode(manifest)
-            release.require_compatible(self.boot_abi, self.configuration_sha256)
+            release.require_compatible(self.boot_abi)
         except (InvalidSignature, ValueError, TypeError):
             raise ReleaseError("invalid_release", 422) from None
         return release

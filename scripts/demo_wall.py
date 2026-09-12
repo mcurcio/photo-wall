@@ -37,7 +37,6 @@ CORE_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
 DEMO_BOOT_ABI = "a" * 64
-DEMO_CONFIGURATION_SHA256 = "b" * 64
 
 # This is the ONLY benchmark application code copied into the Player image.
 # It imports source-neutral Player/contracts and stdlib; no host harness follows.
@@ -400,7 +399,6 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             PHOTO_WALL_ADMIN_TOKEN="${DEMO_ADMIN_TOKEN}", PHOTO_WALL_MEDIA_ROOT="/media",
             PHOTO_WALL_HORIZON_SECONDS="15", PHOTO_WALL_RELEASE_PUBLIC_KEY="/release/release.pub.pem",
             PHOTO_WALL_RELEASE_BOOT_ABI=DEMO_BOOT_ABI,
-            PHOTO_WALL_RELEASE_CONFIGURATION_SHA256=DEMO_CONFIGURATION_SHA256,
             PHOTO_WALL_INITIAL_RELEASE_MANIFEST="/release/release.json",
             PHOTO_WALL_INITIAL_RELEASE_SIGNATURE="/release/release.sig",
             PHOTO_WALL_RELEASE_ROOT="/release"), volumes=["media:/media:ro"], networks=["wall", "backend"],
@@ -551,7 +549,7 @@ class DemoHost:
         release_root = helper / "release"
         release_root.mkdir()
         rootfs = b"photo-wall stateless demo release\n"
-        release = Release(self.revision, DEMO_BOOT_ABI, DEMO_CONFIGURATION_SHA256,
+        release = Release(self.revision, DEMO_BOOT_ABI,
             hashlib.sha256(rootfs).hexdigest(), len(rootfs))
         signing_key = Ed25519PrivateKey.generate()
         manifest = release.encode()

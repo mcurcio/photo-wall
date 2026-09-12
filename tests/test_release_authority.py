@@ -11,16 +11,16 @@ from central.releases import ReleaseAuthority, ReleaseError
 from contracts.release import BootRequest, Release
 
 DEVICE = "device-" + "d" * 64
-ABI, CONFIG = "b" * 64, "c" * 64
+ABI = "b" * 64
 
 
 @pytest.fixture
 def authority(registry):
     key = Ed25519PrivateKey.generate()
-    service = ReleaseAuthority(registry.db, registry.clock, key.public_key(), ABI, CONFIG,
+    service = ReleaseAuthority(registry.db, registry.clock, key.public_key(), ABI,
                                health_seconds=3)
     def register(data):
-        release = Release(hashlib.sha1(data).hexdigest(), ABI, CONFIG,
+        release = Release(hashlib.sha1(data).hexdigest(), ABI,
                           hashlib.sha256(data).hexdigest(), len(data))
         service.register(release.encode(), key.sign(release.encode()))
         return release
@@ -70,7 +70,7 @@ def test_duplicate_boot_request_concurrently_returns_exact_ticket_and_consumes_o
 def test_failed_trial_next_boot_uses_accepted_and_old_trial_never_reissued(authority):
     service, key, accepted, candidate = authority
     boot_request, selected = trial(authority)
-    restarted = ReleaseAuthority(service.db, service.clock, key.public_key(), ABI, CONFIG)
+    restarted = ReleaseAuthority(service.db, service.clock, key.public_key(), ABI)
     assert restarted.select_boot(boot_request) == selected
     fallback = restarted.select_boot(request())
     assert not fallback.trial and fallback.release_id == accepted.release_id
@@ -112,7 +112,7 @@ def test_health_promotes_only_fresh_continuous_current_session_and_survives_rest
     service.clock.advance(1)
     assert not report(service, selected)["accepted"]
     service.clock.advance(1)
-    service = ReleaseAuthority(service.db, service.clock, key.public_key(), ABI, CONFIG, health_seconds=3)
+    service = ReleaseAuthority(service.db, service.clock, key.public_key(), ABI, health_seconds=3)
     assert not report(service, selected)["accepted"]
     service.clock.advance(1)
     assert report(service, selected)["accepted"]
@@ -161,7 +161,7 @@ def test_signature_compatibility_and_exact_release_identity(authority):
     assert service.register(accepted.encode(), key.sign(accepted.encode())) == accepted
     with pytest.raises(ReleaseError, match="invalid_release"):
         service.register(accepted.encode(), Ed25519PrivateKey.generate().sign(accepted.encode()))
-    incompatible = Release("a" * 40, "d" * 64, CONFIG, "e" * 64, 10)
+    incompatible = Release("a" * 40, "d" * 64, "e" * 64, 10)
     with pytest.raises(ReleaseError, match="invalid_release"):
         service.register(incompatible.encode(), key.sign(incompatible.encode()))
     ticket = service.select_boot(request())

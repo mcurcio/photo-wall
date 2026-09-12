@@ -25,7 +25,6 @@ from appliance.build import (
     outside_git,
     squash,
 )
-from contracts.release import configuration_digest
 
 MAX_CANDIDATE_BYTES = 64 * 1024
 FAULT_PATH = "etc/systemd/system/photo-wall-player.service.d/99-ci-failure.conf"
@@ -70,7 +69,8 @@ def _directory(path: Path, error: str) -> None:
     _reject_symlink_parents(path)
 
 
-def _configuration(directory: Path, error: str, *, extras: set[str] = frozenset()) -> str:
+def _configuration(directory: Path, error: str, *, extras: set[str] = frozenset()) -> None:
+    """Validate the standard public-input file set; not bound into the signed release."""
     _directory(directory, error)
     entries = set()
     for path in directory.iterdir():
@@ -81,22 +81,20 @@ def _configuration(directory: Path, error: str, *, extras: set[str] = frozenset(
         raise BuildError(error)
     if any(path.is_symlink() for path in directory.iterdir()):
         raise BuildError(error)
-    inputs = {}
     for name in sorted(PUBLIC_NAMES):
         path = directory / name
         if path.is_symlink():
             raise BuildError(error)
         try:
             checked_file(path, 1024**2)
-            inputs[name] = path.read_bytes()
+            size = path.stat().st_size
         except (OSError, BuildError):
             raise BuildError(error) from None
-        if not 0 < len(inputs[name]) <= 1024**2:
+        if not 0 < size <= 1024**2:
             raise BuildError(error)
-    return configuration_digest(inputs)
 
 
-def _read_base(base_bundle: Path) -> tuple[dict, object, Path, str]:
+def _read_base(base_bundle: Path) -> tuple[dict, object, Path]:
     _directory(base_bundle, "base_bundle_invalid")
     _, build = _regular_json(base_bundle / "build.json", 4 * 1024**2)
     from contracts.release import Release
@@ -110,7 +108,6 @@ def _read_base(base_bundle: Path) -> tuple[dict, object, Path, str]:
     if (build.get("schema") != 1 or build.get("revision") != release.revision
             or type(epoch) is not int
             or build.get("boot_abi") != release.boot_abi
-            or build.get("configuration_sha256") != release.configuration_sha256
             or build.get("rootfs_sha256") != release.rootfs_sha256
             or build.get("rootfs_size") != release.rootfs_size):
         raise BuildError("base_identity_mismatch")
@@ -122,10 +119,8 @@ def _read_base(base_bundle: Path) -> tuple[dict, object, Path, str]:
         raise BuildError("base_rootfs_size")
     boot = base_bundle / "boot"
     _directory(boot, "base_boot_invalid")
-    config = _configuration(base_bundle / "public", "base_public_invalid")
-    if config != release.configuration_sha256:
-        raise BuildError("base_configuration_mismatch")
-    return build, release, boot, config
+    _configuration(base_bundle / "public", "base_public_invalid")
+    return build, release, boot
 
 
 def _kernel_name(root: Path) -> str:
@@ -179,11 +174,9 @@ def prepare(root: Path, base_bundle: Path, destination: Path) -> dict:
     if not destination.parent.is_dir() or destination.parent.is_symlink():
         raise BuildError("destination_parent_invalid")
 
-    build, base, boot, config = _read_base(base_bundle)
-    root_config = _configuration(root / "etc/photo-wall", "root_configuration_invalid",
-                                  extras={"boot-policy.json"})
-    if root_config != config:
-        raise BuildError("root_configuration_mismatch")
+    build, base, boot = _read_base(base_bundle)
+    _configuration(root / "etc/photo-wall", "root_configuration_invalid",
+                    extras={"boot-policy.json"})
     _, source = _regular_json(root / "usr/share/photo-wall/build/source.json", 4 * 1024**2)
     if (source.get("revision") != base.revision
             or source.get("source_epoch") != build["source_epoch"]):
@@ -218,8 +211,7 @@ def prepare(root: Path, base_bundle: Path, destination: Path) -> dict:
         temporary_rootfs = destination / "rootfs.squashfs"
         squash(root, temporary_rootfs, build["source_epoch"])
         candidate = manifest(temporary_rootfs, revision=base.revision,
-                             boot_abi=calculated_abi,
-                             configuration_sha256=config)
+                             boot_abi=calculated_abi)
         if candidate.rootfs_sha256 == base.rootfs_sha256:
             raise BuildError("candidate_unchanged")
         candidate_rootfs = destination / candidate.rootfs_name
@@ -232,7 +224,6 @@ def prepare(root: Path, base_bundle: Path, destination: Path) -> dict:
             "source_revision": base.revision,
             "source_epoch": build["source_epoch"],
             "boot_abi": calculated_abi,
-            "configuration_sha256": config,
             "fault_path": FAULT_PATH,
             "content_sha256": fault_hash,
             "releases": {

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from appliance.build import BuildError, boot_abi, canonical
-from contracts.release import Release, configuration_digest
+from contracts.release import Release
 from scripts import build_rollback_candidate as candidate
 
 REVISION = "a" * 40
@@ -15,14 +15,13 @@ EPOCH = 1_700_000_000
 PUBLIC_NAMES = ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
 
 
-def _write_config(directory: Path) -> str:
+def _write_config(directory: Path) -> None:
     directory.mkdir(parents=True)
     for name in PUBLIC_NAMES:
         (directory / name).write_bytes((name + "\n").encode())
-    return configuration_digest({name: (directory / name).read_bytes() for name in PUBLIC_NAMES})
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Release, str]:
+def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Release]:
     root, bundle, destination = (tmp_path / name for name in ("root", "bundle", "candidate"))
     (root / "usr/lib/modules/test-kernel").mkdir(parents=True)
     (root / "usr/lib/modules/test-kernel/test.ko").write_bytes(b"module")
@@ -40,7 +39,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Release, str]:
         path = root / "etc/initramfs-tools" / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(value)
-    config = _write_config(root / "etc/photo-wall")
+    _write_config(root / "etc/photo-wall")
     (root / "etc/photo-wall/boot-policy.json").write_bytes(b"generated policy\n")
     (root / "etc/systemd/system").mkdir(parents=True)
     source = root / "usr/share/photo-wall/build/source.json"
@@ -56,7 +55,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Release, str]:
     _write_config(public)
     base_bytes = b"base rootfs"
     base_hash = hashlib.sha256(base_bytes).hexdigest()
-    base = Release(revision=REVISION, boot_abi=abi, configuration_sha256=config,
+    base = Release(revision=REVISION, boot_abi=abi,
                    rootfs_sha256=base_hash, rootfs_size=len(base_bytes))
     (bundle / base.rootfs_name).write_bytes(base_bytes)
     build = {
@@ -64,13 +63,12 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Release, str]:
         "revision": REVISION,
         "source_epoch": EPOCH,
         "boot_abi": abi,
-        "configuration_sha256": config,
         "rootfs_sha256": base.rootfs_sha256,
         "rootfs_size": base.rootfs_size,
     }
     (bundle / "release.json").write_bytes(base.encode())
     (bundle / "build.json").write_bytes(canonical(build))
-    return root, bundle, destination, base, config
+    return root, bundle, destination, base
 
 
 @pytest.fixture
@@ -85,13 +83,12 @@ def fake_squash(monkeypatch):
 
 
 def test_prepare_binds_distinct_ab_candidate_and_restores_root(tmp_path, fake_squash):
-    root, bundle, destination, base, config = _fixture(tmp_path)
+    root, bundle, destination, base = _fixture(tmp_path)
     result = candidate.prepare(root, bundle, destination)
 
     assert result["kind"] == "ci-rollback-candidate"
     assert result["source_revision"] == REVISION
     assert result["source_epoch"] == EPOCH
-    assert result["configuration_sha256"] == config
     assert result["releases"]["accepted"]["release_id"] == base.release_id
     assert result["releases"]["candidate"]["release_id"] != base.release_id
     assert result["releases"]["candidate"]["rootfs_sha256"] != base.rootfs_sha256
@@ -101,20 +98,26 @@ def test_prepare_binds_distinct_ab_candidate_and_restores_root(tmp_path, fake_sq
     assert json.loads((destination / "candidate.json").read_bytes()) == result
 
 
-@pytest.mark.parametrize("fault", ["abi", "configuration"])
-def test_prepare_rejects_changed_root_identity(tmp_path, fake_squash, monkeypatch, fault):
-    root, bundle, _destination, _base, _config = _fixture(tmp_path)
-    if fault == "abi":
-        monkeypatch.setattr(candidate, "boot_abi", lambda *_args: ("b" * 64, {}))
-    else:
-        (root / "etc/photo-wall/public.json").write_bytes(b"changed\n")
-    with pytest.raises(BuildError, match="(base_boot_abi_mismatch|root_configuration_mismatch)"):
+def test_prepare_rejects_changed_root_boot_abi(tmp_path, fake_squash, monkeypatch):
+    root, bundle, _destination, _base = _fixture(tmp_path)
+    monkeypatch.setattr(candidate, "boot_abi", lambda *_args: ("b" * 64, {}))
+    with pytest.raises(BuildError, match="base_boot_abi_mismatch"):
+        candidate.prepare(root, bundle, tmp_path / "candidate")
+    assert not (root / candidate.FAULT_PATH).exists()
+
+
+def test_prepare_rejects_root_configuration_missing_a_required_file(tmp_path, fake_squash):
+    """0008 decision 4: config content is no longer bound to the signed release, but
+    the standard public-input file set is still validated structurally."""
+    root, bundle, _destination, _base = _fixture(tmp_path)
+    (root / "etc/photo-wall/public.json").unlink()
+    with pytest.raises(BuildError, match="root_configuration_invalid"):
         candidate.prepare(root, bundle, tmp_path / "candidate")
     assert not (root / candidate.FAULT_PATH).exists()
 
 
 def test_prepare_rejects_existing_fault_directory_and_preserves_it(tmp_path, fake_squash):
-    root, bundle, destination, _base, _config = _fixture(tmp_path)
+    root, bundle, destination, _base = _fixture(tmp_path)
     dropdir = root / candidate.FAULT_PATH
     dropdir.parent.mkdir(parents=True)
     sentinel = dropdir / "sentinel"
@@ -127,7 +130,7 @@ def test_prepare_rejects_existing_fault_directory_and_preserves_it(tmp_path, fak
 
 
 def test_prepare_rejects_destination_inside_root_or_via_symlink(tmp_path, fake_squash):
-    root, bundle, _destination, _base, _config = _fixture(tmp_path)
+    root, bundle, _destination, _base = _fixture(tmp_path)
     with pytest.raises(BuildError, match="destination_inside_root"):
         candidate.prepare(root, bundle, root / "candidate")
     linked_parent = tmp_path / "linked"
@@ -137,7 +140,7 @@ def test_prepare_rejects_destination_inside_root_or_via_symlink(tmp_path, fake_s
 
 
 def test_prepare_failure_removes_partial_candidate_and_restores_root(tmp_path, monkeypatch):
-    root, bundle, destination, _base, _config = _fixture(tmp_path)
+    root, bundle, destination, _base = _fixture(tmp_path)
 
     def fail(_root, path, _epoch):
         path.write_bytes(b"partial")
@@ -159,7 +162,7 @@ def test_exclusive_writer_rejects_zero_progress_and_removes_its_file(tmp_path, m
 
 
 def test_dropin_collision_is_not_removed_as_owned(tmp_path, monkeypatch):
-    root, bundle, destination, _base, _config = _fixture(tmp_path)
+    root, bundle, destination, _base = _fixture(tmp_path)
 
     def collide(path, _payload):
         path.write_bytes(b"preexisting race")

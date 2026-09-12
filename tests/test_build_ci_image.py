@@ -11,7 +11,7 @@ import pytest
 
 from appliance.build import BuildError
 from appliance.updates import verify_release
-from contracts.release import Release, configuration_digest
+from contracts.release import Release
 from player.service import PlayerConfig
 from scripts.build_ci_image import (
     _fixture_deployment,
@@ -138,17 +138,10 @@ def test_shared_release_signer_produces_verifiable_ed25519_signature(tmp_path, m
     monkeypatch.setattr("appliance.updates.OPENSSL", shutil.which("openssl"))
     deployment, key = _fixture_deployment(tmp_path / "deployment")
     public = deployment / "public"
-    config = configuration_digest(
-        {
-            name: (public / name).read_bytes()
-            for name in ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem")
-        }
-    )
     manifest = tmp_path / "release.json"
     release = Release(
         revision="a" * 40,
         boot_abi="b" * 64,
-        configuration_sha256=config,
         rootfs_sha256="c" * 64,
         rootfs_size=1,
     )
@@ -162,7 +155,6 @@ def test_shared_release_signer_produces_verifiable_ed25519_signature(tmp_path, m
             signature.read_bytes(),
             public / "release.pub.pem",
             release.boot_abi,
-            config,
         )
         == release
     )

@@ -15,7 +15,7 @@ from central.releases import ReleaseAuthority
 from contracts.release import Release
 from scripts import vm_release_probe
 from scripts.vm_release_contract import ReleaseStageResult, decode_release_result
-from tests.conftest import BOOT_ABI, CONFIGURATION
+from tests.conftest import BOOT_ABI
 
 ADMIN = 'release-stage-integration-' + 'x' * 32
 DEVICE = 'device-' + 'e' * 64
@@ -25,11 +25,11 @@ DEVICE = 'device-' + 'e' * 64
 def stage_boundary(registry, monkeypatch):
     key = Ed25519PrivateKey.generate()
     authority = ReleaseAuthority(registry.db, registry.clock, key.public_key(),
-        BOOT_ABI, CONFIGURATION)
-    accepted = Release('1' * 40, BOOT_ABI, CONFIGURATION, '2' * 64, 1024)
+        BOOT_ABI)
+    accepted = Release('1' * 40, BOOT_ABI, '2' * 64, 1024)
     authority.register(accepted.encode(), key.sign(accepted.encode()))
     authority.set_default(accepted.release_id)
-    candidate = Release('3' * 40, BOOT_ABI, CONFIGURATION, '4' * 64, 2048)
+    candidate = Release('3' * 40, BOOT_ABI, '4' * 64, 2048)
     manifest = base64.b64encode(candidate.encode()).decode()
     signature = base64.b64encode(key.sign(candidate.encode())).decode()
     app = create_app(db=registry.db, clock=registry.clock, release_authority=authority,

@@ -22,15 +22,15 @@ from appliance.bootstrap import (
     read_regular,
 )
 from appliance.updates import UpdateError
-from contracts.release import BootTicket, Release, configuration_digest
+from contracts.release import BootTicket, Release
 
 BODY = b"generated rootfs bytes"
-RELEASE = Release("a" * 40, "b" * 64, "c" * 64, hashlib.sha256(BODY).hexdigest(), len(BODY))
+RELEASE = Release("a" * 40, "b" * 64, hashlib.sha256(BODY).hexdigest(), len(BODY))
 BOOT_ID = "11111111-2222-3333-4444-555555555555"
 
 
 def config(path):
-    return BootConfig("https://photo-wall.test", "photo-wall.test", "b" * 64, "c" * 64, path)
+    return BootConfig("https://photo-wall.test", "photo-wall.test", "b" * 64, path)
 
 
 def verify(payload, signature, *_):
@@ -110,17 +110,23 @@ def test_config_rejects_url_credentials_and_arbitrary_paths(tmp_path, origin):
         replace(config(tmp_path), release_origin=origin)
 
 
-def test_public_config_exact_hash_and_unknown_keys(tmp_path):
-    inputs = {"public.json": b'{"schema":1}\n', "ca.pem": b"public ca\n",
-              "release.pub.pem": b"public key\n", "bootstrap.json": json.dumps(dict(
-                  schema=1, release_origin="https://photo-wall.test", time_server="photo-wall.test")).encode()}
-    for name, value in inputs.items():
-        (tmp_path / name).write_bytes(value)
+def test_config_loads_boot_policy_independent_of_deployment_config_files(tmp_path):
+    """0008 decision 4: boot-tree config files are no longer bound into any
+    digest the loader checks, so editing them post-build needs no re-sign."""
+    (tmp_path / "bootstrap.json").write_bytes(json.dumps(dict(
+        schema=1, release_origin="https://photo-wall.test", time_server="photo-wall.test")).encode())
     policy = tmp_path / "boot-policy.json"
-    policy.write_text(json.dumps(dict(schema=1, boot_abi="b" * 64,
-                                    configuration_sha256=configuration_digest(inputs))))
+    policy.write_text(json.dumps(dict(schema=1, boot_abi="b" * 64)))
     assert BootConfig.load(tmp_path).release_origin == "https://photo-wall.test"
     (tmp_path / "public.json").write_bytes(b"changed")
+    assert BootConfig.load(tmp_path).boot_abi == "b" * 64
+
+
+def test_config_rejects_boot_policy_with_removed_or_unknown_fields(tmp_path):
+    (tmp_path / "bootstrap.json").write_bytes(json.dumps(dict(
+        schema=1, release_origin="https://photo-wall.test", time_server="photo-wall.test")).encode())
+    policy = tmp_path / "boot-policy.json"
+    policy.write_text(json.dumps(dict(schema=1, boot_abi="b" * 64, configuration_sha256="c" * 64)))
     with pytest.raises(BootstrapError, match="boot_configuration"):
         BootConfig.load(tmp_path)
 

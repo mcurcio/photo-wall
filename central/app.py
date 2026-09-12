@@ -111,7 +111,6 @@ def _configured_release_authority(db: Database, clock: Clock) -> ReleaseAuthorit
     names = (
         "PHOTO_WALL_RELEASE_PUBLIC_KEY",
         "PHOTO_WALL_RELEASE_BOOT_ABI",
-        "PHOTO_WALL_RELEASE_CONFIGURATION_SHA256",
     )
     configured = [name in os.environ for name in names]
     if not any(configured):
@@ -124,7 +123,7 @@ def _configured_release_authority(db: Database, clock: Clock) -> ReleaseAuthorit
     public_key = serialization.load_pem_public_key(payload)
     if not isinstance(public_key, Ed25519PublicKey):
         raise ValueError("release public key must be Ed25519")
-    return ReleaseAuthority(db, clock, public_key, os.environ[names[1]], os.environ[names[2]])
+    return ReleaseAuthority(db, clock, public_key, os.environ[names[1]])
 
 
 def _initialize_release_authority(authority: ReleaseAuthority | None) -> None:
