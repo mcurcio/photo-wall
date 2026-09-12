@@ -122,9 +122,6 @@ def run(argv: list[str], *, timeout: int = 600, log: Path | None = None,
             except subprocess.TimeoutExpired:
                 raise BuildError("tool_timeout") from None
             if code:
-                tail = bytes(output[-4000:]).decode(errors="replace")
-                print(f"--- tool_failed output tail ({argv[0]!r}) ---\n{tail}\n"
-                      "--- end tool_failed output tail ---", file=sys.stderr, flush=True)
                 raise BuildError("tool_failed")
             return bytes(output)
     finally:
