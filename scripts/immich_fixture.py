@@ -43,6 +43,18 @@ MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_STREAM_BYTES = 16 * 1024 * 1024
 TERMINATE_GRACE = 5.0
 
+# A disposable fixture's image pull and container start are the two docker
+# operations exposed to real registry/daemon flakiness. Bounding the retry
+# count keeps a truly permanent failure (bad image ref, unfixable config)
+# from hanging CI, while still absorbing the transient hiccup that clears on
+# a human re-run. This layer cannot reliably tell the two apart -- both
+# surface as the same closed `docker_command_failed`/`docker_command_timeout`
+# code -- so retrying a bounded few times regardless is treated as safe for a
+# fixture that is torn down and rebuilt from scratch on every attempt anyway.
+STARTUP_RETRY_ATTEMPTS = 4
+STARTUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
+_TRANSIENT_DOCKER_CODES = ("docker_command_failed", "docker_command_timeout")
+
 
 class _Tail:
     def __init__(self, maximum: int):
@@ -91,6 +103,30 @@ class HarnessError(CodedFailure):
 def require(condition: bool, code: str) -> None:
     if not condition:
         raise HarnessError(code)
+
+
+def call_with_retry(action, *, attempts: int, backoff_seconds: tuple[float, ...],
+                    cleanup, retryable, sleep=time.sleep):
+    """Run `action`, retrying a bounded number of times with increasing backoff.
+
+    `cleanup()` runs before every retry (never before the first attempt, and
+    never after the last) so a partial container from the failed attempt
+    cannot collide with the next one by name. A non-retryable error, and the
+    final attempt's error regardless of retryability, always propagate
+    unmodified -- the caller keeps whatever diagnosable detail it carries.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except Exception as error:
+            if attempt == attempts or not retryable(error):
+                raise
+            cleanup()
+            sleep(backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)])
+
+
+def _retryable_startup_error(error: BaseException) -> bool:
+    return isinstance(error, HarnessError) and str(error) in _TRANSIENT_DOCKER_CODES
 
 
 def read_json(path: Path) -> dict:
@@ -240,6 +276,16 @@ class FixtureHost:
         return self._command([*self.base, *args], timeout=timeout, capture=capture)
 
     @staticmethod
+    def _coded_failure(code: str, stderr_tail: "_Tail") -> HarnessError:
+        # The printed/public code stays a closed, bounded value (see
+        # HarnessError); the bounded, already-sanitized stderr tail rides
+        # along as a non-printed attribute so a retry-exhausted caller (or a
+        # test) can still get at *why*, without widening what CI ever prints.
+        error = HarnessError(code)
+        error.diagnostic = stderr_tail.diagnostic()
+        return error
+
+    @staticmethod
     def _command(args: list[str], *, timeout: int, capture: bool) -> str:
         launched = docker_debug_args(args)
         process = subprocess.Popen(launched, cwd=ROOT, start_new_session=True,
@@ -279,14 +325,14 @@ class FixtureHost:
                 FixtureHost._terminate(process)
                 FixtureHost._drain(process, stdout_tail, stderr_tail)
                 FixtureHost._record_failure(args, -1, stdout_tail, stderr_tail)
-                raise HarnessError(failure)
+                raise FixtureHost._coded_failure(failure, stderr_tail)
             try:
                 code = process.wait(timeout=max(.01, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 FixtureHost._terminate(process)
                 FixtureHost._drain(process, stdout_tail, stderr_tail)
                 FixtureHost._record_failure(args, -1, stdout_tail, stderr_tail)
-                raise HarnessError("docker_command_timeout") from None
+                raise FixtureHost._coded_failure("docker_command_timeout", stderr_tail) from None
             if code:
                 FixtureHost._record_failure(args, code, stdout_tail, stderr_tail)
                 provenance_failure = trusted_provenance_failure(args, bytes(stderr_tail.data))
@@ -295,7 +341,7 @@ class FixtureHost:
                 failure = trusted_helper_failure(args, bytes(stderr_tail.data))
                 if failure is not None:
                     raise HarnessError(failure.code)
-                raise HarnessError("docker_command_failed")
+                raise FixtureHost._coded_failure("docker_command_failed", stderr_tail)
             return bytes(stdout).decode(errors="strict") if capture else ""
         finally:
             if process.poll() is None:
@@ -377,6 +423,28 @@ class FixtureHost:
         # Buildx builder (as in GHA) cannot resolve that daemon-local FROM tag.
         self.compose(*daemon_compose_build("central-probe"), timeout=600, capture=False)
 
+    def pull(self, *services: str, timeout: int = 300, sleep=time.sleep) -> None:
+        """Pull upstream registry images before startup, isolating a slow or
+        hiccupping registry from the container-start step below and retrying
+        it independently (see module docstring on STARTUP_RETRY_ATTEMPTS)."""
+        call_with_retry(
+            lambda: self.compose("pull", *services, timeout=timeout, capture=False),
+            attempts=STARTUP_RETRY_ATTEMPTS, backoff_seconds=STARTUP_RETRY_BACKOFF_SECONDS,
+            cleanup=self.cleanup, retryable=_retryable_startup_error, sleep=sleep,
+        )
+
+    def start(self, *, wait_timeout: int = 240, timeout: int = 600, sleep=time.sleep) -> None:
+        """Start the fixture's containers and wait for health, retrying a
+        transient docker/daemon hiccup a bounded number of times. `cleanup()`
+        runs between retries so the next attempt never collides with a
+        partial container left by the last one."""
+        call_with_retry(
+            lambda: self.compose("up", "-d", "--wait", "--wait-timeout", str(wait_timeout),
+                                 timeout=timeout, capture=False),
+            attempts=STARTUP_RETRY_ATTEMPTS, backoff_seconds=STARTUP_RETRY_BACKOFF_SECONDS,
+            cleanup=self.cleanup, retryable=_retryable_startup_error, sleep=sleep,
+        )
+
     def export_runtime(self) -> None:
         # Container state includes the fixture runtime key; target is private 0700.
         self.compose("cp", "central-probe:/runtime/.", str(self.state / "runtime"),
@@ -457,7 +525,8 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
         host.build(base_image=base_image)
         evidence["stage"] = "startup"
         write_json(host.state / "evidence.json", evidence)
-        host.compose("up", "-d", "--wait", "--wait-timeout", "240", timeout=600, capture=False)
+        host.pull("immich", "database", "redis")
+        host.start(wait_timeout=240, timeout=600)
         inventory, upstream_ip = host.topology()
         evidence["inventory"] = inventory
         audited_files, harness_files = fixture_provenance_paths()
