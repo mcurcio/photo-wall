@@ -376,8 +376,12 @@ def build(repository: Path, revision: str, output: Path,
     lock = tomllib.loads(sources["uv.lock"].decode())
     runtime = locked_runtime(project, lock)
     base_version = Version(project["project"]["version"])
-    if (base_version.local or SpecifierSet(project["project"]["requires-python"])
-            != SpecifierSet(">=3.12,<3.13")):
+    # This wheelhouse targets 3.12 (TARGET), but the project's requires-python
+    # now spans 3.12 (this wheelhouse) and 3.13 (the apt-deps player .deb runs on
+    # trixie's system python3 -- p4-deb-full-depends). So require that 3.12 is
+    # WITHIN requires-python, not that the range is 3.12-only.
+    if (base_version.local or not SpecifierSet(project["project"]["requires-python"])
+            .contains(TARGET["python_full_version"])):
         raise BuildError("unsupported project version or Python target")
     version = f"{base_version}+g{revision}"
     filename, wheel_data = make_player_wheel(sources, version, runtime)
