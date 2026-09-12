@@ -103,3 +103,53 @@ Append-only. Read with `grep -a`.
   instead, that is a new pattern (this codebase has no existing convention
   for streaming request-body file uploads) and should be a separate,
   explicitly-scoped decision.
+
+## p3-base-bootstrapper (0009 slice 2 -- `appliance/provision.py`)
+
+- **The design's literal "reuse `appliance/bootstrap.py`'s `Fetcher`" does not
+  fit an mDNS-discovered origin as written.** `Fetcher.__init__` takes a
+  `BootConfig` (`appliance/bootstrap.py:92`), whose `__post_init__`
+  hard-requires `release_origin` to be `https://` and pins a 64-hex-char
+  `boot_abi`. The 0009 bootstrapper's origin comes from
+  `MdnsCentralDiscovery`, which legitimately returns `http://` on the T0
+  home-LAN baseline (`player/mdns_discovery.py:35`) and has no OS-ABI to pin
+  (it fetches an app `.deb`, not a signed rootfs). Constructing `BootConfig`
+  with a synthetic https-only wrapper to satisfy the constructor would be
+  worse than the alternative taken: `appliance/provision.py` reimplements the
+  same *discipline* (one deadline for the whole acquisition, no
+  proxies/redirects, exact `Content-Length` bound enforced while streaming,
+  `Content-Encoding` pinned to identity) as a small standalone `AppFetcher`
+  class scoped to `http://`-or-`https://` origins with no ABI pinning. This is
+  a reuse-the-pattern, not reuse-the-class, reading of the design doc's "the
+  bounded ... `Fetcher` ... reused for the manifest + `.deb`" language
+  (0009-minimal-base-and-app-package.md, "The seam") -- flagged because a
+  literal read could be taken as "import `Fetcher` directly," which does not
+  typecheck against a plain-HTTP discovered origin.
+- **Corollary the design doc does not spell out: a plain-HTTP origin handoff
+  needs `allow_http: true` alongside it.** `PlayerConfig`'s explicit-origin
+  validator (`player/service.py` `_validate_origin`, exercised by
+  `test_config_rejects_untrusted_or_non_origin_urls`,
+  `tests/test_player_service.py:118`) rejects an *explicit* `central_origin`
+  with scheme `http` unless `allow_http=True` is also set -- `resolve_origin`
+  only forces `allow_http=True` for a *discovered* origin
+  (`player/service.py:423`), never for the config's own field. Since the
+  design's origin handoff ("The origin must be handed forward, not
+  re-discovered") turns a discovered origin into an explicit one, a bare
+  `{"central_origin": "http://..."}` handoff on the common home-LAN
+  (plain-HTTP) case would make the Player's own `PlayerConfig` fail to
+  validate at boot -- the opposite of the intended fix.
+  `appliance.provision.write_public_config` sets `allow_http: true` whenever
+  the resolved origin's scheme is `http`, so the handoff cannot self-defeat.
+  This is a necessary consequence of 0009's home-LAN ruling, not a new
+  decision, but the design doc's origin-handoff section does not mention it.
+- **Scope note, not a contradiction:** the design's "The seam" section lists
+  `contracts.equipment.equipment_device_id` as one of exactly three things the
+  bootstrapper imports, implying it also produces the boot-context file
+  (`/run/photo-wall/boot.json`, device_id/ticket_id/persistence) that
+  replaces `appliance/bootstrap.py:428`'s `persistence="volatile"`+ticket
+  production (migration edit B). The task brief scoping this slice lists only
+  discover/fetch/verify/install/origin-handoff/start -- no boot-context or
+  enroll concern -- and says explicitly "it does NOT enroll." `provision.py`
+  therefore does not import `contracts.equipment` or touch
+  `/run/photo-wall/boot.json`; that production (edit B) is left for whichever
+  slice replaces `appliance/bootstrap.py`'s netboot path.
