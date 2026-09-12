@@ -104,9 +104,11 @@ Slices (tracer-first; design: [0009](0009-minimal-base-and-app-package.md)):
 | **T (tracer)** p3-enroll-rekey | player+central | diskless ticketless enroll re-keyed off "no boot ticket present"; registry.py:92 guard move | HIGH (fleet-brick) | yes | closed `8f35e5c` (verified+reviewed) |
 | 1 p3-central-app-service | central | app manifest + package endpoints + current-app pointer | med | yes | closed `101a140` |
 | 2 p3-base-bootstrapper | appliance | discover→fetch→verify sha256→unpack→run→origin handoff | HIGH boot-critical | mocked | in_progress |
-| 3 p3-retire-authority | central+contracts+appliance | delete release-authority/boot-ticket/rootfs routes/trial | HIGH | yes | open |
-| 4 p3-deb-build | scripts | player .deb (prebuilt venv) | med | yes | open |
-| 5 p3-base-image | appliance | minimal generic base OS image | med-high | build only; real Pi = owner | open |
+| 4 p3-deb-build | scripts | player .deb (prebuilt venv) | med | yes | closed `beeaf9f` |
+| 5 p3-base-image | appliance | minimal generic base OS image (NEW path, additive) | med-high | structure only; real Pi = owner | in_progress |
+| 6 p3-release-workflow-rework | workflows | publish base image + .deb | med | yes | open |
+| 7 p3-docs | docs | README/runbook/module docs to the new model | low | link-check | open |
+| 3 p3-retire-authority (RESEQUENCED LAST) | central+contracts+appliance | delete old netboot/release-authority/boot-ticket/rootfs/trial + signing | HIGH destructive | yes | **deferred until owner hardware-validates the new base-image boot** |
 | 6 p3-release-workflow-rework | workflows | publish base image + .deb; retire signed-rootfs publish | med | yes | open |
 | 7 p3-docs | docs | README/runbook/module docs to the new model | low | link-check | open |
 
