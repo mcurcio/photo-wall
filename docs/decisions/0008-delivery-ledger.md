@@ -71,6 +71,25 @@ but it MUST land before the baseline PR merges (implementation-workflow §3.7).
 - Assemble ~8 min: investigated. Safe next win = R1 (mksquashfs `-processors` 2→nproc, ~60-120s, needs a byte-identical `rootfs_sha256` check). Owner-decision items: R2 (skip rollback candidate in smoke scope, ~157s) and R3 (overlap rollback squash with finalize VM work). Non-starters: `--*-cache` hooks (wrong code path), changing compressor/block size (alters signed bytes).
 - Framework question (Yocto/rpi-image-gen/pi-gen): recent pain was incidental (duplicated allowlists + leaky cache key), not a framework failure; a swap likely isn't faster and would re-implement the signed-release/netboot model. If pursued, scope it to the D0 flash tier only, as a deliberate design decision.
 
+## Phase 2 — PXE + published image (0008 steps 5-6; owner reprioritized 2026-09-12)
+Owner's fleet is DISKLESS (netboot). PXE and a published image are deliverables, not deferred.
+Signing decision: **CI signs with a persistent release key stored as a GitHub Actions secret.**
+Directive: build as much as possible up to the software/QEMU line; owner hardware-tests later.
+
+Slices (tracer-first):
+| Bead | Package(s) | Risk | Status |
+|---|---|---|---|
+| p2-d1-refreeze | contracts+appliance+central | signature/migration — reviewed | open |
+| p2-signing-key | appliance/build+workflow | security (key) | open |
+| p2-release-workflow | .github/workflows | infra | open |
+| p2-flash-in-ci | .github/workflows+appliance | infra (unverified boot) | open |
+| p2-operator-tftp | scripts+docs | medium | open |
+| p2-docs-pxe-first | docs | low | open |
+
+**Owner hand-off actions (only you can do these):**
+1. Generate the release Ed25519 keypair; commit `release.pub.pem` (trust anchor); add the private key as the GitHub Actions secret the release workflow references. I build the plumbing around a named secret and never handle the private key.
+2. Real Raspberry Pi 5 PXE boot qualification (DHCP next-server/filename, TFTP, EEPROM netboot) — CI cannot exercise the PXE transport; it only boots RAM-root under QEMU.
+
 ## Residuals (follow-up, not blocking)
 - **Single source of truth for bootstrap's contracts/appliance module set** — currently duplicated across 4 sites (wheelhouse `ROOTS`, dist-packages copy, initramfs hook, `verify_initramfs`). Collapsing this kills the failure class that caused three CI cycles here.
 - Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
