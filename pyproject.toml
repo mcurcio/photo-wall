@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "photo-wall"
 version = "0.1.0"
 description = "Self-hosted Photo Wall control plane and appliance player"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
   "fastapi==0.115.12", "uvicorn==0.34.2", "pydantic==2.11.4",
   "psycopg[binary]==3.2.9", "psycopg-pool==3.3.1", "httpx==0.28.1", "websockets==15.0.1",

@@ -23,7 +23,7 @@ from appliance.provision import (
     AppUnconfigured,
     Bootstrapper,
     ProvisionError,
-    dpkg_install,
+    apt_install,
     fetch_manifest,
     fetch_package,
     start_player_unit,
@@ -347,17 +347,27 @@ def test_origin_handoff_makes_app_skip_rediscovery(tmp_path):
 # --- dpkg / systemctl are thin, replaceable shell-outs -----------------------
 
 
-def test_dpkg_install_and_start_unit_are_real_but_easily_stubbed(monkeypatch, tmp_path):
-    """Not exercised against real dpkg/systemctl (no such sandbox in CI --
+def test_apt_install_and_start_unit_are_real_but_easily_stubbed(monkeypatch, tmp_path):
+    """Not exercised against real apt-get/systemctl (no such sandbox in CI --
     the owner's Pi bench step covers that); this just proves the default
     implementations are simple, injectable `subprocess.run` calls, matching
-    the brief's "thin, injectable/mockable step" requirement."""
+    the brief's "thin, injectable/mockable step" requirement.
+
+    The default install is `apt-get install -y <deb path>` (not `dpkg -i`) so
+    the Player .deb's declared Depends resolve from the base's distro sources
+    (0009 p4-deb-full-depends): a bare dpkg unpack would leave them unsatisfied.
+    """
     calls = []
     monkeypatch.setattr(
         "appliance.provision.subprocess.run",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
-    dpkg_install(BODY, {"sha256": SHA256})
+    apt_install(BODY, {"sha256": SHA256})
     start_player_unit()
-    assert calls[0][0][0][:2] == ["dpkg", "-i"]
+    args, kwargs = calls[0]
+    assert args[0][:3] == ["apt-get", "install", "-y"]
+    # A local .deb file path, not a bare package name to look up.
+    assert args[0][3].endswith(".deb")
+    # Non-interactive so the boot-time install never blocks on a prompt.
+    assert kwargs["env"]["DEBIAN_FRONTEND"] == "noninteractive"
     assert calls[1][0][0] == ["systemctl", "start", "photo-wall-player.service"]
