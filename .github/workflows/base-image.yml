@@ -221,7 +221,13 @@ jobs:
           # closure (python3-zeroconf pulls in python3-ifaddr) -- both are
           # now the `.deb`'s own Depends, resolved by apt at install time,
           # not a second raw mmdebstrap.packages declaration.
-          require_path - usr/bin/python3 'the python3 interpreter'
+          # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
+          # regular file on some distros), so accept either type here.
+          if grep -Eq -- '^[-l] squashfs-root/usr/bin/python3$' "$typed"; then
+            echo "OK: found the python3 interpreter (usr/bin/python3, file or symlink)"
+          else
+            violation "missing required the python3 interpreter at usr/bin/python3"
+          fi
           require_path d usr/lib/python3/dist-packages/zeroconf 'the zeroconf library (python3-zeroconf)'
           require_path d usr/lib/python3/dist-packages/ifaddr 'the ifaddr library (python3-ifaddr)'
 
