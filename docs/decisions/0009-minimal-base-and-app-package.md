@@ -1,9 +1,21 @@
 # 0009 — Minimal base OS and the Player app as a downloadable package
 
-Date: 2026-09-11. Status: **proposed — awaiting owner approval.** This directory
-(`docs/decisions/`) holds accepted architecture decisions; this file is the ONE
-gate document for the re-architecture and replaces every prior note, brief, and
-sketch on it.
+Date: 2026-09-11. Status: **accepted — owner approved 2026-09-12; UX-over-security
+ruling recorded.** This directory (`docs/decisions/`) holds accepted architecture
+decisions; this file is the ONE gate document for the re-architecture and
+replaces every prior note, brief, and sketch on it.
+
+> **Owner ruling (2026-09-12).** This is a home LAN. There is no threat model.
+> Optimize for UX and simplicity over security. A player failing to connect is
+> visibly obvious to the operator — that is the monitoring. Accordingly **gate #1
+> (app authenticity) is the simplest option: central serves the app `.deb` plus a
+> plain sha256 that is a corruption check only, fetched over the mDNS-discovered
+> central. No boot-tree hash, no signing, no extra operator steps.** The owner
+> explicitly accepts "zero authenticity versus a hypothetical rogue" because there
+> is no rogue on a home LAN. All six gates are decided as recommended (gate #1 to
+> the simplest option, not the boot-tree-hash recommendation of r1). The migration
+> correctness (ticketless diskless enroll, guard move, blast radius, origin
+> handoff) is unaffected by this ruling and stands in full.
 
 This decision **supersedes the RAM-root signed-squashfs mechanism** of
 [0008](0008-generic-image-and-serial-identity.md) for the **netboot / appliance
@@ -12,14 +24,17 @@ This decision **supersedes the RAM-root signed-squashfs mechanism** of
 explicit-origin precedence). It changes only *how the OS and the application
 reach a diskless Player*.
 
-**What you are being asked:** approve the shape below — a bare base OS that
-carries no application, plus the Player shipped as a downloadable `.deb` central
-serves — and rule on the six open choices in
-[Decisions that are yours](#decisions-that-are-yours). The largest is #1
-(**app authenticity** — how a Player knows the `.deb` bytes are the ones the
-operator meant to publish) and #5 (retiring the release-signing machinery).
-Gate #1 is now framed as a three-way choice whose recommended answer costs no
-signing key at all; read it before ruling.
+**What was decided:** the shape below — a bare base OS that carries no
+application, plus the Player shipped as a downloadable `.deb` central serves — is
+approved, and the six choices in
+[Decisions that are yours](#decisions-that-are-yours) are all ruled as
+recommended, with **gate #1 (app authenticity) resolved to the simplest option
+per the owner ruling above**: central serves the `.deb` plus a plain sha256 that
+is a corruption check only, fetched over the mDNS-discovered central. There is no
+boot-tree hash and no signing anywhere in the system. The owner accepts that this
+buys **zero authenticity against a hypothetical rogue on the LAN**, because on a
+home LAN there is no rogue and a player failing to connect is visibly obvious to
+the operator.
 
 ---
 
@@ -38,14 +53,12 @@ signing key at all; read it before ruling.
   that rarely revs, and (b) the Player application as a `.deb`.
 - **No baked origin.** The running base finds central over the LAN by mDNS, the
   same way 0008's flashed baseline already does.
-- **Two independent signing questions, not one.** (a) *Does the OS boot path
-  demand a signature?* No — Raspberry Pi 5 netboot requires none by default
-  (facts table), so the bespoke release-signing key and its whole ledger
-  retire. (b) *How does a Player know the `.deb` is the app the operator
-  published (authenticity), not a rogue's?* The hardware fact says **nothing**
-  about this — it is a distinct threat. Gate #1 answers it, and its recommended
-  answer needs no signing key: bind the app's expected hash to the same
-  operator-trusted boot-server path the OS already comes from.
+- **No signing anywhere.** Raspberry Pi 5 netboot requires no signature by
+  default (facts table), so the bespoke release-signing key and its whole ledger
+  retire. The app `.deb` is likewise unsigned: central serves it with a plain
+  sha256 that a Player checks **only to catch corruption in transit**, not to
+  prove authorship. On a home LAN, by the owner's explicit ruling, there is no
+  authorship threat to defend against, so no key exists anywhere in the system.
 
 ### Owner decisions this design builds on
 
@@ -67,8 +80,7 @@ signing key at all; read it before ruling.
 | `release_accepted` is set `True` **only** for persistent boots ([service.py:511](../../player/service.py)); a volatile boot starts it `False`, and `_control_loop` then POSTs boot-health every loop ([service.py:826-827](../../player/service.py)). | [player/service.py:511](../../player/service.py), [:826](../../player/service.py) | With boot-health **retired**, a diskless Player would POST a dead route on every loop. The diskless base must also yield `release_accepted=True`. |
 | `enroll()` hard-requires a configured release authority and returns 503 if it is absent — even before the ticket branch. | [central/registry.py:92](../../central/registry.py) | Load-bearing coupling: retiring the release authority **breaks all enrollment** unless this guard is moved. **Necessary but not sufficient** — the diskless client-side ticket/health fix above is also required. |
 | Central serves an unauthenticated, sha256-addressed, length-bounded artifact today (the rootfs), and an authenticated sha256-addressed one (media). | rootfs [central/app.py:400](../../central/app.py); media [central/app.py:451](../../central/app.py) | The `.deb` endpoint is a direct copy of an existing, reviewed pattern — not new surface. |
-| RPi 5 network boot requires **no signature** by default; secure boot (signed `boot.img`, OTP-fused key) is opt-in and irreversible. The repo already treats TFTP as trusted-LAN-only. | [docs/module-pxe-service.md:37](../module-pxe-service.md); see Sources | Justifies dropping the **OS-boot** signature only: no boot-path regression. It says **nothing** about **app authenticity** — a rogue-served `.deb` is a separate threat gate #1 must answer on its own merits. |
-| The boot-server (PXE/TFTP) tree is operator-controlled and delivers the OS bytes over a trusted path; the running OS already trusts everything that arrives there. | [docs/module-pxe-service.md:37](../module-pxe-service.md) | Rule 1's own "every OS byte comes from the boot server" makes the boot tree a *pre-existing operator-trusted channel*. Gate #1's recommended answer rides it: the app's expected sha256 is dropped there too, so app authenticity == boot-server trust with no key. |
+| RPi 5 network boot requires **no signature** by default; secure boot (signed `boot.img`, OTP-fused key) is opt-in and irreversible. The repo already treats TFTP as trusted-LAN-only. | [docs/module-pxe-service.md:37](../module-pxe-service.md); see Sources | Justifies dropping the **OS-boot** signature with no boot-path regression. App authenticity is a separate question, ruled by the owner as out of scope on a home LAN — the `.deb` is served unsigned with a corruption-only sha256. |
 
 ---
 
@@ -78,7 +90,7 @@ signing key at all; read it before ruling.
 graph LR
   subgraph boot["Boot path — operator-trusted infra (DHCP/PXE/TFTP)"]
     dhcp["DHCP / PXE<br/>next-server + filename"]
-    tree["Boot-server tree<br/>kernel + initramfs + base.squashfs<br/><b>+ app-hash (expected sha256)</b>"]
+    tree["Boot-server tree<br/>kernel + initramfs + base.squashfs"]
   end
   subgraph pi["Diskless Player (RAM only)"]
     init["initramfs<br/>overlay-mount base in RAM"]
@@ -87,14 +99,14 @@ graph LR
   end
   subgraph central["Central"]
     mdns["mDNS advert<br/>_photowall._tcp"]
-    appsvc["App package service<br/>.deb by sha256"]
+    appsvc["App package service<br/>.deb + sha256 by manifest"]
     plane["Operational plane<br/>enroll / state / media"]
   end
   dhcp --> tree --> init --> boots
-  tree -->|"expected sha256 (trusted path)"| boots
   boots -->|"mDNS discover"| mdns
+  boots -->|"GET manifest {version, sha256}"| appsvc
   boots -->|"GET .deb bytes"| appsvc
-  boots -->|"verify against boot-tree hash;<br/>install into RAM overlay, start"| app
+  boots -->|"sha256 corruption check;<br/>install into RAM overlay, start"| app
   app -->|"enroll by serial, poll state"| plane
 ```
 
@@ -103,22 +115,20 @@ graph LR
 1. **The base OS carries no application and no origin.** Every OS byte comes
    from the boot server (PXE/TFTP path DHCP already points at); the base's only
    job is to find central and fetch the app. Nothing deployment-specific and
-   no application code is baked into the published base bundle. **The boot tree
-   is therefore an operator-trusted channel already** — rule 1 puts every OS
-   byte on it — which is exactly what gate #1's recommended answer exploits.
+   no application code is baked into the published base bundle.
 2. **Central serves the app bytes; the base finds central by mDNS.** The `.deb`
-   bytes, all operational config (Frame binding, assignments, calibration) come
-   from central after discovery — never from the image. The app revs by
-   publishing a new `.deb`; the base bundle almost never rebuilds.
-3. **App authenticity comes from the boot-server path, not a signing key.** The
-   recommended shape (gate #1) drops the app's *expected sha256* — a tiny
-   hash/manifest file — into the same operator-controlled boot tree the OS bytes
-   arrive on; the `.deb` bytes still stream from central over mDNS+HTTP; the
-   bootstrapper accepts the bytes only if they match the **boot-tree** hash.
-   Authenticity is then a property of the operator-trusted boot path, with no
-   release-signing key anywhere in the system. The app still revs independently:
-   the operator drops the new `.deb` in central **and** updates the small hash
-   file in the boot tree. Trusting the boot-server path is the stated cost.
+   bytes, its sha256, and all operational config (Frame binding, assignments,
+   calibration) come from central after discovery — never from the image. The
+   app revs by publishing a new `.deb`; the base bundle almost never rebuilds.
+3. **Integrity is a corruption check; trust is the home LAN.** Central serves the
+   app's sha256 in a plain manifest; the bootstrapper streams the `.deb` from the
+   same discovered central and accepts it only if the bytes hash to that value.
+   This catches a truncated or corrupted download — nothing more. It is **not**
+   an authenticity proof: the hash and the bytes ride the same discovered channel,
+   so a rogue could serve a self-consistent pair. By the owner's explicit ruling
+   there is no rogue on a home LAN to defend against, so no signing key and no
+   out-of-band hash exist. A single operator act (upload + promote in central)
+   ships a new app. Trusting the home LAN is the stated cost.
 
 ---
 
@@ -133,19 +143,12 @@ graph LR
 - **App package (`.deb`)** — the Player application, published by central and
   fetched each boot. Self-contained (vendored Python deps); depends only on
   native libraries the base already provides.
-- **Boot-tree app hash** (recommended, gate #1) — a tiny file in the
-  operator-controlled boot-server (PXE/TFTP) tree naming the app's *expected*
-  sha256 (and version). It arrives over the same trusted path as the OS bytes,
-  so it is the authenticity anchor: the bootstrapper trusts it, then fetches
-  `.deb` bytes from central and accepts them only if they hash to this value.
-  A rogue mDNS central cannot influence it.
 - **App manifest** (central) — central's small, plain (unsigned) document
   naming the app version, `.deb` sha256, and size that central *holds and
-  serves*. Under the recommended gate #1 it is a convenience/corruption check
-  only, **not** the authenticity anchor (it shares the spoofable discovered
-  channel with the bytes); the boot-tree app hash is what the bootstrapper
-  actually trusts. Under the sha256-from-central alternative it is the only
-  hash, giving zero authenticity.
+  serves*. The sha256 is a **corruption check only**: the bootstrapper reads it
+  from the discovered central and rejects a `.deb` whose bytes do not match. It
+  is not an authenticity anchor — the hash and the bytes share the discovered
+  channel — and by the owner's home-LAN ruling none is required.
 - **RAM overlay** — the diskless root: a read-only base squashfs (lower) plus a
   tmpfs (upper) in RAM. The `.deb` installs into the tmpfs upper; nothing
   survives reboot. Reused verbatim from today's netboot mount.
@@ -159,50 +162,33 @@ graph LR
 
 ## How trust and integrity work
 
-The model is deliberately flat, matching 0008's trusted-LAN (T0) baseline.
-
-This table describes the **recommended** gate #1 shape (boot-tree app hash).
+The model is deliberately flat, matching 0008's trusted-LAN (T0) baseline, and
+by the owner's 2026-09-12 ruling it stays flat: a home LAN with no threat model.
 
 | Who is asking | What they get | Why |
 |---|---|---|
-| initramfs → boot server (TFTP/HTTP) | The base OS bytes **and the app's expected sha256**, no signature check | Operator-trusted bootstrap transport ([module-pxe-service.md:37](../module-pxe-service.md)); DHCP already designates this server |
-| bootstrapper → central (mDNS + HTTP) | The `.deb` bytes, accepted only if they hash to the **boot-tree** value | Bytes ride the discovered (spoofable) channel; the authenticity anchor rode the trusted boot path, so a rogue's bytes are rejected |
+| initramfs → boot server (TFTP/HTTP) | The base OS bytes, no signature check | Operator-trusted bootstrap transport ([module-pxe-service.md:37](../module-pxe-service.md)); DHCP already designates this server |
+| bootstrapper → central (mDNS + HTTP) | The app manifest (version + sha256), then the `.deb` bytes, accepted only if they hash to the manifest value | Corruption check on the download; the hash and bytes share the discovered channel, so this is integrity, not authenticity |
 | app → central (enroll by serial) | A session token, then state/media | Unchanged from 0008; nonce + proof-of-possession of a fresh key |
-| operator → central (bind) | The human checkpoint that grants a Frame | Unchanged from 0008 — but see the containment note below |
+| operator → central (bind) | The human checkpoint that grants a Frame | Unchanged from 0008 |
 
-**What a rogue LAN device gets — and why the recommended shape neutralizes it.**
-The rogue's win is **deterministic, not incidental**: `MdnsCentralDiscovery`
-tiebreaks by the lowest-sorting fully-qualified service name
-([player/mdns_discovery.py:52-54](../../player/mdns_discovery.py),
-[:100](../../player/mdns_discovery.py)), so a rogue advertising a
-lexicographically-smallest name **wins every boot, repeatably** — so it
-deterministically becomes the Player's central and serves a `.deb` of its
-choosing.
+**Security posture — home LAN, no threat model (owner ruling).** There is no
+authenticity check on the app `.deb`. The sha256 catches a corrupted download,
+not a lie: a rogue on the LAN could advertise mDNS and serve arbitrary app code
+(the discovery tiebreak is deterministic —
+[player/mdns_discovery.py:52-54](../../player/mdns_discovery.py) — so a rogue with
+a low-sorting name would win repeatably, and its code runs before enroll and
+before the operator sees the device). **The owner has explicitly accepted this**:
+on a home LAN there is no such rogue, and a player that fails to render is
+immediately visible to the operator, which is the monitoring. Signing and an
+out-of-band (boot-tree) hash were considered and deliberately not chosen — see
+gate #1's alternatives. This is the one place the design trades security for
+UX/simplicity, and it does so on purpose.
 
-- **Under the recommended shape** the expected sha256 came over the boot tree,
-  which the rogue cannot touch, so its bytes fail the hash and the boot stops.
-  The rogue-mDNS→arbitrary-code-execution escalation is closed.
-- **Absent that mitigation** (either alternative below where the only hash rides
-  the discovered channel) the bootstrapper verifies the sha256 *the same rogue
-  advertised* — corruption caught, a consistent lie not. That is **reliable,
-  repeatable arbitrary code execution on every Player**, a category worse than
-  0008's Edge 3 (attacker-chosen *content*): root-adjacent code inside the base
-  root, a LAN pivot, and an attack surface onto central and sibling Players.
-
-**No containment from the bind checkpoint.** Do not assume "the operator still
-has to bind, so a rogue is bounded." In 0009 the boot sequence is
-fetch-`.deb` → **execute it** → *then* the app enrolls and lands in the pending
-queue for the operator to see. The rogue's code has already run as the base's
-provisioning context **before** enrollment exists and **before** any human looks
-at the device. The bind checkpoint gates *Frame assignment*, not *code
-execution*; it provides **no** containment against a hostile `.deb`. (Contrast
-0008 Edge 3, where the rogue only supplied *content* to already-running trusted
-code — here the rogue supplies the code.)
-
-**Invariant (recommended shape):** *the base runs a `.deb` only if its bytes
-match the sha256 delivered over the operator-trusted boot tree; a mismatch stops
-the boot before the app runs. Authenticity is a property of the boot-server
-path, not of a signature — and, critically, not of the mDNS-discovered origin.*
+**Invariant:** *the base runs a `.deb` only if its bytes match the sha256 the
+manifest declares; a mismatch stops the boot before the app runs.* This is a
+corruption guard, not an authenticity guard — integrity of the bytes against the
+manifest, on a trusted home LAN.
 
 ---
 
@@ -219,41 +205,36 @@ sequenceDiagram
   participant C as Central
   participant A as Player app
   participant O as Operator
-  D->>I: TFTP kernel + initramfs + base.squashfs + app-hash file
+  D->>I: TFTP kernel + initramfs + base.squashfs
   I->>I: overlay-mount base (ro squashfs + tmpfs) in RAM, pivot
-  B->>B: read expected sha256 from the boot-tree app-hash file (trusted path)
   B->>M: browse _photowall._tcp (no origin baked)
   M-->>B: central_origin (deterministic lowest-name winner)
+  B->>C: GET /v1/app/manifest {version, sha256, size}
   B->>C: GET /v1/app/package/<sha256>.deb
-  B->>B: verify bytes against the BOOT-TREE sha256 while streaming; install into tmpfs overlay
-  B->>A: start photo-wall-player.service (app CODE now executes)
+  B->>B: verify bytes against the manifest sha256 while streaming (corruption check); install into tmpfs overlay
+  B->>A: start photo-wall-player.service (app code now executes)
   A->>C: enroll {serial, fresh key, nonce} — ticketless
-  C-->>O: pending player: serial S1 (operator sees the device only now)
+  C-->>O: pending player: serial S1
   O->>C: bind S1 -> Frame F, calibrate
   C-->>A: state for Frame F  (renders)
   Note over I,A: reboot re-fetches the .deb fresh and re-enrolls by serial
 ```
 
-1. The OS **and the app-hash file** arrive over the PXE/TFTP path; no signature,
-   no central contact for the OS. The base squashfs is overlay-mounted in RAM
-   exactly as [appliance/bootstrap.py:366](../../appliance/bootstrap.py) already
-   does.
-2. The bootstrapper reads the expected sha256 from the trusted boot tree, then
-   discovers central by mDNS (no baked origin), reusing
+1. The OS arrives over the PXE/TFTP path; no signature, no central contact for
+   the OS. The base squashfs is overlay-mounted in RAM exactly as
+   [appliance/bootstrap.py:366](../../appliance/bootstrap.py) already does.
+2. The bootstrapper discovers central by mDNS (no baked origin), reusing
    [player/mdns_discovery.py:46](../../player/mdns_discovery.py). The discovery
    winner is deterministic (lowest-sorting name,
-   [mdns_discovery.py:100](../../player/mdns_discovery.py)), so a rogue is a
-   repeatable winner absent the boot-tree hash — which is why the anchor must not
-   ride the discovered channel.
-3. The `.deb` bytes stream from the discovered central and are checked against
-   the **boot-tree** hash before anything from it executes. A rogue's bytes fail
-   here.
+   [mdns_discovery.py:100](../../player/mdns_discovery.py)); on a home LAN the
+   only advertiser is the operator's central.
+3. The bootstrapper reads the manifest, then streams the `.deb` from the same
+   central and checks the bytes against the manifest sha256 before install — a
+   corruption guard. A truncated or garbled download is rejected and retried.
 4. **Only after the `.deb` executes** does the app enroll by serial with
    `ticket_id=None` ([player/service.py:489](../../player/service.py)); it lands
-   in the pending queue and the operator binds it. Note the ordering: **code runs
-   before enrollment and before the operator sees the device** — the bind
-   checkpoint is not a barrier in front of a hostile `.deb`. (See the migration
-   section for the diskless ticketless-enroll fix this step depends on.)
+   in the pending queue and the operator binds it. (See the migration section for
+   the diskless ticketless-enroll fix this step depends on.)
 
 ### Publish and promote a new app
 
@@ -267,21 +248,18 @@ sequenceDiagram
   CI->>G: publish photo-wall-player_<version>.deb
   Op->>C: upload .deb (stored by sha256)
   Op->>C: promote <version> as current
-  Op->>Op: update the boot-tree app-hash file to the new sha256 (recommended gate #1)
   Note over C: next boot of any Player fetches the new .deb; running Players unaffected until reboot
 ```
 
-Under the recommended gate #1 a promote is **two operator acts**: upload+promote
-in central *and* update the small hash file in the boot tree. That is the
-stated cost of anchoring authenticity in the boot path (it is one extra edit on
-the same trusted host the operator already manages).
+A promote is a **single operator act**: upload + promote in central. The manifest
+central serves then names the new sha256, and every Player picks it up on its next
+reboot. No boot-tree file, no signing step, no extra host to touch.
 
 | Situation | What the operator sees |
 |---|---|
-| No app promoted yet | Bootstrapper cannot fetch a matching `.deb`; Player stays pre-app, retrying discovery |
-| Promoted app fails to render on a Pi | That Pi reboots and re-fetches the same app (no auto-rollback — retired); operator promotes a prior `.deb` (and reverts the boot-tree hash) to recover the fleet |
-| Rogue mDNS central (recommended shape) | Rogue's `.deb` fails the boot-tree hash; boot stops before its code runs |
-| Rogue mDNS central (either gate #1 alternative) | **Deterministic** win ([mdns_discovery.py:52-54](../../player/mdns_discovery.py)) → reliable **arbitrary code execution**; the bind checkpoint gives **no** containment because the code runs before enroll and before the operator sees the device |
+| No app promoted yet | Bootstrapper cannot fetch a manifest / matching `.deb`; Player stays pre-app, retrying discovery |
+| Promoted app fails to render on a Pi | That Pi reboots and re-fetches the same app (no auto-rollback — retired); the dark screen is the visible signal; operator promotes a prior `.deb` to recover the fleet |
+| Rogue mDNS central | Out of scope by owner ruling (home LAN, no threat model); the manifest sha256 is a corruption check, not an authenticity check, so a rogue serving a self-consistent `.deb` is not stopped — accepted |
 
 ---
 
@@ -295,13 +273,14 @@ with the app.
 ```mermaid
 stateDiagram-v2
   [*] --> Netbooting: power on
-  Netbooting --> BaseRAMRoot: initramfs overlay-mounts base (+ app-hash file)
-  BaseRAMRoot --> ReadingHash: bootstrapper starts
-  ReadingHash --> Discovering: expected sha256 read from boot tree
+  Netbooting --> BaseRAMRoot: initramfs overlay-mounts base
+  BaseRAMRoot --> Discovering: bootstrapper starts
   Discovering --> Discovering: mDNS timeout -> retry (fail closed)
-  Discovering --> Fetching: origin resolved (recorded for handoff)
+  Discovering --> FetchingManifest: origin resolved (recorded for handoff)
+  FetchingManifest --> Discovering: no app promoted (503) -> retry
+  FetchingManifest --> Fetching: manifest {version, sha256}
   Fetching --> Verifying: .deb streamed
-  Verifying --> Discovering: boot-tree-hash mismatch -> discard, retry
+  Verifying --> Discovering: sha256 mismatch (corruption) -> discard, retry
   Verifying --> Installing: hash ok
   Installing --> AppRunning: unit started (central_origin handed forward, ticketless enroll)
   AppRunning --> [*]: reboot (RAM wiped)
@@ -330,9 +309,8 @@ discovers central by mDNS to fetch the `.deb`. The app then starts and runs its
 which — because `MdnsCentralDiscovery` remembers nothing across calls
 ([mdns_discovery.py:63-64](../../player/mdns_discovery.py)) — performs a **fresh**
 mDNS browse. Two independent discoveries can resolve **different** responders:
-the app could enroll against a central other than the one that served its code
-(and, with a deterministic-winning rogue in play, the split is a lever, not a
-fluke). **Fix:** the bootstrapper writes its resolved origin as an explicit
+the app could enroll against a central other than the one that served its code.
+**Fix:** the bootstrapper writes its resolved origin as an explicit
 `central_origin` for the app (on the RAM overlay the app reads at start).
 `resolve_origin`'s precedence then makes that explicit origin **win over
 re-discovery** ([service.py:415](../../player/service.py): discovery is consulted
@@ -341,19 +319,17 @@ central that served its `.deb`, with no new discovery machinery. This is the
 recommended handoff; the alternative (two independent discoveries) must be
 explicitly defended if chosen, and is not recommended.
 
-**Attack found in review of the shape:** if the bootstrapper *also* enrolled (to
-authenticate the fetch), it would duplicate the identity/enroll machinery into
-the base and cause a **double enrollment** (bootstrapper session, then app
-session), bumping `authority_epoch` and churning the session for no operational
-gain — because the fetch authenticity is the boot-tree hash, not a token.
-**Fix:** the bootstrapper does **not** enroll; it discovers and fetches only. The
-app enrolls exactly **once** — but note that its enroll path is **not** unchanged:
-the diskless base must be re-keyed to enroll ticketless (see migration edit B).
+**Why the bootstrapper does not enroll:** if the bootstrapper *also* enrolled, it
+would duplicate the identity/enroll machinery into the base and cause a **double
+enrollment** (bootstrapper session, then app session), bumping `authority_epoch`
+and churning the session for no operational gain — the fetch integrity is the
+manifest sha256, not a token, so enrollment buys the fetch nothing. **Fix:** the
+bootstrapper does **not** enroll; it discovers and fetches only. The app enrolls
+exactly **once** — but note that its enroll path is **not** unchanged: the
+diskless base must be re-keyed to enroll ticketless (see migration edit B).
 **Residual, stated plainly:** app-*version selection* is fleet-global, not
-per-device (every Player reads the one boot-tree hash) — a per-device rollout
-needs the bootstrapper to enroll first (gate #2/#3). This is a selection limit,
-not an authenticity limit: under recommended gate #1 the bytes are still
-authenticated by the boot-tree hash.
+per-device (every Player fetches whatever central currently promotes) — a
+per-device rollout would need the bootstrapper to enroll first (gate #2/#3).
 
 **Cost:** the base image must now ship `zeroconf` and a Python runtime for the
 bootstrapper even though the app also ships them. One small duplication of a
@@ -368,7 +344,7 @@ without touching the OS.**
 
 | Today (0008 D1) | This design |
 |---|---|
-| A Player fix = rebuild the squashfs = re-sign = register a new `Release` = `set_default` = every Pi re-trials the whole OS | A Player fix = build a `.deb` = upload + promote + (recommended gate #1) update the small boot-tree hash file = every Pi fetches it next reboot; the OS bundle is untouched |
+| A Player fix = rebuild the squashfs = re-sign = register a new `Release` = `set_default` = every Pi re-trials the whole OS | A Player fix = build a `.deb` = upload + promote in central = every Pi fetches it next reboot; the OS bundle is untouched |
 | OS and app share a version and a blast radius | OS and app version independently; an app bug cannot force an OS rebuild |
 
 **Why this shape and not the two alternatives** (design-it-twice at the system
@@ -418,22 +394,11 @@ layer):
   (mirroring the singleton `appliance_release_policy`,
   [central/releases.py:116](../../central/releases.py)). Promote = update the row.
 
-### The boot-tree app-hash file (recommended gate #1)
-
-- A tiny operator-maintained file in the boot-server (PXE/TFTP) tree naming the
-  app's **expected sha256** (and version). It is **not** a central artifact — it
-  rides the same operator-trusted path the OS bytes come from, which is what
-  gives it its authenticity property. Promote therefore updates **both** the
-  central `app_package_policy` row **and** this file.
-- The bootstrapper reads this value first and treats it as authoritative; it
-  then GETs `/v1/app/package/{that-sha256}.deb` from the discovered central and
-  accepts the bytes only if they match.
-
 ### Endpoints (new, both mirror reviewed patterns)
 
 | Route | Auth | Returns | Errors |
 |---|---|---|---|
-| `GET /v1/app/manifest` | none (trusted LAN) | `{version, sha256, size}` of the current app; 503 if none promoted. **Under recommended gate #1 this is a corruption/convenience read only — NOT the authenticity anchor** (it shares the discovered channel with the bytes); the boot-tree hash is what the bootstrapper trusts | 503 `app_unconfigured` |
+| `GET /v1/app/manifest` | none (trusted LAN) | `{version, sha256, size}` of the current app; 503 if none promoted. The sha256 is the **corruption check** the bootstrapper verifies the `.deb` bytes against; it is not an authenticity anchor and, per the owner ruling, none is required | 503 `app_unconfigured` |
 | `GET /v1/app/package/{sha256}.deb` | none | the `.deb` bytes, `Content-Length` set, immutable cache, sha256-addressed | 404 unknown sha256; 503 bytes missing |
 | `POST /v1/operator/app` (admin) | admin token | upload a `.deb`, stored by sha256 | 422 malformed |
 | `PUT /v1/operator/app/current` (admin) | admin token | promote a version | 404 unknown |
@@ -536,40 +501,40 @@ bootstrapper's boot-context production (replacing
 together; either alone leaves the diskless fleet unable to enroll.
 
 **Rollback.** Because the base is stateless and re-fetches each boot, rollback of
-an app is "promote the previous `.deb` (and, under recommended gate #1, revert
-the boot-tree hash to its sha256); reboot the fleet." Rollback of the whole
-decision is "re-stage the old signed boot tree and restore the release-authority
-config" — possible only until the retired code is deleted, which is why gate #5
-asks whether to delete now or keep it dormant.
+an app is "promote the previous `.deb` in central; reboot the fleet." Rollback of
+the whole decision is "re-stage the old signed boot tree and restore the
+release-authority config" — possible only until the retired code is deleted,
+which per gate #5 is deleted in this workstream (so decision-level rollback needs
+git, not config).
 
 ---
 
-## Decisions that are yours
+## Decisions — all ruled (owner, 2026-09-12)
+
+All six were presented as open choices; the owner ruled each as the
+recommendation, with gate #1 taken to the **simplest** option per the
+UX-over-security ruling. The table below records the decision as made.
 
 Ladder for costs: a design fails safe if the failure is caught at
 **construction > transaction > decision > test > convention > documented**.
 
-| # | Question | Recommendation | Cost of the recommendation | Alternative |
-|---|---|---|---|---|
-| 1 | **App authenticity** (how a Player knows the `.deb` is the operator's, not a rogue's) | **Expected sha256 delivered over the boot-server (PXE/TFTP) tree; `.deb` bytes stream from central; bytes accepted only if they match the boot-tree hash** | Promote is two operator acts (upload+promote in central **and** update the small hash file in the boot tree); authenticity == boot-server trust | See the three-way breakdown below — this row's alternatives are the other two options |
-| 2 | Registration ↔ app-fetch ordering | **Discover → fetch → app enrolls by serial** (bootstrapper never enrolls) | App-version selection is fleet-global, not per-device | Bootstrapper enrolls first, fetch is token-authenticated (per-device selection, but duplicates identity in the base + double-enroll churn) |
-| 3 | App-version selection / rollout | **One global "current app" pointer the operator promotes** | No staged/per-device rollout and **no auto-rollback** (that safety retires with the release authority) | Per-device candidate + health-trial rollout like today's release authority (keeps the very complexity we are retiring) |
-| 4 | Base OS transport into RAM | **Base squashfs staged in the boot-server tree, loaded by initramfs; no central, no signature** | A larger TFTP/HTTP load than a bespoke initramfs; operator stages the GitHub bundle | (a) Embed the squashfs in the initramfs (huge initramfs over UDP); (b) fetch base from central over mDNS (chicken-and-egg — rejected in The hard part) |
-| 5 | The orphaned release-authority / boot-ticket code | **Delete it in this workstream** (and land **both** enroll fixes — central guard move + the diskless ticketless/health gates) | Big diff; loses the signed-OS + per-device auto-rollback safety net; rollback of the decision needs git, not config | Keep it dormant behind a flag (dead code rots; both enroll fixes still must land) |
-| 6 | `.deb` payload shape | **Prebuilt venv baked to `/opt/photo-wall/venv`, install = unpack** | Fixed install path; larger `.deb`; venv not relocatable | Ship the hashed wheelhouse + `pip install` in postinst (needs offline pip in the base, slower per boot) |
+| # | Question | Decision | Cost accepted |
+|---|---|---|---|
+| 1 | **App integrity / authenticity** | **Central serves the `.deb` plus a plain sha256 (corruption check only), fetched over the mDNS-discovered central. No boot-tree hash, no signing** | **Zero authenticity vs a hypothetical rogue** — accepted, because a home LAN has no rogue and a dark player is visibly obvious. Simplest to operate: one promote act, no key, no extra host |
+| 2 | Registration ↔ app-fetch ordering | **Discover → fetch → app enrolls by serial** (bootstrapper never enrolls) | App-version selection is fleet-global, not per-device |
+| 3 | App-version selection / rollout | **One global "current app" pointer the operator promotes** | No staged/per-device rollout and **no auto-rollback** (retires with the release authority); recovery is a manual re-promote of the prior `.deb` |
+| 4 | Base OS transport into RAM | **Base squashfs staged in the boot-server tree, loaded by initramfs; no central, no signature** | A larger TFTP/HTTP load than a bespoke initramfs; operator stages the GitHub bundle |
+| 5 | The orphaned release-authority / boot-ticket code | **Delete it in this workstream** (and land **both** enroll fixes — central guard move + the diskless ticketless/health gates) | Big diff; loses the signed-OS + per-device auto-rollback safety net; rollback of the decision needs git, not config |
+| 6 | `.deb` payload shape | **Prebuilt venv baked to `/opt/photo-wall/venv`, install = unpack** | Fixed install path; larger `.deb`; venv not relocatable |
 
-**Gate #1 in full — the three ways to get app authenticity (recommend the first):**
-
-| Option | Where the expected sha256 comes from | Authenticity guarantee | Cost | New machinery / key? |
-|---|---|---|---|---|
-| **A — boot-tree app hash (RECOMMENDED)** | The operator-controlled boot-server (PXE/TFTP) tree — the same trusted path the OS bytes ride | **Full** vs a rogue mDNS central: its `.deb` fails the boot-tree hash; the rogue→ACE escalation is neutralized because the hash never comes from the spoofable discovered origin | Promote is two operator edits (central + one small file in the boot tree); a bad hash/deb pairing bricks that boot (fail-closed) | **None** — no signing key, no revived ledger; the app still revs independently |
-| B — sha256 from central's manifest | The same mDNS-discovered central that serves the bytes | **Zero** — hash and bytes share the rogue-controllable channel; catches **corruption only**, never a consistent lie → reliable, repeatable **arbitrary code execution** on a deterministic rogue win | Cheapest to operate (one promote); worst security | None, but buys no authenticity |
-| C — revive Ed25519 signing on the `.deb` | A signature the Player verifies against a project public key in the base | **Full** cryptographic, even off a trusted LAN | Re-introduces the exact signing key + ledger this decision retires (gate #5); a key to manage and rotate | **Yes** — resurrects retired machinery |
-
-Recommendation: **A**. It gives the same rogue-resistance as C at the cost of C's
-key management, using a trust anchor (the boot tree) rule 1 already establishes.
-B is listed to be explicit that "just hash it" over the discovered channel buys
-**nothing** against a rogue — it is corruption-detection, not authenticity.
+**Gate #1 — options not chosen (recorded for the trail):** a *boot-tree app hash*
+(the app's expected sha256 dropped into the operator-trusted PXE/TFTP tree, out of
+the discovered channel) would give full rogue-resistance with no key but adds a
+second operator edit per promote and a second host to keep in sync; *Ed25519
+signing on the `.deb`* would give cryptographic authenticity even off a trusted
+LAN but resurrects the exact signing key + ledger this decision retires. Both were
+**deliberately not chosen** — the owner ruled there is no threat model on a home
+LAN, so the extra machinery buys nothing worth its UX cost. Do not resurrect them.
 
 **Assumptions made on your behalf — say so if any is wrong:**
 
@@ -577,11 +542,11 @@ B is listed to be explicit that "just hash it" over the discovered channel buys
    (`create_disk_flash`, [appliance/build.py:328](../../appliance/build.py)) is
    out of scope here and is left unchanged; if you also want D0 to fetch the
    `.deb`, that is a separate slice.
-2. The **boot-server (PXE/TFTP) path is operator-trusted** (0008's T0 infra).
-   Under the recommended gate #1 that trusted path — not the whole LAN — is what
-   authenticates the app code; the mDNS channel can be hostile and the boot-tree
-   hash still stops it. Under either gate #1 alternative, trust must cover the
-   whole LAN for *executable code*, not only content — a strictly larger ask.
+2. The **whole home LAN is trusted** (owner ruling, 2026-09-12). There is no
+   threat model: the mDNS channel that carries both the app bytes and their
+   sha256 is trusted, so the sha256 is a corruption check and not an authenticity
+   proof. The boot-server (PXE/TFTP) path remains operator-trusted (0008's T0
+   infra) for the OS bytes.
 3. The `.deb` is **self-contained** apart from native libraries the base
    provides; the base image is the source of GTK/GStreamer/Mesa/Python.
 4. Central's operational plane is otherwise **unchanged**; the only central-side
@@ -605,20 +570,23 @@ Players (updates are pull-at-boot).
 
 ## What can go wrong
 
-Ordered worst-first within the app-delivery threats.
+Ordered worst-first. These are **reliability and UX** risks — the security
+column is a single honest line, because the owner ruled there is no threat model
+on a home LAN. The operational risks below are the ones that actually bite and
+are ranked accordingly.
 
 | Failure | Behaviour | Guarantee strength |
 |---|---|---|
-| **Promoted `.deb` crashes on boot, fleet-wide** | Every Player loops boot → fetch-same-`.deb` → crash → reboot, all at once; **and boot-health is retired, so central has NO down-signal** — the fleet goes dark with no telemetry. Recovery is manual: operator promotes a prior `.deb` (and reverts the boot-tree hash) | **documented** — no auto-rollback (retired, gate #3) **and no crash-detection signal**; ranked above corruption because it is self-inflicted by a normal promote and is invisible to central |
-| Rogue mDNS central serves a hostile `.deb` — **recommended gate #1** | Bytes fail the **boot-tree** hash; boot stops before the code runs | **decision** — authenticity anchored off the spoofable channel |
-| Rogue mDNS central serves a hostile `.deb` — **either gate #1 alternative** | **Deterministic** rogue win ([mdns_discovery.py:52-54](../../player/mdns_discovery.py)) → reliable **arbitrary code execution**; bind checkpoint gives **no** containment (code runs before enroll, before the operator sees the device) | **documented** — the reason A is recommended over B/C |
-| App `.deb` corrupted in transit | sha256 mismatch (boot-tree hash under A); bootstrapper discards and retries; app never starts | **decision** — hash checked while streaming before install |
+| **Promoted `.deb` crashes on boot, fleet-wide** | Every Player loops boot → fetch-same-`.deb` → crash → reboot, all at once; **and boot-health is retired, so central has NO down-signal** — the fleet goes dark with no telemetry. Recovery is manual: operator promotes a prior `.deb`. The dark screen is the intended (and only) monitoring, per the owner ruling | **documented** — no auto-rollback (retired, gate #3) **and no crash-detection signal**; ranked worst because it is self-inflicted by a normal promote and is invisible to central |
 | Release authority retired but **either** enroll fix omitted | Edit A omitted → all enroll 503s; edit B omitted → diskless enroll 404s fleet-wide **and** every loop POSTs the retired boot-health route | **construction** — both edits ([registry.py:92](../../central/registry.py) **and** the client ticket/health gates [service.py:489](../../player/service.py),[:511](../../player/service.py),[:826](../../player/service.py)) must land, enforced by a diskless-enroll test |
-| No app promoted on central | Player cannot fetch a matching `.deb`; stays pre-app and retries; no fabrication | **decision** — fail closed, no default app |
-| mDNS finds nothing / no central | Bootstrapper blocks with a bounded retry; never invents an origin | **decision** — [player/mdns_discovery.py:75](../../player/mdns_discovery.py) returns None on timeout |
-| Boot server serves a bad base OS **or bad app-hash file** | Base fails to mount/boot, or the hash never matches any `.deb` (fail-closed) | **documented** — operator-trusted transport ([module-pxe-service.md:37](../module-pxe-service.md)) |
+| **mDNS multicast is unavailable / filtered** (VLAN, AP client-isolation, IGMP-snooping switch) | No central discovered; every Player blocks pre-app on bounded retry; the whole fleet stays dark until multicast works. A hard operational dependency of the origin-free design | **documented** — [player/mdns_discovery.py:75](../../player/mdns_discovery.py) returns None on timeout; fail-closed, but the network must carry multicast |
+| **Per-boot bandwidth** — every Player re-fetches the full `.deb` on every boot | A fleet power-cycle (power blip, morning turn-on) is N × `.deb` + N × base-squashfs concurrent pulls off central and the boot server; large `.deb` (prebuilt venv, gate #6) makes this worse | **documented** — pull-at-boot with no local cache (diskless); a slow cold-start is expected, sized by the operator's LAN |
+| App `.deb` corrupted in transit | sha256 mismatch against the manifest; bootstrapper discards and retries; app never starts | **decision** — hash checked while streaming before install |
+| No app promoted on central | Player cannot fetch a manifest / matching `.deb`; stays pre-app and retries; no fabrication | **decision** — fail closed, no default app |
+| Boot server serves a bad base OS | Base fails to mount/boot (fail-closed) | **documented** — operator-trusted transport ([module-pxe-service.md:37](../module-pxe-service.md)) |
 | Reboot mid-provision | RAM wiped; next boot re-fetches fresh; central shows a re-enroll by serial | **construction** — nothing persists, idempotent by re-fetch |
 | Two Players, same serial | Same as 0008 I0 (last-enroll-wins) | **documented** — unchanged; 0008 Edge 2 |
+| Rogue device on the LAN serves a hostile `.deb` | Home LAN, no threat model per the owner ruling. The manifest sha256 is a corruption check, not an authenticity check, so a rogue could run app code on Players. **Accepted** — no rogue exists on a home LAN | **accepted** — explicit owner decision (UX over security); signing / boot-tree hash deliberately not chosen |
 
 ---
 
@@ -629,7 +597,7 @@ graph LR
   a["0008 D1: signed squashfs<br/>base+app in one RAM root"] -->|"owner: base rarely revs,<br/>app is a downloadable .deb"| b["split OS from app"]
   b -->|"where does early discovery live?"| c["tiny bootstrapper,<br/>no enroll"]
   c -->|"does RPi5 netboot need an OS signature?"| d["no -> drop the OS-boot signature"]
-  d -->|"but app authenticity is a SEPARATE threat"| f["anchor the app hash<br/>in the trusted boot tree"]
+  d -->|"owner: home LAN, no threat model,<br/>UX over security"| f["plain central sha256<br/>(corruption check only)"]
   f -->|"this decision"| e["minimal base + app package"]
 ```
 
@@ -665,6 +633,14 @@ graph LR
   necessary-but-not-sufficient. (6) Specified the bootstrapper→app origin handoff
   ([service.py:415-421](../../player/service.py) re-discovers). (7) Ranked the
   fleet-brick-with-no-down-signal failure above corruption.
+- **r2: owner ruling — UX over security; gate #1 = plain central sha256;
+  signing/boot-tree-hash dropped.** The owner ruled the home LAN has no threat
+  model and optimized for simplicity: gate #1 resolves to central serving the
+  `.deb` plus a corruption-only sha256 over the discovered channel. The
+  boot-tree-hash apparatus (r1's recommendation) and Ed25519 signing are both
+  dropped, kept only as a "not chosen" note. The migration-correctness content
+  (ticketless diskless enroll, guard move, blast radius, origin handoff) is
+  unaffected and stands. All six gates accepted as recommended.
 
 ---
 
@@ -681,8 +657,9 @@ graph LR
    release-authority routes/tables per gate #5.
 3. **Base image + client:** add `appliance/provision.py` (the bootstrapper)
    reusing `equipment_device_id` + `MdnsCentralDiscovery` + the bounded fetch;
-   have it read the **boot-tree app hash** (recommended gate #1) and write the
-   resolved `central_origin` forward for the app; **re-key
+   have it read the central **app manifest**, verify the `.deb` against its
+   sha256 (corruption check), and write the resolved `central_origin` forward for
+   the app; **re-key
    [service.py:489](../../player/service.py)/[:511](../../player/service.py)/[:826](../../player/service.py)
    off "no boot ticket present" instead of `persistence`** so the diskless base
    enrolls ticketless with `release_accepted=True`; replace the
@@ -690,10 +667,9 @@ graph LR
    ([bootstrap.py:428](../../appliance/bootstrap.py)); strip the Player venv,
    `release.pub.pem`, the trial units, and the ticket/signature paths from the
    netboot root; ship Python + `zeroconf` for the bootstrapper.
-4. **Packaging + boot tree:** wrap `build_player.py`'s wheelhouse into the `.deb`
-   (gate #6); publish base bundle + `.deb` as GitHub Release assets; document the
-   operator promote flow that updates both central and the boot-tree app-hash
-   file (recommended gate #1).
+4. **Packaging:** wrap `build_player.py`'s wheelhouse into the `.deb` (gate #6);
+   publish base bundle + `.deb` as GitHub Release assets; document the operator
+   promote flow — a single upload + promote act in central.
 5. **Docs:** rewrite [module-appliance-builder.md](../module-appliance-builder.md),
    [module-appliance-release.md](../module-appliance-release.md),
    [module-player-package.md](../module-player-package.md),
@@ -705,26 +681,28 @@ production, retire ticket/trial), `player` (the ticketless/health re-key at
 [service.py:489](../../player/service.py)/[:511](../../player/service.py)/[:826](../../player/service.py)
 and the origin handoff), `central` (app package service, enroll-guard move,
 retire release authority), `contracts` (retire `release.py` boot-ticket types),
-`scripts` (`.deb` assembly, release publish), the boot-server tree (app-hash
-file), decisions 0008/0009, `docs/design-decisions.md` (D10).
+`scripts` (`.deb` assembly, release publish), decisions 0008/0009,
+`docs/design-decisions.md` (D10).
 
 **Tracer bullet.** Stand up central on a LAN advertising mDNS, with one app
-`.deb` uploaded and promoted, and its sha256 written into the boot-tree app-hash
-file (recommended gate #1). Netboot a bare **diskless** base (kernel + initramfs
-+ base squashfs + app-hash file) with **no** Player and **no** origin baked in.
-The base RAM-roots, the bootstrapper reads the expected sha256 from the boot
-tree, mDNS-discovers central, downloads `app-<sha>.deb`, verifies it against the
-**boot-tree** hash, installs it into the RAM overlay, writes the resolved
-`central_origin` forward, and starts the app. The app enrolls by serial `S1`
-**ticketless** (`ticket_id=None`, `release_accepted=True`) against the same
-central that served its `.deb`, appears in the pending queue; the operator binds
-`S1 → Frame F`; it renders. Reboot re-fetches fresh and re-enrolls by serial —
-no operator action.
+`.deb` uploaded and promoted (its sha256 in the app manifest). Netboot a bare
+**diskless** base (kernel + initramfs + base squashfs) with **no** Player and
+**no** origin baked in. The base RAM-roots, the bootstrapper mDNS-discovers
+central, GETs the app manifest, downloads `app-<sha>.deb`, verifies the bytes
+against the manifest sha256 (corruption check), installs it into the RAM overlay,
+writes the resolved `central_origin` forward, and starts the app. The app enrolls
+by serial `S1` **ticketless** (`ticket_id=None`, `release_accepted=True`) against
+the same central that served its `.deb`, appears in the pending queue; the
+operator binds `S1 → Frame F`; it renders. Reboot re-fetches fresh and re-enrolls
+by serial — no operator action.
 
-- **Refusal — corrupt or rogue `.deb`** (flip one byte, or point mDNS at a rogue
-  serving different bytes): the boot-tree hash check fails; the app never starts.
-  *Record:* a provision log line `app_integrity`; no unit started.
-- **Refusal — no app promoted:** the bootstrapper has no expected hash / no
+- **Happy path — central-served `.deb` runs after sha256 match:** the bytes hash
+  to the manifest value, install, and the unit starts; the app enrolls and
+  renders. *Record:* provision log `app_installed <sha>`; unit active.
+- **Refusal — corrupt `.deb`** (flip one byte): the sha256 mismatch is caught;
+  the app never starts. *Record:* a provision log line `app_integrity`; no unit
+  started; retry.
+- **Refusal — no app promoted:** the bootstrapper gets a 503 manifest / no
   matching `.deb`; the Player stays pre-app and retries; it does not run stale or
   default code.
 - **Refusal — no central on the LAN:** discovery returns None and the
@@ -732,12 +710,11 @@ no operator action.
 
 **Mutation probes that must turn a test red:**
 
-- Make the bootstrapper install a `.deb` whose bytes do not match the **boot-tree**
-  hash → the integrity test must fail.
-- Point mDNS at a rogue serving a self-consistent (hash-matches-its-own-bytes)
-  `.deb` under a lexicographically-smallest name → under recommended gate #1 the
-  boot-tree hash must still reject it; a test asserting the boot proceeds must
-  fail. This probe is the whole point of gate #1-A.
+- **Central-served `.deb` runs after sha256 match (happy path):** with bytes that
+  match the manifest, the bootstrapper must install and start the unit; a build
+  that fails to start the app on a valid match must fail the test.
+- Make the bootstrapper install a `.deb` whose bytes do not match the manifest
+  sha256 → the integrity (corruption) test must fail.
 - Have nothing promoted but let the bootstrapper start *any* app → the
   fail-closed test must fail.
 - **Boot a diskless base and assert the enroll carries `ticket_id=None` and
@@ -751,11 +728,8 @@ no operator action.
 - Boot a diskless base and assert `_report_boot_health` is **never** called
   (route retired) → a build that leaves `release_accepted=False` for the diskless
   path must fail.
-- Promote a new `.deb` (update central **and** the boot-tree hash) and boot →
-  the next fetch must pull the new sha256; a test pinning the old version must
-  fail.
-- Serve a `.deb` whose declared package version disagrees with the boot-tree
-  hash's version → it must be rejected, not coerced.
+- Promote a new `.deb` and boot → the next fetch must pull the manifest's new
+  sha256; a test pinning the old version must fail.
 
 ---
 
