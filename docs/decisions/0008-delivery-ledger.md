@@ -131,11 +131,19 @@ the custom pipeline + old signed path. 0009 gets updated once the spike proves v
 |---|---|---|---|
 | p4-rpi-image-gen-spike | minimal-base rpi-image-gen config + CI build job (emits base squashfs) | CI build (arm64) | **PROVEN** — builds + content-verified green (`d526428`); folded into PR |
 | p4-package-all-custom | ALL custom code shipped as portable .debs: bootstrapper .deb (in base) + player .deb (at boot); base install = apt-install our .debs, no tool-specific overlay | yes | **PROVEN** — rpi-image-gen base builds + apt-installs the bootstrapper .deb + content-verified green |
-| p4-boot-chain | netboot init boots the rpi-image-gen base squashfs -> runs bootstrapper -> fetch/run player .deb (QEMU e2e); replaces old signed-rootfs boot | QEMU + owner Pi | open |
-| p4-retire | delete custom image pipeline (~2,500 LOC) + old signed netboot/release-authority/boot-ticket/trial | HIGH destructive | open (green-lit; do after boot chain) |
+| p4-boot-chain **s1** (slim netboot init) | appliance/netboot_init.py: cmdline base_url -> HTTP fetch -> corruption sha256 -> reuse LinuxOps.mount_root -> pivot; writes NO ticketed context (app enrolls ticketless). Additive; old bootstrap.boot() untouched | unit (14 tests) | **closed `653f4bf`** (verified+probed) |
+| p4-boot-chain **s2a** (netboot-initrd builder) | portable initramfs-tools hook + boot script running `python3 -I -m appliance.netboot_init` + standalone content-verify (staged closure: netboot_init + appliance/{__init__,bootstrap,provision} + contracts/{__init__,release,equipment} + python + /scripts/functions; NEGATIVE: no updates.py/signed material/zeroconf/gtk/central). Reuses the build.py pattern, NOT build.py itself (retiring) | unit (verify fn) | open (next) |
+| p4-boot-chain **s2b** (bundle in CI) | base-image.yml builds a scratch Debian-trixie-arm64 root (linux-image-rpi-2712 + raspi-firmware + initramfs-tools + python3), installs the s2a hook+script, `mkinitramfs`, assembles bundle {config.txt, cmdline.txt template, kernel_2712.img, initrd.img, bcm2712-rpi-5-b.dtb, overlays/, photo-wall-base.squashfs, SHA256SUMS}, content-verifies (no hardware) + uploads | CI build (arm64) | open |
+| p4-boot-chain **s3** (QEMU e2e tracer) | boot base -> provision -> install player .deb -> ticketless enroll -> pending -> bind -> render; GATES all deletion; inject discovery (QEMU slirp = no multicast) | QEMU | open |
+| p4-retire | delete custom image pipeline (~2,500 LOC) + old signed netboot/release-authority/boot-ticket/trial | HIGH destructive | open (green-lit; AFTER s3 proves boot chain) |
 | p4-deb-full-depends | .deb declares full app Depends; bootstrapper apt-installs it | yes | open |
-| p4-boot-chain | netboot init boots the rpi-image-gen base -> runs bootstrapper (QEMU e2e) | QEMU + owner Pi | open |
-| p4-retire | delete custom image pipeline + old signed netboot/release-authority | yes | open (after spike proves) |
+
+**Boot-chain decisions (2026-09-12, owner-delegated technicals; owner approved "wire boot chain + retire"):**
+- **Kernel = Raspberry Pi `linux-image-rpi-2712` + `raspi-firmware`** (Pi 5 = BCM2712; ships Pi 5 DTBs + SPI-EEPROM bootloader firmware), NOT Debian generic `linux-image-arm64`. rpi-image-gen squashfs has NO kernel/`/lib/modules` (metadata-only device layer) — kernel is built in a SEPARATE scratch root, never baked into the RAM-root squashfs.
+- **Initrd = initramfs-tools + `mkinitramfs`** in that scratch root (supplies `/scripts/functions` `configure_networking` + `mountroot` + `$rootmnt` that netboot_init.py:87 hard-depends on), NOT a hand-rolled cpio.
+- **Transport split (decided):** kernel + initrd over TFTP; large squashfs over HTTP. `base_url`/`base_sha256` injected by operator boot server via cmdline.txt, never baked.
+- **Init closure (empirically verified, 7 files):** netboot_init + appliance/{__init__,bootstrap,provision} + contracts/{__init__,release,equipment}. mDNS/zeroconf/ifaddr/updates.py/GTK deliberately absent (lazy imports never reached on this path).
+- **Open (settle in s2b, not blocking s2a):** exact Pi 5 TFTP firmware filename set — confirm vs RPi network-boot doc (0009 Sources). Content-verified only until s3 (QEMU) + owner Pi.
 
 ## Residuals (follow-up, not blocking)
 - CI Immich-fixture is flaky (`docker_command_failed` starting the container) — recurs on ~1/3 of
