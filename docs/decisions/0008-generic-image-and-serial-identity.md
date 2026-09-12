@@ -188,6 +188,20 @@ stateDiagram-v2
 
 ## The netboot tier (D1) and its config decoupling
 
+> **Superseded by [0009](0009-minimal-base-and-app-package.md).** 0009 replaces
+> this section's signed-RAM-root mechanism (a squashfs carrying base OS *and*
+> Player together, verified against `release.pub.pem`) with a bare, unsigned
+> base OS image plus the Player shipped as a `.deb` that a small in-image
+> bootstrapper fetches from central over mDNS at every boot. Identity,
+> enrollment, and the operator plane described elsewhere in this file are
+> unchanged. As of this writing the 0009 replacement's pieces (central's app
+> package service, the bootstrapper, the base image build, the `.deb` build)
+> exist independently but are **not yet wired into a working boot chain** —
+> today's initramfs described just below still performs the signed
+> boot-ticket protocol this section documents — so the D1 mechanism below
+> remains the as-built netboot path during the transition; see 0009's
+> migration section for what retires and when.
+
 D1 already exists (RAM-root, PXE tree, HTTPS rootfs verified against the project key). One improvement belongs here so netboot deployments also avoid per-deployment re-signs: **remove the `configuration_sha256` binding** that ties boot-tree config files to the signed release. The tree files (`release_origin`, `central_origin`, `ca.pem`) stay operator-editable on the trusted LAN; `release.pub.pem` stays the project rootfs key delivered via the trusted TFTP path.
 
 This re-freezes `Release` to five fields (`revision, boot_abi, rootfs_sha256, rootfs_size, schema`); `require_compatible` gates on `boot_abi`. Blast radius (D1 only): [contracts/release.py:34](../../contracts/release.py), [:61](../../contracts/release.py); the initramfs verifier [appliance/updates.py:71](../../appliance/updates.py), [:103](../../appliance/updates.py) and call site [bootstrap.py:421](../../appliance/bootstrap.py); [central/releases.py:38](../../central/releases.py), [:68](../../central/releases.py) and [central/app.py:109](../../central/app.py); [appliance/build.py](../../appliance/build.py); the manifest scripts. **Stored-blob migration:** existing six-field manifests in `appliance_releases` become undecodable, so a five-field release must be registered and `set_default` before netboot players boot ([releases.py:96](../../central/releases.py), [:172](../../central/releases.py)). Irrelevant to the flash baseline.
