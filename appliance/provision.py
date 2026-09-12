@@ -11,7 +11,9 @@ Runs before the Player app exists on a diskless (RAM-root) base. It:
    **corruption check only** (0009 owner ruling: home LAN, no threat model,
    no signature anywhere). A mismatch discards the bytes and retries; it is
    never installed or run;
-4. installs the `.deb` (unpack: `dpkg -i`) into the running RAM root;
+4. installs the `.deb` (`apt-get install -y <deb path>`) into the running RAM
+   root, so the Player `.deb`'s declared `Depends` (its full runtime stack,
+   0009 p4-deb-full-depends) resolve from the base's distro sources at boot;
 5. hands the resolved origin forward as the app's explicit `central_origin`
    (`/etc/photo-wall/public.json`, the file `player.service.load_config`
    reads) so the Player app's own `resolve_origin` -- which consults
@@ -57,6 +59,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -205,16 +208,30 @@ def fetch_package(origin: str, manifest: dict, *, seconds: float = 120, opener=N
     return fetcher.get(f"/v1/app/package/{manifest['sha256']}.deb", manifest["size"])
 
 
-def dpkg_install(package: bytes, manifest: dict) -> None:
-    """Default install step: unpack the `.deb` into the running RAM root via
-    `dpkg -i`. Thin and replaceable -- tests inject a stub instead of
-    shelling to real `dpkg` (this codebase has no dpkg-backed CI sandbox;
-    real installation is the owner's Pi bench step)."""
+def apt_install(package: bytes, manifest: dict) -> None:
+    """Default install step: install the `.deb` into the running RAM root via
+    `apt-get install -y <deb path>`.
+
+    `apt-get install` (not `dpkg -i`) so the `.deb`'s declared `Depends` -- the
+    full runtime dependency set the Player `.deb` now carries (GTK/GStreamer/
+    weston/Mesa + the `python3-*` libraries, 0009 p4-deb-full-depends) -- are
+    resolved and installed from the base's configured distro sources at boot.
+    A bare `dpkg -i` would unpack the `.deb` but leave every dependency
+    unsatisfied. The absolute temp path (it starts with `/` and ends in
+    `.deb`) is treated by apt as a file to install, not a package name.
+
+    Thin and replaceable -- tests inject a stub instead of shelling to real
+    `apt-get` (this codebase has no apt-backed CI sandbox; real installation is
+    the owner's Pi bench step)."""
     with tempfile.NamedTemporaryFile(suffix=".deb", delete=False) as handle:
         handle.write(package)
         deb_path = Path(handle.name)
     try:
-        subprocess.run(["dpkg", "-i", str(deb_path)], check=True)
+        subprocess.run(
+            ["apt-get", "install", "-y", os.fspath(deb_path)],
+            check=True,
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+        )
     finally:
         deb_path.unlink(missing_ok=True)
 
@@ -287,7 +304,7 @@ class Bootstrapper:
         discovery,
         fetch_manifest=fetch_manifest,
         fetch_package=fetch_package,
-        install=dpkg_install,
+        install=apt_install,
         write_origin=write_public_config,
         start_unit=start_player_unit,
         sleep=asyncio.sleep,

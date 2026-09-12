@@ -18,6 +18,7 @@ on:
       - appliance/netboot_init.py
       - scripts/build_netboot_bundle.sh
       - scripts/verify_netboot_initrd.py
+      - scripts/build_player_deb.py
       - .github/workflows/base-image.yml
 
 permissions:
@@ -66,6 +67,37 @@ jobs:
           printf '%s\n' "$build_out"
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+
+      # p4-deb-full-depends: the player .deb now DECLARES its runtime deps
+      # (GTK/GStreamer/weston/Mesa + python3-*) as apt Depends and ships no
+      # venv, so it builds on any host with dpkg-deb (pure staging, like the
+      # bootstrapper .deb) -- no OS-base chroot. Build it here...
+      - name: Build the photo-wall-player .deb
+        id: player-deb
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-deb"
+          build_out=$(.venv/bin/python -m scripts.build_player_deb \
+            --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/photo-wall-player-deb")
+          printf '%s\n' "$build_out"
+          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+
+      # ...and PROVE its declared Depends actually resolve from the Debian
+      # trixie distro repo (the whole point of the apt-deps model), with no
+      # hardware: a --simulate install in a stock trixie arm64 container fails
+      # the job on any unmet/unlocatable dependency. This is the CI gate for
+      # p4-deb-full-depends; the s3 Part A tracer installs it for real.
+      - name: Prove the player .deb Depends resolve in Debian trixie
+        env:
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+        run: |
+          set -eu
+          docker run --rm --platform linux/arm64 \
+            -v "$(dirname "$PLAYER_DEB"):/pkgs:ro" debian:trixie-slim \
+            sh -ec 'apt-get update >/dev/null && \
+              apt-get install -y --simulate "/pkgs/$(basename "'"$PLAYER_DEB"'")"'
 
       # Pinned by exact commit, not just the tag, for reproducibility --
       # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
