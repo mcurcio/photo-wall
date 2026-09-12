@@ -78,3 +78,28 @@ Append-only. Read with `grep -a`.
   script, not a workflow change) — flagged as a follow-up bead: teach
   `build_ci_flash_image.py` to accept the same prepared `--os-base`/`--player-package`
   inputs so a release run doesn't pay for two independent OS-base assemblies.
+
+## p3-central-app-service (0009 slice 1 — central app package service)
+
+- **The 0009 endpoint table's literal wording for `POST /v1/operator/app`
+  ("upload a `.deb`, stored by sha256") contradicts how the existing, reviewed
+  release-registration pattern actually works.** `POST /v1/operator/releases`
+  (`central/app.py` `register_release`) never uploads rootfs bytes through the
+  request body — it registers a signed JSON manifest naming
+  `rootfs_sha256`/`rootfs_size`, and the actual squashfs bytes are staged
+  out-of-band under `PHOTO_WALL_RELEASE_ROOT` before or after that call;
+  existence/size is checked lazily, only at GET-artifact time
+  (`central/app.py` `release_image`, 503 `release_artifact_unavailable`/
+  `_invalid` if missing/wrong-sized). The task brief explicitly asked to
+  "decide upload-vs-stage-by-reference consistent with how releases are
+  registered today," so `POST /v1/operator/app` was implemented as
+  **stage-by-reference**: it takes `{version, sha256, size}` JSON metadata
+  only (no request-body file bytes), mirroring `register_release`/`set_default`
+  exactly, and the operator stages the actual `.deb` bytes at
+  `PHOTO_WALL_APP_ROOT/app-{sha256}.deb` out of band. This is a deliberate
+  divergence from the endpoint table's literal word "upload," made for
+  consistency with the mirrored pattern per the task's own instruction — not
+  an oversight. If a literal multipart/binary upload endpoint is wanted
+  instead, that is a new pattern (this codebase has no existing convention
+  for streaming request-body file uploads) and should be a separate,
+  explicitly-scoped decision.
