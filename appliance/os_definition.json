@@ -27,5 +27,15 @@
     "busybox-initramfs",
     "iproute2",
     "kmod"
+  ],
+  "base_runtime_packages": [
+    "python3.12",
+    "python3-zeroconf",
+    "ca-certificates",
+    "openssl",
+    "initramfs-tools",
+    "busybox-initramfs",
+    "iproute2",
+    "kmod"
   ]
 }

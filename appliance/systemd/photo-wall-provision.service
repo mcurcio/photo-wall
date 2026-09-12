@@ -1,0 +1,29 @@
+[Unit]
+Description=Photo Wall base bootstrapper (discover central, fetch and install the Player app)
+Documentation=file:///usr/share/doc/photo-wall/0009-minimal-base-and-app-package.md
+Wants=network-online.target
+After=network-online.target
+# A base with no central on the LAN, or a central with no app promoted yet,
+# must keep retrying (appliance.provision.Bootstrapper.run loops forever by
+# default) rather than be restarted into a fresh attempt counter.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Installs a `.deb` into this running root and starts the resulting unit --
+# needs broad filesystem and service-manager access, so this unit is
+# deliberately unsandboxed (0009 owner ruling: home LAN, no threat model;
+# see docs/decisions/0009-minimal-base-and-app-package.md).
+ExecStart=/usr/bin/python3.12 -I -m appliance.provision
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -613,8 +613,16 @@ def in_root(root: Path, *argv: str, timeout: int = 900, log: Path | None = None)
                env=dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8"))
 
 
-def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> dict:
-    """Resolve and retain the snapshot package closure inside the owned root."""
+def install_runtime_packages(root: Path, evidence: Path, archive_cache=None,
+                             packages: tuple[str, ...] = RUNTIME_PACKAGES) -> dict:
+    """Resolve and retain the snapshot package closure inside the owned root.
+
+    `packages` defaults to the full netboot/flash `RUNTIME_PACKAGES` set
+    (GTK/GStreamer/weston and friends). The minimal base image (0009 slice
+    5) passes `appliance.os_packages.BASE_RUNTIME_PACKAGES` instead -- same
+    apt/snapshot/evidence discipline, a much smaller closure, no Player
+    rendering stack.
+    """
     root = _root(root)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
     if Path("/tool-packages.tsv").is_file():
@@ -678,7 +686,7 @@ def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> 
         plan = in_root(
             root, "apt-get", "-o", "Dir::Cache::archives=/tmp/photo-wall-apt-plan",
             "-o", "Acquire::ForceHash=SHA256", "--print-uris", "--download-only",
-            "--quiet=2", "install", "-y", "--no-install-recommends", *RUNTIME_PACKAGES,
+            "--quiet=2", "install", "-y", "--no-install-recommends", *packages,
         )
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
@@ -691,7 +699,7 @@ def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> 
         cache_record = {**archive_cache.restore(archives, cache_plan), "publish": None}
     try:
         in_root(root, "apt-get", "--download-only", "install", "-y", "--no-install-recommends",
-                *RUNTIME_PACKAGES, log=evidence / "apt-download.log")
+                *packages, log=evidence / "apt-download.log")
     finally:
         if archive_cache is not None:
             try:
@@ -707,7 +715,7 @@ def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> 
     for package in sorted((root / "var/cache/apt/archives").glob("*.deb")):
         shutil.copy2(package, debs / package.name)
     (evidence / "deb-hashes.json").write_bytes(canonical(inventory(debs)))
-    in_root(root, "apt-get", "install", "-y", "--no-install-recommends", *RUNTIME_PACKAGES,
+    in_root(root, "apt-get", "install", "-y", "--no-install-recommends", *packages,
             log=evidence / "apt-install.log")
     (evidence / "packages.tsv").write_bytes(in_root(
         root, "dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n"))
@@ -962,6 +970,92 @@ def configure_root_generic(root: Path, source: Path, wheelhouse: Path, release_p
     obsolete_state = root / "var/lib/photo-wall"
     if obsolete_state.exists() and list(obsolete_state.iterdir()):
         raise BuildError("common_state_not_empty")
+
+
+BASE_MINIMAL_MODULES = (
+    "appliance/__init__.py", "appliance/provision.py",
+    "player/__init__.py", "player/mdns_discovery.py",
+)
+
+
+def configure_root_base(root: Path, source: Path, evidence: Path) -> None:
+    """Bake the minimal, GENERIC base OS root (0009 slice 5: p3-base-image).
+
+    Carries no Player application, no deployment configuration, and no
+    release-signing key -- the owner's UX-over-security ruling (0009) drops
+    app authenticity to a plain corruption-check sha256 the bootstrapper
+    itself verifies, so no signing key exists anywhere in this image. The
+    base's only job at boot is to run `appliance/provision.py` (0009 slice
+    2, "the bootstrapper"): mDNS-discover central, fetch the Player `.deb`,
+    verify its bytes against the manifest sha256, install it, and start it.
+
+    Installs exactly the bootstrapper's minimal import closure --
+    `appliance/provision.py` itself plus `player/mdns_discovery.py` (never
+    `player.service`, which pulls in GTK/GStreamer) -- at the same distro
+    `dist-packages` path `configure_root`/`configure_root_generic` already
+    use for their own minimal appliance/contracts modules
+    (`usr/lib/python3/dist-packages`), and the systemd unit that starts it
+    after networking. `zeroconf`/`ifaddr` (the closure's one third-party
+    dependency, `player.mdns_discovery`'s `zeroconf` import) are installed
+    by apt as part of this image's own, smaller runtime-package set --
+    `appliance.os_packages.BASE_RUNTIME_PACKAGES` -- not vendored as a
+    hash-pinned wheelhouse like the Player's: unlike the Player app, the
+    bootstrapper's two-package dependency carries no per-app version pin,
+    and installing it the same way the base's other native packages already
+    are avoids adding pip/venv machinery to an image whose only job is to
+    fetch and unpack a `.deb`.
+
+    Deliberately does NOT: install a Player venv at `/opt/photo-wall/venv`,
+    write any `/etc/photo-wall/{public.json,bootstrap.json,ca.pem}`
+    deployment config, ship `release.pub.pem`, or install the
+    accept-trial/trial-recovery units (they watch `/run/photo-wall/boot.json`,
+    a boot-ticket artifact that never exists on this path -- gate #5 retires
+    the ticket/trial machinery itself in a later, separate slice).
+    `/etc/photo-wall` is created and left EMPTY: the bootstrapper is the only
+    thing that ever writes into it (`write_public_config`, at boot, once it
+    has resolved an origin), never this build.
+    """
+    root = _root(root)
+    for relative in BASE_MINIMAL_MODULES:
+        target = root / "usr/lib/python3/dist-packages" / relative
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, target)
+    in_root(root, "python3.12", "-I", "-c",
+            "import appliance.provision, player.mdns_discovery, zeroconf, ifaddr;"
+            "assert 'dist-packages' in appliance.provision.__file__",
+            log=evidence / "provision-import.log")
+    unit_name = "photo-wall-provision.service"
+    unit = root / "etc/systemd/system" / unit_name
+    shutil.copyfile(source / "appliance/systemd" / unit_name, unit)
+    wants = root / "etc/systemd/system/multi-user.target.wants" / unit_name
+    wants.parent.mkdir(parents=True, exist_ok=True)
+    wants.unlink(missing_ok=True)
+    wants.symlink_to("/etc/systemd/system/" + unit_name)
+    config_dir = root / "etc/photo-wall"
+    config_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if any(config_dir.iterdir()):
+        raise BuildError("base_config_not_empty")
+    netplan = root / "etc/netplan"
+    for path in netplan.glob("*.yaml"):
+        path.unlink()
+    (netplan / "10-photo-wall.yaml").write_text(
+        "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n"
+        "    wired:\n      match:\n        name: 'e*'\n      dhcp4: true\n      optional: true\n")
+    (netplan / "10-photo-wall.yaml").chmod(0o600)
+    (root / "etc/hostname").write_text("photo-wall\n")
+    (root / "etc/machine-id").write_bytes(b"")
+    resolver = root / "etc/resolv.conf"
+    resolver.unlink(missing_ok=True)
+    resolver.symlink_to("/run/systemd/resolve/stub-resolv.conf")
+    for name in ("getty@.service", "serial-getty@.service", "ssh.service", "ssh.socket",
+                 "cloud-init.service", "cloud-init-local.service", "cloud-config.service",
+                 "cloud-final.service", "apt-daily.timer", "apt-daily-upgrade.timer"):
+        path = root / "etc/systemd/system" / name
+        path.unlink(missing_ok=True)
+        path.symlink_to("/dev/null")
+    journal = root / "etc/systemd/journald.conf.d"
+    journal.mkdir(parents=True, exist_ok=True)
+    (journal / "photo-wall.conf").write_text("[Journal]\nStorage=volatile\nRuntimeMaxUse=32M\n")
 
 
 def boot_abi(root: Path, boot_tree: Path, kernel: str) -> tuple[str, dict]:

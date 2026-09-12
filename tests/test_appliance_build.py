@@ -12,12 +12,14 @@ from pathlib import Path
 import pytest
 
 from appliance.build import (
+    BASE_MINIMAL_MODULES,
     MIB,
     SECTOR,
     BuildError,
     Partition,
     boot_abi,
     checked_file,
+    configure_root_base,
     configure_root_generic,
     create_disk,
     decompress_base,
@@ -498,6 +500,96 @@ def test_configure_root_generic_bakes_only_release_key_and_drops_netboot_wiring(
     assert not (root / "etc/fstab").exists()
 
 
+def _base_root_and_source(tmp_path):
+    """Shared fixture: a `_root`-valid root plus a `source` tree holding
+    exactly the bootstrapper's minimal import closure and its unit --
+    everything `configure_root_base` (0009 slice 5) needs, and nothing
+    `configure_root`/`configure_root_generic` (netboot/flash, untouched by
+    this slice) uses.
+    """
+    root = tmp_path / "root"
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/bin/python3.12").write_bytes(b"python")
+    (root / "etc").mkdir()
+    (root / "etc/os-release").write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    (root / "etc/netplan").mkdir(parents=True)
+    (root / "etc/systemd/system").mkdir(parents=True)
+
+    project = Path(__file__).resolve().parents[1]
+    source = tmp_path / "source"
+    for relative in (*BASE_MINIMAL_MODULES, "appliance/systemd/photo-wall-provision.service"):
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / relative, target)
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    return root, source, evidence
+
+
+def test_configure_root_base_stages_bootstrapper_closure_and_provision_unit(tmp_path, monkeypatch):
+    """Tier 1, acceptance item 1: the base configuration STAGES the enabled
+    `photo-wall-provision` unit, `appliance/provision.py` plus its minimal
+    import closure, and a working Python + zeroconf/ifaddr import."""
+    root, source, evidence = _base_root_and_source(tmp_path)
+    calls = []
+
+    def fake_in_root(_root, *argv, **kwargs):
+        calls.append(argv)
+        return b""
+
+    monkeypatch.setattr("appliance.build.in_root", fake_in_root)
+
+    configure_root_base(root, source, evidence)
+
+    dist_packages = root / "usr/lib/python3/dist-packages"
+    for relative in BASE_MINIMAL_MODULES:
+        staged = dist_packages / relative
+        assert staged.read_bytes() == (source / relative).read_bytes()
+
+    # The one native-dependency import check actually asserted (mutation
+    # probe: dropping the unit/closure below turns this same call absent).
+    import_calls = [argv for argv in calls if argv[:1] == ("python3.12",)]
+    assert any("appliance.provision" in " ".join(argv) and "zeroconf" in " ".join(argv)
+               for argv in import_calls)
+
+    unit = root / "etc/systemd/system/photo-wall-provision.service"
+    assert unit.is_file()
+    assert unit.read_bytes() == (source / "appliance/systemd/photo-wall-provision.service").read_bytes()
+    wants = root / "etc/systemd/system/multi-user.target.wants/photo-wall-provision.service"
+    assert wants.is_symlink()
+    assert os.readlink(wants) == "/etc/systemd/system/photo-wall-provision.service"
+
+
+def test_configure_root_base_excludes_player_venv_and_deployment_config(tmp_path, monkeypatch):
+    """Tier 1, acceptance item 2: the base configuration does NOT stage the
+    Player venv, any deployment `/etc/photo-wall` config, `release.pub.pem`,
+    or the accept-trial/trial-recovery units. Assert their ABSENCE.
+
+    Mutation probe (reverse by hand): staging the Player venv into the base
+    (e.g. re-adding `configure_root`'s `pip install --require-hashes ...`
+    venv build to this function) makes the venv-absence assertion below
+    fail; omitting the unit install makes the presence test above fail.
+    """
+    root, source, evidence = _base_root_and_source(tmp_path)
+    monkeypatch.setattr("appliance.build.in_root", lambda _root, *argv, **kwargs: b"")
+
+    configure_root_base(root, source, evidence)
+
+    assert not (root / "opt/photo-wall/venv").exists()
+    config_dir = root / "etc/photo-wall"
+    assert config_dir.is_dir()
+    assert list(config_dir.iterdir()) == []
+    for name in ("public.json", "bootstrap.json", "ca.pem", "release.pub.pem"):
+        assert not (config_dir / name).exists()
+    units = {path.name for path in (root / "etc/systemd/system").iterdir() if path.is_file()}
+    assert units == {"photo-wall-provision.service"}
+    assert "photo-wall-accept-trial.service" not in units
+    assert "photo-wall-trial-recovery.service" not in units
+    wants_dir = root / "etc/systemd/system/multi-user.target.wants"
+    assert {path.name for path in wants_dir.iterdir()} == {"photo-wall-provision.service"}
+
+
 linux_tools = pytest.mark.skipif(
     sys.platform != "linux" or os.environ.get("PHOTO_WALL_IMAGE_TOOL_TESTS") != "1",
     reason="explicit disposable Linux file-tooling fixture required")
@@ -610,3 +702,37 @@ def test_real_flash_two_partition_disk_assembly_and_verify(tmp_path):
     (root / "usr/bin/init").write_bytes(b"changed outside the signed disk")
     with pytest.raises(BuildError, match="disk_root_mismatch"):
         verify_disk_flash(output, boot, root)
+
+
+@linux_tools
+def test_real_base_squashfs_contains_provision_unit_and_lacks_player_venv(tmp_path, monkeypatch):
+    """Tier 2 (0009 slice 5 acceptance): real squashfs assembly of the base
+    image. SKIPPED HERE -- this sandbox has no Linux `mksquashfs`/root; only
+    the CI arm64 builder (`sys.platform == "linux"` and
+    `PHOTO_WALL_IMAGE_TOOL_TESTS=1`) runs this, exactly like the other
+    `@linux_tools` real-build tests in this file.
+
+    Exercises the real assembly `configure_root_base` alone cannot: squash
+    the configured root with `mksquashfs` and reopen it with `unsquashfs`
+    to assert the built image contains the provision unit + a working
+    zeroconf import, and lacks the Player venv/config.
+    """
+    root, source, evidence = _base_root_and_source(tmp_path)
+    (root / "tmp").mkdir()
+
+    def fake_in_root(_root, *argv, **kwargs):
+        if argv[:1] == ("python3.12",):
+            return b""
+        return b""
+
+    monkeypatch.setattr("appliance.build.in_root", fake_in_root)
+    configure_root_base(root, source, evidence)
+
+    squashfile = tmp_path / "base.squashfs"
+    squash(root, squashfile, 1_700_000_000)
+    listing = run(["unsquashfs", "-l", str(squashfile)]).decode()
+    assert "usr/lib/python3/dist-packages/appliance/provision.py" in listing
+    assert "etc/systemd/system/photo-wall-provision.service" in listing
+    assert "opt/photo-wall/venv" not in listing
+    assert "etc/photo-wall/public.json" not in listing
+    assert "etc/photo-wall/release.pub.pem" not in listing
