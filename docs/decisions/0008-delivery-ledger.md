@@ -114,7 +114,29 @@ Slices (tracer-first; design: [0009](0009-minimal-base-and-app-package.md)):
 
 Owner hardware hand-off: real Pi 5 netboot of the base image (slice 5) + full tracer on hardware.
 
+## Phase 4 — rpi-image-gen base + dependency-via-.deb (owner-approved 2026-09-12)
+Owner rulings: (1) SPIKE rpi-image-gen NOW for the base OS (delete our custom guestfs/squashfs/
+os-base pipeline, ~2,500 LOC, once proven); (2) the `.deb` DECLARES its full runtime deps
+(GTK/GStreamer/weston/Mesa/…) and the bootstrapper installs it **via apt** so those deps are
+pulled from the distro repo at boot — base stays minimal (OS + apt + sources + bootstrapper +
+python/zeroconf). (3) Retirement of the old signed netboot/release-authority is GREEN-LIT.
+pi-gen rejected (SD-only, no netboot). rpi-image-gen: Debian re-base, emits a squashfs via
+genimage; we still own a slim netboot init + TFTP assembly. Only runs in CI (arm64/podman).
+
+Approach: spike-first (prove rpi-image-gen builds our base in CI) → adjust slice 4 (.deb full
+Depends) + slice 2 (apt-install) → wire the netboot boot chain on the rpi-image-gen base → retire
+the custom pipeline + old signed path. 0009 gets updated once the spike proves viable.
+
+| Slice | Delivers | CI? | Status |
+|---|---|---|---|
+| p4-rpi-image-gen-spike | minimal-base rpi-image-gen config + CI build job (emits base squashfs) | CI build (arm64) | in_progress |
+| p4-deb-full-depends | .deb declares full app Depends; bootstrapper apt-installs it | yes | open |
+| p4-boot-chain | netboot init boots the rpi-image-gen base -> runs bootstrapper (QEMU e2e) | QEMU + owner Pi | open |
+| p4-retire | delete custom image pipeline + old signed netboot/release-authority | yes | open (after spike proves) |
+
 ## Residuals (follow-up, not blocking)
+- CI Immich-fixture is flaky (`docker_command_failed` starting the container) — recurs on ~1/3 of
+  e2e runs, clears on re-run. Worth a retry/hardening pass on `scripts/immich_fixture.py`.
 - **Single source of truth for bootstrap's contracts/appliance module set** — currently duplicated across 4 sites (wheelhouse `ROOTS`, dist-packages copy, initramfs hook, `verify_initramfs`). Collapsing this kills the failure class that caused three CI cycles here.
 - Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
   even for a D0/persistent player — telemetry-only inaccuracy; docs describe actual behavior.
