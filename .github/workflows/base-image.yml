@@ -14,6 +14,10 @@ on:
   pull_request:
     paths:
       - appliance/rpi_image_gen/**
+      - appliance/netboot_initramfs/**
+      - appliance/netboot_init.py
+      - scripts/build_netboot_bundle.sh
+      - scripts/verify_netboot_initrd.py
       - .github/workflows/base-image.yml
 
 permissions:
@@ -272,6 +276,240 @@ jobs:
           fi
           echo "PASS: built base image content matches 0009's minimal-base-plus-bootstrapper contract"
 
+      # --- p4-boot-chain s2b: netboot base bundle (kernel + initrd + DTBs +
+      # the base squashfs) -------------------------------------------------
+      # rpi-image-gen's squashfs is metadata-only (no kernel, no /lib/modules).
+      # The kernel + initrd are therefore built in a SEPARATE scratch
+      # Debian-trixie-arm64 root (0008 boot-chain decision) -- NEVER baked into
+      # the RAM-root squashfs. The runner is arm64, so this chroot needs no
+      # qemu. Diagnostics are captured to files uploaded on failure (OWNER
+      # STANDING RULE: root-cause, do not guess).
+      - name: Build the scratch kernel + initrd root (Debian trixie arm64)
+        id: scratch-root
+        env:
+          SCRATCH: ${{ runner.temp }}/netboot-scratch
+          DIAG: ${{ runner.temp }}/netboot-diag
+        run: |
+          set -eu
+          set -x
+          mkdir -p "$DIAG"
+          sudo apt-get update
+          # mmdebstrap builds the scratch root; initramfs-tools on the HOST
+          # provides lsinitramfs for the content-verify; squashfs-tools may
+          # already be present from the squashfs verify step above.
+          sudo apt-get install -y --no-install-recommends \
+            mmdebstrap ca-certificates gnupg curl initramfs-tools
+
+          sudo rm -rf "$SCRATCH"
+          # Minimal Debian trixie arm64 root carrying the initrd toolchain +
+          # interpreter the netboot init needs. The rpi-2712 kernel itself comes
+          # from the Raspberry Pi archive, added below.
+          if ! sudo mmdebstrap --arch=arm64 --variant=minbase \
+              --include=initramfs-tools,python3,ca-certificates,gnupg,kmod,zstd \
+              trixie "$SCRATCH" http://deb.debian.org/debian \
+              > "$DIAG/mmdebstrap.log" 2>&1; then
+            echo "mmdebstrap failed; tail:" >&2
+            tail -n 80 "$DIAG/mmdebstrap.log" >&2
+            exit 1
+          fi
+
+          # linux-image-rpi-2712 (BCM2712, 16K-page Pi 5 kernel) + raspi-firmware
+          # (Pi 5 DTBs + SPI-EEPROM bootloader firmware) live in the Raspberry Pi
+          # archive, NOT Debian's own (which ships only generic linux-image-arm64).
+          # trusted=yes: the RPi archive's InRelease is signed with a SHA1 binding
+          # signature that trixie's sqv verifier rejects ("SHA1 is not considered
+          # secure since 2026-02-01"), so signed-by verification fails outright.
+          # This is a build-time trusted fetch on our own CI, consistent with
+          # 0009's no-threat-model / corruption-only ruling. If RPi later re-signs
+          # its key with SHA256, restore `[signed-by=.../raspberrypi.gpg]` (fetch
+          # + dearmor the key) in place of `[trusted=yes]`.
+          printf '%s\n' \
+            'deb [trusted=yes] http://archive.raspberrypi.com/debian trixie main' \
+            | sudo tee "$SCRATCH/etc/apt/sources.list.d/raspberrypi.list"
+          sudo cp /etc/resolv.conf "$SCRATCH/etc/resolv.conf"
+
+          # Bind the kernel-visible filesystems so the kernel package's postinst
+          # (depmod / update-initramfs) works inside the chroot.
+          for fs in proc sys dev dev/pts; do
+            sudo mount --bind "/$fs" "$SCRATCH/$fs"
+          done
+
+          if ! sudo chroot "$SCRATCH" apt-get update > "$DIAG/apt-update.log" 2>&1; then
+            echo "apt-get update (RPi archive) failed; tail:" >&2
+            tail -n 60 "$DIAG/apt-update.log" >&2
+            exit 1
+          fi
+          if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
+              apt-get install -y --no-install-recommends \
+              linux-image-rpi-2712 raspi-firmware \
+              > "$DIAG/apt-install-kernel.log" 2>&1; then
+            echo "kernel/raspi-firmware install failed; tail:" >&2
+            tail -n 80 "$DIAG/apt-install-kernel.log" >&2
+            exit 1
+          fi
+
+          # Install the s2a hook + boot script + BOOT= selector, then stage the
+          # exact 7-file init closure at dist-packages so the hook (which copies
+          # from /usr/lib/python3/dist-packages) finds it. Reuses the build.py
+          # STAGING PATTERN, not build.py itself (retiring).
+          sudo install -D -m 0755 \
+            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/hooks/photo-wall-netboot" \
+            "$SCRATCH/etc/initramfs-tools/hooks/photo-wall-netboot"
+          sudo install -D -m 0755 \
+            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/scripts/photowall-netboot" \
+            "$SCRATCH/etc/initramfs-tools/scripts/photowall-netboot"
+          printf 'BOOT=photowall-netboot\n' \
+            | sudo tee "$SCRATCH/etc/initramfs-tools/conf.d/photo-wall"
+          dist="$SCRATCH/usr/lib/python3/dist-packages"
+          for module in __init__ bootstrap provision netboot_init; do
+            sudo install -D -m 0644 \
+              "$GITHUB_WORKSPACE/appliance/$module.py" "$dist/appliance/$module.py"
+          done
+          for module in __init__ release equipment; do
+            sudo install -D -m 0644 \
+              "$GITHUB_WORKSPACE/contracts/$module.py" "$dist/contracts/$module.py"
+          done
+
+          # Exactly one kernel is installed; derive its version for mkinitramfs.
+          kver=$(sudo ls "$SCRATCH/lib/modules" | head -n1)
+          if [ -z "$kver" ]; then
+            echo "no kernel modules dir under $SCRATCH/lib/modules" >&2
+            sudo ls -la "$SCRATCH/lib/modules" >&2 || true
+            exit 1
+          fi
+          echo "kernel version: $kver" | tee "$DIAG/kernelver.txt"
+
+          if ! sudo chroot "$SCRATCH" mkinitramfs -o /boot/initrd.img "$kver" \
+              > "$DIAG/mkinitramfs.log" 2>&1; then
+            echo "mkinitramfs failed; tail:" >&2
+            tail -n 80 "$DIAG/mkinitramfs.log" >&2
+            exit 1
+          fi
+
+          # Diagnostics: boot listings, initrd size + member listing.
+          sudo ls -la "$SCRATCH/boot" | tee "$DIAG/boot-listing.txt" || true
+          sudo ls -la "$SCRATCH/boot/firmware" 2>/dev/null \
+            | tee "$DIAG/boot-firmware-listing.txt" || true
+          initrd_bytes=$(sudo stat -c %s "$SCRATCH/boot/initrd.img")
+          echo "initrd.img size: $initrd_bytes bytes" | tee "$DIAG/initrd-size.txt"
+          sudo lsinitramfs "$SCRATCH/boot/initrd.img" > "$DIAG/lsinitramfs.txt" 2>&1 || true
+          echo "lsinitramfs members: $(wc -l < "$DIAG/lsinitramfs.txt")"
+
+          # Unmount the binds before find/stat over $SCRATCH so procfs does not
+          # trip later steps.
+          for fs in dev/pts dev sys proc; do
+            sudo umount "$SCRATCH/$fs" || true
+          done
+
+          # Locate the kernel image, Pi 5 DTB, and overlays for the assembler.
+          # Names/locations are exactly what this run installs (no guessing);
+          # the boot listings above are the evidence.
+          kernel_img=$(sudo find "$SCRATCH/boot" -maxdepth 2 -name 'vmlinuz-*' | head -n1)
+          if [ -z "$kernel_img" ]; then
+            echo "no vmlinuz-* under $SCRATCH/boot" >&2
+            cat "$DIAG/boot-listing.txt" >&2 || true
+            exit 1
+          fi
+          dtb=$(sudo find "$SCRATCH" -name 'bcm2712-rpi-5-b.dtb' | head -n1)
+          if [ -z "$dtb" ]; then
+            echo "bcm2712-rpi-5-b.dtb not found under $SCRATCH" >&2
+            exit 1
+          fi
+          overlays_dir=""
+          any_dtbo=$(sudo find "$SCRATCH" -name '*.dtbo' -path '*overlays*' | head -n1)
+          if [ -n "$any_dtbo" ]; then
+            overlays_dir=$(dirname "$any_dtbo")
+          fi
+          echo "kernel_img=$kernel_img"       >> "$GITHUB_OUTPUT"
+          echo "initrd=$SCRATCH/boot/initrd.img" >> "$GITHUB_OUTPUT"
+          echo "dtb=$dtb"                       >> "$GITHUB_OUTPUT"
+          echo "overlays_dir=$overlays_dir"     >> "$GITHUB_OUTPUT"
+          # find over a root-owned tree can leave outputs root-owned; make the
+          # staged artifacts readable to the unprivileged assembler step.
+          sudo chmod -R a+rX "$SCRATCH/boot"
+
+      - name: Assemble the netboot base bundle and content-verify the initrd
+        env:
+          SCRATCH: ${{ runner.temp }}/netboot-scratch
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+          KERNEL_IMG: ${{ steps.scratch-root.outputs.kernel_img }}
+          INITRD: ${{ steps.scratch-root.outputs.initrd }}
+          DTB: ${{ steps.scratch-root.outputs.dtb }}
+          OVERLAYS_DIR: ${{ steps.scratch-root.outputs.overlays_dir }}
+        run: |
+          set -eu
+          set -x
+          squashfs="$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs"
+          rm -rf "$BUNDLE"
+          overlay_arg=""
+          if [ -n "$OVERLAYS_DIR" ]; then
+            overlay_arg="--overlays-dir $OVERLAYS_DIR"
+          fi
+          # The assembly script runs verify_netboot_initrd.py against the initrd
+          # via lsinitramfs (installed on the host above) -- content-verify #2.
+          # shellcheck disable=SC2086
+          sh "$GITHUB_WORKSPACE/scripts/build_netboot_bundle.sh" \
+            --kernel "$KERNEL_IMG" \
+            --initrd "$INITRD" \
+            --dtb "$DTB" \
+            $overlay_arg \
+            --squashfs "$squashfs" \
+            --output "$BUNDLE" \
+            --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
+            --python python3
+
+      - name: Verify the assembled bundle (content, no hardware)
+        env:
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+        run: |
+          set -eu
+          set -x
+          fail=0
+          violation() { echo "VIOLATION: $1" >&2; fail=1; }
+
+          # Required artifacts present.
+          for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
+                   boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
+                   photo-wall-base.squashfs SHA256SUMS; do
+            [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
+          done
+
+          # squashfs under the release size ceiling (MAX_ROOTFS_BYTES, 1 GiB;
+          # contracts/release.py). Hardcoded here to avoid importing python into
+          # a shell assertion; kept in sync with that constant by comment.
+          max=1073741824
+          sq_bytes=$(stat -c %s "$BUNDLE/photo-wall-base.squashfs")
+          echo "squashfs size: $sq_bytes bytes (ceiling $max)"
+          [ "$sq_bytes" -gt 0 ] && [ "$sq_bytes" -lt "$max" ] \
+            || violation "squashfs size $sq_bytes not in (0, $max)"
+
+          # SHA256SUMS covers EVERY file except itself, and every listed digest
+          # re-verifies (corruption-only).
+          expected=$(find "$BUNDLE" -type f ! -name SHA256SUMS | wc -l | tr -d ' ')
+          listed=$(wc -l < "$BUNDLE/SHA256SUMS" | tr -d ' ')
+          [ "$expected" = "$listed" ] \
+            || violation "SHA256SUMS lists $listed files, bundle has $expected"
+          ( cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS ) \
+            || violation "SHA256SUMS re-verification failed"
+
+          # No signed / trust material anywhere in the bundle (this path is
+          # unsigned by construction -- 0008 boot-chain).
+          signed=$(find "$BUNDLE" \( -name '*.sig' -o -name 'release.pub.pem' \
+            -o -name 'ca.pem' -o -name 'bootstrap.json' \
+            -o -name 'boot-policy.json' \) 2>/dev/null || true)
+          if [ -n "$signed" ]; then
+            violation "signed material present in bundle: $signed"
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: assembled bundle does not satisfy the s2b contract" >&2
+            find "$BUNDLE" -type f -printf '%10s %p\n' >&2 || true
+            exit 1
+          fi
+          echo "PASS: bundle content contract satisfied"
+          find "$BUNDLE" -type f -printf '%10s %p\n'
+
       - name: Show what was produced
         if: always()
         env:
@@ -289,4 +527,26 @@ jobs:
             ${{ runner.temp }}/photo-wall-base-work/image-*/image.json
             ${{ runner.temp }}/photo-wall-base-work/image-*/genimage*.cfg
           if-no-files-found: error
+          retention-days: 7
+
+      # The whole netboot bundle as ONE artifact (0008 boot-chain: kernel +
+      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS).
+      - name: Upload the netboot base bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-base-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-base-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+      # Scratch-root build diagnostics (kernel version, boot listings,
+      # lsinitramfs, initrd size, mmdebstrap/apt logs) -- uploaded on failure so
+      # a red run is root-caused from evidence, not guessed (OWNER STANDING RULE).
+      - name: Upload netboot scratch-root diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-netboot-diag-${{ github.sha }}
+          path: ${{ runner.temp }}/netboot-diag/
+          if-no-files-found: warn
           retention-days: 7

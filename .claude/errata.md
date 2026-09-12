@@ -187,3 +187,31 @@ Append-only. Read with `grep -a`.
   therefore does not import `contracts.equipment` or touch
   `/run/photo-wall/boot.json`; that production (edit B) is left for whichever
   slice replaces `appliance/bootstrap.py`'s netboot path.
+
+- **p4-boot-chain s2b OPEN-item resolution + assumptions to confirm in CI.**
+  The Pi 5 (BCM2712) network-boot filename set was confirmed against RPi docs
+  (raspberrypi.com network-booting + rpi-eeprom firmware-2712 notes): the Pi 5
+  boots from its SPI EEPROM and needs NO `start*.elf`/`fixup*.dat`; `config.txt`
+  is MANDATORY (its presence marks a TFTP prefix bootable); kernel image is
+  `kernel_2712.img` (16K-page rpi-2712 kernel; firmware default on Pi 5); DTB is
+  `bcm2712-rpi-5-b.dtb`; initramfs is pulled via `initramfs initrd.img
+  followkernel` in config.txt. TWO items still need a GREEN arm64 CI run to
+  confirm (no hardware nails them): (1) `linux-image-rpi-2712` + `raspi-firmware`
+  are pulled from `archive.raspberrypi.com/debian trixie main` -- the `trixie`
+  suite is ASSUMED published there; the workflow's `apt-get update` fails loudly
+  with captured diagnostics if not (fallback would be the `bookworm` suite).
+  (2) The kernel image / DTB / overlays install paths under the scratch root are
+  discovered at build time via `find` (evidence logged to the diag artifact),
+  not hardcoded, because the exact raspi-firmware `/boot` vs `/boot/firmware`
+  layout is not verifiable off-hardware. **Also:** the Pi firmware passes
+  `cmdline.txt` verbatim to the kernel and does NOT support `#` comments, yet the
+  bundle layout calls for a "cmdline.txt template + a comment" -- resolved by
+  shipping the explanatory comment as leading `#` lines the operator MUST delete
+  (the `@@...@@` placeholders already make the file un-bootable unedited). Flag
+  for review: a stricter design would move the comment to a sidecar README.
+
+## 2026-09-12 — s2b: verify_netboot_initrd required a `_socket*.so` that does not exist on Debian
+- **Where:** scripts/verify_netboot_initrd.py REQUIRED_GLOBS; tests/test_verify_netboot_initrd.py GOLDEN fixture.
+- **Spec-vs-reality:** the s2a contract listed "_ssl / _hashlib / _socket lib-dynload extension modules" as required initrd files. On Debian trixie (python3.13) `_socket` (and array/math/select/_struct/binascii/zlib/…) are BUILT INTO libpython3.13.so (statically linked), so there is NO `lib-dynload/_socket*.so` file. `copy_exec python3` pulls libpython (with built-in _socket) in, so `import socket`/`import ssl` work at runtime — but the file-existence check failed CI (run 34712822314). The local unit test passed only because the synthetic GOLDEN fixture invented a `_socket.so` that real Debian never produces (fixture-vs-reality theater).
+- **Fix:** require the stdlib `socket.py` (`*lib/python3*/socket.py`) instead of `_socket*.so`. `_ssl.so` (present; links openssl) + `socket.py` (stdlib tree present) is the honest file-level proxy for "the initrd can do TCP+TLS". Fixture made realistic (dropped the fake `_socket.so`/`array.so`, added `socket.py`).
+- **Lesson:** initrd content-verify fixtures must mirror a REAL `lsinitramfs` listing from the target distro, not an idealized one; built-in vs shared extension split is distro/build-specific.

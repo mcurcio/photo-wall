@@ -25,10 +25,12 @@ GOLDEN = [
     "usr/bin/mount",
     "usr/bin/umount",
     "usr/sbin/modprobe",
+    # _ssl / _hashlib link external libs -> shipped as shared .so. _socket,
+    # array, math, select, ... are BUILT INTO libpython on Debian (no .so),
+    # so this honest fixture does NOT invent a lib-dynload/_socket*.so.
     f"{_PREFIX}/lib-dynload/_ssl.cpython-313-aarch64-linux-gnu.so",
     f"{_PREFIX}/lib-dynload/_hashlib.cpython-313-aarch64-linux-gnu.so",
-    f"{_PREFIX}/lib-dynload/_socket.cpython-313-aarch64-linux-gnu.so",
-    f"{_PREFIX}/lib-dynload/array.cpython-313-aarch64-linux-gnu.so",
+    f"{_PREFIX}/socket.py",
     f"{_PREFIX}/os.py",
     f"{_PREFIX}/asyncio/__init__.py",
     "scripts/functions",
@@ -56,7 +58,7 @@ REQUIRED_PRESENT = [
     ("python versioned interpreter", "usr/bin/python3.13"),
     ("_ssl extension", f"{_PREFIX}/lib-dynload/_ssl.cpython-313-aarch64-linux-gnu.so"),
     ("_hashlib extension", f"{_PREFIX}/lib-dynload/_hashlib.cpython-313-aarch64-linux-gnu.so"),
-    ("_socket extension", f"{_PREFIX}/lib-dynload/_socket.cpython-313-aarch64-linux-gnu.so"),
+    ("socket stdlib module", f"{_PREFIX}/socket.py"),
     ("boot script", "scripts/photowall-netboot"),
     ("configure_networking helper", "scripts/functions"),
 ] + [(f"closure {module}", f"{_PREFIX}/{module}") for module in CLOSURE_MODULES]
