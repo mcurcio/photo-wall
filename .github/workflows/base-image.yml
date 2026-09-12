@@ -52,9 +52,14 @@ jobs:
         run: |
           set -eu
           install -d -m 0755 "$RUNNER_TEMP/photo-wall-bootstrapper-deb"
-          deb_path=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
+          # The builder may print progress before the final .deb path; capture
+          # all of it, then take only the last line (the path) for the output —
+          # a multiline value would corrupt $GITHUB_OUTPUT.
+          build_out=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
             --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
             --output-dir "$RUNNER_TEMP/photo-wall-bootstrapper-deb")
+          printf '%s\n' "$build_out"
+          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
       # Pinned by exact commit, not just the tag, for reproducibility --
