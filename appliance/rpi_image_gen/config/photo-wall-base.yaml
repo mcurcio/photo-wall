@@ -25,6 +25,13 @@
 # not a rolling mirror -- see debian-trixie-arm64-minbase-snapshot,
 # pulled in transitively by debian-trixie-arm64-minbase-rolling below.
 
+device:
+  # Satisfies image-base's X-Env-Layer-RequiresProvider: device (see
+  # device/photo-wall-device-none.yaml for the full rationale) without
+  # pulling in a real Pi board layer's kernel/boot-firmware/wifi-firmware --
+  # this build emits a bare rootfs squashfs, not a bootable Pi disk image.
+  layer: photo-wall-device-none
+
 layer:
   # Debian (not Raspberry Pi OS) trixie arm64 minbase, built from a pinned
   # snapshot.debian.org mirror (debian-trixie-arm64-minbase-snapshot, pulled

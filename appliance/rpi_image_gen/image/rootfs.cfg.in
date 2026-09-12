@@ -5,6 +5,18 @@
 # mksquashfs's own upstream default; zstd trades a slightly slower squash for
 # noticeably smaller netboot-fetch bytes, matching this repo's general
 # compression convention elsewhere (deploy-base's own default is zstd too).
+#
+# A standalone top-level `image <name> { squashfs {...} }` block with no
+# enclosing hdimage/partition-table block is valid genimage syntax, not just
+# rpi-image-gen's embedded-inside-a-partition usage (contrast rpi-image-gen's
+# own examples/nested_image/image/embedded_squashfs/ro_assets.cfg.in, which
+# nests a squashfs image inside an ext4/vfat hdimage): verified against
+# upstream genimage's own test fixture (pengutronix/genimage,
+# test/squashfs.config: `image test.squashfs { squashfs { compression =
+# "lzo" } }`, no hdimage wrapper) and its README ("mountpoint" doc: default
+# "/", fills the filesystem from "${rootpath}${mountpoint}" -- our explicit
+# mountpoint = "/" is this default made explicit, matching every other
+# mountpoint use in this tool's own image/*.cfg.in root-partition blocks).
 image <IMAGE_NAME>.<IMAGE_SUFFIX> {
    squashfs {
       block-size = 131072
