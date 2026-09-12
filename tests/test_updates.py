@@ -11,7 +11,7 @@ from appliance import updates
 from appliance.updates import TrialWatchdog, UpdateError, verify_release
 from contracts.release import Release
 
-ABI, CONFIG = "b" * 64, "c" * 64
+ABI = "b" * 64
 
 
 @pytest.fixture
@@ -22,18 +22,16 @@ def signed(tmp_path, monkeypatch):
                                                    serialization.PublicFormat.SubjectPublicKeyInfo))
     openssl = Path("/opt/homebrew/opt/openssl@3/bin/openssl")
     monkeypatch.setattr(updates, "OPENSSL", str(openssl) if openssl.exists() else shutil.which("openssl"))
-    release = Release("a" * 40, ABI, CONFIG, hashlib.sha256(b"root").hexdigest(), 4)
+    release = Release("a" * 40, ABI, hashlib.sha256(b"root").hexdigest(), 4)
     return key, public, release
 
 
 def test_exact_signed_release_and_compatibility(signed):
     key, public, release = signed
     signature = key.sign(release.encode())
-    assert verify_release(release.encode(), signature, public, ABI, CONFIG) == release
+    assert verify_release(release.encode(), signature, public, ABI) == release
     with pytest.raises(UpdateError, match="release_incompatible"):
-        verify_release(release.encode(), signature, public, "d" * 64, CONFIG)
-    with pytest.raises(UpdateError, match="release_incompatible"):
-        verify_release(release.encode(), signature, public, ABI, "d" * 64)
+        verify_release(release.encode(), signature, public, "d" * 64)
 
 
 def test_signature_verified_before_parsing(signed, monkeypatch):
@@ -42,16 +40,16 @@ def test_signature_verified_before_parsing(signed, monkeypatch):
         pytest.fail("unauthenticated bytes must not be parsed")
     monkeypatch.setattr(Release, "decode", forbidden)
     with pytest.raises(UpdateError, match="invalid_signature"):
-        verify_release(b"arbitrary bytes", key.sign(release.encode()), public, ABI, CONFIG)
+        verify_release(b"arbitrary bytes", key.sign(release.encode()), public, ABI)
 
 
 def test_signed_noncanonical_manifest_and_other_key_rejected(signed):
     key, public, release = signed
     manifest = release.encode() + b" "
     with pytest.raises(UpdateError, match="invalid_release"):
-        verify_release(manifest, key.sign(manifest), public, ABI, CONFIG)
+        verify_release(manifest, key.sign(manifest), public, ABI)
     with pytest.raises(UpdateError, match="invalid_signature"):
-        verify_release(release.encode(), Ed25519PrivateKey.generate().sign(release.encode()), public, ABI, CONFIG)
+        verify_release(release.encode(), Ed25519PrivateKey.generate().sign(release.encode()), public, ABI)
 
 
 def health(now, **changes):

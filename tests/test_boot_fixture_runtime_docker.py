@@ -88,7 +88,7 @@ def https_fixture(tmp_path, image_id):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from contracts.release import Release, configuration_digest
+    from contracts.release import Release
 
     bundle, deployment, old = synthetic_bundle_and_deployment(tmp_path / "inputs")
     key = Ed25519PrivateKey.generate()
@@ -96,9 +96,7 @@ def https_fixture(tmp_path, image_id):
     (public / "ca.pem").write_bytes((deployment / "private/server.pem").read_bytes())
     (public / "release.pub.pem").write_bytes(key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
-    release = Release(old.revision, old.boot_abi,
-        configuration_digest({path.name: path.read_bytes() for path in public.iterdir()}),
-        old.rootfs_sha256, old.rootfs_size)
+    release = Release(old.revision, old.boot_abi, old.rootfs_sha256, old.rootfs_size)
     (bundle / "release.json").write_bytes(release.encode())
     (bundle / "release.sig").write_bytes(key.sign(release.encode()))
     return BootFixture.prepare(tmp_path / "state", bundle, deployment, image_id)

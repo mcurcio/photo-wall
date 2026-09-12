@@ -15,7 +15,6 @@ from contracts.release import Release
 from contracts.time import ManualClock
 
 BOOT_ABI = "a" * 64
-CONFIGURATION = "b" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -46,12 +45,11 @@ def registry():
         clock = ManualClock(1000)
         signing_key = Ed25519PrivateKey.generate()
         authority = ReleaseAuthority(
-            db, clock, signing_key.public_key(), BOOT_ABI, CONFIGURATION
+            db, clock, signing_key.public_key(), BOOT_ABI
         )
         release = Release(
             revision="c" * 40,
             boot_abi=BOOT_ABI,
-            configuration_sha256=CONFIGURATION,
             rootfs_sha256="d" * 64,
             rootfs_size=1024,
         )

@@ -31,7 +31,6 @@ from contracts.release import (
     BootRequest,
     BootTicket,
     Release,
-    configuration_digest,
 )
 
 CHUNK = 64 * 1024
@@ -94,7 +93,6 @@ class BootConfig:
     release_origin: str
     time_server: str
     boot_abi: str
-    configuration_sha256: str
     directory: Path
 
     def __post_init__(self):
@@ -109,24 +107,22 @@ class BootConfig:
             valid = False
         if (not valid or not isinstance(self.time_server, str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", self.time_server)
-                or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
-                       for value in (self.boot_abi, self.configuration_sha256))):
+                or not isinstance(self.boot_abi, str) or not re.fullmatch(r"[a-f0-9]{64}", self.boot_abi)):
             raise BootstrapError("boot_configuration")
 
     @classmethod
     def load(cls, directory: Path) -> BootConfig:
-        files = {name: read_regular(directory / name, 1024**2) for name in (
-            "public.json", "bootstrap.json", "ca.pem", "release.pub.pem")}
-        boot = _json(files["bootstrap.json"])
+        # public.json/ca.pem/release.pub.pem are read directly by their
+        # consumers (verify_release, Fetcher's TLS context); they are no
+        # longer bound into a configuration digest here (0008 decision 4).
+        boot = _json(read_regular(directory / "bootstrap.json", 1024**2))
         policy = _json(read_regular(directory / "boot-policy.json", MAX_MANIFEST_BYTES))
         if (set(boot) != {"schema", "release_origin", "time_server"}
                 or type(boot["schema"]) is not int or boot["schema"] != 1
-                or set(policy) != {"schema", "boot_abi", "configuration_sha256"}
-                or type(policy["schema"]) is not int or policy["schema"] != 1
-                or policy["configuration_sha256"] != configuration_digest(files)):
+                or set(policy) != {"schema", "boot_abi"}
+                or type(policy["schema"]) is not int or policy["schema"] != 1):
             raise BootstrapError("boot_configuration")
-        return cls(boot["release_origin"], boot["time_server"], policy["boot_abi"],
-                   policy["configuration_sha256"], directory)
+        return cls(boot["release_origin"], boot["time_server"], policy["boot_abi"], directory)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -421,8 +417,7 @@ def boot(config: BootConfig, rootmnt: Path, *, ops=None,
         # reboot backstop that systemd will take over.
         ops.arm_trial_watchdog()
     release = verify(ticket.manifest.encode(), base64.b64decode(ticket.signature, validate=True),
-                     config.directory / "release.pub.pem", config.boot_abi,
-                     config.configuration_sha256)
+                     config.directory / "release.pub.pem", config.boot_abi)
     if release.release_id != ticket.release_id:
         raise BootstrapError("boot_release_mismatch")
     ram = ops.ram()

@@ -24,7 +24,7 @@ from cryptography.x509 import (
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from contracts.release import Release, configuration_digest
+from contracts.release import Release
 from scripts.boot_fixture import (
     LABEL,
     RUNTIME,
@@ -74,7 +74,6 @@ def synthetic_bundle_and_deployment(root: Path):
     release = Release(
         revision="a" * 40,
         boot_abi="b" * 64,
-        configuration_sha256=configuration_digest(public),
         rootfs_sha256=hashlib.sha256(rootfs).hexdigest(),
         rootfs_size=len(rootfs),
     )

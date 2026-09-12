@@ -206,8 +206,7 @@ def test_boot_abi_covers_kernel_and_bootstrap_logic_but_excludes_derived_files(t
 def test_manifest_names_only_actual_hashed_root(tmp_path):
     file = tmp_path / "root"
     file.write_bytes(b"generated")
-    release = manifest(file, revision="a" * 40, boot_abi="b" * 64,
-                       configuration_sha256="c" * 64)
+    release = manifest(file, revision="a" * 40, boot_abi="b" * 64)
     assert release.rootfs_name == "rootfs-" + hashlib.sha256(b"generated").hexdigest() + ".squashfs"
     assert release.rootfs_size == 9
 
@@ -337,7 +336,7 @@ def test_finalizer_rejects_entire_bundle_resigned_under_replaced_public_key(tmp_
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from contracts.release import Release, configuration_digest
+    from contracts.release import Release
 
     trusted, bundle = tmp_path / "trusted-public", tmp_path / "forged-bundle"
     trusted.mkdir()
@@ -349,9 +348,8 @@ def test_finalizer_rejects_entire_bundle_resigned_under_replaced_public_key(tmp_
             (directory / name).write_bytes(b"generated public fixture\n")
         (directory / "release.pub.pem").write_bytes(key.public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
-    inputs = {path.name: path.read_bytes() for path in (bundle / "public").iterdir()}
     body = b"generated attacker rootfs"
-    release = Release("a" * 40, "b" * 64, configuration_digest(inputs),
+    release = Release("a" * 40, "b" * 64,
                       hashlib.sha256(body).hexdigest(), len(body))
     (bundle / "release.json").write_bytes(release.encode())
     (bundle / release.rootfs_name).write_bytes(body)

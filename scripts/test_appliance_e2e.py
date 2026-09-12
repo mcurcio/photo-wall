@@ -165,7 +165,6 @@ def checked_inputs(manifest: Path) -> dict:
     require(metadata.get("schema") == 1 and metadata.get("kind") == "ci-rollback-candidate"
             and metadata.get("source_revision") == release.revision == candidate.revision
             and metadata.get("boot_abi") == release.boot_abi == candidate.boot_abi
-            and metadata.get("configuration_sha256") == release.configuration_sha256 == candidate.configuration_sha256
             and metadata.get("fault_path") == FAULT_PATH
             and metadata.get("content_sha256") == hashlib.sha256(FAULT_CONTENT).hexdigest()
             and candidate.release_id != release.release_id, "candidate_identity_mismatch")
@@ -342,7 +341,6 @@ class ApplianceE2E:
             source_commit=inputs["source_commit"], image_sha256=inputs["disk_record"]["sha256"],
             image_size=inputs["disk_record"]["size"], release_id=inputs["release"].release_id,
             rootfs_sha256=inputs["release"].rootfs_sha256,
-            configuration_sha256=inputs["release"].configuration_sha256,
             generic_kernel_sha256=inputs["generic_record"]["outputs"]["kernel"]["sha256"],
             generic_initrd_sha256=inputs["generic_record"]["outputs"]["initrd"]["sha256"],
             central_image=central_image, builder_image=builder_image, checks={}, boots=[],

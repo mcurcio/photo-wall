@@ -54,8 +54,7 @@ from pathlib import Path
 
 def identity(bundle):
     release = bundle.release
-    return dict(release_id=release.release_id, rootfs_sha256=release.rootfs_sha256,
-                configuration_sha256=release.configuration_sha256)
+    return dict(release_id=release.release_id, rootfs_sha256=release.rootfs_sha256)
 
 def expected(bundle):
     if identity(bundle) != json.loads(sys.argv[2]):
@@ -159,7 +158,7 @@ def probe():
         raise ValueError('central scheduler absent')
     release = bundle.release
     config = BootConfig('https://photo-wall.test','photo-wall.test',release.boot_abi,
-                        release.configuration_sha256,Path('/public'))
+                        Path('/public'))
     fetch = Fetcher(config)
     payload, signature = fetch.read('release.json',8192), fetch.read('release.sig',64)
     if payload != release.encode() or signature != read_regular(Path('/bundle/release.sig'),64):
@@ -503,7 +502,7 @@ class BootFixture:
         loaded = BootBundle.load(bundle,deployment/"public")
         candidate = BootBundle.load(candidate_bundle, deployment/"public") if candidate_bundle else None
         if candidate:
-            candidate.release.require_compatible(loaded.release.boot_abi, loaded.release.configuration_sha256)
+            candidate.release.require_compatible(loaded.release.boot_abi)
         public = read_json(deployment/"public/public.json")
         boot = read_json(deployment/"public/bootstrap.json")
         require(public.get("central_origin") in ("https://photo-wall.test","https://photo-wall.test:443")
@@ -562,7 +561,7 @@ class BootFixture:
             source_hash = hashlib.sha256(encoded(copied)).hexdigest()
             marker = dict(schema=1,state=str(state),project=project,central_image=central_image,
                 release_id=release.release_id,rootfs_sha256=release.rootfs_sha256,
-                configuration_sha256=release.configuration_sha256,source_sha256=source_hash,
+                source_sha256=source_hash,
                 source_files=copied,initialized=False,
                 inputs={str(path.relative_to(state)):file_hash(path) for group in ("bundle","public","tls")
                         for path in sorted((state/group).iterdir())})
@@ -684,7 +683,7 @@ class BootFixture:
         require(hashlib.sha256(encoded(files)).hexdigest()==self.marker["source_sha256"],"image_source_changed")
 
     def expect(self):
-        return {key:self.marker[key] for key in ("release_id","rootfs_sha256","configuration_sha256")}
+        return {key:self.marker[key] for key in ("release_id","rootfs_sha256")}
 
     def create_resource(self, kind, suffix):
         name = self.project+"-"+suffix

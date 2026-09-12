@@ -12,7 +12,7 @@ from central.app import create_app
 from central.releases import ReleaseAuthority
 from contracts.enrollment import OutputReport, enrollment_message
 from contracts.release import BootRequest, Release
-from tests.conftest import BOOT_ABI, CONFIGURATION
+from tests.conftest import BOOT_ABI
 
 ADMIN = "release-http-operator-" + "x" * 32
 
@@ -20,13 +20,12 @@ ADMIN = "release-http-operator-" + "x" * 32
 def test_boot_enrollment_time_health_and_exact_artifact_share_central_authority(registry, tmp_path):
     release_key = Ed25519PrivateKey.generate()
     authority = ReleaseAuthority(
-        registry.db, registry.clock, release_key.public_key(), BOOT_ABI, CONFIGURATION
+        registry.db, registry.clock, release_key.public_key(), BOOT_ABI
     )
     rootfs = b"central immutable root filesystem"
     release = Release(
         revision="e" * 40,
         boot_abi=BOOT_ABI,
-        configuration_sha256=CONFIGURATION,
         rootfs_sha256=hashlib.sha256(rootfs).hexdigest(),
         rootfs_size=len(rootfs),
     )

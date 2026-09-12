@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
-from contracts.release import Release, configuration_digest
+from contracts.release import Release
 from scripts.boot_gateway import BootBundle
 
 
@@ -32,7 +32,6 @@ def bundle(tmp_path, signing_key):
         (public / name).write_bytes(data)
     payload = b"signed synthetic rootfs bytes"
     release = Release(revision="a"*40, boot_abi="b"*64,
-                      configuration_sha256=configuration_digest(files),
                       rootfs_sha256=hashlib.sha256(payload).hexdigest(), rootfs_size=len(payload))
     (root / "release.json").write_bytes(release.encode())
     (root / "release.sig").write_bytes(private.sign(release.encode()))
@@ -61,14 +60,12 @@ def test_only_three_signed_public_files_are_served(bundle):
             assert client.get("/appliance/" + name).status_code == 404
 
 
-@pytest.mark.parametrize("failure", ["signature", "configuration", "corrupt", "truncated",
+@pytest.mark.parametrize("failure", ["signature", "corrupt", "truncated",
                                       "manifest_symlink", "rootfs_symlink", "directory_symlink"])
 def test_unverified_or_symlinked_bundle_is_never_served(bundle, failure):
     root, public, release, payload = bundle
     if failure == "signature":
         (root / "release.sig").write_bytes(b"x"*64)
-    elif failure == "configuration":
-        (public / "public.json").write_bytes(b"changed public configuration")
     elif failure in ("corrupt", "truncated"):
         (root / release.rootfs_name).write_bytes(b"x"*len(payload) if failure == "corrupt" else payload[:-1])
     elif failure == "directory_symlink":
@@ -153,13 +150,13 @@ def test_real_central_fixture_selects_registered_signed_candidate_and_falls_back
 
     root, public, accepted, _ = bundle
     candidate_bytes = b'failed candidate root'
-    candidate = Release('e'*40, accepted.boot_abi, accepted.configuration_sha256,
+    candidate = Release('e'*40, accepted.boot_abi,
                         hashlib.sha256(candidate_bytes).hexdigest(), len(candidate_bytes))
     (root / candidate.rootfs_name).write_bytes(candidate_bytes)
     monkeypatch.setenv('PHOTO_WALL_APPLIANCE_BUNDLE', str(root))
     monkeypatch.setenv('PHOTO_WALL_BOOT_PUBLIC_CONFIG', str(public))
     for name in ('PHOTO_WALL_RELEASE_PUBLIC_KEY', 'PHOTO_WALL_RELEASE_BOOT_ABI',
-                 'PHOTO_WALL_RELEASE_CONFIGURATION_SHA256', 'PHOTO_WALL_RELEASE_ROOT',
+                 'PHOTO_WALL_RELEASE_ROOT',
                  'PHOTO_WALL_INITIAL_RELEASE_MANIFEST', 'PHOTO_WALL_INITIAL_RELEASE_SIGNATURE'):
         monkeypatch.setenv(name, '')  # Record restoration before gateway configures its public inputs.
     monkeypatch.setattr(boot_gateway, 'create_central_app', lambda: central_app(

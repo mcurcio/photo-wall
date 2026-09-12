@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from appliance.os_packages import BASE_BYTES, BASE_SHA256, RUNTIME_PACKAGES, SNAPSHOT
-from contracts.release import MAX_ROOTFS_BYTES, Release, configuration_digest
+from contracts.release import MAX_ROOTFS_BYTES, Release
 
 MAX_RAW_BYTES = 12 * 1024**3
 MIB = 1024**2
@@ -719,7 +719,7 @@ def install_runtime_packages(root: Path, evidence: Path, archive_cache=None) -> 
 
 
 def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
-                   evidence: Path) -> str:
+                   evidence: Path) -> None:
     """Install public common files and the offline Player-only dependency closure."""
     from appliance.bootstrap import BootConfig, read_regular
 
@@ -728,10 +728,11 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
         raise BuildError("public_inputs_invalid")
     inputs = {name: read_regular(public / name, MIB) for name in (
         "public.json", "bootstrap.json", "ca.pem", "release.pub.pem")}
-    config_hash = configuration_digest(inputs)
     bootstrap = json.loads(inputs["bootstrap.json"])
     # Reuse the runtime origin/time syntax validation before generating any script.
-    BootConfig(bootstrap["release_origin"], bootstrap["time_server"], "0" * 64, config_hash, public)
+    # release_origin/central_origin/ca.pem stay operator-editable on the boot
+    # tree, not bound into the signed release (0008 decision 4).
+    BootConfig(bootstrap["release_origin"], bootstrap["time_server"], "0" * 64, public)
     config_dir = root / "etc/photo-wall"
     config_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
     for name, data in inputs.items():
@@ -843,7 +844,6 @@ def configure_root(root: Path, source: Path, wheelhouse: Path, public: Path,
     obsolete_state = root / "var/lib/photo-wall"
     if obsolete_state.exists() and list(obsolete_state.iterdir()):
         raise BuildError("common_state_not_empty")
-    return config_hash
 
 
 def configure_root_generic(root: Path, source: Path, wheelhouse: Path, release_pub: Path,
@@ -998,10 +998,9 @@ def boot_abi(root: Path, boot_tree: Path, kernel: str) -> tuple[str, dict]:
     return hashlib.sha256(canonical(files)).hexdigest(), files
 
 
-def manifest(rootfs: Path, *, revision: str, boot_abi: str,
-             configuration_sha256: str) -> Release:
+def manifest(rootfs: Path, *, revision: str, boot_abi: str) -> Release:
     record = checked_file(rootfs, MAX_ROOTFS_BYTES)
-    return Release(revision=revision, boot_abi=boot_abi, configuration_sha256=configuration_sha256,
+    return Release(revision=revision, boot_abi=boot_abi,
                    rootfs_sha256=record["sha256"], rootfs_size=record["size"])
 
 
@@ -1217,7 +1216,7 @@ def prepare(root: Path, source: Path, wheelhouse: Path, public: Path,
     destination.mkdir(mode=0o700)
     evidence = destination / "inventory"
     shutil.copytree(package_evidence, evidence)
-    config_hash = configure_root(root, source, wheelhouse, public, evidence)
+    configure_root(root, source, wheelhouse, public, evidence)
     profile_firmware(root, evidence)
     kernels = sorted(path.name for path in (root / "usr/lib/modules").iterdir() if path.is_dir())
     if kernels != ["6.8.0-1047-raspi"]:
@@ -1236,7 +1235,7 @@ def prepare(root: Path, source: Path, wheelhouse: Path, public: Path,
         "vt.global_cursor_default=0 logo.nologo panic=10 watchdog_core.nowayout=1 "
         "bcm2835_wdt.nowayout=1\n")
     abi, abi_inventory = boot_abi(root, firmware, kernel)
-    policy = dict(schema=1, boot_abi=abi, configuration_sha256=config_hash)
+    policy = dict(schema=1, boot_abi=abi)
     (root / "etc/photo-wall/boot-policy.json").write_bytes(canonical(policy))
     initconfig = root / "etc/initramfs-tools/conf.d/photo-wall"
     initconfig.write_text("BOOT=photowall\nMODULES=most\nCOMPRESS=gzip\n")
@@ -1259,14 +1258,14 @@ def prepare(root: Path, source: Path, wheelhouse: Path, public: Path,
     (embedded / "boot-abi.json").write_bytes(canonical(abi_inventory))
     rootfs = destination / "rootfs.squashfs"
     squash(root, rootfs, record["source_epoch"])
-    release = manifest(rootfs, revision=record["revision"], boot_abi=abi, configuration_sha256=config_hash)
+    release = manifest(rootfs, revision=record["revision"], boot_abi=abi)
     rootfs.rename(destination / release.rootfs_name)
     (destination / "release.json").write_bytes(release.encode())
     shutil.copytree(firmware, destination / "boot", symlinks=True)
     shutil.copytree(public, destination / "public")
     report = dict(schema=1, revision=record["revision"], source_epoch=record["source_epoch"],
                   base_sha256=BASE_SHA256, base_size=BASE_BYTES, boot_abi=abi,
-                  configuration_sha256=config_hash, rootfs_sha256=release.rootfs_sha256,
+                  rootfs_sha256=release.rootfs_sha256,
                   rootfs_size=release.rootfs_size, initramfs=initrd, files=inventory(destination / "boot"),
                   qualified=dict(rootfs_build=True, native_import=True, vm_boot=False, physical_pi=False))
     (destination / "build.json").write_bytes(canonical(report))
@@ -1288,10 +1287,9 @@ def finalize(bundle: Path, signature: Path, destination: Path, *, trusted_public
     inputs = {name: read_regular(trusted_public / name, MIB) for name in names}
     if any(read_regular(public / name, MIB) != value for name, value in inputs.items()):
         raise BuildError("bundle_public_mismatch")
-    config_hash = configuration_digest(inputs)
     release = verify_release(read_regular(bundle / "release.json", 8192),
                              read_regular(signature, 64), trusted_public / "release.pub.pem",
-                             build["boot_abi"], config_hash)
+                             build["boot_abi"])
     checked_file(bundle / release.rootfs_name, release.rootfs_size, expected=release.rootfs_sha256)
     if inventory(bundle / "boot") != build["files"]:
         raise BuildError("boot_tree_changed")
@@ -1309,7 +1307,7 @@ def finalize(bundle: Path, signature: Path, destination: Path, *, trusted_public
     for path in (bundle / "release.json", bundle / release.rootfs_name):
         shutil.copyfile(path, common / path.name)
     shutil.copyfile(signature, common / "release.sig")
-    image = destination / f"photo-wall-pi5-{release.revision}-{config_hash[:16]}.img"
+    image = destination / f"photo-wall-pi5-{release.revision}.img"
     result = create_disk(tree, image, source_epoch=build["source_epoch"])
     report = dict(schema=1, release_id=release.release_id, image=image.name,
                   image_sha256=result["sha256"], image_size=result["size"],

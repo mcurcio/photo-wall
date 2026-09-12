@@ -69,7 +69,7 @@ def _private_write(path: Path, data: bytes) -> None:
 
 
 def verify_release(manifest: bytes, signature: bytes, public_key: Path,
-                   boot_abi: str, configuration_sha256: str) -> Release:
+                   boot_abi: str) -> Release:
     """Authenticate exact bytes using the pinned OpenSSL before parsing fields."""
     if (not isinstance(manifest, bytes) or not 0 < len(manifest) <= MAX_MANIFEST_BYTES
             or not isinstance(signature, bytes) or len(signature) != 64):
@@ -100,7 +100,7 @@ def verify_release(manifest: bytes, signature: bytes, public_key: Path,
             raise UpdateError("invalid_signature")
     try:
         release = Release.decode(manifest)
-        release.require_compatible(boot_abi, configuration_sha256)
+        release.require_compatible(boot_abi)
         return release
     except ValueError as error:
         raise UpdateError(str(error)) from error
