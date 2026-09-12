@@ -149,7 +149,13 @@ class State(Model):
 
 class BootContext(Model):
     schema_version: Literal[2] = Field(alias="schema")
-    ticket_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    # None means no boot ticket was issued for this boot -- the signal the
+    # player and central key ticketless enroll and boot-health reporting on
+    # (see enroll(), _report_boot_health, and central/registry.py enroll()).
+    # A netboot (D1) boot always carries a real ticket here
+    # (appliance/bootstrap.py boot()); hardware_boot_context() (D0/flashed)
+    # never had a ticket and now says so honestly instead of synthesizing one.
+    ticket_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{48}$")
     device_id: str = Field(pattern=r"^device-[a-f0-9]{64}$")
     boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
     release_id: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -227,16 +233,14 @@ def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_se
     Pi keeps one device_id across tiers (0008: device_id is the immutable
     serial).
 
-    ticket_id/release_id have no netboot-ticket source at D0 (there is no
-    boot server to issue one), so schema-valid placeholders are synthesized
-    here for `BootContext`'s own schema, but this `ticket_id` is NEVER sent
-    to central as if it were a real one: `enroll()` sends `ticket_id=None`
-    instead whenever `persistence == "persistent"` (m3-central-d0-enroll),
-    which is the explicit D0 signal central's enroll (central/registry.py)
-    branches on -- it skips the netboot release-binding entirely and enrolls
-    the player unbound (pending) by serial alone, with no prior boot ticket
-    required. Boot-health / OS-release tracking still has no ticket to
-    report against at D0 and remains out of scope here.
+    There is no netboot-ticket source at D0 (there is no boot server to
+    issue one), so `ticket_id` is honestly `None` here -- this is the
+    explicit "no boot ticket" signal `enroll()` and `_report_boot_health`
+    key off of (re-keyed off the ticket itself, not `persistence`): it
+    skips the netboot release-binding entirely and enrolls the player
+    unbound (pending) by serial alone, with no prior boot ticket required.
+    Boot-health / OS-release tracking has no ticket to report against at D0
+    and remains out of scope here.
     """
     try:
         raw = serial_reader()
@@ -247,7 +251,7 @@ def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_se
         raise ServiceError("boot_equipment_identity")
     return BootContext(
         schema=2,
-        ticket_id=secrets.token_hex(24),
+        ticket_id=None,
         device_id=device_id,
         boot_id=str(uuid.uuid4()),
         release_id=secrets.token_hex(32),
@@ -482,12 +486,11 @@ class PlayerService:
             raise ServiceError("boot_context")
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
-        # D0 (flashed/persistent) has no netboot-issued ticket -- central's own
-        # `appliance_devices` row would not exist for it -- so the boot
-        # context's `persistence`, not the synthesized placeholder ticket_id,
-        # is what tells central this is a ticketless enroll (0008 baseline).
-        ticket_id = (None if self.boot_context.persistence == "persistent"
-                    else self.boot_context.ticket_id)
+        # A boot context with no ticket (D0/flashed, and 0009's diskless
+        # bootstrapper) has no `appliance_devices` row to bind against, so
+        # the presence of a ticket -- not `persistence` -- is what tells
+        # central this is a ticketless enroll (0008 baseline).
+        ticket_id = self.boot_context.ticket_id
         enrollment = self.identity.enrollment(
             challenge.nonce,
             self.outputs,
@@ -498,17 +501,16 @@ class PlayerService:
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
         self.registration = registered
-        # D0 (flashed/persistent) has no central-issued boot ticket and no
-        # signed-release trial to report against -- `ticket_id` above is
-        # None, and boot-health's ticket lookup (central/releases.py
-        # health()) would 403 `stale_boot_ticket` on a ticket central never
-        # recorded (the synthesized placeholder in hardware_boot_context()).
-        # Treat the release as locally accepted so `_control_loop` never
-        # calls `_report_boot_health` for D0, and the player proceeds
-        # straight to a sustained running session. D1 (netboot/volatile)
-        # is unaffected: it still starts unaccepted and only flips true
-        # after the full boot-health trial, exactly as before.
-        self.release_accepted = self.boot_context.persistence == "persistent"
+        # A boot context with no ticket (D0/flashed, and 0009's diskless
+        # bootstrapper) has no central-issued boot ticket and no
+        # signed-release trial to report against. Treat the release as
+        # locally accepted so `_control_loop` never calls
+        # `_report_boot_health` for a ticketless boot, and the player
+        # proceeds straight to a sustained running session. D1 (netboot,
+        # with a real ticket) is unaffected: it still starts unaccepted and
+        # only flips true after the full boot-health trial, exactly as
+        # before.
+        self.release_accepted = self.boot_context.ticket_id is None
         with self._lock:
             self._offered = False
             self._jobs = ()
@@ -823,7 +825,11 @@ class PlayerService:
             await self.poll_state()
             readiness, observations = await self.dispatch(self._feedback)
             healthy, reason = await self.dispatch(self._health_status)
-            if not self.release_accepted:
+            # A ticketless boot (no boot ticket present) has no release
+            # trial to report against -- boot-health is a ticketed-boot-only
+            # concern, keyed off the ticket itself, not `release_accepted`
+            # alone (which a ticketless boot also starts True at).
+            if self.boot_context.ticket_id is not None and not self.release_accepted:
                 await self._report_boot_health(healthy)
             self._write_health(healthy, reason)
             if readiness is not None:

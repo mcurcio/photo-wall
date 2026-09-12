@@ -89,8 +89,6 @@ class Registry:
         return {"nonce": nonce, "expires_at": now + 60}
 
     def enroll(self, request: Enrollment) -> dict:
-        if self.release_authority is None:
-            raise RegistryError("release_authority_unavailable", 503)
         try:
             signature = base64.b64decode(request.signature, validate=True)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(request.public_key)).verify(
@@ -131,11 +129,16 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
-            # D0 (ticketless/flashed, 0008): no boot server ever issued a
-            # ticket, so there is no `appliance_devices` row and no release
-            # to bind -- the player enrolls unbound (pending) by serial
-            # alone. D1 (netboot) is unchanged: bind the real boot session.
+            # D0 (ticketless/flashed, 0008) and the diskless bootstrapper
+            # (0009): no boot server ever issued a ticket, so there is no
+            # `appliance_devices` row and no release to bind -- the player
+            # enrolls unbound (pending) by serial alone, with no release
+            # authority required. D1 (netboot) is unchanged: a real ticket
+            # requires a configured release authority to bind the boot
+            # session against.
             if request.ticket_id is not None:
+                if self.release_authority is None:
+                    raise RegistryError("release_authority_unavailable", 503)
                 self.release_authority.bind_session_in(
                     conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
                 )
