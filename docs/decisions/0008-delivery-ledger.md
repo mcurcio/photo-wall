@@ -106,8 +106,8 @@ Slices (tracer-first; design: [0009](0009-minimal-base-and-app-package.md)):
 | 2 p3-base-bootstrapper | appliance | discover→fetch→verify sha256→unpack→run→origin handoff | HIGH boot-critical | mocked | in_progress |
 | 4 p3-deb-build | scripts | player .deb (prebuilt venv) | med | yes | closed `beeaf9f` |
 | 5 p3-base-image | appliance | minimal generic base OS image (NEW path, additive) | med-high | structure only; real Pi = owner | in_progress |
-| 6 p3-release-workflow-rework | workflows | publish base image + .deb | med | yes | open |
-| 7 p3-docs | docs | README/runbook/module docs to the new model | low | link-check | open |
+| 6 p3-release-workflow-rework | workflows | publish base image + .deb (unsigned) | med | yes | closed `d107798` |
+| 7 p3-docs | docs | README/runbook/module docs to the new model (honest, mid-migration) | low | link-check | closed `45e8703` |
 | 3 p3-retire-authority (RESEQUENCED LAST) | central+contracts+appliance | delete old netboot/release-authority/boot-ticket/rootfs/trial + signing | HIGH destructive | yes | **deferred until owner hardware-validates the new base-image boot** |
 | 6 p3-release-workflow-rework | workflows | publish base image + .deb; retire signed-rootfs publish | med | yes | open |
 | 7 p3-docs | docs | README/runbook/module docs to the new model | low | link-check | open |
