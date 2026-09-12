@@ -130,7 +130,9 @@ the custom pipeline + old signed path. 0009 gets updated once the spike proves v
 | Slice | Delivers | CI? | Status |
 |---|---|---|---|
 | p4-rpi-image-gen-spike | minimal-base rpi-image-gen config + CI build job (emits base squashfs) | CI build (arm64) | **PROVEN** — builds + content-verified green (`d526428`); folded into PR |
-| p4-package-all-custom | ALL custom code shipped as portable .debs: bootstrapper .deb (in base) + player .deb (at boot); base install = apt-install our .debs, no tool-specific overlay | yes | in_progress |
+| p4-package-all-custom | ALL custom code shipped as portable .debs: bootstrapper .deb (in base) + player .deb (at boot); base install = apt-install our .debs, no tool-specific overlay | yes | **PROVEN** — rpi-image-gen base builds + apt-installs the bootstrapper .deb + content-verified green |
+| p4-boot-chain | netboot init boots the rpi-image-gen base squashfs -> runs bootstrapper -> fetch/run player .deb (QEMU e2e); replaces old signed-rootfs boot | QEMU + owner Pi | open |
+| p4-retire | delete custom image pipeline (~2,500 LOC) + old signed netboot/release-authority/boot-ticket/trial | HIGH destructive | open (green-lit; do after boot chain) |
 | p4-deb-full-depends | .deb declares full app Depends; bootstrapper apt-installs it | yes | open |
 | p4-boot-chain | netboot init boots the rpi-image-gen base -> runs bootstrapper (QEMU e2e) | QEMU + owner Pi | open |
 | p4-retire | delete custom image pipeline + old signed netboot/release-authority | yes | open (after spike proves) |
