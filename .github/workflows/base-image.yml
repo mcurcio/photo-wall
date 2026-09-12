@@ -84,6 +84,128 @@ jobs:
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT"
 
+      # Proves the squashfs is CORRECT, not merely that rpi-image-gen exited
+      # 0 -- see docs/decisions/0009-minimal-base-and-app-package.md, "Base
+      # OS bundle" (line ~669: "ship Python + zeroconf for the bootstrapper"
+      # / "strip the Player venv, release.pub.pem, ... from the netboot
+      # root") and layer/photo-wall-bootstrapper.yaml's own rule #1, "the
+      # base OS carries no application and no origin". Reads the rootfs
+      # tree straight out of the built squashfs via `unsquashfs -ll`
+      # (permissions/type + path, no extraction needed) rather than trusting
+      # the build's own exit code.
+      #
+      # Squashfs location: rpi-image-gen's image-base layer places genimage's
+      # output directly at $IGconf_image_outputdir =
+      # "$WORKROOT/image-${IGconf_image_name}" (image-base.yaml,
+      # X-Env-Var-outputdir) -- confirmed against the pinned tool's own
+      # rpi-image-gen:generate_images(), which passes that same directory to
+      # genimage as both --inputpath and --outputpath, and
+      # image/rootfs.cfg.in's <IMAGE_NAME>.<IMAGE_SUFFIX> substitution
+      # (photo-wall-base.squashfs, config/photo-wall-base.yaml's
+      # name/suffix). This is the RAW artefact, found before rpi-image-gen's
+      # own later `deploy` stage zstd-compresses a copy into deploy-*/ (see
+      # layer/base/deploy-base.yaml's compression default) -- deliberately
+      # not decompressing that copy back out.
+      - name: Verify the built base image is what 0009 requires (content, not just build success)
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -eu
+          set -x
+
+          command -v unsquashfs >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends squashfs-tools
+          }
+
+          squashfs_count=$(find "$WORKROOT" -type f -name 'photo-wall-base.squashfs' | wc -l)
+          if [ "$squashfs_count" -ne 1 ]; then
+            echo "VIOLATION: expected exactly one photo-wall-base.squashfs under $WORKROOT, found $squashfs_count:" >&2
+            find "$WORKROOT" -type f -name 'photo-wall-base.squashfs' >&2 || true
+            exit 1
+          fi
+          squashfs=$(find "$WORKROOT" -type f -name 'photo-wall-base.squashfs')
+          echo "Inspecting $squashfs"
+
+          listing="$RUNNER_TEMP/photo-wall-base.listing"
+          unsquashfs -ll "$squashfs" > "$listing"
+          echo "-- squashfs listing: $(wc -l < "$listing") entries --"
+
+          # "<type-char> <path>" per entry, e.g. "d squashfs-root/etc" or
+          # "l squashfs-root/.../foo.service" -- $6 of `unsquashfs -ll`'s
+          # `<perms> <owner/group> <size> <date> <time> <path> [-> <target>]`
+          # is the bare path with no `-> target` suffix even for symlinks
+          # (verified against this exact squashfs-tools output format).
+          typed="$RUNNER_TEMP/photo-wall-base.typed-paths"
+          awk '{ print substr($1, 1, 1), $6 }' "$listing" > "$typed"
+
+          fail=0
+          violation() {
+            echo "VIOLATION: $1" >&2
+            fail=1
+          }
+
+          # $1 = type char (- file, d dir, l symlink), $2 = path under the
+          # rootfs, $3 = human description.
+          require_path() {
+            if grep -Fxq -- "$1 squashfs-root/$2" "$typed"; then
+              echo "OK: found $3 ($2)"
+            else
+              violation "missing required $3 at $2"
+            fi
+          }
+
+          # $1 = substring to search for anywhere in the full listing
+          # (matches a directory entry or anything nested under it), $2 =
+          # human description.
+          forbid_substring() {
+            if grep -qF -- "$1" "$listing"; then
+              violation "forbidden $2 present (matched '$1')"
+            else
+              echo "OK: absent $2 (no match for '$1')"
+            fi
+          }
+
+          echo "== MUST BE PRESENT =="
+          # The bootstrapper and its minimal import closure (never
+          # player.service, which pulls in GTK/GStreamer -- see
+          # stage_overlay.sh's own module docstring).
+          require_path - usr/lib/python3/dist-packages/appliance/provision.py 'the bootstrapper (appliance/provision.py)'
+          require_path - usr/lib/python3/dist-packages/player/mdns_discovery.py 'mDNS discovery (player/mdns_discovery.py)'
+          require_path - usr/lib/python3/dist-packages/player/discovery.py 'the discovery Protocol (player/discovery.py)'
+          # The unit, AND that it is actually enabled (symlinked into the
+          # multi-user.target.wants/ target), not just installed inert.
+          require_path - etc/systemd/system/photo-wall-provision.service 'the photo-wall-provision.service unit'
+          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-provision.service 'photo-wall-provision.service enablement symlink'
+          # Python 3 plus the bootstrapper's one third-party dependency
+          # closure (python3-zeroconf pulls in python3-ifaddr).
+          require_path - usr/bin/python3 'the python3 interpreter'
+          require_path d usr/lib/python3/dist-packages/zeroconf 'the zeroconf library (python3-zeroconf)'
+          require_path d usr/lib/python3/dist-packages/ifaddr 'the ifaddr library (python3-ifaddr)'
+
+          echo "== MUST BE ABSENT (base stays minimal; app + render stack come from the .deb at boot) =="
+          # No Player venv baked into the base.
+          forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
+          # No deployment config or app trust anchor baked into the base --
+          # the bootstrapper resolves these at boot, not build time.
+          forbid_substring 'squashfs-root/etc/photo-wall/public.json' 'a baked /etc/photo-wall/public.json'
+          forbid_substring 'squashfs-root/etc/photo-wall/bootstrap.json' 'a baked /etc/photo-wall/bootstrap.json'
+          forbid_substring 'squashfs-root/etc/photo-wall/ca.pem' 'a baked /etc/photo-wall/ca.pem'
+          forbid_substring 'release.pub.pem' 'a baked release.pub.pem app trust anchor'
+          # No GTK/GStreamer/weston render stack -- that is the .deb's
+          # Depends, resolved against the live Debian mirror at boot (see
+          # config/photo-wall-base.yaml's "apt sources configured to the
+          # Debian distro repo" note). Multiarch-triplet-agnostic: matches
+          # the last path component, not a fixed usr/lib/<triplet>/ prefix.
+          forbid_substring 'usr/bin/weston' 'the weston compositor binary'
+          forbid_substring '/gstreamer-1.0' 'a GStreamer plugin directory'
+
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: built base image does not match 0009's minimal-base-plus-bootstrapper contract; see VIOLATION lines above" >&2
+            exit 1
+          fi
+          echo "PASS: built base image content matches 0009's minimal-base-plus-bootstrapper contract"
+
       - name: Show what was produced
         if: always()
         env:
