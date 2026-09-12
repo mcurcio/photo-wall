@@ -356,11 +356,27 @@ def main() -> None:
     check = commands.add_parser("verify")
     check.add_argument("--repository", type=Path, required=True)
     check.add_argument("--bundle", type=Path, required=True)
+    # Extracts an already-qualified OS base bundle (as restored by
+    # `scripts.ci_images base`, e.g. `$RUNNER_TEMP/photo-wall-os-base`) into a
+    # working root with `appliance.os_packages.RUNTIME_PACKAGES` already
+    # installed -- the same root `scripts/build_ci_image.py`'s prepared-base
+    # path restores internally. Added for 0009 slice 6 so the release
+    # workflow can hand that exact root to `scripts/build_player_deb.py`
+    # (which needs a full runtime-package root, not the minimal base image's
+    # own smaller `BASE_RUNTIME_PACKAGES` root) without duplicating this
+    # extraction logic in the workflow YAML.
+    unpack = commands.add_parser("restore")
+    unpack.add_argument("--repository", type=Path, required=True)
+    unpack.add_argument("--bundle", type=Path, required=True)
+    unpack.add_argument("--output", type=Path, required=True)
+    unpack.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "identity":
         result = {"definition_id": definition_id(args.repository)}
     elif args.command == "verify":
         result = verify(args.bundle, definition(args.repository))
+    elif args.command == "restore":
+        result = restore(args.bundle, args.output, args.evidence, definition(args.repository))
     else:
         result = build(args.repository, args.output, builder_image=args.builder_image)
     print(json.dumps(result, sort_keys=True))

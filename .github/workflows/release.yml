@@ -1,18 +1,21 @@
 name: Appliance release
 
-# Publishes a tagged commit's appliance build as a GitHub Release, signed with
-# the persistent project key, with operator-consumable artifacts for both the
-# diskless netboot fleet and the flash path.
+# Publishes a tagged commit's 0009 release assets as a GitHub Release: the
+# minimal base OS image (squashfs + boot tree) and the Player `.deb`. Per the
+# 0009 owner ruling (home LAN, no threat model, UX over security) NEITHER
+# asset is signed -- there is no signing key anywhere in this workflow, and
+# every sha256 published alongside them is a corruption check only, never an
+# authenticity anchor.
 #
-# This workflow does not itself construct the Pi OS or signed appliance --
+# This workflow does not itself construct the Pi OS or the Player package --
 # only appliance.yml does that (see docs/module-appliance-ci.md and the
 # `tests/test_service_workflows.py` invariant that enforces it). It calls
 # appliance.yml as a reusable workflow (its `workflow_call` trigger, guarded
-# by its own `release-artifacts` job) to reassemble and sign the exact same
-# already-qualified definition/application inputs with the production key,
-# then downloads that job's raw build output and packages it here. It assumes
-# the tagged commit already passed appliance.yml's push/PR boot qualification
-# on its way to `main`; it does not repeat that VM boot gate.
+# by its own `release-artifacts` job) to rebuild the exact same
+# already-qualified definition/revision's base image and `.deb`, then
+# downloads that job's raw build output and packages it here. It assumes the
+# tagged commit already passed appliance.yml's push/PR boot qualification on
+# its way to `main`; it does not repeat that VM boot gate.
 
 on:
   push:
@@ -49,25 +52,6 @@ jobs:
             exit 1
           fi
 
-      # Fail closed BEFORE any expensive build work. A GitHub secret that was
-      # never configured at all renders exactly the same as an empty string
-      # in this ${{ secrets.* }} expression -- the appliance build's own
-      # persistent-signing-key guard only fires for a variable that is SET
-      # but empty, so it cannot see that "never configured" case. This check
-      # closes that gap instead of silently falling back to a disposable
-      # per-build key for a published release.
-      - name: Require the persistent release signing key secret
-        env:
-          PHOTO_WALL_RELEASE_SIGNING_KEY: ${{ secrets.PHOTO_WALL_RELEASE_SIGNING_KEY }}
-        run: |
-          value="${PHOTO_WALL_RELEASE_SIGNING_KEY//[[:space:]]/}"
-          if [[ -z "$value" ]]; then
-            echo "::error::PHOTO_WALL_RELEASE_SIGNING_KEY secret is missing or empty." \
-                 "Refusing to publish a release that would silently fall back to a" \
-                 "disposable per-build signing key." >&2
-            exit 1
-          fi
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: refs/tags/${{ env.TAG_INPUT }}
@@ -95,8 +79,6 @@ jobs:
     uses: ./.github/workflows/appliance.yml
     with:
       revision: ${{ needs.resolve.outputs.revision }}
-    secrets:
-      release_signing_key: ${{ secrets.PHOTO_WALL_RELEASE_SIGNING_KEY }}
 
   publish:
     needs: [resolve, build]
@@ -121,14 +103,15 @@ jobs:
       - name: Package operator-consumable release artifacts
         run: |
           release_root="$RUNNER_TEMP/photo-wall-release"
-          flash_image=$(python3 -c '
-          import json, sys
-          print(json.load(open(sys.argv[1]))["image"])
-          ' "$release_root/flash/ci-flash-image.json")
+          player_deb=$(python3 -c '
+          import glob, sys
+          matches = glob.glob(sys.argv[1] + "/*.deb")
+          assert len(matches) == 1, matches
+          print(matches[0])
+          ' "$release_root/deb")
           python3 -m scripts.package_release_artifacts \
-            --output "$release_root/output" \
-            --flash-image "$flash_image" \
-            --release-pub "$release_root/deployment/public/release.pub.pem" \
+            --base-image "$release_root/base" \
+            --player-deb "$player_deb" \
             --destination "$release_root/artifacts" \
             --revision "$REVISION"
 
@@ -137,39 +120,59 @@ jobs:
       - name: Generate release notes
         run: |
           release_root="$RUNNER_TEMP/photo-wall-release"
-          python3 - "$release_root/notes.md" <<'PY'
+          python3 - "$release_root/notes.md" "$release_root/artifacts" <<'PY'
+          import json
           import os
           import sys
 
           revision = os.environ["REVISION"]
           repo_blob = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['TAG']}"
+          manifest = json.load(open(os.path.join(sys.argv[2], "manifest.json")))
           notes = f"""\
-          Signed appliance release for `{revision}`, built and signed with the
-          persistent project release key (`release.pub.pem` attached below).
+          Photo Wall 0009 release assets for `{revision}`: the minimal base OS
+          image and the Player application, built for this exact commit.
 
-          ## Netboot fleet
+          **Unsigned, by design.** Per the project's home-LAN, no-threat-model
+          ruling ([0009]({repo_blob}/docs/decisions/0009-minimal-base-and-app-package.md)),
+          neither asset is signed. Every sha256 below (and in the attached
+          `SHA256SUMS`/`manifest.json`) is a **corruption check only** -- it
+          proves the download was not truncated or mangled in transit, never
+          who published it.
 
-          Unpack `photo-wall-netboot-{revision}.tar.gz`:
+          ## Base OS image (rarely changes)
 
-          - stage its `tftp/` tree beneath your TFTP root (see
-            [PXE service setup]({repo_blob}/docs/module-pxe-service.md));
-          - copy its `release/` contents into central's `PHOTO_WALL_RELEASE_ROOT`
-            and register the release with central using `release.json`/`release.sig`.
+          Unpack `{manifest['base_image']['filename']}` (sha256
+          `{manifest['base_image']['sha256']}`) and stage its contents beneath
+          your TFTP boot-server tree -- see
+          [PXE service setup]({repo_blob}/docs/module-pxe-service.md). Every
+          diskless Player netboots this image and fetches the current app at
+          boot; it carries no application code itself.
 
-          ## Flash fleet
+          ## Player application (revs independently of the base)
 
-          Decompress `photo-wall-flash-{revision}.img.xz` (verify against its
-          `.sha256` first) and write it to an SD card or USB drive -- see
-          [Provision Player appliances]({repo_blob}/README.md#provision-player-appliances).
+          Central serves the `.deb` by reference, the same way it already
+          serves release artifacts: stage the bytes, then register and
+          promote the pointer.
 
-          ## Trust anchor
+          1. Copy `{manifest['player_deb']['filename']}` to central's
+             `PHOTO_WALL_APP_ROOT` as `app-{manifest['player_deb']['sha256']}.deb`.
+          2. Register it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
 
-          Configure central with the attached `release.pub.pem` -- it must match
-          the key this release was signed with, or registration fails closed.
-          Verify every attached file against `SHA256SUMS`.
+                 curl -X POST http://<central>/v1/operator/app \\
+                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
+                   -d '{{"version": "{manifest['player_deb']['version']}", "sha256": "{manifest['player_deb']['sha256']}", "size": {manifest['player_deb']['size']}}}'
 
-          See the [setup and recovery runbook]({repo_blob}/docs/runbook.md) for the
-          full operator procedure.
+          3. Promote it as the current version:
+
+                 curl -X PUT http://<central>/v1/operator/app/current \\
+                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
+                   -d '{{"sha256": "{manifest['player_deb']['sha256']}"}}'
+
+          Every Player fetches the newly promoted `.deb` on its next reboot;
+          running Players are unaffected until then.
+
+          See the [setup and recovery runbook]({repo_blob}/docs/runbook.md) for
+          the full operator procedure.
           """
           destination = sys.argv[1]
           with open(destination, "w") as handle:
