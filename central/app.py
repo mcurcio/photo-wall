@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field, model_validator
 
+from central.app_packages import AppPackageError, AppPackages
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
@@ -37,6 +38,7 @@ from central.runtime import Program, Scene
 from contracts.enrollment import BootTicketId
 from contracts.models import (
     Calibration,
+    Digest,
     Identifier,
     Instant,
     Model,
@@ -107,6 +109,18 @@ class BootHealth(Model):
     observed_at: Instant
 
 
+class AppPackageRegistration(Model):
+    """Records a `.deb` already staged under PHOTO_WALL_APP_ROOT by sha256."""
+
+    version: str = Field(min_length=1, max_length=256)
+    sha256: Digest
+    size: int = Field(gt=0)
+
+
+class AppPackagePromotion(Model):
+    sha256: Digest
+
+
 def _configured_release_authority(db: Database, clock: Clock) -> ReleaseAuthority | None:
     names = (
         "PHOTO_WALL_RELEASE_PUBLIC_KEY",
@@ -149,6 +163,7 @@ def create_app(
     release_authority: ReleaseAuthority | None = None,
     media_queue: MediaTaskQueue | None = None,
     release_root: Path | None = None,
+    app_root: Path | None = None,
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
@@ -183,6 +198,10 @@ def create_app(
         if "PHOTO_WALL_RELEASE_ROOT" in os.environ
         else None
     )
+    app_root = app_root or (
+        Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
+    )
+    app_packages = AppPackages(db, clock)
     media_gateway = (
         MediaGateway(
             MediaStore(
@@ -292,6 +311,7 @@ def create_app(
     app.state.registry = registry
     app.state.coordinator = coordinator
     app.state.release_authority = release_authority
+    app.state.app_packages = app_packages
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
 
@@ -315,6 +335,10 @@ def create_app(
 
     @app.exception_handler(ReleaseError)
     async def release_error(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.exception_handler(AppPackageError)
+    async def app_package_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
@@ -428,6 +452,50 @@ def create_app(
                 "Cache-Control": "public, immutable",
                 "Content-Length": str(release.rootfs_size),
                 "Digest": f"sha-256={base64.b64encode(bytes.fromhex(rootfs_sha256)).decode()}",
+            },
+        )
+
+    @app.get("/v1/app/manifest")
+    def app_manifest():
+        # Player-facing, unauthenticated (trusted LAN, 0009): the bootstrapper
+        # asks this before it has any app code to enroll with.
+        return app_packages.current()
+
+    @app.get("/v1/app/package/{sha256}.deb")
+    def app_package(sha256: str):
+        # Line-for-line analogue of the rootfs route above: same O_NOFOLLOW,
+        # fstat, size-match, and bounded streaming discipline. The sha256 here
+        # is a corruption check only (0009 owner ruling) -- this route proves
+        # the bytes match what central registered, not who authored them.
+        package = app_packages.package(sha256)
+        if app_root is None:
+            raise AppPackageError("app_artifact_unavailable", 503)
+        path = app_root / f"app-{sha256}.deb"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except (FileNotFoundError, OSError):
+            raise AppPackageError("app_artifact_unavailable", 503) from None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != package["size"]:
+                raise AppPackageError("app_artifact_invalid", 503)
+        except Exception:
+            os.close(descriptor)
+            raise
+
+        def content():
+            with os.fdopen(descriptor, "rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    yield chunk
+
+        return StreamingResponse(
+            content(),
+            media_type="application/vnd.debian.binary-package",
+            headers={
+                "Cache-Control": "public, immutable",
+                "Content-Length": str(package["size"]),
+                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode()}",
             },
         )
 
@@ -575,6 +643,20 @@ def create_app(
     )
     def stage_release(device_id: str, release_id: str):
         return ReleaseStagingReceipt(staged=releases().stage(device_id, release_id))
+
+    @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
+    def register_app(request: AppPackageRegistration):
+        # Stage-by-reference, mirroring register_release above: the operator
+        # places the `.deb` bytes under PHOTO_WALL_APP_ROOT out of band, and
+        # this call records the {version, sha256, size} pointer to them. No
+        # bytes cross this request body.
+        app_packages.register(request.version, request.sha256, request.size)
+        return {"status": "registered"}
+
+    @app.put("/v1/operator/app/current", dependencies=[Depends(admin)])
+    def promote_app(request: AppPackagePromotion):
+        app_packages.promote(request.sha256)
+        return {"status": "configured"}
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
