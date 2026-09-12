@@ -202,7 +202,13 @@ correction are recorded in [media evidence](evidence/2026-09-06-vm-media.md).
 
 ## Shared service and test dependencies
 
-Only `appliance.yml` constructs the Pi OS and signed appliance. The
+Only `appliance.yml` constructs the Pi OS and signed appliance --
+[`release.yml`](../.github/workflows/release.yml) does not duplicate that
+machinery; it calls `appliance.yml` as a reusable workflow (its
+`workflow_call` trigger and dedicated `release-artifacts` job) to reassemble
+and sign an already-qualified revision with the persistent project key, then
+packages that job's uploaded build output (via `scripts/package_release_artifacts.py`)
+into a GitHub Release. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
 `software-e2e.yml`, and the appliance's manual `full` scope. The smoke scope
