@@ -91,6 +91,27 @@ Slices (tracer-first):
 1. Generate the release Ed25519 keypair; commit `release.pub.pem` (trust anchor); add the private key as the GitHub Actions secret the release workflow references. I build the plumbing around a named secret and never handle the private key.
 2. Real Raspberry Pi 5 PXE boot qualification (DHCP next-server/filename, TFTP, EEPROM netboot) — CI cannot exercise the PXE transport; it only boots RAM-root under QEMU.
 
+## Phase 3 — 0009 re-architecture (minimal base OS + app-as-.deb-from-central; accepted 2026-09-12)
+Owner ruling: home LAN, no threat model, UX over security. Supersedes 0008's D1 signed-RAM-root
+tier. Keeps serial identity, mDNS, pending/bind/unbind. Retires the release-authority/boot-ticket
+machinery and the bespoke signing. **Supersedes** the earlier Phase-2 slices `p2-signing-key`
+(`6bf2fe7`) and the signed-rootfs publish in `p2-release-workflow` (`59616d1`) — reworked/retired
+by slices 3 & 6 below. The five-field Release re-freeze (`c32ad7a`) is largely subsumed by slice 3.
+
+Slices (tracer-first; design: [0009](0009-minimal-base-and-app-package.md)):
+| Slice | Package(s) | Delivers | Risk | CI? | Status |
+|---|---|---|---|---|---|
+| **T (tracer)** p3-enroll-rekey | player+central | diskless ticketless enroll re-keyed off "no boot ticket present"; registry.py:92 guard move | HIGH (fleet-brick) | yes | closed `8f35e5c` (verified+reviewed) |
+| 1 p3-central-app-service | central | app manifest + package endpoints + current-app pointer | med | yes | open |
+| 2 p3-base-bootstrapper | appliance | discover→fetch→verify sha256→unpack→run→origin handoff | HIGH boot-critical | mocked | open |
+| 3 p3-retire-authority | central+contracts+appliance | delete release-authority/boot-ticket/rootfs routes/trial | HIGH | yes | open |
+| 4 p3-deb-build | scripts | player .deb (prebuilt venv) | med | yes | open |
+| 5 p3-base-image | appliance | minimal generic base OS image | med-high | build only; real Pi = owner | open |
+| 6 p3-release-workflow-rework | workflows | publish base image + .deb; retire signed-rootfs publish | med | yes | open |
+| 7 p3-docs | docs | README/runbook/module docs to the new model | low | link-check | open |
+
+Owner hardware hand-off: real Pi 5 netboot of the base image (slice 5) + full tracer on hardware.
+
 ## Residuals (follow-up, not blocking)
 - **Single source of truth for bootstrap's contracts/appliance module set** — currently duplicated across 4 sites (wheelhouse `ROOTS`, dist-packages copy, initramfs hook, `verify_initramfs`). Collapsing this kills the failure class that caused three CI cycles here.
 - Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
