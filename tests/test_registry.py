@@ -21,6 +21,7 @@ from central.registry import (
     RegistryError,
     enrollment_message,
 )
+from central.releases import ReleaseError
 from contracts.models import Calibration, FrameProfile
 from contracts.release import BootRequest
 
@@ -122,6 +123,61 @@ def test_d0_retired_serial_is_refused_reenrollment(registry):
     registry.retire(identity["player_id"])
     with pytest.raises(RegistryError, match="retired"):
         enroll_d0(registry, device_id=request.device_id)
+
+
+def test_ticketless_enroll_succeeds_with_no_release_authority_configured(registry):
+    """0009 migration edit A: the enroll<->release-authority guard
+    (central/registry.py) now lives INSIDE the `ticket_id is not None`
+    (ticketed) branch, not ahead of it -- a ticketless enroll (the diskless
+    base's fleet-brick path) must succeed even when central has no release
+    authority configured at all, never dereferencing `self.release_authority`."""
+    unauthorized = Registry(Database(registry.db.dsn), registry.clock)
+    identity, _, request = enroll_d0(unauthorized)
+    assert request.ticket_id is None
+    assert identity["token"] and identity["player_id"] and identity["authority_epoch"] == 1
+    by_id = {p.id: p for p in unauthorized.inventory().players}
+    assert by_id[identity["player_id"]].device_id == request.device_id
+    assert by_id[identity["player_id"]].is_bound is False
+    assert by_id[identity["player_id"]].retired_at is None
+
+
+def test_ticketed_enroll_with_no_release_authority_configured_returns_503(registry):
+    """The moved guard still protects the TICKETED path: a real ticket has
+    no authority to bind its release session against, so it must still 503,
+    exactly as an unmoved guard would have -- only ticketless enroll is
+    exempted."""
+    unauthorized = Registry(Database(registry.db.dsn), registry.clock)
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw().hex()
+    device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    boot_id, ticket_id, outputs = str(uuid.uuid4()), "a" * 48, ()
+    nonce = unauthorized.challenge(public)["nonce"]
+    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
+                         device_id=device_id, boot_id=boot_id, ticket_id=ticket_id,
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, device_id, boot_id, ticket_id))).decode())
+    with pytest.raises(RegistryError, match="release_authority_unavailable") as excinfo:
+        unauthorized.enroll(request)
+    assert excinfo.value.status == 503
+
+
+def test_ticketed_enroll_with_no_appliance_devices_row_still_404s(registry):
+    """Regression (unchanged by the guard move): a real ticket that never
+    went through `select_boot` has no `appliance_devices` row to bind
+    against, and still surfaces as `device_not_found` when a release
+    authority IS configured."""
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw().hex()
+    device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    boot_id, ticket_id, outputs = str(uuid.uuid4()), "b" * 48, ()
+    nonce = registry.challenge(public)["nonce"]
+    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
+                         device_id=device_id, boot_id=boot_id, ticket_id=ticket_id,
+                         signature=base64.b64encode(key.sign(enrollment_message(
+                             nonce, outputs, device_id, boot_id, ticket_id))).decode())
+    with pytest.raises(ReleaseError, match="device_not_found") as excinfo:
+        registry.enroll(request)
+    assert excinfo.value.status == 404
 
 
 def test_d0_enroll_never_touches_appliance_devices(registry):

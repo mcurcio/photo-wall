@@ -75,11 +75,12 @@ def boot_context() -> BootContext:
 
 
 def d0_boot_context() -> BootContext:
-    """m3-central-d0-enroll: flashed/ticketless (persistence="persistent").
-    ticket_id/release_id are the schema-valid placeholders `hardware_boot_context`
-    synthesizes (player/service.py); enroll() must derive the D0 signal from
-    `persistence`, never send the placeholder ticket_id as a real one."""
-    return boot_context().model_copy(update={"persistence": "persistent"})
+    """m3-central-d0-enroll / 0009 re-key: flashed/ticketless
+    (persistence="persistent", ticket_id=None). `hardware_boot_context`
+    (player/service.py) has no netboot-ticket source and honestly reports
+    `ticket_id=None`; enroll() derives the ticketless signal from the
+    presence of a ticket, not from `persistence`."""
+    return boot_context().model_copy(update={"persistence": "persistent", "ticket_id": None})
 
 
 def test_importing_service_never_pulls_in_zeroconf():
@@ -324,9 +325,11 @@ def test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted(tmp_p
 
 
 def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
-    """The player derives the D0 signal from `boot_context.persistence`, not
-    a config toggle, and never leaks the synthesized placeholder ticket_id
-    (player/service.py hardware_boot_context) to central as if it were real."""
+    """The player derives the ticketless signal from `boot_context.ticket_id
+    is None`, not `persistence` -- `hardware_boot_context` (player/service.py)
+    now honestly reports `ticket_id=None` rather than a synthesized
+    placeholder, and enroll() never has to translate `persistence` into a
+    ticketless flag."""
     async def check():
         directory = tmp_path / "cache"
         directory.mkdir(mode=0o700)
@@ -348,8 +351,8 @@ def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
 
 
 def test_volatile_boot_context_enrolls_with_its_real_ticket_id_unchanged(tmp_path):
-    """Netboot (persistence="volatile") is byte-unchanged: the real ticket_id
-    still reaches central, exactly as before this bead."""
+    """Netboot (persistence="volatile", a real ticket_id) is byte-unchanged:
+    the real ticket_id still reaches central, exactly as before this bead."""
     async def check():
         service, server = await rig(tmp_path)
         try:
@@ -359,17 +362,48 @@ def test_volatile_boot_context_enrolls_with_its_real_ticket_id_unchanged(tmp_pat
     asyncio.run(check())
 
 
+def test_volatile_persistence_with_no_ticket_still_enrolls_ticketless(tmp_path):
+    """0009 re-key proof: `persistence` no longer gates enroll at all. A
+    boot context that is `persistence="volatile"` (the netboot label) but
+    carries `ticket_id=None` (0009's diskless bootstrapper issues no ticket)
+    must still enroll ticketless and start `release_accepted=True` -- keying
+    on `persistence` instead of the ticket would send this boot context's
+    real-looking `persistence="volatile"` down the ticketed branch and 404."""
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+        diskless = boot_context().model_copy(update={"ticket_id": None})
+        assert diskless.persistence == "volatile"
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=False,
+            health_path=None, boot_context=diskless)
+        try:
+            await service.enroll()
+            assert server.proofs[-1].ticket_id is None
+            assert service.release_accepted is True
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
 def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_loop(
         tmp_path, monkeypatch):
     """m3-central-d0-enroll FIX: a D0/flashed player has no central-issued boot
-    ticket to report against -- boot-health would 403 `stale_boot_ticket` on the
-    synthesized placeholder ticket_id central never recorded (hardware_boot_context),
-    and the uncaught error tears down every sibling task via run()'s
-    FIRST_COMPLETED wait, restarting forever (never rendering/downloading/opening
-    a websocket). Drive the actual control loop through run() and assert the
-    session SURVIVES: the boot-health endpoint is never called, the websocket
-    loop connects exactly once (never torn down and reconnected by a crash
-    restart), and the media loop reaches and completes a real download."""
+    ticket to report against -- `boot_context.ticket_id is None`
+    (hardware_boot_context) means `_control_loop` must never call
+    `_report_boot_health` for it at all (0009 re-key); calling it anyway
+    would 403 `stale_boot_ticket` and, uncaught, tear down every sibling task
+    via run()'s FIRST_COMPLETED wait, restarting forever (never
+    rendering/downloading/opening a websocket). Drive the actual control loop
+    through run() and assert the session SURVIVES: the boot-health endpoint
+    is never called, the websocket loop connects exactly once (never torn
+    down and reconnected by a crash restart), and the media loop reaches and
+    completes a real download."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
 
     async def check():
