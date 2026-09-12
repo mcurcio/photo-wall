@@ -207,11 +207,17 @@ jobs:
           # overlay file), AND is actually enabled (a `.wants` symlink the
           # `.deb` bakes as data, pointing back at the vendor path), not
           # just installed inert.
-          require_path - lib/systemd/system/photo-wall-provision.service 'the photo-wall-provision.service unit'
+          # On merged-/usr Debian, /lib is a symlink to /usr/lib, so the
+          # packaged unit is listed under usr/lib/systemd/system; accept either.
+          if grep -Eq -- '^- squashfs-root/(usr/)?lib/systemd/system/photo-wall-provision.service$' "$typed"; then
+            echo "OK: found the photo-wall-provision.service unit ((usr/)lib/systemd/system)"
+          else
+            violation "missing required the photo-wall-provision.service unit at (usr/)lib/systemd/system/photo-wall-provision.service"
+          fi
           require_path l etc/systemd/system/multi-user.target.wants/photo-wall-provision.service 'photo-wall-provision.service enablement symlink'
           if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service' "$typed"; then
             target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service ->' "$listing" | awk '{print $NF}')
-            if [ "$target" = "/lib/systemd/system/photo-wall-provision.service" ]; then
+            if [ "$target" = "/lib/systemd/system/photo-wall-provision.service" ] || [ "$target" = "/usr/lib/systemd/system/photo-wall-provision.service" ]; then
               echo "OK: enablement symlink points at the vendor unit path"
             else
               violation "enablement symlink points at unexpected target: $target"
