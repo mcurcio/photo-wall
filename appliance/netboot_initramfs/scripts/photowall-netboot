@@ -1,0 +1,28 @@
+#!/bin/sh
+# initramfs-tools sources the boot=photowall-netboot script and calls mountroot.
+# Installed as /etc/initramfs-tools/scripts/photowall-netboot in the scratch
+# builder root (0008 p4-boot-chain s2a).
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+
+mount_top() { :; }
+mount_premount() { :; }
+mount_bottom() { :; }
+mountroot()
+{
+    # Noble panic() honors this value and reboots without opening a shell.
+    # Keep it explicit here as well as in the common kernel command line.
+    panic=10
+    # No configure_networking here: appliance.netboot_init brings up networking
+    # itself (NetbootOps.configure_networking sources /scripts/functions and
+    # runs configure_networking) before it fetches the base squashfs. Calling it
+    # here too would only duplicate that step.
+    if ! /usr/bin/python3 -I -m appliance.netboot_init --rootmnt "$rootmnt"; then
+        echo "photo-wall: netboot_failed" >&2
+        sleep 5
+        reboot -f
+        # Fail closed if reboot is unavailable; never enter an interactive shell.
+        while :; do sleep 60; done
+    fi
+}
