@@ -733,6 +733,41 @@ by serial — no operator action.
 
 ---
 
+## Phase 4 boot-chain + retirement plan
+
+Phases 1–3 have landed on this branch: the app-package service
+([central/app_packages.py](../../central/app_packages.py), routes
+[central/app.py:458-500](../../central/app.py), migration
+[014_app_package.sql](../../central/migrations/014_app_package.sql)), the
+bootstrapper ([appliance/provision.py](../../appliance/provision.py)), the two
+enroll fixes (Edit A guard-move [central/registry.py:139-144](../../central/registry.py);
+Edit B ticket-keyed gates [player/service.py:493,513](../../player/service.py),
+`hardware_boot_context` [:227-261](../../player/service.py) returns
+`ticket_id=None`), and the `.deb` builders
+([scripts/build_player_deb.py](../../scripts/build_player_deb.py),
+[scripts/build_bootstrapper_deb.py](../../scripts/build_bootstrapper_deb.py)),
+plus the rpi-image-gen base squashfs
+([appliance/rpi_image_gen/](../../appliance/rpi_image_gen/),
+[.github/workflows/base-image.yml](../../.github/workflows/base-image.yml)).
+
+**Consequence for retirement:** the diskless base now enrolls ticketless *by
+construction* — it writes no ticketed boot context, so the app falls to
+`hardware_boot_context` (`ticket_id=None`, `release_accepted=True`). The
+enroll↔authority coupling is already severed at
+[registry.py:139-141](../../central/registry.py); retiring `ReleaseAuthority`
+therefore cannot break enrollment. The guard move is *sufficient*.
+
+**What rpi-image-gen does and does not emit.** It emits ONLY
+`photo-wall-base.squashfs` (the rootfs). The device layer is deliberately
+metadata-only ([device/photo-wall-device-none.yaml](../../appliance/rpi_image_gen/device/photo-wall-device-none.yaml))
+so no kernel, initramfs, or boot firmware is produced. Kernel + slim initramfs
++ TFTP staging are net-new Phase-4 work, reusing the RAM-overlay mount
+([appliance/bootstrap.py:366-399](../../appliance/bootstrap.py) `mount_root`)
+with the ticket/signature/trial layer removed.
+
+The boot chain, e2e migration, retirement list/order/risks, and slice
+breakdown are held in the workstream plan (this section is the durable index).
+
 ## Sources
 
 - [Raspberry Pi network boot (Pi 5) — documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#network-booting)
