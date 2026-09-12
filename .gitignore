@@ -206,12 +206,6 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
-# rpi-image-gen spike (0009 Phase 4): the bootstrapper module closure is
-# staged into this overlay from the real repo sources at build time
-# (appliance/rpi_image_gen/stage_overlay.sh) and must never be committed --
-# see appliance/rpi_image_gen/layer/photo-wall-bootstrapper.yaml.
-appliance/rpi_image_gen/layer/photo-wall-bootstrapper.rootfs-overlay/
-
 # Runtime state and appliance artifacts stay outside source control.
 artifacts/
 *.img

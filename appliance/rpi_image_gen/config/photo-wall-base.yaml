@@ -6,19 +6,28 @@
 #
 # Produces ONLY the "Base OS bundle" rootfs described in
 # docs/decisions/0009-minimal-base-and-app-package.md: a Debian trixie arm64
-# minbase, systemd, the bootstrapper's one third-party runtime dependency
-# (python3-zeroconf / python3-ifaddr), ca-certificates, the bootstrapper's
-# own minimal Python module closure, and its systemd unit -- nothing else.
-# No Player app, no GTK/GStreamer/weston/Mesa: 0009 rule #1 is "the base OS
-# carries no application and no origin." Kernel/initramfs/PXE-TFTP staging
-# are the existing, separate appliance/initramfs + appliance/provisioning
-# concern and are out of scope for this config -- this emits the rootfs
-# squashfs artifact only (see image/photo-wall-squashfs.yaml).
+# minbase, systemd, ca-certificates, and the photo-wall-bootstrapper `.deb`
+# (scripts/build_bootstrapper_deb.py) -- which itself carries the
+# bootstrapper's own minimal Python module closure, its systemd unit, and
+# its one third-party runtime dependency (python3-zeroconf / python3-ifaddr,
+# via the `.deb`'s own Depends, resolved by apt at install time) -- nothing
+# else. No Player app, no GTK/GStreamer/weston/Mesa: 0009 rule #1 is "the
+# base OS carries no application and no origin." Kernel/initramfs/PXE-TFTP
+# staging are the existing, separate appliance/initramfs +
+# appliance/provisioning concern and are out of scope for this config --
+# this emits the rootfs squashfs artifact only (see
+# image/photo-wall-squashfs.yaml).
+#
+# Every bit of Photo Wall's own code ships to this build as a `.deb` -- this
+# rpi-image-gen tree owns none of it, only the install step (the owner
+# directive behind this rework: portable code must migrate cleanly across
+# build tool chains, never be baked in as a tool-coupled raw-file overlay).
 #
 # Build (see .github/workflows/base-image.yml for the full recipe, including
-# staging the bootstrapper module closure into layer/photo-wall-bootstrapper
-# .rootfs-overlay/ before invoking this):
-#   rpi-image-gen build -S appliance/rpi_image_gen -c photo-wall-base.yaml
+# building scripts/build_bootstrapper_deb.py's `.deb` and passing its host
+# path as `IGconf_app_bootstrapper_deb` before invoking this):
+#   rpi-image-gen build -S appliance/rpi_image_gen -c photo-wall-base.yaml \
+#     -- IGconf_app_bootstrapper_deb=/path/to/photo-wall-bootstrapper_<version>_all.deb
 #
 # Reproducibility: the Debian arm64 base is pulled from a pinned
 # snapshot.debian.org mirror keyed off SOURCE_DATE_EPOCH (set by the CI job),
@@ -44,13 +53,15 @@ layer:
   # installs none of those packages -- it only enables apt to pull them later.
   base: debian-trixie-arm64-minbase-rolling
   # systemd + systemd-sysv as PID 1 and `systemctl` -- required both to boot
-  # this rootfs at all and for photo-wall-bootstrapper's enable-units hook
-  # and photo-wall-provision.service (Type=oneshot, WantedBy=multi-user.target).
+  # this rootfs at all and to run photo-wall-provision.service
+  # (Type=oneshot, WantedBy=multi-user.target, already enabled by a symlink
+  # the bootstrapper `.deb` bakes as data -- no enable-units hook needed).
   init: systemd-min
-  # Our own layer: appliance.provision + its one runtime dependency
-  # (python3-zeroconf/-ifaddr) + ca-certificates (via this layer's own
-  # X-Env-Layer-Requires) + the bootstrapper's module-closure rootfs overlay
-  # + enabling photo-wall-provision.service. See layer/photo-wall-bootstrapper.yaml.
+  # Our own layer: apt-get installs the prebuilt photo-wall-bootstrapper
+  # `.deb` (appliance.provision + player.mdns_discovery/discovery, its unit,
+  # and its own python3-zeroconf/python3-ifaddr Depends) + ca-certificates
+  # (via this layer's own X-Env-Layer-Requires). See
+  # layer/photo-wall-bootstrapper.yaml.
   app: photo-wall-bootstrapper
 
 image:

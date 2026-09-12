@@ -19,7 +19,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # needs broad filesystem and service-manager access, so this unit is
 # deliberately unsandboxed (0009 owner ruling: home LAN, no threat model;
 # see docs/decisions/0009-minimal-base-and-app-package.md).
-ExecStart=/usr/bin/python3.12 -I -m appliance.provision
+ExecStart=/usr/bin/python3 -I -m appliance.provision
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=infinity
