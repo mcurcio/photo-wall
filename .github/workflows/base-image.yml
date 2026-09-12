@@ -141,13 +141,17 @@ jobs:
             sudo apt-get install -y --no-install-recommends squashfs-tools
           }
 
-          squashfs_count=$(find "$WORKROOT" -type f -name 'photo-wall-base.squashfs' | wc -l)
-          if [ "$squashfs_count" -ne 1 ]; then
-            echo "VIOLATION: expected exactly one photo-wall-base.squashfs under $WORKROOT, found $squashfs_count:" >&2
-            find "$WORKROOT" -type f -name 'photo-wall-base.squashfs' >&2 || true
+          # Address the squashfs directly at its deterministic output path
+          # (image-base's IGconf_image_outputdir = $WORKROOT/image-<name>);
+          # do NOT `find` over $WORKROOT, which contains the root-owned chroot
+          # (mode-700 apt dirs) and would make find exit non-zero on
+          # "Permission denied", killing this step under set -e.
+          squashfs="$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs"
+          if [ ! -f "$squashfs" ]; then
+            echo "VIOLATION: expected base squashfs at $squashfs" >&2
+            ls -la "$WORKROOT/image-photo-wall-base" >&2 || true
             exit 1
           fi
-          squashfs=$(find "$WORKROOT" -type f -name 'photo-wall-base.squashfs')
           echo "Inspecting $squashfs"
 
           listing="$RUNNER_TEMP/photo-wall-base.listing"
