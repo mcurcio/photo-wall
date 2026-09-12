@@ -52,13 +52,11 @@ import signal
 import sys
 import threading
 import time
-import urllib.request
 import uuid
 from concurrent.futures import Future
 from pathlib import Path
 
 from contracts.enrollment import OutputReport
-from contracts.release import BootRequest
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
 from player.service import BootContext, PlayerConfig, PlayerService
@@ -157,17 +155,17 @@ renderer, dispatcher = Recorder(), Dispatch()
 config = PlayerConfig(central_origin='http://central:8000', allow_http=True,
                       cache_dir='/tmp/cache', cache_bytes=32*1024**2)
 device_id = os.environ['PHOTO_WALL_DEMO_DEVICE_ID']
-boot_request = BootRequest(device_id, str(uuid.uuid4()), secrets.token_hex(24))
-request = urllib.request.Request('http://central:8000/v1/bootstrap/boot',
-    data=json.dumps(boot_request.__dict__, separators=(',', ':')).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
-with urllib.request.urlopen(request, timeout=15) as response:
-    assert response.status == 200
-    ticket = json.load(response)
+# 0009 diskless/netboot: no boot ticket is issued -- the base bootstrapper
+# fetches the app .deb and hands off only the origin, never a ticket. A
+# ticketless boot context (ticket_id=None) is the signal the app and central
+# key ticketless enroll on: enroll() sends ticket_id=None (no appliance_devices
+# row to bind), release_accepted flips True immediately, and _control_loop
+# never POSTs the retired /v1/player/boot-health route. This is the runtime
+# contract p4 s3 proves; the old /v1/bootstrap/boot ticket path is gone here.
 boot_context = BootContext.model_validate({
-    'schema': 2, 'ticket_id': ticket['ticket_id'], 'device_id': device_id,
-    'boot_id': boot_request.boot_id, 'release_id': ticket['release_id'],
-    'trial': ticket['trial'], 'persistence': 'volatile', 'fault': None,
+    'schema': 2, 'ticket_id': None, 'device_id': device_id,
+    'boot_id': str(uuid.uuid4()), 'release_id': secrets.token_hex(32),
+    'trial': False, 'persistence': 'volatile', 'fault': None,
 })
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
                          health_path=None, boot_context=boot_context)
