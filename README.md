@@ -23,6 +23,19 @@ New here? Start with the control plane below. Come back for [Provision Player ap
 
 > **Project maturity:** this is an MVP in active development. The control plane and its full media demo work today. The flash-and-go baseline (mDNS discovery, serial enrollment, pending queue, bind/unbind) is implemented and tested in software, but **building the flash `.img` and booting it on physical Pi 5 hardware are not yet qualified** — see [Status and caveats](#status-and-caveats) before you depend on the Player half.
 
+### The flash-and-go flow, end to end
+
+Bringing a display online is four steps and **no per-device setup**:
+
+1. **Run central** on any Docker host — the operator UI, scheduler, and media pipeline ([below](#run-the-control-plane-locally)).
+2. **Flash the generic image** to an SD card or USB drive, put it in a Pi 5, and power it on the same LAN.
+3. **The Pi appears on its own,** unbound, in the operator UI — it read its hardware serial, found central over mDNS, and enrolled over the LAN. No PXE, no per-device install, no baked-in secret.
+4. **Bind it to a Frame** and calibrate; it starts rendering. A reboot re-associates by serial automatically, and **unbind** frees a Frame later without retiring the hardware.
+
+That is the whole baseline. Deployments that need more can climb three independent, opt-in ladders — netboot instead of flashing, cryptographic per-device identity, and authenticated transport — none required to get started. See [Provision Player appliances](#provision-player-appliances) and [decision 0008](docs/decisions/0008-generic-image-and-serial-identity.md).
+
+The one caveat today: there is no published image to download yet, so you build the generic `.img` once on a Linux arm64 host — a few commands, [covered below](#build-and-flash-the-baseline-image).
+
 ### Run the control plane locally
 
 **You need:** Git, Docker Engine or Desktop with Compose, and Python 3.12 (for the config script and development tests). No paid runtime service is required.
