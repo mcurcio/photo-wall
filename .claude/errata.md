@@ -48,3 +48,33 @@ Append-only. Read with `grep -a`.
   before m3-flash-image.
 - The player bead (serial->device_id derivation) is correct in isolation (risks A/B passed);
   its docstring claim that "central records but does not verify" is FALSE and was corrected.
+
+## p2-release-workflow (signed GitHub Release, netboot + flash artifacts)
+
+- **The spec's literal steps 1-3 ("reuse the existing base/builder/os-base preparation
+  approach from appliance.yml ... duplicate minimally") contradict an existing, tested
+  architectural invariant.** `tests/test_service_workflows.py::test_only_appliance_workflow_assembles_pi_os_and_smoke_skips_media`
+  asserts that no workflow file OTHER than `appliance.yml` contains the literal strings
+  `scripts.os_base`, `scripts.build_ci_image`, or `scripts.ci_images builder` — i.e. "only
+  appliance.yml constructs the Pi OS and signed appliance" (`docs/module-appliance-ci.md`)
+  is enforced by a grep-style test, not just documented. A first draft of `release.yml` that
+  called those scripts directly (as the spec's context bullets literally describe) fails that
+  test. Resolved by FACTORING rather than duplicating: added a `workflow_call` trigger and a
+  new `release-artifacts` job to `appliance.yml` itself (the one file the invariant permits)
+  that reassembles/signs with the persistent key and builds the flash image, gated
+  `if: github.event_name == 'workflow_call'` so none of appliance.yml's existing
+  push/pull_request/workflow_dispatch jobs change behavior. `release.yml` calls it via
+  `uses: ./.github/workflows/appliance.yml`, downloads its uploaded build-output artifact,
+  and only does tag validation, the fail-closed signing-secret check, packaging, and
+  `gh release create` — none of which touch the forbidden substrings. This is the
+  convention-consistent reading of "you may factor shared setup," made mandatory rather
+  than optional by the existing test.
+- **`scripts/build_ci_flash_image.py` has no prepared-OS-base input mode** (unlike
+  `scripts/build_ci_image.py`'s `--os-base`/`--player-package`/`--os-base-builder-image`
+  triple) — every flash-image build cold-fetches and re-installs the Ubuntu base root from
+  scratch, duplicating work `build_ci_image.py` just did with a published, cached OS base.
+  Out of scope here (its own docstring forbids modifying `build_ci_image.py` or anything it
+  calls, and adding a symmetrical prepared-input mode is a real design change to that
+  script, not a workflow change) — flagged as a follow-up bead: teach
+  `build_ci_flash_image.py` to accept the same prepared `--os-base`/`--player-package`
+  inputs so a release run doesn't pay for two independent OS-base assemblies.

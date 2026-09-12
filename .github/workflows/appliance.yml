@@ -19,6 +19,24 @@ on:
         options:
           - smoke
           - full
+  # Reused by release.yml only, to reassemble and sign an already-qualified
+  # definition/revision with the persistent project key. This never runs the
+  # push/pull_request/workflow_dispatch jobs below (each excludes this event
+  # explicitly) -- only the dedicated release-artifacts job does.
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact 40-character commit to build and sign for release
+        required: true
+        type: string
+    secrets:
+      release_signing_key:
+        description: Persistent Ed25519 release signing key PEM that signs the release
+        required: true
+    outputs:
+      artifact_name:
+        description: Name of the uploaded release build output artifact
+        value: ${{ jobs.release-artifacts.outputs.artifact_name }}
 
 permissions:
   contents: read
@@ -77,7 +95,9 @@ jobs:
       prepare_base: ${{ inputs.prepare_base }}
 
   build-and-boot:
-    if: always() && (needs.select-definition.result != 'success' || needs.select-definition.outputs.qualify == 'true')
+    if: >-
+      always() && github.event_name != 'workflow_call' &&
+      (needs.select-definition.result != 'success' || needs.select-definition.outputs.qualify == 'true')
     needs: [select-definition, service-base]
     permissions:
       contents: read
@@ -358,7 +378,7 @@ jobs:
           retention-days: 7
 
   appliance-required:
-    if: always()
+    if: always() && github.event_name != 'workflow_call'
     needs: [select-definition, build-and-boot]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 2
@@ -371,3 +391,148 @@ jobs:
         run: |
           test "$SELECTION" = success
           if [[ "$REQUIRED" != "false" ]]; then test "$QUALIFICATION" = success; fi
+
+  # Only this job runs for a workflow_call from release.yml. It reuses the
+  # same select-definition identities and the same pinned-builder/prepared-OS-base
+  # assembly path as build-and-boot above, but signs with the persistent
+  # project key instead of a disposable per-build one, adds the generic flash
+  # image, and skips the VM e2e boot gate -- release.yml only calls this for
+  # a revision that already passed that gate on a prior push/PR run of this
+  # same workflow. No --allow-build/--publish anywhere below: a missing
+  # builder or OS base artifact means this revision's definition was never
+  # qualified, and the release fails closed instead of cold-building an
+  # unqualified candidate for publication.
+  release-artifacts:
+    if: github.event_name == 'workflow_call'
+    needs: select-definition
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      artifact_name: photo-wall-release-${{ inputs.revision }}
+    env:
+      BUILDER_KEY: ${{ needs.select-definition.outputs.builder_key }}
+      BASE_KEY: ${{ needs.select-definition.outputs.base_key }}
+    steps:
+      - name: Require a valid image definition selection
+        run: test "${{ needs.select-definition.result }}" = success
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - name: Check the Player service sandbox before image assembly
+        timeout-minutes: 3
+        run: sudo python3 scripts/check_player_unit.py
+
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull the exact qualified builder for this revision's definition
+        id: builder
+        run: |
+          python3 -m scripts.ci_images builder \
+            --namespace "${GITHUB_REPOSITORY,,}" --key "$BUILDER_KEY"
+
+      - name: Pull the matching qualified OS base for this revision's definition
+        id: os-base
+        env:
+          BUILDER_IMAGE: ${{ steps.builder.outputs.image }}
+          BUILDER_CONFIG: ${{ steps.builder.outputs.imageid }}
+        run: |
+          python3 -m scripts.ci_images base \
+            --namespace "${GITHUB_REPOSITORY,,}" --key "$BASE_KEY" \
+            --output "$RUNNER_TEMP/photo-wall-os-base" \
+            --builder-image "$BUILDER_IMAGE" --builder-config "$BUILDER_CONFIG"
+
+      - name: Build the Player package from the tagged revision
+        env:
+          BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+        run: |
+          docker run --rm --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            "$BUILDER_IMAGE" python3.12 -m scripts.build_player \
+              --repository "$GITHUB_WORKSPACE" --revision "${{ inputs.revision }}" \
+              --output "$RUNNER_TEMP/photo-wall-player-package"
+
+      # Signed with the persistent project key, passed through to the pinned
+      # builder container by name only -- its value never appears in this
+      # command's logged text, only in the inherited container environment.
+      - name: Assemble the signed netboot appliance image and PXE bundle
+        id: assemble
+        env:
+          PHOTO_WALL_RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
+          BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+          OS_BASE_IMAGE: ${{ steps.os-base.outputs.image }}
+          OS_BASE_BUILDER_IMAGE: ${{ steps.builder.outputs.image }}
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          install -d -m 0700 "$release_root"
+          docker run --rm --platform linux/arm64 --network none \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env GITHUB_ACTIONS=true \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            --env PHOTO_WALL_RELEASE_SIGNING_KEY \
+            "$BUILDER_IMAGE" \
+            python3.12 -m scripts.build_ci_image \
+              --repository "$GITHUB_WORKSPACE" \
+              --revision "${{ inputs.revision }}" \
+              --output-dir "$release_root/output" \
+              --deployment-dir "$release_root/deployment" \
+              --os-base "$RUNNER_TEMP/photo-wall-os-base" \
+              --player-package "$RUNNER_TEMP/photo-wall-player-package" \
+              --os-base-builder-image "$OS_BASE_BUILDER_IMAGE" \
+              --os-base-image "$OS_BASE_IMAGE" \
+              --builder-image "$BUILDER_IMAGE"
+          sudo chown -R "$(id -u):$(id -g)" "$release_root/output" "$release_root/deployment"
+
+      # build_ci_flash_image.py has no prepared-OS-base input mode (unlike
+      # build_ci_image.py above) -- it always cold-builds its own root from
+      # the Ubuntu base image, so this container keeps network access rather
+      # than reusing --network none. Signed against the same release.pub.pem
+      # the assemble step above just derived from the persistent key.
+      - name: Build the generic flash image
+        env:
+          BUILDER_IMAGE: ${{ steps.builder.outputs.imageid }}
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          docker run --rm --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            "$BUILDER_IMAGE" python3.12 -m scripts.build_ci_flash_image \
+              --repository "$GITHUB_WORKSPACE" --revision "${{ inputs.revision }}" \
+              --release-pub "$release_root/deployment/public/release.pub.pem" \
+              --output-dir "$release_root/flash"
+          sudo chown -R "$(id -u):$(id -g)" "$release_root/flash"
+
+      - name: Upload the release build output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-release-${{ inputs.revision }}
+          path: |
+            ${{ runner.temp }}/photo-wall-release/output
+            ${{ runner.temp }}/photo-wall-release/flash
+            ${{ runner.temp }}/photo-wall-release/deployment/public/release.pub.pem
+          if-no-files-found: error
+          retention-days: 7
