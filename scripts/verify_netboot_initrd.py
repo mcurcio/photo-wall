@@ -14,7 +14,14 @@ Contract (0008 p4-boot-chain s2a "Init closure"):
 
 POSITIVE -- every one of these must be present:
   * a python3 interpreter (version-agnostic: ``usr/bin/python3*``),
-  * the ``_ssl`` / ``_hashlib`` / ``_socket`` lib-dynload extension modules,
+  * the ``_ssl`` / ``_hashlib`` lib-dynload extension modules (they link
+    external libs, so Debian ships them as shared ``.so`` files),
+  * the ``socket`` stdlib module (``socket.py``): on Debian the ``_socket``
+    C extension is BUILT INTO ``libpython3.x.so`` (which ``copy_exec python3``
+    stages) rather than a standalone ``lib-dynload/_socket*.so`` -- so the
+    honest file-level proxy for "the initrd can open TCP sockets" is the
+    presence of the stdlib tree (``socket.py``) plus ``_ssl.so`` (which itself
+    imports ``socket``), not a ``_socket.so`` that does not exist there.
   * the boot script ``scripts/photowall-netboot``,
   * initramfs-tools' ``scripts/functions`` (its configure_networking helper,
     which appliance.netboot_init sources -- load-bearing),
@@ -41,7 +48,10 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("python3 interpreter", "usr/bin/python3*"),
     ("_ssl extension module", "*lib-dynload/_ssl*.so"),
     ("_hashlib extension module", "*lib-dynload/_hashlib*.so"),
-    ("_socket extension module", "*lib-dynload/_socket*.so"),
+    # NOT "*lib-dynload/_socket*.so": _socket is a BUILT-IN module in Debian's
+    # libpython (no standalone .so). Require the stdlib socket.py instead --
+    # its presence proves the stdlib tree landed; _ssl.so covers the C layer.
+    ("socket stdlib module", "*lib/python3*/socket.py"),
     ("netboot boot script", "scripts/photowall-netboot"),
     ("initramfs-tools configure_networking helper", "scripts/functions"),
 )
