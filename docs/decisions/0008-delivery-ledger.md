@@ -79,8 +79,9 @@ Directive: build as much as possible up to the software/QEMU line; owner hardwar
 Slices (tracer-first):
 | Bead | Package(s) | Risk | Status |
 |---|---|---|---|
-| p2-d1-refreeze | contracts+appliance+central | signature/migration — reviewed | open |
-| p2-signing-key | appliance/build+workflow | security (key) | open |
+| p2-d1-refreeze | contracts+appliance+central | signature/migration — reviewed | closed `c32ad7a` |
+| p2-netboot-config-relocation | appliance/boot | boot-critical — OPEN DECISION | open (needed only for generic netboot rootfs) |
+| p2-signing-key | appliance/build+workflow | security (key) — reviewed | closed `6bf2fe7` |
 | p2-release-workflow | .github/workflows | infra | open |
 | p2-flash-in-ci | .github/workflows+appliance | infra (unverified boot) | open |
 | p2-operator-tftp | scripts+docs | medium | open |
