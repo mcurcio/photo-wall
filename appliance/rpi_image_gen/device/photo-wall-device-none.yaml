@@ -41,6 +41,51 @@
 #  login-user machinery would be pure, unwanted weight on this headless
 #  rootfs. No packages, no hooks: metadata-only, same pattern as this repo's
 #  own ../image/photo-wall-squashfs.yaml.
+#
+#  image/post-image.sh (pinned rpi-image-gen commit
+#  262d4df5a9f9d4133370465399a7958a7c22cdc7) unconditionally truncates every
+#  built image asset to a multiple of the target sector size --
+#  `truncate -s %${IGconf_device_sector_size} $f` at line 53, run for every
+#  file matching `${IGconf_image_name}*.${IGconf_image_suffix}` in the image
+#  outputdir with no provider/genimage-config gate -- so it dereferences
+#  IGconf_device_sector_size for this build's photo-wall-base.squashfs too,
+#  even though we produce no partition table. That var is normally seeded by
+#  device-base (layer/base/device-base.yaml: `X-Env-Var-sector_size: 512`,
+#  Valid: int:512-512, under `X-Env-VarPrefix: device`), which this layer
+#  deliberately does not require (see above). Declare it directly below, same
+#  schema, same default, so post-image.sh's truncate has a value without
+#  pulling in device-base's device-user-admin login-user machinery.
+#
+#  post-image.sh's other consumer of IGconf_device_* -- the Image Description
+#  Provisioning (IDP) block at lines 22-43, gated on
+#  `[ -f ${1}/genimage.cfg ]` (the *literal*, non-numbered filename) -- reads
+#  IGconf_device_sector_size too (via bin/image2json's IMAGE_KEYS/
+#  IMAGE_KEY_TYPES), but only after image2json's parse_genimage_config, which
+#  anchors on a top-level `hdimage` block and returns (None, None, None) for
+#  any genimage config without one -- exactly our bare, unpartitioned
+#  ../image/rootfs.cfg.in. That None then flows into an unguarded
+#  `attributes.get(...)` in image2json's __main__ and would crash. This build
+#  never hits that path: ../image/pre-image.sh writes the fragment as
+#  `genimage01.cfg` (matching the multi-fragment numbering
+#  examples/nested_image/image/embedded_squashfs/pre-image.sh uses for its
+#  own genimage01.cfg/genimage02.cfg, not the single-fragment
+#  examples/custom_kernel or examples/slim/compact pre-image.sh scripts,
+#  which write the exact literal genimage.cfg), so the literal
+#  `${1}/genimage.cfg` post-image.sh checks for is never present and the IDP
+#  block -- image2json included -- is skipped entirely for this build.
 # X-Env-Layer-Version: 1.0.0
 # X-Env-Layer-Provides: device
+#
+# X-Env-VarPrefix: device
+#
+# X-Env-Var-sector_size: 512
+# X-Env-Var-sector_size-Desc: Logical sector size (in bytes) assumed by
+#  image/post-image.sh's post-build truncate of the built image asset to a
+#  sector-size multiple. This build has no partitioned disk / target storage
+#  device (see layer rationale above); 512 is device-base's own default
+#  (layer/base/device-base.yaml) and the only value its schema (and this
+#  var's own Valid range below) currently allows.
+# X-Env-Var-sector_size-Required: n
+# X-Env-Var-sector_size-Valid: int:512-512
+# X-Env-Var-sector_size-Set: y
 # METAEND
