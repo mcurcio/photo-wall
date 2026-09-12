@@ -64,7 +64,15 @@ but it MUST land before the baseline PR merges (implementation-workflow §3.7).
   `equipment` to both. Same allowlist-not-updated class as the ROOTS bug. (e2e that cycle failed
   on an unrelated infra hiccup — Immich fixture container `docker_command_failed` — retrigger.)
 
+- **CI fully GREEN on `38f0c50` (2026-09-12): MVP checks, e2e, AND the ARM appliance build+QEMU boot+Player enrollment all pass.** Baseline verified end-to-end in CI (not just locally). Boot fix (`contracts.equipment` in the initramfs) confirmed; OS base restored in ~1 min after the base_key parity fix; P2 (candidate reuse) + P3 (KVM probe/TCG fallback) landed without regression.
+
+## Build-time perf (owner raised)
+- OS-base "Pull" 16 min → ~1 min: `base_key` no longer tracks `run()`'s diagnostic AST (`38f0c50`). P2 candidate-tag reuse is insurance for genuine base changes; P3 uses KVM when a runner exposes `/dev/kvm` (inert TCG fallback on hosted arm64).
+- Assemble ~8 min: investigated. Safe next win = R1 (mksquashfs `-processors` 2→nproc, ~60-120s, needs a byte-identical `rootfs_sha256` check). Owner-decision items: R2 (skip rollback candidate in smoke scope, ~157s) and R3 (overlap rollback squash with finalize VM work). Non-starters: `--*-cache` hooks (wrong code path), changing compressor/block size (alters signed bytes).
+- Framework question (Yocto/rpi-image-gen/pi-gen): recent pain was incidental (duplicated allowlists + leaky cache key), not a framework failure; a swap likely isn't faster and would re-implement the signed-release/netboot model. If pursued, scope it to the D0 flash tier only, as a deliberate design decision.
+
 ## Residuals (follow-up, not blocking)
+- **Single source of truth for bootstrap's contracts/appliance module set** — currently duplicated across 4 sites (wheelhouse `ROOTS`, dist-packages copy, initramfs hook, `verify_initramfs`). Collapsing this kills the failure class that caused three CI cycles here.
 - Health-JSON `persistence` (`player/service.py` `_write_health`) is hardcoded `"volatile"`
   even for a D0/persistent player — telemetry-only inaccuracy; docs describe actual behavior.
 
