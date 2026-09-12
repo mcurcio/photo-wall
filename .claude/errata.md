@@ -142,6 +142,40 @@ Append-only. Read with `grep -a`.
   the resolved origin's scheme is `http`, so the handoff cannot self-defeat.
   This is a necessary consequence of 0009's home-LAN ruling, not a new
   decision, but the design doc's origin-handoff section does not mention it.
+## p4-rpi-image-gen-spike (0009 Phase 4 -- rpi-image-gen base OS spike)
+
+- **The reused `photo-wall-provision.service`'s hardcoded `/usr/bin/python3.12`
+  ExecStart does not exist on a Debian trixie base, contradicting a literal
+  read of "reuse the existing unit file" against "select a Debian arm64
+  base."** The unit (`appliance/systemd/photo-wall-provision.service`) was
+  written against the **existing, Ubuntu-24.04-based**
+  `appliance/os_definition.json` path, where Ubuntu Noble co-installs
+  `python3.12` alongside its default `python3`. Debian trixie carries no
+  `python3.12` package at all -- confirmed against packages.debian.org
+  (`trixie/python3.12` returns "Package not available in this suite");
+  trixie's own default `python3` is 3.13. Reusing the unit **verbatim** (as
+  instructed) against a plain Debian trixie rootfs (as instructed) would
+  therefore make the unit fail to start with no compensation. Resolved by
+  adding a `ln -sf python3 "$1/usr/bin/python3.12"` compatibility symlink in
+  `appliance/rpi_image_gen/layer/photo-wall-bootstrapper.yaml`'s
+  customize-hooks, rather than editing the unit (out of scope) or silently
+  shipping a base that cannot boot the unit. This is a deliberate,
+  documented compensation for a genuine cross-distro mismatch between the
+  two OS bases this repo now targets (Ubuntu for the existing
+  `scripts.os_base`/`build_ci_base_image` path, Debian trixie for this
+  spike) -- not a fix to the underlying mismatch, and worth resolving for
+  real (either always installing a fixed Python minor version explicitly on
+  both bases, or making the unit's ExecStart reference `python3` generically)
+  before this spike's approach is taken past the spike stage.
+- **rpi-image-gen ships no literal `--verbose`/`--debug` CLI flag** (checked
+  the root `rpi-image-gen` wrapper and `bin/ig`'s argument parsing -- there
+  is none). The task's "make the run output verbose" is satisfied by simply
+  not redirecting/suppressing the tool's own output (it is already quite
+  verbose by default -- `msg()` stage headers, a full resolved-ENV dump, and
+  `mmdebstrap`/`apt`/`genimage` output all stream to stdout with no existing
+  redirection) plus `set -x` in the workflow's own steps. Flagging this in
+  case a literal `--verbose`/`--debug` flag was expected to exist and be
+  passed.
 - **Scope note, not a contradiction:** the design's "The seam" section lists
   `contracts.equipment.equipment_device_id` as one of exactly three things the
   bootstrapper imports, implying it also produces the boot-context file

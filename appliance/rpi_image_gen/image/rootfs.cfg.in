@@ -1,0 +1,14 @@
+# One bare squashfs image of the whole built rootfs -- no hdimage/partition
+# table wrapper. <IMAGE_NAME>/<IMAGE_SUFFIX> are substituted by pre-image.sh
+# from IGconf_image_name/IGconf_image_suffix (config/photo-wall-base.yaml:
+# name=photo-wall-base, suffix=squashfs). block-size 131072 (128K) is
+# mksquashfs's own upstream default; zstd trades a slightly slower squash for
+# noticeably smaller netboot-fetch bytes, matching this repo's general
+# compression convention elsewhere (deploy-base's own default is zstd too).
+image <IMAGE_NAME>.<IMAGE_SUFFIX> {
+   squashfs {
+      block-size = 131072
+      compression = zstd
+   }
+   mountpoint = "/"
+}
