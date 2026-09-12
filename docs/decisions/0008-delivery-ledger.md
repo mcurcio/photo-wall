@@ -140,9 +140,11 @@ the custom pipeline + old signed path. 0009 gets updated once the spike proves v
 
 ### Retirement (owner authorized FULL retirement 2026-09-12; corrected order so the build survives)
 Order: **s5 (retire old build pipeline) -> s4 (retire old signed client+central path) -> s6 (DROP appliance_* tables, LAST/irreversible).** All gated on s3 (now closed). s5 before s4 because the old appliance.yml QEMU e2e (test_appliance_e2e) exercises the signed routes; delete those workflow jobs (s5) before/with removing the routes (s4). netboot_init.py + s2a keep appliance/bootstrap.py (LinuxOps.mount_root) + contracts/release.py (MAX_ROOTFS_BYTES) — s4 strips ONLY the ticket/signature/trial parts, not those symbols.
+Owner chose FULL (2026-09-12): migrate the media-OS test base off the old pipeline FIRST, then delete the whole pipeline. New order: **p4-media-os-migrate -> s5(full) -> s4 -> s6.**
 | Slice | Delivers | CI? | Status |
 |---|---|---|---|
-| p4-retire **s5** (build pipeline) | delete disk-image build fns + build_ci_*/os_base/ci_images/fetch_ubuntu; delete appliance.yml/service-base.yml old jobs; rewire release.yml to publish base bundle + player .deb + bootstrapper .deb | yes | open (next) |
+| p4-media-os-migrate | replace the service_base/ci_images/os_base media-OS builder (software-e2e + checks dep) with a simple base (plain Debian/mmdebstrap or a Dockerfile of the media worker's native deps), so nothing but the retiring appliance uses appliance/build.py + os_base | software-e2e + checks green on new base | open (next) |
+| p4-retire **s5** (build pipeline, FULL) | after media-os-migrate: delete appliance/build.py + os_base + os_packages + os_definition.json + fetch_ubuntu + ci_base_cache + ci_images + build_ci_*/vm_*/boot_gateway/boot_fixture/rollback + old service_base bits + appliance.yml; rewire release.yml to publish base bundle + player .deb + bootstrapper .deb | yes | open |
 | p4-retire **s4** (signed client+central) | delete /v1/bootstrap/boot, /appliance/rootfs-*, /v1/player/boot-health, operator releases; central/releases.py, contracts/release.py boot-ticket types (KEEP MAX_ROOTFS_BYTES), registry ticket branch, _report_boot_health, appliance/updates.py; reduce bootstrap.py to mount_root + helpers netboot_init needs | yes | open |
 | p4-retire **s6** (tables) | DROP migration for appliance_* tables | migration | open (LAST, irreversible; owner-authorized) |
 
