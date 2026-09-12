@@ -1,0 +1,49 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-bootstrapper
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: Installs the Photo Wall base bootstrapper
+#  (appliance.provision, 0009 slice 2 -- see
+#  docs/decisions/0009-minimal-base-and-app-package.md) and its one
+#  third-party runtime dependency, python3-zeroconf (which in turn pulls in
+#  python3-ifaddr; both are declared explicitly here too, per the task
+#  brief). Ships the bootstrapper's minimal Python module closure --
+#  appliance/__init__.py, appliance/provision.py, player/__init__.py,
+#  player/mdns_discovery.py, player/discovery.py -- as a rootfs overlay
+#  (photo-wall-bootstrapper.rootfs-overlay/, staged from the real repo
+#  sources by ../stage_overlay.sh -- never hand-duplicated into this tree)
+#  under /usr/lib/python3/dist-packages, Debian's default python3
+#  sys.path, so `python3 -I -m appliance.provision` (the reused
+#  photo-wall-provision.service's ExecStart) resolves it with no PYTHONPATH.
+#  Installs appliance/systemd/photo-wall-provision.service verbatim via the
+#  same overlay and enables it. Carries NO application or render-stack
+#  package -- 0009 rule #1: "the base OS carries no application and no
+#  origin."
+#
+#  KNOWN CROSS-DISTRO MISMATCH (flagged, not silently patched -- see
+#  .claude/errata.md): the reused unit's ExecStart hardcodes
+#  /usr/bin/python3.12, which matches the EXISTING Ubuntu-24.04-based
+#  appliance/os_definition.json path (Ubuntu Noble co-installs python3.12
+#  alongside its default python3). Debian trixie has no python3.12 package
+#  at all -- its default `python3` is 3.13 (confirmed against
+#  packages.debian.org: trixie/python3.12 is "not available in this
+#  suite"). Rather than edit the reused unit file (out of scope per the
+#  task brief) or silently ship a base that can never start it, this layer
+#  adds a compensating /usr/bin/python3.12 -> python3 symlink so the
+#  unmodified unit's ExecStart resolves. This is a deliberate, documented
+#  compensation, not a fix to the underlying mismatch.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: systemd-min,ca-certificates
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - python3
+    - python3-zeroconf
+    - python3-ifaddr
+  customize-hooks:
+    - |-
+      set -eu
+      # Compensate for the reused unit's hardcoded python3.12 -- see the
+      # X-Env-Layer-Desc note above. `python3` on Debian trixie is 3.13.
+      ln -sf python3 "$1/usr/bin/python3.12"
+    - $BDEBSTRAP_HOOKS/enable-units "$1" photo-wall-provision.service

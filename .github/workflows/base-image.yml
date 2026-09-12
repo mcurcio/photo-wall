@@ -1,0 +1,104 @@
+name: rpi-image-gen base OS spike
+
+# 0009 Phase 4 SPIKE (see docs/decisions/0009-minimal-base-and-app-package.md,
+# "base-OS" + "Bootstrapper" sections): proves out raspberrypi/rpi-image-gen
+# as a candidate builder for the minimal netboot base OS squashfs. Standalone
+# -- deliberately NOT wired into appliance.yml/release.yml or the boot chain.
+# Does not retire or replace anything the existing appliance pipeline builds.
+#
+# Scoped to workflow_dispatch (manual iteration on this spike) and
+# pull_request touching the rpi-image-gen config or this workflow file, so it
+# never runs on every push to main.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - appliance/rpi_image_gen/**
+      - .github/workflows/base-image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-base-image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      # Pinned by exact commit, not just the tag, for reproducibility --
+      # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
+      # the time this spike was authored.
+      - name: Clone the pinned rpi-image-gen tool
+        env:
+          RPI_IMAGE_GEN_REF: 262d4df5a9f9d4133370465399a7958a7c22cdc7
+        run: |
+          set -x
+          git clone --no-checkout https://github.com/raspberrypi/rpi-image-gen.git "$RUNNER_TEMP/rpi-image-gen"
+          git -C "$RUNNER_TEMP/rpi-image-gen" checkout "$RPI_IMAGE_GEN_REF"
+          git -C "$RUNNER_TEMP/rpi-image-gen" rev-parse HEAD
+
+      # Verbatim recipe from rpi-image-gen's own CI
+      # (.github/workflows/build.yml, job build-arm64, "install dependencies"
+      # step) -- the chmod works around a runner /home/runner permission the
+      # tool's podman-based unshare build needs.
+      - name: Install rpi-image-gen's host dependencies
+        working-directory: ${{ runner.temp }}/rpi-image-gen
+        run: |
+          set -x
+          sudo apt-get update
+          sudo chmod o+x /home/runner
+          sudo ./install_deps.sh
+
+      # Populates layer/photo-wall-bootstrapper.rootfs-overlay/ from the real
+      # appliance/provision.py, player/mdns_discovery.py, etc. -- never
+      # hand-duplicated/committed (see .gitignore and stage_overlay.sh).
+      - name: Stage the bootstrapper module closure into the rpi-image-gen overlay
+        run: |
+          set -x
+          "$GITHUB_WORKSPACE/appliance/rpi_image_gen/stage_overlay.sh" "$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE/appliance/rpi_image_gen/layer/photo-wall-bootstrapper.rootfs-overlay" -type f
+
+      # SOURCE_DATE_EPOCH pins the debian-trixie-arm64-minbase-snapshot
+      # layer's snapshot.debian.org mirror (see bin/generators/snapgen) to a
+      # fixed instant, so this build's Debian package set is reproducible
+      # rather than "whatever snapshot.debian.org has right now". Fixed,
+      # not `date +%s` at run time (contrast rpi-image-gen's own CI, which
+      # uses `date -d 'today 00:00:00'` -- that pins to the day, not a
+      # specific stable revision).
+      - name: Build the minimal base OS rootfs and squashfs image
+        env:
+          SOURCE_DATE_EPOCH: '1788480000' # 2026-09-04T00:00:00Z
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/rpi-image-gen"
+          ./rpi-image-gen build \
+            -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
+            -c photo-wall-base.yaml \
+            -- "IGconf_sys_workroot=$WORKROOT"
+
+      - name: Show what was produced
+        if: always()
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -x
+          find "$WORKROOT" -maxdepth 3 -printf '%y %10s %p\n' 2>/dev/null || true
+
+      - name: Upload the base rootfs squashfs and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-base-image-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/photo-wall-base-work/deploy-*/
+            ${{ runner.temp }}/photo-wall-base-work/image-*/image.json
+            ${{ runner.temp }}/photo-wall-base-work/image-*/genimage*.cfg
+          if-no-files-found: error
+          retention-days: 7
