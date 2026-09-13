@@ -19,6 +19,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field, model_validator
 
 from central.app_packages import AppPackageError, AppPackages
+from central.app_release_queue import AppReleaseTaskQueue, ProcrastinateAppReleaseQueue
+from central.app_releases import AppReleaseError, AppReleases
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
@@ -111,6 +113,7 @@ def create_app(
     run_scheduler: bool | None = None,
     media_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
+    release_queue: AppReleaseTaskQueue | None = None,
     app_root: Path | None = None,
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
@@ -144,6 +147,21 @@ def create_app(
         Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
     )
     app_packages = AppPackages(db, clock)
+    # GitHub release sourcing (0010) is the same OPT-IN gate the worker uses
+    # (bead 3): the feature is live only when PHOTO_WALL_APP_ROOT is set (the
+    # shared storage the mirror lands `.deb` bytes into and the serving route
+    # reads). When unset, `app_root` is None, no enqueue port is built, and the
+    # operator release routes answer 503 "release sourcing not configured"
+    # rather than crashing create_app.
+    app_releases = AppReleases(db, clock)
+    # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
+    # and injected above: promote defers a tag-keyed mirror, refresh defers a
+    # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker.
+    release_queue = release_queue or (
+        ProcrastinateAppReleaseQueue(db.dsn)
+        if isinstance(db, Database) and app_root is not None
+        else None
+    )
     media_gateway = (
         MediaGateway(
             MediaStore(
@@ -270,6 +288,10 @@ def create_app(
 
     @app.exception_handler(AppPackageError)
     async def app_package_error(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.exception_handler(AppReleaseError)
+    async def app_release_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
@@ -511,6 +533,53 @@ def create_app(
     def promote_app(request: AppPackagePromotion):
         app_packages.promote(request.sha256)
         return {"status": "configured"}
+
+    def _release_sourcing() -> AppReleaseTaskQueue:
+        # 0010 gate: the release routes exist only when PHOTO_WALL_APP_ROOT is
+        # configured (app_root + an enqueue port). Unconfigured -> a clean 503,
+        # never a crash. This coexists with the manual POST /v1/operator/app and
+        # PUT /v1/operator/app/current escape hatches (0010 decision #6).
+        if app_root is None or release_queue is None:
+            raise AppReleaseError("release_sourcing_unconfigured", 503)
+        return release_queue
+
+    @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
+    def list_releases():
+        _release_sourcing()
+        # Discovered list, semver-ordered; each row flagged deployable/promoted/
+        # current (current = this row's mirrored bytes are the served ones).
+        return app_releases.list()
+
+    @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
+    def promote_release(tag: str):
+        queue = _release_sourcing()
+        # set_promoted records the operator's chosen tag under FOR UPDATE on the
+        # app_release_policy singleton (serializing against any concurrent promote
+        # or the worker's reconcile) and reports whether the bytes are already
+        # registered. Unknown tag -> 404, undeployable -> 409 (AppReleaseError).
+        already_mirrored = app_releases.set_promoted(tag)
+        if already_mirrored:
+            # Fast path: bytes present, so advance `current` in-request via the
+            # single reconcile path (a DB pointer flip under the same lock; no
+            # network, no worker). reconcile reads the *current* promoted_tag, so
+            # it never advances off a stale value.
+            app_releases.reconcile(app_packages)
+            return {"status": "promoted"}
+        # Lazy mirror: the bytes are absent, so defer a tag-keyed mirror onto the
+        # worker's queue and report pending. The worker downloads + verifies +
+        # registers, then its own reconcile advances `current` once the bytes land.
+        with db.transaction() as conn:
+            queue.enqueue_mirror_in(conn, tag)
+        return JSONResponse({"status": "pending"}, status_code=202)
+
+    @app.post("/v1/operator/app/releases/refresh", dependencies=[Depends(admin)])
+    def refresh_releases():
+        queue = _release_sourcing()
+        # Defer an on-demand poll (coalesced with the periodic tick) so a
+        # newly-cut release appears without waiting for the next cadence.
+        with db.transaction() as conn:
+            queue.enqueue_poll_in(conn)
+        return JSONResponse({"status": "polling"}, status_code=202)
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):

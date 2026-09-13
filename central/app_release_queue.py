@@ -15,7 +15,7 @@ repeat promotes of the *same* tag into one in-flight job.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import procrastinate
 
@@ -49,8 +49,21 @@ class QueueReceipt:
     coalesced: bool
 
 
+class AppReleaseTaskQueue(Protocol):
+    """The producer-side enqueue port the API's operator routes (bead 4) depend on.
+
+    The promote route defers a tag-keyed mirror; the refresh route defers a
+    tag-less, coalesced poll. Depending on this abstraction (not the concrete
+    Procrastinate class) lets `create_app` inject a fake in tests with no worker
+    or network, mirroring `MediaTaskQueue`.
+    """
+
+    def enqueue_mirror_in(self, conn: Any, tag: str) -> "QueueReceipt": ...
+    def enqueue_poll_in(self, conn: Any) -> "QueueReceipt": ...
+
+
 class ProcrastinateAppReleaseQueue:
-    """Defer a tag-keyed mirror through the caller's psycopg transaction."""
+    """Defer a tag-keyed mirror (or an on-demand poll) through the caller's txn."""
 
     def __init__(self, dsn: str):
         connector = procrastinate.SyncPsycopgConnector(conninfo=dsn)
@@ -70,6 +83,25 @@ class ProcrastinateAppReleaseQueue:
                 queueing_lock=tag,
                 connection=conn,
             ).defer(tag=tag)
+            return QueueReceipt(coalesced=False)
+        except procrastinate.exceptions.AlreadyEnqueued:
+            return QueueReceipt(coalesced=True)
+
+    def enqueue_poll_in(self, conn: Any) -> QueueReceipt:
+        """Enqueue an on-demand `poll_releases`; coalesce onto the pending poll.
+
+        Shares the periodic poll's `queueing_lock` (`POLL_QUEUEING_LOCK`), so an
+        operator refresh folds into an already-queued tick instead of stacking a
+        second poll -- the same coalescing the periodic task relies on. The task
+        ignores its `timestamp` argument, so `0` is a harmless on-demand marker.
+        """
+        try:
+            self.app.configure_task(
+                POLL_RELEASES_TASK,
+                queue=APP_RELEASE_QUEUE,
+                queueing_lock=POLL_QUEUEING_LOCK,
+                connection=conn,
+            ).defer(timestamp=0)
             return QueueReceipt(coalesced=False)
         except procrastinate.exceptions.AlreadyEnqueued:
             return QueueReceipt(coalesced=True)
