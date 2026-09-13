@@ -11,7 +11,7 @@ container running systemd 255.4-1ubuntu8.17. The retained tooling image was
 It had its own systemd/cgroup namespace, no network and no host mounts.
 No Pi image was built locally.
 
-The [opt-in test](../../tests/test_systemd_updates.py) installs the production
+The `opt-in test` installs the production
 acceptance and recovery units and uses their normal isolated Python command,
 sandbox, `OnFailure` transition, and recovery `ExecCondition`. Before any unit
 starts, it replaces only the recovery action with a marker write and verifies
