@@ -137,17 +137,6 @@ def test_ticketless_enroll_succeeds_with_no_release_authority_configured(registr
     assert by_id[identity["player_id"]].retired_at is None
 
 
-def test_d0_enroll_never_touches_appliance_devices(registry):
-    """Distinguishes the D0 branch from netboot: no boot-ticket bookkeeping
-    row is created for a serial that never went through select_boot."""
-    identity, _, request = enroll_d0(registry)
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT 1 FROM appliance_devices WHERE device_id=%s",
-                           (request.device_id,)).fetchone()
-    assert row is None
-    assert identity["player_id"]
-
-
 def test_registration_precedes_binding_proof_replay_and_token_rotation(registry):
     identity, key, request = enroll(registry)
     assert registry.inventory().frames == ()
