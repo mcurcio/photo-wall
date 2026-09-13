@@ -22,7 +22,6 @@ from test_executor import binding, layer
 
 from contracts.enrollment import Enrollment, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
-from contracts.release import BootRequest
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.output_discovery import (
@@ -385,7 +384,6 @@ def test_volatile_persistence_with_no_ticket_still_enrolls_ticketless(tmp_path):
         try:
             await service.enroll()
             assert server.proofs[-1].ticket_id is None
-            assert service.release_accepted is True
         finally:
             await close(service)
     asyncio.run(check())
@@ -469,7 +467,6 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
             # and restart (m3-central-d0-enroll's crash-loop).
             await asyncio.sleep(.2)
             assert service.registration is not None
-            assert service.release_accepted is True
             assert not boot_health_calls
             assert connect_calls == [True]
         finally:
@@ -663,38 +660,15 @@ def test_same_key_reenrollment_rotates_authority_and_rejects_old_jobs(tmp_path):
         try:
             service._feedback()
             old_job, old_state = service._jobs[0], server.state
-            service.release_accepted = True
             await service.enroll()
             server.offer()
             await service.poll_state()
             assert server.proofs[0].public_key == server.proofs[1].public_key
             assert service.registration.authority_epoch == 2
-            assert service.release_accepted is False
             assert not service._authorized(old_job)
             with pytest.raises(ServiceError, match="state_authority"):
                 service._apply_state(old_state)
         finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_boot_health_ack_must_match_boot_release(tmp_path):
-    async def check():
-        service, server = await rig(tmp_path)
-        old_client = service.client
-
-        def wrong_release(request):
-            if request.url.path == "/v1/player/boot-health":
-                return httpx.Response(200, json={"accepted": True, "release_id": "d" * 64})
-            return server(request)
-
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(wrong_release))
-        try:
-            with pytest.raises(ServiceError, match="release_mismatch"):
-                await service._report_boot_health(True)
-            assert service.release_accepted is False
-        finally:
-            await old_client.aclose()
             await close(service)
     asyncio.run(check())
 
@@ -1307,7 +1281,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         registry.clock,
         ADMIN,
         media_root=storage.root,
-        release_authority=registry.release_authority,
     )
     unavailable = False
 
@@ -1334,13 +1307,13 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         cache_dir = private_dir(tmp_path / "player-cache")
         boot_id = "12345678-1234-1234-1234-123456789abc"
         device_id = "device-" + "d" * 64
-        ticket = registry.release_authority.select_boot(
-            BootRequest(device_id, boot_id, "a" * 48)
-        )
+        # Ticketless enroll (0009): the signed boot-ticket path is retired, so
+        # this drives the real central with ticket_id=None, exactly as a
+        # diskless/flashed player does.
         context = BootContext.model_validate({
             "schema": 2, "device_id": device_id, "boot_id": boot_id,
-            "ticket_id": ticket.ticket_id, "release_id": ticket.release_id,
-            "trial": ticket.trial, "persistence": "volatile", "fault": None,
+            "ticket_id": None, "release_id": "c" * 64,
+            "trial": False, "persistence": "volatile", "fault": None,
         })
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
         service = PlayerService(PlayerConfig(central_origin=origin, allow_http=True,

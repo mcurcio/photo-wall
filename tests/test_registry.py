@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import secrets
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -21,28 +20,25 @@ from central.registry import (
     RegistryError,
     enrollment_message,
 )
-from central.releases import ReleaseError
 from contracts.models import Calibration, FrameProfile
-from contracts.release import BootRequest
 
 ADMIN = "test-operator-" + "x" * 40
 
 
 def enroll(registry, key=None, count=2, device_id=None):
+    # Ticketless enroll (0009): the signed-rootfs boot-ticket path is retired,
+    # so no boot server ever issues a ticket -- ticket_id is always None.
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
     boot_id = str(uuid.uuid4())
-    ticket = registry.release_authority.select_boot(BootRequest(
-        device_id=device_id, boot_id=boot_id, request_id=secrets.token_hex(24)
-    ))
     nonce = registry.challenge(public)["nonce"]
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=ticket.ticket_id,
+                         device_id=device_id, boot_id=boot_id, ticket_id=None,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, ticket.ticket_id))).decode())
+                             nonce, outputs, device_id, boot_id, None))).decode())
     return registry.enroll(request), key, request
 
 
@@ -141,45 +137,6 @@ def test_ticketless_enroll_succeeds_with_no_release_authority_configured(registr
     assert by_id[identity["player_id"]].retired_at is None
 
 
-def test_ticketed_enroll_with_no_release_authority_configured_returns_503(registry):
-    """The moved guard still protects the TICKETED path: a real ticket has
-    no authority to bind its release session against, so it must still 503,
-    exactly as an unmoved guard would have -- only ticketless enroll is
-    exempted."""
-    unauthorized = Registry(Database(registry.db.dsn), registry.clock)
-    key = Ed25519PrivateKey.generate()
-    public = key.public_key().public_bytes_raw().hex()
-    device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
-    boot_id, ticket_id, outputs = str(uuid.uuid4()), "a" * 48, ()
-    nonce = unauthorized.challenge(public)["nonce"]
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=ticket_id,
-                         signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, ticket_id))).decode())
-    with pytest.raises(RegistryError, match="release_authority_unavailable") as excinfo:
-        unauthorized.enroll(request)
-    assert excinfo.value.status == 503
-
-
-def test_ticketed_enroll_with_no_appliance_devices_row_still_404s(registry):
-    """Regression (unchanged by the guard move): a real ticket that never
-    went through `select_boot` has no `appliance_devices` row to bind
-    against, and still surfaces as `device_not_found` when a release
-    authority IS configured."""
-    key = Ed25519PrivateKey.generate()
-    public = key.public_key().public_bytes_raw().hex()
-    device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
-    boot_id, ticket_id, outputs = str(uuid.uuid4()), "b" * 48, ()
-    nonce = registry.challenge(public)["nonce"]
-    request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=ticket_id,
-                         signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, ticket_id))).decode())
-    with pytest.raises(ReleaseError, match="device_not_found") as excinfo:
-        registry.enroll(request)
-    assert excinfo.value.status == 404
-
-
 def test_d0_enroll_never_touches_appliance_devices(registry):
     """Distinguishes the D0 branch from netboot: no boot-ticket bookkeeping
     row is created for a serial that never went through select_boot."""
@@ -251,13 +208,10 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     outputs = (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),)
     device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
     boot_id = str(uuid.uuid4())
-    ticket = registry.release_authority.select_boot(BootRequest(
-        device_id=device_id, boot_id=boot_id, request_id=secrets.token_hex(24)
-    ))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=ticket.ticket_id,
+                         device_id=device_id, boot_id=boot_id, ticket_id=None,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, ticket.ticket_id))).decode())
+                             nonce, outputs, device_id, boot_id, None))).decode())
     bad = request.model_copy(update={"signature": base64.b64encode(b"x" * 64).decode()})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(bad)

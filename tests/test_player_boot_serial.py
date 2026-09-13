@@ -161,7 +161,7 @@ def test_hardware_boot_context_now_enrolls_against_a_real_registry_pending_unbou
     real Postgres-backed `Registry`, and the enroll now succeeds."""
     context = hardware_boot_context(serial_reader=lambda: RAW_PI_SERIAL)
     assert context.persistence == "persistent"
-    app = create_app(db=registry.db, clock=registry.clock, release_authority=registry.release_authority,
+    app = create_app(db=registry.db, clock=registry.clock,
                      admin_token="integration-only-admin-" + "x" * 32, run_scheduler=False)
     cache = tmp_path / "cache"
     cache.mkdir(mode=0o700)

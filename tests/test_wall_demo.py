@@ -336,7 +336,7 @@ def example():
     jobs = [dict(state="ready", variant=dict(sha256=digest, media_type=kind))
             for digest, kind in (("a"*64, "image/jpeg"), ("b"*64, "video/mp4"))]
     events = [dict(output_id="HDMI-A-1", layers=[dict(job["variant"])]) for job in jobs]
-    return dict(jobs=jobs, observations=[{}], groups=[dict(status="committed", members={"assignment": ["player-one"]})]), {"player-one": dict(persistence="volatile", release_accepted=True,
+    return dict(jobs=jobs, observations=[{}], groups=[dict(status="committed", members={"assignment": ["player-one"]})]), {"player-one": dict(persistence="volatile",
         forbidden_imports_absent=True, commit_checks=2, commit_failures=[], outputs=1, events=events)}
 
 
@@ -680,18 +680,21 @@ def test_selected_secured_presentation_uses_earlier_valid_until_boundary():
     assert selected_secured_presentation(before, reports, lock["sha256"], 109.0) is None
 
 
-def test_rejoined_player_waits_for_central_release_acceptance():
+def test_rejoined_player_ready_requires_fresh_epoch_and_post_rejoin_draw():
+    """0009: the signed-release boot-health acceptance gate is retired, so a
+    rejoined player is ready once it re-enrolls under a fresh authority epoch
+    and draws complete, non-fallback content after the restart."""
     old = {"player_id": "p-player-one", "authority_epoch": 1}
     report = {
         "player_id": "p-player-one",
-        "authority_epoch": 2,
-        "release_accepted": False,
+        "authority_epoch": 1,
         "outputs": 1,
         "events": [{"output_id": "HDMI-A-1", "utc": 101.0, "layers": [{}], "fallback": False}],
     }
 
+    # Same authority epoch: the replacement has not re-enrolled yet.
     assert not rejoined_player_ready(old, report, 100.0)
-    report["release_accepted"] = True
+    report["authority_epoch"] = 2
     assert rejoined_player_ready(old, report, 100.0)
 
 
