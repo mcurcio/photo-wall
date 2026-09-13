@@ -31,7 +31,6 @@ from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.models import (
     Commit,
-    Digest,
     Instant,
     Layer,
     Model,
@@ -165,18 +164,6 @@ class BootContext(Model):
     # below when no netboot boot context file is present.
     persistence: Literal["volatile", "persistent"]
     fault: None = None
-
-
-class BootHealthResponse(Model):
-    accepted: bool
-    release_id: Digest | None = None
-    reason: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
-
-    @model_validator(mode="after")
-    def accepted_release(self):
-        if self.accepted and self.release_id is None:
-            raise ValueError("accepted health requires a release")
-        return self
 
 
 class Registration(Model):
@@ -368,7 +355,6 @@ class PlayerService:
         self.cache = None
         self.executor = None
         self.registration: Registration | None = None
-        self.release_accepted = False
         self._owner = threading.get_ident()
         self._lock = threading.RLock()
         self._plan: Plan | None = None
@@ -501,16 +487,6 @@ class PlayerService:
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
         self.registration = registered
-        # A boot context with no ticket (D0/flashed, and 0009's diskless
-        # bootstrapper) has no central-issued boot ticket and no
-        # signed-release trial to report against. Treat the release as
-        # locally accepted so `_control_loop` never calls
-        # `_report_boot_health` for a ticketless boot, and the player
-        # proceeds straight to a sustained running session. D1 (netboot,
-        # with a real ticket) is unaffected: it still starts unaccepted and
-        # only flips true after the full boot-health trial, exactly as
-        # before.
-        self.release_accepted = self.boot_context.ticket_id is None
         with self._lock:
             self._offered = False
             self._jobs = ()
@@ -647,7 +623,6 @@ class PlayerService:
                     player_id=self.registration.player_id if self.registration else None,
                     authority_epoch=self.registration.authority_epoch if self.registration else None,
                     persistence="volatile", healthy=bool(healthy), health_reason=reason,
-                    release_accepted=self.release_accepted,
                     clock=asdict(self.mapping.diagnostics))
         temporary = None
         try:
@@ -800,37 +775,15 @@ class PlayerService:
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
-    async def _report_boot_health(self, healthy: bool) -> None:
-        if self.boot_context is None:
-            raise ServiceError("boot_context")
-        result = BootHealthResponse.model_validate(await self.request(
-            "POST",
-            "/v1/player/boot-health",
-            body={
-                "ticket_id": self.boot_context.ticket_id,
-                "healthy": healthy,
-                "observed_at": self.clock.utc(),
-            },
-        ))
-        if result.accepted:
-            if result.release_id != self.boot_context.release_id:
-                raise ServiceError("release_mismatch")
-            # An unhealthy local sample can never disarm the trial watchdog,
-            # even if the central response were malformed or stale.
-            self.release_accepted = healthy
-
     async def _control_loop(self):
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             await self.poll_state()
             readiness, observations = await self.dispatch(self._feedback)
             healthy, reason = await self.dispatch(self._health_status)
-            # A ticketless boot (no boot ticket present) has no release
-            # trial to report against -- boot-health is a ticketed-boot-only
-            # concern, keyed off the ticket itself, not `release_accepted`
-            # alone (which a ticketless boot also starts True at).
-            if self.boot_context.ticket_id is not None and not self.release_accepted:
-                await self._report_boot_health(healthy)
+            # The signed-release boot-health trial has been retired (0009):
+            # every boot is ticketless, so there is no per-boot release to
+            # report against and no watchdog to disarm.
             self._write_health(healthy, reason)
             if readiness is not None:
                 try:

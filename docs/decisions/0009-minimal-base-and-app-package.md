@@ -71,12 +71,12 @@ the operator.
 
 | Fact | Where | Consequence |
 |---|---|---|
-| Netboot RAM-roots a **signed** squashfs: the initramfs asks central for a `BootTicket`, verifies an Ed25519-signed `Release` manifest, streams the squashfs, checks its sha256, and overlay-mounts it in RAM. | [appliance/bootstrap.py:207](../../appliance/bootstrap.py), [:402](../../appliance/bootstrap.py), [:366](../../appliance/bootstrap.py); [appliance/updates.py:71](../../appliance/updates.py) | The OS-delivery mechanism this decision replaces. The overlay-in-RAM machinery ([:366](../../appliance/bootstrap.py)) is reusable; the ticket/signature layer is not. |
-| The whole squashfs (base OS **plus** the Player venv) is one signed artifact selected per device. | [central/releases.py:183](../../central/releases.py) `select_boot`; `appliance/build.py:721` (retired) `configure_root` bakes the venv into the root. | Base and app rev together today. Splitting them is the core change. |
+| Netboot RAM-roots a **signed** squashfs: the initramfs asks central for a `BootTicket`, verifies an Ed25519-signed `Release` manifest, streams the squashfs, checks its sha256, and overlay-mounts it in RAM. | [appliance/bootstrap.py:207](../../appliance/bootstrap.py), [:402](../../appliance/bootstrap.py), [:366](../../appliance/bootstrap.py); `appliance/updates.py:71` | The OS-delivery mechanism this decision replaces. The overlay-in-RAM machinery ([:366](../../appliance/bootstrap.py)) is reusable; the ticket/signature layer is not. |
+| The whole squashfs (base OS **plus** the Player venv) is one signed artifact selected per device. | `central/releases.py:183` `select_boot`; `appliance/build.py:721` (retired) `configure_root` bakes the venv into the root. | Base and app rev together today. Splitting them is the core change. |
 | The Player is built as a **hashed wheelhouse** (one app wheel + exactly five runtime wheels) with a `--require-hashes` `requirements.txt`, installed offline into a venv. | [scripts/build_player.py:349](../../scripts/build_player.py); ROOTS = pydantic/httpx/websockets/cryptography/zeroconf [:39](../../scripts/build_player.py); pip install `appliance/build.py:752` (retired) | The `.deb` payload can reuse this builder verbatim; only the packaging wrapper is new. |
 | mDNS discovery already exists and is wired into the **running app**, consulted only when no explicit origin is set. | [player/mdns_discovery.py:46](../../player/mdns_discovery.py); `resolve_origin` [player/service.py:405](../../player/service.py); wiring [player/service.py:1013](../../player/service.py) | The base's bootstrapper can reuse this exact class; but discovery must now also run **before the app exists**. |
 | Only the **flashed / persistent** path enrolls ticketless: `service.py:489` sends `ticket_id=None` **only when** `boot_context.persistence == "persistent"`. The **netboot / diskless** path writes `persistence="volatile"` ([appliance/bootstrap.py:428](../../appliance/bootstrap.py)) and so sends a **real** `ticket_id`. | [player/service.py:489](../../player/service.py); [appliance/bootstrap.py:428](../../appliance/bootstrap.py) | The diskless path does **not** enroll ticketless today. "The app enrolls unchanged" is **false** for 0009's diskless fleet — a real ticket goes to central, which now has no authority to honor it. Fixed in migration. |
-| A real `ticket_id` at enroll drives `bind_session_in` → `_device` → **404 `device_not_found`** once the release authority (and its `appliance_devices` rows) retire. | [central/registry.py:138](../../central/registry.py) → [central/releases.py:167](../../central/releases.py) | Every diskless enroll would 404 → **fleet-wide enroll failure** if the diskless base is not made to send `ticket_id=None`. |
+| A real `ticket_id` at enroll drives `bind_session_in` → `_device` → **404 `device_not_found`** once the release authority (and its `appliance_devices` rows) retire. | [central/registry.py:138](../../central/registry.py) → `central/releases.py:167` | Every diskless enroll would 404 → **fleet-wide enroll failure** if the diskless base is not made to send `ticket_id=None`. |
 | `release_accepted` is set `True` **only** for persistent boots ([service.py:511](../../player/service.py)); a volatile boot starts it `False`, and `_control_loop` then POSTs boot-health every loop ([service.py:826-827](../../player/service.py)). | [player/service.py:511](../../player/service.py), [:826](../../player/service.py) | With boot-health **retired**, a diskless Player would POST a dead route on every loop. The diskless base must also yield `release_accepted=True`. |
 | `enroll()` hard-requires a configured release authority and returns 503 if it is absent — even before the ticket branch. | [central/registry.py:92](../../central/registry.py) | Load-bearing coupling: retiring the release authority **breaks all enrollment** unless this guard is moved. **Necessary but not sufficient** — the diskless client-side ticket/health fix above is also required. |
 | Central serves an unauthenticated, sha256-addressed, length-bounded artifact today (the rootfs), and an authenticated sha256-addressed one (media). | rootfs [central/app.py:400](../../central/app.py); media [central/app.py:451](../../central/app.py) | The `.deb` endpoint is a direct copy of an existing, reviewed pattern — not new surface. |
@@ -392,7 +392,7 @@ layer):
   `PHOTO_WALL_RELEASE_ROOT`, [central/app.py:181](../../central/app.py)).
 - One small `app_package_policy` row naming the current version + sha256 + size
   (mirroring the singleton `appliance_release_policy`,
-  [central/releases.py:116](../../central/releases.py)). Promote = update the row.
+  `central/releases.py:116`). Promote = update the row.
 
 ### Endpoints (new, both mirror reviewed patterns)
 
@@ -427,18 +427,18 @@ size-match, and streaming discipline.
 - Signed-OS delivery: `BootTicket`/`BootRequest` and the signed `Release`
   manifest ([contracts/release.py:21](../../contracts/release.py),
   [:98](../../contracts/release.py)); `verify_release`
-  ([appliance/updates.py:71](../../appliance/updates.py)); the ticket/trial
+  (`appliance/updates.py:71`); the ticket/trial
   logic in [appliance/bootstrap.py:207](../../appliance/bootstrap.py).
 - Release authority: `select_boot`, `_ticket`, `stage`, `health`, and the
   `appliance_boot_attempts` / `appliance_release_trials` / `appliance_devices`
-  tables ([central/releases.py:183](../../central/releases.py), [:286](../../central/releases.py)).
+  tables (`central/releases.py:183`, `:286`).
 - Central routes: `POST /v1/bootstrap/boot`, `GET /appliance/rootfs-*.squashfs`,
   `POST /v1/player/boot-health` ([central/app.py:393](../../central/app.py),
   [:400](../../central/app.py), [:478](../../central/app.py)); the signing-key
   config `_configured_release_authority` / `_initialize_release_authority`
   ([central/app.py:110](../../central/app.py), [:129](../../central/app.py)).
 - Boot-time OS trial: the `accept-trial` / `trial-recovery` units and the
-  `TrialWatchdog` ([appliance/updates.py:151](../../appliance/updates.py)).
+  `TrialWatchdog` (`appliance/updates.py:151`).
 - The `p2-signing-key`, `PHOTO_WALL_RELEASE_PUBLIC_KEY`/`_BOOT_ABI` /
   `_INITIAL_RELEASE_*` config, `release.pub.pem` in the image, and the
   signed-rootfs publish in [.github/workflows/release.yml](../../.github/workflows/release.yml).
@@ -472,7 +472,7 @@ Today the diskless/netboot boot context is `persistence="volatile"` with a real
 app keys two behaviours on that flag:
 - `service.py:489` sends the real `ticket_id` → after edit A that hits the
   retired `ticket_id is not None` branch → `bind_session_in` → `_device` →
-  **404 `device_not_found`** ([releases.py:167](../../central/releases.py)):
+  **404 `device_not_found`** (`releases.py:167`):
   fleet-wide enroll failure.
 - `service.py:511` leaves `release_accepted=False` → `_control_loop`
   ([service.py:826-827](../../player/service.py)) POSTs the **retired**

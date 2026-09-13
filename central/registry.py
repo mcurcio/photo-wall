@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -25,9 +24,6 @@ from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.models import Calibration, FrameProfile, Identifier, Model, OutputBinding
 from contracts.time import Clock
-
-if TYPE_CHECKING:
-    from central.releases import ReleaseAuthority
 
 
 class RegistryError(Exception):
@@ -54,9 +50,8 @@ class FrameCreate(Model):
 
 
 class Registry:
-    def __init__(self, db: Database, clock: Clock,
-                 release_authority: ReleaseAuthority | None = None):
-        self.db, self.clock, self.release_authority = db, clock, release_authority
+    def __init__(self, db: Database, clock: Clock):
+        self.db, self.clock = db, clock
 
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
@@ -129,19 +124,11 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
-            # D0 (ticketless/flashed, 0008) and the diskless bootstrapper
-            # (0009): no boot server ever issued a ticket, so there is no
-            # `appliance_devices` row and no release to bind -- the player
-            # enrolls unbound (pending) by serial alone, with no release
-            # authority required. D1 (netboot) is unchanged: a real ticket
-            # requires a configured release authority to bind the boot
-            # session against.
-            if request.ticket_id is not None:
-                if self.release_authority is None:
-                    raise RegistryError("release_authority_unavailable", 503)
-                self.release_authority.bind_session_in(
-                    conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
-                )
+            # Ticketless enroll (0009): the signed-rootfs boot-ticket path has
+            # been retired, so no boot server ever issues a ticket and there is
+            # no release session to bind. Every player enrolls unbound (pending)
+            # by serial alone; request.ticket_id is always None now and is only
+            # recorded in health below.
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id, "ticket_id": request.ticket_id}),
                           player_id))

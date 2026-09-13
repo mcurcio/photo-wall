@@ -12,9 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -32,21 +30,16 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.registry import Enrollment, FrameCreate, Registry, RegistryError
-from central.release_models import ReleaseRegistrationReceipt, ReleaseStagingReceipt
-from central.releases import ReleaseAuthority, ReleaseError
 from central.runtime import Program, Scene
-from contracts.enrollment import BootTicketId
 from contracts.models import (
     Calibration,
     Digest,
     Identifier,
-    Instant,
     Model,
     Observation,
     PlayerTime,
     Readiness,
 )
-from contracts.release import MAX_MANIFEST_BYTES, BootRequest
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
@@ -98,17 +91,6 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
-class ReleaseRegistration(Model):
-    manifest: str = Field(min_length=1, max_length=MAX_MANIFEST_BYTES)
-    signature: str = Field(min_length=88, max_length=88)
-
-
-class BootHealth(Model):
-    ticket_id: BootTicketId
-    healthy: bool
-    observed_at: Instant
-
-
 class AppPackageRegistration(Model):
     """Records a `.deb` already staged under PHOTO_WALL_APP_ROOT by sha256."""
 
@@ -121,38 +103,6 @@ class AppPackagePromotion(Model):
     sha256: Digest
 
 
-def _configured_release_authority(db: Database, clock: Clock) -> ReleaseAuthority | None:
-    names = (
-        "PHOTO_WALL_RELEASE_PUBLIC_KEY",
-        "PHOTO_WALL_RELEASE_BOOT_ABI",
-    )
-    configured = [name in os.environ for name in names]
-    if not any(configured):
-        return None
-    if not all(configured):
-        raise ValueError("incomplete release authority configuration")
-    payload = Path(os.environ[names[0]]).read_bytes()
-    if len(payload) > 8192:
-        raise ValueError("invalid release public key")
-    public_key = serialization.load_pem_public_key(payload)
-    if not isinstance(public_key, Ed25519PublicKey):
-        raise ValueError("release public key must be Ed25519")
-    return ReleaseAuthority(db, clock, public_key, os.environ[names[1]])
-
-
-def _initialize_release_authority(authority: ReleaseAuthority | None) -> None:
-    names = ("PHOTO_WALL_INITIAL_RELEASE_MANIFEST", "PHOTO_WALL_INITIAL_RELEASE_SIGNATURE")
-    configured = [name in os.environ for name in names]
-    if not any(configured):
-        return
-    if authority is None or not all(configured):
-        raise ValueError("incomplete initial release configuration")
-    manifest = Path(os.environ[names[0]]).read_bytes()
-    signature = Path(os.environ[names[1]]).read_bytes()
-    release = authority.register(manifest, signature)
-    authority.initialize_default(release.release_id)
-
-
 def create_app(
     db: Database | None = None,
     clock: Clock | None = None,
@@ -160,9 +110,7 @@ def create_app(
     *,
     run_scheduler: bool | None = None,
     media_root: Path | None = None,
-    release_authority: ReleaseAuthority | None = None,
     media_queue: MediaTaskQueue | None = None,
-    release_root: Path | None = None,
     app_root: Path | None = None,
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
@@ -175,8 +123,7 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    release_authority = release_authority or _configured_release_authority(db, clock)
-    registry = Registry(db, clock, release_authority)
+    registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
@@ -192,11 +139,6 @@ def create_app(
     )
     media_root = media_root or (
         Path(os.environ["PHOTO_WALL_MEDIA_ROOT"]) if "PHOTO_WALL_MEDIA_ROOT" in os.environ else None
-    )
-    release_root = release_root or (
-        Path(os.environ["PHOTO_WALL_RELEASE_ROOT"])
-        if "PHOTO_WALL_RELEASE_ROOT" in os.environ
-        else None
     )
     app_root = app_root or (
         Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
@@ -266,7 +208,6 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
-        _initialize_release_authority(release_authority)
         if isinstance(media_queue, ProcrastinateMediaQueue):
             media_queue.apply_schema(db.dsn)
         # Real network registration (join multicast group, register the
@@ -310,7 +251,6 @@ def create_app(
     )
     app.state.registry = registry
     app.state.coordinator = coordinator
-    app.state.release_authority = release_authority
     app.state.app_packages = app_packages
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
@@ -324,17 +264,8 @@ def create_app(
             raise RegistryError("unauthorized", 401)
         return registry.authenticate(credentials.credentials)
 
-    def releases() -> ReleaseAuthority:
-        if release_authority is None:
-            raise ReleaseError("release_unconfigured", 503)
-        return release_authority
-
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=exc.status)
-
-    @app.exception_handler(ReleaseError)
-    async def release_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.exception_handler(AppPackageError)
@@ -413,47 +344,6 @@ def create_app(
     @app.post("/v1/enrollment/register")
     def register(request: Enrollment):
         return registry.enroll(request)
-
-    @app.post("/v1/bootstrap/boot")
-    def select_boot(request: BootRequest):
-        ticket = releases().select_boot(request)
-        return Response(
-            ticket.encode(), media_type="application/json", headers={"Cache-Control": "no-store"}
-        )
-
-    @app.get("/appliance/rootfs-{rootfs_sha256}.squashfs")
-    def release_image(rootfs_sha256: str):
-        release = releases().release_for_rootfs(rootfs_sha256)
-        if release_root is None:
-            raise ReleaseError("release_artifact_unavailable", 503)
-        path = release_root / release.rootfs_name
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except (FileNotFoundError, OSError):
-            raise ReleaseError("release_artifact_unavailable", 503) from None
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != release.rootfs_size:
-                raise ReleaseError("release_artifact_invalid", 503)
-        except Exception:
-            os.close(descriptor)
-            raise
-
-        def content():
-            with os.fdopen(descriptor, "rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    yield chunk
-
-        return StreamingResponse(
-            content(),
-            media_type="application/octet-stream",
-            headers={
-                "Cache-Control": "public, immutable",
-                "Content-Length": str(release.rootfs_size),
-                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(rootfs_sha256)).decode()}",
-            },
-        )
 
     @app.get("/v1/app/manifest")
     def app_manifest():
@@ -543,16 +433,6 @@ def create_app(
         coordinator.observe(identity["id"], request)
         return {"accepted": True}
 
-    @app.post("/v1/player/boot-health")
-    def boot_health(report: BootHealth, identity: dict = Depends(player)):
-        return releases().health(
-            report.ticket_id,
-            identity["id"],
-            identity["authority_epoch"],
-            healthy=report.healthy,
-            observed_at=report.observed_at,
-        )
-
     @app.websocket("/v1/player/session")
     async def session(websocket: WebSocket):
         authorization = websocket.headers.get("authorization", "")
@@ -617,32 +497,6 @@ def create_app(
     )
     def inventory():
         return registry.inventory()
-
-    @app.get("/v1/operator/releases", dependencies=[Depends(admin)])
-    def release_inventory():
-        return releases().inventory()
-
-    @app.post("/v1/operator/releases", dependencies=[Depends(admin)], status_code=201,
-              response_model=ReleaseRegistrationReceipt)
-    def register_release(request: ReleaseRegistration):
-        try:
-            signature = base64.b64decode(request.signature, validate=True)
-        except ValueError:
-            raise ReleaseError("invalid_release", 422) from None
-        release = releases().register(request.manifest.encode(), signature)
-        return ReleaseRegistrationReceipt(release_id=release.release_id)
-
-    @app.put("/v1/operator/releases/{release_id}/default", dependencies=[Depends(admin)])
-    def set_default_release(release_id: str):
-        releases().set_default(release_id)
-        return {"status": "configured"}
-
-    @app.put(
-        "/v1/operator/equipment/{device_id}/candidate/{release_id}", dependencies=[Depends(admin)],
-        response_model=ReleaseStagingReceipt,
-    )
-    def stage_release(device_id: str, release_id: str):
-        return ReleaseStagingReceipt(staged=releases().stage(device_id, release_id))
 
     @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
     def register_app(request: AppPackageRegistration):

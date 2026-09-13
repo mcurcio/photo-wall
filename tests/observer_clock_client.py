@@ -106,7 +106,7 @@ async def main():
             faults = [type(value).__name__ for value in results if isinstance(value, BaseException)
                       and not isinstance(value, asyncio.CancelledError)]
             result = json.dumps(dict(elapsed=time.monotonic() - started,
-                probes=probes, health_responses=responses, release_accepted=service.release_accepted,
+                probes=probes, health_responses=responses,
                 task_faults=faults, constants=dict(max_uncertainty=service.mapping.max_uncertainty,
                     max_step=service.mapping.max_step, max_age=service.mapping.max_age),
                 source_files=observed), allow_nan=False)
