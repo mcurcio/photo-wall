@@ -51,15 +51,36 @@ wheelhouse, no arm64 chroot. It can be built on any host with `dpkg-deb`
 (gated identically to the Player builder's Tier 2, see the "gated" banner
 below) and needs no `--root`.
 
-Version scheme matches `scripts/build_player.py`/`scripts/build_player_deb.py`
-exactly: `{pyproject project.version}+g{revision}`, read from the given
-Git revision (not the working tree), for one reproducible identifier across
-every artifact built from that commit.
+Version scheme (DELIBERATELY unlike the Player `.deb`)
+------------------------------------------------------
+The Player `.deb` keeps `{pyproject version}+g{revision}` -- it is rebuilt
+fresh every release, served by central by reference, and its version is
+ignored by the watcher. This bootstrapper `.deb`, by contrast, is *baked into
+the rpi-image-gen base squashfs*, and that squashfs is content-addressed and
+cached in `.github/workflows/base-image.yml`. A per-commit `+g{revision}`
+suffix would put a different byte into the `.deb` (its control `Version`
+field) on every commit even when nothing this package ships changed, poisoning
+the base cache with a misleading per-commit label. So this package's version is
+`{pyproject project.version}+{short content hash}`: the short hash is the first
+12 hex of a sha256 over this package's exact PACKAGED CLOSURE -- the module
+files staged into the `.deb`, the systemd unit, and the pyproject version --
+NOT the git revision. This keeps the version LABEL content-derived and
+commit-independent -- it changes only when one of those packaged inputs
+changes, not on every commit -- so the base squashfs's content-addressed
+cache key (a hash over this package's SOURCE files, not over the built `.deb`
+bytes) stays clean across commits that do not touch the bootstrapper's own
+inputs. The built `.deb` bytes themselves are only reproducible when
+`SOURCE_DATE_EPOCH` is exported for the `dpkg-deb --build` step (the
+base-image workflow sets it; dpkg then clamps member mtimes to it) -- without
+it `dpkg-deb` embeds build-time mtimes, so it is the LABEL that is stable, not
+unconditionally the bytes. The version is a valid Debian upstream version
+(`+` and lowercase hex are permitted).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import re
 import subprocess
@@ -106,15 +127,46 @@ _MODULE_FILES = (
 MAX_SOURCE = 256 * 1024
 
 
-def package_version(sources: dict[str, bytes], revision: str) -> str:
-    """The .deb version is `{pyproject version}+g{revision}` -- the same
-    scheme `scripts/build_player.py:build` uses for the Player wheel/`.deb`,
-    read from the given revision's `pyproject.toml`, not the working tree."""
+def package_version(sources: dict[str, bytes], unit: bytes) -> str:
+    """The .deb version is `{pyproject version}+{short content hash}` -- a
+    CONTENT-DERIVED build-metadata suffix over this package's exact packaged
+    closure, NOT the git revision (see the module docstring, "Version scheme").
+
+    The hash covers, order-independently: the base pyproject version, each
+    module file's dist-packages DESTINATION path and bytes, and the systemd
+    unit's name and bytes -- i.e. everything that ends up inside the `.deb`
+    and would change its bytes. `pyproject.toml` is not itself packaged, so
+    only its `project.version` participates (via `base_version`), not its full
+    contents. Two commits that leave all of these identical produce an
+    identical version LABEL, so the base squashfs's content-addressed cache
+    key (hashed over this package's source files) is not needlessly busted.
+    This makes the version LABEL commit-independent; it does NOT by itself make
+    the built `.deb` bytes reproducible (that needs `SOURCE_DATE_EPOCH` set for
+    the `dpkg-deb` build -- see the module docstring, "Version scheme").
+    """
     project = tomllib.loads(sources["pyproject.toml"].decode())
     base_version = Version(project["project"]["version"])
     if base_version.local:
         raise BuildError("unsupported project version")
-    return f"{base_version}+g{revision}"
+    # Sort (name, bytes) pairs so the digest is independent of iteration order;
+    # length-prefix each field so no concatenation of distinct inputs can alias.
+    payload = sorted(
+        [(dest, sources[source]) for source, dest in _MODULE_FILES]
+        + [(UNIT_NAME, unit)]
+    )
+    hasher = hashlib.sha256()
+    hasher.update(str(base_version).encode())
+    for name, content in payload:
+        name_bytes = name.encode()
+        hasher.update(b"\x00")
+        hasher.update(str(len(name_bytes)).encode())
+        hasher.update(b"\x00")
+        hasher.update(name_bytes)
+        hasher.update(b"\x00")
+        hasher.update(str(len(content)).encode())
+        hasher.update(b"\x00")
+        hasher.update(content)
+    return f"{base_version}+{hasher.hexdigest()[:12]}"
 
 
 def fetch_sources(repository: Path, revision: str) -> dict[str, bytes]:
@@ -223,8 +275,10 @@ def build(repository: Path, revision: str, output_dir: Path) -> Path:
     output_dir = output_dir.resolve()
     repository = repository.resolve(strict=True)
     sources = fetch_sources(repository, revision)
-    version = package_version(sources, revision)
     unit = (repository / "appliance/systemd" / UNIT_NAME).read_bytes()
+    # Version is derived from the packaged CONTENT (sources + unit), not the
+    # revision; the revision only selects WHICH content `fetch_sources` pulls.
+    version = package_version(sources, unit)
     with tempfile.TemporaryDirectory(prefix=".photo-wall-bootstrapper-deb-", dir=output_dir) as tmp:
         deb_root = Path(tmp) / "deb-root"
         stage_tree(deb_root, sources=sources, unit=unit, version=version)
