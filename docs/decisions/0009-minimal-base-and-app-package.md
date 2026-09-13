@@ -72,8 +72,8 @@ the operator.
 | Fact | Where | Consequence |
 |---|---|---|
 | Netboot RAM-roots a **signed** squashfs: the initramfs asks central for a `BootTicket`, verifies an Ed25519-signed `Release` manifest, streams the squashfs, checks its sha256, and overlay-mounts it in RAM. | [appliance/bootstrap.py:207](../../appliance/bootstrap.py), [:402](../../appliance/bootstrap.py), [:366](../../appliance/bootstrap.py); [appliance/updates.py:71](../../appliance/updates.py) | The OS-delivery mechanism this decision replaces. The overlay-in-RAM machinery ([:366](../../appliance/bootstrap.py)) is reusable; the ticket/signature layer is not. |
-| The whole squashfs (base OS **plus** the Player venv) is one signed artifact selected per device. | [central/releases.py:183](../../central/releases.py) `select_boot`; [appliance/build.py:721](../../appliance/build.py) `configure_root` bakes the venv into the root. | Base and app rev together today. Splitting them is the core change. |
-| The Player is built as a **hashed wheelhouse** (one app wheel + exactly five runtime wheels) with a `--require-hashes` `requirements.txt`, installed offline into a venv. | [scripts/build_player.py:349](../../scripts/build_player.py); ROOTS = pydantic/httpx/websockets/cryptography/zeroconf [:39](../../scripts/build_player.py); pip install [appliance/build.py:752](../../appliance/build.py) | The `.deb` payload can reuse this builder verbatim; only the packaging wrapper is new. |
+| The whole squashfs (base OS **plus** the Player venv) is one signed artifact selected per device. | [central/releases.py:183](../../central/releases.py) `select_boot`; `appliance/build.py:721` (retired) `configure_root` bakes the venv into the root. | Base and app rev together today. Splitting them is the core change. |
+| The Player is built as a **hashed wheelhouse** (one app wheel + exactly five runtime wheels) with a `--require-hashes` `requirements.txt`, installed offline into a venv. | [scripts/build_player.py:349](../../scripts/build_player.py); ROOTS = pydantic/httpx/websockets/cryptography/zeroconf [:39](../../scripts/build_player.py); pip install `appliance/build.py:752` (retired) | The `.deb` payload can reuse this builder verbatim; only the packaging wrapper is new. |
 | mDNS discovery already exists and is wired into the **running app**, consulted only when no explicit origin is set. | [player/mdns_discovery.py:46](../../player/mdns_discovery.py); `resolve_origin` [player/service.py:405](../../player/service.py); wiring [player/service.py:1013](../../player/service.py) | The base's bootstrapper can reuse this exact class; but discovery must now also run **before the app exists**. |
 | Only the **flashed / persistent** path enrolls ticketless: `service.py:489` sends `ticket_id=None` **only when** `boot_context.persistence == "persistent"`. The **netboot / diskless** path writes `persistence="volatile"` ([appliance/bootstrap.py:428](../../appliance/bootstrap.py)) and so sends a **real** `ticket_id`. | [player/service.py:489](../../player/service.py); [appliance/bootstrap.py:428](../../appliance/bootstrap.py) | The diskless path does **not** enroll ticketless today. "The app enrolls unchanged" is **false** for 0009's diskless fleet — a real ticket goes to central, which now has no authority to honor it. Fixed in migration. |
 | A real `ticket_id` at enroll drives `bind_session_in` → `_device` → **404 `device_not_found`** once the release authority (and its `appliance_devices` rows) retire. | [central/registry.py:138](../../central/registry.py) → [central/releases.py:167](../../central/releases.py) | Every diskless enroll would 404 → **fleet-wide enroll failure** if the diskless base is not made to send `ticket_id=None`. |
@@ -376,7 +376,7 @@ layer):
   `/opt/photo-wall/venv` plus the systemd units and `weston.ini` — install is an
   unpack, needing no pip or build tools in the base at boot. Built by running the
   **existing** wheelhouse builder ([scripts/build_player.py:349](../../scripts/build_player.py))
-  and then assembling the venv the way [appliance/build.py:752](../../appliance/build.py)
+  and then assembling the venv the way `appliance/build.py:752` (retired)
   does today, wrapped as a `.deb`.
 - **Version:** the existing wheel version `base_version+g<commit>`
   ([scripts/build_player.py:382](../../scripts/build_player.py)) becomes the
@@ -539,7 +539,7 @@ LAN, so the extra machinery buys nothing worth its UX cost. Do not resurrect the
 **Assumptions made on your behalf — say so if any is wrong:**
 
 1. The fleet is **diskless netboot only**. The SD-flash D0 path
-   (`create_disk_flash`, [appliance/build.py:328](../../appliance/build.py)) is
+   (`create_disk_flash`, `appliance/build.py:328`, retired) is
    out of scope here and is left unchanged; if you also want D0 to fetch the
    `.deb`, that is a separate slice.
 2. The **whole home LAN is trusted** (owner ruling, 2026-09-12). There is no

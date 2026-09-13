@@ -1,25 +1,17 @@
-"""Fail-closed contracts for the hosted appliance qualification workflow."""
+"""Fail-closed contracts for the surviving hosted workflows.
+
+The old appliance qualification workflow (appliance.yml: signed-disk build + VM
+boot + old release-artifacts) was retired in p4-retire s5. What remains here is
+the software-e2e diagnostics contract, which is independent of that pipeline.
+"""
 
 from pathlib import Path
 
-WORKFLOW = Path(__file__).parents[1] / ".github/workflows/appliance.yml"
-
-
-def test_routine_appliance_runs_are_smoke_and_manual_full_binds_native_media():
-    workflow = WORKFLOW.read_text()
-
-    assert "default: smoke" in workflow
-    assert "APPLIANCE_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'smoke' }}" in workflow
-    assert "if: env.APPLIANCE_SCOPE == 'full'" in workflow
-    assert "target: media-worker" in workflow
-    assert workflow.count("WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}") == 2
-    assert workflow.count('worker_args=(--worker-image "$WORKER_IMAGE")') == 2
-    assert '--scope "$APPLIANCE_SCOPE"' in workflow
-    assert "--scope smoke" not in workflow
+WORKFLOWS = Path(__file__).parents[1] / ".github/workflows"
 
 
 def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
-    workflow = (WORKFLOW.parent / "software-e2e.yml").read_text()
+    workflow = (WORKFLOWS / "software-e2e.yml").read_text()
 
     job_prefix = workflow.split("    steps:", 1)[0]
     assert "runner.temp" not in job_prefix
@@ -30,33 +22,3 @@ def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
     assert "name: Upload Docker failure diagnostics" in workflow
     assert "if: failure()" in workflow
     assert "photo-wall-software-e2e/docker-debug.log" in workflow
-
-
-def test_upload_compression_uses_available_cpus_after_exact_artifact_acceptance():
-    workflow = WORKFLOW.read_text()
-    acceptance = workflow.index("- name: Boot the exact artifact and launch the production Player")
-    compression = workflow.index("- name: Compress the disk for artifact upload")
-    assert acceptance < compression
-    assert 'xz -T0 -6 "$disk"' in workflow[compression:]
-    assert 'sha256sum "$(basename "$disk").xz" ci-image.json artifact.json > UPLOAD-SHA256SUMS' in workflow
-    assert "compression-level: 0" in workflow
-
-
-def test_os_candidates_are_published_only_after_offline_assembly_and_boot():
-    workflow = WORKFLOW.read_text()
-    prepare = workflow.index("- name: Pull the matching OS base")
-    package = workflow.index("- name: Build the Player package")
-    assemble = workflow.index("- name: Assemble the signed image")
-    acceptance = workflow.index("- name: Boot the exact artifact")
-    publish = workflow.index("- name: Retain the newly qualified OS definition")
-    assert prepare < package < assemble < acceptance < publish
-    assembly = workflow[assemble:acceptance]
-    assert "--network none" in assembly
-    assert '--os-base "$RUNNER_TEMP/photo-wall-os-base"' in assembly
-    assert '--player-package "$RUNNER_TEMP/photo-wall-player-package"' in assembly
-    assert "actions/cache/restore" not in workflow
-    assert "--apt-archive-cache" not in assembly
-    assert "--extracted-base-cache" not in assembly
-    assert "steps.os-base.outputs.built == 'true' && env.CAN_PUBLISH == 'true'" in workflow
-    assert "appliance-required:" in workflow
-    assert "needs: [select-definition, build-and-boot]" in workflow
