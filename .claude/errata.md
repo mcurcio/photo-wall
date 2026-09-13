@@ -246,3 +246,25 @@ Append-only. Read with `grep -a`.
 - **Follow-up for beads 3/4:** if a future reviewer wants the redirect target
   constrained, add an allowlist of GitHub CDN hosts rather than forbidding
   redirects outright. The current bound is redirect COUNT, not host.
+
+## 2026-09-12 — 0010 bead 3: env-var names + ETag store location
+- **Where:** docs/decisions/0010-github-release-sourcing.md gate #4 ("Repo via
+  `PHOTO_WALL_GITHUB_REPO`; optional `PHOTO_WALL_GITHUB_TOKEN`") vs the bead-3
+  task brief ("read `PHOTO_WALL_RELEASE_REPO` / `PHOTO_WALL_RELEASE_TOKEN`");
+  central/app_release_service.py `AppReleaseService.from_env`.
+- **Contradiction (brief overrides doc):** 0010's decision table names the config
+  env vars `PHOTO_WALL_GITHUB_REPO` / `PHOTO_WALL_GITHUB_TOKEN`, but the bead-3
+  task brief names them `PHOTO_WALL_RELEASE_REPO` / `PHOTO_WALL_RELEASE_TOKEN`.
+  Implemented per the brief: `from_env` reads `PHOTO_WALL_RELEASE_REPO`
+  (default `mcurcio/photo-wall`), `PHOTO_WALL_RELEASE_TOKEN` (optional),
+  `PHOTO_WALL_APP_ROOT` (required on the worker), and
+  `PHOTO_WALL_RELEASE_PRERELEASES` (default off).
+- **Action for bead 4/5:** the operator docs / config-env reference and any
+  producer-side wiring MUST use the `PHOTO_WALL_RELEASE_*` names, and 0010's gate
+  #4 text should be reconciled to match (a doc edit, not a code change).
+- **ETag store (0010 unspecified, chose):** 0010 mandates ETag/If-None-Match
+  hygiene but names no persistence location and 016 has no ETag column. Added
+  migration `017_app_release_poll.sql` (singleton `app_release_poll(etag)`);
+  `AppReleaseService._load_etag/_store_etag` read/write it, refreshing only on a
+  fresh (non-304) list. Losing the row forces one full re-poll — never incorrect.
+  Flagged for the bead-4 reviewer in case a different home is preferred.
