@@ -1,21 +1,17 @@
 name: Appliance release
 
-# Publishes a tagged commit's 0009 release assets as a GitHub Release: the
-# minimal base OS image (squashfs + boot tree) and the Player `.deb`. Per the
-# 0009 owner ruling (home LAN, no threat model, UX over security) NEITHER
-# asset is signed -- there is no signing key anywhere in this workflow, and
-# every sha256 published alongside them is a corruption check only, never an
-# authenticity anchor.
+# Publishes a tagged commit's release assets as a GitHub Release: the netboot
+# base bundle (kernel + initrd + Pi 5 DTBs + base squashfs) and the Player and
+# bootstrapper `.deb`s. Per the owner ruling (home LAN, no threat model, UX
+# over security) NONE of these is signed -- there is no signing key anywhere in
+# this workflow, and every sha256 published alongside them is a corruption
+# check only, never an authenticity anchor.
 #
-# This workflow does not itself construct the Pi OS or the Player package --
-# only appliance.yml does that (see docs/module-appliance-ci.md and the
-# `tests/test_service_workflows.py` invariant that enforces it). It calls
-# appliance.yml as a reusable workflow (its `workflow_call` trigger, guarded
-# by its own `release-artifacts` job) to rebuild the exact same
-# already-qualified definition/revision's base image and `.deb`, then
-# downloads that job's raw build output and packages it here. It assumes the
-# tagged commit already passed appliance.yml's push/PR boot qualification on
-# its way to `main`; it does not repeat that VM boot gate.
+# This workflow does not itself build the base OS or the packages -- it calls
+# base-image.yml as a reusable workflow (its `workflow_call` trigger) to build
+# the netboot base bundle and both `.deb`s for the exact tagged revision, then
+# downloads those revision-named artifacts and packages them here into the flat
+# operator asset set.
 
 on:
   push:
@@ -58,13 +54,10 @@ jobs:
           persist-credentials: false
 
       # workflow_dispatch's ambient github.sha is whatever ref was selected in
-      # the "Run workflow" UI, which need not match the typed `tag` input --
-      # and appliance.yml's shared select-definition job (reused below) reads
-      # that ambient context, not our input. Resolving and threading the exact
-      # commit through as an explicit `revision` input keeps this correct
-      # regardless of that selector; a mismatch there still fails closed (the
-      # OS-base bundle's definition_id is independently re-verified against
-      # this exact checked-out revision -- see scripts/os_base.py::verify).
+      # the "Run workflow" UI, which need not match the typed `tag` input.
+      # Resolving the tag's exact commit here and threading it to base-image.yml
+      # as an explicit `revision` input keeps the built assets bound to the tag
+      # regardless of that selector.
       - name: Resolve the tag's exact commit
         id: resolve
         run: |
@@ -75,8 +68,7 @@ jobs:
     needs: resolve
     permissions:
       contents: read
-      packages: read
-    uses: ./.github/workflows/appliance.yml
+    uses: ./.github/workflows/base-image.yml
     with:
       revision: ${{ needs.resolve.outputs.revision }}
 
@@ -95,23 +87,41 @@ jobs:
           ref: refs/tags/${{ needs.resolve.outputs.tag }}
           persist-credentials: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - name: Download the netboot base bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ needs.build.outputs.artifact_name }}
-          path: ${{ runner.temp }}/photo-wall-release
+          name: photo-wall-base-bundle-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bundle
+
+      - name: Download the Player .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-player-deb-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/player-deb
+
+      - name: Download the bootstrapper .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-bootstrapper-deb-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bootstrapper-deb
 
       - name: Package operator-consumable release artifacts
         run: |
           release_root="$RUNNER_TEMP/photo-wall-release"
-          player_deb=$(python3 -c '
+          find_one_deb() {
+            python3 -c '
           import glob, sys
           matches = glob.glob(sys.argv[1] + "/*.deb")
           assert len(matches) == 1, matches
           print(matches[0])
-          ' "$release_root/deb")
+          ' "$1"
+          }
+          player_deb=$(find_one_deb "$release_root/player-deb")
+          bootstrapper_deb=$(find_one_deb "$release_root/bootstrapper-deb")
           python3 -m scripts.package_release_artifacts \
-            --base-image "$release_root/base" \
+            --base-bundle "$release_root/bundle" \
             --player-deb "$player_deb" \
+            --bootstrapper-deb "$bootstrapper_deb" \
             --destination "$release_root/artifacts" \
             --revision "$REVISION"
 
