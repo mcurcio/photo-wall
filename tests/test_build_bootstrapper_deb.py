@@ -9,6 +9,7 @@ repository (this checkout) and, for the gated Tier 2 tests, `dpkg-deb`.
 """
 
 import os
+import re
 import subprocess
 import sys
 
@@ -28,7 +29,9 @@ def _head_revision() -> str:
 
 
 HEAD = _head_revision()
-VERSION = "0.1.0+g" + "a" * 40
+# A sample version in the new content-derived shape ({pyproject version}+{12
+# hex}); the control-file tests only need a valid version string to round-trip.
+VERSION = "0.1.0+0123456789ab"
 
 
 # --- control-file generation (reused from scripts.build_player_deb) --------
@@ -70,18 +73,47 @@ def test_deb_depends_names_are_valid_debian_package_names():
         assert __import__("re").fullmatch(r"[a-z0-9][a-z0-9+.-]*", name)
 
 
-# --- version derivation ------------------------------------------------------
+# --- version derivation (content-derived, NOT the git revision) --------------
 
 
-def test_package_version_matches_the_pyproject_plus_revision_scheme():
-    sources = {"pyproject.toml": b'[project]\nversion = "0.1.0"\n'}
-    assert deb.package_version(sources, "a" * 40) == "0.1.0+g" + "a" * 40
+def _real_sources_and_unit():
+    sources = deb.fetch_sources(REPO, HEAD)
+    unit = (REPO / "appliance/systemd" / deb.UNIT_NAME).read_bytes()
+    return sources, unit
+
+
+def test_package_version_is_content_derived_and_revision_independent():
+    """`{pyproject version}+{12 hex}` over the packaged closure -- carries NO
+    git revision, so a commit that leaves the bootstrapper's packaged inputs
+    untouched yields an identical .deb version (keeping the base squashfs that
+    bakes it byte-stable, so its content-addressed cache is not busted)."""
+    sources, unit = _real_sources_and_unit()
+    version = deb.package_version(sources, unit)
+    assert re.fullmatch(r"0\.1\.0\+[0-9a-f]{12}", version)
+    # The git revision does NOT appear in the version.
+    assert HEAD not in version
+    # Deterministic: identical content -> identical version.
+    assert deb.package_version(dict(sources), bytes(unit)) == version
+
+
+def test_package_version_changes_when_a_packaged_input_changes():
+    """The hash covers each packaged file's bytes AND the unit, so touching
+    any of them (or the unit) changes the version -- the cache busts only when
+    a real input to this .deb changes."""
+    sources, unit = _real_sources_and_unit()
+    version = deb.package_version(sources, unit)
+    mutated = dict(sources)
+    mutated["player/discovery.py"] = sources["player/discovery.py"] + b"\n# x\n"
+    assert deb.package_version(mutated, unit) != version
+    assert deb.package_version(sources, unit + b"\n# x\n") != version
 
 
 def test_package_version_rejects_a_local_version_segment():
     sources = {"pyproject.toml": b'[project]\nversion = "0.1.0+local"\n'}
+    # The local-segment check fires before the content hash touches the module
+    # files, so an otherwise-empty sources dict and empty unit suffice.
     with pytest.raises(BuildError, match="unsupported project version"):
-        deb.package_version(sources, "a" * 40)
+        deb.package_version(sources, b"")
 
 
 # --- source fetch (real git archive of THIS checkout, any host) ------------
@@ -107,19 +139,18 @@ def test_fetch_sources_returns_exactly_the_fixed_module_closure_plus_pyproject()
     assert not any(name.startswith("contracts/") for name in sources)
 
 
-def test_package_version_from_the_real_head_revision_is_well_formed():
-    sources = deb.fetch_sources(REPO, HEAD)
-    version = deb.package_version(sources, HEAD)
-    assert version == f"0.1.0+g{HEAD}"
+def test_package_version_from_the_real_head_closure_is_well_formed():
+    sources, unit = _real_sources_and_unit()
+    version = deb.package_version(sources, unit)
+    assert re.fullmatch(r"0\.1\.0\+[0-9a-f]{12}", version)
 
 
 # --- staging layout ----------------------------------------------------------
 
 
 def _staged(tmp_path):
-    sources = deb.fetch_sources(REPO, HEAD)
-    version = deb.package_version(sources, HEAD)
-    unit = (REPO / "appliance/systemd" / deb.UNIT_NAME).read_bytes()
+    sources, unit = _real_sources_and_unit()
+    version = deb.package_version(sources, unit)
     deb_root = tmp_path / "deb-root"
     deb.stage_tree(deb_root, sources=sources, unit=unit, version=version)
     return deb_root
@@ -162,8 +193,8 @@ def test_stage_tree_carries_no_deployment_config(tmp_path):
 
 def test_stage_tree_control_file_matches_control_file_output(tmp_path):
     deb_root = _staged(tmp_path)
-    sources = deb.fetch_sources(REPO, HEAD)
-    version = deb.package_version(sources, HEAD)
+    sources, unit = _real_sources_and_unit()
+    version = deb.package_version(sources, unit)
     control = (deb_root / "DEBIAN/control").read_bytes()
     assert control == deb.control_file(
         version, deb.DEB_DEPENDS, package=deb.PACKAGE, architecture=deb.ARCHITECTURE,

@@ -36,6 +36,17 @@ on:
 permissions:
   contents: read
 
+# Human-bumpable cache epoch. The two expensive base-OS stages (the
+# rpi-image-gen squashfs and the scratch kernel+initrd) are content-addressed
+# and cached below, keyed by a hash of each stage's TRUE input closure. That
+# closure cannot capture inputs pulled UNPINNED at build time -- notably the
+# scratch kernel stage installs linux-image-rpi-2712 + raspi-firmware from
+# archive.raspberrypi.com and Debian trixie with no snapshot pin. Bump this
+# integer to force BOTH caches to miss and fully rebuild (e.g. to pick up a
+# newer upstream Pi kernel/firmware). It is part of BOTH cache keys.
+env:
+  BASE_CACHE_EPOCH: "1"
+
 concurrency:
   group: base-image-${{ inputs.revision || github.ref }}
   cancel-in-progress: true
@@ -74,6 +85,13 @@ jobs:
 
       - name: Build the photo-wall-bootstrapper .deb
         id: bootstrapper-deb
+        env:
+          # Make the .deb bytes reproducible: dpkg-deb (>= 1.18.11, well below
+          # trixie's) clamps its members' mtimes to SOURCE_DATE_EPOCH instead of
+          # embedding build-time mtimes. Same fixed instant the squashfs build
+          # below pins, so the two agree. run_dpkg_deb inherits this env (its
+          # subprocess.run sets no env=), so no build-script change is needed.
+          SOURCE_DATE_EPOCH: '1788480000' # 2026-09-04T00:00:00Z
         run: |
           set -eu
           install -d -m 0755 "$RUNNER_TEMP/photo-wall-bootstrapper-deb"
@@ -118,6 +136,18 @@ jobs:
             sh -ec 'apt-get update >/dev/null && \
               apt-get install -y --simulate "/pkgs/$(basename "'"$PLAYER_DEB"'")"'
 
+      # Host tools used by the UNGATED content-verify + bundle-assembly steps
+      # (squashfs `unsquashfs`, initrd `lsinitramfs`). Installed here, out of
+      # the two expensive build steps, so those verifications still run on a
+      # CACHE HIT (when the build steps that used to install these are skipped).
+      # Idempotent: the build steps below still install their own build-time
+      # tooling on a miss.
+      - name: Install host tools for content verification (unsquashfs, lsinitramfs)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools initramfs-tools
+
       # Pinned by exact commit, not just the tag, for reproducibility --
       # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
       # the time this spike was authored.
@@ -149,7 +179,32 @@ jobs:
       # not `date +%s` at run time (contrast rpi-image-gen's own CI, which
       # uses `date -d 'today 00:00:00'` -- that pins to the day, not a
       # specific stable revision).
+      # Cache A: the rpi-image-gen squashfs build (~20 min) is content-addressed
+      # on its TRUE input closure -- the rpi-image-gen config, the bootstrapper
+      # .deb's packaged closure + its build script (the .deb is BAKED into the
+      # squashfs), the pyproject version, and this workflow. Deliberately EXACT
+      # match only (no restore-keys): a prefix-fallback could restore a stale
+      # base built from different inputs -- exactly the poisoning risk. The
+      # player APP source (player/service.py, cache.py, ...) is NOT in this
+      # closure because it is NOT baked into the base (it ships as the player
+      # .deb, served by reference), so a player-only change HITS this cache.
+      # The three player files that ARE listed (player/__init__.py,
+      # mdns_discovery.py, discovery.py) belong to the BOOTSTRAPPER's packaged
+      # closure and are legitimately baked in; build_player_deb.py/build_player.py
+      # are imported by build_bootstrapper_deb.py, so they can change the .deb's
+      # bytes and are (conservatively) included -- a change there rebuilds
+      # rather than risking a stale hit.
+      - name: Cache the rpi-image-gen base squashfs
+        id: cache-squashfs
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
+            ${{ runner.temp }}/photo-wall-base-work/deploy-*
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'appliance/__init__.py', 'appliance/provision.py', 'appliance/systemd/photo-wall-provision.service', 'player/__init__.py', 'player/mdns_discovery.py', 'player/discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}
+
       - name: Build the minimal base OS rootfs and squashfs image
+        if: steps.cache-squashfs.outputs.cache-hit != 'true'
         env:
           SOURCE_DATE_EPOCH: '1788480000' # 2026-09-04T00:00:00Z
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
@@ -161,6 +216,24 @@ jobs:
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB"
+
+      # rpi-image-gen's genimage/deploy output can be root-owned and not
+      # world-readable, so the unprivileged actions/cache post-job SAVE for
+      # Cache A above could fail or silently drop files, leaving the cache
+      # unpopulated and no-op'ing the whole optimization. Make exactly Cache A's
+      # cached paths world-readable (dirs traversable) after a fresh build so
+      # the save can read them -- mirrors the $KOUT chmod the kernel step does
+      # for Cache B. Gated on the SAME cache-miss as the build: on a cache hit
+      # the build is skipped and there is nothing to re-permission.
+      - name: Make the base squashfs cache paths readable for the cache save
+        if: steps.cache-squashfs.outputs.cache-hit != 'true'
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -eux
+          sudo chmod -R a+rX \
+            "$WORKROOT/image-photo-wall-base" \
+            "$WORKROOT"/deploy-*
 
       # Proves the squashfs is CORRECT, not merely that rpi-image-gen exited
       # 0 -- see docs/decisions/0009-minimal-base-and-app-package.md, "Base
@@ -335,11 +408,32 @@ jobs:
       # the RAM-root squashfs. The runner is arm64, so this chroot needs no
       # qemu. Diagnostics are captured to files uploaded on failure (OWNER
       # STANDING RULE: root-cause, do not guess).
+      # Cache B: the scratch kernel + initrd build (~several min) is
+      # content-addressed on its TRUE input closure -- the initramfs hooks/
+      # scripts, the netboot init module closure (appliance + contracts files
+      # STAGED into the initrd, including appliance/__init__.py, which the build
+      # stages but the earlier `pull_request: paths` list omitted), the
+      # assembler + verifier, and this workflow. NOT keyed on player/ or the
+      # rpi-image-gen config -- neither affects the kernel/initrd. EXACT match
+      # only (no restore-keys): a stale-base prefix-fallback is the poisoning
+      # risk. The kernel/firmware themselves are pulled UNPINNED at build time
+      # and are NOT in any file the key can hash -- bump BASE_CACHE_EPOCH to
+      # force them to refresh. Only the fixed-layout output dir ($KOUT below) is
+      # cached, never the full root-owned scratch rootfs ($SCRATCH).
+      - name: Cache the scratch kernel + initrd + DTBs
+        id: cache-kernel
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/netboot-kernel-out
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'appliance/netboot_init.py', 'appliance/bootstrap.py', 'appliance/provision.py', 'appliance/__init__.py', 'contracts/__init__.py', 'contracts/release.py', 'contracts/equipment.py', 'scripts/build_netboot_bundle.sh', 'scripts/verify_netboot_initrd.py', '.github/workflows/base-image.yml') }}
+
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         env:
           SCRATCH: ${{ runner.temp }}/netboot-scratch
           DIAG: ${{ runner.temp }}/netboot-diag
+          KOUT: ${{ runner.temp }}/netboot-kernel-out
         run: |
           set -eu
           set -x
@@ -479,31 +573,51 @@ jobs:
           # staged artifacts readable to the unprivileged assembler step.
           sudo chmod -R a+rX "$SCRATCH/boot"
 
+          # Copy the located artifacts into a FIXED-LAYOUT output dir ($KOUT)
+          # with deterministic names. This dir -- NOT the huge root-owned
+          # scratch rootfs -- is what Cache B stores, and it is what the
+          # (ungated) assembly step consumes, so assembly works identically
+          # whether this step built the artifacts or Cache B restored them.
+          # The assembler renames --kernel/--dtb to the frozen bundle names,
+          # so the source names here are arbitrary.
+          sudo rm -rf "$KOUT"
+          sudo install -d -m 0755 "$KOUT" "$KOUT/overlays"
+          sudo cp "$kernel_img" "$KOUT/kernel"
+          sudo cp "$SCRATCH/boot/initrd.img" "$KOUT/initrd.img"
+          sudo cp "$dtb" "$KOUT/dtb"
+          if [ -n "$overlays_dir" ]; then
+            sudo cp "$overlays_dir"/*.dtbo "$KOUT/overlays/" 2>/dev/null || true
+          fi
+          # World-readable (and dirs traversable) so the unprivileged cache-save
+          # and assembly steps can read the root-owned copies.
+          sudo chmod -R a+rX "$KOUT"
+
+      # Consumes the FIXED-LAYOUT $KOUT (freshly built OR Cache B-restored) and
+      # the squashfs (freshly built OR Cache A-restored), so it is NOT gated by
+      # either cache-hit -- the initrd content-verify (verify_netboot_initrd.py,
+      # run inside the assembler via lsinitramfs installed above) therefore runs
+      # even on a cache hit, catching a corrupt/wrong restored artifact.
       - name: Assemble the netboot base bundle and content-verify the initrd
         env:
-          SCRATCH: ${{ runner.temp }}/netboot-scratch
+          KOUT: ${{ runner.temp }}/netboot-kernel-out
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
           BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
-          KERNEL_IMG: ${{ steps.scratch-root.outputs.kernel_img }}
-          INITRD: ${{ steps.scratch-root.outputs.initrd }}
-          DTB: ${{ steps.scratch-root.outputs.dtb }}
-          OVERLAYS_DIR: ${{ steps.scratch-root.outputs.overlays_dir }}
         run: |
           set -eu
           set -x
           squashfs="$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs"
           rm -rf "$BUNDLE"
           overlay_arg=""
-          if [ -n "$OVERLAYS_DIR" ]; then
-            overlay_arg="--overlays-dir $OVERLAYS_DIR"
+          if ls "$KOUT"/overlays/*.dtbo >/dev/null 2>&1; then
+            overlay_arg="--overlays-dir $KOUT/overlays"
           fi
           # The assembly script runs verify_netboot_initrd.py against the initrd
           # via lsinitramfs (installed on the host above) -- content-verify #2.
           # shellcheck disable=SC2086
           sh "$GITHUB_WORKSPACE/scripts/build_netboot_bundle.sh" \
-            --kernel "$KERNEL_IMG" \
-            --initrd "$INITRD" \
-            --dtb "$DTB" \
+            --kernel "$KOUT/kernel" \
+            --initrd "$KOUT/initrd.img" \
+            --dtb "$KOUT/dtb" \
             $overlay_arg \
             --squashfs "$squashfs" \
             --output "$BUNDLE" \
