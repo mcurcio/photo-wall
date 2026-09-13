@@ -1,14 +1,15 @@
-name: rpi-image-gen base OS spike
+name: rpi-image-gen base OS build
 
-# 0009 Phase 4 SPIKE (see docs/decisions/0009-minimal-base-and-app-package.md,
-# "base-OS" + "Bootstrapper" sections): proves out raspberrypi/rpi-image-gen
-# as a candidate builder for the minimal netboot base OS squashfs. Standalone
-# -- deliberately NOT wired into appliance.yml/release.yml or the boot chain.
-# Does not retire or replace anything the existing appliance pipeline builds.
+# 0009 Phase 4 (see docs/decisions/0009-minimal-base-and-app-package.md,
+# "base-OS" + "Bootstrapper" sections): builds the minimal netboot base OS
+# squashfs with raspberrypi/rpi-image-gen, plus the Player and bootstrapper
+# `.deb`s and the assembled netboot base bundle. The old custom-image /
+# signed-disk pipeline (appliance.yml) was retired in p4-retire s5; this is now
+# the sole base-OS + package build, reused by release.yml via `workflow_call`.
 #
-# Scoped to workflow_dispatch (manual iteration on this spike) and
-# pull_request touching the rpi-image-gen config or this workflow file, so it
-# never runs on every push to main.
+# Scoped to workflow_dispatch (manual iteration), pull_request touching the
+# rpi-image-gen config or this workflow file (so it never runs on every push to
+# main), and workflow_call (release.yml, for an exact tagged revision).
 on:
   workflow_dispatch:
   pull_request:
@@ -20,21 +21,39 @@ on:
       - scripts/verify_netboot_initrd.py
       - scripts/build_player_deb.py
       - .github/workflows/base-image.yml
+  # Reused by release.yml to build the release assets (the netboot base bundle
+  # + the Player and bootstrapper .debs) for an exact tagged revision. Every
+  # artifact is named by that revision so release.yml can consume it by name.
+  # Nothing here is signed (home LAN, no threat model), so this call takes no
+  # signing secret.
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact 40-character commit to build release assets for
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: base-image-${{ github.ref }}
+  group: base-image-${{ inputs.revision || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-base-image:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
+    env:
+      # The exact commit these assets are built for: the caller's `revision`
+      # when reused by release.yml, else the triggering commit. Threads through
+      # the .deb builds and every artifact name so a release consumes the
+      # bytes built for its tag, not whatever ref the reusable call resolved.
+      REVISION: ${{ inputs.revision || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
 
       # ALL our own code ships to the base build as a portable `.deb`, never
@@ -62,7 +81,7 @@ jobs:
           # all of it, then take only the last line (the path) for the output —
           # a multiline value would corrupt $GITHUB_OUTPUT.
           build_out=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
-            --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
             --output-dir "$RUNNER_TEMP/photo-wall-bootstrapper-deb")
           printf '%s\n' "$build_out"
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
@@ -78,7 +97,7 @@ jobs:
           set -eu
           install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-deb"
           build_out=$(.venv/bin/python -m scripts.build_player_deb \
-            --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
             --output-dir "$RUNNER_TEMP/photo-wall-player-deb")
           printf '%s\n' "$build_out"
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
@@ -553,7 +572,7 @@ jobs:
       - name: Upload the base rootfs squashfs and manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-base-image-${{ github.sha }}
+          name: photo-wall-base-image-${{ env.REVISION }}
           path: |
             ${{ runner.temp }}/photo-wall-base-work/deploy-*/
             ${{ runner.temp }}/photo-wall-base-work/image-*/image.json
@@ -562,12 +581,32 @@ jobs:
           retention-days: 7
 
       # The whole netboot bundle as ONE artifact (0008 boot-chain: kernel +
-      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS).
+      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS). release.yml consumes this
+      # by name (photo-wall-base-bundle-<revision>).
       - name: Upload the netboot base bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-base-bundle-${{ github.sha }}
+          name: photo-wall-base-bundle-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-base-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+      # The two .debs built above, each as its own revision-named artifact so
+      # release.yml can publish them as standalone release assets alongside the
+      # base bundle.
+      - name: Upload the Player .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-player-deb-${{ env.REVISION }}
+          path: ${{ steps.player-deb.outputs.deb_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the bootstrapper .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-bootstrapper-deb-${{ env.REVISION }}
+          path: ${{ steps.bootstrapper-deb.outputs.deb_path }}
           if-no-files-found: error
           retention-days: 7
 
@@ -578,7 +617,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-netboot-diag-${{ github.sha }}
+          name: photo-wall-netboot-diag-${{ env.REVISION }}
           path: ${{ runner.temp }}/netboot-diag/
           if-no-files-found: warn
           retention-days: 7
