@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -15,6 +16,8 @@ from typing import Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
+from central.app_release_queue import APP_RELEASE_QUEUE
+from central.app_release_service import AppReleaseService
 from central.catalog import CatalogSnapshot
 from central.db import Database
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
@@ -23,6 +26,7 @@ from central.media_store import MediaStore
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
+from media.app_release_tasks import register_app_release_tasks
 from media.immich import ImmichClient
 from media.models import (
     ConnectionConfig,
@@ -36,6 +40,24 @@ from media.models import (
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
 from media.task_queue import MediaTaskFailed, RetryableMediaTask, create_worker_app
+
+logger = logging.getLogger("photo_wall.worker")
+
+
+def worker_queues(release_enabled: bool) -> list[str]:
+    """The queues this worker consumes, given whether release sourcing is on.
+
+    MEDIA_QUEUE is always consumed. A task deferred onto a queue absent here is
+    never dispatched, so gating APP_RELEASE_QUEUE on `release_enabled` is exactly
+    what keeps an unconfigured worker (PHOTO_WALL_APP_ROOT unset) from ever
+    polling GitHub (0010 bead-3 opt-in wiring; the wiring test mutation-probes
+    both the presence when enabled and the absence when disabled).
+    """
+    queues = [MEDIA_QUEUE]
+    if release_enabled:
+        queues.append(APP_RELEASE_QUEUE)
+    return queues
+
 
 _FILE_LIMIT = 1024**2
 _PERMANENT = frozenset({
@@ -327,12 +349,25 @@ async def _entry():
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
     clock = SystemClock()
+    db = Database(dsn)
     queue = ProcrastinateMediaQueue(dsn)
-    repository = MediaRepository(Database(dsn), clock, queue=queue)
+    repository = MediaRepository(db, clock, queue=queue)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
+    # Release sourcing (0010) is OPT-IN: enabled only when PHOTO_WALL_APP_ROOT is
+    # set (the shared storage the mirror lands bytes into, read by the serving
+    # route). from_env returns None when unset, so an unconfigured worker
+    # (compose, software-e2e) starts unchanged -- no service, no tasks, no queue,
+    # no GitHub polling. When present it shares the media worker's DB pool.
+    release_service = AppReleaseService.from_env(db, clock)
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
+    additional_context = {"media_worker": worker}
+    if release_service is not None:
+        register_app_release_tasks(app)
+        additional_context["app_release_service"] = release_service
+    else:
+        logger.info("release sourcing disabled: PHOTO_WALL_APP_ROOT unset")
     try:
         with worker.store.worker_lock():
             await worker._register_recipe()
@@ -340,9 +375,9 @@ async def _entry():
             await worker.refresh_once()
             async with app.open_async():
                 await app.run_worker_async(
-                    queues=[MEDIA_QUEUE],
+                    queues=worker_queues(release_service is not None),
                     concurrency=4,
-                    additional_context={"media_worker": worker},
+                    additional_context=additional_context,
                 )
     finally:
         await worker._close_clients()
