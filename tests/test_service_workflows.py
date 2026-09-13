@@ -15,7 +15,7 @@ def test_every_hosted_media_build_supplies_the_retained_base():
                 consumers.append(workflow.name)
                 assert 'build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}' in step
                 assert 'uses: ./.github/workflows/service-base.yml' in text
-    assert sorted(consumers) == ['appliance.yml', 'checks.yml', 'checks.yml', 'software-e2e.yml']
+    assert sorted(consumers) == ['checks.yml', 'checks.yml', 'software-e2e.yml']
 
 
 def test_shared_producer_queues_all_callers_and_requires_published_output():
@@ -27,8 +27,7 @@ def test_shared_producer_queues_all_callers_and_requires_published_output():
     assert '--compare "$COMPARE_REVISION"' in producer
     assert 'github.event.pull_request.head.repo.full_name == github.repository' in producer
     assert 'if [[ "$CAN_PUBLISH" == "true" ]]; then args+=(--publish); fi' in producer
-    for name, architecture in [('checks.yml', 'amd64'), ('software-e2e.yml', 'arm64'),
-                               ('appliance.yml', 'arm64')]:
+    for name, architecture in [('checks.yml', 'amd64'), ('software-e2e.yml', 'arm64')]:
         text = (WORKFLOWS / name).read_text()
         # The jobs have a shared owner, independent of the workflow or PR ref.
         assert f'architecture: {architecture}' in text
@@ -47,17 +46,17 @@ def test_existing_required_jobs_fail_if_shared_preparation_fails():
             assert 'test -n "$MEDIA_BASE_IMAGE"' in body
 
 
-def test_only_appliance_workflow_assembles_pi_os_and_smoke_skips_media():
+def test_no_workflow_references_the_retired_ci_os_image_pipeline():
+    """The old custom-image / signed-disk CI pipeline (scripts.os_base,
+    scripts.build_ci_image, scripts.ci_images and the appliance.yml that drove
+    them) is fully retired in p4-retire s5. No surviving workflow may reference
+    any of its modules."""
     for workflow in WORKFLOWS.glob('*.yml'):
-        if workflow.name != 'appliance.yml':
-            text = workflow.read_text()
-            assert 'scripts.os_base' not in text
-            assert 'scripts.build_ci_image' not in text
-            assert 'scripts.ci_images builder' not in text
-    appliance = (WORKFLOWS / 'appliance.yml').read_text()
-    assert "inputs.scope == 'full'" in appliance
-    assert 'needs: [select-definition, service-base]' in appliance
-    assert 'if [[ "$APPLIANCE_SCOPE" == full ]]; then test "$MEDIA_SELECTION" = success; fi' in appliance
+        text = workflow.read_text()
+        assert 'scripts.os_base' not in text
+        assert 'scripts.build_ci_image' not in text
+        assert 'scripts.ci_images' not in text
+    assert not (WORKFLOWS / 'appliance.yml').exists()
 
 
 def test_browser_dependencies_are_published_and_match_locked_playwright():

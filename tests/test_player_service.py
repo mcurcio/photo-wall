@@ -8,6 +8,8 @@ import inspect
 import json
 import math
 import stat
+import subprocess
+import sys
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -20,7 +22,6 @@ from test_executor import binding, layer
 
 from contracts.enrollment import Enrollment, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
-from contracts.release import BootRequest
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.output_discovery import (
@@ -70,6 +71,33 @@ def boot_context() -> BootContext:
         "persistence": "volatile",
         "fault": None,
     })
+
+
+def d0_boot_context() -> BootContext:
+    """m3-central-d0-enroll / 0009 re-key: flashed/ticketless
+    (persistence="persistent", ticket_id=None). `hardware_boot_context`
+    (player/service.py) has no netboot-ticket source and honestly reports
+    `ticket_id=None`; enroll() derives the ticketless signal from the
+    presence of a ticket, not from `persistence`."""
+    return boot_context().model_copy(update={"persistence": "persistent", "ticket_id": None})
+
+
+def test_importing_service_never_pulls_in_zeroconf():
+    """The appliance chroot smoke-test does `import player.service,gi,OpenGL`
+    in a netboot venv that has no zeroconf -- 0008 D1 players use an explicit
+    `central_origin` and never need mDNS discovery. `MdnsCentralDiscovery` (and
+    its `zeroconf` dependency) must therefore be imported lazily, only on the
+    discovery branch in main(), never at `player.service` module import time.
+
+    Run in a subprocess (not just `sys.modules` in-process) so this doesn't
+    depend on whichever test happened to import zeroconf first in this
+    session, and so it doesn't poison `sys.modules` for later tests."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import player.service, sys; "
+            "assert 'zeroconf' not in sys.modules, sys.modules.keys()"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_identity_is_fresh_signed_and_never_written(tmp_path):
@@ -258,6 +286,306 @@ async def close(service):
     service._worker.shutdown(wait=True, cancel_futures=True)
 
 
+class FakeDiscovery:
+    def __init__(self, origin):
+        self.origin = origin
+        self.calls = 0
+
+    async def discover(self):
+        self.calls += 1
+        return self.origin
+
+
+async def discovery_rig(tmp_path, *, central_origin, discovery):
+    clock = ManualClock(100)
+    server = Server(clock)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+    config = PlayerConfig(central_origin=central_origin, allow_http=central_origin is not None)
+    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+        clock=clock, client=client, time_client=client, websocket_connect=False,
+        health_path=None, boot_context=boot_context(), discovery=discovery)
+    return service, server
+
+
+def test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://rogue")
+        service, server = await discovery_rig(tmp_path, central_origin="http://central",
+                                              discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            assert discovery.calls == 0
+            await service.enroll()
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
+    """The player derives the ticketless signal from `boot_context.ticket_id
+    is None`, not `persistence` -- `hardware_boot_context` (player/service.py)
+    now honestly reports `ticket_id=None` rather than a synthesized
+    placeholder, and enroll() never has to translate `persistence` into a
+    ticketless flag."""
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=False,
+            health_path=None, boot_context=d0_boot_context())
+        try:
+            await service.enroll()
+            assert server.proofs[-1].ticket_id is None
+            assert server.proofs[-1].device_id == d0_boot_context().device_id
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_volatile_boot_context_enrolls_with_its_real_ticket_id_unchanged(tmp_path):
+    """Netboot (persistence="volatile", a real ticket_id) is byte-unchanged:
+    the real ticket_id still reaches central, exactly as before this bead."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            assert server.proofs[-1].ticket_id == boot_context().ticket_id
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_volatile_persistence_with_no_ticket_still_enrolls_ticketless(tmp_path):
+    """0009 re-key proof: `persistence` no longer gates enroll at all. A
+    boot context that is `persistence="volatile"` (the netboot label) but
+    carries `ticket_id=None` (0009's diskless bootstrapper issues no ticket)
+    must still enroll ticketless and start `release_accepted=True` -- keying
+    on `persistence` instead of the ticket would send this boot context's
+    real-looking `persistence="volatile"` down the ticketed branch and 404."""
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+        diskless = boot_context().model_copy(update={"ticket_id": None})
+        assert diskless.persistence == "volatile"
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=False,
+            health_path=None, boot_context=diskless)
+        try:
+            await service.enroll()
+            assert server.proofs[-1].ticket_id is None
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_loop(
+        tmp_path, monkeypatch):
+    """m3-central-d0-enroll FIX: a D0/flashed player has no central-issued boot
+    ticket to report against -- `boot_context.ticket_id is None`
+    (hardware_boot_context) means `_control_loop` must never call
+    `_report_boot_health` for it at all (0009 re-key); calling it anyway
+    would 403 `stale_boot_ticket` and, uncaught, tear down every sibling task
+    via run()'s FIRST_COMPLETED wait, restarting forever (never
+    rendering/downloading/opening a websocket). Drive the actual control loop
+    through run() and assert the session SURVIVES: the boot-health endpoint
+    is never called, the websocket loop connects exactly once (never torn
+    down and reconnected by a crash restart), and the media loop reaches and
+    completes a real download."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    async def check():
+        directory = tmp_path / "cache"
+        directory.mkdir(mode=0o700)
+        clock = ManualClock(100)
+        server = Server(clock)
+        boot_health_calls, media_calls, connect_calls = [], [], []
+
+        def handle(request):
+            if request.url.path == "/v1/player/boot-health":
+                boot_health_calls.append(request)
+                # Central never recorded the D0 placeholder ticket: a real
+                # central would 403 any boot-health call from a D0 player.
+                return httpx.Response(403, json={"error": "stale_boot_ticket"})
+            if request.url.path.startswith("/v1/media/"):
+                media_calls.append(request)
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            return result
+
+        config = PlayerConfig(central_origin="http://central", allow_http=True,
+                              cache_dir=str(directory), cache_bytes=1024**2)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False)
+
+        class Socket:
+            async def __aenter__(self):
+                connect_calls.append(True)
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                # A real session websocket stays open with no message due;
+                # only cancellation (test teardown) ever unblocks this.
+                await asyncio.Event().wait()
+
+        def connect(uri, **options):
+            return Socket()
+
+        service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
+            clock=clock, client=client, time_client=client, websocket_connect=connect,
+            health_path=None, boot_context=d0_boot_context())
+        task = asyncio.create_task(service.run())
+        try:
+            async def connected():
+                while not connect_calls:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(connected(), 3)
+
+            async def downloaded():
+                while not media_calls:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(downloaded(), 3)
+
+            # Give the control loop several more 0.5s cadences to prove it
+            # keeps running rather than looping the 403 into a task teardown
+            # and restart (m3-central-d0-enroll's crash-loop).
+            await asyncio.sleep(.2)
+            assert service.registration is not None
+            assert not boot_health_calls
+            assert connect_calls == [True]
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 3)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_absent_origin_resolves_and_enrolls_against_discovered_origin(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://central")
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            assert discovery.calls == 1
+            await service.enroll()
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_absent_origin_with_no_discovery_result_fails_clearly_then_explicit_config_recovers(tmp_path):
+    async def check():
+        discovery = FakeDiscovery(None)
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            with pytest.raises(ServiceError, match="central_origin_unavailable"):
+                await service.resolve_origin()
+            assert service.registration is None
+            service.config = PlayerConfig(central_origin="http://central", allow_http=True)
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+            await service.enroll()
+            assert service.registration is not None
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    class LateDiscovery(FakeDiscovery):
+        """Fails discovery once, then returns an origin on a later cycle."""
+
+        async def discover(self):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            return self.origin
+
+    async def check():
+        discovery = LateDiscovery("http://central")
+        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        # Offer a real plan the instant the late-discovered enroll completes
+        # (mirrors the `server.offer()`-on-register idiom already used above
+        # at line ~392 and ~1128). Without this, poll_state() has nothing to
+        # serve, so run()'s per-iteration task list stays empty every cycle
+        # (poll_state() faults before the control/media/time/observation
+        # tasks are ever created) and the retry loop spins at
+        # BACKOFF[0]==.001s -- racing service.stop()'s scheduled
+        # `self._task.cancel()` against the loop's own cooperative
+        # `_stop.is_set()` recheck. When the loop's own recheck wins, run()
+        # exits its `while` normally (no CancelledError, so run()'s
+        # `except asyncio.CancelledError: pass` never engages) and proceeds
+        # into the *unguarded* shutdown `finally:` -- and the still-pending,
+        # already-scheduled `task.cancel()` can then land on the
+        # `run_in_executor(self._worker, self.cache.close)` await there,
+        # propagating an uncaught CancelledError out of the task. That is
+        # exactly what CI saw at `await asyncio.wait_for(task, 10)`, after
+        # faults `central_origin_unavailable` then `connection_failed` (the
+        # server had no state to hand back). Reaching the real, long-lived
+        # `asyncio.wait(tasks, FIRST_COMPLETED)` steady state -- the same
+        # single stable cancellation point every other run()-driven test in
+        # this file relies on -- removes the race instead of tolerating it.
+        steady = asyncio.Event()
+
+        def handle(request):
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            if request.url.path == "/v1/player/readiness":
+                # Only sent from `_control_loop`, i.e. only once run() has
+                # created the steady-state tasks and is blocked on them.
+                steady.set()
+            return result
+        await service.client.aclose()
+        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.time_client = service.client
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(steady.wait(), 10)
+            assert discovery.calls >= 2
+            assert service.registration is not None
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_discovered_http_origin_is_trusted_baseline_but_explicit_http_still_needs_allow_http(tmp_path):
+    async def check():
+        discovery = FakeDiscovery("http://central")
+        service, _ = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        try:
+            resolved = await service.resolve_origin()
+            assert resolved == "http://central"
+        finally:
+            await close(service)
+    asyncio.run(check())
+    with pytest.raises(ValidationError):
+        PlayerConfig(central_origin="http://central")
+
+
 def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
@@ -332,38 +660,15 @@ def test_same_key_reenrollment_rotates_authority_and_rejects_old_jobs(tmp_path):
         try:
             service._feedback()
             old_job, old_state = service._jobs[0], server.state
-            service.release_accepted = True
             await service.enroll()
             server.offer()
             await service.poll_state()
             assert server.proofs[0].public_key == server.proofs[1].public_key
             assert service.registration.authority_epoch == 2
-            assert service.release_accepted is False
             assert not service._authorized(old_job)
             with pytest.raises(ServiceError, match="state_authority"):
                 service._apply_state(old_state)
         finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_boot_health_ack_must_match_boot_release(tmp_path):
-    async def check():
-        service, server = await rig(tmp_path)
-        old_client = service.client
-
-        def wrong_release(request):
-            if request.url.path == "/v1/player/boot-health":
-                return httpx.Response(200, json={"accepted": True, "release_id": "d" * 64})
-            return server(request)
-
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(wrong_release))
-        try:
-            with pytest.raises(ServiceError, match="release_mismatch"):
-                await service._report_boot_health(True)
-            assert service.release_accepted is False
-        finally:
-            await old_client.aclose()
             await close(service)
     asyncio.run(check())
 
@@ -976,7 +1281,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         registry.clock,
         ADMIN,
         media_root=storage.root,
-        release_authority=registry.release_authority,
     )
     unavailable = False
 
@@ -1003,13 +1307,13 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         cache_dir = private_dir(tmp_path / "player-cache")
         boot_id = "12345678-1234-1234-1234-123456789abc"
         device_id = "device-" + "d" * 64
-        ticket = registry.release_authority.select_boot(
-            BootRequest(device_id, boot_id, "a" * 48)
-        )
+        # Ticketless enroll (0009): the signed boot-ticket path is retired, so
+        # this drives the real central with ticket_id=None, exactly as a
+        # diskless/flashed player does.
         context = BootContext.model_validate({
             "schema": 2, "device_id": device_id, "boot_id": boot_id,
-            "ticket_id": ticket.ticket_id, "release_id": ticket.release_id,
-            "trial": ticket.trial, "persistence": "volatile", "fault": None,
+            "ticket_id": None, "release_id": "c" * 64,
+            "trial": False, "persistence": "volatile", "fault": None,
         })
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
         service = PlayerService(PlayerConfig(central_origin=origin, allow_http=True,

@@ -8,42 +8,40 @@ import json
 import os
 import secrets
 import stat
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field, model_validator
 
+from central.app_packages import AppPackageError, AppPackages
+from central.app_release_queue import AppReleaseTaskQueue, ProcrastinateAppReleaseQueue
+from central.app_releases import AppReleaseError, AppReleases
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
+from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
 from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigurationReceipt
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.registry import Enrollment, FrameCreate, Registry, RegistryError
-from central.release_models import ReleaseRegistrationReceipt, ReleaseStagingReceipt
-from central.releases import ReleaseAuthority, ReleaseError
 from central.runtime import Program, Scene
-from contracts.enrollment import BootTicketId
 from contracts.models import (
     Calibration,
+    Digest,
     Identifier,
-    Instant,
     Model,
     Observation,
     PlayerTime,
     Readiness,
 )
-from contracts.release import MAX_MANIFEST_BYTES, BootRequest
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
@@ -57,6 +55,10 @@ class Challenge(Model):
 class BindingRequest(Model):
     player_id: Identifier
     output_id: Identifier
+    expected_generation: int = Field(ge=0)
+
+
+class UnbindRequest(Model):
     expected_generation: int = Field(ge=0)
 
 
@@ -91,48 +93,16 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
-class ReleaseRegistration(Model):
-    manifest: str = Field(min_length=1, max_length=MAX_MANIFEST_BYTES)
-    signature: str = Field(min_length=88, max_length=88)
+class AppPackageRegistration(Model):
+    """Records a `.deb` already staged under PHOTO_WALL_APP_ROOT by sha256."""
+
+    version: str = Field(min_length=1, max_length=256)
+    sha256: Digest
+    size: int = Field(gt=0)
 
 
-class BootHealth(Model):
-    ticket_id: BootTicketId
-    healthy: bool
-    observed_at: Instant
-
-
-def _configured_release_authority(db: Database, clock: Clock) -> ReleaseAuthority | None:
-    names = (
-        "PHOTO_WALL_RELEASE_PUBLIC_KEY",
-        "PHOTO_WALL_RELEASE_BOOT_ABI",
-        "PHOTO_WALL_RELEASE_CONFIGURATION_SHA256",
-    )
-    configured = [name in os.environ for name in names]
-    if not any(configured):
-        return None
-    if not all(configured):
-        raise ValueError("incomplete release authority configuration")
-    payload = Path(os.environ[names[0]]).read_bytes()
-    if len(payload) > 8192:
-        raise ValueError("invalid release public key")
-    public_key = serialization.load_pem_public_key(payload)
-    if not isinstance(public_key, Ed25519PublicKey):
-        raise ValueError("release public key must be Ed25519")
-    return ReleaseAuthority(db, clock, public_key, os.environ[names[1]], os.environ[names[2]])
-
-
-def _initialize_release_authority(authority: ReleaseAuthority | None) -> None:
-    names = ("PHOTO_WALL_INITIAL_RELEASE_MANIFEST", "PHOTO_WALL_INITIAL_RELEASE_SIGNATURE")
-    configured = [name in os.environ for name in names]
-    if not any(configured):
-        return
-    if authority is None or not all(configured):
-        raise ValueError("incomplete initial release configuration")
-    manifest = Path(os.environ[names[0]]).read_bytes()
-    signature = Path(os.environ[names[1]]).read_bytes()
-    release = authority.register(manifest, signature)
-    authority.initialize_default(release.release_id)
+class AppPackagePromotion(Model):
+    sha256: Digest
 
 
 def create_app(
@@ -142,9 +112,12 @@ def create_app(
     *,
     run_scheduler: bool | None = None,
     media_root: Path | None = None,
-    release_authority: ReleaseAuthority | None = None,
     media_queue: MediaTaskQueue | None = None,
-    release_root: Path | None = None,
+    release_queue: AppReleaseTaskQueue | None = None,
+    app_root: Path | None = None,
+    mdns_enabled: bool | None = None,
+    mdns_port: int | None = None,
+    mdns_advertiser: MdnsCentralAdvertiser | None = None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     owns_db = db is None
@@ -153,8 +126,7 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    release_authority = release_authority or _configured_release_authority(db, clock)
-    registry = Registry(db, clock, release_authority)
+    registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
@@ -171,9 +143,23 @@ def create_app(
     media_root = media_root or (
         Path(os.environ["PHOTO_WALL_MEDIA_ROOT"]) if "PHOTO_WALL_MEDIA_ROOT" in os.environ else None
     )
-    release_root = release_root or (
-        Path(os.environ["PHOTO_WALL_RELEASE_ROOT"])
-        if "PHOTO_WALL_RELEASE_ROOT" in os.environ
+    app_root = app_root or (
+        Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
+    )
+    app_packages = AppPackages(db, clock)
+    # GitHub release sourcing (0010) is the same OPT-IN gate the worker uses
+    # (bead 3): the feature is live only when PHOTO_WALL_APP_ROOT is set (the
+    # shared storage the mirror lands `.deb` bytes into and the serving route
+    # reads). When unset, `app_root` is None, no enqueue port is built, and the
+    # operator release routes answer 503 "release sourcing not configured"
+    # rather than crashing create_app.
+    app_releases = AppReleases(db, clock)
+    # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
+    # and injected above: promote defers a tag-keyed mirror, refresh defers a
+    # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker.
+    release_queue = release_queue or (
+        ProcrastinateAppReleaseQueue(db.dsn)
+        if isinstance(db, Database) and app_root is not None
         else None
     )
     media_gateway = (
@@ -187,6 +173,21 @@ def create_app(
         )
         if media_root
         else None
+    )
+    mdns_enabled = (
+        mdns_enabled
+        if mdns_enabled is not None
+        else os.environ.get("PHOTO_WALL_MDNS_ADVERTISE", "true").strip().lower()
+        not in ("false", "0")
+    )
+    # No PHOTO_WALL_HTTP_PORT precedent exists: today the listen port is only
+    # known to the `uvicorn --port` invocation outside this module (see
+    # Dockerfile), never passed into create_app(). Advertising needs it, so
+    # this introduces the one new config knob, defaulting to the port the
+    # shipped Dockerfile's uvicorn CMD already binds (8000).
+    mdns_port = mdns_port or int(os.environ.get("PHOTO_WALL_HTTP_PORT", "8000"))
+    mdns_advertiser = mdns_advertiser or (
+        MdnsCentralAdvertiser(port=mdns_port) if mdns_enabled else None
     )
     scheduler_health = {
         "enabled": run_scheduler,
@@ -225,9 +226,20 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
-        _initialize_release_authority(release_authority)
         if isinstance(media_queue, ProcrastinateMediaQueue):
             media_queue.apply_schema(db.dsn)
+        # Real network registration (join multicast group, register the
+        # service) can be slow -- or simply hang -- on a constrained Docker
+        # bridge network. Advertising is a convenience for discovery, never
+        # a serving requirement (mdns_advertiser.start() already treats
+        # registration failure as best-effort), so it must not delay
+        # central becoming ready: run it in the background instead of
+        # awaiting it before yield.
+        mdns_advertise_task = (
+            asyncio.create_task(mdns_advertiser.start())
+            if mdns_enabled and mdns_advertiser is not None
+            else None
+        )
         task = asyncio.create_task(scheduler()) if run_scheduler else None
         try:
             yield
@@ -238,6 +250,12 @@ def create_app(
                     await task
                 except asyncio.CancelledError:
                     pass
+            if mdns_enabled and mdns_advertiser is not None:
+                if mdns_advertise_task is not None and not mdns_advertise_task.done():
+                    mdns_advertise_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await mdns_advertise_task
+                await mdns_advertiser.stop()
             if owns_db:
                 db.close()
 
@@ -251,7 +269,8 @@ def create_app(
     )
     app.state.registry = registry
     app.state.coordinator = coordinator
-    app.state.release_authority = release_authority
+    app.state.app_packages = app_packages
+    app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
 
     def admin(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
@@ -263,17 +282,16 @@ def create_app(
             raise RegistryError("unauthorized", 401)
         return registry.authenticate(credentials.credentials)
 
-    def releases() -> ReleaseAuthority:
-        if release_authority is None:
-            raise ReleaseError("release_unconfigured", 503)
-        return release_authority
-
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
-    @app.exception_handler(ReleaseError)
-    async def release_error(request, exc):
+    @app.exception_handler(AppPackageError)
+    async def app_package_error(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.exception_handler(AppReleaseError)
+    async def app_release_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
@@ -349,28 +367,31 @@ def create_app(
     def register(request: Enrollment):
         return registry.enroll(request)
 
-    @app.post("/v1/bootstrap/boot")
-    def select_boot(request: BootRequest):
-        ticket = releases().select_boot(request)
-        return Response(
-            ticket.encode(), media_type="application/json", headers={"Cache-Control": "no-store"}
-        )
+    @app.get("/v1/app/manifest")
+    def app_manifest():
+        # Player-facing, unauthenticated (trusted LAN, 0009): the bootstrapper
+        # asks this before it has any app code to enroll with.
+        return app_packages.current()
 
-    @app.get("/appliance/rootfs-{rootfs_sha256}.squashfs")
-    def release_image(rootfs_sha256: str):
-        release = releases().release_for_rootfs(rootfs_sha256)
-        if release_root is None:
-            raise ReleaseError("release_artifact_unavailable", 503)
-        path = release_root / release.rootfs_name
+    @app.get("/v1/app/package/{sha256}.deb")
+    def app_package(sha256: str):
+        # Line-for-line analogue of the rootfs route above: same O_NOFOLLOW,
+        # fstat, size-match, and bounded streaming discipline. The sha256 here
+        # is a corruption check only (0009 owner ruling) -- this route proves
+        # the bytes match what central registered, not who authored them.
+        package = app_packages.package(sha256)
+        if app_root is None:
+            raise AppPackageError("app_artifact_unavailable", 503)
+        path = app_root / f"app-{sha256}.deb"
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(path, flags)
         except (FileNotFoundError, OSError):
-            raise ReleaseError("release_artifact_unavailable", 503) from None
+            raise AppPackageError("app_artifact_unavailable", 503) from None
         try:
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != release.rootfs_size:
-                raise ReleaseError("release_artifact_invalid", 503)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != package["size"]:
+                raise AppPackageError("app_artifact_invalid", 503)
         except Exception:
             os.close(descriptor)
             raise
@@ -382,11 +403,11 @@ def create_app(
 
         return StreamingResponse(
             content(),
-            media_type="application/octet-stream",
+            media_type="application/vnd.debian.binary-package",
             headers={
                 "Cache-Control": "public, immutable",
-                "Content-Length": str(release.rootfs_size),
-                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(rootfs_sha256)).decode()}",
+                "Content-Length": str(package["size"]),
+                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode()}",
             },
         )
 
@@ -433,16 +454,6 @@ def create_app(
             raise RegistryError("stale_authority", 403)
         coordinator.observe(identity["id"], request)
         return {"accepted": True}
-
-    @app.post("/v1/player/boot-health")
-    def boot_health(report: BootHealth, identity: dict = Depends(player)):
-        return releases().health(
-            report.ticket_id,
-            identity["id"],
-            identity["authority_epoch"],
-            healthy=report.healthy,
-            observed_at=report.observed_at,
-        )
 
     @app.websocket("/v1/player/session")
     async def session(websocket: WebSocket):
@@ -509,31 +520,66 @@ def create_app(
     def inventory():
         return registry.inventory()
 
-    @app.get("/v1/operator/releases", dependencies=[Depends(admin)])
-    def release_inventory():
-        return releases().inventory()
+    @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
+    def register_app(request: AppPackageRegistration):
+        # Stage-by-reference, mirroring register_release above: the operator
+        # places the `.deb` bytes under PHOTO_WALL_APP_ROOT out of band, and
+        # this call records the {version, sha256, size} pointer to them. No
+        # bytes cross this request body.
+        app_packages.register(request.version, request.sha256, request.size)
+        return {"status": "registered"}
 
-    @app.post("/v1/operator/releases", dependencies=[Depends(admin)], status_code=201,
-              response_model=ReleaseRegistrationReceipt)
-    def register_release(request: ReleaseRegistration):
-        try:
-            signature = base64.b64decode(request.signature, validate=True)
-        except ValueError:
-            raise ReleaseError("invalid_release", 422) from None
-        release = releases().register(request.manifest.encode(), signature)
-        return ReleaseRegistrationReceipt(release_id=release.release_id)
-
-    @app.put("/v1/operator/releases/{release_id}/default", dependencies=[Depends(admin)])
-    def set_default_release(release_id: str):
-        releases().set_default(release_id)
+    @app.put("/v1/operator/app/current", dependencies=[Depends(admin)])
+    def promote_app(request: AppPackagePromotion):
+        app_packages.promote(request.sha256)
         return {"status": "configured"}
 
-    @app.put(
-        "/v1/operator/equipment/{device_id}/candidate/{release_id}", dependencies=[Depends(admin)],
-        response_model=ReleaseStagingReceipt,
-    )
-    def stage_release(device_id: str, release_id: str):
-        return ReleaseStagingReceipt(staged=releases().stage(device_id, release_id))
+    def _release_sourcing() -> AppReleaseTaskQueue:
+        # 0010 gate: the release routes exist only when PHOTO_WALL_APP_ROOT is
+        # configured (app_root + an enqueue port). Unconfigured -> a clean 503,
+        # never a crash. This coexists with the manual POST /v1/operator/app and
+        # PUT /v1/operator/app/current escape hatches (0010 decision #6).
+        if app_root is None or release_queue is None:
+            raise AppReleaseError("release_sourcing_unconfigured", 503)
+        return release_queue
+
+    @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
+    def list_releases():
+        _release_sourcing()
+        # Discovered list, semver-ordered; each row flagged deployable/promoted/
+        # current (current = this row's mirrored bytes are the served ones).
+        return app_releases.list()
+
+    @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
+    def promote_release(tag: str):
+        queue = _release_sourcing()
+        # set_promoted records the operator's chosen tag under FOR UPDATE on the
+        # app_release_policy singleton (serializing against any concurrent promote
+        # or the worker's reconcile) and reports whether the bytes are already
+        # registered. Unknown tag -> 404, undeployable -> 409 (AppReleaseError).
+        already_mirrored = app_releases.set_promoted(tag)
+        if already_mirrored:
+            # Fast path: bytes present, so advance `current` in-request via the
+            # single reconcile path (a DB pointer flip under the same lock; no
+            # network, no worker). reconcile reads the *current* promoted_tag, so
+            # it never advances off a stale value.
+            app_releases.reconcile(app_packages)
+            return {"status": "promoted"}
+        # Lazy mirror: the bytes are absent, so defer a tag-keyed mirror onto the
+        # worker's queue and report pending. The worker downloads + verifies +
+        # registers, then its own reconcile advances `current` once the bytes land.
+        with db.transaction() as conn:
+            queue.enqueue_mirror_in(conn, tag)
+        return JSONResponse({"status": "pending"}, status_code=202)
+
+    @app.post("/v1/operator/app/releases/refresh", dependencies=[Depends(admin)])
+    def refresh_releases():
+        queue = _release_sourcing()
+        # Defer an on-demand poll (coalesced with the periodic tick) so a
+        # newly-cut release appears without waiting for the next cadence.
+        with db.transaction() as conn:
+            queue.enqueue_poll_in(conn)
+        return JSONResponse({"status": "polling"}, status_code=202)
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
@@ -547,6 +593,10 @@ def create_app(
             binding.output_id,
             expected_generation=binding.expected_generation,
         )
+
+    @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
+    def unbind(frame_id: Identifier, request: UnbindRequest):
+        return registry.unbind(frame_id, expected_generation=request.expected_generation)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration", dependencies=[Depends(admin)])
     def calibrate(frame_id: Identifier, request: CalibrationRequest):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -25,9 +24,6 @@ from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.models import Calibration, FrameProfile, Identifier, Model, OutputBinding
 from contracts.time import Clock
-
-if TYPE_CHECKING:
-    from central.releases import ReleaseAuthority
 
 
 class RegistryError(Exception):
@@ -54,9 +50,8 @@ class FrameCreate(Model):
 
 
 class Registry:
-    def __init__(self, db: Database, clock: Clock,
-                 release_authority: ReleaseAuthority | None = None):
-        self.db, self.clock, self.release_authority = db, clock, release_authority
+    def __init__(self, db: Database, clock: Clock):
+        self.db, self.clock = db, clock
 
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
@@ -89,8 +84,6 @@ class Registry:
         return {"nonce": nonce, "expires_at": now + 60}
 
     def enroll(self, request: Enrollment) -> dict:
-        if self.release_authority is None:
-            raise RegistryError("release_authority_unavailable", 503)
         try:
             signature = base64.b64decode(request.signature, validate=True)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(request.public_key)).verify(
@@ -131,9 +124,11 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
-            self.release_authority.bind_session_in(
-                conn, request.ticket_id, request.device_id, request.boot_id, player_id, epoch
-            )
+            # Ticketless enroll (0009): the signed-rootfs boot-ticket path has
+            # been retired, so no boot server ever issues a ticket and there is
+            # no release session to bind. Every player enrolls unbound (pending)
+            # by serial alone; request.ticket_id is always None now and is only
+            # recorded in health below.
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id, "ticket_id": request.ticket_id}),
                           player_id))
@@ -211,6 +206,27 @@ class Registry:
                 return {**row, "changed": True}
         except UniqueViolation as exc:
             raise RegistryError("output_already_bound") from exc
+
+    def unbind(self, frame_id: str, *, expected_generation: int) -> dict:
+        """Release a Frame's active binding, reversibly: unlike retire, the player record
+        (and its ability to be re-bound, to this or another Frame) is untouched."""
+        with self.db.transaction() as conn:
+            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            existing = conn.execute("SELECT * FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
+            if not existing:
+                raise RegistryError("not_bound", 404)
+            if frame["generation"] != expected_generation:
+                raise RegistryError("binding_generation_conflict")
+            conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
+            row = conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
+                               "configuration_revision=configuration_revision+1,"
+                               "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
+                               (frame_id,)).fetchone()
+            self._audit(conn, "frame_unbound", frame_id,
+                        {"player_id": existing["player_id"], "output_id": existing["output_id"], **row})
+            return {**row, "changed": True}
 
     def retire(self, player_id: str) -> None:
         with self.db.transaction() as conn:
@@ -309,8 +325,10 @@ class Registry:
                 if frame["preview_expires"] is not None and frame["preview_expires"] <= self.clock.utc():
                     frame["preview"] = None
                     frame["preview_expires"] = None
+            bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
             return InstallationInventory(
-                players=tuple(PlayerInventory.model_validate(row) for row in players),
+                players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
+                             for row in players),
                 outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
                 frames=tuple(FrameInventory.model_validate(row) for row in frames),
             )

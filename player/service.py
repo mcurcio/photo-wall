@@ -11,10 +11,12 @@ import math
 import os
 import queue
 import re
+import secrets
 import signal
 import ssl
 import tempfile
 import threading
+import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -26,9 +28,9 @@ import httpx
 from pydantic import ConfigDict, Field, model_validator
 
 from contracts.enrollment import OutputReport
+from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.models import (
     Commit,
-    Digest,
     Instant,
     Layer,
     Model,
@@ -40,6 +42,7 @@ from contracts.models import (
 )
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
+from player.discovery import CentralDiscovery, NoDiscovery
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.output_discovery import discover_outputs, output_app_id
@@ -63,10 +66,29 @@ class StaleFeedback(ServiceError):
     pass
 
 
+def _validate_origin(value: str, *, allow_http: bool) -> None:
+    """Shared origin well-formedness check, for both configured and discovered origins."""
+    try:
+        parsed = urlsplit(value)
+        valid = (parsed.scheme in ("https", "http") and parsed.hostname
+                 and parsed.port != 0 and not parsed.username and not parsed.password
+                 and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
+                 and not any(c.isspace() or ord(c) < 32 for c in value)
+                 and "\\" not in value
+                 and (parsed.scheme != "http" or allow_http))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("one trusted HTTPS origin required")
+
+
 class PlayerConfig(Model):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
     schema_version: Literal[1] = Field(default=1, alias="schema")
-    central_origin: str = Field(max_length=2048)
+    # Absent by default (the flash baseline, 0008): an unconfigured player
+    # resolves its origin from a discovery provider at run time instead.
+    # When present, it is explicit and always wins over discovery.
+    central_origin: str | None = Field(default=None, max_length=2048)
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
     boot_context_file: str = Field(
@@ -79,17 +101,8 @@ class PlayerConfig(Model):
 
     @model_validator(mode="after")
     def trusted_origin(self):
-        try:
-            parsed = urlsplit(self.central_origin)
-            valid = (parsed.scheme in ("https", "http") and parsed.hostname
-                     and parsed.port != 0 and not parsed.username and not parsed.password
-                     and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
-                     and not any(c.isspace() or ord(c) < 32 for c in self.central_origin)
-                     and "\\" not in self.central_origin)
-        except ValueError:
-            valid = False
-        if not valid or (parsed.scheme == "http" and not self.allow_http):
-            raise ValueError("one trusted HTTPS origin required")
+        if self.central_origin is not None:
+            _validate_origin(self.central_origin, allow_http=self.allow_http)
         if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
             raise ValueError("absolute cache directory required")
         if not Path(self.boot_context_file).is_absolute():
@@ -135,25 +148,22 @@ class State(Model):
 
 class BootContext(Model):
     schema_version: Literal[2] = Field(alias="schema")
-    ticket_id: str = Field(pattern=r"^[a-f0-9]{48}$")
+    # None means no boot ticket was issued for this boot -- the signal the
+    # player and central key ticketless enroll and boot-health reporting on
+    # (see enroll(), _report_boot_health, and central/registry.py enroll()).
+    # A netboot (D1) boot always carries a real ticket here
+    # (appliance/bootstrap.py boot()); hardware_boot_context() (D0/flashed)
+    # never had a ticket and now says so honestly instead of synthesizing one.
+    ticket_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{48}$")
     device_id: str = Field(pattern=r"^device-[a-f0-9]{64}$")
     boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
     release_id: str = Field(pattern=r"^[a-f0-9]{64}$")
     trial: bool
-    persistence: Literal["volatile"]
+    # "volatile": netboot (D1), written by appliance/bootstrap.py boot().
+    # "persistent": flashed (D0), synthesized by hardware_boot_context()
+    # below when no netboot boot context file is present.
+    persistence: Literal["volatile", "persistent"]
     fault: None = None
-
-
-class BootHealthResponse(Model):
-    accepted: bool
-    release_id: Digest | None = None
-    reason: str | None = Field(default=None, pattern=r"^[a-z_]{1,64}$")
-
-    @model_validator(mode="after")
-    def accepted_release(self):
-        if self.accepted and self.release_id is None:
-            raise ValueError("accepted health requires a release")
-        return self
 
 
 class Registration(Model):
@@ -170,6 +180,83 @@ class Challenge(Model):
 def load_boot_context(path: Path) -> BootContext:
     with path.open("rb") as stream:
         return BootContext.model_validate(_json(stream.read(MAX_JSON + 1)))
+
+
+PI_SERIAL_PATH = Path("/sys/firmware/devicetree/base/serial-number")
+CPUINFO_PATH = Path("/proc/cpuinfo")
+
+
+def read_pi_serial() -> bytes | None:
+    """Raw Pi hardware serial, preferring the devicetree file (present on all
+    current Pi kernels) and falling back to the `Serial` line `/proc/cpuinfo`
+    exposes when it is not. Returns None when neither source exists (dev
+    machines, CI, non-Pi hardware) so callers can raise a clear error instead
+    of fabricating an identity.
+    """
+    try:
+        with PI_SERIAL_PATH.open("rb") as stream:
+            raw = stream.read(READ_CAP)
+        if raw:
+            return raw
+    except OSError:
+        pass
+    try:
+        with CPUINFO_PATH.open("rb") as stream:
+            for line in stream:
+                label, sep, value = line.partition(b":")
+                if sep and label.strip().lower() == b"serial":
+                    return value
+    except OSError:
+        pass
+    return None
+
+
+def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
+    """Flashed/D0 fallback for when no netboot boot context file exists.
+
+    Derives `device_id` from the Pi hardware serial using the SAME kind+hash
+    scheme as the netboot bootstrap (appliance/bootstrap.py LinuxOps.device_id,
+    kind="pi", via the shared contracts.equipment.equipment_device_id), so one
+    Pi keeps one device_id across tiers (0008: device_id is the immutable
+    serial).
+
+    There is no netboot-ticket source at D0 (there is no boot server to
+    issue one), so `ticket_id` is honestly `None` here -- this is the
+    explicit "no boot ticket" signal `enroll()` and `_report_boot_health`
+    key off of (re-keyed off the ticket itself, not `persistence`): it
+    skips the netboot release-binding entirely and enrolls the player
+    unbound (pending) by serial alone, with no prior boot ticket required.
+    Boot-health / OS-release tracking has no ticket to report against at D0
+    and remains out of scope here.
+    """
+    try:
+        raw = serial_reader()
+    except OSError as error:
+        raise ServiceError("boot_equipment_identity") from error
+    device_id = equipment_device_id("pi", raw) if raw is not None else None
+    if device_id is None:
+        raise ServiceError("boot_equipment_identity")
+    return BootContext(
+        schema=2,
+        ticket_id=None,
+        device_id=device_id,
+        boot_id=str(uuid.uuid4()),
+        release_id=secrets.token_hex(32),
+        trial=False,
+        persistence="persistent",
+        fault=None,
+    )
+
+
+def resolve_boot_context(path: Path, *,
+                         serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
+    """D1 (netboot): the boot server writes `path` before handing off to the
+    player service; use it verbatim, unmodified. D0 (flashed): no such file
+    exists, so derive an equivalent boot context from the Pi hardware serial.
+    """
+    if path.exists():
+        return load_boot_context(path)
+    return hardware_boot_context(serial_reader)
 
 
 @dataclass(frozen=True)
@@ -245,7 +332,8 @@ class PlayerService:
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext | None = None):
+                 boot_context: BootContext | None = None,
+                 discovery: CentralDiscovery = NoDiscovery()):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
@@ -262,10 +350,11 @@ class PlayerService:
         except OSError:
             self.boot_id = None
         self.boot_context = boot_context
+        self.discovery = discovery
+        self._discovered_origin: str | None = None
         self.cache = None
         self.executor = None
         self.registration: Registration | None = None
-        self.release_accepted = False
         self._owner = threading.get_ident()
         self._lock = threading.RLock()
         self._plan: Plan | None = None
@@ -298,7 +387,28 @@ class PlayerService:
 
     @property
     def origin(self):
-        return self.config.central_origin.rstrip("/")
+        value = self.config.central_origin or self._discovered_origin
+        if value is None:
+            raise ServiceError("central_origin_unavailable")
+        return value.rstrip("/")
+
+    async def resolve_origin(self) -> str:
+        """Resolve the effective origin: explicit config always wins over discovery.
+
+        Discovery is consulted only when `central_origin` is unset (0008
+        precedence, closing the silent-hijack gap). A discovered origin may be
+        plain HTTP (T0, trusted-LAN baseline); `allow_http` continues to gate
+        only an *explicit* HTTP origin, unweakened. Raises `ServiceError` (not
+        a silent default) when neither an explicit nor a discovered origin is
+        available.
+        """
+        if self.config.central_origin is None:
+            discovered = await self.discovery.discover()
+            if not discovered:
+                raise ServiceError("central_origin_unavailable")
+            _validate_origin(discovered, allow_http=True)
+            self._discovered_origin = discovered
+        return self.origin
 
     def _headers(self, authenticated=True):
         headers = {"Accept-Encoding": "identity"}
@@ -362,17 +472,21 @@ class PlayerService:
             raise ServiceError("boot_context")
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
+        # A boot context with no ticket (D0/flashed, and 0009's diskless
+        # bootstrapper) has no `appliance_devices` row to bind against, so
+        # the presence of a ticket -- not `persistence` -- is what tells
+        # central this is a ticketless enroll (0008 baseline).
+        ticket_id = self.boot_context.ticket_id
         enrollment = self.identity.enrollment(
             challenge.nonce,
             self.outputs,
             device_id=self.boot_context.device_id,
             boot_id=self.boot_context.boot_id,
-            ticket_id=self.boot_context.ticket_id,
+            ticket_id=ticket_id,
         )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
         self.registration = registered
-        self.release_accepted = False
         with self._lock:
             self._offered = False
             self._jobs = ()
@@ -509,7 +623,6 @@ class PlayerService:
                     player_id=self.registration.player_id if self.registration else None,
                     authority_epoch=self.registration.authority_epoch if self.registration else None,
                     persistence="volatile", healthy=bool(healthy), health_reason=reason,
-                    release_accepted=self.release_accepted,
                     clock=asdict(self.mapping.diagnostics))
         temporary = None
         try:
@@ -662,33 +775,15 @@ class PlayerService:
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
-    async def _report_boot_health(self, healthy: bool) -> None:
-        if self.boot_context is None:
-            raise ServiceError("boot_context")
-        result = BootHealthResponse.model_validate(await self.request(
-            "POST",
-            "/v1/player/boot-health",
-            body={
-                "ticket_id": self.boot_context.ticket_id,
-                "healthy": healthy,
-                "observed_at": self.clock.utc(),
-            },
-        ))
-        if result.accepted:
-            if result.release_id != self.boot_context.release_id:
-                raise ServiceError("release_mismatch")
-            # An unhealthy local sample can never disarm the trial watchdog,
-            # even if the central response were malformed or stale.
-            self.release_accepted = healthy
-
     async def _control_loop(self):
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             await self.poll_state()
             readiness, observations = await self.dispatch(self._feedback)
             healthy, reason = await self.dispatch(self._health_status)
-            if not self.release_accepted:
-                await self._report_boot_health(healthy)
+            # The signed-release boot-health trial has been retired (0009):
+            # every boot is ticketless, so there is no per-boot release to
+            # report against and no watchdog to disarm.
             self._write_health(healthy, reason)
             if readiness is not None:
                 try:
@@ -759,6 +854,7 @@ class PlayerService:
                 session_started = None
                 try:
                     if self.registration is None:
+                        await self.resolve_origin()
                         await self.enroll()
                     # Reconnection reconciles authority before any download work.
                     await self.probe_time()
@@ -847,7 +943,7 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_config(args.config)
     identity = load_identity()
-    boot_context = load_boot_context(Path(config.boot_context_file))
+    boot_context = resolve_boot_context(Path(config.boot_context_file))
     discovery = discover_outputs()
     import gi
     gi.require_version("Gtk", "3.0")
@@ -866,6 +962,19 @@ def main():
                 decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
         except Exception:
             native_fault = "native_initialization"
+    # Explicit config always wins over mDNS (0008 precedence); discovery is
+    # only ever consulted by resolve_origin() when central_origin is unset,
+    # so avoid standing up a browser at all when an explicit origin exists.
+    # The zeroconf-dependent import is deferred to this branch so that
+    # `import player.service` never pulls in zeroconf -- a netboot player
+    # with an explicit central_origin never needs it, and the appliance
+    # build's chroot smoke-test import must not require it either.
+    if config.central_origin:
+        central_discovery = NoDiscovery()
+    else:
+        from player.mdns_discovery import MdnsCentralDiscovery
+
+        central_discovery = MdnsCentralDiscovery()
     service = PlayerService(
         config,
         identity,
@@ -873,6 +982,7 @@ def main():
         renderer,
         GLibDispatcher(GLib),
         boot_context=boot_context,
+        discovery=central_discovery,
     )
     for fault in (discovery.fault, native_fault):
         if fault:

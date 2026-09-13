@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import ci_images, service_base
+from scripts import service_base
 
 REPOSITORY = Path(__file__).parents[1]
 CONFIG = "sha256:" + "a" * 64
@@ -80,29 +80,29 @@ def test_first_introduction_has_no_previous_identity(repository):
 
 @pytest.mark.parametrize("revision", ["main", "abc", "f" * 40])
 def test_invalid_or_missing_comparison_fails(repository, revision):
-    with pytest.raises(ci_images.ImageError):
+    with pytest.raises(service_base.ImageError):
         service_base.previous_id(repository, revision, "amd64")
 
 
 @pytest.mark.parametrize("recipe", [b"FROM scratch\n", service_base.MARKER * 2])
 def test_invalid_current_boundary_is_rejected(repository, recipe):
     (repository / "Dockerfile").write_bytes(recipe)
-    with pytest.raises(ci_images.ImageError, match="boundary"):
+    with pytest.raises(service_base.ImageError, match="boundary"):
         service_base.id(repository, "amd64")
 
 
 def test_unsupported_architecture_is_rejected(repository):
-    with pytest.raises(ci_images.ImageError, match="architecture"):
+    with pytest.raises(service_base.ImageError, match="architecture"):
         service_base.id(repository, "x86")
 
 
 def test_registry_hit_uses_digest_and_exact_architecture_without_build(repository, monkeypatch):
     pulls = []
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: REF)
-    monkeypatch.setattr(ci_images, "pull", lambda ref, *, platform:
+    monkeypatch.setattr(service_base, "resolve", lambda ref: REF)
+    monkeypatch.setattr(service_base, "pull", lambda ref, *, platform:
                         pulls.append((ref, platform)) or CONFIG)
     monkeypatch.setattr(service_base, "previous_id", lambda *args: None)
-    monkeypatch.setattr(ci_images, "run", lambda *a, **k: pytest.fail("no preparation on hit"))
+    monkeypatch.setattr(service_base, "run", lambda *a, **k: pytest.fail("no preparation on hit"))
     result = service_base.prepare(repository, "example/wall", "amd64", "0" * 40,
                                   force=True, publish=True)
     assert result["image"] == REF and result["built"] == "false"
@@ -110,16 +110,16 @@ def test_registry_hit_uses_digest_and_exact_architecture_without_build(repositor
 
 
 def test_application_only_missing_base_never_runs_apt(repository, monkeypatch):
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
+    monkeypatch.setattr(service_base, "resolve", lambda ref: None)
     before = git(repository, "rev-parse", "HEAD")
-    with pytest.raises(ci_images.ImageError, match="Application-only"):
+    with pytest.raises(service_base.ImageError, match="Application-only"):
         service_base.prepare(repository, "example/wall", "arm64", before, publish=True)
 
 
 def test_unpublishable_candidate_is_rejected_before_build(repository, monkeypatch):
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
-    monkeypatch.setattr(ci_images, "run", lambda *a, **k: pytest.fail("no unusable candidate"))
-    with pytest.raises(ci_images.ImageError, match="needs a published base"):
+    monkeypatch.setattr(service_base, "resolve", lambda ref: None)
+    monkeypatch.setattr(service_base, "run", lambda *a, **k: pytest.fail("no unusable candidate"))
+    with pytest.raises(service_base.ImageError, match="needs a published base"):
         service_base.prepare(repository, "example/wall", "arm64", "0" * 40,
                              require_published=True)
 
@@ -127,11 +127,11 @@ def test_unpublishable_candidate_is_rejected_before_build(repository, monkeypatc
 def test_new_definition_smokes_offline_before_publishing(repository, monkeypatch):
     commands = []
     resolutions = iter([None, None, REF])
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: next(resolutions))
-    monkeypatch.setattr(ci_images, "run", lambda command, **kw: commands.append(command) or b"")
-    monkeypatch.setattr(ci_images, "image_id", lambda ref: CONFIG)
+    monkeypatch.setattr(service_base, "resolve", lambda ref: next(resolutions))
+    monkeypatch.setattr(service_base, "run", lambda command, **kw: commands.append(command) or b"")
+    monkeypatch.setattr(service_base, "image_id", lambda ref: CONFIG)
     pulls = []
-    monkeypatch.setattr(ci_images, "pull", lambda ref, *, platform:
+    monkeypatch.setattr(service_base, "pull", lambda ref, *, platform:
                         pulls.append((ref, platform)) or CONFIG)
     result = service_base.prepare(repository, "example/wall", "amd64", "0" * 40,
                                   publish=True, require_published=True)
@@ -149,48 +149,48 @@ def test_new_definition_smokes_offline_before_publishing(repository, monkeypatch
 
 
 def test_failed_native_smoke_cannot_publish(repository, monkeypatch):
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
-    monkeypatch.setattr(ci_images, "image_id", lambda ref: CONFIG)
+    monkeypatch.setattr(service_base, "resolve", lambda ref: None)
+    monkeypatch.setattr(service_base, "image_id", lambda ref: CONFIG)
     commands = []
 
     def run(command, **kwargs):
         commands.append(command)
         if command[:2] == ["docker", "run"]:
-            raise ci_images.CommandError("FFmpeg cannot start")
+            raise service_base.CommandError("FFmpeg cannot start")
         return b""
 
-    monkeypatch.setattr(ci_images, "run", run)
-    with pytest.raises(ci_images.CommandError, match="FFmpeg"):
+    monkeypatch.setattr(service_base, "run", run)
+    with pytest.raises(service_base.CommandError, match="FFmpeg"):
         service_base.prepare(repository, "example/wall", "arm64", "0" * 40, publish=True)
     assert not any(command[:2] == ["docker", "push"] for command in commands)
 
 
 def test_registry_outage_is_not_permission_to_build(repository, monkeypatch):
     def outage(ref):
-        raise ci_images.CommandError("503 Service Unavailable")
+        raise service_base.CommandError("503 Service Unavailable")
 
-    monkeypatch.setattr(ci_images, "resolve", outage)
-    monkeypatch.setattr(ci_images, "run", lambda *a, **k: pytest.fail("no outage fallback"))
-    with pytest.raises(ci_images.CommandError, match="503"):
+    monkeypatch.setattr(service_base, "resolve", outage)
+    monkeypatch.setattr(service_base, "run", lambda *a, **k: pytest.fail("no outage fallback"))
+    with pytest.raises(service_base.CommandError, match="503"):
         service_base.prepare(repository, "example/wall", "amd64", "0" * 40, force=True)
 
 
 def test_concurrent_publication_cannot_replace_existing_base(repository, monkeypatch):
     resolutions = iter([None, REF])
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: next(resolutions))
-    monkeypatch.setattr(ci_images, "image_id", lambda ref: CONFIG)
+    monkeypatch.setattr(service_base, "resolve", lambda ref: next(resolutions))
+    monkeypatch.setattr(service_base, "image_id", lambda ref: CONFIG)
     commands = []
-    monkeypatch.setattr(ci_images, "run", lambda command, **kw: commands.append(command) or b"")
-    with pytest.raises(ci_images.ImageError, match="overwrite"):
+    monkeypatch.setattr(service_base, "run", lambda command, **kw: commands.append(command) or b"")
+    with pytest.raises(service_base.ImageError, match="overwrite"):
         service_base.prepare(repository, "example/wall", "arm64", "0" * 40, publish=True)
     assert not any(command[:2] == ["docker", "push"] for command in commands)
 
 
 def test_local_candidate_is_available_by_tag_without_registry_write(repository, monkeypatch):
-    monkeypatch.setattr(ci_images, "resolve", lambda ref: None)
-    monkeypatch.setattr(ci_images, "image_id", lambda ref: CONFIG)
+    monkeypatch.setattr(service_base, "resolve", lambda ref: None)
+    monkeypatch.setattr(service_base, "image_id", lambda ref: CONFIG)
     commands = []
-    monkeypatch.setattr(ci_images, "run", lambda command, **kw: commands.append(command) or b"")
+    monkeypatch.setattr(service_base, "run", lambda command, **kw: commands.append(command) or b"")
     result = service_base.prepare(repository, "example/wall", "arm64", "0" * 40)
     assert result["image"].startswith("ghcr.io/example/wall/appliance-media-system:definition-")
     assert result["imageid"] == CONFIG

@@ -1,0 +1,74 @@
+#!/bin/sh
+# Installed as /etc/initramfs-tools/hooks/photo-wall-netboot in the scratch
+# builder root. Stages the slim, UNSIGNED netboot init (appliance.netboot_init)
+# and its exact 7-file Python closure into the initrd.
+#
+# Self-contained on purpose (0008 p4-boot-chain s2a): it copies NO signed or
+# time-path material (no ca.pem/bootstrap.json/boot-policy.json/release.pub.pem,
+# no openssl/chronyd/blkid) and NO appliance.updates / player / central, so the
+# old signed initramfs dir (appliance/initramfs/) can be deleted whole at
+# p4-retire without touching this one.
+set -eu
+case "${1:-}" in prereqs) exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+# Do NOT hardcode 3.12: Debian trixie is 3.13. Derive the interpreter present.
+python_bin=$(command -v python3)
+real_python=$(readlink -f "$python_bin")
+pyver=$("$python_bin" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+libdir="/usr/lib/python${pyver}"
+
+copy_exec "$real_python" "$real_python"
+# The boot script execs /usr/bin/python3; keep that name resolvable.
+ln -sf "$(basename "$real_python")" "${DESTDIR}/usr/bin/python3"
+
+mkdir -p "${DESTDIR}${libdir}"
+# Extension modules need their dynamic dependencies as well as the .so itself.
+# copy_exec stops on an already-copied executable, so resolve dependencies
+# first, then copy the stdlib tree over the top. The closure imports ssl,
+# hashlib, urllib.request, asyncio, fcntl, array, secrets, socket -- all served
+# by the stdlib tree plus these lib-dynload .so's (_ssl, _hashlib, _socket, ...).
+for extension in "${libdir}"/lib-dynload/*.so; do
+    copy_exec "$extension" "$extension"
+done
+cp -a "${libdir}/." "${DESTDIR}${libdir}/"
+
+# Only what LinuxOps.mount_root / ram / command actually shell out to:
+#   mount/umount  -- squashfs(loop,ro), tmpfs, overlay mounts + cleanup
+#   modprobe      -- on-demand module load behind those mounts
+# configure_networking comes from initramfs-tools' own /scripts/functions
+# (staged by initramfs-tools), so ip/ipconfig are not staged here. openssl/
+# chronyd/blkid are deliberately absent: no signature check, no time sync, no
+# block-device probe on this RAM-overlay path.
+for program in mount umount modprobe; do
+    executable=$(command -v "$program")
+    copy_exec "$executable" "$executable"
+done
+
+# The exact 7-file init closure (empirically verified: importing
+# appliance.netboot_init pulls in only these first-party modules). Placed under
+# the stdlib dir so `python3 -I -m appliance.netboot_init` finds them without
+# PYTHONPATH. NOTE: appliance/updates.py is intentionally NOT among them.
+mkdir -p "${DESTDIR}${libdir}/appliance" "${DESTDIR}${libdir}/contracts"
+for module in __init__ bootstrap provision netboot_init; do
+    copy_file config "/usr/lib/python3/dist-packages/appliance/$module.py" "${libdir}/appliance/$module.py"
+done
+for module in __init__ release equipment; do
+    copy_file config "/usr/lib/python3/dist-packages/contracts/$module.py" "${libdir}/contracts/$module.py"
+done
+
+# Minimal userland the HTTP-by-hostname fetch needs: name resolution + a root
+# account for the interpreter. Carried over from the old hook (same python +
+# networking path); NOT signed material.
+mkdir -p "${DESTDIR}/etc"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' > "${DESTDIR}/etc/passwd"
+printf '%s\n' 'root:x:0:' > "${DESTDIR}/etc/group"
+printf '%s\n' 'passwd: files' 'group: files' 'hosts: files dns' > "${DESTDIR}/etc/nsswitch.conf"
+printf '%s\n' '127.0.0.1 localhost' '::1 localhost' > "${DESTDIR}/etc/hosts"
+
+# Modules the RAM-overlay mount needs: squashfs (loop-mounted base), overlay
+# (merged root), loop (backing device). ext4/vfat/nls_* from the old signed
+# path are dropped -- this path never touches a block filesystem.
+for module in squashfs overlay loop; do
+    manual_add_modules "$module"
+done

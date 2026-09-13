@@ -36,8 +36,6 @@ CORE_IMAGES = {
 CORE_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
-DEMO_BOOT_ABI = "a" * 64
-DEMO_CONFIGURATION_SHA256 = "b" * 64
 
 # This is the ONLY benchmark application code copied into the Player image.
 # It imports source-neutral Player/contracts and stdlib; no host harness follows.
@@ -53,13 +51,11 @@ import signal
 import sys
 import threading
 import time
-import urllib.request
 import uuid
 from concurrent.futures import Future
 from pathlib import Path
 
 from contracts.enrollment import OutputReport
-from contracts.release import BootRequest
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
 from player.service import BootContext, PlayerConfig, PlayerService
@@ -158,17 +154,17 @@ renderer, dispatcher = Recorder(), Dispatch()
 config = PlayerConfig(central_origin='http://central:8000', allow_http=True,
                       cache_dir='/tmp/cache', cache_bytes=32*1024**2)
 device_id = os.environ['PHOTO_WALL_DEMO_DEVICE_ID']
-boot_request = BootRequest(device_id, str(uuid.uuid4()), secrets.token_hex(24))
-request = urllib.request.Request('http://central:8000/v1/bootstrap/boot',
-    data=json.dumps(boot_request.__dict__, separators=(',', ':')).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
-with urllib.request.urlopen(request, timeout=15) as response:
-    assert response.status == 200
-    ticket = json.load(response)
+# 0009 diskless/netboot: no boot ticket is issued -- the base bootstrapper
+# fetches the app .deb and hands off only the origin, never a ticket. A
+# ticketless boot context (ticket_id=None) is the signal the app and central
+# key ticketless enroll on: enroll() sends ticket_id=None (no appliance_devices
+# row to bind), release_accepted flips True immediately, and _control_loop
+# never POSTs the retired /v1/player/boot-health route. This is the runtime
+# contract p4 s3 proves; the old /v1/bootstrap/boot ticket path is gone here.
 boot_context = BootContext.model_validate({
-    'schema': 2, 'ticket_id': ticket['ticket_id'], 'device_id': device_id,
-    'boot_id': boot_request.boot_id, 'release_id': ticket['release_id'],
-    'trial': ticket['trial'], 'persistence': 'volatile', 'fault': None,
+    'schema': 2, 'ticket_id': None, 'device_id': device_id,
+    'boot_id': str(uuid.uuid4()), 'release_id': secrets.token_hex(32),
+    'trial': False, 'persistence': 'volatile', 'fault': None,
 })
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
                          health_path=None, boot_context=boot_context)
@@ -198,7 +194,7 @@ while not (stopping[0] and service.stopped):
         report = dict(schema=1, scope='simulated_actuation', utc=time.time(),
             monotonic=start, player_id=registration.player_id if registration else None,
             authority_epoch=registration.authority_epoch if registration else None,
-            persistence='volatile', release_accepted=service.release_accepted,
+            persistence='volatile',
             fault=service.last_fault,
             outputs=count, events=list(renderer.events), recent_readiness=readiness_samples, commit_checks=checks,
             commit_failures=failures,
@@ -398,12 +394,7 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
                              interval="2s", timeout="3s", retries=30), restart="no", mem_limit="192m", cpus=1),
         "central": dict(app, environment=dict(PHOTO_WALL_DATABASE_URL=dsn,
             PHOTO_WALL_ADMIN_TOKEN="${DEMO_ADMIN_TOKEN}", PHOTO_WALL_MEDIA_ROOT="/media",
-            PHOTO_WALL_HORIZON_SECONDS="15", PHOTO_WALL_RELEASE_PUBLIC_KEY="/release/release.pub.pem",
-            PHOTO_WALL_RELEASE_BOOT_ABI=DEMO_BOOT_ABI,
-            PHOTO_WALL_RELEASE_CONFIGURATION_SHA256=DEMO_CONFIGURATION_SHA256,
-            PHOTO_WALL_INITIAL_RELEASE_MANIFEST="/release/release.json",
-            PHOTO_WALL_INITIAL_RELEASE_SIGNATURE="/release/release.sig",
-            PHOTO_WALL_RELEASE_ROOT="/release"), volumes=["media:/media:ro"], networks=["wall", "backend"],
+            PHOTO_WALL_HORIZON_SECONDS="15"), volumes=["media:/media:ro"], networks=["wall", "backend"],
             sysctls={"net.ipv4.ip_forward": "0"}, mem_limit="384m", depends_on={"database": {"condition": "service_healthy"}}),
         "worker": dict(common, image=project + "-worker:local", user="10001:10001",
             environment=dict(PHOTO_WALL_DATABASE_URL=dsn, PHOTO_WALL_MEDIA_ROOT="/media",
@@ -543,26 +534,9 @@ class DemoHost:
         helper.mkdir()
         bundle_files = WALL_HELPER_BUNDLE.stage(ROOT, helper)
         write_json(helper / "bundle.json", {"schema": 1, "files": bundle_files})
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-        from contracts.release import Release
-
-        release_root = helper / "release"
-        release_root.mkdir()
-        rootfs = b"photo-wall stateless demo release\n"
-        release = Release(self.revision, DEMO_BOOT_ABI, DEMO_CONFIGURATION_SHA256,
-            hashlib.sha256(rootfs).hexdigest(), len(rootfs))
-        signing_key = Ed25519PrivateKey.generate()
-        manifest = release.encode()
-        (release_root / "release.json").write_bytes(manifest)
-        (release_root / "release.sig").write_bytes(signing_key.sign(manifest))
-        (release_root / "release.pub.pem").write_bytes(signing_key.public_key().public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
-        (release_root / release.rootfs_name).write_bytes(rootfs)
         for role in ("central", "worker"):
             (helper / "Dockerfile").write_text(wall_helper_dockerfile(
-                f"{self.project}-core-{role}:local", include_release=role == "central"
+                f"{self.project}-core-{role}:local"
             ))
             self.command(daemon_image_build(f"{self.project}-{role}:local", helper), 120, False)
         player = context / "player"
@@ -889,7 +863,7 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
     variants = {job["variant"]["sha256"] for job in ready}
     seen_types = set()
     for report in players.values():
-        require(report["persistence"] == "volatile" and report["release_accepted"]
+        require(report["persistence"] == "volatile"
                 and report["forbidden_imports_absent"], "player_boundary")
         require(report["commit_checks"] > 0 and not report["commit_failures"], "readiness_commit_proof")
         drawn = [event for event in report["events"] if event["layers"]]
@@ -941,10 +915,9 @@ def outage_checks(reports, expiry):
 
 
 def rejoined_player_ready(old, report, rejoined_at):
-    """A replacement process is ready only after Central accepts its fresh session health."""
+    """A replacement process is ready once it re-enrolls under a fresh epoch and draws."""
     return (report["player_id"] == old["player_id"]
             and report["authority_epoch"] > old["authority_epoch"]
-            and report["release_accepted"]
             and all(event["utc"] > rejoined_at and event["layers"] and not event["fallback"]
                     for event in current_outputs(report)))
 
@@ -1193,7 +1166,6 @@ def full_sequence(host, evidence, save):
     )
     cache_after = host.byte_audit()["player-one"]
     require(reports["player-one"]["persistence"] == "volatile", "rejoin_not_stateless")
-    require(reports["player-one"]["release_accepted"], "release_not_centrally_accepted")
     require(bool(cache_after), "cache_not_rebuilt")
     record("player_rejoined", snapshot, reports, cache_before=cache_before, cache_after=cache_after,
            cache_rebuilt_after_restart=True)

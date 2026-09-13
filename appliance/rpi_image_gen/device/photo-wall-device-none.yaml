@@ -1,0 +1,91 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-device-none
+# X-Env-Layer-Category: device
+# X-Env-Layer-Desc: Metadata-only "device" provider satisfying image-base's
+#  hard requirement (layer/base/image-base.yaml:
+#  X-Env-Layer-RequiresProvider: device -- pinned raspberrypi/rpi-image-gen
+#  commit 262d4df5a9f9d4133370465399a7958a7c22cdc7, see
+#  ../config/photo-wall-base.yaml's header for the pin) WITHOUT pulling in a
+#  real Raspberry Pi board layer. Every board layer rpi-image-gen ships
+#  (device/pi5, device/pi4, device/cm4, device/cm5, device/pi3,
+#  device/zero2w) requires rpi-device-base
+#  (layer/rpi/device/family-base.yaml), which installs udev,
+#  firmware-brcm80211, bluez-firmware and generates network units for real
+#  Pi hardware, and in turn requires rpi-boot-firmware/rpi-idp (boot
+#  partition firmware, kernel provisioning) -- exactly the "kernel/
+#  initramfs/PXE-TFTP staging" this spike's own header (../config/
+#  photo-wall-base.yaml) says is out of scope: that stays the separate
+#  appliance/initramfs + appliance/provisioning concern, and this build
+#  emits a bare rootfs squashfs, not a bootable Pi image.
+#
+#  rpi-image-gen ships no hardware-agnostic/"none" device layer of its own.
+#  Its own documented pattern for this exact situation is a small custom
+#  device layer that declares only X-Env-Layer-Provides -- see
+#  examples/custom_kernel/device/device.yaml ("custom-rpi5", Category:
+#  example, Provides: device,rpi-device) and examples/slim/device/mypi5/
+#  myboard.yaml ("example-mydevice", same Provides) in the pinned
+#  rpi-image-gen tree: both stand in for a real device layer purely to
+#  satisfy this same provider gate, then add whatever packages/hooks their
+#  example actually needs. This layer follows that pattern but adds nothing:
+#  it Provides only the bare `device` token (not `rpi-device`, which a
+#  repo-wide grep for X-Env-Layer-RequiresProvider confirms nothing in this
+#  build's dependency chain ever requires) and skips `X-Env-Layer-Requires:
+#  device-base` entirely. device-base
+#  (layer/base/device-base.yaml) only seeds IGconf_device_{vendor,class,
+#  variant,storage_type,hostname,assetdir} defaults and additionally
+#  requires device-user-admin (creates a login user, SSH keys/password
+#  handling) -- confirmed by grepping the whole pinned rpi-image-gen tree
+#  that no IGconf_device_* variable is read anywhere in image-base.yaml, our
+#  own ../image/photo-wall-squashfs.yaml, ../image/rootfs.cfg.in, or
+#  ../image/pre-image.sh, so device-base's vars and device-user-admin's
+#  login-user machinery would be pure, unwanted weight on this headless
+#  rootfs. No packages, no hooks: metadata-only, same pattern as this repo's
+#  own ../image/photo-wall-squashfs.yaml.
+#
+#  image/post-image.sh (pinned rpi-image-gen commit
+#  262d4df5a9f9d4133370465399a7958a7c22cdc7) unconditionally truncates every
+#  built image asset to a multiple of the target sector size --
+#  `truncate -s %${IGconf_device_sector_size} $f` at line 53, run for every
+#  file matching `${IGconf_image_name}*.${IGconf_image_suffix}` in the image
+#  outputdir with no provider/genimage-config gate -- so it dereferences
+#  IGconf_device_sector_size for this build's photo-wall-base.squashfs too,
+#  even though we produce no partition table. That var is normally seeded by
+#  device-base (layer/base/device-base.yaml: `X-Env-Var-sector_size: 512`,
+#  Valid: int:512-512, under `X-Env-VarPrefix: device`), which this layer
+#  deliberately does not require (see above). Declare it directly below, same
+#  schema, same default, so post-image.sh's truncate has a value without
+#  pulling in device-base's device-user-admin login-user machinery.
+#
+#  post-image.sh's other consumer of IGconf_device_* -- the Image Description
+#  Provisioning (IDP) block at lines 22-43, gated on
+#  `[ -f ${1}/genimage.cfg ]` (the *literal*, non-numbered filename) -- reads
+#  IGconf_device_sector_size too (via bin/image2json's IMAGE_KEYS/
+#  IMAGE_KEY_TYPES), but only after image2json's parse_genimage_config, which
+#  anchors on a top-level `hdimage` block and returns (None, None, None) for
+#  any genimage config without one -- exactly our bare, unpartitioned
+#  ../image/rootfs.cfg.in. That None then flows into an unguarded
+#  `attributes.get(...)` in image2json's __main__ and would crash. This build
+#  never hits that path: ../image/pre-image.sh writes the fragment as
+#  `genimage01.cfg` (matching the multi-fragment numbering
+#  examples/nested_image/image/embedded_squashfs/pre-image.sh uses for its
+#  own genimage01.cfg/genimage02.cfg, not the single-fragment
+#  examples/custom_kernel or examples/slim/compact pre-image.sh scripts,
+#  which write the exact literal genimage.cfg), so the literal
+#  `${1}/genimage.cfg` post-image.sh checks for is never present and the IDP
+#  block -- image2json included -- is skipped entirely for this build.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Provides: device
+#
+# X-Env-VarPrefix: device
+#
+# X-Env-Var-sector_size: 512
+# X-Env-Var-sector_size-Desc: Logical sector size (in bytes) assumed by
+#  image/post-image.sh's post-build truncate of the built image asset to a
+#  sector-size multiple. This build has no partitioned disk / target storage
+#  device (see layer rationale above); 512 is device-base's own default
+#  (layer/base/device-base.yaml) and the only value its schema (and this
+#  var's own Valid range below) currently allows.
+# X-Env-Var-sector_size-Required: n
+# X-Env-Var-sector_size-Valid: int:512-512
+# X-Env-Var-sector_size-Set: y
+# METAEND

@@ -1,0 +1,623 @@
+name: rpi-image-gen base OS build
+
+# 0009 Phase 4 (see docs/decisions/0009-minimal-base-and-app-package.md,
+# "base-OS" + "Bootstrapper" sections): builds the minimal netboot base OS
+# squashfs with raspberrypi/rpi-image-gen, plus the Player and bootstrapper
+# `.deb`s and the assembled netboot base bundle. The old custom-image /
+# signed-disk pipeline (appliance.yml) was retired in p4-retire s5; this is now
+# the sole base-OS + package build, reused by release.yml via `workflow_call`.
+#
+# Scoped to workflow_dispatch (manual iteration), pull_request touching the
+# rpi-image-gen config or this workflow file (so it never runs on every push to
+# main), and workflow_call (release.yml, for an exact tagged revision).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - appliance/rpi_image_gen/**
+      - appliance/netboot_initramfs/**
+      - appliance/netboot_init.py
+      - scripts/build_netboot_bundle.sh
+      - scripts/verify_netboot_initrd.py
+      - scripts/build_player_deb.py
+      - .github/workflows/base-image.yml
+  # Reused by release.yml to build the release assets (the netboot base bundle
+  # + the Player and bootstrapper .debs) for an exact tagged revision. Every
+  # artifact is named by that revision so release.yml can consume it by name.
+  # Nothing here is signed (home LAN, no threat model), so this call takes no
+  # signing secret.
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact 40-character commit to build release assets for
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-${{ inputs.revision || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-base-image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      # The exact commit these assets are built for: the caller's `revision`
+      # when reused by release.yml, else the triggering commit. Threads through
+      # the .deb builds and every artifact name so a release consumes the
+      # bytes built for its tag, not whatever ref the reusable call resolved.
+      REVISION: ${{ inputs.revision || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+
+      # ALL our own code ships to the base build as a portable `.deb`, never
+      # a raw-file overlay this tool owns (see
+      # scripts/build_bootstrapper_deb.py's module docstring). Pure Python,
+      # no arm64 chroot needed, so this runs directly on the runner before
+      # rpi-image-gen is even cloned.
+      # Install uv via pipx (isolated env) rather than actions/setup-python:
+      # setup-python prepends its own python3 to PATH for the whole job, which
+      # would shadow the system python3 that rpi-image-gen's install_deps.sh
+      # provisions `yaml` (and its other deps) into, breaking `bin/ig`. pipx
+      # keeps the system python3 intact for the rpi-image-gen build below; the
+      # .deb build uses uv's own .venv explicitly.
+      - name: Install uv and sync the locked environment
+        run: |
+          pipx install uv==0.7.8
+          uv sync --frozen
+
+      - name: Build the photo-wall-bootstrapper .deb
+        id: bootstrapper-deb
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-bootstrapper-deb"
+          # The builder may print progress before the final .deb path; capture
+          # all of it, then take only the last line (the path) for the output —
+          # a multiline value would corrupt $GITHUB_OUTPUT.
+          build_out=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --output-dir "$RUNNER_TEMP/photo-wall-bootstrapper-deb")
+          printf '%s\n' "$build_out"
+          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+
+      # p4-deb-full-depends: the player .deb now DECLARES its runtime deps
+      # (GTK/GStreamer/weston/Mesa + python3-*) as apt Depends and ships no
+      # venv, so it builds on any host with dpkg-deb (pure staging, like the
+      # bootstrapper .deb) -- no OS-base chroot. Build it here...
+      - name: Build the photo-wall-player .deb
+        id: player-deb
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-deb"
+          build_out=$(.venv/bin/python -m scripts.build_player_deb \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --output-dir "$RUNNER_TEMP/photo-wall-player-deb")
+          printf '%s\n' "$build_out"
+          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+
+      # ...and PROVE its declared Depends actually resolve from the Debian
+      # trixie distro repo (the whole point of the apt-deps model), with no
+      # hardware: a --simulate install in a stock trixie arm64 container fails
+      # the job on any unmet/unlocatable dependency. This is the CI gate for
+      # p4-deb-full-depends; the s3 Part A tracer installs it for real.
+      - name: Prove the player .deb Depends resolve in Debian trixie
+        env:
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+        run: |
+          set -eu
+          docker run --rm --platform linux/arm64 \
+            -v "$(dirname "$PLAYER_DEB"):/pkgs:ro" debian:trixie-slim \
+            sh -ec 'apt-get update >/dev/null && \
+              apt-get install -y --simulate "/pkgs/$(basename "'"$PLAYER_DEB"'")"'
+
+      # Pinned by exact commit, not just the tag, for reproducibility --
+      # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
+      # the time this spike was authored.
+      - name: Clone the pinned rpi-image-gen tool
+        env:
+          RPI_IMAGE_GEN_REF: 262d4df5a9f9d4133370465399a7958a7c22cdc7
+        run: |
+          set -x
+          git clone --no-checkout https://github.com/raspberrypi/rpi-image-gen.git "$RUNNER_TEMP/rpi-image-gen"
+          git -C "$RUNNER_TEMP/rpi-image-gen" checkout "$RPI_IMAGE_GEN_REF"
+          git -C "$RUNNER_TEMP/rpi-image-gen" rev-parse HEAD
+
+      # Verbatim recipe from rpi-image-gen's own CI
+      # (.github/workflows/build.yml, job build-arm64, "install dependencies"
+      # step) -- the chmod works around a runner /home/runner permission the
+      # tool's podman-based unshare build needs.
+      - name: Install rpi-image-gen's host dependencies
+        working-directory: ${{ runner.temp }}/rpi-image-gen
+        run: |
+          set -x
+          sudo apt-get update
+          sudo chmod o+x /home/runner
+          sudo ./install_deps.sh
+
+      # SOURCE_DATE_EPOCH pins the debian-trixie-arm64-minbase-snapshot
+      # layer's snapshot.debian.org mirror (see bin/generators/snapgen) to a
+      # fixed instant, so this build's Debian package set is reproducible
+      # rather than "whatever snapshot.debian.org has right now". Fixed,
+      # not `date +%s` at run time (contrast rpi-image-gen's own CI, which
+      # uses `date -d 'today 00:00:00'` -- that pins to the day, not a
+      # specific stable revision).
+      - name: Build the minimal base OS rootfs and squashfs image
+        env:
+          SOURCE_DATE_EPOCH: '1788480000' # 2026-09-04T00:00:00Z
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          BOOTSTRAPPER_DEB: ${{ steps.bootstrapper-deb.outputs.deb_path }}
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/rpi-image-gen"
+          ./rpi-image-gen build \
+            -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
+            -c photo-wall-base.yaml \
+            -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB"
+
+      # Proves the squashfs is CORRECT, not merely that rpi-image-gen exited
+      # 0 -- see docs/decisions/0009-minimal-base-and-app-package.md, "Base
+      # OS bundle" (line ~669: "ship Python + zeroconf for the bootstrapper"
+      # / "strip the Player venv, release.pub.pem, ... from the netboot
+      # root") and layer/photo-wall-bootstrapper.yaml's own rule #1, "the
+      # base OS carries no application and no origin". Reads the rootfs
+      # tree straight out of the built squashfs via `unsquashfs -ll`
+      # (permissions/type + path, no extraction needed) rather than trusting
+      # the build's own exit code.
+      #
+      # Squashfs location: rpi-image-gen's image-base layer places genimage's
+      # output directly at $IGconf_image_outputdir =
+      # "$WORKROOT/image-${IGconf_image_name}" (image-base.yaml,
+      # X-Env-Var-outputdir) -- confirmed against the pinned tool's own
+      # rpi-image-gen:generate_images(), which passes that same directory to
+      # genimage as both --inputpath and --outputpath, and
+      # image/rootfs.cfg.in's <IMAGE_NAME>.<IMAGE_SUFFIX> substitution
+      # (photo-wall-base.squashfs, config/photo-wall-base.yaml's
+      # name/suffix). This is the RAW artefact, found before rpi-image-gen's
+      # own later `deploy` stage zstd-compresses a copy into deploy-*/ (see
+      # layer/base/deploy-base.yaml's compression default) -- deliberately
+      # not decompressing that copy back out.
+      - name: Verify the built base image is what 0009 requires (content, not just build success)
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -eu
+          set -x
+
+          command -v unsquashfs >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends squashfs-tools
+          }
+
+          # Address the squashfs directly at its deterministic output path
+          # (image-base's IGconf_image_outputdir = $WORKROOT/image-<name>);
+          # do NOT `find` over $WORKROOT, which contains the root-owned chroot
+          # (mode-700 apt dirs) and would make find exit non-zero on
+          # "Permission denied", killing this step under set -e.
+          squashfs="$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs"
+          if [ ! -f "$squashfs" ]; then
+            echo "VIOLATION: expected base squashfs at $squashfs" >&2
+            ls -la "$WORKROOT/image-photo-wall-base" >&2 || true
+            exit 1
+          fi
+          echo "Inspecting $squashfs"
+
+          listing="$RUNNER_TEMP/photo-wall-base.listing"
+          unsquashfs -ll "$squashfs" > "$listing"
+          echo "-- squashfs listing: $(wc -l < "$listing") entries --"
+
+          # "<type-char> <path>" per entry, e.g. "d squashfs-root/etc" or
+          # "l squashfs-root/.../foo.service" -- $6 of `unsquashfs -ll`'s
+          # `<perms> <owner/group> <size> <date> <time> <path> [-> <target>]`
+          # is the bare path with no `-> target` suffix even for symlinks
+          # (verified against this exact squashfs-tools output format).
+          typed="$RUNNER_TEMP/photo-wall-base.typed-paths"
+          awk '{ print substr($1, 1, 1), $6 }' "$listing" > "$typed"
+
+          fail=0
+          violation() {
+            echo "VIOLATION: $1" >&2
+            fail=1
+          }
+
+          # $1 = type char (- file, d dir, l symlink), $2 = path under the
+          # rootfs, $3 = human description.
+          require_path() {
+            if grep -Fxq -- "$1 squashfs-root/$2" "$typed"; then
+              echo "OK: found $3 ($2)"
+            else
+              violation "missing required $3 at $2"
+            fi
+          }
+
+          # $1 = substring to search for anywhere in the full listing
+          # (matches a directory entry or anything nested under it), $2 =
+          # human description.
+          forbid_substring() {
+            if grep -qF -- "$1" "$listing"; then
+              violation "forbidden $2 present (matched '$1')"
+            else
+              echo "OK: absent $2 (no match for '$1')"
+            fi
+          }
+
+          echo "== MUST BE PRESENT =="
+          # The bootstrapper and its minimal import closure (never
+          # player.service, which pulls in GTK/GStreamer -- see
+          # scripts/build_bootstrapper_deb.py's own module docstring). All
+          # of this is now delivered by the photo-wall-bootstrapper `.deb`,
+          # not a raw-file overlay.
+          require_path - usr/lib/python3/dist-packages/appliance/provision.py 'the bootstrapper (appliance/provision.py)'
+          require_path - usr/lib/python3/dist-packages/player/mdns_discovery.py 'mDNS discovery (player/mdns_discovery.py)'
+          require_path - usr/lib/python3/dist-packages/player/discovery.py 'the discovery Protocol (player/discovery.py)'
+          # The unit ships at the vendor path (/lib/systemd/system, not
+          # /etc/systemd/system -- this is a packaged unit now, not a raw
+          # overlay file), AND is actually enabled (a `.wants` symlink the
+          # `.deb` bakes as data, pointing back at the vendor path), not
+          # just installed inert.
+          # On merged-/usr Debian, /lib is a symlink to /usr/lib, so the
+          # packaged unit is listed under usr/lib/systemd/system; accept either.
+          if grep -Eq -- '^- squashfs-root/(usr/)?lib/systemd/system/photo-wall-provision.service$' "$typed"; then
+            echo "OK: found the photo-wall-provision.service unit ((usr/)lib/systemd/system)"
+          else
+            violation "missing required the photo-wall-provision.service unit at (usr/)lib/systemd/system/photo-wall-provision.service"
+          fi
+          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-provision.service 'photo-wall-provision.service enablement symlink'
+          if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service' "$typed"; then
+            target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service ->' "$listing" | awk '{print $NF}')
+            if [ "$target" = "/lib/systemd/system/photo-wall-provision.service" ] || [ "$target" = "/usr/lib/systemd/system/photo-wall-provision.service" ]; then
+              echo "OK: enablement symlink points at the vendor unit path"
+            else
+              violation "enablement symlink points at unexpected target: $target"
+            fi
+          fi
+          # Python 3 plus the bootstrapper's one third-party dependency
+          # closure (python3-zeroconf pulls in python3-ifaddr) -- both are
+          # now the `.deb`'s own Depends, resolved by apt at install time,
+          # not a second raw mmdebstrap.packages declaration.
+          # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
+          # regular file on some distros), so accept either type here.
+          if grep -Eq -- '^[-l] squashfs-root/usr/bin/python3$' "$typed"; then
+            echo "OK: found the python3 interpreter (usr/bin/python3, file or symlink)"
+          else
+            violation "missing required the python3 interpreter at usr/bin/python3"
+          fi
+          require_path d usr/lib/python3/dist-packages/zeroconf 'the zeroconf library (python3-zeroconf)'
+          require_path d usr/lib/python3/dist-packages/ifaddr 'the ifaddr library (python3-ifaddr)'
+
+          # The package itself is INSTALLED, not just its files unpacked by
+          # some other means -- dpkg's own database records it.
+          status_dir="$RUNNER_TEMP/photo-wall-base-dpkg-status"
+          rm -rf "$status_dir"
+          unsquashfs -d "$status_dir" "$squashfs" var/lib/dpkg/status >/dev/null
+          if grep -Fxq 'Package: photo-wall-bootstrapper' "$status_dir/var/lib/dpkg/status" \
+              && grep -Fxq 'Status: install ok installed' "$status_dir/var/lib/dpkg/status"; then
+            echo "OK: dpkg records photo-wall-bootstrapper as installed"
+          else
+            violation "dpkg status does not record photo-wall-bootstrapper as installed"
+          fi
+
+          echo "== MUST BE ABSENT (base stays minimal; app + render stack come from the .deb at boot) =="
+          # No Player venv baked into the base.
+          forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
+          # No deployment config or app trust anchor baked into the base --
+          # the bootstrapper resolves these at boot, not build time.
+          forbid_substring 'squashfs-root/etc/photo-wall/public.json' 'a baked /etc/photo-wall/public.json'
+          forbid_substring 'squashfs-root/etc/photo-wall/bootstrap.json' 'a baked /etc/photo-wall/bootstrap.json'
+          forbid_substring 'squashfs-root/etc/photo-wall/ca.pem' 'a baked /etc/photo-wall/ca.pem'
+          forbid_substring 'release.pub.pem' 'a baked release.pub.pem app trust anchor'
+          # No GTK/GStreamer/weston render stack -- that is the .deb's
+          # Depends, resolved against the live Debian mirror at boot (see
+          # config/photo-wall-base.yaml's "apt sources configured to the
+          # Debian distro repo" note). Multiarch-triplet-agnostic: matches
+          # the last path component, not a fixed usr/lib/<triplet>/ prefix.
+          forbid_substring 'usr/bin/weston' 'the weston compositor binary'
+          forbid_substring '/gstreamer-1.0' 'a GStreamer plugin directory'
+
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: built base image does not match 0009's minimal-base-plus-bootstrapper contract; see VIOLATION lines above" >&2
+            exit 1
+          fi
+          echo "PASS: built base image content matches 0009's minimal-base-plus-bootstrapper contract"
+
+      # --- p4-boot-chain s2b: netboot base bundle (kernel + initrd + DTBs +
+      # the base squashfs) -------------------------------------------------
+      # rpi-image-gen's squashfs is metadata-only (no kernel, no /lib/modules).
+      # The kernel + initrd are therefore built in a SEPARATE scratch
+      # Debian-trixie-arm64 root (0008 boot-chain decision) -- NEVER baked into
+      # the RAM-root squashfs. The runner is arm64, so this chroot needs no
+      # qemu. Diagnostics are captured to files uploaded on failure (OWNER
+      # STANDING RULE: root-cause, do not guess).
+      - name: Build the scratch kernel + initrd root (Debian trixie arm64)
+        id: scratch-root
+        env:
+          SCRATCH: ${{ runner.temp }}/netboot-scratch
+          DIAG: ${{ runner.temp }}/netboot-diag
+        run: |
+          set -eu
+          set -x
+          mkdir -p "$DIAG"
+          sudo apt-get update
+          # mmdebstrap builds the scratch root; initramfs-tools on the HOST
+          # provides lsinitramfs for the content-verify; squashfs-tools may
+          # already be present from the squashfs verify step above.
+          sudo apt-get install -y --no-install-recommends \
+            mmdebstrap ca-certificates gnupg curl initramfs-tools
+
+          sudo rm -rf "$SCRATCH"
+          # Minimal Debian trixie arm64 root carrying the initrd toolchain +
+          # interpreter the netboot init needs. The rpi-2712 kernel itself comes
+          # from the Raspberry Pi archive, added below.
+          if ! sudo mmdebstrap --arch=arm64 --variant=minbase \
+              --include=initramfs-tools,python3,ca-certificates,gnupg,kmod,zstd \
+              trixie "$SCRATCH" http://deb.debian.org/debian \
+              > "$DIAG/mmdebstrap.log" 2>&1; then
+            echo "mmdebstrap failed; tail:" >&2
+            tail -n 80 "$DIAG/mmdebstrap.log" >&2
+            exit 1
+          fi
+
+          # linux-image-rpi-2712 (BCM2712, 16K-page Pi 5 kernel) + raspi-firmware
+          # (Pi 5 DTBs + SPI-EEPROM bootloader firmware) live in the Raspberry Pi
+          # archive, NOT Debian's own (which ships only generic linux-image-arm64).
+          # trusted=yes: the RPi archive's InRelease is signed with a SHA1 binding
+          # signature that trixie's sqv verifier rejects ("SHA1 is not considered
+          # secure since 2026-02-01"), so signed-by verification fails outright.
+          # This is a build-time trusted fetch on our own CI, consistent with
+          # 0009's no-threat-model / corruption-only ruling. If RPi later re-signs
+          # its key with SHA256, restore `[signed-by=.../raspberrypi.gpg]` (fetch
+          # + dearmor the key) in place of `[trusted=yes]`.
+          printf '%s\n' \
+            'deb [trusted=yes] http://archive.raspberrypi.com/debian trixie main' \
+            | sudo tee "$SCRATCH/etc/apt/sources.list.d/raspberrypi.list"
+          sudo cp /etc/resolv.conf "$SCRATCH/etc/resolv.conf"
+
+          # Bind the kernel-visible filesystems so the kernel package's postinst
+          # (depmod / update-initramfs) works inside the chroot.
+          for fs in proc sys dev dev/pts; do
+            sudo mount --bind "/$fs" "$SCRATCH/$fs"
+          done
+
+          if ! sudo chroot "$SCRATCH" apt-get update > "$DIAG/apt-update.log" 2>&1; then
+            echo "apt-get update (RPi archive) failed; tail:" >&2
+            tail -n 60 "$DIAG/apt-update.log" >&2
+            exit 1
+          fi
+          if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
+              apt-get install -y --no-install-recommends \
+              linux-image-rpi-2712 raspi-firmware \
+              > "$DIAG/apt-install-kernel.log" 2>&1; then
+            echo "kernel/raspi-firmware install failed; tail:" >&2
+            tail -n 80 "$DIAG/apt-install-kernel.log" >&2
+            exit 1
+          fi
+
+          # Install the s2a hook + boot script + BOOT= selector, then stage the
+          # exact 7-file init closure at dist-packages so the hook (which copies
+          # from /usr/lib/python3/dist-packages) finds it. Reuses the build.py
+          # STAGING PATTERN, not build.py itself (retiring).
+          sudo install -D -m 0755 \
+            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/hooks/photo-wall-netboot" \
+            "$SCRATCH/etc/initramfs-tools/hooks/photo-wall-netboot"
+          sudo install -D -m 0755 \
+            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/scripts/photowall-netboot" \
+            "$SCRATCH/etc/initramfs-tools/scripts/photowall-netboot"
+          printf 'BOOT=photowall-netboot\n' \
+            | sudo tee "$SCRATCH/etc/initramfs-tools/conf.d/photo-wall"
+          dist="$SCRATCH/usr/lib/python3/dist-packages"
+          for module in __init__ bootstrap provision netboot_init; do
+            sudo install -D -m 0644 \
+              "$GITHUB_WORKSPACE/appliance/$module.py" "$dist/appliance/$module.py"
+          done
+          for module in __init__ release equipment; do
+            sudo install -D -m 0644 \
+              "$GITHUB_WORKSPACE/contracts/$module.py" "$dist/contracts/$module.py"
+          done
+
+          # Exactly one kernel is installed; derive its version for mkinitramfs.
+          kver=$(sudo ls "$SCRATCH/lib/modules" | head -n1)
+          if [ -z "$kver" ]; then
+            echo "no kernel modules dir under $SCRATCH/lib/modules" >&2
+            sudo ls -la "$SCRATCH/lib/modules" >&2 || true
+            exit 1
+          fi
+          echo "kernel version: $kver" | tee "$DIAG/kernelver.txt"
+
+          if ! sudo chroot "$SCRATCH" mkinitramfs -o /boot/initrd.img "$kver" \
+              > "$DIAG/mkinitramfs.log" 2>&1; then
+            echo "mkinitramfs failed; tail:" >&2
+            tail -n 80 "$DIAG/mkinitramfs.log" >&2
+            exit 1
+          fi
+
+          # Diagnostics: boot listings, initrd size + member listing.
+          sudo ls -la "$SCRATCH/boot" | tee "$DIAG/boot-listing.txt" || true
+          sudo ls -la "$SCRATCH/boot/firmware" 2>/dev/null \
+            | tee "$DIAG/boot-firmware-listing.txt" || true
+          initrd_bytes=$(sudo stat -c %s "$SCRATCH/boot/initrd.img")
+          echo "initrd.img size: $initrd_bytes bytes" | tee "$DIAG/initrd-size.txt"
+          sudo lsinitramfs "$SCRATCH/boot/initrd.img" > "$DIAG/lsinitramfs.txt" 2>&1 || true
+          echo "lsinitramfs members: $(wc -l < "$DIAG/lsinitramfs.txt")"
+
+          # Unmount the binds before find/stat over $SCRATCH so procfs does not
+          # trip later steps.
+          for fs in dev/pts dev sys proc; do
+            sudo umount "$SCRATCH/$fs" || true
+          done
+
+          # Locate the kernel image, Pi 5 DTB, and overlays for the assembler.
+          # Names/locations are exactly what this run installs (no guessing);
+          # the boot listings above are the evidence.
+          kernel_img=$(sudo find "$SCRATCH/boot" -maxdepth 2 -name 'vmlinuz-*' | head -n1)
+          if [ -z "$kernel_img" ]; then
+            echo "no vmlinuz-* under $SCRATCH/boot" >&2
+            cat "$DIAG/boot-listing.txt" >&2 || true
+            exit 1
+          fi
+          dtb=$(sudo find "$SCRATCH" -name 'bcm2712-rpi-5-b.dtb' | head -n1)
+          if [ -z "$dtb" ]; then
+            echo "bcm2712-rpi-5-b.dtb not found under $SCRATCH" >&2
+            exit 1
+          fi
+          overlays_dir=""
+          any_dtbo=$(sudo find "$SCRATCH" -name '*.dtbo' -path '*overlays*' | head -n1)
+          if [ -n "$any_dtbo" ]; then
+            overlays_dir=$(dirname "$any_dtbo")
+          fi
+          echo "kernel_img=$kernel_img"       >> "$GITHUB_OUTPUT"
+          echo "initrd=$SCRATCH/boot/initrd.img" >> "$GITHUB_OUTPUT"
+          echo "dtb=$dtb"                       >> "$GITHUB_OUTPUT"
+          echo "overlays_dir=$overlays_dir"     >> "$GITHUB_OUTPUT"
+          # find over a root-owned tree can leave outputs root-owned; make the
+          # staged artifacts readable to the unprivileged assembler step.
+          sudo chmod -R a+rX "$SCRATCH/boot"
+
+      - name: Assemble the netboot base bundle and content-verify the initrd
+        env:
+          SCRATCH: ${{ runner.temp }}/netboot-scratch
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+          KERNEL_IMG: ${{ steps.scratch-root.outputs.kernel_img }}
+          INITRD: ${{ steps.scratch-root.outputs.initrd }}
+          DTB: ${{ steps.scratch-root.outputs.dtb }}
+          OVERLAYS_DIR: ${{ steps.scratch-root.outputs.overlays_dir }}
+        run: |
+          set -eu
+          set -x
+          squashfs="$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs"
+          rm -rf "$BUNDLE"
+          overlay_arg=""
+          if [ -n "$OVERLAYS_DIR" ]; then
+            overlay_arg="--overlays-dir $OVERLAYS_DIR"
+          fi
+          # The assembly script runs verify_netboot_initrd.py against the initrd
+          # via lsinitramfs (installed on the host above) -- content-verify #2.
+          # shellcheck disable=SC2086
+          sh "$GITHUB_WORKSPACE/scripts/build_netboot_bundle.sh" \
+            --kernel "$KERNEL_IMG" \
+            --initrd "$INITRD" \
+            --dtb "$DTB" \
+            $overlay_arg \
+            --squashfs "$squashfs" \
+            --output "$BUNDLE" \
+            --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
+            --python python3
+
+      - name: Verify the assembled bundle (content, no hardware)
+        env:
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+        run: |
+          set -eu
+          set -x
+          fail=0
+          violation() { echo "VIOLATION: $1" >&2; fail=1; }
+
+          # Required artifacts present.
+          for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
+                   boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
+                   photo-wall-base.squashfs SHA256SUMS; do
+            [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
+          done
+
+          # squashfs under the release size ceiling (MAX_ROOTFS_BYTES, 1 GiB;
+          # contracts/release.py). Hardcoded here to avoid importing python into
+          # a shell assertion; kept in sync with that constant by comment.
+          max=1073741824
+          sq_bytes=$(stat -c %s "$BUNDLE/photo-wall-base.squashfs")
+          echo "squashfs size: $sq_bytes bytes (ceiling $max)"
+          [ "$sq_bytes" -gt 0 ] && [ "$sq_bytes" -lt "$max" ] \
+            || violation "squashfs size $sq_bytes not in (0, $max)"
+
+          # SHA256SUMS covers EVERY file except itself, and every listed digest
+          # re-verifies (corruption-only).
+          expected=$(find "$BUNDLE" -type f ! -name SHA256SUMS | wc -l | tr -d ' ')
+          listed=$(wc -l < "$BUNDLE/SHA256SUMS" | tr -d ' ')
+          [ "$expected" = "$listed" ] \
+            || violation "SHA256SUMS lists $listed files, bundle has $expected"
+          ( cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS ) \
+            || violation "SHA256SUMS re-verification failed"
+
+          # No signed / trust material anywhere in the bundle (this path is
+          # unsigned by construction -- 0008 boot-chain).
+          signed=$(find "$BUNDLE" \( -name '*.sig' -o -name 'release.pub.pem' \
+            -o -name 'ca.pem' -o -name 'bootstrap.json' \
+            -o -name 'boot-policy.json' \) 2>/dev/null || true)
+          if [ -n "$signed" ]; then
+            violation "signed material present in bundle: $signed"
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: assembled bundle does not satisfy the s2b contract" >&2
+            find "$BUNDLE" -type f -printf '%10s %p\n' >&2 || true
+            exit 1
+          fi
+          echo "PASS: bundle content contract satisfied"
+          find "$BUNDLE" -type f -printf '%10s %p\n'
+
+      - name: Show what was produced
+        if: always()
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+        run: |
+          set -x
+          find "$WORKROOT" -maxdepth 3 -printf '%y %10s %p\n' 2>/dev/null || true
+
+      - name: Upload the base rootfs squashfs and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-base-image-${{ env.REVISION }}
+          path: |
+            ${{ runner.temp }}/photo-wall-base-work/deploy-*/
+            ${{ runner.temp }}/photo-wall-base-work/image-*/image.json
+            ${{ runner.temp }}/photo-wall-base-work/image-*/genimage*.cfg
+          if-no-files-found: error
+          retention-days: 7
+
+      # The whole netboot bundle as ONE artifact (0008 boot-chain: kernel +
+      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS). release.yml consumes this
+      # by name (photo-wall-base-bundle-<revision>).
+      - name: Upload the netboot base bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-base-bundle-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-base-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+      # The two .debs built above, each as its own revision-named artifact so
+      # release.yml can publish them as standalone release assets alongside the
+      # base bundle.
+      - name: Upload the Player .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-player-deb-${{ env.REVISION }}
+          path: ${{ steps.player-deb.outputs.deb_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the bootstrapper .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-bootstrapper-deb-${{ env.REVISION }}
+          path: ${{ steps.bootstrapper-deb.outputs.deb_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Scratch-root build diagnostics (kernel version, boot listings,
+      # lsinitramfs, initrd size, mmdebstrap/apt logs) -- uploaded on failure so
+      # a red run is root-caused from evidence, not guessed (OWNER STANDING RULE).
+      - name: Upload netboot scratch-root diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-netboot-diag-${{ env.REVISION }}
+          path: ${{ runner.temp }}/netboot-diag/
+          if-no-files-found: warn
+          retention-days: 7

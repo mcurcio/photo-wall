@@ -221,7 +221,7 @@ current bounded `appsink`/GTK3 `GLArea` renderer remains the selected path.
 
 ## Native health acceptance adapter
 
-The [native-health fixture](../tests/native/health_smoke.py) additionally
+The `native-health fixture` additionally
 connects real initialized GTK/GStreamer capacity to the production Player
 health writer and 30-second signed-trial acceptance gate. Its
 [executed evidence](evidence/2026-09-06-native-health.md) passed after 30.437s.

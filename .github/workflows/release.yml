@@ -1,0 +1,202 @@
+name: Appliance release
+
+# Publishes a tagged commit's release assets as a GitHub Release: the netboot
+# base bundle (kernel + initrd + Pi 5 DTBs + base squashfs) and the Player and
+# bootstrapper `.deb`s. Per the owner ruling (home LAN, no threat model, UX
+# over security) NONE of these is signed -- there is no signing key anywhere in
+# this workflow, and every sha256 published alongside them is a corruption
+# check only, never an authenticity anchor.
+#
+# This workflow does not itself build the base OS or the packages -- it calls
+# base-image.yml as a reusable workflow (its `workflow_call` trigger) to build
+# the netboot base bundle and both `.deb`s for the exact tagged revision, then
+# downloads those revision-named artifacts and packages them here into the flat
+# operator asset set.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (e.g. v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      revision: ${{ steps.resolve.outputs.revision }}
+    env:
+      TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate the release tag format
+        run: |
+          if [[ ! "$TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)*$ ]]; then
+            echo "::error::TAG '$TAG_INPUT' is not a v-prefixed release tag (expected e.g. v1.2.3)." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/tags/${{ env.TAG_INPUT }}
+          persist-credentials: false
+
+      # workflow_dispatch's ambient github.sha is whatever ref was selected in
+      # the "Run workflow" UI, which need not match the typed `tag` input.
+      # Resolving the tag's exact commit here and threading it to base-image.yml
+      # as an explicit `revision` input keeps the built assets bound to the tag
+      # regardless of that selector.
+      - name: Resolve the tag's exact commit
+        id: resolve
+        run: |
+          echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    permissions:
+      contents: read
+    uses: ./.github/workflows/base-image.yml
+    with:
+      revision: ${{ needs.resolve.outputs.revision }}
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      REVISION: ${{ needs.resolve.outputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Download the netboot base bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-base-bundle-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bundle
+
+      - name: Download the Player .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-player-deb-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/player-deb
+
+      - name: Download the bootstrapper .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-bootstrapper-deb-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bootstrapper-deb
+
+      - name: Package operator-consumable release artifacts
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          find_one_deb() {
+            python3 -c '
+          import glob, sys
+          matches = glob.glob(sys.argv[1] + "/*.deb")
+          assert len(matches) == 1, matches
+          print(matches[0])
+          ' "$1"
+          }
+          player_deb=$(find_one_deb "$release_root/player-deb")
+          bootstrapper_deb=$(find_one_deb "$release_root/bootstrapper-deb")
+          python3 -m scripts.package_release_artifacts \
+            --base-bundle "$release_root/bundle" \
+            --player-deb "$player_deb" \
+            --bootstrapper-deb "$bootstrapper_deb" \
+            --destination "$release_root/artifacts" \
+            --revision "$REVISION"
+
+      # Notes are rendered by Python (not a shell heredoc) so the Markdown's
+      # own backticks/`${...}` cannot be reinterpreted as shell substitution.
+      - name: Generate release notes
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          python3 - "$release_root/notes.md" "$release_root/artifacts" <<'PY'
+          import json
+          import os
+          import sys
+
+          revision = os.environ["REVISION"]
+          repo_blob = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['TAG']}"
+          manifest = json.load(open(os.path.join(sys.argv[2], "manifest.json")))
+          notes = f"""\
+          Photo Wall 0009 release assets for `{revision}`: the minimal base OS
+          image and the Player application, built for this exact commit.
+
+          **Unsigned, by design.** Per the project's home-LAN, no-threat-model
+          ruling ([0009]({repo_blob}/docs/decisions/0009-minimal-base-and-app-package.md)),
+          neither asset is signed. Every sha256 below (and in the attached
+          `SHA256SUMS`/`manifest.json`) is a **corruption check only** -- it
+          proves the download was not truncated or mangled in transit, never
+          who published it.
+
+          ## Base OS image (rarely changes)
+
+          Unpack `{manifest['base_image']['filename']}` (sha256
+          `{manifest['base_image']['sha256']}`) and stage its contents beneath
+          your TFTP boot-server tree -- see
+          [PXE service setup]({repo_blob}/docs/module-pxe-service.md). Every
+          diskless Player netboots this image and fetches the current app at
+          boot; it carries no application code itself.
+
+          ## Player application (revs independently of the base)
+
+          Central serves the `.deb` by reference, the same way it already
+          serves release artifacts: stage the bytes, then register and
+          promote the pointer.
+
+          1. Copy `{manifest['player_deb']['filename']}` to central's
+             `PHOTO_WALL_APP_ROOT` as `app-{manifest['player_deb']['sha256']}.deb`.
+          2. Register it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
+
+                 curl -X POST http://<central>/v1/operator/app \\
+                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
+                   -d '{{"version": "{manifest['player_deb']['version']}", "sha256": "{manifest['player_deb']['sha256']}", "size": {manifest['player_deb']['size']}}}'
+
+          3. Promote it as the current version:
+
+                 curl -X PUT http://<central>/v1/operator/app/current \\
+                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
+                   -d '{{"sha256": "{manifest['player_deb']['sha256']}"}}'
+
+          Every Player fetches the newly promoted `.deb` on its next reboot;
+          running Players are unaffected until then.
+
+          See the [setup and recovery runbook]({repo_blob}/docs/runbook.md) for
+          the full operator procedure.
+          """
+          destination = sys.argv[1]
+          with open(destination, "w") as handle:
+              handle.write(notes)
+          PY
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Photo Wall appliance $TAG" \
+            --notes-file "$release_root/notes.md" \
+            "$release_root"/artifacts/*

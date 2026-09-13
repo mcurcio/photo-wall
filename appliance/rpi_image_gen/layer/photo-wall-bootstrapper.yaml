@@ -1,0 +1,54 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-bootstrapper
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: Installs the Photo Wall base bootstrapper as the
+#  `.deb` (`scripts/build_bootstrapper_deb.py`, "ALL our custom code ships
+#  as a portable .deb" -- the image-build tool owns none of it) rather than
+#  a raw-file rootfs overlay this layer used to own. The `.deb` is built
+#  BEFORE rpi-image-gen runs (see .github/workflows/base-image.yml) and
+#  staged at the host path this layer's own `IGconf_app_bootstrapper_deb`
+#  config var names; this layer's customize-hook copies it into the chroot
+#  and `apt-get install`s it, resolving its Depends
+#  (`python3-zeroconf`, which pulls in `python3-ifaddr`) from this build's
+#  configured Debian apt sources -- the SAME sources.list the base's own
+#  `python3` package (below) is already installed from, so no separate
+#  network setup is needed for this hook. Neither package is declared
+#  directly in `mmdebstrap.packages` any more: they are the `.deb`'s own
+#  Depends now, resolved by apt at install time, not duplicated here.
+#  Installs the `.deb`'s own `/lib/systemd/system/photo-wall-provision
+#  .service`, already enabled via a symlink the `.deb` bakes as data (see
+#  `scripts/build_bootstrapper_deb.py:stage_tree`) -- no `enable-units` hook
+#  needed here either. Carries NO application or render-stack package --
+#  0009 rule #1: "the base OS carries no application and no origin."
+# X-Env-Layer-Version: 2.0.0
+# X-Env-Layer-Requires: systemd-min,ca-certificates
+#
+# X-Env-VarPrefix: app
+#
+# X-Env-Var-bootstrapper_deb:
+# X-Env-Var-bootstrapper_deb-Desc: Absolute host path to the prebuilt
+#  photo-wall-bootstrapper_<version>_all.deb (scripts/build_bootstrapper_deb.py),
+#  built and staged by .github/workflows/base-image.yml before this build
+#  runs. Installed into the chroot by this layer's customize-hook via
+#  `apt-get install`, so its Depends (python3-zeroconf/python3-ifaddr)
+#  resolve against this build's configured Debian apt sources rather than
+#  being carried as a second, raw-file rootfs overlay.
+# X-Env-Var-bootstrapper_deb-Required: y
+# X-Env-Var-bootstrapper_deb-Valid: file
+# X-Env-Var-bootstrapper_deb-Set: y
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - python3
+  customize-hooks:
+    - |-
+      set -eu
+      # Copy the prebuilt .deb into the chroot and install it with apt-get
+      # (not a bare `dpkg -i`) so its Depends -- python3-zeroconf, which
+      # pulls in python3-ifaddr -- resolve from the apt sources this same
+      # chroot already used to install `python3` above, rather than being
+      # declared a second time as raw mmdebstrap packages here.
+      install -m 0644 "$IGconf_app_bootstrapper_deb" "$1/tmp/photo-wall-bootstrapper.deb"
+      chroot "$1" apt-get install -y /tmp/photo-wall-bootstrapper.deb
+      rm -f "$1/tmp/photo-wall-bootstrapper.deb"

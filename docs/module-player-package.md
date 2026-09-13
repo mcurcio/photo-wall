@@ -38,6 +38,25 @@ The [reusable OS base decision](decisions/0007-reusable-os-base.md) describes th
 separate native dependency artifact. The existing offline pip installation
 contract is unchanged.
 
+## The `.deb` package (0009)
+
+[Decision 0009](decisions/0009-minimal-base-and-app-package.md) wraps this exact wheelhouse into a `.deb` central publishes and a netboot bootstrapper downloads, instead of baking the Player venv into a signed base image. `scripts/build_player_deb.py` builds it, reusing `build_player.py`'s `build`/`ROOTS`/`locked_runtime`/`make_player_wheel` verbatim rather than reimplementing them:
+
+- **Payload (gate #6):** a prebuilt venv at the fixed path `/opt/photo-wall/venv` plus the Player and weston systemd units — "install is an unpack," needing no pip or build tools in the base at boot. The venv is assembled the same way `appliance.build.configure_root` does today (`python3.12 -m venv --system-site-packages`, then `pip install --no-index --require-hashes` from the wheelhouse), inside the same arm64/24.04 chroot the appliance build uses.
+- **Version:** exactly the player wheel version (`base_version+g<commit>`) — one identifier for source, wheel, and `.deb`.
+- **Dependencies:** `Depends:` names only the native system libraries the venv needs at run time (GTK/GStreamer/weston, from `appliance.os_packages.RUNTIME_PACKAGES`); every PyPI package stays vendored in the venv, preserving the hashed-wheelhouse integrity model above.
+- **No deployment configuration.** The package carries no `central_origin` and no other deployment config — per 0009, the bootstrapper supplies that at boot, never a published asset.
+
+The central side is register-then-promote by reference, mirroring the existing release-registration pattern: an operator stages the `.deb` bytes under central's `PHOTO_WALL_APP_ROOT`, then `POST /v1/operator/app` records `{version, sha256, size}` and `PUT /v1/operator/app/current` promotes it — see [the app-package contract](module-appliance-release.md#the-app-package-contract-0009-unsigned-in-parallel) and the [runbook](runbook.md#player-provisioning-netboot-and-promote-the-app-0009-in-progress). The sha256 involved is a corruption check only, per the owner's home-LAN ruling — there is no signing anywhere in this path.
+
+**Status:** the builder is implemented, split so its staging/metadata logic is tested on any host and only its venv/`dpkg-deb` assembly (`tests/test_build_player_deb.py`) is gated to Linux with the image tools installed, the same gating `tests/test_appliance_build.py` already uses. This establishes that the `.deb` builds and installs correctly as a package; it does not establish that a netboot base can fetch and run it, since the boot chain that would do that is not yet wired — see [the appliance builder module](module-appliance-builder.md#the-0009-minimal-base-and-bootstrapper-in-progress).
+
+## Operator release sourcing (0010)
+
+[Decision 0010](decisions/0010-github-release-sourcing.md) automates the register-then-promote step above. Instead of an operator hand-staging `.deb` bytes, central's worker polls the project's GitHub Releases, records each semver release with a mirror state, and — only on an operator **promote** — lazily downloads that release's `.deb` into the same `PHOTO_WALL_APP_ROOT` store this module's package lands in. The Player-facing surface is unchanged: Players still `GET /v1/app/manifest` and `/v1/app/package/{sha}.deb` from central, which serves local bytes and never depends on GitHub being reachable.
+
+The operator flow is three admin routes on central — `GET /v1/operator/app/releases` (list tracked releases), `POST /v1/operator/app/releases/{tag}/promote` (200 already-mirrored, 202 pending mirror, 404 unknown tag, 409 undeployable), and `POST /v1/operator/app/releases/refresh` (poll now) — all returning 503 when release sourcing is unconfigured. The feature is opt-in: it activates only when `PHOTO_WALL_APP_ROOT` is set on the worker, and central plus worker must share that store. The [runbook](runbook.md#player-provisioning-promote-a-release-from-github-0010) has the copy-pasteable env config and `curl` commands; the manual `POST /v1/operator/app` + `PUT /v1/operator/app/current` path above coexists as the offline/air-gapped escape hatch.
+
 ## Package qualification
 
 Unit checks cover package boundaries and metadata, deterministic output and `RECORD`, dependency markers and target tags, invalid or ambiguous locks, hash failures, unsafe archives and output paths. A real build must also be installed with pip into a clean CPython 3.12 Linux ARM64 environment, using only the emitted wheelhouse and hash-locked requirements. Successful installation is package evidence; it does not establish Pi boot or physical rendering behavior.
