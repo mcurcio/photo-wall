@@ -138,6 +138,43 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 
 **Where this actually stands.** Central's app-package endpoints (`central/app_packages.py`, `central/app.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
 
+## Player provisioning: promote a release from GitHub (0010)
+
+[Decision 0010](decisions/0010-github-release-sourcing.md) removes the manual sha256 dance above for the common case: central **watches the project's GitHub Releases**, records every semver release as a candidate, and lazily mirrors the `.deb` into the same `PHOTO_WALL_APP_ROOT` store Players already fetch from — but only when *you* promote a version. Discovery is automatic; promotion is a deliberate operator action. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
+
+**Enable it (config env).** Release sourcing is opt-in: it activates only when `PHOTO_WALL_APP_ROOT` is set on the **worker** (it is the worker that reaches the internet and mirrors bytes). Central and the worker must point `PHOTO_WALL_APP_ROOT` at the **same shared `.deb` store** (the worker writes `app-<sha256>.deb`; central serves it), exactly as the manual path already requires.
+
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `PHOTO_WALL_APP_ROOT` | central + worker | (unset) | Shared `.deb` store; setting it on the worker enables release sourcing |
+| `PHOTO_WALL_RELEASE_REPO` | worker | `mcurcio/photo-wall` | `owner/name` of the GitHub repo whose releases are polled |
+| `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
+| `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Truthy to also track GitHub prereleases (drafts are always skipped) |
+| `PHOTO_WALL_RELEASE_POLL_SECONDS` | worker | `900` | Poll cadence in seconds |
+
+**List, promote, refresh (all admin-authenticated).** These reach central's operator API; substitute your central origin and admin token:
+
+```sh
+# List tracked releases: tag / version / mirror_state / deployable / promoted / current.
+curl --fail -H 'Authorization: Bearer <admin-token>' \
+  http://<central>/v1/operator/app/releases
+
+# Promote a version. 200 if its bytes are already mirrored (current advances now);
+# 202 pending if central must mirror the .deb first; 404 unknown tag; 409 undeployable.
+curl -X POST -H 'Authorization: Bearer <admin-token>' \
+  http://<central>/v1/operator/app/releases/<tag>/promote
+
+# Poll GitHub now instead of waiting for the next cadence (coalesced; 202).
+curl -X POST -H 'Authorization: Bearer <admin-token>' \
+  http://<central>/v1/operator/app/releases/refresh
+```
+
+All three return **503 `release_sourcing_unconfigured`** when `PHOTO_WALL_APP_ROOT`/the release queue is not wired.
+
+**Promoted vs. current (pending).** A promote records your **chosen tag** immediately. If that release is already mirrored, the served **current** pointer advances in the same request (`200 promoted`). If it is not yet mirrored, the request returns `202 pending`: the worker downloads and verifies the `.deb`, and `current` advances only once those bytes are on disk — the previously current version keeps serving until then, so Players are never broken. A pending promote whose uplink is down stays pending; it completes automatically when connectivity returns (no re-promote needed). Watch `mirror_state` in the list to see it move `discovered → mirroring → mirrored`, and `current` flip to the new tag.
+
+**Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
+
 ## Tests and local development
 
 Install the free `uv` Python package manager, then:
@@ -167,8 +204,6 @@ prepare an unchanged missing definition explicitly, dispatch `checks.yml`,
 for appliance media qualification. Fork runs require the definition to have
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
-
-A disposable operator fixture is available with `.venv/bin/python -m scripts.demo_registry` after starting the database. It listens on localhost:8010, prints a public fixture token, and registers two simulated Players (two Outputs and one Output) in its own temporary schema. Stop it with Ctrl-C to remove that schema. It is a registry demo only; it does not render or emulate PXE.
 
 The [real-browser registry walkthrough](../tests/browser/test_operator_browser.py) and [content walkthrough](../tests/browser/test_operator_content_browser.py) use the production operator HTML, JavaScript, and HTTP API against their own temporary PostgreSQL schemas. Install the locked development dependencies and their matching Chromium build, then run:
 

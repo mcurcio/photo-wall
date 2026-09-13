@@ -29,7 +29,7 @@ New here? Start with the control plane below. Come back for [Bring a display onl
 
 Once central is running, bringing a display online is four steps — and **none of them touch the individual Pi**:
 
-1. **Publish the Player app to central, once.** Download the `photo-wall-player` `.deb` (a GitHub release asset), register it by its sha256, and promote it as current ([app-package endpoints](docs/module-player-package.md), [runbook](docs/runbook.md)). Every Pi fetches this at boot; shipping an update later is just promoting a new `.deb` — no re-imaging.
+1. **Choose which Player version central serves, once.** Central **auto-discovers** the `.deb` from your project's published GitHub releases — you just **promote the version you want** from the operator API; no manual download, no sha256 registration ([release sourcing](docs/module-player-package.md#operator-release-sourcing-0010), [runbook](docs/runbook.md#player-provisioning-promote-a-release-from-github-0010)). Every Pi fetches the promoted `.deb` at boot; shipping an update later is just promoting a newer version — no re-imaging. (Offline/air-gapped sites can still stage a `.deb` by hand — see the runbook.)
 2. **Stage the generic base bundle on your boot server.** Kernel, initrd, and the base image — the same bytes for every Pi, carrying no application ([PXE service setup](docs/module-pxe-service.md)).
 3. **Netboot a Pi 5** on the LAN. It loads the base, discovers central over mDNS, fetches and `apt`-installs the promoted `.deb`, and **enrolls by hardware serial — appearing unbound in the operator UI.** No boot ticket, no signature, no pre-registration, no baked-in secret.
 4. **Bind it to a Frame** and calibrate; it renders. A reboot re-associates by serial automatically, and **unbind** frees a Frame later without retiring the hardware.
@@ -99,7 +99,7 @@ Most of this lives outside this repo — your LAN, your Pi hardware, and a DHCP/
 Both are GitHub release assets — or build them yourself on any host with `dpkg-deb` (no disk-imaging, no chroot, no signing tooling):
 
 1. **The base bundle** — `config.txt`, a `cmdline.txt` template (fill in your central's base-image URL), the Pi 5 kernel, the initrd, the device tree, and the base squashfs. Stage it in your boot server's tree. It carries no application and almost never changes.
-2. **The Player `.deb`** — register it in central by its sha256 and promote it as current. This is the only thing you re-publish to ship an app update.
+2. **The Player `.deb`** — central discovers it from your GitHub releases; you promote the version you want as current. This is the only thing you re-publish to ship an app update.
 
 ### How a Player comes online
 

@@ -17,6 +17,31 @@ release as a candidate, and — only when *you* promote one — download that
 release's Player `.deb` into central so connected Players keep fetching it from
 the LAN. The decisions are in [Decisions that are yours](#decisions-that-are-yours).
 
+**As built (beads 1-5, landed + CI-green).** Shipped as designed, with these
+reconciliations to the prose below (kept truthful; the design shape is
+unchanged):
+
+- **Config env names.** The vars are `PHOTO_WALL_RELEASE_REPO`,
+  `PHOTO_WALL_RELEASE_TOKEN`, `PHOTO_WALL_RELEASE_PRERELEASES`, and
+  `PHOTO_WALL_RELEASE_POLL_SECONDS` — **not** the `PHOTO_WALL_GITHUB_REPO` /
+  `PHOTO_WALL_GITHUB_TOKEN` names used in gate decision #4 and the tracer below.
+  Setting `PHOTO_WALL_APP_ROOT` on the worker is what enables the feature.
+- **ETag storage.** The release tables are migration `016_release_tracking.sql`
+  (the doc calls it `016_app_release.sql`); the poller's conditional-GET ETag is
+  persisted separately in migration `017_app_release_poll.sql` (a singleton
+  `app_release_poll.etag`), which the design left unnamed.
+- **Promote status codes.** Promote returns **404** for an unknown tag and
+  **409** for an `undeployable` one — finer than the lumped `409` in the tables
+  below — plus **503** `release_sourcing_unconfigured` when the feature is off.
+- **Redirect follow (deviation).** The mirror's `.deb` and `manifest.json` byte
+  fetches **follow up to 5 redirects** (a GitHub `browser_download_url` 302s to a
+  different CDN host), contradicting the "no redirect off-host" note in the
+  promote/mirror sequence below. The streamed size/sha256 bounds hold on every
+  hop and `Authorization` is stripped on the cross-host hop. Recorded in
+  `.claude/errata.md` (2026-09-12, bead 2).
+- **Docs (bead 5).** `README.md` "Bring a display online" and
+  `docs/runbook.md` "promote a release from GitHub (0010)".
+
 ---
 
 ## The problem in plain words
@@ -484,7 +509,7 @@ unaffected.
 | Route | Requires | Returns |
 | --- | --- | --- |
 | `GET /v1/operator/app/releases` | admin | `[{tag, version, mirror_state, deployable, current, size, error}]`, semver-ordered; `current` = this row's `mirrored_sha256` equals `app_package_policy.current_sha256` |
-| `POST /v1/operator/app/releases/{tag}/promote` | admin | `200 {status: promoted}` if mirrored; `202 {status: pending}` if mirror enqueued; `409` if `undeployable`/unknown |
+| `POST /v1/operator/app/releases/{tag}/promote` | admin | `200 {status: promoted}` if mirrored; `202 {status: pending}` if mirror enqueued; `404` if the tag is unknown; `409` if `undeployable` (as built — finer than one lumped `409`) |
 | `POST /v1/operator/app/releases/refresh` | admin | `202 {status: polling}`; enqueues an immediate poll (coalesced) |
 | `GET /v1/app/manifest` | (unchanged, unauth) | The current registered `{version, sha256, size}` — reads `app_packages` exactly as today |
 | `PUT /v1/operator/app/current` | admin | (unchanged) direct sha256 promote — retained as the manual/escape-hatch path |
@@ -523,7 +548,7 @@ beside `media/task_queue.py`, using the same `@app.periodic` / retry patterns.
 | 1 | Tracking semantics | Auto-discover the list; operator promotes an **exact** version. Offer **no** auto-advance channel | Every upgrade is a manual promote; no "always run latest" convenience | An optional "follow latest stable" channel that auto-advances `current` — contradicts the deliberate-deploy requirement; only add if you explicitly want it |
 | 2 | When central downloads the bytes | **Lazy — on promote.** Discovery stays metadata-only | A promote of a never-mirrored version needs GitHub reachable then; it returns "pending" and waits (the residual above) | **Eager — mirror every discovered release.** Always offline-ready, always instantly promotable; costs bandwidth and up to 1 GiB × N releases of disk |
 | 3 | Poll cadence + mechanism | Procrastinate periodic task in the **existing** worker, every **900 s (placeholder)**, plus an on-demand `refresh` endpoint | Up to ~15 min before a new release appears (mitigated by manual refresh) | Shorter interval (more API calls, closer to the rate limit) or GitHub webhooks (needs inbound internet — rejected on a LAN) |
-| 4 | GitHub source config | Repo via `PHOTO_WALL_GITHUB_REPO` (default `mcurcio/photo-wall`); **unauthenticated** by default; optional `PHOTO_WALL_GITHUB_TOKEN`; prereleases **excluded** by default; drafts always excluded; the list uses `ETag`/`If-None-Match` and skips re-fetching `manifest.json` for unchanged releases | Unauth is ~60 req/hr/IP (only the list call counts; asset/CDN downloads generally do not); conditional requests keep a steady state near one request per cadence | Require a token (raises the limit to ~5000/hr) at the cost of an operator having to mint and store one |
+| 4 | GitHub source config | Repo via `PHOTO_WALL_RELEASE_REPO` (default `mcurcio/photo-wall`); **unauthenticated** by default; optional `PHOTO_WALL_RELEASE_TOKEN`; prereleases **excluded** by default (opt in via `PHOTO_WALL_RELEASE_PRERELEASES`); cadence via `PHOTO_WALL_RELEASE_POLL_SECONDS`; drafts always excluded; the list uses `ETag`/`If-None-Match` (persisted in migration `017_app_release_poll`) and skips re-fetching `manifest.json` for unchanged releases | Unauth is ~60 req/hr/IP (only the list call counts; asset/CDN downloads generally do not); conditional requests keep a steady state near one request per cadence | Require a token (raises the limit to ~5000/hr) at the cost of an operator having to mint and store one |
 | 5 | Semver + asset identification | Strict `vX.Y.Z[-pre]` tag as the ordering/identity key; identify the player asset via the release's **`manifest.json`** (`player_deb` record); non-semver tags skipped, releases without the asset marked `undeployable` | Couples central to `manifest.json` continuing to be published by `release.yml` (schema 1) | Match the asset **filename** `photo-wall-player_*.deb` directly — no manifest dependency, but the sha256/size are unknown until the `.deb` is fully downloaded |
 | 6 | Relationship to manual staging | **Coexist.** GitHub sourcing is an additional automated producer into the same `app_packages` registry + current pointer; `POST /v1/operator/app` stays as the offline/manual escape hatch | Two producers exist; a manually staged sha256 won't appear in the release list (it has no `app_releases` row) | **Replace** the manual path — smaller API surface, but loses hand-recovery when GitHub is unreachable and you have the bytes on a USB stick |
 
@@ -646,7 +671,7 @@ fetches that exact `.deb` from central. **Non-goals of the tracer:** the list
 UI, prerelease policy, eager mirroring, multi-page release lists.
 
 **Setup:** worker running with `PHOTO_WALL_APP_ROOT` set and
-`PHOTO_WALL_GITHUB_REPO` pointing at a repo (or a stubbed API) with one release
+`PHOTO_WALL_RELEASE_REPO` pointing at a repo (or a stubbed API) with one release
 `v0.0.1` carrying `manifest.json` + `photo-wall-player_*.deb`; nothing promoted.
 
 **Path:**
