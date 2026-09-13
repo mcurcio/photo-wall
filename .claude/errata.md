@@ -227,3 +227,22 @@ Append-only. Read with `grep -a`.
 - **Keepers that break if the pipeline is deleted whole:** service-base.yml is a `workflow_call` used by checks.yml:27 AND software-e2e.yml:24 (Part B, green). Deleting appliance/build.py makes `import scripts.ci_images` fail at module load -> service_base breaks -> checks + software-e2e break.
 - **Consequence:** s5 cannot be "delete the whole old pipeline". Either (a) SURGICAL: delete only the appliance signed-DISK-image + VM-boot + rollback + release-authority-image code (build_ci_image/flash/base, create_disk*, build_vm_initrd, build_rollback_candidate, boot_gateway/fixture, vm_* probes, test_appliance_e2e, appliance.yml) and KEEP the shared OS-base/media-OS builder (build.py primitives, os_base, os_packages, os_definition.json, fetch_ubuntu, ci_base_cache, ci_images, service_base); or (b) migrate the media OS off the old pipeline first (bigger), then delete all; or (c) defer retirement.
 - **Partial s5 work parked on branch wip/p4-retire-s5-partial (b5d71c4) — INCOMPLETE/BROKEN (ci_images still calls deleted os_base). Do not land.** PR branch reset clean at e5d0bd9.
+
+## 2026-09-12 — 0010 bead 2: "no redirect off-host" contradicts real GitHub asset downloads
+- **Where:** docs/decisions/0010-github-release-sourcing.md (promote/mirror sequence diagram: "GET asset_url (bounded, streamed, no redirect off-host)"); central/github_releases.py `GithubReleaseSource` download/manifest fetch.
+- **Spec-vs-reality:** GitHub release-asset `browser_download_url`
+  (`https://github.com/<repo>/releases/download/<tag>/<file>`) responds 302 to a
+  signed CDN on a DIFFERENT host (`objects.githubusercontent.com` /
+  `codeload...`). The `manifest.json` asset redirects the same way. A literal
+  "no redirect off-host" (as `appliance/provision.py` `_NoRedirect` and
+  `media/immich.py`'s `follow_redirects=False` enforce) makes the client unable
+  to fetch ANY asset from real GitHub — the feature is non-functional.
+- **Decision (implemented):** the byte fetches (manifest + `.deb`) follow a
+  bounded number of redirects (`follow_redirects=True, max_redirects=5`); the
+  streamed running-total + `Content-Length` + sha256 bounds still hold on every
+  hop, and httpx strips `Authorization` on the cross-host CDN hop. The API list
+  call (`api.github.com`) does not redirect. Acceptable on a home LAN with no
+  threat model (0009/0010 ruling: sha256 is corruption-only, not a trust anchor).
+- **Follow-up for beads 3/4:** if a future reviewer wants the redirect target
+  constrained, add an allowlist of GitHub CDN hosts rather than forbidding
+  redirects outright. The current bound is redirect COUNT, not host.
