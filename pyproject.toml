@@ -4,6 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "photo-wall"
+# DECORATIVE, not the release version. Commitizen uses `version_provider = "scm"`
+# (see [tool.commitizen]), so releases are numbered from the latest git tag, not
+# from this field -- bumping it here changes NOTHING about what gets released,
+# and we intentionally never auto-bump/commit it (that would loop `push: main`).
 version = "0.1.0"
 description = "Self-hosted Photo Wall control plane and appliance player"
 requires-python = ">=3.12,<3.14"
@@ -12,6 +16,7 @@ dependencies = [
   "psycopg[binary]==3.2.9", "psycopg-pool==3.3.1", "httpx==0.28.1", "websockets==15.0.1",
   "cryptography==44.0.3", "Pillow==12.3.0",
   "procrastinate==3.9.0", "zeroconf==0.151.3",
+  "semver>=3,<4",
 ]
 
 [dependency-groups]
@@ -26,6 +31,27 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["central", "contracts", "media", "player"]
+
+[tool.commitizen]
+# Conventional-Commits ruleset: classify feat/fix/perf/BREAKING to pick the bump.
+name = "cz_conventional_commits"
+# Release identity is the git tag, strict v-prefixed X.Y.Z[-pre] -- the central
+# watcher's parse_semver accepts and orders exactly this shape.
+tag_format = "v$version"
+# The latest `v*` tag IS the current version; the next version is bumped from it
+# by the commits since that tag. This matches release.yml's model -- the tag is
+# the sole source of truth and we never write a bumped number back to pyproject
+# (a version-bump commit would re-trigger `push: main` and loop). With no tags
+# (first release ever) the base is 0.0.0, so a `feat` bootstraps to v0.1.0 and a
+# `fix` to v0.0.1 -- deterministic without seeding a tag. `pep621` is deliberately
+# NOT used: it would peg the base to the frozen [project] version = 0.1.0 and,
+# finding no matching v0.1.0 tag, recompute from the whole history every push --
+# never signalling "no release" and never advancing past 0.2.0.
+version_provider = "scm"
+# Pre-1.0 home-LAN appliance with no external API-stability contract: a breaking
+# change bumps the MINOR within 0.x (0.2.0 -> 0.3.0) rather than jumping to 1.0.0,
+# until we deliberately cut 1.0.
+major_version_zero = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

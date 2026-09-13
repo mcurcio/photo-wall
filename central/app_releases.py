@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import re
 
+import semver
+
 from central.app_packages import AppPackages
 from central.db import Database
 from contracts.time import Clock
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-# Tag identity/ordering key: strict vX.Y.Z with an optional prerelease tail
-# (matches release.yml's publish-time validation and the migration's CHECK).
-_TAG = re.compile(r"v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:[.-](?P<pre>[0-9A-Za-z.-]+))?")
 
 # mirror_states whose asset metadata a re-poll may refresh (0010: a release
 # re-cut before its bytes were mirrored heals). mirrored/divergent/withdrawn
@@ -48,14 +47,30 @@ def parse_semver(tag: str) -> tuple[int, int, int, str]:
     """Parse a `vX.Y.Z[-pre]` tag into ordering components; 422 if unparseable.
 
     The tag -- not the `.deb`'s internal version -- is the identity/ordering key
-    (0010). Prerelease is the raw tail (compared lexically downstream).
+    (0010). Parsing is delegated to the `semver` library (strict SemVer 2.0.0):
+    the required leading `v` is stripped and the remainder must be a full
+    `X.Y.Z` with an optional `-prerelease`. This is deliberately stricter than
+    the old regex: the 4-segment `vX.Y.Z.W` dot-form is now rejected rather than
+    mis-parsed as a prerelease. Prerelease is returned as the raw tail (compared
+    lexically downstream).
+
+    Build metadata (`+build`) is REJECTED, not silently dropped. `semver` parses
+    and discards it, so `v1.2.3` and `v1.2.3+build.5` would collapse to the same
+    ordering tuple `(1, 2, 3, "")` while remaining two distinct `tag` PKs -- one
+    ordering key for two rows, a nondeterministic "latest" that the migration's
+    CHECK cannot prevent. Since build metadata carries no ordering weight
+    (SemVer 2.0.0 precedence), the only safe policy is to refuse it. Prerelease
+    is still accepted.
     """
-    if not isinstance(tag, str):
+    if not isinstance(tag, str) or not tag.startswith("v"):
         raise AppReleaseError("invalid_tag", 422)
-    m = _TAG.fullmatch(tag)
-    if not m:
+    try:
+        version = semver.Version.parse(tag[1:])
+    except ValueError:
+        raise AppReleaseError("invalid_tag", 422) from None
+    if version.build is not None:
         raise AppReleaseError("invalid_tag", 422)
-    return int(m["major"]), int(m["minor"]), int(m["patch"]), m["pre"] or ""
+    return version.major, version.minor, version.patch, version.prerelease or ""
 
 
 def _sanitize_error(reason: object) -> str | None:
