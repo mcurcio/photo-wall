@@ -29,7 +29,6 @@ from central.app_releases import AppReleaseError, AppReleases, parse_semver
         ("v0.0.1", (0, 0, 1, "")),
         ("v10.20.30", (10, 20, 30, "")),
         ("v1.0.0-rc.1", (1, 0, 0, "rc.1")),
-        ("v2.3.4.5", (2, 3, 4, "5")),
     ],
 )
 def test_parse_semver_accepts_valid_tags(tag, expected):
@@ -38,7 +37,16 @@ def test_parse_semver_accepts_valid_tags(tag, expected):
 
 @pytest.mark.parametrize(
     "tag",
-    ["1.2.3", "v1.2", "valpha", "release-1", "v1.2.3 ", "", "v1.2.x", None],
+    # The 4-segment dot-form `v2.3.4.5` is now rejected (was mis-parsed as a
+    # prerelease by the old regex -- the `v1.2.3.4`-parses-as-prerelease hazard).
+    # Build metadata (`v1.2.3+build.5`) is rejected too: semver would strip it,
+    # collapsing it onto `v1.2.3`'s ordering tuple while staying a distinct PK --
+    # one ordering key for two rows, a nondeterministic "latest" the CHECK cannot
+    # catch. `+build` carries no ordering weight, so the only safe policy is 422.
+    [
+        "1.2.3", "v1.2", "valpha", "release-1", "v1.2.3 ", "", "v1.2.x",
+        "v2.3.4.5", "v1.2.3+build.5", "v1.0.0-rc.1+build.5", None,
+    ],
 )
 def test_parse_semver_rejects_non_semver(tag):
     # Mutation probe 1: a parser that accepts any of these must fail here.

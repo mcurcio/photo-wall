@@ -2,15 +2,31 @@ name: Appliance release
 
 # Immediate, conventional-commit-driven releases for the Photo Wall appliance.
 #
-# MODEL: every push to `main` runs scripts/compute_release_version.py over the
-# commits since the last `v*` tag. A releasable commit (`feat` -> minor, `fix`/
-# `perf` -> patch, a `!`/`BREAKING CHANGE:` -> major) yields the next strict
-# `vX.Y.Z`; this workflow then builds the release assets and creates the tag +
-# GitHub Release together at that commit. A docs/chore-only push decides
-# "no release" and skips straight past build/publish -- a cheap no-op run.
-# The tag is the sole version source of truth: we never auto-commit a pyproject
-# bump or changelog back to main (that would re-trigger this workflow and loop,
-# and the central watcher orders by the tag, not the .deb/pyproject version).
+# MODEL: every push to `main` runs commitizen (`cz bump --get-next`, pinned, via
+# uvx) over the commits since the last `v*` tag. The release policy is NOT
+# hand-rolled here -- it is commitizen 4.9.1's stock `cz_conventional_commits`
+# bump map, adopted verbatim (see pyproject `[tool.commitizen]`). That mapping,
+# under `major_version_zero = true` (pre-1.0), is exactly:
+#   feat                              -> MINOR   (0.2.0 -> 0.3.0)
+#   fix, perf, refactor               -> PATCH   (0.2.0 -> 0.2.1)
+#   any `!` breaking / `BREAKING CHANGE:` footer, on ANY type
+#                                     -> MINOR   (capped from major while pre-1.0)
+#   docs, style, test, ci, build, chore, revert, and any other/unknown type
+#                                     -> NO RELEASE
+# (Verified empirically against commitizen 4.9.1: `build`/`ci`/`revert`/`style`
+# do NOT bump; `refactor`/`perf` DO, as patch. Post-1.0 a breaking change would
+# instead cut a MAJOR; `major_version_zero` is what caps it to minor for now.)
+# A releasable push yields the next strict `vX.Y.Z`; this workflow then builds
+# the release assets and creates the tag + GitHub Release together at that
+# commit. A no-release push (only the types above) skips straight past
+# build/publish -- a cheap no-op run.
+# The git tag is the SOLE version source of truth. `version_provider = "scm"`
+# means the release number comes from the latest `v*` tag, NOT from pyproject's
+# `[project] version` (which is decorative and intentionally never bumped): we
+# never auto-commit a pyproject bump or changelog back to main (that would
+# re-trigger this workflow and loop), and the central watcher orders by the tag,
+# not the .deb/pyproject version. With no tags yet (first release ever) the base
+# is 0.0.0, so this repo's feat history bootstraps the first release to v0.1.0.
 #
 # There is deliberately NO `push: tags: v*` trigger: the publish job creates the
 # tag itself (server-side, at the exact built commit), and a second run on that
@@ -99,18 +115,57 @@ jobs:
             echo "revision=$revision"
           } >> "$GITHUB_OUTPUT"
 
-      # push(main): decide from the conventional commits since the last tag. The
-      # script writes should_release/version/tag to $GITHUB_OUTPUT itself; the
-      # release, if any, is created at this push's commit (github.sha).
+      # push(main): decide from the conventional commits since the last v* tag,
+      # using commitizen (Conventional Commits ruleset) run EPHEMERALLY via uvx
+      # with a PINNED version -- no project dependency, no uv.lock entry. uv is
+      # pinned to the repo-wide 0.7.8 (see checks.yml). `cz bump --get-next`
+      # prints the next strict X.Y.Z on a releasable history and exits 0; it
+      # exits 21 with a `[NO_COMMITS_TO_BUMP]` sentinel when only docs/chore-style
+      # commits landed (-> no release, build/publish skipped). fetch-depth: 0
+      # above supplies the tags + history it reads; `--yes` answers the
+      # first-release "is this the first tag?" prompt non-interactively (with no
+      # tags the base is 0.0.0, so a feat bootstraps to v0.1.0). The release, if
+      # any, is created at this push's commit (github.sha).
+      # Install uv exactly as checks.yml does: actions/setup-python provides an
+      # isolated interpreter that is NOT PEP-668 externally-managed, so the bare
+      # `python -m pip install uv==0.7.8` that follows succeeds (a bare pip
+      # install against ubuntu-24.04's system python3 can fail on the
+      # externally-managed marker). Same pinned action, same Python and uv pins.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: github.event_name == 'push'
+        with:
+          python-version: '3.12.11'
+      - name: Install uv
+        if: github.event_name == 'push'
+        run: python -m pip install uv==0.7.8
       - name: Plan the release (conventional commits on main)
         id: plan-push
         if: github.event_name == 'push'
         run: |
-          set -eu
-          python3 scripts/compute_release_version.py
-          {
-            echo "revision=${{ github.sha }}"
-          } >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          set +e
+          next="$(uvx --from 'commitizen==4.9.1' cz bump --get-next --yes 2>plan.err)"
+          status=$?
+          set -e
+          cat plan.err >&2 || true
+          if [ "$status" -eq 0 ]; then
+            if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::commitizen returned an unexpected next version '$next'."
+              exit 1
+            fi
+            {
+              echo "should_release=true"
+              echo "version=$next"
+              echo "tag=v$next"
+            } >> "$GITHUB_OUTPUT"
+          elif grep -q 'NO_COMMITS_TO_BUMP' plan.err; then
+            # Docs/chore-only push: nothing releasable -> a cheap no-op run.
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::commitizen failed to compute the next version (exit $status)."
+            exit "$status"
+          fi
+          echo "revision=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       # Collapse the two event paths into one set of job outputs.
       - name: Consolidate the plan outputs
@@ -292,7 +347,8 @@ jobs:
             # Tag already exists (dispatch rebuild, or a prior run of this same
             # release). It MUST already point at REVISION -- on the push path
             # REVISION==github.sha and a pre-existing tag would have made
-            # compute_release_version emit NO_RELEASE; on dispatch REVISION was
+            # commitizen compute the same tag's version as already-released (no
+            # new commits to bump -> should_release=false); on dispatch REVISION was
             # resolved FROM this tag. A mismatch is an anomaly, not something to
             # paper over.
             if [ "$existing_sha" != "$REVISION" ]; then
