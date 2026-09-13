@@ -1,9 +1,14 @@
 # 0010 — Sourcing the Player app from GitHub Releases
 
 **Date:** 2026-09-12
-**Status:** Proposed. This directory (`docs/decisions/`) holds accepted
-architecture decisions; this file is the single gate artifact for the feature
-and supersedes any brief, frame, or review note produced while drafting it.
+**Status:** **Accepted 2026-09-12** (owner gate). All six gate decisions took the
+recommended defaults; the two behavior-shaping ones were ruled explicitly:
+**tracking = pin an exact version, manual promote (no auto-advance channel)**,
+and **download = lazy, on promote**. This directory (`docs/decisions/`) holds
+accepted architecture decisions; this file is the single gate artifact for the
+feature and supersedes any brief, frame, or review note produced while drafting
+it. Delivery is by vertical slices (store -> release-source client -> poll+
+reconcile+mirror tasks -> operator API -> docs).
 
 **What you are being asked:** approve the shape below and rule on six open
 questions. Central would stop depending on an operator hand-staging `.deb`
