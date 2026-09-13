@@ -1,26 +1,46 @@
 name: Appliance release
 
-# Publishes a tagged commit's release assets as a GitHub Release: the netboot
-# base bundle (kernel + initrd + Pi 5 DTBs + base squashfs) and the Player and
-# bootstrapper `.deb`s. Per the owner ruling (home LAN, no threat model, UX
-# over security) NONE of these is signed -- there is no signing key anywhere in
-# this workflow, and every sha256 published alongside them is a corruption
-# check only, never an authenticity anchor.
+# Immediate, conventional-commit-driven releases for the Photo Wall appliance.
+#
+# MODEL: every push to `main` runs scripts/compute_release_version.py over the
+# commits since the last `v*` tag. A releasable commit (`feat` -> minor, `fix`/
+# `perf` -> patch, a `!`/`BREAKING CHANGE:` -> major) yields the next strict
+# `vX.Y.Z`; this workflow then builds the release assets and creates the tag +
+# GitHub Release together at that commit. A docs/chore-only push decides
+# "no release" and skips straight past build/publish -- a cheap no-op run.
+# The tag is the sole version source of truth: we never auto-commit a pyproject
+# bump or changelog back to main (that would re-trigger this workflow and loop,
+# and the central watcher orders by the tag, not the .deb/pyproject version).
+#
+# There is deliberately NO `push: tags: v*` trigger: the publish job creates the
+# tag itself (server-side, at the exact built commit), and a second run on that
+# tag push would double-release the same commit. workflow_dispatch remains as a
+# universal recovery path -- it (re)builds and publishes a tag on demand (e.g.
+# after a runner outage). Because the publish job creates the git tag UP FRONT,
+# independent of the release's draft state, dispatch reliably heals a run that
+# died mid-publish: the tag already exists at the built commit, so dispatching it
+# rebuilds and publishes at that same commit. Creating a tag ref via the ambient
+# GITHUB_TOKEN does not trigger other workflows, so there is no release loop.
 #
 # This workflow does not itself build the base OS or the packages -- it calls
 # base-image.yml as a reusable workflow (its `workflow_call` trigger) to build
-# the netboot base bundle and both `.deb`s for the exact tagged revision, then
+# the netboot base bundle and both `.deb`s for the exact release revision, then
 # downloads those revision-named artifacts and packages them here into the flat
 # operator asset set.
+#
+# UNSIGNED BY DESIGN: per the owner ruling (home LAN, no threat model, UX over
+# security) NONE of these assets is signed -- there is no signing key anywhere
+# in this workflow, and every sha256 published alongside them is a corruption
+# check only, never an authenticity anchor.
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build and publish (e.g. v1.2.3)
+        description: Existing v-prefixed tag to (re)build and publish
         required: true
         type: string
 
@@ -28,81 +48,126 @@ permissions:
   contents: read
 
 concurrency:
+  # One release at a time; never cancel a publish mid-flight. Keyed by the tag on
+  # dispatch (rebuild of a specific tag) and by the branch ref on push (serialize
+  # main-driven releases).
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
-  resolve:
+  plan:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-      revision: ${{ steps.resolve.outputs.revision }}
-    env:
-      TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      revision: ${{ steps.plan.outputs.revision }}
     steps:
-      - name: Validate the release tag format
-        run: |
-          if [[ ! "$TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)*$ ]]; then
-            echo "::error::TAG '$TAG_INPUT' is not a v-prefixed release tag (expected e.g. v1.2.3)." >&2
-            exit 1
-          fi
-
+      # Full history + tags: the push path needs them for the semver walk, and
+      # the dispatch path needs the tag object to resolve its commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: refs/tags/${{ env.TAG_INPUT }}
+          fetch-depth: 0
           persist-credentials: false
 
-      # workflow_dispatch's ambient github.sha is whatever ref was selected in
-      # the "Run workflow" UI, which need not match the typed `tag` input.
-      # Resolving the tag's exact commit here and threading it to base-image.yml
-      # as an explicit `revision` input keeps the built assets bound to the tag
-      # regardless of that selector.
-      - name: Resolve the tag's exact commit
-        id: resolve
+      # workflow_dispatch: (re)build and publish an EXISTING tag. Validate the
+      # typed tag against the STRICT vX.Y.Z[-pre] shape the central watcher's
+      # parse_semver accepts, then resolve the exact commit the tag points at --
+      # the ambient github.sha is whatever ref the "Run workflow" UI selected and
+      # need not match the typed tag, so we bind the build to the tag's commit.
+      - name: Plan the release (existing tag)
+        id: plan-dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
-          echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
-          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          set -eu
+          if [[ ! "$TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag '$TAG_INPUT' is not a strict v-prefixed release tag (expected e.g. v1.2.3 or v1.2.3-rc.1)."
+            exit 1
+          fi
+          # The checkout above uses fetch-depth: 0, which fetches all tags, so
+          # the tag object is already present -- resolve its commit directly. No
+          # extra `git fetch` (which would be unauthenticated under
+          # persist-credentials:false and fail on a private repo).
+          revision=$(git rev-parse "refs/tags/$TAG_INPUT^{commit}")
+          {
+            echo "should_release=true"
+            echo "tag=$TAG_INPUT"
+            echo "revision=$revision"
+          } >> "$GITHUB_OUTPUT"
+
+      # push(main): decide from the conventional commits since the last tag. The
+      # script writes should_release/version/tag to $GITHUB_OUTPUT itself; the
+      # release, if any, is created at this push's commit (github.sha).
+      - name: Plan the release (conventional commits on main)
+        id: plan-push
+        if: github.event_name == 'push'
+        run: |
+          set -eu
+          python3 scripts/compute_release_version.py
+          {
+            echo "revision=${{ github.sha }}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Collapse the two event paths into one set of job outputs.
+      - name: Consolidate the plan outputs
+        id: plan
+        env:
+          SHOULD_RELEASE: ${{ steps.plan-dispatch.outputs.should_release || steps.plan-push.outputs.should_release }}
+          TAG: ${{ steps.plan-dispatch.outputs.tag || steps.plan-push.outputs.tag }}
+          REVISION: ${{ steps.plan-dispatch.outputs.revision || steps.plan-push.outputs.revision }}
+        run: |
+          set -eu
+          {
+            echo "should_release=${SHOULD_RELEASE:-false}"
+            echo "tag=${TAG:-}"
+            echo "revision=${REVISION:-}"
+          } >> "$GITHUB_OUTPUT"
 
   build:
-    needs: resolve
+    needs: plan
+    if: needs.plan.outputs.should_release == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/base-image.yml
     with:
-      revision: ${{ needs.resolve.outputs.revision }}
+      revision: ${{ needs.plan.outputs.revision }}
 
   publish:
-    needs: [resolve, build]
+    needs: [plan, build]
+    if: needs.plan.outputs.should_release == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     permissions:
       contents: write
     env:
-      TAG: ${{ needs.resolve.outputs.tag }}
-      REVISION: ${{ needs.resolve.outputs.revision }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      REVISION: ${{ needs.plan.outputs.revision }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Download the netboot base bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: photo-wall-base-bundle-${{ needs.resolve.outputs.revision }}
+          name: photo-wall-base-bundle-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/bundle
 
       - name: Download the Player .deb
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: photo-wall-player-deb-${{ needs.resolve.outputs.revision }}
+          name: photo-wall-player-deb-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/player-deb
 
       - name: Download the bootstrapper .deb
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: photo-wall-bootstrapper-deb-${{ needs.resolve.outputs.revision }}
+          name: photo-wall-bootstrapper-deb-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/bootstrapper-deb
 
       - name: Package operator-consumable release artifacts
@@ -189,14 +254,67 @@ jobs:
               handle.write(notes)
           PY
 
+      # Create the release in four idempotent, re-runnable steps: (1) create the
+      # git TAG server-side at the exact built REVISION, then (2) draft, (3)
+      # upload every asset, (4) un-draft. The central watcher discovers only
+      # NON-DRAFT releases and permanently freezes an `undeployable` one, so a
+      # release must never become visible until all of its assets are attached --
+      # hence draft-until-last.
+      #
+      # Creating the tag UP FRONT (step 1), rather than letting a published
+      # release create it at un-draft time, is what makes the failure class
+      # impossible: a GitHub draft release does NOT create the git tag, so the old
+      # ordering could strand a draft with no tag and break the dispatch recovery
+      # path (which resolves the built commit FROM the tag). Now the tag always
+      # exists at REVISION the moment step 1 runs, uniformly for push and
+      # dispatch, so `--verify-tag` is always valid and no --target/new-tag
+      # branching is needed.
+      #
+      # RESIDUAL EDGE: a brand-new tag stranded at commit R1 (tag + draft created,
+      # run died before un-draft) is healed by dispatching that tag -- it rebuilds
+      # and publishes at R1 -- or by re-running the failed job. A different, later
+      # commit can NEVER silently reuse that version: step 1 refuses to move an
+      # existing tag and fails loudly.
       - name: Publish the GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           release_root="$RUNNER_TEMP/photo-wall-release"
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "Photo Wall appliance $TAG" \
-            --notes-file "$release_root/notes.md" \
-            "$release_root"/artifacts/*
+          notes="$release_root/notes.md"
+          # 1. Ensure the git TAG exists at the exact built REVISION, created
+          #    explicitly and server-side (independent of the release's draft
+          #    state). Idempotent; never moves a tag. `git/ref/tags/$TAG` is the
+          #    single-ref endpoint: it returns exactly one ref or 404 (unlike
+          #    `git/matching-refs`, which prefix-matches).
+          if existing_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
+            # Tag already exists (dispatch rebuild, or a prior run of this same
+            # release). It MUST already point at REVISION -- on the push path
+            # REVISION==github.sha and a pre-existing tag would have made
+            # compute_release_version emit NO_RELEASE; on dispatch REVISION was
+            # resolved FROM this tag. A mismatch is an anomaly, not something to
+            # paper over.
+            if [ "$existing_sha" != "$REVISION" ]; then
+              echo "::error::Tag $TAG already exists at $existing_sha but this run built $REVISION. Refusing to move the tag. If a prior release run for $TAG was stranded, re-run that failed job (it heals at the original commit) or delete the stray tag+draft, then retry." >&2
+              exit 1
+            fi
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$REVISION" >/dev/null
+          fi
+          # 2. Ensure a DRAFT release for that (now-existing) tag. Uniform across
+          #    push/dispatch: re-draft an existing release so a rebuild re-uploads
+          #    cleanly, else create one with --verify-tag (the tag exists).
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --notes-file "$notes"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "Photo Wall appliance $TAG" --notes-file "$notes"
+          fi
+          # 3. Upload all assets idempotently (safe on re-run). failglob makes an
+          #    empty artifacts/ fail loudly instead of passing a literal glob.
+          shopt -s failglob
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$release_root"/artifacts/*
+          # 4. Publish (creates nothing new; the tag already exists). Only now is
+          #    it discoverable to the watcher.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
