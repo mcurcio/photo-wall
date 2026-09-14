@@ -1,6 +1,6 @@
 import React from "react";
 
-import { nowShowing } from "./join.js";
+import { nowShowing, rankedContributions } from "./join.js";
 
 /**
  * Now-showing facet (Bead 3, read-only).
@@ -26,17 +26,10 @@ import { nowShowing } from "./join.js";
 export function NowShowingFacet({ snapshot, frameId }) {
   const now = nowShowing(snapshot?.runtime, frameId);
 
-  const target = "frame:" + frameId;
-  const contributions = snapshot?.runtime?.current?.contributions ?? [];
-  const why = contributions
-    .filter((intent) => intent.target === target)
-    .slice()
-    .sort(
-      (a, b) =>
-        b.priority - a.priority ||
-        b.root_order - a.root_order ||
-        b.admission_order - a.admission_order,
-    );
+  // The "why" reuses the shared precedence read (primitive #4, join.js) so the
+  // ranking rule lives in exactly one place — the same list the Showrunner Runs
+  // "why" panel (Bead 16) renders. Sorted DESCENDING, so the visible winner tops.
+  const why = rankedContributions(snapshot?.runtime, frameId);
 
   return (
     <div className="facet facet--nowshowing">

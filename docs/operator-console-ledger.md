@@ -28,9 +28,9 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 13 | SR-sources (Sources list + Refresh) | closed | d90e3ce | M6 |
 | 14a | SR-scenes-live (scene authoring shell + live-source scene save) | closed | d2b32d6 | M6 (pre-split of 14) |
 | 14b | SR-scenes-authored (per-frame candidate choosers + profile hard-filter + save) | closed | 531389b | M6 (pre-split of 14) |
-| 15 | SR-programs (Programs + N-window helper) | closed | PEND15 | M6 |
-| 16 | SR-runs (Run control + activation outcome + why) | in_progress | — | M6 |
-| 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | open | — | M6 |
+| 15 | SR-programs (Programs + N-window helper) | closed | fcd53bb | M6 |
+| 16 | SR-runs (Run control + activation outcome + why) | closed | PEND16 | M6 |
+| 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | in_progress | — | M6 |
 | D6 | Docs — M6 (Showrunner + R4) | open | — | after M6 |
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | open | — | M7 |
 | D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
