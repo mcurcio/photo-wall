@@ -32,7 +32,7 @@ from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigur
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.registry import Enrollment, FrameCreate, Registry, RegistryError
+from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
     Calibration,
@@ -613,6 +613,10 @@ def create_app(
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
         return registry.create_frame(frame)
+
+    @app.patch("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
+    def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
+        return registry.place_frame(frame_id, placement)
 
     @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def bind(frame_id: Identifier, binding: BindingRequest):
