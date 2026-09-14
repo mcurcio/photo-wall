@@ -256,3 +256,78 @@ body {
   margin: 0;
   padding-left: 20px;
 }
+
+.facet__note {
+  margin: 0 0 8px;
+  color: #8b98a4;
+  font-size: 0.85em;
+}
+
+.facet__error {
+  margin: 8px 0 0;
+  color: #e5484d;
+  font-weight: 600;
+}
+
+.facet__draft-status {
+  margin: 6px 0 0;
+  color: #8b98a4;
+}
+
+.calib__svg {
+  touch-action: none;
+  display: block;
+  background: #10161c;
+  border-radius: 6px;
+}
+
+.calib__frame {
+  fill: #1b232b;
+  stroke: #2b3946;
+  stroke-width: 1;
+}
+
+.calib__crop {
+  fill: rgba(90, 160, 255, 0.12);
+  stroke: #5aa0ff;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.calib__quad {
+  fill: rgba(120, 220, 160, 0.1);
+  stroke: #6fdc9c;
+  stroke-width: 1.5;
+}
+
+.calib__handle {
+  cursor: grab;
+}
+
+.calib__handle--corner {
+  fill: #6fdc9c;
+}
+
+.calib__handle--crop {
+  fill: #5aa0ff;
+}
+
+.calib__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.calib__control {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.8em;
+  color: #b9c4cf;
+}
+
+.calib__control input,
+.calib__control select {
+  width: 92px;
+}
