@@ -22,8 +22,8 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 9 | O-bind (pending rail + bind/unbind + recovery + CTA) | closed | 69eafa6 | M4 |
 | D4 | Docs — M4 (onboarding/binding/recovery) | closed | 0e0f48b | after M4 (coherence: COHERENT) |
 | 10 | S-place (drag-to-create POST + drag-to-move PATCH) | closed | e355cec | M5 |
-| 11 | S-remove (delete + Unplaced tray drag-out) | closed | PEND11 | M5 |
-| D5 | Docs — M5 (spatial editing + tray) | open | — | after M5 |
+| 11 | S-remove (delete + Unplaced tray drag-out) | closed | 708a60c | M5 |
+| D5 | Docs — M5 (spatial editing + tray) | closed | PENDD5 | after M5 (coherence: COHERENT) |
 | 12 | SR-mode (mode toggle + Showrunner shell + R4 + badge) | open | — | M6 |
 | 13 | SR-sources (Sources list + Refresh) | open | — | M6 |
 | 14 | SR-scenes (Scene authoring) [near-ceiling, may pre-split] | open | — | M6 |

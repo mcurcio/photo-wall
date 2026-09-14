@@ -331,3 +331,18 @@ Append-only. Read with `grep -a`.
   have the M6 write beads use it (optionally refactor BindingFacet/useCalibration onto it). This is the
   rule-of-three prevention. useMutate (primitive #7, refresh-after-write) stays separate.
 - Disposition: residual, scheduled for M6 start. Also RESIDUAL: dedupe-calibration-defaults (M3) still open.
+
+## 2026-09-14 — M5 coherence: client-generated Frame id (path back to plan of record)
+- **Where:** central/console/src/Plan.jsx createFrame; design J3 POST body (ux-design:483) + fact table (:104).
+- **Divergence:** `POST /v1/operator/frames` requires a client-provided `id` (FrameCreate.id is required, no default,
+  registry.py:44), but design J3's POST body OMITS id (implying server assignment). createFrame mints an
+  Identifier-valid `frame-<...>` id. Works (tests green). Recorded here so M6/future consumers know the POST
+  needs a client id; a doc touch-up to J3 could note it. Disposition: accepted, non-blocking.
+
+## 2026-09-14 — M6 START (mandatory refactor before write beads): extract operator-write helper
+- Operator-write scaffolding is now RULE-OF-FOUR (BindingFacet.bind/unbind, useCalibration POST,
+  Plan.createFrame/moveFrame/deleteFrame, interpretFrame) and M5 created a SIBLING import
+  (UnplacedTray.jsx imports deleteFrame from ./Plan.jsx). Bead R-apiwrite (first M6 step) extracts a shared
+  low-level operator-write helper + a frames-API module both Plan and UnplacedTray import from (dissolving the
+  sibling import), and refactors BindingFacet + useCalibration onto the low-level helper. Behavior-preserving;
+  guarded by the existing 36-test browser suite. Supersedes the earlier "M6 start" residual note.
