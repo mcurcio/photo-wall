@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from central.app import create_app
 from central.db import Database
@@ -15,6 +16,7 @@ from central.installation_models import InstallationInventory
 from central.registry import (
     Enrollment,
     FrameCreate,
+    FramePlacement,
     OutputReport,
     Registry,
     RegistryError,
@@ -395,3 +397,48 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
         assert response.status_code == 200
         assert response.json() == expected.model_dump(mode="json")
         assert InstallationInventory.model_validate_json(response.content) == expected
+
+
+def test_place_frame_merges_only_supplied_fields_and_echoes_result(registry):
+    frame(registry)
+    result = registry.place_frame("portrait", FramePlacement(x_mm=10, y_mm=20))
+    assert result == {"id": "portrait", "surface_id": "wall", "x_mm": 10, "y_mm": 20,
+                      "width_mm": 300, "height_mm": 500}
+    location = registry.inventory().frames[0]
+    assert (location.x_mm, location.y_mm, location.width_mm, location.height_mm) == (10, 20, 300, 500)
+
+
+def test_place_frame_rejects_a_merged_result_that_breaks_orientation(registry):
+    frame(registry)
+    # 300x500 portrait mm on a 1080x1920 portrait profile; widening to 600 makes
+    # the physical Frame landscape while the profile stays portrait -- incoherent.
+    with pytest.raises(RegistryError) as excinfo:
+        registry.place_frame("portrait", FramePlacement(width_mm=600))
+    assert (excinfo.value.code, excinfo.value.status) == ("oriented_profile", 422)
+
+
+def test_place_frame_on_unknown_frame_is_404(registry):
+    with pytest.raises(RegistryError) as excinfo:
+        registry.place_frame("nope", FramePlacement(x_mm=1))
+    assert (excinfo.value.code, excinfo.value.status) == ("unknown_frame", 404)
+
+
+def test_place_frame_never_touches_generation_revision_or_calibration(registry):
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("portrait", "commit", 1, Calibration(gain=.7), expected_generation=1)
+    before = registry.inventory().frames[0]
+    registry.place_frame("portrait", FramePlacement(x_mm=42))
+    after = registry.inventory().frames[0]
+    assert after.x_mm == 42
+    assert after.generation == before.generation
+    assert after.configuration_revision == before.configuration_revision
+    assert after.calibration == before.calibration
+
+
+def test_frame_create_still_rejects_an_incoherent_profile(registry):
+    # Guards the validator migration onto the shared _orientation_coherent helper.
+    with pytest.raises(ValidationError):
+        FrameCreate(id="bad", width_mm=500, height_mm=300,
+                    profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24))

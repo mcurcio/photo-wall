@@ -32,6 +32,14 @@ class RegistryError(Exception):
         super().__init__(code)
 
 
+def _orientation_coherent(width_mm: float, height_mm: float,
+                          width_px: int, height_px: int) -> bool:
+    """True when physical and pixel dimensions agree on orientation:
+    height_mm == width_mm OR (height_mm > width_mm) == (height_px > width_px).
+    Single copy of the invariant shared by FrameCreate and Registry.place_frame."""
+    return height_mm == width_mm or (height_mm > width_mm) == (height_px > width_px)
+
+
 class FrameCreate(Model):
     id: Identifier
     surface_id: Identifier = "wall"
@@ -43,10 +51,18 @@ class FrameCreate(Model):
 
     @model_validator(mode="after")
     def oriented_profile(self):
-        if self.height_mm != self.width_mm and ((self.height_mm > self.width_mm) !=
-                                                (self.profile.height_px > self.profile.width_px)):
+        if not _orientation_coherent(self.width_mm, self.height_mm,
+                                     self.profile.width_px, self.profile.height_px):
             raise ValueError("display profile must use dimensions oriented to the physical Frame")
         return self
+
+
+class FramePlacement(Model):
+    surface_id: Identifier | None = None
+    x_mm: float | None = None
+    y_mm: float | None = None
+    width_mm: float | None = Field(default=None, gt=0)
+    height_mm: float | None = Field(default=None, gt=0)
 
 
 class Registry:
@@ -227,6 +243,28 @@ class Registry:
             self._audit(conn, "frame_unbound", frame_id,
                         {"player_id": existing["player_id"], "output_id": existing["output_id"], **row})
             return {**row, "changed": True}
+
+    def place_frame(self, frame_id: str, placement: FramePlacement) -> dict:
+        """Reposition: last-write-wins, no token (the one deliberate exception to R3,
+        design §9a). FOR UPDATE makes the read-merge-write atomic; the row is still LWW.
+        Bumps NO generation, NO configuration_revision; never touches calibration."""
+        with self.db.transaction() as conn:
+            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
+                                 (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            merged = {field: value if value is not None else frame[field]
+                      for field, value in placement.model_dump().items()}
+            profile = FrameProfile.model_validate(frame["profile"])
+            if not _orientation_coherent(merged["width_mm"], merged["height_mm"],
+                                         profile.width_px, profile.height_px):
+                raise RegistryError("oriented_profile", 422)
+            conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s,width_mm=%s,"
+                         "height_mm=%s WHERE id=%s",
+                         (merged["surface_id"], merged["x_mm"], merged["y_mm"],
+                          merged["width_mm"], merged["height_mm"], frame_id))
+            self._audit(conn, "frame_repositioned", frame_id)
+            return {"id": frame_id, **merged}
 
     def retire(self, player_id: str) -> None:
         with self.db.transaction() as conn:
