@@ -353,3 +353,123 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
         assert frame.height_mm == 500
         # It still renders on the plan by identity.
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
+
+
+# Bead 11 -- S-remove: DELETE (guarded 409 -> distinctive operator guidance) + drag
+# a tray (origin-stacked) frame onto the plan (PATCH -> distinct geometry -> leaves
+# the tray). Assertions are behavioral OUTCOMES: server-side identity via
+# registry.inventory(), on-plan/in-tray identity by role/label, and the DISTINCTIVE
+# guard wording (design §9a) -- never SVG pixel coordinates or a generic substring.
+CLEAR = "clear-frame"
+BOUND = "bound-frame"
+
+
+def _plan(page):
+    return page.get_by_role("group", name="Wall plan for surface wall", exact=True)
+
+
+def _seed_bound(registry):
+    """A placed frame bound to a connected output, with NO live Run -- so DELETE
+    passes the runtime guard and is refused by the binding guard (frame_bound)."""
+    identity, _key, _request = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    registry.create_frame(FrameCreate(
+        id=BOUND, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.bind(BOUND, player_id, "HDMI-A-1", expected_generation=0)
+    return player_id
+
+
+def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        # Select the clear frame on the plan, then delete it via its control.
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+
+        # Gone by identity from the plan AND from server inventory (real removal).
+        expect(page.get_by_role("button", name=f"Frame {CLEAR}", exact=True)).to_have_count(0)
+        _wait_for(lambda: all(f.id != CLEAR for f in registry.inventory().frames))
+
+
+def test_delete_bound_frame_shows_unbind_guidance(page, registry):
+    _seed_bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        page.get_by_role("button", name=f"Frame {BOUND}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {BOUND}", exact=True).click()
+
+        # 409 frame_bound -> the DISTINCTIVE unbind guidance (design §9a). Asserting
+        # the specific remedy wording, not a generic substring, so a mapping that
+        # collapses the code to a generic error cannot false-green.
+        expect(_plan(page).get_by_role("alert")).to_contain_text("unbind it before deleting")
+        # The Frame is NOT deleted -- it still renders and still exists server-side.
+        expect(page.get_by_role("button", name=f"Frame {BOUND}", exact=True)).to_be_visible()
+        assert any(f.id == BOUND for f in registry.inventory().frames)
+
+
+def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
+    # SHOWING is bound AND a live Run targets it; the route checks the runtime guard
+    # first, so DELETE is refused with frame_in_use (not frame_bound).
+    _seed_now_showing(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {SHOWING}", exact=True).click()
+
+        # 409 frame_in_use -> the DISTINCTIVE finish/cancel-the-Run guidance.
+        expect(_plan(page).get_by_role("alert")).to_contain_text("finish or cancel")
+        expect(page.get_by_role("button", name=f"Frame {SHOWING}", exact=True)).to_be_visible()
+
+
+def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
+    # The only frame is origin-stacked -> it starts in the Unplaced tray.
+    registry.create_frame(FrameCreate(
+        id=ORIGIN, surface_id="wall", x_mm=0, y_mm=0,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        tray = page.get_by_role("group", name="Unplaced frames")
+        item = tray.get_by_role("button", name=ORIGIN, exact=True)
+        expect(item).to_be_visible()
+        # It is not on the plan yet.
+        expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_have_count(0)
+
+        # Tall viewport so BOTH the plan (top) and the tray (below it) are fully
+        # on-screen without scrolling -- mouse coords and getBoundingClientRect then
+        # share one stable frame.
+        page.set_viewport_size({"width": 1400, "height": 2000})
+        svg = _plan_svg(page)
+        svg.wait_for(state="visible")
+        plan_box = svg.bounding_box()
+        for _ in range(20):
+            time.sleep(0.05)
+            nxt = svg.bounding_box()
+            if nxt == plan_box:
+                break
+            plan_box = nxt
+        item_box = item.bounding_box()
+
+        # Press on the tray entry and RELEASE over the plan interior: the frame is
+        # dropped onto the plan (PATCH), gaining a distinct non-origin position.
+        page.mouse.move(item_box["x"] + item_box["width"] / 2,
+                        item_box["y"] + item_box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(plan_box["x"] + 0.5 * plan_box["width"],
+                        plan_box["y"] + 0.4 * plan_box["height"], steps=8)
+        page.mouse.up()
+
+        def _placed():
+            frame = next(f for f in registry.inventory().frames if f.id == ORIGIN)
+            return frame if (frame.x_mm, frame.y_mm) != (0, 0) else None
+
+        moved = _wait_for(_placed)
+        # PATCH preserved the stored physical dimensions (partial placement).
+        assert moved.width_mm == 300
+        assert moved.height_mm == 500
+        # It now renders on the plan by identity and has LEFT the Unplaced tray.
+        expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_be_visible()
+        expect(tray.get_by_role("button", name=ORIGIN, exact=True)).to_have_count(0)
