@@ -11,8 +11,8 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 1 | T-plan (per-Surface SVG plan + Unplaced tray) | closed | acbb70d | M1 |
 | 2 | T-join (now-showing join + tile chips) | closed | 226d855 | M1 |
 | 3 | T-inspector (Inspector shell + Binding/Now-showing) | closed | 3650e54 | M1 |
-| 4 | Commission-read (read-only Commissioning + gate) | closed | PENDING4 | M1 |
-| D1 | Docs — M1 (README wall/inspector/now-showing) | open | — | after M1 |
+| 4 | Commission-read (read-only Commissioning + gate) | closed | 8572220 | M1 |
+| D1 | Docs — M1 (README wall/inspector/now-showing) | closed | PENDD1 | after M1 (coherence: COHERENT) |
 | 5 | B-PATCH (reposition route, LWW) | closed | 047eb00 | M2 |
 | 6 | B-DELETE (guarded delete route) [HIGH] | closed | 873d86c | M2 |
 | D2 | Docs — M2 (PATCH/DELETE API doc) | open | — | after M2 |
