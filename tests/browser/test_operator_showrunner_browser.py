@@ -44,6 +44,10 @@ OUTPUT = "HDMI-A-1"
 # is the `name:rev` string the operator chose, NOT a downloaded album.
 SOURCE = "holiday:1"
 
+# The scene_id an operator authors below; a Scene is identified by its id, never
+# a name (design J4).
+SCENE_ID = "holiday-scene"
+
 
 def _seed_source(registry):
     """Configure ONE saved live query through the shared DB so the console's
@@ -217,3 +221,55 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         assert "immich" not in copy
         assert "album" not in copy
         assert "open in" not in copy
+
+
+def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
+    """Bead 14a: author a LIVE-source Scene backed by a Source, targeting explicit
+    Frames on a cycle interval; it saves in ONE request and then appears in the
+    Scenes list by its scene_id (design J4).
+
+    The single-request save is asserted on the ONE PUT to the plain scene route
+    and its body: one media Contribution per target Frame, each driven by the
+    chosen Source. This is the load-bearing invariant the mutation probe attacks
+    (drop the target frames from the payload -> the target assertion goes red).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        expect(scenes).to_be_visible()
+        # No scenes exist yet, so the appearance below is not vacuously true.
+        expect(scenes.get_by_label(f"Scene {SCENE_ID}", exact=True)).to_have_count(0)
+
+        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
+        form.get_by_label("Scene ID", exact=True).fill(SCENE_ID)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        # Target one or more EXPLICIT Frames.
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}")
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+
+        response = info.value
+        assert response.status == 200
+        # The scene saved in ONE request whose body carries the live source and
+        # every explicit target Frame as a media Contribution.
+        body = response.request.post_data_json
+        assert body["scene_id"] == SCENE_ID
+        assert body["cycle_seconds"] == 45
+        contributions = {c["target"]: c for c in body["contributions"]}
+        assert set(contributions) == {
+            f"frame:{VALID_FRAME}", f"frame:{INVALID_FRAME}"}
+        for target in (VALID_FRAME, INVALID_FRAME):
+            assert contributions[f"frame:{target}"]["source_refs"] == [SOURCE]
+
+        # After the useMutate() refresh, the saved Scene appears by its scene_id.
+        expect(scenes.get_by_label(f"Scene {SCENE_ID}", exact=True)).to_be_visible()
