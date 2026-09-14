@@ -114,6 +114,9 @@ def _seed_now_showing(registry):
         contributions=(Contribution(target="frame:" + SHOWING,
                                      source_refs=("lobby-photos:1",)),)))
     store.command("activate", SCENE, "lobby-activation", registry.clock.utc())
+    # Returned for callers (Bead 3 Inspector) that assert the bound Player id;
+    # the Bead 2 tile tests ignore the return.
+    return player_id
 
 
 def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, registry):
@@ -138,6 +141,45 @@ def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, re
 
         # Honesty (design §6a): the surface asserts intent, never confirmed
         # playback -- the literal "LIVE" appears nowhere on the console.
+        expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
+
+
+def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, registry):
+    # Reuse the Bead 2 seeding: a placed frame bound to a connected output that a
+    # live Run targets. `player_id` is the Player the frame is bound to.
+    player_id = _seed_now_showing(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+
+        # Selecting the frame on the plan (by identity) opens its read-only
+        # Inspector, scoped to that frame's identity.
+        page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
+        inspector = page.get_by_role("region", name=f"Frame {SHOWING} inspector", exact=True)
+        expect(inspector).to_be_visible()
+
+        # The three facet tabs exist; Commissioning is present as a stub (its real
+        # body lands in Bead 4 -- it is NOT a hardware control here).
+        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_be_visible()
+        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_be_visible()
+        expect(inspector.get_by_role("tab", name="Now-showing", exact=True)).to_be_visible()
+
+        # Binding facet: the bound Player and Output, read through the frame's
+        # FrameInventory row.
+        inspector.get_by_role("tab", name="Binding", exact=True).click()
+        expect(inspector).to_contain_text(player_id)
+        expect(inspector).to_contain_text("HDMI-A-1")
+
+        # Now-showing facet: the intended scene_id (joined by the STRING
+        # "frame:<id>") plus the precedence-ranked "why" -- the frame's
+        # contributions ranked by (priority, root_order, admission_order).
+        inspector.get_by_role("tab", name="Now-showing", exact=True).click()
+        expect(inspector).to_contain_text(f"Intended scene: {SCENE}")
+        why = inspector.get_by_role("list", name="Why")
+        expect(why).to_contain_text(SCENE)
+        expect(why).to_contain_text("priority")
+
+        # Honesty (design §6a): the Inspector asserts intent, never confirmed
+        # playback -- "LIVE" appears nowhere.
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
 
 

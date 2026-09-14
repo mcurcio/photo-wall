@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 
 import "./index.css";
+import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { setToken, useSnapshot } from "./useSnapshot.js";
@@ -21,6 +22,16 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState("");
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
+  // Which Inspector facet is open (Plane B, component-local). Defaults to
+  // "commissioning" and resets to it each time a new Frame is selected.
+  const [facet, setFacet] = useState(/** @type {string} */ ("commissioning"));
+
+  // Selecting a Frame (on the plan or in the tray) opens its Inspector on the
+  // default facet; the facet contract's default is "commissioning".
+  const selectFrame = (frameId) => {
+    setSelection(frameId);
+    setFacet("commissioning");
+  };
 
   // Surfaces present in the snapshot, sorted for a deterministic default.
   const surfaces = useMemo(() => {
@@ -96,9 +107,17 @@ export default function App() {
               snapshot={snapshot}
               surfaceId={activeSurface}
               selection={selection}
-              onSelect={setSelection}
+              onSelect={selectFrame}
             />
-            <UnplacedTray snapshot={snapshot} onSelect={setSelection} />
+            <UnplacedTray snapshot={snapshot} onSelect={selectFrame} />
+            {selection !== null && (
+              <Inspector
+                snapshot={snapshot}
+                frameId={selection}
+                facet={facet}
+                onFacet={setFacet}
+              />
+            )}
           </>
         )}
       </main>
