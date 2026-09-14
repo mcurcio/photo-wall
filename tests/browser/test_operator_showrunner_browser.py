@@ -17,6 +17,7 @@ assertion.
 """
 
 import os
+import re
 
 import pytest
 from media_queue import RecordingMediaQueue
@@ -593,3 +594,189 @@ def test_programs_region_implies_no_recurrence_rule(page, registry):
         # No recurrence language anywhere in the region.
         assert "recurring" not in copy
         assert "recurrence" not in copy
+
+
+# Bead 16 — Run control + activation outcome + "why" panel (SR-runs).
+
+WHY_HIGH = "why-high"
+WHY_LOW = "why-low"
+
+
+def _activate(page, scene_id, activation_id, priority):
+    """Activate a Scene NOW through the Runs region's Activate form and return the
+    synchronous POST /v1/operator/activations response. The server answers with an
+    Admission ({status, reason}) that the console shows AT THE MOMENT.
+    """
+    runs = page.get_by_role("region", name="Runs", exact=True)
+    form = runs.get_by_role("form", name="Activate a Scene", exact=True)
+    form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
+    form.get_by_label("Activation ID", exact=True).fill(activation_id)
+    form.get_by_label("Activation priority", exact=True).fill(str(priority))
+    with page.expect_response(
+        lambda r: r.url.endswith("/v1/operator/activations")
+        and r.request.method == "POST"
+    ) as info:
+        form.get_by_role("button", name="Activate now", exact=True).click()
+    return info.value
+
+
+def test_activation_shows_synchronous_outcome_truthfully(page, registry):
+    """Bead 16: POST …/activations returns a SYNCHRONOUS Admission {status,
+    reason}; the console shows that outcome at the moment, exactly as returned —
+    admitted first, then IGNORED for a second activation of the same running Scene
+    (repeat=ignore). The non-admitted outcome is surfaced truthfully, never
+    softened (design J4).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        outcome = runs.get_by_label("Activation outcome", exact=True)
+        # No outcome is shown before an activation — it is synchronous only.
+        expect(outcome).to_have_count(0)
+
+        response = _activate(page, SCENE_ID, "act-first", 0)
+        assert response.status == 200
+        # The server admitted it; the console says exactly that.
+        expect(runs.get_by_text("Activation admitted", exact=True)).to_be_visible()
+
+        # Activating the SAME running Scene again (new activation id,
+        # repeat=ignore) is IGNORED — shown truthfully, not as a success.
+        _activate(page, SCENE_ID, "act-second", 0)
+        expect(runs.get_by_text("Activation ignored", exact=True)).to_be_visible()
+
+
+def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, registry):
+    """Bead 16 honesty (design §5/§6, R2): the Runs region renders NO activation
+    HISTORY and, in particular, NO "expired: missed_window" row — that reason is a
+    server-side Admission on NO operator GET, so surfacing it would invent state
+    the operator surface cannot truthfully know. An activation outcome appears
+    ONLY synchronously, at activation time.
+
+    This is the mutation-probe target: rendering an invented missed_window history
+    row turns the `missed_window` assertions below red.
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        expect(runs).to_be_visible()
+
+        # On load: no synchronous outcome, and no expired/missed_window history.
+        expect(runs.get_by_label("Activation outcome", exact=True)).to_have_count(0)
+        before = runs.inner_text().lower()
+        assert "missed_window" not in before
+        assert "missed window" not in before
+
+        # The outcome appears ONLY at the synchronous moment of activation.
+        response = _activate(page, SCENE_ID, "act-sync", 0)
+        assert response.status == 200
+        expect(runs.get_by_label("Activation outcome", exact=True)).to_be_visible()
+        expect(runs.get_by_text("Activation admitted", exact=True)).to_be_visible()
+
+        # Even after a real outcome, no invented missed_window history is rendered.
+        after = runs.inner_text().lower()
+        assert "missed_window" not in after
+        assert "missed window" not in after
+
+
+def test_cancel_removes_live_run(page, registry):
+    """Bead 16: an activated Scene lists as a live Run with Finish and Cancel;
+    Cancel issues POST …/runs/{id}/cancel and, after the mutate refresh, the Run
+    leaves the list (design J4).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        # Not vacuous: no live Runs before activation.
+        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+
+        _activate(page, SCENE_ID, "cancel-act", 0)
+
+        run_row = runs.get_by_role("listitem").first
+        expect(run_row).to_be_visible()
+        expect(run_row.get_by_text(f"Scene {SCENE_ID}", exact=True)).to_be_visible()
+
+        with page.expect_response(
+            lambda r: "/v1/operator/runs/" in r.url
+            and r.url.endswith("/cancel")
+            and r.request.method == "POST"
+        ) as info:
+            run_row.get_by_role("button", name=re.compile(r"^Cancel run ")).click()
+        assert info.value.status == 200
+
+        # After the useMutate() refresh the cancelled Run is gone.
+        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+
+
+def test_finish_live_run_posts(page, registry):
+    """Bead 16: Finish issues POST …/runs/{id}/finish for a live Run (design J4).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        _activate(page, SCENE_ID, "finish-act", 0)
+
+        run_row = runs.get_by_role("listitem").first
+        expect(run_row).to_be_visible()
+
+        with page.expect_response(
+            lambda r: "/v1/operator/runs/" in r.url
+            and r.url.endswith("/finish")
+            and r.request.method == "POST"
+        ) as info:
+            run_row.get_by_role("button", name=re.compile(r"^Finish run ")).click()
+        assert info.value.status == 200
+
+
+def test_why_panel_ranks_contributions_by_precedence(page, registry):
+    """Bead 16: the "why" panel ranks a Frame's contributions by the total
+    precedence order (priority, root_order, admission_order) — deterministically,
+    winner first — reusing the shared precedence read (primitive #4, join.js).
+
+    Two Scenes both target VALID_FRAME; the higher-priority activation ranks ABOVE
+    the lower one regardless of activation order (design J4/§6a).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        # Two Scenes, both targeting VALID_FRAME.
+        _author_live_scene(page, WHY_LOW)
+        _author_live_scene(page, WHY_HIGH)
+
+        # Activate the LOW priority first, the HIGH priority second — so ordering
+        # cannot be an accident of activation order.
+        _activate(page, WHY_LOW, "why-low-act", 1)
+        _activate(page, WHY_HIGH, "why-high-act", 5)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        why = runs.get_by_role("group", name="Why", exact=True)
+        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+
+        rows = why.get_by_role("listitem")
+        expect(rows).to_have_count(2)
+        # Deterministic precedence: higher priority (why-high, 5) ranks first.
+        expect(rows.nth(0)).to_contain_text(WHY_HIGH)
+        expect(rows.nth(0)).to_contain_text("priority 5")
+        expect(rows.nth(1)).to_contain_text(WHY_LOW)
+        expect(rows.nth(1)).to_contain_text("priority 1")

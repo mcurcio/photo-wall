@@ -42,6 +42,42 @@ export function nowShowing(runtime, frameId) {
 }
 
 /**
+ * The "why" for a frame: every `contribution` targeting it, ranked by the total
+ * precedence order — the shared precedence read of primitive #4.
+ *
+ * The filter is the SAME verified string join as `nowShowing`
+ * (`intent.target === "frame:" + frameId`), NOT the object `{kind,id}` shape
+ * (that targets only the player protocol and would match nothing here). The sort
+ * is DESCENDING by the precedence tuple `(priority, root_order, admission_order)`,
+ * matching the runtime's own winner rule — it keeps the MAX-precedence Intent as
+ * the visible winner (`intent.precedence > winner.precedence`, runtime.py:708) —
+ * so the winning contribution sits at the top. The order is total and
+ * deterministic (design J4/§6a: no ties).
+ *
+ * This is the ONE copy of the precedence ranking: the Now-showing facet's "why"
+ * (Bead 3) and the Showrunner Runs "why" panel (Bead 16) both read through here,
+ * so the ordering rule lives in exactly one place.
+ *
+ * @param {{current?: {contributions?: Array<{target: string, scene_id: string, phase: string, priority: number, root_order: number, admission_order: number, run_id: string, role: string|null}>}}} runtime
+ *   the `/v1/operator/runtime` payload (snapshot.runtime)
+ * @param {string} frameId
+ * @returns {Array<object>} contributions for the frame, highest precedence first
+ */
+export function rankedContributions(runtime, frameId) {
+  const target = "frame:" + frameId;
+  const contributions = runtime?.current?.contributions ?? [];
+  return contributions
+    .filter((intent) => intent.target === target)
+    .slice()
+    .sort(
+      (a, b) =>
+        b.priority - a.priority ||
+        b.root_order - a.root_order ||
+        b.admission_order - a.admission_order,
+    );
+}
+
+/**
  * The OutputInventory row serving a frame, resolved on the COMPOUND key
  * (player_id AND output_id). This is the ONE copy of the compound-key join rule
  * (outputs PK is `(player_id, output_id)`, 001_registry.sql:20; `output_id`
