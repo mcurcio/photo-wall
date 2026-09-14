@@ -25,9 +25,9 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 11 | S-remove (delete + Unplaced tray drag-out) | closed | 708a60c | M5 |
 | D5 | Docs — M5 (spatial editing + tray) | closed | e676b0a | after M5 (coherence: COHERENT) |
 | 12 | SR-mode (mode toggle + Showrunner shell + R4 + badge) | closed | e8c66a1 | M6 |
-| 13 | SR-sources (Sources list + Refresh) | closed | PEND13 | M6 |
-| 14a | SR-scenes-live (scene authoring shell + live-source scene save) | in_progress | — | M6 (pre-split of 14) |
-| 14b | SR-scenes-authored (per-frame candidate choosers + profile hard-filter + save) | open | — | M6 (pre-split of 14) |
+| 13 | SR-sources (Sources list + Refresh) | closed | d90e3ce | M6 |
+| 14a | SR-scenes-live (scene authoring shell + live-source scene save) | closed | PEND14A | M6 (pre-split of 14) |
+| 14b | SR-scenes-authored (per-frame candidate choosers + profile hard-filter + save) | in_progress | — | M6 (pre-split of 14) |
 | 15 | SR-programs (Programs + N-window helper) | open | — | M6 |
 | 16 | SR-runs (Run control + activation outcome + why) | open | — | M6 |
 | 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | open | — | M6 |

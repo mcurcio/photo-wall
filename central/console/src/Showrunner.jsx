@@ -1,6 +1,7 @@
 import React, { useCallback } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { SceneAuthoring } from "./SceneAuthoring.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -102,6 +103,9 @@ export function Showrunner({ snapshot }) {
       </section>
       <section className="showrunner__region" role="region" aria-label="Scenes">
         <h2 className="showrunner__region-title">Scenes</h2>
+        {/* Bead 14a: author + save a live-source Scene; the Scenes list appears
+            here by scene_id. Bead 14b adds the authored per-frame mode. */}
+        <SceneAuthoring snapshot={snapshot} />
       </section>
       <section className="showrunner__region" role="region" aria-label="Programs">
         <h2 className="showrunner__region-title">Programs</h2>
