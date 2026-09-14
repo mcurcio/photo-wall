@@ -268,3 +268,13 @@ Append-only. Read with `grep -a`.
   `AppReleaseService._load_etag/_store_etag` read/write it, refreshing only on a
   fresh (non-304) list. Losing the row forces one full re-poll — never incorrect.
   Flagged for the bead-4 reviewer in case a different home is preferred.
+
+## 2026-09-13 — console M1 coherence: isUnplaced origin heuristic (for Bead 10 / M5)
+- **Where:** central/console/src/projection.js `isUnplaced` = `x_mm===0 && y_mm===0`.
+- **Finding (non-blocking at T0):** correct for legacy origin-stacked frames while the console is
+  read-only (M1). BUT once M5 (Bead 10 S-place, drag-to-create POST) can place a frame, a frame a
+  user deliberately drops at the origin would be mis-routed into the Unplaced tray.
+- **Apply in Bead 10:** distinguish "unplaced/legacy" from "deliberately placed at origin". Options:
+  drag-to-create should avoid emitting exactly (0,0) (nudge/round), OR carry a placement signal.
+  Decide in Bead 10's frozen page; do NOT change isUnplaced's read-only M1 behavior retroactively.
+- Disposition: residual, tracked here; not a blocker for M1.
