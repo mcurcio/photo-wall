@@ -76,6 +76,79 @@ export function project(frames, surfaceId, viewport) {
 }
 
 /**
+ * Physical wall span (mm) that the plan viewport's WIDTH represents.
+ *
+ * `project()` (above) draws the plan scale-to-fit against the bounding box of the
+ * Surface's placed frames, so there is NO single global mm↔px scale to invert —
+ * the forward scale is data-dependent and changes as frames are added. For the
+ * INVERSE placement of a fresh pointer drag we therefore adopt ONE documented
+ * convention: the viewport width maps to a 4 m wall. This is a deliberate,
+ * flagged choice (see the report) — a drag-created/moved frame is NOT guaranteed
+ * to render at the exact same pixels after the write, because `project()` re-fits
+ * on the next snapshot; the design explicitly accepts this ("the plan corrects on
+ * the next snapshot", design §9a/J3).
+ */
+const WALL_SPAN_MM = 4000;
+
+/**
+ * Invert a pointer-drag rectangle (px, in the plan's viewBox space) back to a mm
+ * placement — the px→mm inverse of `project()`'s forward `mm→px` mapping (Bead 10,
+ * design J3/§9a).
+ *
+ * A single uniform `mmPerPx` (derived from the viewport WIDTH so a square drag
+ * maps to a square placement, matching `project()`'s single `min()` scale) is
+ * applied to every coordinate. Width/height are clamped to a minimum 1 mm so a
+ * degenerate (zero-area) drag still yields a server-valid Frame (`FrameCreate`
+ * requires `width_mm`/`height_mm` > 0).
+ *
+ * ORIGIN NUDGE (errata 2026-09-13, "isUnplaced origin heuristic"): `isUnplaced`
+ * routes a frame at exactly `x_mm === 0 && y_mm === 0` to the Unplaced tray. A
+ * drag that lands at the plan origin would therefore be mis-routed into the tray
+ * instead of being drawn. This inverse nudges the exact-origin case to a minimal
+ * non-origin offset (`x_mm = 1`) so a drag-created frame ALWAYS has distinct
+ * geometry and renders on the plan. `isUnplaced`'s read-only heuristic is left
+ * untouched (per the errata's instruction).
+ *
+ * @param {Rect} pxRect the drag rectangle `{x, y, w, h}` in viewBox px
+ * @param {{width: number, height: number}} viewport the plan viewport in px
+ * @param {string} surfaceId the Surface the frame is being placed on
+ * @returns {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}}
+ */
+export function dragToPlacement(pxRect, viewport, surfaceId) {
+  const mmPerPx = WALL_SPAN_MM / viewport.width;
+  let x_mm = Math.round(pxRect.x * mmPerPx);
+  let y_mm = Math.round(pxRect.y * mmPerPx);
+  const width_mm = Math.max(1, Math.round(pxRect.w * mmPerPx));
+  const height_mm = Math.max(1, Math.round(pxRect.h * mmPerPx));
+  if (x_mm === 0 && y_mm === 0) {
+    // Never emit the exact origin — see ORIGIN NUDGE above.
+    x_mm = 1;
+  }
+  return { surface_id: surfaceId, x_mm, y_mm, width_mm, height_mm };
+}
+
+/**
+ * True when physical (mm) and pixel dimensions agree on orientation — the SAME
+ * guard the server enforces on `FrameCreate`/`place_frame`
+ * (central/registry.py `_orientation_coherent`). A square frame
+ * (`height_mm === width_mm`) is always coherent; otherwise portrait-vs-landscape
+ * must match between the mm rectangle and the display profile's pixels.
+ *
+ * Used by the new-frame form to reject an incoherent profile client-side (design
+ * §J2's "invalid → inline reason, no request" discipline) before the POST, rather
+ * than relying only on the server's 422.
+ *
+ * @param {number} widthMm
+ * @param {number} heightMm
+ * @param {number} widthPx
+ * @param {number} heightPx
+ * @returns {boolean}
+ */
+export function orientationCoherent(widthMm, heightMm, widthPx, heightPx) {
+  return heightMm === widthMm || heightMm > widthMm === heightPx > widthPx;
+}
+
+/**
  * Corner-handle pixel positions for the calibration editor (design §J2, Bead 7).
  *
  * The editor draws the four calibration corners (TL, TR, BR, BL) on a square

@@ -1,10 +1,13 @@
-import React from "react";
+import React, { useRef, useState } from "react";
 
 import { connectivity, nowShowing } from "./join.js";
-import { project } from "./projection.js";
+import { dragToPlacement, orientationCoherent, project } from "./projection.js";
+import { useMutate } from "./useMutate.js";
+import { getToken } from "./useSnapshot.js";
 
 /**
- * Read-only per-Surface plan (Bead 1 / tracer; Bead 2 adds now-showing chips).
+ * Per-Surface plan (Bead 1 read-only tracer; Bead 2 status chips; Bead 10 spatial
+ * editing — drag-to-create + drag-to-move).
  *
  * Renders the selected Surface's placed frames as hand-coded SVG `<rect>`
  * elements from their committed `x_mm/y_mm/width_mm/height_mm`, scaled to fit the
@@ -18,10 +21,16 @@ import { project } from "./projection.js";
  * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`),
  * a connectivity dot (from `connectivity`), and a `calibration_valid` badge. The
  * chip asserts operator INTENT, never confirmed playback — the word "LIVE" is
- * deliberately absent (design §6a). The status lives in its OWN `<g role="group">`
- * (aria-label "Frame <id> status") rather than inside the selectable button group,
- * so its text and connectivity `img` stay independently discoverable and are not
- * folded into the button's accessible name.
+ * deliberately absent (design §6a).
+ *
+ * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
+ * an in-progress rectangle (Plane B, held as component-local drag state) and, on
+ * release, opens a minimal new-frame form to capture the display `FrameProfile`;
+ * submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
+ * ON an existing frame repositions it via {@link moveFrame} (`PATCH`,
+ * last-write-wins, no token — §9a). Both writes go through the shared
+ * `useMutate()` hook so the plan corrects from the next Plane A snapshot. A press
+ * that does not move beyond a small threshold stays a plain click (selection).
  *
  * Origin-stacked / geometry-less frames are NOT drawn here; they belong to the
  * Unplaced tray (see UnplacedTray.jsx).
@@ -31,16 +40,279 @@ import { project } from "./projection.js";
  */
 const VIEWPORT = { width: 960, height: 600 };
 
+// Movement (viewBox px) a press must exceed before it counts as a drag rather
+// than a click. Below this, a press-release on a frame selects it.
+const DRAG_THRESHOLD = 6;
+
 const CONNECTIVITY_LABEL = {
   connected: "Player connected",
   disconnected: "Player disconnected",
   unbound: "Player unbound",
 };
 
+/**
+ * Normalize the two drag endpoints (viewBox px) into a top-left rect `{x,y,w,h}`.
+ */
+function normRect(start, cur) {
+  return {
+    x: Math.min(start.x, cur.x),
+    y: Math.min(start.y, cur.y),
+    w: Math.abs(cur.x - start.x),
+    h: Math.abs(cur.y - start.y),
+  };
+}
+
+/** Map a pointer event to viewBox px via the SVG's on-screen box (no letterbox:
+ * `.plan__svg` is `width:100%; height:auto`, preserving the viewBox aspect). */
+function toViewbox(svg, event) {
+  const box = svg.getBoundingClientRect();
+  return {
+    x: ((event.clientX - box.left) / box.width) * VIEWPORT.width,
+    y: ((event.clientY - box.top) / box.height) * VIEWPORT.height,
+  };
+}
+
+async function interpretFrame(response) {
+  if (response.ok) {
+    let frame = null;
+    try {
+      frame = await response.json();
+    } catch {
+      frame = null;
+    }
+    return { ok: true, frame };
+  }
+  let error = null;
+  try {
+    error = (await response.json()).error;
+  } catch {
+    error = null;
+  }
+  return { ok: false, error: error ?? String(response.status) };
+}
+
+/**
+ * Create a Frame (Bead 10): POST /v1/operator/frames with the drag placement +
+ * the operator-supplied display profile. `FrameCreate` requires an `id` that the
+ * design/POST body do not carry, so a client id is generated here (matching the
+ * `Identifier` pattern `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`) — see the report.
+ * The server re-runs the orientation-coherence guard and 422s an incoherent
+ * profile. Wrap in `useMutate()` at the call site so the plan refreshes.
+ *
+ * @param {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}} placement
+ * @param {{width_px: number, height_px: number, diagonal_inches: number, video: boolean}} profile
+ * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
+ */
+export async function createFrame(placement, profile) {
+  const id = `frame-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const response = await fetch("/v1/operator/frames", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + getToken(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ id, ...placement, profile }),
+    signal: AbortSignal.timeout(15000),
+  });
+  return interpretFrame(response);
+}
+
+/**
+ * Reposition a Frame (Bead 10): PATCH /v1/operator/frames/{id} with a partial
+ * placement. Last-write-wins, NO concurrency token (design §9a — the one
+ * deliberate exception to R3; placement is cosmetic and never reaches a player).
+ * Wrap in `useMutate()` at the call site so the plan corrects from the next
+ * snapshot.
+ *
+ * @param {string} frameId
+ * @param {{surface_id?: string, x_mm?: number, y_mm?: number, width_mm?: number, height_mm?: number}} placement
+ * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
+ */
+export async function moveFrame(frameId, placement) {
+  const response = await fetch(`/v1/operator/frames/${frameId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: "Bearer " + getToken(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(placement),
+    signal: AbortSignal.timeout(15000),
+  });
+  return interpretFrame(response);
+}
+
+const PROFILE_DEFAULTS = { width_px: 1920, height_px: 1080, diagonal_inches: 24, video: true };
+
 export function Plan({ snapshot, surfaceId, selection, onSelect }) {
+  const mutate = useMutate();
+  const svgRef = useRef(null);
+  // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
+  // because a full pointerdown->move->up sequence can fire before React re-renders
+  // — the move/up handlers must read the drag synchronously (cf. tryingRef in
+  // useCalibration). `draft` mirrors it purely to render the in-progress rectangle.
+  const dragRef = useRef(/** @type {object|null} */ (null));
+  const [draft, setDraft] = useState(/** @type {object|null} */ (null));
+  // The pending new-frame drag rect awaiting a profile from the form (px).
+  const [newFrame, setNewFrame] = useState(/** @type {{pxRect: object}|null} */ (null));
+  const [profile, setProfile] = useState(PROFILE_DEFAULTS);
+  const [formError, setFormError] = useState(/** @type {string|null} */ (null));
+  // True once the current press has moved past the threshold — read by a frame's
+  // onClick so a drag-move is not also treated as a selection.
+  const didDragRef = useRef(false);
+
   const frames = snapshot?.inventory?.frames ?? [];
   const framesById = new Map(frames.map((frame) => [frame.id, frame]));
   const { placed } = project(frames, surfaceId, VIEWPORT);
+
+  const beginCreate = (event) => {
+    if (surfaceId == null || newFrame != null) {
+      return;
+    }
+    const svg = svgRef.current;
+    try {
+      svg.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; drag still tracks via SVG-level events.
+    }
+    const start = toViewbox(svg, event);
+    didDragRef.current = false;
+    dragRef.current = { mode: "create", start, cur: start };
+    setDraft(normRect(start, start));
+  };
+
+  const beginMove = (event, id, rect) => {
+    // Do not let the SVG's create-drag also start; this press owns a move.
+    event.stopPropagation();
+    const svg = svgRef.current;
+    try {
+      svg.setPointerCapture(event.pointerId);
+    } catch {
+      // best-effort
+    }
+    const start = toViewbox(svg, event);
+    didDragRef.current = false;
+    dragRef.current = { mode: "move", frameId: id, rect, start, cur: start };
+    setDraft({ ...rect });
+  };
+
+  const onPointerMove = (event) => {
+    const drag = dragRef.current;
+    if (drag == null) {
+      return;
+    }
+    const cur = toViewbox(svgRef.current, event);
+    drag.cur = cur;
+    if (
+      Math.abs(cur.x - drag.start.x) > DRAG_THRESHOLD ||
+      Math.abs(cur.y - drag.start.y) > DRAG_THRESHOLD
+    ) {
+      didDragRef.current = true;
+    }
+    setDraft(
+      drag.mode === "create"
+        ? normRect(drag.start, cur)
+        : {
+            x: drag.rect.x + (cur.x - drag.start.x),
+            y: drag.rect.y + (cur.y - drag.start.y),
+            w: drag.rect.w,
+            h: drag.rect.h,
+          },
+    );
+  };
+
+  const onPointerUp = (event) => {
+    const finished = dragRef.current;
+    if (finished == null) {
+      return;
+    }
+    const svg = svgRef.current;
+    try {
+      svg.releasePointerCapture(event.pointerId);
+    } catch {
+      // best-effort
+    }
+    dragRef.current = null;
+    setDraft(null);
+    if (!didDragRef.current) {
+      // A press that did not move is a click. Selection is handled HERE (not via a
+      // DOM `onClick`) because a frame's pointerdown sets pointer capture on the
+      // SVG, which redirects the subsequent `click` event to the SVG rather than
+      // the frame — so an onClick on the frame would never fire.
+      if (finished.mode === "move") {
+        onSelect(finished.frameId);
+      }
+      return;
+    }
+    if (finished.mode === "create") {
+      setFormError(null);
+      setProfile(PROFILE_DEFAULTS);
+      setNewFrame({ pxRect: normRect(finished.start, finished.cur) });
+      return;
+    }
+    // Move: translate the frame's rendered rect by the drag delta, invert to mm,
+    // and PATCH. Physical dimensions are preserved from the stored frame — a move
+    // must never resize (the rendered rect uses project()'s data-dependent scale,
+    // not dragToPlacement's; only the repositioned origin is taken from the drag).
+    const dx = finished.cur.x - finished.start.x;
+    const dy = finished.cur.y - finished.start.y;
+    const moved = {
+      x: finished.rect.x + dx,
+      y: finished.rect.y + dy,
+      w: finished.rect.w,
+      h: finished.rect.h,
+    };
+    const placement = dragToPlacement(moved, VIEWPORT, surfaceId);
+    const frame = framesById.get(finished.frameId);
+    mutate(() =>
+      moveFrame(finished.frameId, {
+        surface_id: placement.surface_id,
+        x_mm: placement.x_mm,
+        y_mm: placement.y_mm,
+        width_mm: frame?.width_mm ?? placement.width_mm,
+        height_mm: frame?.height_mm ?? placement.height_mm,
+      }),
+    ).catch(() => {});
+  };
+
+  const submitNewFrame = (event) => {
+    event.preventDefault();
+    if (newFrame == null || surfaceId == null) {
+      return;
+    }
+    const placement = dragToPlacement(newFrame.pxRect, VIEWPORT, surfaceId);
+    const widthPx = Number(profile.width_px);
+    const heightPx = Number(profile.height_px);
+    const diagonal = Number(profile.diagonal_inches);
+    if (!(widthPx > 0 && heightPx > 0 && diagonal > 0)) {
+      setFormError("Profile dimensions must be positive.");
+      return;
+    }
+    // Reject an incoherent profile client-side (design §J2: inline reason, no
+    // request) — the server enforces the same guard as a 422 backstop.
+    if (!orientationCoherent(placement.width_mm, placement.height_mm, widthPx, heightPx)) {
+      setFormError("Display profile must match the frame's orientation.");
+      return;
+    }
+    mutate(() =>
+      createFrame(placement, {
+        width_px: widthPx,
+        height_px: heightPx,
+        diagonal_inches: diagonal,
+        video: profile.video,
+      }),
+    )
+      .then((result) => {
+        if (result.ok) {
+          setNewFrame(null);
+          setFormError(null);
+        } else {
+          setFormError("Could not create the frame — check the profile.");
+        }
+      })
+      .catch(() => setFormError("Could not create the frame."));
+  };
+
+  const draftRect = draft;
 
   return (
     <section
@@ -49,11 +321,15 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
       aria-label={`Wall plan for surface ${surfaceId}`}
     >
       <svg
+        ref={svgRef}
         className="plan__svg"
         viewBox={`0 0 ${VIEWPORT.width} ${VIEWPORT.height}`}
         width={VIEWPORT.width}
         height={VIEWPORT.height}
         preserveAspectRatio="xMinYMin meet"
+        onPointerDown={beginCreate}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
       >
         {placed.map(({ id, rect }) => {
           const selected = selection === id;
@@ -69,7 +345,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
                 tabIndex={0}
                 aria-label={`Frame ${id}`}
                 aria-pressed={selected}
-                onClick={() => onSelect(id)}
+                onPointerDown={(event) => beginMove(event, id, rect)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
@@ -128,7 +404,69 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
             </React.Fragment>
           );
         })}
+        {draftRect != null && (
+          <rect
+            className="plan__draft"
+            x={draftRect.x}
+            y={draftRect.y}
+            width={draftRect.w}
+            height={draftRect.h}
+          />
+        )}
       </svg>
+
+      {newFrame != null && (
+        <form className="plan__new-frame" aria-label="New frame" onSubmit={submitNewFrame}>
+          <h3 className="plan__new-frame-title">New frame</h3>
+          <label className="plan__new-frame-field">
+            Display width (px)
+            <input
+              type="number"
+              min="1"
+              value={profile.width_px}
+              onChange={(event) => setProfile({ ...profile, width_px: event.target.value })}
+            />
+          </label>
+          <label className="plan__new-frame-field">
+            Display height (px)
+            <input
+              type="number"
+              min="1"
+              value={profile.height_px}
+              onChange={(event) => setProfile({ ...profile, height_px: event.target.value })}
+            />
+          </label>
+          <label className="plan__new-frame-field">
+            Diagonal (inches)
+            <input
+              type="number"
+              min="1"
+              step="any"
+              value={profile.diagonal_inches}
+              onChange={(event) => setProfile({ ...profile, diagonal_inches: event.target.value })}
+            />
+          </label>
+          <label className="plan__new-frame-field plan__new-frame-field--check">
+            <input
+              type="checkbox"
+              checked={profile.video}
+              onChange={(event) => setProfile({ ...profile, video: event.target.checked })}
+            />
+            Video capable
+          </label>
+          <div className="plan__new-frame-actions">
+            <button type="submit">Create frame</button>
+            <button type="button" onClick={() => setNewFrame(null)}>
+              Cancel
+            </button>
+          </div>
+          {formError != null && (
+            <p className="plan__new-frame-error" role="alert">
+              {formError}
+            </p>
+          )}
+        </form>
+      )}
     </section>
   );
 }
