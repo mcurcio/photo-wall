@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-import { deleteFrame } from "./Plan.jsx";
+import { deleteFrame } from "./framesApi.js";
 import { project } from "./projection.js";
 import { useMutate } from "./useMutate.js";
 

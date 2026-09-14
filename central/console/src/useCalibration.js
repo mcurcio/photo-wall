@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getToken, useSnapshot } from "./useSnapshot.js";
+import { apiWrite } from "./apiWrite.js";
+import { useSnapshot } from "./useSnapshot.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -27,29 +28,19 @@ const POLL_MS = 5000;
  * @returns {Promise<object>} the parsed success body (preview: {calibration, expires_at})
  */
 async function postCalibration(frameId, body) {
-  const response = await fetch(`/v1/operator/frames/${frameId}/calibration`, {
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/calibration`, {
     method: "POST",
-    headers: {
-      Authorization: "Bearer " + getToken(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    body,
   });
-  if (!response.ok) {
-    let code = "request_failed";
-    try {
-      const data = await response.json();
-      code = data?.error ?? code;
-    } catch {
-      // A non-JSON error body leaves the generic code in place.
-    }
+  if (!result.ok) {
+    // A non-JSON / fieldless error body leaves the generic code in place.
+    const code = result.error ?? "request_failed";
     const error = new Error(code);
     error.code = code;
-    error.httpStatus = response.status;
+    error.httpStatus = result.status;
     throw error;
   }
-  return response.json();
+  return result.data;
 }
 
 /**
