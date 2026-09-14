@@ -445,9 +445,21 @@ body {
   gap: 6px;
 }
 
+.rail__item {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
 .rail__entry {
-  width: 100%;
+  flex: 1;
   text-align: left;
+}
+
+.rail__retire {
+  flex: 0 0 auto;
+  color: #f5a623;
+  border-color: #6a4a12;
 }
 
 .rail__empty {

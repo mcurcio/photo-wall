@@ -95,6 +95,47 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
         ).to_be_visible()
 
 
+def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page, registry):
+    # Bead G1 (SR-retire): the console must re-host the legacy "Retire a Player"
+    # control (legacy test_operator_browser.py:137-141) so the cutover keeps
+    # content parity. Retiring a pending Player moves it to the Retired rail AND
+    # removes its Output from the Binding facet's bind choices.
+    identity, _, _ = enroll(registry, count=1)  # a pending Player with HDMI-A-1
+    _placed_frame(registry, "wall-r")
+    player_id = identity["player_id"]
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        retired = page.get_by_role("group", name="Retired players", exact=True)
+        expect(
+            pending.get_by_role("button", name=player_id, exact=True)
+        ).to_be_visible()
+
+        # Precondition: the Player's Output IS a bind candidate — the Binding
+        # facet offers an ENABLED "Bind pending display".
+        page.get_by_role("button", name="Frame wall-r", exact=True).click()
+        inspector = page.get_by_role("region", name="Frame wall-r inspector", exact=True)
+        inspector.get_by_role("tab", name="Binding", exact=True).click()
+        bind_button = inspector.get_by_role("button", name="Bind pending display", exact=True)
+        expect(bind_button).to_be_enabled()
+
+        # Retire the pending Player from the rail (a deliberate, labelled action).
+        pending.get_by_role(
+            "button", name=f"Retire player {player_id}", exact=True
+        ).click()
+
+        # It moves to the Retired rail (by identity) and leaves the Pending rail.
+        expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        expect(
+            pending.get_by_role("button", name=player_id, exact=True)
+        ).to_have_count(0)
+
+        # Its Output is no longer offered: the bind control has no pending Output
+        # to bind, so it is disabled (pendingOutput == null after retire).
+        expect(bind_button).to_be_disabled()
+
+
 def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "stale-1")
