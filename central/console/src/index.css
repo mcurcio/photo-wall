@@ -474,3 +474,64 @@ body {
   color: #ff6b6b;
   font-weight: 600;
 }
+
+/* Top-level Wall/Showrunner mode toggle (Bead 12). */
+.console__mode-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.console__mode {
+  background: #1c262d;
+  color: #9dabb5;
+  border: 1px solid #32404a;
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.console__mode--active {
+  background: #2f6f8f;
+  color: #f2f6f8;
+  border-color: #2f6f8f;
+}
+
+/* Showrunner shell (Bead 12): Frame-health badges + region shells. */
+.showrunner {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.showrunner__health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.showrunner__badge {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid #32404a;
+}
+
+.showrunner__badge--valid {
+  color: #4caf7d;
+}
+
+.showrunner__badge--invalid {
+  color: #d6a55a;
+}
+
+.showrunner__region {
+  border: 1px solid #32404a;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.showrunner__region-title {
+  margin: 0;
+  font-size: 16px;
+  color: #f2f6f8;
+}
