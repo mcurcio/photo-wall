@@ -346,3 +346,26 @@ Append-only. Read with `grep -a`.
   low-level operator-write helper + a frames-API module both Plan and UnplacedTray import from (dissolving the
   sibling import), and refactors BindingFacet + useCalibration onto the low-level helper. Behavior-preserving;
   guarded by the existing 36-test browser suite. Supersedes the earlier "M6 start" residual note.
+
+## 2026-09-14 — Bead 17 CUTOVER BLOCKED by content-parity gaps (re-cut: add G1/G2/G3 first)
+- **Finding (pre-cutover audit):** deleting the two legacy browser tests at cutover would DROP coverage of
+  operator FEATURES the new /console never re-hosted. The Bead 17 precondition (plan:833-835) explicitly
+  requires parity incl. "bind/RETIRE ... SOURCES". Beads 9 (O-bind) and 13 (SR-sources) were under-scoped
+  vs the old flat page.
+- **GAP 1 (HIGH, missing feature):** no player-RETIRE control anywhere in the console (no console file calls
+  POST /v1/operator/players/{id}/retire; EquipmentRail only DISPLAYS the Retired rail). Legacy
+  test_operator_browser.py:137-141 exercises retire + its UI consequences.
+- **GAP 2 (HIGH, missing feature):** no SOURCE-CONFIGURATION control (console lists+Refreshes sources but
+  cannot create one; no POST /v1/operator/sources/{ref}). Legacy test_operator_content_browser.py:94-102.
+- **GAP 3 (MED, test-only):** manual calibration Revert control exists (Commissioning.jsx) but no /console
+  test clicks it. Legacy test_operator_browser.py:118-120.
+- **GAP 4 (MED, sequencing):** no token-rejection -> return-to-login / mid-session-401 handling (App.jsx:96
+  defers to Bead 18, which lands AFTER the cutover). Legacy test_operator_browser.py:99-104,164-226.
+- **GAP 5 (LOW, acceptable):** no /console restart-persistence browser test; the durability property stays
+  covered by backend unit tests (tests/test_registry.py etc.). ACCEPTED as backend-covered; noted, not closed.
+- **Re-cut (before Bead 17):**
+  - G1 `SR-retire`: retire action on the rail/Binding facet -> POST players/{id}/retire + /console test.
+  - G2 `SR-source-config`: source-config form (name:rev + connection + type) -> POST sources/{ref} + test.
+  - G3 `SR-parity`: token-rejection recovery in App.jsx (401 -> "token not accepted" + return to login) +
+    a manual-revert /console test.
+  Cutover (17) runs only after G1+G2+G3 land and re-audit shows parity.
