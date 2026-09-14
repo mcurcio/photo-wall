@@ -18,6 +18,7 @@ assertion.
 
 import os
 import re
+from urllib.parse import quote
 
 import pytest
 from media_queue import RecordingMediaQueue
@@ -256,6 +257,66 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         assert "immich" not in copy
         assert "album" not in copy
         assert "open in" not in copy
+
+
+# Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
+# GAP 2). A distinct name:rev the seeded SOURCE does not use, so its appearance
+# below is caused by THIS create, not the fixture.
+NEW_SOURCE = "spring:1"
+
+
+def test_source_configuration_creates_source_awaiting_refresh(page, registry):
+    """Bead G2: an operator CONFIGURES a new Source from the console — the create
+    the legacy page had and Bead 13's list+Refresh lacked (content-parity GAP 2).
+
+    Filling the source-config form and submitting PUTs the stored SourceSpec to
+    `/v1/operator/sources/{ref}` (ref = `name:rev`, path-encoded); the server
+    answers with a SourceConfigurationReceipt ({source_ref, created}); and after
+    the useMutate() refresh the new Source appears in the Sources list by its
+    `name:rev` identity, awaiting its first refresh (design D-e / J4).
+
+    This is the invariant the mutation probe attacks: break the create (omit the
+    required source_ref from the body) and the Source is never stored, so the
+    "appears awaiting refresh" assertion goes red.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        sources = page.get_by_role("region", name="Sources", exact=True)
+        expect(sources).to_be_visible()
+        # Not vacuously true: the new Source does not exist before the create.
+        expect(sources.get_by_text(NEW_SOURCE, exact=True)).to_have_count(0)
+
+        form = sources.get_by_role("form", name="Configure a Source", exact=True)
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        form.get_by_label("Media type", exact=True).select_option("image")
+
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save source", exact=True).click()
+
+        response = info.value
+        assert response.status == 200
+        # The saved query carries its identity, connection and chosen kind.
+        body = response.request.post_data_json
+        assert body["source_ref"] == NEW_SOURCE
+        assert body["connection_ref"] == "fixture-library"
+        assert body["media_types"] == ["image"]
+        # The server reports the Source as CREATED.
+        receipt = response.json()
+        assert receipt["source_ref"] == NEW_SOURCE and receipt["created"] is True
+
+        # After the useMutate() refresh the new Source is listed by name:rev, and
+        # — never having been refreshed — shows the honest "Awaiting refresh".
+        row = sources.get_by_role("listitem").filter(has_text=NEW_SOURCE)
+        expect(row).to_be_visible()
+        expect(row.get_by_text(NEW_SOURCE, exact=True)).to_be_visible()
+        expect(row.get_by_text("Awaiting refresh", exact=True)).to_be_visible()
 
 
 def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
