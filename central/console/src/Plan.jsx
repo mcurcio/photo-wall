@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import { createFrame, deleteFrame, dropFromTray, moveFrame } from "./framesApi.js";
 import { connectivity, nowShowing } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
 import { useMutate } from "./useMutate.js";
-import { getToken } from "./useSnapshot.js";
 
 /**
  * Per-Surface plan (Bead 1 read-only tracer; Bead 2 status chips; Bead 10 spatial
@@ -70,141 +70,6 @@ function toViewbox(svg, event) {
     x: ((event.clientX - box.left) / box.width) * VIEWPORT.width,
     y: ((event.clientY - box.top) / box.height) * VIEWPORT.height,
   };
-}
-
-async function interpretFrame(response) {
-  if (response.ok) {
-    let frame = null;
-    try {
-      frame = await response.json();
-    } catch {
-      frame = null;
-    }
-    return { ok: true, frame };
-  }
-  let error = null;
-  try {
-    error = (await response.json()).error;
-  } catch {
-    error = null;
-  }
-  return { ok: false, error: error ?? String(response.status) };
-}
-
-/**
- * Create a Frame (Bead 10): POST /v1/operator/frames with the drag placement +
- * the operator-supplied display profile. `FrameCreate` requires an `id` that the
- * design/POST body do not carry, so a client id is generated here (matching the
- * `Identifier` pattern `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`) — see the report.
- * The server re-runs the orientation-coherence guard and 422s an incoherent
- * profile. Wrap in `useMutate()` at the call site so the plan refreshes.
- *
- * @param {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}} placement
- * @param {{width_px: number, height_px: number, diagonal_inches: number, video: boolean}} profile
- * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
- */
-export async function createFrame(placement, profile) {
-  const id = `frame-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const response = await fetch("/v1/operator/frames", {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer " + getToken(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ id, ...placement, profile }),
-    signal: AbortSignal.timeout(15000),
-  });
-  return interpretFrame(response);
-}
-
-/**
- * Reposition a Frame (Bead 10): PATCH /v1/operator/frames/{id} with a partial
- * placement. Last-write-wins, NO concurrency token (design §9a — the one
- * deliberate exception to R3; placement is cosmetic and never reaches a player).
- * Wrap in `useMutate()` at the call site so the plan corrects from the next
- * snapshot.
- *
- * @param {string} frameId
- * @param {{surface_id?: string, x_mm?: number, y_mm?: number, width_mm?: number, height_mm?: number}} placement
- * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
- */
-export async function moveFrame(frameId, placement) {
-  const response = await fetch(`/v1/operator/frames/${frameId}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: "Bearer " + getToken(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(placement),
-    signal: AbortSignal.timeout(15000),
-  });
-  return interpretFrame(response);
-}
-
-/**
- * Guard-code -> operator message for a refused DELETE (design §9a). The distinctive
- * wording is load-bearing: {@link deleteFrame} maps the server's 409 `error` code to
- * exactly these sentences so the operator is told the specific remedy (unbind, or
- * finish/cancel the Run), not a generic "could not delete." A test asserts the
- * distinctive substrings, so collapsing this map to a generic string is caught.
- */
-const DELETE_MESSAGES = {
-  frame_bound: "This Frame still has a bound Output — unbind it before deleting.",
-  frame_in_use: "A live Run is scheduled on this Frame — finish or cancel it before deleting.",
-};
-
-/**
- * Delete a Frame (Bead 11, design §9a/J3): DELETE /v1/operator/frames/{id}. The
- * server refuses with 409 while the Frame is bound (`frame_bound`) or while a live
- * Run targets it (`frame_in_use`); those codes are mapped to the design's
- * plain-language operator messages so the guidance names the specific remedy. Any
- * other non-ok response falls back to a generic message. Wrap in `useMutate()` at
- * the call site so the plan refreshes once the delete lands.
- *
- * @param {string} frameId
- * @returns {Promise<{ok:true}|{ok:false, message:string}>}
- */
-export async function deleteFrame(frameId) {
-  const response = await fetch(`/v1/operator/frames/${frameId}`, {
-    method: "DELETE",
-    headers: { Authorization: "Bearer " + getToken() },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (response.ok) {
-    return { ok: true };
-  }
-  let code = null;
-  try {
-    code = (await response.json()).error;
-  } catch {
-    code = null;
-  }
-  return { ok: false, message: DELETE_MESSAGES[code] ?? "Could not delete the frame." };
-}
-
-/**
- * Drop an Unplaced-tray Frame onto the plan (Bead 11, design J3/§12): PATCH the
- * frame with a distinct mm ORIGIN inverted from the drop point, reusing
- * {@link dragToPlacement} for the px->mm inversion and {@link moveFrame} for the
- * write. Only `surface_id`/`x_mm`/`y_mm` are sent — the PATCH is partial, so the
- * stored `width_mm`/`height_mm` (and thus orientation coherence with the profile)
- * are preserved; the drop merely gives the frame a non-origin position so
- * `isUnplaced` no longer routes it to the tray. Wrap in `useMutate()` so the frame
- * leaves the tray and renders on the plan from the next snapshot.
- *
- * @param {string} frameId
- * @param {import("./projection.js").Rect} pxRect drop rectangle in viewBox px
- * @param {{width: number, height: number}} viewport the plan viewport in px
- * @param {string} surfaceId the Surface the frame is dropped onto
- * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
- */
-export function dropFromTray(frameId, pxRect, viewport, surfaceId) {
-  const placement = dragToPlacement(pxRect, viewport, surfaceId);
-  return moveFrame(frameId, {
-    surface_id: placement.surface_id,
-    x_mm: placement.x_mm,
-    y_mm: placement.y_mm,
-  });
 }
 
 const PROFILE_DEFAULTS = { width_px: 1920, height_px: 1080, diagonal_inches: 24, video: true };

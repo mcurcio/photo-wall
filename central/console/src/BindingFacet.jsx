@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
+import { apiWrite } from "./apiWrite.js";
 import { useMutate } from "./useMutate.js";
-import { getToken } from "./useSnapshot.js";
 
 /**
  * Issue the bind write (Bead 9): PUT /v1/operator/frames/{id}/binding.
@@ -18,20 +18,15 @@ import { getToken } from "./useSnapshot.js";
  * @returns {Promise<{ok:true}|{ok:false, conflict?:"generation", error?:string}>}
  */
 export async function bind(frameId, playerId, outputId, expectedGeneration) {
-  const response = await fetch(`/v1/operator/frames/${frameId}/binding`, {
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/binding`, {
     method: "PUT",
-    headers: {
-      Authorization: "Bearer " + getToken(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+    body: {
       player_id: playerId,
       output_id: outputId,
       expected_generation: expectedGeneration,
-    }),
-    signal: AbortSignal.timeout(15000),
+    },
   });
-  return interpret(response);
+  return interpret(result);
 }
 
 /**
@@ -43,32 +38,21 @@ export async function bind(frameId, playerId, outputId, expectedGeneration) {
  * @returns {Promise<{ok:true}|{ok:false, conflict?:"generation", error?:string}>}
  */
 export async function unbind(frameId, expectedGeneration) {
-  const response = await fetch(`/v1/operator/frames/${frameId}/binding`, {
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/binding`, {
     method: "DELETE",
-    headers: {
-      Authorization: "Bearer " + getToken(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ expected_generation: expectedGeneration }),
-    signal: AbortSignal.timeout(15000),
+    body: { expected_generation: expectedGeneration },
   });
-  return interpret(response);
+  return interpret(result);
 }
 
-async function interpret(response) {
-  if (response.ok) {
+function interpret(result) {
+  if (result.ok) {
     return { ok: true };
   }
-  let error = null;
-  try {
-    error = (await response.json()).error;
-  } catch {
-    error = null;
-  }
-  if (response.status === 409 && error === "binding_generation_conflict") {
+  if (result.status === 409 && result.error === "binding_generation_conflict") {
     return { ok: false, conflict: "generation" };
   }
-  return { ok: false, error: error ?? String(response.status) };
+  return { ok: false, error: result.error ?? String(result.status) };
 }
 
 const CONFLICT_MESSAGE = "This Frame changed — reload and review its binding.";

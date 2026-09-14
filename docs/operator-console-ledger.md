@@ -34,4 +34,4 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | open | — | M7 |
 | D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
 | residual: dedupe-calibration-defaults | share DEFAULT_CORNERS/CROP (useDraft+Commissioning) | open | — | opportunistic (M3 coherence) |
-| R-apiwrite | extract shared operator-write helper + frames-API module (M6 pre-refactor) | in_progress | — | M6 start (behavior-preserving) |
+| R-apiwrite | extract shared operator-write helper + frames-API module | closed | PENDRA | M6 start (behavior-preserving) |
