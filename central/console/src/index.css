@@ -39,3 +39,94 @@ body {
   color: #9dabb5;
   line-height: 1.5;
 }
+
+.console__token {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.console__token-field,
+.console__surface-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #9dabb5;
+}
+
+.console__token input,
+.console__surface-field select {
+  padding: 6px 8px;
+  background: #0b131a;
+  color: #e9edf0;
+  border: 1px solid #32404a;
+  border-radius: 4px;
+}
+
+.console__token button {
+  padding: 7px 16px;
+  background: #2d6cdf;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.console__surface-filter {
+  margin-bottom: 20px;
+}
+
+.plan {
+  border: 1px solid #32404a;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 24px;
+}
+
+.plan__svg {
+  width: 100%;
+  height: auto;
+  background: #0b131a;
+  border-radius: 4px;
+}
+
+.plan__frame {
+  cursor: pointer;
+}
+
+.plan__rect {
+  fill: #1c3350;
+  stroke: #4a83d6;
+  stroke-width: 2;
+}
+
+.plan__rect--selected {
+  fill: #295089;
+  stroke: #7fb3ff;
+}
+
+.plan__label {
+  fill: #e9edf0;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.tray__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tray__item {
+  padding: 6px 12px;
+  background: #17232c;
+  color: #e9edf0;
+  border: 1px solid #32404a;
+  border-radius: 4px;
+  cursor: pointer;
+}
