@@ -15,7 +15,7 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | D1 | Docs — M1 (README wall/inspector/now-showing) | closed | 3ecb802 | after M1 (coherence: COHERENT) |
 | 5 | B-PATCH (reposition route, LWW) | closed | 047eb00 | M2 |
 | 6 | B-DELETE (guarded delete route) [HIGH] | closed | 873d86c | M2 |
-| D2 | Docs — M2 (PATCH/DELETE API doc) | closed | PENDD2 | after M2 (coherence: COHERENT) |
+| D2 | Docs — M2 (PATCH/DELETE API doc) | closed | e9332b5 | after M2 (coherence: COHERENT) |
 | 7 | C-draft (calibration direct-manip + convex guard) | open | — | M3 |
 | 8 | C-lease (preview/commit/revert + lease countdown) [HIGH] | open | — | M3 |
 | D3 | Docs — M3 (Commissioning + lease/conflict) | open | — | after M3 |
