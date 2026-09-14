@@ -30,9 +30,9 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 14b | SR-scenes-authored (per-frame candidate choosers + profile hard-filter + save) | closed | 531389b | M6 (pre-split of 14) |
 | 15 | SR-programs (Programs + N-window helper) | closed | fcd53bb | M6 |
 | 16 | SR-runs (Run control + activation outcome + why) | closed | 962a499 | M6 |
-| G1 | SR-retire (player retire control + test) | closed | PENDG1 | M6 (parity gap 1; retire target is unbound-legacy-parity-met) |
-| G2 | SR-source-config (create-source form + test) | in_progress | — | M6 (parity gap 2) |
-| G3 | SR-parity (token-rejection recovery + manual-revert test) | open | — | M6 (parity gaps 3,4) |
+| G1 | SR-retire (player retire control + test) | closed | 380db60 | M6 (parity gap 1; legacy retire target is unbound — parity met) |
+| G2 | SR-source-config (create-source form + test) | closed | PENDG2 | M6 (parity gap 2) |
+| G3 | SR-parity (token-rejection recovery + manual-revert test) | in_progress | — | M6 (parity gaps 3,4) |
 | 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | blocked | — | M6 (awaits G1-G3 + re-audit) |
 | D6 | Docs — M6 (Showrunner + R4) | open | — | after M6 |
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | open | — | M7 |
