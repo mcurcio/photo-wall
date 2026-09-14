@@ -24,10 +24,12 @@ from playwright.sync_api import expect
 from test_operator_browser import operator_server
 from test_registry import ADMIN, enroll
 
+from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository
 from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
-from media.models import SourceSpec
+from media.models import RefreshResult, SourceSpec
+from tests.public_media import public_photo
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -49,10 +51,17 @@ SOURCE = "holiday:1"
 SCENE_ID = "holiday-scene"
 
 
-def _seed_source(registry):
+def _seed_source(registry, photos=()):
     """Configure ONE saved live query through the shared DB so the console's
     /v1/operator/media renders it, wiring a RecordingMediaQueue so the Refresh
     POST is accepted (202). No worker, upstream, or renderer runs.
+
+    When `photos` are supplied, publish ONE successful refresh so the source is
+    `ok` and its candidate membership is populated — this is what the authored
+    candidates route (`GET …/sources/{ref}/candidates?frame_id=`) reads and
+    hard-filters by profile. No variants are prepared: an authored save needs
+    only source membership + asset metadata, and unprepared candidates are still
+    offered (they render "Awaiting preparation" in the legacy page).
 
     Returns the queue to hand to operator_server so the app's own media
     repository (built in create_app) shares it and accepts the refresh.
@@ -61,7 +70,32 @@ def _seed_source(registry):
     repository = MediaRepository(registry.db, registry.clock, queue=queue)
     repository.configure_source(
         SourceSpec(source_ref=SOURCE, connection_ref="fixture-library"))
+    if photos:
+        lease = repository.begin_scheduled_refresh()
+        assert lease is not None and lease.source.source_ref == SOURCE
+        assert repository.publish_refresh(lease, RefreshResult(
+            snapshot=CatalogSnapshot(
+                source_ref=SOURCE, refreshed_at=registry.clock.utc(),
+                candidates=tuple(photo.asset.candidate for photo in photos)),
+            assets=tuple(photo.asset for photo in photos)))
     return queue
+
+
+def _authored_photos(registry):
+    """Two PORTRAIT-eligible candidates and one LANDSCAPE candidate.
+
+    Both target Frames use the PORTRAIT profile, so the two portrait candidates
+    pass central's per-Frame profile hard filter while the landscape candidate is
+    rejected for a portrait Frame (planner.eligible: a portrait profile refuses a
+    landscape original). The landscape candidate is therefore never offered in a
+    portrait Frame's chooser — the load-bearing hard-filter invariant.
+    """
+    now = registry.clock.utc()
+    return (
+        public_photo(number=1, width=108, height=192, captured_at=now),
+        public_photo(number=2, width=120, height=200, captured_at=now),
+        public_photo(number=3, width=192, height=108, captured_at=now),
+    )
 
 
 def _seed(registry):
@@ -273,3 +307,105 @@ def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
 
         # After the useMutate() refresh, the saved Scene appears by its scene_id.
         expect(scenes.get_by_label(f"Scene {SCENE_ID}", exact=True)).to_be_visible()
+
+
+AUTHORED_SCENE_ID = "authored-scene"
+
+
+def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, registry):
+    """Bead 14b: author a Scene with a DISTINCT asset chosen per target Frame,
+    saved in ONE request to `PUT …/scenes/{id}/authored` (design J4).
+
+    Each Frame's candidates come from `GET …/candidates?frame_id=`, already
+    hard-filtered by that Frame's profile server-side. The single-request save is
+    asserted on the ONE PUT to the authored route and its {scene, source_ref,
+    asset_ids} body: one media Contribution per Frame carrying that Frame's chosen
+    asset ref (never a live source_ref).
+    """
+    _seed(registry)
+    portrait_a, portrait_b, _landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, _landscape))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
+        # Not vacuously true: the scene must not already exist.
+        expect(scenes.get_by_label(f"Scene {AUTHORED_SCENE_ID}", exact=True)).to_have_count(0)
+
+        form.get_by_label("Scene ID", exact=True).fill(AUTHORED_SCENE_ID)
+        form.get_by_label("Authored per-frame", exact=True).check()
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+
+        # Each Frame's chooser loads its (profile-filtered) candidates: two
+        # portrait candidates each, plus the placeholder option.
+        valid_choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        invalid_choice = form.get_by_label(f"Media for frame {INVALID_FRAME}", exact=True)
+        expect(valid_choice.get_by_role("option")).to_have_count(3)
+        expect(invalid_choice.get_by_role("option")).to_have_count(3)
+
+        # A DISTINCT asset per Frame — the essence of per-frame authoring.
+        valid_choice.select_option(portrait_a.asset.asset_id)
+        invalid_choice.select_option(portrait_b.asset.asset_id)
+        form.get_by_label("Seconds per cycle", exact=True).fill("20")
+
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/scenes/{AUTHORED_SCENE_ID}/authored")
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+
+        response = info.value
+        assert response.status == 200
+        # ONE request carries the whole authored Scene: source_ref, the exact set
+        # of chosen asset ids, and one Contribution per Frame with its asset ref.
+        body = response.request.post_data_json
+        assert body["source_ref"] == SOURCE
+        assert set(body["asset_ids"]) == {
+            portrait_a.asset.asset_id, portrait_b.asset.asset_id}
+        scene = body["scene"]
+        assert scene["scene_id"] == AUTHORED_SCENE_ID
+        assert scene["cycle_seconds"] == 20
+        by_target = {c["target"]: c for c in scene["contributions"]}
+        assert by_target[f"frame:{VALID_FRAME}"]["asset_refs"] == [portrait_a.asset.asset_id]
+        assert by_target[f"frame:{INVALID_FRAME}"]["asset_refs"] == [portrait_b.asset.asset_id]
+        # Authored contributions carry NO live source_ref.
+        for contribution in scene["contributions"]:
+            assert "source_refs" not in contribution or not contribution["source_refs"]
+
+        # After the useMutate() refresh, the saved Scene appears by its scene_id.
+        expect(scenes.get_by_label(f"Scene {AUTHORED_SCENE_ID}", exact=True)).to_be_visible()
+
+
+def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
+    """Bead 14b: the profile HARD FILTER. A landscape candidate is ineligible for
+    a portrait Frame, so `GET …/candidates?frame_id=` never returns it and the
+    Frame's chooser never offers it (design J4).
+
+    The two portrait candidates ARE offered (so the assertion is not vacuously
+    true); the landscape candidate is NOT. This is the invariant the mutation
+    probe attacks: dropping `frame_id` from the candidates request drops the
+    profile filter, the landscape candidate reappears, and this test goes red.
+    """
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
+        form.get_by_label("Authored per-frame", exact=True).check()
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+
+        choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        # Both portrait candidates are eligible and offered.
+        expect(choice.get_by_role("option", name="Photo 108×192", exact=True)).to_have_count(1)
+        expect(choice.get_by_role("option", name="Photo 120×200", exact=True)).to_have_count(1)
+        # The landscape candidate is hard-filtered out for a portrait Frame.
+        expect(choice.get_by_role("option", name="Photo 192×108", exact=True)).to_have_count(0)
