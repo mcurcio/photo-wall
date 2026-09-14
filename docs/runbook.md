@@ -175,6 +175,14 @@ All three return **503 `release_sourcing_unconfigured`** when `PHOTO_WALL_APP_RO
 
 **Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
 
+## Operator API: reposition and remove Frames
+
+The operator console edits the wall plan through two admin-authenticated routes on central (both `Depends(admin)`, like every `/v1/operator/*` route). They change no schema and add no migration — the placement columns (`surface_id`, `x_mm`, `y_mm`, `width_mm`, `height_mm`) already exist on the `frames` row.
+
+`PATCH /v1/operator/frames/{frame_id}` applies a **partial** placement. The body accepts `surface_id`, `x_mm`, `y_mm`, `width_mm` (> 0), and `height_mm` (> 0); any omitted field keeps its stored value — this is a merge, not a replace. Central re-runs the same orientation-coherence guard as Frame creation against the merged dimensions and the stored profile, returning **422** when the resulting aperture orientation would disagree with the display profile. An id that no longer exists returns **404 `unknown_frame`**; on success the response echoes the merged placement. Placement is **last-write-wins with no concurrency token** — two operators dragging the same Frame silently overwrite each other and the plan corrects on the next snapshot — because geometry is operator-only metadata: it never reaches a Player, it is independent of calibration (whose corners and crop are normalized to `[0,1]`), and a move is trivially re-dragged. The route therefore **does not bump `generation` or `configuration_revision` and never invalidates calibration**.
+
+`DELETE /v1/operator/frames/{frame_id}` removes a Frame, but only a clear one. It refuses with **409 `frame_in_use`** when a live Run (phase body or outro) targets the Frame — finish or cancel that Run first — and with **409 `frame_bound`** when an Output is still bound to it — unbind first (`DELETE /v1/operator/frames/{frame_id}/binding`). An unknown id returns **404**. On success it deletes the Frame and returns **200 `{"status": "deleted"}`**. The guards protect one invariant: you cannot delete a Frame a Player is currently bound to serve.
+
 ## Tests and local development
 
 Install the free `uv` Python package manager, then:
