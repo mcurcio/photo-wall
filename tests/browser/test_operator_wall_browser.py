@@ -473,3 +473,72 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
         # It now renders on the plan by identity and has LEFT the Unplaced tray.
         expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_be_visible()
         expect(tray.get_by_role("button", name=ORIGIN, exact=True)).to_have_count(0)
+
+
+# Bead 18 -- H-refresh: the global snapshot-age clock ("updated N s ago" + Refresh),
+# the /healthz pill, and the non-blocking, dismissible first-run guidance banner
+# whose dismissed flag lives in Plane B (survives a Plane A refresh). Behavioral:
+# role/text/visible state only.
+
+
+def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+
+        # The global bar shows the snapshot age in the "updated N s ago" form.
+        expect(page.get_by_text(re.compile(r"updated \d+ s ago"))).to_be_visible()
+
+        # The clock advances on its own (no refresh) -- wait until it reads >= 2s.
+        expect(
+            page.get_by_text(re.compile(r"updated [2-9]\d* s ago"))
+        ).to_be_visible(timeout=8000)
+
+        # Explicit Refresh replaces Plane A with a fresh read, so the age resets.
+        page.get_by_role("button", name="Refresh", exact=True).click()
+        expect(
+            page.get_by_text(re.compile(r"updated [01] s ago"))
+        ).to_be_visible(timeout=8000)
+
+
+def test_health_pill_renders_a_health_state(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+
+        # The /healthz pill reports central reachable (DB up in the test harness),
+        # located by its accessible name, not by coordinates.
+        expect(
+            page.get_by_role("status", name="Central health: ok")
+        ).to_be_visible(timeout=12000)
+
+
+def test_guidance_banner_is_dismissible_and_dismissal_survives_refresh(page, registry):
+    # No frames seeded -> first-run empty wall -> the guidance banner shows.
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+
+        guidance = page.get_by_role("note", name="Getting started")
+        expect(guidance).to_be_visible()
+
+        # Dismiss it (Plane B, component-local).
+        guidance.get_by_role("button", name="Dismiss guidance", exact=True).click()
+        expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
+
+        # Let the clock advance, then explicitly Refresh (replaces Plane A). Wait
+        # for the age to reset to prove the refresh actually landed and re-rendered
+        # -- only then assert the banner is STILL gone: a dismissal that lives in
+        # Plane B is not resurrected by a Plane A refresh (design §4a).
+        expect(
+            page.get_by_text(re.compile(r"updated [1-9]\d* s ago"))
+        ).to_be_visible(timeout=8000)
+        page.get_by_role("button", name="Refresh", exact=True).click()
+        expect(
+            page.get_by_text(re.compile(r"updated [01] s ago"))
+        ).to_be_visible(timeout=8000)
+        # Let post-refresh effects settle: a mutation that resurrects the dismissed
+        # flag on a Plane A change re-renders the banner within a frame or two, so a
+        # bare to_have_count(0) can false-green in the paint window before it
+        # reappears. Wait past that window, THEN assert the banner stays gone.
+        page.wait_for_timeout(800)
+        expect(page.get_by_role("note", name="Getting started")).to_have_count(0)

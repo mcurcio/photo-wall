@@ -113,6 +113,33 @@ export function SnapshotProvider({ children }) {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    // Bead 18: refresh Plane A when the operator returns to the tab. There is no
+    // operator push channel (WS is player-only, design §9), so the console can
+    // only be as fresh as its last read; refreshing on focus/visibility-change
+    // narrows the staleness window whenever attention returns to the console. A
+    // refresh with no token in hand is doomed, so it is skipped until Connect.
+    const refreshOnReturn = () => {
+      if (!adminToken) {
+        return;
+      }
+      // A failed refresh leaves the prior snapshot untouched (refresh's own
+      // catch); swallow here so an inactive-tab reject is never uncaught.
+      refresh().catch(() => {});
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refreshOnReturn();
+      }
+    };
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
+
   const value = useMemo(
     () => ({ snapshot, refresh, authRejected }),
     [snapshot, refresh, authRejected],
@@ -136,4 +163,93 @@ export function useSnapshot() {
     throw new Error("useSnapshot must be used within a SnapshotProvider");
   }
   return value;
+}
+
+/**
+ * Whole seconds since the current snapshot was read (pure). Drives the global
+ * "updated N s ago" bar (Bead 18). Reads the snapshot's `at` timestamp — the one
+ * age every region shares because inventory+runtime+media are swapped together
+ * (design §4a) — so the clock is honest about staleness. Returns null when there
+ * is no snapshot yet (never connected / initial load failed).
+ *
+ * @param {Snapshot|null} snapshot
+ * @param {number} [now]
+ * @returns {number|null}
+ */
+export function snapshotAge(snapshot, now = Date.now()) {
+  if (snapshot == null || typeof snapshot.at !== "number") {
+    return null;
+  }
+  return Math.max(0, Math.floor((now - snapshot.at) / 1000));
+}
+
+/**
+ * Live snapshot-age clock (Bead 18). Reads Plane A from context and ticks once a
+ * second so "updated N s ago" advances on its own; a refresh replaces Plane A
+ * with a fresh `at`, so the age drops back to ~0 on the next render (Refresh
+ * resets the clock). Returns null until the first snapshot lands.
+ *
+ * @returns {number|null}
+ */
+export function useSnapshotAge() {
+  const { snapshot } = useSnapshot();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return snapshotAge(snapshot, now);
+}
+
+/**
+ * @typedef {"unknown"|"ok"|"unavailable"|"unreachable"} HealthState
+ */
+
+/**
+ * Health-pill poll (Bead 18). Polls the public, unauthenticated `GET /healthz`
+ * every ~10s (design §9 cadence — matches the legacy health pill) and reports a
+ * coarse reachability state, independent of Plane A and of the operator token.
+ *  - "ok"          — 200 with body status "ok"
+ *  - "unavailable" — a response that is not a healthy 200 (e.g. 503)
+ *  - "unreachable" — the request failed / timed out (no response)
+ *  - "unknown"     — before the first poll returns
+ * The pill lags reachability by at most one interval (the stated cost, design §9).
+ *
+ * @param {number} [intervalMs]
+ * @returns {HealthState}
+ */
+export function useHealth(intervalMs = 10000) {
+  const [health, setHealth] = useState(/** @type {HealthState} */ ("unknown"));
+  useEffect(() => {
+    let live = true;
+    const poll = async () => {
+      try {
+        const response = await fetch("/healthz", {
+          signal: AbortSignal.timeout(5000),
+        });
+        let state = response.ok ? "ok" : "unavailable";
+        try {
+          const body = await response.json();
+          state = body?.status === "ok" ? "ok" : "unavailable";
+        } catch {
+          // A non-JSON body: fall back to the HTTP status alone.
+        }
+        if (live) {
+          setHealth(state);
+        }
+      } catch {
+        // No response at all (network error / timeout) — central is unreachable.
+        if (live) {
+          setHealth("unreachable");
+        }
+      }
+    };
+    poll();
+    const id = setInterval(poll, intervalMs);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, [intervalMs]);
+  return health;
 }
