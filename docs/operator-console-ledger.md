@@ -33,7 +33,7 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | G1 | SR-retire (player retire control + test) | closed | 380db60 | M6 (parity gap 1; legacy retire target is unbound — parity met) |
 | G2 | SR-source-config (create-source form + test) | closed | 2aa6c12 | M6 (parity gap 2) |
 | G3 | SR-parity (token-rejection recovery + manual-revert test) | closed | 088e36f | M6 (parity gaps 3,4; ws-fencing arch-specific) |
-| 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | closed | PEND17 | M6 (adversarial content-parity: PARITY-COMPLETE) |
+| 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | closed | 56163d1 | M6 (adversarial content-parity: PARITY-COMPLETE) |
 | D6 | Docs — M6 (Showrunner + R4) | open | — | after M6 |
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | open | — | M7 |
 | D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
