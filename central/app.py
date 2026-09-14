@@ -342,38 +342,20 @@ def create_app(
             status_code=200 if healthy else 503,
         )
 
-    @app.get("/", include_in_schema=False)
-    def index():
-        return FileResponse(
-            Path(__file__).with_name("operator.html"),
-            headers={
-                "Cache-Control": "no-store",
-                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
-            },
-        )
-
-    @app.get("/operator.js", include_in_schema=False)
-    def operator_script():
-        return FileResponse(
-            Path(__file__).with_name("operator.js"),
-            media_type="text/javascript",
-            headers={"Cache-Control": "no-store"},
-        )
-
-    # The redesigned React console (delivery plan Bead 0) is served on a PARALLEL
-    # route so `/`, operator.html and operator.js stay untouched until cutover.
-    # The bundle is BUILT (Vite) into central/console/dist/ locally and in CI, and
-    # is git-ignored — never committed. Neither serving path may require dist/ to
-    # exist when create_app() is constructed (the fast Python gate builds no
-    # bundle): the shell FileResponse is built per-request and only stats dist/ when
-    # hit, and the asset mount uses check_dir=False so an absent dist/ 404s at
-    # request time instead of raising at construction.
+    # The redesigned React console (delivery plan Bead 17 cutover) is now the
+    # operator surface at `/`. The bundle is BUILT (Vite) into
+    # central/console/dist/ locally and in CI, and is git-ignored — never
+    # committed. Serving must never require dist/ to exist when create_app() is
+    # constructed (the fast Python gate builds no bundle): the shell FileResponse
+    # is built per-request and only reads dist/ when the route is hit, and the
+    # asset mount uses check_dir=False so an absent dist/ 404s at request time
+    # instead of raising at construction.
     console_dist = Path(__file__).with_name("console") / "dist"
 
-    @app.get("/console", include_in_schema=False)
-    def console():
-        # Mirrors index() exactly: same no-store + CSP; `script-src 'self'` already
-        # admits the same-origin bundle, so the CSP is unchanged from operator.html.
+    def console_shell() -> FileResponse:
+        # Same hardening the legacy flat page carried (former app.py:344-352):
+        # `no-store` + the strict same-origin CSP. `script-src 'self'` admits the
+        # same-origin bundle the shell loads, so the CSP is unchanged at cutover.
         return FileResponse(
             console_dist / "index.html",
             headers={
@@ -381,6 +363,17 @@ def create_app(
                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
             },
         )
+
+    @app.get("/", include_in_schema=False)
+    def index():
+        return console_shell()
+
+    @app.get("/console", include_in_schema=False)
+    def console():
+        # Cutover alias: the console has always been reachable at `/console` (Bead
+        # 0), and existing `/console` browser tests + operator bookmarks keep
+        # working now that `/` serves the same shell.
+        return console_shell()
 
     app.mount(
         "/console/assets",
