@@ -230,3 +230,7 @@ __marimo__/
 
 # Playwright per-run artifacts
 test-results/
+
+# React operator console: dependencies are installed and the bundle is built
+# in CI and locally, never committed (dist/ is already ignored above).
+central/console/node_modules/

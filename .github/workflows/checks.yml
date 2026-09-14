@@ -58,6 +58,14 @@ jobs:
       - run: .venv/bin/lint-imports
       - run: python scripts/check_docs.py
       - run: python scripts/configure.py
+      - name: Set up Node for the operator console build
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Build the operator console bundle
+        run: |
+          npm --prefix central/console ci
+          npm --prefix central/console run build
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central.app_packages import AppPackageError, AppPackages
@@ -358,6 +359,34 @@ def create_app(
             media_type="text/javascript",
             headers={"Cache-Control": "no-store"},
         )
+
+    # The redesigned React console (delivery plan Bead 0) is served on a PARALLEL
+    # route so `/`, operator.html and operator.js stay untouched until cutover.
+    # The bundle is BUILT (Vite) into central/console/dist/ locally and in CI, and
+    # is git-ignored — never committed. Neither serving path may require dist/ to
+    # exist when create_app() is constructed (the fast Python gate builds no
+    # bundle): the shell FileResponse is built per-request and only stats dist/ when
+    # hit, and the asset mount uses check_dir=False so an absent dist/ 404s at
+    # request time instead of raising at construction.
+    console_dist = Path(__file__).with_name("console") / "dist"
+
+    @app.get("/console", include_in_schema=False)
+    def console():
+        # Mirrors index() exactly: same no-store + CSP; `script-src 'self'` already
+        # admits the same-origin bundle, so the CSP is unchanged from operator.html.
+        return FileResponse(
+            console_dist / "index.html",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+            },
+        )
+
+    app.mount(
+        "/console/assets",
+        StaticFiles(directory=console_dist / "assets", check_dir=False),
+        name="console_assets",
+    )
 
     @app.post("/v1/enrollment/challenge")
     def challenge(request: Challenge):
