@@ -18,8 +18,8 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | D2 | Docs — M2 (PATCH/DELETE API doc) | closed | e9332b5 | after M2 (coherence: COHERENT) |
 | 7 | C-draft (calibration direct-manip + convex guard) | closed | 2cc7437 | M3 |
 | 8 | C-lease (preview/commit/revert + lease countdown) [HIGH] | closed | cbe9649 | M3 (adversarial: 1 blocking fixed) |
-| D3 | Docs — M3 (Commissioning + lease/conflict) | closed | PENDD3 | after M3 (coherence: COHERENT) |
-| 9 | O-bind (pending rail + bind/unbind + recovery + CTA) | in_progress | — | M4 |
+| D3 | Docs — M3 (Commissioning + lease/conflict) | closed | 63ff1cc | after M3 (coherence: COHERENT) |
+| 9 | O-bind (pending rail + bind/unbind + recovery + CTA) | closed | PEND9 | M4 |
 | D4 | Docs — M4 (onboarding/binding/recovery) | open | — | after M4 |
 | 10 | S-place (drag-to-create POST + drag-to-move PATCH) | open | — | M5 |
 | 11 | S-remove (delete + Unplaced tray drag-out) | open | — | M5 |

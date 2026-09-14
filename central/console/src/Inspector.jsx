@@ -69,7 +69,12 @@ export function Inspector({ snapshot, frameId, facet, onFacet }) {
           <Commissioning snapshot={snapshot} frameId={frameId} />
         )}
         {active === "binding" && (
-          <BindingFacet snapshot={snapshot} frameId={frameId} />
+          <BindingFacet
+            key={frameId}
+            snapshot={snapshot}
+            frameId={frameId}
+            onFacet={onFacet}
+          />
         )}
         {active === "nowshowing" && (
           <NowShowingFacet snapshot={snapshot} frameId={frameId} />
