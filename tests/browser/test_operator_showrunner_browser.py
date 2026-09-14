@@ -409,3 +409,187 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
         expect(choice.get_by_role("option", name="Photo 120×200", exact=True)).to_have_count(1)
         # The landscape candidate is hard-filtered out for a portrait Frame.
         expect(choice.get_by_role("option", name="Photo 192×108", exact=True)).to_have_count(0)
+
+
+# Bead 15 — Programs (single window + priority) + optional N-window helper.
+
+PROGRAM_ID = "morning-show"
+PROGRAM_PRIORITY = 5
+# Two datetime-local field values (operator-local time); the console converts
+# them to POSIX-epoch seconds for the stored Program window (starts_at/ends_at).
+WINDOW_START = "2027-03-01T09:00"
+WINDOW_END = "2027-03-01T11:00"
+
+
+def _author_live_scene(page, scene_id):
+    """Author a LIVE-source Scene through the Scenes region so a real Scene exists
+    to bind a Program to (a Program can only reference a stored Scene —
+    central/runtime.py:298). Reuses the SceneAuthoring form; the seeded SOURCE and
+    VALID_FRAME must already exist.
+    """
+    scenes = page.get_by_role("region", name="Scenes", exact=True)
+    form = scenes.get_by_role("form", name="Author a Scene", exact=True)
+    form.get_by_label("Scene ID", exact=True).fill(scene_id)
+    form.get_by_label("Source", exact=True).select_option(SOURCE)
+    form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+    form.get_by_label("Seconds per cycle", exact=True).fill("30")
+    with page.expect_response(
+        lambda r: r.url.endswith(f"/v1/operator/scenes/{scene_id}")
+        and r.request.method == "PUT"
+    ):
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+    # The Scene must be listed before it can be bound (proves the refresh landed).
+    expect(scenes.get_by_label(f"Scene {scene_id}", exact=True)).to_be_visible()
+
+
+def test_program_schedules_single_window_and_lists(page, registry):
+    """Bead 15: bind a Scene to a SINGLE time window with a priority via
+    PUT …/programs/{id}; the stored Program then lists with its window + priority
+    (design J4).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        expect(programs).to_be_visible()
+        # Not vacuously true: no Program exists yet.
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
+
+        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
+        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
+        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
+        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
+        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
+        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
+
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Schedule Program", exact=True).click()
+
+        response = info.value
+        assert response.status == 200
+        # A single-window Program: the body is exactly one Scene bound to ONE
+        # [starts_at, ends_at) window with a priority — no recurrence field.
+        body = response.request.post_data_json
+        assert body["program_id"] == PROGRAM_ID
+        assert body["scene_id"] == SCENE_ID
+        assert body["priority"] == PROGRAM_PRIORITY
+        assert body["ends_at"] > body["starts_at"]
+        assert "recurrence" not in body
+        assert "rrule" not in body
+
+        # After the useMutate() refresh the Program lists with its priority.
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        expect(row).to_be_visible()
+        expect(row.get_by_text(f"Priority {PROGRAM_PRIORITY}", exact=True)).to_be_visible()
+
+
+def test_program_remove_deletes_it(page, registry):
+    """Bead 15: Remove issues DELETE …/programs/{id} and the Program leaves the
+    list.
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
+        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
+        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
+        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
+        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
+        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            and r.request.method == "PUT"
+        ):
+            form.get_by_role("button", name="Schedule Program", exact=True).click()
+
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        expect(row).to_be_visible()
+
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            and r.request.method == "DELETE"
+        ) as info:
+            programs.get_by_role(
+                "button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        assert info.value.status == 200
+
+        # After the refresh the Program is gone.
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
+
+
+def test_n_window_helper_creates_separate_programs(page, registry):
+    """Bead 15 / Q2: the optional helper creates N SEPARATE windows in one action
+    — N independent, individually-stored single-window Programs (each a real
+    PUT …/programs/{id}), NOT one recurring rule.
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
+        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
+        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
+        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
+        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
+        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
+
+        multi = programs.get_by_role("group", name="Create separate windows", exact=True)
+        multi.get_by_label("Number of windows", exact=True).fill("3")
+
+        # The helper fans out into N discrete PUTs — one stored Program each.
+        seen = []
+        page.on("request", lambda req: (
+            seen.append(req.url)
+            if req.method == "PUT" and "/v1/operator/programs/" in req.url
+            else None))
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+
+        # Three separate Programs are now listed, by three distinct ids.
+        for index in (1, 2, 3):
+            expect(
+                programs.get_by_label(f"Program {PROGRAM_ID}-{index}", exact=True)
+            ).to_be_visible()
+
+
+def test_programs_region_implies_no_recurrence_rule(page, registry):
+    """Bead 15 honesty (design R2 / Q2): central stores single windows only, so
+    NOTHING in the Programs region implies a stored recurrence rule. The N-window
+    helper is described only as creating SEPARATE windows / INDIVIDUAL Programs;
+    the words "recurring"/"recurrence" appear nowhere in the region.
+
+    This is the mutation-probe target: labelling the helper a "recurring rule"
+    turns this test red.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        expect(programs).to_be_visible()
+
+        # The honest N-window copy is present (so the negative assertions below
+        # are not vacuously true): separate windows / individual Programs.
+        copy = programs.inner_text().lower()
+        assert "separate windows" in copy
+        assert "individual programs" in copy
+
+        # No recurrence language anywhere in the region.
+        assert "recurring" not in copy
+        assert "recurrence" not in copy
