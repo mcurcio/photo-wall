@@ -618,6 +618,22 @@ def create_app(
     def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
         return registry.place_frame(frame_id, placement)
 
+    @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
+    def remove_frame(frame_id: Identifier) -> dict:
+        # Guard 1 (runtime, in-route, in-memory, cheap): refuse while a live Run
+        # targets this Frame. Read the projected runtime exactly as
+        # GET /v1/operator/runtime does. run.phase is a plain str on RunView --
+        # do NOT use `.active` (that exists only on the internal _Run, not on the
+        # projected RunView). participants is built from ALL runs unfiltered, so
+        # filtering to the live phases (body, outro) is BOTH correct and required:
+        # completed/cancelled runs must not block a delete.
+        view = coordinator.runtime.read().project(clock.utc())
+        target = f"frame:{frame_id}"
+        if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
+            raise RegistryError("frame_in_use", 409)
+        # Guard 2 (binding) is enforced atomically inside the store transaction.
+        return registry.delete_frame(frame_id)
+
     @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def bind(frame_id: Identifier, binding: BindingRequest):
         return registry.bind(

@@ -10,11 +10,11 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 0 | F-shell (React toolchain + /console shell) | closed | 07a27fd | M1 |
 | 1 | T-plan (per-Surface SVG plan + Unplaced tray) | closed | acbb70d | M1 |
 | 2 | T-join (now-showing join + tile chips) | closed | 226d855 | M1 |
-| 3 | T-inspector (Inspector shell + Binding/Now-showing) | closed | 3d9530e | M1 |
+| 3 | T-inspector (Inspector shell + Binding/Now-showing) | closed | 3650e54 | M1 |
 | 4 | Commission-read (read-only Commissioning + gate) | in_progress | — | M1 |
 | D1 | Docs — M1 (README wall/inspector/now-showing) | open | — | after M1 |
 | 5 | B-PATCH (reposition route, LWW) | closed | 047eb00 | M2 |
-| 6 | B-DELETE (guarded delete route) [HIGH] | open | — | M2 |
+| 6 | B-DELETE (guarded delete route) [HIGH] | closed | PENDING6 | M2 |
 | D2 | Docs — M2 (PATCH/DELETE API doc) | open | — | after M2 |
 | 7 | C-draft (calibration direct-manip + convex guard) | open | — | M3 |
 | 8 | C-lease (preview/commit/revert + lease countdown) [HIGH] | open | — | M3 |

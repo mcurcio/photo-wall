@@ -266,6 +266,27 @@ class Registry:
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
 
+    def delete_frame(self, frame_id: str) -> dict:
+        """Remove a clear Frame. Refuses (409 frame_bound) while a binding exists.
+
+        The binding guard is enforced ATOMICALLY inside this transaction, under
+        FOR UPDATE on the frame row: bindings.frame_id is the ONLY FK into
+        frames(id) in the whole schema (001_registry.sql:37), so a bound frame's
+        DELETE would otherwise surface a raw 500 from the FK -- the explicit
+        check returns a clean 409 instead. The binding guard is therefore
+        necessary AND sufficient: runs reference frames by string (not FK), and
+        nothing else references frames(id), so no cascade or pre-clear is needed.
+        """
+        with self.db.transaction() as conn:
+            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+                raise RegistryError("frame_bound")
+            conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
+            self._audit(conn, "frame_deleted", frame_id)
+            return {"status": "deleted"}
+
     def retire(self, player_id: str) -> None:
         with self.db.transaction() as conn:
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
