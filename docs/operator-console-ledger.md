@@ -20,8 +20,8 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 8 | C-lease (preview/commit/revert + lease countdown) [HIGH] | closed | cbe9649 | M3 (adversarial: 1 blocking fixed) |
 | D3 | Docs — M3 (Commissioning + lease/conflict) | closed | 63ff1cc | after M3 (coherence: COHERENT) |
 | 9 | O-bind (pending rail + bind/unbind + recovery + CTA) | closed | 69eafa6 | M4 |
-| D4 | Docs — M4 (onboarding/binding/recovery) | closed | PENDD4 | after M4 (coherence: COHERENT) |
-| 10 | S-place (drag-to-create POST + drag-to-move PATCH) | open | — | M5 |
+| D4 | Docs — M4 (onboarding/binding/recovery) | closed | 0e0f48b | after M4 (coherence: COHERENT) |
+| 10 | S-place (drag-to-create POST + drag-to-move PATCH) | in_progress | — | M5 |
 | 11 | S-remove (delete + Unplaced tray drag-out) | open | — | M5 |
 | D5 | Docs — M5 (spatial editing + tray) | open | — | after M5 |
 | 12 | SR-mode (mode toggle + Showrunner shell + R4 + badge) | open | — | M6 |
