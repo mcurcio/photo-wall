@@ -1,6 +1,7 @@
 import React from "react";
 
 import { BindingFacet } from "./BindingFacet.jsx";
+import { Commissioning } from "./Commissioning.jsx";
 import { NowShowingFacet } from "./NowShowingFacet.jsx";
 
 /**
@@ -14,9 +15,10 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
- * The Commissioning tab EXISTS now but its body is a placeholder: the real
- * Commissioning facet (hardware/geometry, capability-gated) lands in Bead 4.
- * This bead renders a stub there, never a hardware control.
+ * The Commissioning tab hosts the read-only Commissioning facet (Bead 4):
+ * committed geometry + SDR gain, Frame facts, live Display readback, the bound
+ * Player/Output, and the capability-gated hardware areas rendered "not yet
+ * available".
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * @param {{snapshot: object|null, frameId: string, facet: Facet,
@@ -64,7 +66,7 @@ export function Inspector({ snapshot, frameId, facet, onFacet }) {
         aria-label={`${activeLabel} facet`}
       >
         {active === "commissioning" && (
-          <p className="inspector__stub">Commissioning controls arrive in Bead 4.</p>
+          <Commissioning snapshot={snapshot} frameId={frameId} />
         )}
         {active === "binding" && (
           <BindingFacet snapshot={snapshot} frameId={frameId} />

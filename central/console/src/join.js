@@ -42,13 +42,45 @@ export function nowShowing(runtime, frameId) {
 }
 
 /**
+ * The OutputInventory row serving a frame, resolved on the COMPOUND key
+ * (player_id AND output_id). This is the ONE copy of the compound-key join rule
+ * (outputs PK is `(player_id, output_id)`, 001_registry.sql:20; `output_id`
+ * repeats across players so output_id alone resolves the wrong player's port).
+ * Both `connectivity` (the tile dot) and the Commissioning facet's Display facts
+ * read the bound output through here, so the rule lives in exactly one place.
+ *
+ * Returns null when the frame is unknown, unbound (either id null), or has no
+ * matching OutputInventory row.
+ *
+ * @param {{inventory?: {frames?: Array<object>, outputs?: Array<object>}}} snapshot
+ * @param {string} frameId
+ * @returns {object|null} the OutputInventory row (with `.observation`), or null
+ */
+export function boundOutput(snapshot, frameId) {
+  const frames = snapshot?.inventory?.frames ?? [];
+  const frame = frames.find((candidate) => candidate.id === frameId);
+  if (!frame || frame.player_id == null || frame.output_id == null) {
+    return null;
+  }
+  const outputs = snapshot?.inventory?.outputs ?? [];
+  return (
+    outputs.find(
+      (candidate) =>
+        candidate.player_id === frame.player_id &&
+        candidate.output_id === frame.output_id,
+    ) ?? null
+  );
+}
+
+/**
  * Connectivity fact for a frame, from its bound output's observation.
  *
  * "unbound" when the frame has no binding (player_id/output_id null). Otherwise the
- * frame's OutputInventory is found on the COMPOUND key (player_id AND output_id) and
- * its `observation.connected` decides "connected" vs "disconnected". A bound frame
- * whose output report is missing is reported "disconnected" — there is no connected
- * observation to trust (a conservative, honesty-preserving default).
+ * frame's OutputInventory is found on the COMPOUND key (player_id AND output_id) via
+ * `boundOutput` and its `observation.connected` decides "connected" vs
+ * "disconnected". A bound frame whose output report is missing is reported
+ * "disconnected" — there is no connected observation to trust (a conservative,
+ * honesty-preserving default).
  *
  * @param {{inventory?: {frames?: Array<object>, outputs?: Array<object>}}} snapshot
  * @param {string} frameId
@@ -60,11 +92,7 @@ export function connectivity(snapshot, frameId) {
   if (!frame || frame.player_id == null || frame.output_id == null) {
     return "unbound";
   }
-  const outputs = snapshot?.inventory?.outputs ?? [];
-  const output = outputs.find(
-    (candidate) =>
-      candidate.player_id === frame.player_id && candidate.output_id === frame.output_id,
-  );
+  const output = boundOutput(snapshot, frameId);
   if (!output) {
     return "disconnected";
   }
