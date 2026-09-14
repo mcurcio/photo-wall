@@ -36,7 +36,7 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | closed | 56163d1 | M6 (adversarial content-parity: PARITY-COMPLETE) |
 | D6 | Docs — M6 (Showrunner + R4 + cutover) | closed | 70b9466 | after M6 (coherence: COHERENT; gate 1123/52) |
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | closed | 059ee1c | M7 |
-| D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
+| D7 | Docs — M7 (refresh model + snapshot age) | closed | PENDD7 | after M7 |
 | residual: dedupe-calibration-defaults | share DEFAULT_CORNERS/CROP (useDraft+Commissioning) | open | — | opportunistic (M3 coherence) |
 | R-apiwrite | extract shared operator-write helper + frames-API module | closed | 9941612 | M6 start (behavior-preserving) |
-| residual: conftest-evidence | repoint conftest CHECKS at re-hosted console tests | closed | PENDCE | operator-browser.json now status=passed; 3 arch-specific items retired |
+| residual: conftest-evidence | repoint conftest CHECKS at re-hosted console tests | closed | 11f3e35 | operator-browser.json now status=passed; 3 arch-specific items retired |
