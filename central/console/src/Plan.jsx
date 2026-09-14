@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { connectivity, nowShowing } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
@@ -141,9 +141,83 @@ export async function moveFrame(frameId, placement) {
   return interpretFrame(response);
 }
 
+/**
+ * Guard-code -> operator message for a refused DELETE (design §9a). The distinctive
+ * wording is load-bearing: {@link deleteFrame} maps the server's 409 `error` code to
+ * exactly these sentences so the operator is told the specific remedy (unbind, or
+ * finish/cancel the Run), not a generic "could not delete." A test asserts the
+ * distinctive substrings, so collapsing this map to a generic string is caught.
+ */
+const DELETE_MESSAGES = {
+  frame_bound: "This Frame still has a bound Output — unbind it before deleting.",
+  frame_in_use: "A live Run is scheduled on this Frame — finish or cancel it before deleting.",
+};
+
+/**
+ * Delete a Frame (Bead 11, design §9a/J3): DELETE /v1/operator/frames/{id}. The
+ * server refuses with 409 while the Frame is bound (`frame_bound`) or while a live
+ * Run targets it (`frame_in_use`); those codes are mapped to the design's
+ * plain-language operator messages so the guidance names the specific remedy. Any
+ * other non-ok response falls back to a generic message. Wrap in `useMutate()` at
+ * the call site so the plan refreshes once the delete lands.
+ *
+ * @param {string} frameId
+ * @returns {Promise<{ok:true}|{ok:false, message:string}>}
+ */
+export async function deleteFrame(frameId) {
+  const response = await fetch(`/v1/operator/frames/${frameId}`, {
+    method: "DELETE",
+    headers: { Authorization: "Bearer " + getToken() },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (response.ok) {
+    return { ok: true };
+  }
+  let code = null;
+  try {
+    code = (await response.json()).error;
+  } catch {
+    code = null;
+  }
+  return { ok: false, message: DELETE_MESSAGES[code] ?? "Could not delete the frame." };
+}
+
+/**
+ * Drop an Unplaced-tray Frame onto the plan (Bead 11, design J3/§12): PATCH the
+ * frame with a distinct mm ORIGIN inverted from the drop point, reusing
+ * {@link dragToPlacement} for the px->mm inversion and {@link moveFrame} for the
+ * write. Only `surface_id`/`x_mm`/`y_mm` are sent — the PATCH is partial, so the
+ * stored `width_mm`/`height_mm` (and thus orientation coherence with the profile)
+ * are preserved; the drop merely gives the frame a non-origin position so
+ * `isUnplaced` no longer routes it to the tray. Wrap in `useMutate()` so the frame
+ * leaves the tray and renders on the plan from the next snapshot.
+ *
+ * @param {string} frameId
+ * @param {import("./projection.js").Rect} pxRect drop rectangle in viewBox px
+ * @param {{width: number, height: number}} viewport the plan viewport in px
+ * @param {string} surfaceId the Surface the frame is dropped onto
+ * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
+ */
+export function dropFromTray(frameId, pxRect, viewport, surfaceId) {
+  const placement = dragToPlacement(pxRect, viewport, surfaceId);
+  return moveFrame(frameId, {
+    surface_id: placement.surface_id,
+    x_mm: placement.x_mm,
+    y_mm: placement.y_mm,
+  });
+}
+
 const PROFILE_DEFAULTS = { width_px: 1920, height_px: 1080, diagonal_inches: 24, video: true };
 
-export function Plan({ snapshot, surfaceId, selection, onSelect }) {
+export function Plan({
+  snapshot,
+  surfaceId,
+  selection,
+  onSelect,
+  onDeleted,
+  trayDragRef,
+  onTrayDrop,
+}) {
   const mutate = useMutate();
   const svgRef = useRef(null);
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
@@ -156,9 +230,17 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
   const [newFrame, setNewFrame] = useState(/** @type {{pxRect: object}|null} */ (null));
   const [profile, setProfile] = useState(PROFILE_DEFAULTS);
   const [formError, setFormError] = useState(/** @type {string|null} */ (null));
+  // The guard message from a refused DELETE (design §9a), cleared on the next attempt.
+  const [deleteError, setDeleteError] = useState(/** @type {string|null} */ (null));
   // True once the current press has moved past the threshold — read by a frame's
   // onClick so a drag-move is not also treated as a selection.
   const didDragRef = useRef(false);
+
+  // A guard message is about the frame it was raised for; drop it when the
+  // selection moves so one frame's refusal never lingers over another.
+  useEffect(() => {
+    setDeleteError(null);
+  }, [selection]);
 
   const frames = snapshot?.inventory?.frames ?? [];
   const framesById = new Map(frames.map((frame) => [frame.id, frame]));
@@ -221,6 +303,22 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
   };
 
   const onPointerUp = (event) => {
+    // A drag that STARTED in the Unplaced tray (App holds its frame id in a ref so
+    // the value is read synchronously here, free of stale-closure risk) and is
+    // RELEASED over the plan drops that frame onto the plan: PATCH a distinct
+    // position so it leaves the tray (design J3/§12). The tray press captured no
+    // pointer on the SVG, so `dragRef` is null — this branch owns the release.
+    const trayFrameId = trayDragRef?.current ?? null;
+    if (trayFrameId != null) {
+      onTrayDrop?.();
+      if (surfaceId != null) {
+        const pt = toViewbox(svgRef.current, event);
+        mutate(() =>
+          dropFromTray(trayFrameId, { x: pt.x, y: pt.y, w: 1, h: 1 }, VIEWPORT, surfaceId),
+        ).catch(() => {});
+      }
+      return;
+    }
     const finished = dragRef.current;
     if (finished == null) {
       return;
@@ -310,6 +408,23 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
         }
       })
       .catch(() => setFormError("Could not create the frame."));
+  };
+
+  const onDelete = () => {
+    if (selection == null) {
+      return;
+    }
+    setDeleteError(null);
+    mutate(() => deleteFrame(selection))
+      .then((result) => {
+        if (result.ok) {
+          onDeleted?.();
+        } else {
+          // Surface the design §9a guard wording verbatim (unbind / finish the Run).
+          setDeleteError(result.message);
+        }
+      })
+      .catch(() => setDeleteError("Could not delete the frame."));
   };
 
   const draftRect = draft;
@@ -466,6 +581,23 @@ export function Plan({ snapshot, surfaceId, selection, onSelect }) {
             </p>
           )}
         </form>
+      )}
+
+      {selection != null && (
+        <div
+          className="plan__selection"
+          role="group"
+          aria-label={`Selected frame ${selection}`}
+        >
+          <button type="button" className="plan__delete" onClick={onDelete}>
+            {`Delete frame ${selection}`}
+          </button>
+          {deleteError != null && (
+            <p className="plan__delete-error" role="alert">
+              {deleteError}
+            </p>
+          )}
+        </div>
       )}
     </section>
   );

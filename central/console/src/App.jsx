@@ -30,6 +30,23 @@ export default function App() {
   // The pending/retired Player last selected in the Equipment rail (Plane B).
   const [selectedPlayer, setSelectedPlayer] = useState(/** @type {string|null} */ (null));
 
+  // Unplaced-tray drag-out (Bead 11). The dragged frame id lives in a REF so the
+  // plan's pointer-up reads it synchronously (a full press->move->release can
+  // fire before React re-renders — cf. Plan's own dragRef). A window-level
+  // pointer-up clears it so a press that does NOT land on the plan (a plain tray
+  // click, or a release anywhere else) cancels the drag rather than leaving a
+  // stale id that a later plan release would wrongly consume. The plan's own
+  // handler runs first (React binds at the root, below window in the bubble
+  // path), so a genuine drop is read and cleared before this reset sees it.
+  const trayDragRef = useRef(/** @type {string|null} */ (null));
+  useEffect(() => {
+    const clear = () => {
+      trayDragRef.current = null;
+    };
+    window.addEventListener("pointerup", clear);
+    return () => window.removeEventListener("pointerup", clear);
+  }, []);
+
   // Auto-recovery banner (design J1, §1a D-a). Recovery is INFERRED by diffing
   // the CURRENT Plane A snapshot against the PRIOR one, so App retains the prior
   // snapshot itself in a ref — useSnapshot's frozen {snapshot, refresh} shape is
@@ -147,8 +164,19 @@ export default function App() {
               surfaceId={activeSurface}
               selection={selection}
               onSelect={selectFrame}
+              onDeleted={() => setSelection(null)}
+              trayDragRef={trayDragRef}
+              onTrayDrop={() => {
+                trayDragRef.current = null;
+              }}
             />
-            <UnplacedTray snapshot={snapshot} onSelect={selectFrame} />
+            <UnplacedTray
+              snapshot={snapshot}
+              onSelect={selectFrame}
+              onDragStart={(id) => {
+                trayDragRef.current = id;
+              }}
+            />
             {selection !== null && (
               <Inspector
                 snapshot={snapshot}
