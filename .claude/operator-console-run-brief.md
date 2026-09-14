@@ -91,3 +91,27 @@ export PHOTO_WALL_TEST_DATABASE_URL="postgresql://photo_wall:$(grep '^PHOTO_WALL
   Node build stage inserts between line 60 and line 89.
 - `pyproject.toml`: `testpaths=["tests"]`; importlinter constrains only contracts/player;
   dev group has pytest-playwright==0.9.0, playwright==1.62.0.
+
+## Harness fact (learned mid-run)
+- `Agent(isolation:"worktree")` branches from the REPO BASE (3929faf), NOT the feature-branch
+  tip. So an isolated worktree does NOT contain earlier feature beads (e.g. Bead 5). A backend
+  bead that must build on a prior feature bead (Bead 6 needs Bead 5) CANNOT be built in an
+  isolated worktree — it must be applied in the MAIN worktree (which has the feature tip).
+- Bead 5 cherry-picked clean because it was self-contained (backend delta on a console-only tip).
+- Bead 6 (B-DELETE) reviewed clean in isolated worktree agent-aa72c395ca65f3bf6 (commit f4859f5),
+  but cherry-pick conflicts with Bead 5 (both touch app.py/registry.py/test_operator_frames.py,
+  all ADDITIVE). PLAN: apply Bead 6's reviewed delta in MAIN, additively, after Bead 3 lands.
+- Remaining beads 7-18 are ALL frontend in central/console/, strictly serial (shared hooks/
+  components) → no more cross-track parallelism after M2. Tear down the :54332 Postgres after
+  Bead 6 lands.
+
+## Verification-scope optimization (frontend beads)
+A frontend-only bead touches ONLY central/console/** + tests/browser/** (confirm with
+`git status --porcelain | awk '{print $2}' | grep '\.py$' | grep -v tests/browser/` → empty).
+The 12-min `scripts/test_local.py` Python DB suite is INVARIANT across such a bead (it tests
+central/*.py etc., unchanged), and it is re-run IN FULL at every milestone coherence review and
+in CI. So for frontend-only beads, implementer AND verifier run: ruff + lint-imports + check_docs
++ vite build + the bead's browser test (positive count) + full tests/browser (no-regression) +
+the mutation probe — and SKIP `test_local.py`. This saves ~12 min per bead on each side.
+BACKEND beads, HIGH-risk beads, milestone coherence, and the cutover STILL run the full gate
+incl. test_local.py. If a "frontend" bead unexpectedly touches Python, run the full gate.
