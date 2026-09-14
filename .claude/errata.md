@@ -369,3 +369,15 @@ Append-only. Read with `grep -a`.
   - G3 `SR-parity`: token-rejection recovery in App.jsx (401 -> "token not accepted" + return to login) +
     a manual-revert /console test.
   Cutover (17) runs only after G1+G2+G3 land and re-audit shows parity.
+
+## 2026-09-14 — Bead G3: useSnapshot frozen return extended (additive) + manual-revert clears draft
+- **useSnapshot (primitive #1):** frozen return was `{snapshot, refresh}`. G3 ADDS `authRejected` (a 401 from
+  any plane clears the in-memory token, nulls the snapshot, sets authRejected; a non-401 leaves prior state).
+  Purely ADDITIVE — existing {snapshot, refresh} consumers unaffected; refresh still replaces Plane A wholesale.
+  Logged for parity with the other frozen-page errata. Non-breaking.
+- **Manual calibration Revert** now calls useDraft.clearDraft() on success (Commissioning.jsx), so the draft
+  resets to committed (legacy single-field revert parity). This is DISTINCT from lease EXPIRY, which
+  deliberately RETAINS `trying` for Re-preview and does NOT clearDraft — Bead 8 expiry tests remain green.
+- Both were needed to close content-parity GAP 3 (manual revert) and GAP 4 (token-rejection recovery). The
+  legacy same-token websocket-fencing test (test_operator_browser.py:185-226) is architecture-specific (old
+  page's operator websocket); the console is REST with per-request bearer auth — NO console equivalent, by design.

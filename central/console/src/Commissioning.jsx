@@ -95,7 +95,7 @@ export function Commissioning({ snapshot, frameId }) {
   // Plane B draft, seeded from the committed calibration and refresh-proof. This
   // hook is called unconditionally (before the early return) to keep hook order
   // stable; when the frame is absent the draft simply seeds from defaults.
-  const { trying, updateHandles } = useDraft(frameId, calibration);
+  const { trying, updateHandles, clearDraft } = useDraft(frameId, calibration);
   // Bead 8 (Plane B network writes): preview/commit/revert under the 30s lease,
   // the server-driven countdown, and the overtake/expiry/conflict states. The
   // draft (trying) is threaded in so preview/commit carry the operator's values.
@@ -199,9 +199,18 @@ export function Commissioning({ snapshot, frameId }) {
   // Run a calibration op and reflect its result. A conflict return sets the
   // banner kind; a success clears it. The poll independently drives expired /
   // overtaken through `status`.
+  //
+  // A successful manual Revert also DISCARDS the local draft back to committed
+  // (parity with the legacy page's single-field revert): Revert clears the panel
+  // preview server-side AND returns the editable draft to committed, so the
+  // operator is back on truth. (Lease EXPIRY is different — it keeps the trying
+  // values for Re-preview; that path never runs clearDraft.)
   const runOp = async (op) => {
     const result = await calibrate(op);
     setConflict(result.ok ? null : result.conflict);
+    if (op === "revert" && result.ok) {
+      clearDraft();
+    }
   };
 
   const banner = leaseBanner(leaseStatus, conflict);

@@ -501,3 +501,54 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
         expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_have_count(0)
         # The single preview slot is still occupied — by the FOREIGN preview.
         assert inventory(page, origin).frames[0].preview is not None
+
+
+# --- Bead G3 (SR-parity, GAP 3): manual Revert -----------------------------
+#
+# The manual Revert control (Commissioning.jsx -> calibrate("revert")) already
+# exists; this closes the missing /console TEST for it (legacy
+# test_operator_browser.py:118-120). Revert clears the panel preview slot
+# server-side AND discards the local draft back to committed — the operator is
+# returned to truth, unlike lease EXPIRY (which retains trying for Re-preview).
+
+
+def test_manual_revert_clears_preview_and_returns_draft_to_committed(page, registry):
+    """Previewing, then clicking Revert, returns the panel to committed.
+
+    The operator previews a changed draft gain onto the panel (preview slot set),
+    then clicks Revert: the server preview slot is cleared and the editable draft
+    gain resets to the committed value — parity with the legacy page's single-
+    field Revert.
+
+    Mutation probe (Revert no-ops): make the Revert button not clear the preview
+    (skip calibrate("revert")/clearDraft) -> the preview slot stays set and the
+    draft never returns to committed -> this test goes RED. Restore -> GREEN.
+    """
+    _seed(registry)  # committed gain 1.5
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        # Change the draft gain away from committed and preview it onto the panel.
+        gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
+        gain.fill("0.75")
+        expect(gain).to_have_value("0.75")
+        lease.get_by_role("button", name="Preview", exact=True).click()
+        expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_be_visible()
+        assert inventory(page, origin).frames[0].preview is not None
+
+        # Manual Revert: the draft returns to committed (1.5). Waiting on the
+        # draft value is the synchronization point — it flips only AFTER the
+        # revert POST resolves, so the server preview is cleared by then.
+        lease.get_by_role("button", name="Revert", exact=True).click()
+        expect(gain).to_have_value("1.5")
+
+        # Committed calibration is unchanged, and the panel preview is cleared.
+        expect(
+            inspector.get_by_role("group", name="Committed calibration")
+        ).to_contain_text(str(GAIN))
+        observed = inventory(page, origin).frames[0]
+        assert observed.preview is None
+        assert observed.calibration.gain == GAIN

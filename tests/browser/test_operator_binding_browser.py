@@ -136,6 +136,42 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
         expect(bind_button).to_be_disabled()
 
 
+def test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login(page, registry):
+    # Bead G3 (SR-parity, GAP 4): a rejected operator token must surface an
+    # explicit "not accepted" message and drop back to the token-entry state —
+    # NOT silently blank (legacy test_operator_browser.py:99-104,164-177). The
+    # console is REST (per-request bearer auth), so this is the ONLY token-
+    # rejection behavior with a console equivalent; the legacy operator-websocket
+    # fencing (test_operator_browser.py:185-226) has none by architecture.
+    identity, _, _ = enroll(registry, count=1)
+    _placed_frame(registry, "auth-1")
+    with operator_server(registry.db, registry.clock) as origin:
+        page.goto(origin + "/console")
+
+        # Connect with a WRONG token: the production auth dependency 401s the
+        # inventory/runtime/media fetch on connect.
+        page.get_by_label("Operator token").fill("not-the-admin-token")
+        page.get_by_role("button", name="Connect", exact=True).click()
+
+        # The 401 surfaces an explicit auth-rejected message...
+        expect(page.get_by_role("alert")).to_contain_text("not accepted")
+        # ...and the console stays on the token form (never enters the connected
+        # state): the token input + Connect button remain, and NO connected
+        # content (the Pending rail) rendered.
+        expect(page.get_by_label("Operator token")).to_be_visible()
+        expect(page.get_by_role("button", name="Connect", exact=True)).to_be_visible()
+        expect(
+            page.get_by_role("group", name="Pending players", exact=True)
+        ).to_have_count(0)
+
+        # Recovery: the CORRECT token connects and the real inventory renders,
+        # and the rejection message is gone.
+        page.get_by_label("Operator token").fill(ADMIN)
+        page.get_by_role("button", name="Connect", exact=True).click()
+        expect(page.get_by_role("button", name="Frame auth-1", exact=True)).to_be_visible()
+        expect(page.get_by_role("alert")).to_have_count(0)
+
+
 def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "stale-1")
