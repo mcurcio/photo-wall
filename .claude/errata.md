@@ -306,3 +306,16 @@ Append-only. Read with `grep -a`.
   (baseline.configuration_revision + 1) at preview-issue; any FURTHER config_revision advance while the
   slot stays occupied → "overtaken"; timer unmounts. Covered by
   test_calibration_foreign_preview_overtakes_by_inventory_poll (red before fix, green after).
+
+## 2026-09-14 — M3 coherence residuals (non-blocking)
+- **(useDraft return-type narrowing):** Bead 7 frozen page declares `useDraft(...) -> {trying: Trying|null,...}`
+  but the impl always seeds a non-null Trying (from defaults). Strict, non-breaking narrowing; signature
+  matches. Logged for parity with the useCalibration signature erratum. No code change needed.
+- **(§4c expired copy):** reconciled docs/operator-console-ux-design.md §4c/J2 line 456 to the §4b-verbatim
+  "Panel is back on committed. Re-preview to keep trying." (dropped the "Preview expired — " prefix). Closed.
+- **(RESIDUAL — DEFAULT_CORNERS/DEFAULT_CROP duplication):** identity-calibration defaults
+  ([[0,0],[1,0],[1,1],[0,1]] / [0,0,1,1]) are defined in BOTH central/console/src/useDraft.js and
+  Commissioning.jsx, pinned to the server Calibration default (contracts/models.py:44-47). Consolidate to
+  ONE shared constant (e.g. exported from convex.js or a small calibration.js) in a later frontend bead that
+  touches those files (opportunistic cleanup; both copies currently identical, low severity). Tracked as
+  residual: dedupe-calibration-defaults.

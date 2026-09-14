@@ -453,7 +453,7 @@ available") until T1/T2 announce them ([§7.6](#76-capability-gating--derived-no
 
 | Situation | What the user sees |
 |---|---|
-| Preview lease reaches 0 with no interaction | "Preview expired — panel is back on committed. Re-preview to keep trying." Trying values retained. |
+| Preview lease reaches 0 with no interaction | "Panel is back on committed. Re-preview to keep trying." Trying values retained. |
 | Another tab previews the same Frame | The wall may show the other tab's values; on next inventory poll: "Committed elsewhere / preview overtaken — re-review." |
 | Commit with stale revision | "Another session changed this frame's calibration — reload and re-review." |
 | Binding changed mid-calibration | "This Frame's binding changed — its display is no longer under your control; reload." |

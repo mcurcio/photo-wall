@@ -183,6 +183,34 @@ The operator console edits the wall plan through two admin-authenticated routes 
 
 `DELETE /v1/operator/frames/{frame_id}` removes a Frame, but only a clear one. It refuses with **409 `frame_in_use`** when a live Run (phase body or outro) targets the Frame — finish or cancel that Run first — and with **409 `frame_bound`** when an Output is still bound to it — unbind first (`DELETE /v1/operator/frames/{frame_id}/binding`). An unknown id returns **404**. On success it deletes the Frame and returns **200 `{"status": "deleted"}`**. The guards protect one invariant: you cannot delete a Frame a Player is currently bound to serve.
 
+## Operator console: commissioning, calibration, and conflict states
+
+In the redesigned `/console` (still parallel to the existing `/` page until cutover), select a Frame in the wall plan to open the Frame Inspector, then open its **Commissioning** facet — the layer where you set up the display behind a Frame. It is reachable **only in Wall mode**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health badge. Everything below rides the existing admin-authenticated `POST /v1/operator/frames/{frame_id}/calibration` route — no new endpoint, no schema change, no migration.
+
+**What the facet shows (read-only, T0).** Four honest readouts, none of them a control:
+
+- **Committed calibration** — the SDR gain, rotation, corners, and crop currently in force on the panel.
+- **Frame facts** (from `FrameProfile`) — pixel width/height, diagonal, and video-capable. These are **operator-declared at Frame creation and persist across a panel swap**, so they are labelled *Frame facts*, not live display facts.
+- **Live Display readback** (from `OutputReport`) — whether the bound Output is **connected** and its reported resolution. This is the *only* live readback the panel offers; nothing richer (EDID, model, refresh rate, HDR, active-area, bezel, overscan) exists anywhere in the system.
+- **Bound equipment** — which Player/Output currently serves the Frame.
+
+The **panel color correction** and **display power / parameters** areas render **"not yet available."** They are capability-gated and no wired path enables them today: panel color is a T1 concern and display power/CEC is a T2 cross-layer epic. No control on the facet implies a stored field that does not exist.
+
+**Calibrate by direct manipulation.** In the *Adjust calibration* editor, drag the four corner handles and the two crop handles, or type the coordinates directly; SDR gain and rotation are separate draft controls. Every edit stays a **local draft** that a background inventory refresh never overwrites. Each geometry change is validated by the **same convex test the server enforces** (the `1e-6` epsilon and clockwise winding): a folded or too-thin quad snaps the handle back with the inline message **"corners must form a convex aperture"**, and an empty crop snaps back with **"crop must describe a nonempty rectangle"** — and **no request is sent**. A rejected drag changes nothing, on the client or the server.
+
+**Preview → 30-second lease → commit / revert.** **Preview** pushes the draft to the panel under a server lease that expires in **30 seconds**; the facet shows the *server's* countdown ("Previewing on the panel — lease expires in Ns"). There is **no auto-renew**. If you do nothing, the lease lapses, the panel returns to its committed calibration, and the facet says so — **"Panel is back on committed. Re-preview to keep trying."** — while keeping your "trying" values so **Re-preview** re-pushes them in one click without re-entering anything. **Commit** saves the draft as a new calibration revision; **Revert** drops the preview and returns the panel to committed immediately. Preview and Commit require a bound Frame.
+
+**One shared preview slot, last-writer-wins.** There is a **single preview slot per Frame and no lock** — the console never implies you have exclusive control of the panel. A second tab or operator who previews or commits the same Frame overtakes you. While the facet is open the console polls the inventory (~5s) so these changes surface as explicit states rather than a silent overwrite:
+
+| What happened | What you see | What to do |
+|---|---|---|
+| Your lease expired with no interaction | "Panel is back on committed. Re-preview to keep trying." | Re-preview to keep adjusting; your trying values are retained. |
+| Another tab/operator committed or re-previewed the same Frame (the single slot was taken) | "Committed elsewhere / your preview was superseded — re-review." | Reload the fresh state and review before writing again. |
+| Commit refused — another commit advanced the calibration revision (stale `expected_revision`) | "Another session changed this frame's calibration — reload and re-review." | Reload and re-review; your stale commit was **refused**, not silently applied. |
+| Commit refused — the Frame's binding changed via bind/unbind/retire (stale `expected_generation`) | "This Frame's binding changed — its display is no longer under your control; reload." | The display is no longer yours to calibrate; reload and re-check the binding. |
+
+Every write carries **both** concurrency tokens (`expected_revision` and `expected_generation`) against the baseline captured when you opened the facet, so a stale commit is refused with a **409** rather than silently overwriting state you never reviewed. (A preview or commit against a Frame whose binding was removed underneath you is refused with "This Frame is no longer bound to a display — bind it before calibrating.")
+
 ## Tests and local development
 
 Install the free `uv` Python package manager, then:
