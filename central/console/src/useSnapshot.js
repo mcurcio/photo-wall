@@ -55,12 +55,16 @@ export function SnapshotProvider({ children }) {
 
   const refresh = useCallback(async () => {
     // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
-    // partial failure rejects and leaves the prior snapshot untouched.
-    const [inventory, runtime] = await Promise.all([
+    // partial failure rejects and leaves the prior snapshot untouched. Media is
+    // part of Plane A (design §4a) — inventory, runtime and the Source catalog
+    // are swapped together so the Showrunner's Sources region and the wall's
+    // now-showing chip always share one age.
+    const [inventory, runtime, media] = await Promise.all([
       fetchJson("/v1/operator/inventory"),
       fetchJson("/v1/operator/runtime"),
+      fetchJson("/v1/operator/media"),
     ]);
-    const next = { inventory, runtime, media: null, at: Date.now() };
+    const next = { inventory, runtime, media, at: Date.now() };
     setSnapshot(next);
     return next;
   }, []);

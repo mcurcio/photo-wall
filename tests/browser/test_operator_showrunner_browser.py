@@ -19,12 +19,15 @@ assertion.
 import os
 
 import pytest
+from media_queue import RecordingMediaQueue
 from playwright.sync_api import expect
 from test_operator_browser import operator_server
 from test_registry import ADMIN, enroll
 
+from central.media_repository import MediaRepository
 from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
+from media.models import SourceSpec
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -36,6 +39,25 @@ PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 VALID_FRAME = "valid-frame"
 INVALID_FRAME = "invalid-frame"
 OUTPUT = "HDMI-A-1"
+
+# A Source is a saved live QUERY named `name:rev` (design D-e) — the ref itself
+# is the `name:rev` string the operator chose, NOT a downloaded album.
+SOURCE = "holiday:1"
+
+
+def _seed_source(registry):
+    """Configure ONE saved live query through the shared DB so the console's
+    /v1/operator/media renders it, wiring a RecordingMediaQueue so the Refresh
+    POST is accepted (202). No worker, upstream, or renderer runs.
+
+    Returns the queue to hand to operator_server so the app's own media
+    repository (built in create_app) shares it and accepts the refresh.
+    """
+    queue = RecordingMediaQueue()
+    repository = MediaRepository(registry.db, registry.clock, queue=queue)
+    repository.configure_source(
+        SourceSpec(source_ref=SOURCE, connection_ref="fixture-library"))
+    return queue
 
 
 def _seed(registry):
@@ -142,3 +164,56 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
         expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_have_count(0)
         expect(page.get_by_role("group", name="Committed calibration")).to_have_count(0)
         expect(page.get_by_role("group", name="Adjust calibration")).to_have_count(0)
+
+
+def test_sources_render_name_rev_with_refresh(page, registry):
+    """A Source renders by its `name:rev` identity with a Refresh button that
+    POSTs …/sources/{ref}/refresh; the mutate-driven snapshot refresh keeps the
+    Source listed (design J4).
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        sources = page.get_by_role("region", name="Sources", exact=True)
+        expect(sources).to_be_visible()
+        # The Source is identified by its `name:rev` string, not an album title.
+        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+
+        refresh = sources.get_by_role(
+            "button", name=f"Refresh {SOURCE}", exact=True)
+        with page.expect_response(
+            lambda r: r.url.endswith("/refresh")
+            and "/v1/operator/sources/" in r.url
+            and r.request.method == "POST"
+        ) as info:
+            refresh.click()
+        assert info.value.status == 202
+
+        # After the useMutate() refresh, the Source is still listed (Plane A —
+        # including the media catalog — was re-fetched, not dropped).
+        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+
+
+def test_sources_have_no_immich_or_album_language(page, registry):
+    """Immich boundary (design D-e): a Source is a saved live query, never a
+    downloaded album, and no UI element may imply a Player browses or links to
+    Immich. The Sources region carries NO "Immich" / "album" / "open in" copy.
+    """
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+
+        sources = page.get_by_role("region", name="Sources", exact=True)
+        expect(sources).to_be_visible()
+        # The Source must be present, so this is not vacuously true.
+        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+
+        copy = sources.inner_text().lower()
+        assert "immich" not in copy
+        assert "album" not in copy
+        assert "open in" not in copy
