@@ -154,3 +154,124 @@ def test_commissioning_provenance_frame_facts_vs_live_readback(page, registry):
         # Provenance: a FrameProfile-only fact (diagonal) must NOT appear as a
         # live Display readback — OutputReport has no diagonal.
         expect(live).not_to_contain_text("24")
+
+
+# --- Bead 7: calibration direct-manipulation + client convex guard (Plane B) ---
+#
+# The Commissioning facet gains an "Adjust calibration" draft editor (design
+# §J2/§4a). Assertions here are BEHAVIORAL — role/text/visible state — never SVG
+# coordinates: a drag ACTION may use pixel coordinates, but every ASSERTION is on
+# the visible draft status, the inline convex message, or a control's value. No
+# network write exists yet (preview/commit are Bead 8), so an invalid edit is
+# proven "sent nothing" by the committed read-back staying put.
+
+
+def test_calibration_drag_to_convex_updates_draft(page, registry):
+    """Dragging a corner handle to a still-convex quad updates the Plane B draft.
+
+    Asserted by the visible draft-status flipping to "Unsaved draft changes"
+    (behavioral), never by the handle's coordinates.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+
+        editor = inspector.get_by_role("group", name="Adjust calibration")
+        expect(editor.get_by_role("status")).to_have_text("Draft matches committed")
+
+        # Drag the top-left corner handle inward — the handle sits at the SVG's
+        # padded top-left; the drag ACTION uses coordinates, the ASSERTION does
+        # not. (0,0) -> ~ (0.2, 0.2) stays convex.
+        svg = inspector.get_by_role("img", name="Calibration editor")
+        box = svg.bounding_box()
+        start_x, start_y = box["x"] + 16, box["y"] + 16
+        page.mouse.move(start_x, start_y)
+        page.mouse.down()
+        page.mouse.move(start_x + 60, start_y + 60, steps=6)
+        page.mouse.up()
+
+        expect(editor.get_by_role("status")).to_have_text("Unsaved draft changes")
+        expect(editor.get_by_role("alert")).to_have_count(0)
+
+
+def test_calibration_folded_quad_snaps_back_no_request(page, registry):
+    """A folded quad snaps back with the inline convex message and sends nothing.
+
+    Editing corner 1 to (0.9, 0.9) folds the aperture (min(cross) < 0). The draft
+    does not mutate (the handle/input snaps back), the inline message appears, and
+    — there being no preview write yet — the COMMITTED read-back is unchanged,
+    which is how "no request was sent" is proven.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+
+        inspector.get_by_role("spinbutton", name="Corner 1 x").fill("0.9")
+        inspector.get_by_role("spinbutton", name="Corner 1 y").fill("0.9")
+
+        expect(
+            inspector.get_by_text("corners must form a convex aperture")
+        ).to_be_visible()
+
+        # No request was sent: the committed calibration read-back is untouched.
+        committed = inspector.get_by_role("group", name="Committed calibration")
+        expect(committed).to_contain_text(str(GAIN))
+
+
+def test_calibration_thin_quad_is_rejected_client_side(page, registry):
+    """A `1e-6`-thin quad the server would 400 is rejected client-side.
+
+    Corner 3 y -> 5e-7 leaves min(cross) = 5e-7 <= 1e-6, so the client convex
+    guard (convex.js, EPSILON=1e-6, server winding) rejects it. Mutation probe:
+    set the client EPSILON to 0 -> this thin quad slips past the client -> the
+    inline message never appears -> this test goes RED. Restore -> GREEN.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+
+        inspector.get_by_role("spinbutton", name="Corner 3 y").fill("0.0000005")
+
+        expect(
+            inspector.get_by_text("corners must form a convex aperture")
+        ).to_be_visible()
+
+
+def test_calibration_draft_survives_snapshot_refresh(page, registry):
+    """A snapshot refresh mid-edit leaves the Plane B draft intact (two-plane).
+
+    The operator edits the trying SDR gain; meanwhile committed calibration moves
+    underneath (a commit from elsewhere), and a Plane A refresh (Connect) is
+    triggered. Plane A visibly updates (the committed read-back shows the NEW
+    gain, proving the refresh was real and non-vacuous) while Plane B (the draft
+    input) persists — because useDraft is a separate, refresh-proof state cell.
+
+    Mutation probe: have useDraft re-seed from committed on refresh -> the draft
+    resets to the newly committed gain -> this test goes RED. Restore -> GREEN.
+    """
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+
+        committed = inspector.get_by_role("group", name="Committed calibration")
+        expect(committed).to_contain_text(str(GAIN))  # 1.5, the seeded commit
+
+        gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
+        gain.fill("1.9")
+        expect(gain).to_have_value("1.9")
+
+        # Committed calibration moves underneath the open draft (a commit from
+        # another session): revision 2 -> 3, gain 1.5 -> 1.2.
+        registry.calibrate(
+            FRAME, "commit", expected_revision=2,
+            calibration=Calibration(gain=1.2), expected_generation=1)
+
+        # Trigger a Plane A refresh. Plane A updates (committed now 1.2) — the
+        # refresh is real — but Plane B (the draft) must NOT be clobbered.
+        page.get_by_role("button", name="Connect", exact=True).click()
+        expect(committed).to_contain_text("1.2")
+        expect(gain).to_have_value("1.9")

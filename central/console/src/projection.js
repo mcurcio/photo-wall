@@ -74,3 +74,54 @@ export function project(frames, surfaceId, viewport) {
 
   return { placed, unplaced };
 }
+
+/**
+ * Corner-handle pixel positions for the calibration editor (design §J2, Bead 7).
+ *
+ * The editor draws the four calibration corners (TL, TR, BR, BL) on a square
+ * SVG whose normalized `[0, 1]` output space maps linearly to `size` px. This
+ * pure helper turns the draft corners into on-screen handle centers, keeping the
+ * mm/px-style projection decisions out of the React component.
+ *
+ * @param {number[][]} corners four normalized `[x, y]` points
+ * @param {number} size the SVG's edge length in px
+ * @returns {Array<{index: number, x: number, y: number}>}
+ */
+export function cornerHandles(corners, size) {
+  return (corners ?? []).map((point, index) => ({
+    index,
+    x: point[0] * size,
+    y: point[1] * size,
+  }));
+}
+
+/**
+ * Crop-rectangle handle pixel positions: the top-left `[left, top]` and
+ * bottom-right `[right, bottom]` corners of the normalized crop rect, in px.
+ *
+ * @param {number[]} crop `[left, top, right, bottom]` in normalized space
+ * @param {number} size the SVG's edge length in px
+ * @returns {{topLeft: {x: number, y: number}, bottomRight: {x: number, y: number}}}
+ */
+export function cropHandles(crop, size) {
+  const [left, top, right, bottom] = crop ?? [0, 0, 1, 1];
+  return {
+    topLeft: { x: left * size, y: top * size },
+    bottomRight: { x: right * size, y: bottom * size },
+  };
+}
+
+/**
+ * Invert a pixel position within the editor back to a normalized `[x, y]`,
+ * clamped to `[0, 1]` so a drag can never leave normalized output space (the
+ * corner range half of the server guard is upheld by construction).
+ *
+ * @param {number} px pixel offset from the SVG's left edge
+ * @param {number} py pixel offset from the SVG's top edge
+ * @param {number} size the SVG's edge length in px
+ * @returns {number[]} normalized `[x, y]`
+ */
+export function toNormalized(px, py, size) {
+  const clamp = (value) => Math.min(1, Math.max(0, value));
+  return [clamp(px / size), clamp(py / size)];
+}
