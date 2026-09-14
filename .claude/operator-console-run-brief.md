@@ -115,3 +115,10 @@ in CI. So for frontend-only beads, implementer AND verifier run: ruff + lint-imp
 the mutation probe — and SKIP `test_local.py`. This saves ~12 min per bead on each side.
 BACKEND beads, HIGH-risk beads, milestone coherence, and the cutover STILL run the full gate
 incl. test_local.py. If a "frontend" bead unexpectedly touches Python, run the full gate.
+
+## Flaky test (do not chase as regression)
+- `tests/browser/test_operator_browser.py::test_browser_same_token_reconnect_fences_delayed_rejection`
+  (LEGACY / page) is flaky under full-suite load: it `page.route(**/v1/operator/media, ...)` then asserts
+  the request was captured before a click — a route-registration vs click race. Fails ~1-in-N under load,
+  passes on isolated re-run. If a full `tests/browser` run shows ONLY this red, re-run it alone to confirm
+  environmental, not a regression. Retired at Bead 17 cutover anyway.
