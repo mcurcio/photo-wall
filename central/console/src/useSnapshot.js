@@ -36,7 +36,11 @@ async function fetchJson(path) {
     signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) {
-    throw new Error(path + " -> " + response.status);
+    // Carry the HTTP status so a rejected operator token (401) can be told
+    // apart from a transient network/500 failure by refresh() below.
+    const error = new Error(path + " -> " + response.status);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -52,6 +56,10 @@ const SnapshotContext = createContext(null);
  */
 export function SnapshotProvider({ children }) {
   const [snapshot, setSnapshot] = useState(/** @type {Snapshot|null} */ (null));
+  // Whether the last connect/refresh was refused for a bad operator token (a
+  // 401 from any plane fetch). App renders the token form + a "not accepted"
+  // message when this is set, instead of silently blanking (design R3).
+  const [authRejected, setAuthRejected] = useState(false);
 
   const refresh = useCallback(async () => {
     // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
@@ -59,14 +67,30 @@ export function SnapshotProvider({ children }) {
     // part of Plane A (design §4a) — inventory, runtime and the Source catalog
     // are swapped together so the Showrunner's Sources region and the wall's
     // now-showing chip always share one age.
-    const [inventory, runtime, media] = await Promise.all([
-      fetchJson("/v1/operator/inventory"),
-      fetchJson("/v1/operator/runtime"),
-      fetchJson("/v1/operator/media"),
-    ]);
-    const next = { inventory, runtime, media, at: Date.now() };
-    setSnapshot(next);
-    return next;
+    try {
+      const [inventory, runtime, media] = await Promise.all([
+        fetchJson("/v1/operator/inventory"),
+        fetchJson("/v1/operator/runtime"),
+        fetchJson("/v1/operator/media"),
+      ]);
+      const next = { inventory, runtime, media, at: Date.now() };
+      setSnapshot(next);
+      // A successful load clears any prior token-rejection message.
+      setAuthRejected(false);
+      return next;
+    } catch (error) {
+      // A rejected operator token (401 on connect OR mid-session) drops the tab
+      // back to the token-entry state: clear the IN-MEMORY token and the stale
+      // snapshot, and flag the rejection so App re-renders the token form with a
+      // "not accepted" message. Any other failure (network/5xx) leaves the prior
+      // snapshot and token untouched for a later retry (Bead 18 richer surfacing).
+      if (error?.status === 401) {
+        setToken("");
+        setSnapshot(null);
+        setAuthRejected(true);
+      }
+      throw error;
+    }
   }, []);
 
   useEffect(() => {
@@ -89,18 +113,22 @@ export function SnapshotProvider({ children }) {
     };
   }, [refresh]);
 
-  const value = useMemo(() => ({ snapshot, refresh }), [snapshot, refresh]);
+  const value = useMemo(
+    () => ({ snapshot, refresh, authRejected }),
+    [snapshot, refresh, authRejected],
+  );
   return React.createElement(SnapshotContext.Provider, { value }, children);
 }
 
 /**
  * Plane A read-snapshot hook (shared primitive #1).
  *
- * Returns the current atomic snapshot plus a refresh fn that replaces Plane A
- * wholesale and NEVER merges into Plane B. Must be used within a
- * SnapshotProvider so every region and useMutate share one Plane A.
+ * Returns the current atomic snapshot, a refresh fn that replaces Plane A
+ * wholesale and NEVER merges into Plane B, and `authRejected` (true once a fetch
+ * was refused for a bad operator token). Must be used within a SnapshotProvider
+ * so every region and useMutate share one Plane A.
  *
- * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot>}}
+ * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot>, authRejected: boolean}}
  */
 export function useSnapshot() {
   const value = useContext(SnapshotContext);

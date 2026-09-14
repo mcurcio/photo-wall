@@ -22,7 +22,7 @@ import { setToken, useSnapshot } from "./useSnapshot.js";
  *  - the read-only per-Surface SVG Plan and the Unplaced tray.
  */
 export default function App() {
-  const { snapshot, refresh } = useSnapshot();
+  const { snapshot, refresh, authRejected } = useSnapshot();
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
@@ -91,8 +91,10 @@ export default function App() {
     event.preventDefault();
     // In-memory only, mirroring the legacy flat page — never persisted.
     setToken(tokenInput);
-    // Trigger one Plane A load with the freshly-set token; a failure leaves the
-    // empty state in place (Bead 18 adds richer error surfacing).
+    // Trigger one Plane A load with the freshly-set token. A 401 surfaces the
+    // auth-rejected state (useSnapshot clears the in-memory token and flags it),
+    // rendering the token form again with a "not accepted" message below; any
+    // other failure leaves the empty state in place (Bead 18 richer surfacing).
     refresh().catch(() => {});
   };
 
@@ -145,6 +147,12 @@ export default function App() {
         </label>
         <button type="submit">Connect</button>
       </form>
+
+      {authRejected && (
+        <p className="console__auth-error" role="alert">
+          Operator token was not accepted. Re-enter the token to connect.
+        </p>
+      )}
 
       <main className="console__body">
         {snapshot === null ? (
