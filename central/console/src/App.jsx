@@ -5,7 +5,9 @@ import { EquipmentRail } from "./EquipmentRail.jsx";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
 import { detectRecovery } from "./recovery.js";
+import { Showrunner } from "./Showrunner.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
+import { useMode } from "./useMode.js";
 import { setToken, useSnapshot } from "./useSnapshot.js";
 
 /**
@@ -21,6 +23,9 @@ import { setToken, useSnapshot } from "./useSnapshot.js";
  */
 export default function App() {
   const { snapshot, refresh } = useSnapshot();
+  // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
+  // fetched inventory alone and never resets this (design §2).
+  const { mode, setMode } = useMode();
   const [tokenInput, setTokenInput] = useState("");
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
@@ -100,7 +105,30 @@ export default function App() {
           role="group"
           aria-label="Console mode"
         >
-          {/* Mode toggle mounts here in Bead 12. */}
+          <button
+            type="button"
+            aria-pressed={mode === "wall"}
+            className={
+              mode === "wall"
+                ? "console__mode console__mode--active"
+                : "console__mode"
+            }
+            onClick={() => setMode("wall")}
+          >
+            Wall
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "showrunner"}
+            className={
+              mode === "showrunner"
+                ? "console__mode console__mode--active"
+                : "console__mode"
+            }
+            onClick={() => setMode("showrunner")}
+          >
+            Showrunner
+          </button>
         </div>
       </header>
 
@@ -121,6 +149,12 @@ export default function App() {
       <main className="console__body">
         {snapshot === null ? (
           <p>Console ready.</p>
+        ) : mode === "showrunner" ? (
+          // The show layer. R4 is enforced by COMPOSITION: Showrunner never
+          // imports the Commissioning facet, and the Wall-only surfaces below
+          // (Plan/Inspector/EquipmentRail/tray — the only mounts of
+          // Commissioning) are simply not rendered in this mode.
+          <Showrunner snapshot={snapshot} />
         ) : (
           <>
             {recovered.length > 0 && (

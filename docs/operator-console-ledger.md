@@ -24,7 +24,7 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 10 | S-place (drag-to-create POST + drag-to-move PATCH) | closed | e355cec | M5 |
 | 11 | S-remove (delete + Unplaced tray drag-out) | closed | 708a60c | M5 |
 | D5 | Docs — M5 (spatial editing + tray) | closed | e676b0a | after M5 (coherence: COHERENT) |
-| 12 | SR-mode (mode toggle + Showrunner shell + R4 + badge) | open | — | M6 |
+| 12 | SR-mode (mode toggle + Showrunner shell + R4 + badge) | closed | PEND12 | M6 |
 | 13 | SR-sources (Sources list + Refresh) | open | — | M6 |
 | 14 | SR-scenes (Scene authoring) [near-ceiling, may pre-split] | open | — | M6 |
 | 15 | SR-programs (Programs + N-window helper) | open | — | M6 |
@@ -34,4 +34,4 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | open | — | M7 |
 | D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
 | residual: dedupe-calibration-defaults | share DEFAULT_CORNERS/CROP (useDraft+Commissioning) | open | — | opportunistic (M3 coherence) |
-| R-apiwrite | extract shared operator-write helper + frames-API module | closed | PENDRA | M6 start (behavior-preserving) |
+| R-apiwrite | extract shared operator-write helper + frames-API module | closed | 9941612 | M6 start (behavior-preserving) |
