@@ -319,3 +319,15 @@ Append-only. Read with `grep -a`.
   ONE shared constant (e.g. exported from convex.js or a small calibration.js) in a later frontend bead that
   touches those files (opportunistic cleanup; both copies currently identical, low severity). Tracked as
   residual: dedupe-calibration-defaults.
+
+## 2026-09-14 — M4 coherence residual: operator-write fetch helper (do at M6 boundary)
+- **Finding:** the operator-write fetch scaffolding (Authorization Bearer via getToken(), Content-Type,
+  AbortSignal.timeout(15000), parse {error}, map 409 codes) is hand-rolled in BOTH
+  central/console/src/BindingFacet.jsx and central/console/src/useCalibration.js (rule-of-two). M6 adds
+  ~5 more write consumers (sources refresh, scenes save, programs, runs, activations) which would each
+  re-hand-roll it.
+- **Plan:** before/at the start of M6, extract a shared low-level operator-write helper (e.g.
+  central/console/src/apiWrite.js) — bearer+timeout+{error}-parse, returning a normalized result — and
+  have the M6 write beads use it (optionally refactor BindingFacet/useCalibration onto it). This is the
+  rule-of-three prevention. useMutate (primitive #7, refresh-after-write) stays separate.
+- Disposition: residual, scheduled for M6 start. Also RESIDUAL: dedupe-calibration-defaults (M3) still open.
