@@ -122,3 +122,9 @@ incl. test_local.py. If a "frontend" bead unexpectedly touches Python, run the f
   the request was captured before a click — a route-registration vs click race. Fails ~1-in-N under load,
   passes on isolated re-run. If a full `tests/browser` run shows ONLY this red, re-run it alone to confirm
   environmental, not a regression. Retired at Bead 17 cutover anyway.
+
+## Delivery COMPLETE (2026-09-14)
+All beads landed; final unscoped gate DONE-GREEN: test_local.py 1122 passed/59 skipped, tests/browser 55 passed,
+operator-browser.json status=passed, / serves the console. Additional flaky-under-load test (isolated re-run passes):
+tests/test_app_releases.py::test_for_update_lock_serializes_a_concurrent_writer can hit psycopg_pool.PoolTimeout at
+the registry-fixture db.migrate() under concurrent Postgres containers on this shared host — environmental, not a defect.

@@ -4,6 +4,8 @@ One row per bead. Status: open | in_progress | blocked | closed.
 Design of record: `operator-console-ux-design.md`. Plan: `operator-console-delivery-plan.md`.
 Running PR: https://github.com/mcurcio/photo-wall/pull/11 (draft; update its bead table as beads land).
 Backend track uses isolated worktrees on Postgres :54332; main/frontend on :54331.
+**STATUS: DELIVERY COMPLETE (DONE-GREEN 2026-09-14).** / serves the React console; legacy page retired. Final gate: test_local.py 1122 passed/59 skipped, tests/browser 55 passed. Open residual: dedupe-calibration-defaults (low). PR #11.
+
 
 | Bead | Name | Status | SHA | Notes |
 |---|---|---|---|---|
