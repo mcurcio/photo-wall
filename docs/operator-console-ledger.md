@@ -2,13 +2,15 @@
 
 One row per bead. Status: open | in_progress | blocked | closed.
 Design of record: `operator-console-ux-design.md`. Plan: `operator-console-delivery-plan.md`.
+Running PR: https://github.com/mcurcio/photo-wall/pull/11 (draft; update its bead table as beads land).
+Backend track uses isolated worktrees on Postgres :54332; main/frontend on :54331.
 
 | Bead | Name | Status | SHA | Notes |
 |---|---|---|---|---|
 | 0 | F-shell (React toolchain + /console shell) | closed | 07a27fd | M1 |
 | 1 | T-plan (per-Surface SVG plan + Unplaced tray) | closed | acbb70d | M1 |
-| 2 | T-join (now-showing join + tile chips) | in_progress | — | M1 |
-| 3 | T-inspector (Inspector shell + Binding/Now-showing) | open | — | M1 |
+| 2 | T-join (now-showing join + tile chips) | closed | PENDING2 | M1 |
+| 3 | T-inspector (Inspector shell + Binding/Now-showing) | in_progress | — | M1 |
 | 4 | Commission-read (read-only Commissioning + gate) | open | — | M1 |
 | D1 | Docs — M1 (README wall/inspector/now-showing) | open | — | after M1 |
 | 5 | B-PATCH (reposition route, LWW) | closed | 047eb00 | M2 |
