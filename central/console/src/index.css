@@ -113,6 +113,53 @@ body {
   pointer-events: none;
 }
 
+.plan__status {
+  pointer-events: none;
+}
+
+.plan__dot {
+  stroke: #0b131a;
+  stroke-width: 1;
+}
+
+.plan__dot--connected {
+  fill: #4caf7d;
+}
+
+.plan__dot--disconnected {
+  fill: #d66a5a;
+}
+
+.plan__dot--unbound {
+  fill: #6b7884;
+}
+
+.plan__chip {
+  fill: #e9edf0;
+  font-size: 11px;
+}
+
+.plan__chip--idle {
+  fill: #8b98a4;
+}
+
+.plan__phase {
+  fill: #b7c1cb;
+  font-size: 10px;
+}
+
+.plan__badge {
+  font-size: 10px;
+}
+
+.plan__badge--valid {
+  fill: #4caf7d;
+}
+
+.plan__badge--invalid {
+  fill: #d6a55a;
+}
+
 .tray__list {
   list-style: none;
   padding: 0;
