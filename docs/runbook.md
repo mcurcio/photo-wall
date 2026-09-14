@@ -265,7 +265,7 @@ for appliance media qualification. Fork runs require the definition to have
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
 
-The [real-browser registry walkthrough](../tests/browser/test_operator_browser.py) and [content walkthrough](../tests/browser/test_operator_content_browser.py) use the production operator HTML, JavaScript, and HTTP API against their own temporary PostgreSQL schemas. Install the locked development dependencies and their matching Chromium build, then run:
+The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own temporary PostgreSQL schemas. Install the locked development dependencies and their matching Chromium build, then run:
 
 ```sh
 uv sync --frozen

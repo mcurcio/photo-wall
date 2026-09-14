@@ -18,8 +18,8 @@ Frames by identity/label, never by SVG coordinates or DOM structure (design §1c
 import os
 
 import pytest
+from operator_harness import operator_server
 from playwright.sync_api import expect
-from test_operator_browser import operator_server
 from test_registry import ADMIN, enroll
 
 from central.registry import FrameCreate

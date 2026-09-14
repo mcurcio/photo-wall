@@ -2,7 +2,7 @@
 
 Date: 2026-09-05. Reviewer: independent requirements review agent.
 
-Scope: [database boundary](../../central/db.py), [registry](../../central/registry.py), [HTTP adapter](../../central/app.py), its [operator page](../../central/operator.html), registry migrations and [decision 0002](../decisions/0002-registry-and-enrollment.md). Read the existing [PostgreSQL registry tests](../../tests/test_registry.py). Implementation changed during review; dispositions distinguish observed fixes from pending evidence. No implementation files were edited by this reviewer.
+Scope: [database boundary](../../central/db.py), [registry](../../central/registry.py), [HTTP adapter](../../central/app.py), its [operator page](../../central/console/index.html), registry migrations and [decision 0002](../decisions/0002-registry-and-enrollment.md). Read the existing [PostgreSQL registry tests](../../tests/test_registry.py). Implementation changed during review; dispositions distinguish observed fixes from pending evidence. No implementation files were edited by this reviewer.
 
 ## Findings and disposition
 

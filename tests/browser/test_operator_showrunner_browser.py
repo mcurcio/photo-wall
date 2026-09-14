@@ -6,8 +6,9 @@ production create_app on an ephemeral loopback listener, the disposable-schema
 through the registry so the console renders real /inventory state.
 
 Every assertion is BEHAVIORAL — role/text/visible state — never SVG coordinates
-or DOM structure (design §1c). This is a NEW /console test file; the legacy
-tests/browser/test_operator_content_browser.py (the OLD flat page) is untouched.
+or DOM structure (design §1c). This is a /console test file; the legacy flat-page
+tests were retired at the Bead 17 cutover (this file re-hosts their Showrunner
+content on the redesign).
 
 The R4 rule (design §2 R4, J4) is the load-bearing check: the Commissioning
 facet — the home of every Display CONTROL — is UNREACHABLE in Showrunner mode.
@@ -22,8 +23,8 @@ from urllib.parse import quote
 
 import pytest
 from media_queue import RecordingMediaQueue
+from operator_harness import operator_server
 from playwright.sync_api import expect
-from test_operator_browser import operator_server
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
