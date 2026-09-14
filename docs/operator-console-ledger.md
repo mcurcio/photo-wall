@@ -6,12 +6,12 @@ Design of record: `operator-console-ux-design.md`. Plan: `operator-console-deliv
 | Bead | Name | Status | SHA | Notes |
 |---|---|---|---|---|
 | 0 | F-shell (React toolchain + /console shell) | closed | 07a27fd | M1 |
-| 1 | T-plan (per-Surface SVG plan + Unplaced tray) | closed | PENDING | M1 |
+| 1 | T-plan (per-Surface SVG plan + Unplaced tray) | closed | acbb70d | M1 |
 | 2 | T-join (now-showing join + tile chips) | in_progress | — | M1 |
 | 3 | T-inspector (Inspector shell + Binding/Now-showing) | open | — | M1 |
 | 4 | Commission-read (read-only Commissioning + gate) | open | — | M1 |
 | D1 | Docs — M1 (README wall/inspector/now-showing) | open | — | after M1 |
-| 5 | B-PATCH (reposition route, LWW) | open | — | M2 |
+| 5 | B-PATCH (reposition route, LWW) | closed | 047eb00 | M2 |
 | 6 | B-DELETE (guarded delete route) [HIGH] | open | — | M2 |
 | D2 | Docs — M2 (PATCH/DELETE API doc) | open | — | after M2 |
 | 7 | C-draft (calibration direct-manip + convex guard) | open | — | M3 |
