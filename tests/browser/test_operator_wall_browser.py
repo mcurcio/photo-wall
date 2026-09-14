@@ -12,6 +12,7 @@ identity/label, NEVER by SVG coordinates or DOM structure (design §1c).
 
 import os
 import re
+import time
 
 import pytest
 from playwright.sync_api import expect
@@ -195,3 +196,160 @@ def test_surface_filter_switches_the_plan(page, registry):
         page.get_by_label("Surface", exact=True).select_option("window")
         expect(page.get_by_role("button", name=f"Frame {OTHER_SURFACE}", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_have_count(0)
+
+
+# Bead 10 -- S-place: drag-to-create (POST) + drag-to-move (PATCH). Assertions are
+# behavioral OUTCOMES: the STORED placement read back from registry.inventory()
+# (mm values), tray membership, and on-plan identity -- NEVER rendered SVG pixel
+# coordinates (design §1c). The px->mm scale MUST match projection.js
+# dragToPlacement (WALL_SPAN_MM / viewport.width = 4000 / 960).
+SCALE = 4000 / 960
+TOL = 40  # mm; absorbs sub-pixel drag rounding + Math.round in dragToPlacement.
+
+
+def _plan_svg(page):
+    return page.get_by_role("group", name="Wall plan for surface wall", exact=True).locator("svg")
+
+
+def _plan_box(page):
+    """Grow the viewport tall enough that the whole plan SVG is on-screen (its
+    height exceeds the default 720px viewport, and a mouse drag off the bottom edge
+    does not register), then return its box. No scrolling — box coords and the
+    handler's getBoundingClientRect stay in one stable, fully-visible frame."""
+    svg = _plan_svg(page)
+    svg.wait_for(state="visible")
+    page.set_viewport_size({"width": 1280, "height": 1600})
+    # A settle read: the resize reflows layout; wait for the box to stop changing.
+    box = svg.bounding_box()
+    for _ in range(20):
+        time.sleep(0.05)
+        nxt = svg.bounding_box()
+        if nxt == box:
+            return box
+        box = nxt
+    return box
+
+
+def _drag(page, box, fx0, fy0, fx1, fy1):
+    """Drag on the plan SVG from one fractional point of its box to another.
+
+    Playwright mouse coords and the element box are both viewport-relative, and
+    the handler maps client px -> viewBox px linearly (the SVG preserves its
+    viewBox aspect: `width:100%; height:auto`), so viewBox_x == fraction * 960.
+    """
+    page.mouse.move(box["x"] + fx0 * box["width"], box["y"] + fy0 * box["height"])
+    page.mouse.down()
+    page.mouse.move(box["x"] + fx1 * box["width"], box["y"] + fy1 * box["height"], steps=8)
+    page.mouse.up()
+
+
+def _wait_for(predicate, timeout=5.0):
+    """Poll `predicate` until it returns a truthy value or the timeout elapses."""
+    deadline = time.time() + timeout
+    value = predicate()
+    while not value and time.time() < deadline:
+        time.sleep(0.1)
+        value = predicate()
+    assert value, "condition not met within timeout"
+    return value
+
+
+def _seed_empty_wall(registry):
+    """A "wall" Surface whose only frame is origin-stacked (routed to the tray),
+    so the plan canvas is EMPTY yet the Surface exists to place onto."""
+    registry.create_frame(FrameCreate(
+        id="origin-seed", surface_id="wall", x_mm=0, y_mm=0,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+
+
+def _fill_landscape_profile(page):
+    page.get_by_label("Display width (px)").fill("1920")
+    page.get_by_label("Display height (px)").fill("1080")
+    page.get_by_label("Diagonal (inches)").fill("24")
+
+
+def test_drag_create_posts_frame_with_scaled_placement(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        box = _plan_box(page)
+        before = {frame.id for frame in registry.inventory().frames}
+
+        # Drag a landscape rectangle across the middle of the empty canvas, then
+        # capture a coherent (landscape) display profile in the new-frame form.
+        _drag(page, box, 0.30, 0.30, 0.60, 0.50)
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        # The form closes on a successful POST -> the row exists server-side.
+        expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
+
+        created = [frame for frame in registry.inventory().frames if frame.id not in before]
+        assert len(created) == 1
+        frame = created[0]
+        # STORED placement matches the dragged region under the px->mm scale:
+        # start viewBox (0.30*960, 0.30*600), end (0.60*960, 0.50*600).
+        assert abs(frame.x_mm - 0.30 * 960 * SCALE) <= TOL       # ~1200
+        assert abs(frame.y_mm - 0.30 * 600 * SCALE) <= TOL       # ~750
+        assert abs(frame.width_mm - 0.30 * 960 * SCALE) <= TOL   # ~1200
+        assert abs(frame.height_mm - 0.20 * 600 * SCALE) <= TOL  # ~500
+
+        # And it renders on the plan by identity (not in the tray).
+        expect(page.get_by_role("button", name=f"Frame {frame.id}", exact=True)).to_be_visible()
+
+
+def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        box = _plan_box(page)
+        before = {frame.id for frame in registry.inventory().frames}
+
+        # Drag DOWN-TO the plan ORIGIN corner so the rect's top-left is viewBox
+        # (0,0) -> raw mm (0,0). (Pressing starts at a safe interior point and
+        # releases at the corner; pointer capture keeps the events on the SVG.) The
+        # non-origin nudge (errata: isUnplaced heuristic) must push it off (0,0) so
+        # it is DRAWN, not routed into the Unplaced tray.
+        _drag(page, box, 0.40, 0.40, 0.0, 0.0)
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
+
+        created = [frame for frame in registry.inventory().frames if frame.id not in before]
+        assert len(created) == 1
+        frame = created[0]
+        # Never the exact origin -> never mis-routed to the tray.
+        assert (frame.x_mm, frame.y_mm) != (0, 0)
+        assert frame.x_mm >= 1
+
+        # It renders on the plan and is absent from the Unplaced tray.
+        expect(page.get_by_role("button", name=f"Frame {frame.id}", exact=True)).to_be_visible()
+        tray = page.get_by_role("group", name="Unplaced frames")
+        expect(tray.get_by_role("button", name=frame.id, exact=True)).to_have_count(0)
+
+
+def test_drag_move_existing_frame_patches_placement(page, registry):
+    registry.create_frame(FrameCreate(
+        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
+        box = _plan_box(page)
+
+        # The single placed frame fits the viewport at rect x:0..360, y:0..600.
+        # Press inside it (viewBox ~180,300) and drag right to viewBox ~540,300;
+        # the frame is REPOSITIONED (PATCH, LWW) and corrects on the next snapshot.
+        _drag(page, box, 180 / 960, 300 / 600, 540 / 960, 300 / 600)
+
+        def _moved():
+            frame = next(f for f in registry.inventory().frames if f.id == PLACED)
+            return frame if frame.x_mm != 100 else None
+
+        frame = _wait_for(_moved)
+        # Repositioned to the right (delta 360 viewBox px -> ~1500 mm).
+        assert abs(frame.x_mm - 360 * SCALE) <= TOL  # ~1500
+        # A move must NOT resize: the stored physical dimensions are preserved.
+        assert frame.width_mm == 300
+        assert frame.height_mm == 500
+        # It still renders on the plan by identity.
+        expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()

@@ -90,10 +90,52 @@ body {
   height: auto;
   background: #0b131a;
   border-radius: 4px;
+  touch-action: none;
 }
 
 .plan__frame {
   cursor: pointer;
+}
+
+.plan__draft {
+  fill: rgba(127, 179, 255, 0.15);
+  stroke: #7fb3ff;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
+}
+
+.plan__new-frame {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #32404a;
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.plan__new-frame-title {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.plan__new-frame-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan__new-frame-field--check {
+  flex-direction: row;
+  align-items: center;
+}
+
+.plan__new-frame-error {
+  flex-basis: 100%;
+  color: #ff8f8f;
+  margin: 0;
 }
 
 .plan__rect {
