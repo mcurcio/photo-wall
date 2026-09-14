@@ -1,8 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import "./index.css";
+import { EquipmentRail } from "./EquipmentRail.jsx";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
+import { detectRecovery } from "./recovery.js";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { setToken, useSnapshot } from "./useSnapshot.js";
 
@@ -25,6 +27,26 @@ export default function App() {
   // Which Inspector facet is open (Plane B, component-local). Defaults to
   // "commissioning" and resets to it each time a new Frame is selected.
   const [facet, setFacet] = useState(/** @type {string} */ ("commissioning"));
+  // The pending/retired Player last selected in the Equipment rail (Plane B).
+  const [selectedPlayer, setSelectedPlayer] = useState(/** @type {string|null} */ (null));
+
+  // Auto-recovery banner (design J1, §1a D-a). Recovery is INFERRED by diffing
+  // the CURRENT Plane A snapshot against the PRIOR one, so App retains the prior
+  // snapshot itself in a ref — useSnapshot's frozen {snapshot, refresh} shape is
+  // untouched. The banner surfaces "a known Pi returned already bound"; it is
+  // suppressed on the true first run (no prior snapshot) by detectRecovery.
+  const prevSnapshotRef = useRef(/** @type {object|null} */ (null));
+  const [recovered, setRecovered] = useState(/** @type {string[]} */ ([]));
+  useEffect(() => {
+    if (snapshot == null) {
+      return;
+    }
+    const returned = detectRecovery(prevSnapshotRef.current, snapshot);
+    if (returned.length > 0) {
+      setRecovered(returned);
+    }
+    prevSnapshotRef.current = snapshot;
+  }, [snapshot]);
 
   // Selecting a Frame (on the plan or in the tray) opens its Inspector on the
   // default facet; the facet contract's default is "commissioning".
@@ -84,6 +106,23 @@ export default function App() {
           <p>Console ready.</p>
         ) : (
           <>
+            {recovered.length > 0 && (
+              <div className="console__recovery" role="status">
+                <p className="console__recovery-text">
+                  Recovered — already bound (serial match, not identity):{" "}
+                  {recovered.join(", ")}
+                </p>
+                <button type="button" onClick={() => setRecovered([])}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <EquipmentRail snapshot={snapshot} onSelect={setSelectedPlayer} />
+            {selectedPlayer !== null && (
+              <p className="console__selected-player">
+                Pending player selected: {selectedPlayer}
+              </p>
+            )}
             <div className="console__surface-filter">
               <label className="console__surface-field">
                 Surface

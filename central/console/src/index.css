@@ -350,3 +350,85 @@ body {
   color: #f5a623;
   font-weight: 600;
 }
+
+/* Bead 9 — equipment rails, recovery banner, bind/unbind facet. */
+.console__recovery {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid #3aa0ff;
+  border-radius: 8px;
+  background: #16324a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.console__recovery-text {
+  margin: 0;
+}
+
+.console__selected-player {
+  margin: 0 0 12px;
+  color: #9fb2bf;
+}
+
+.equipment-rail {
+  display: flex;
+  gap: 24px;
+  margin: 0 0 20px;
+}
+
+.rail {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid #24333d;
+  border-radius: 8px;
+}
+
+.rail__title {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9fb2bf;
+}
+
+.rail__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rail__entry {
+  width: 100%;
+  text-align: left;
+}
+
+.rail__empty {
+  margin: 0;
+  color: #6f8494;
+}
+
+.facet__review {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border: 1px solid #f5a623;
+  border-radius: 8px;
+  background: #3a2c12;
+}
+
+.facet__review-text {
+  margin: 0 0 8px;
+  color: #f5a623;
+  font-weight: 600;
+}
+
+.facet__conflict {
+  margin: 12px 0 0;
+  color: #ff6b6b;
+  font-weight: 600;
+}
