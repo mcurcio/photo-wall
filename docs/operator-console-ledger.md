@@ -34,7 +34,7 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | G2 | SR-source-config (create-source form + test) | closed | 2aa6c12 | M6 (parity gap 2) |
 | G3 | SR-parity (token-rejection recovery + manual-revert test) | closed | 088e36f | M6 (parity gaps 3,4; ws-fencing arch-specific) |
 | 17 | X-cutover (flip / to console, retire old page+tests) [HIGH] | closed | 56163d1 | M6 (adversarial content-parity: PARITY-COMPLETE) |
-| D6 | Docs — M6 (Showrunner + R4 + cutover) | closed | PENDD6 | after M6 (coherence: COHERENT; gate 1123/52) |
+| D6 | Docs — M6 (Showrunner + R4 + cutover) | closed | 70b9466 | after M6 (coherence: COHERENT; gate 1123/52) |
 | 18 | H-refresh (guidance banner + snapshot clock + cadence) | in_progress | — | M7 |
 | D7 | Docs — M7 (refresh model + snapshot age) | open | — | after M7 |
 | residual: dedupe-calibration-defaults | share DEFAULT_CORNERS/CROP (useDraft+Commissioning) | open | — | opportunistic (M3 coherence) |
