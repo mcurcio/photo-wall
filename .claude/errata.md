@@ -278,3 +278,31 @@ Append-only. Read with `grep -a`.
   drag-to-create should avoid emitting exactly (0,0) (nudge/round), OR carry a placement signal.
   Decide in Bead 10's frozen page; do NOT change isUnplaced's read-only M1 behavior retroactively.
 - Disposition: residual, tracked here; not a blocker for M1.
+
+## 2026-09-13 — Bead 8 (C-lease): useCalibration frozen-page signature + conflict enum
+- **Where:** central/console/src/useCalibration.js; delivery plan Bead 8 frozen page.
+- **Frozen page said** `useCalibration(frameId)`, but the `trying` draft it must preview/commit lives
+  in the sibling `useDraft` hook and the frozen sketch had nowhere to express that source.
+  **Implemented as** `useCalibration(frameId, trying)`. The load-bearing return contract
+  (`calibrate(op) => Promise<{ok}|{ok:false,conflict}>`, `countdown`, `status`) is UNCHANGED.
+- Added an internal 4th `conflict: "error"` value for NON-token failures (e.g. a 422) so a dropped-token
+  422 cannot masquerade as a clean revision conflict. The three spec'd values
+  (revision/generation/unbound) are unchanged.
+- **Spec-vs-reality on the probe:** the plan's probe text says dropping `expected_revision` makes the
+  write "silently succeed against stale state." The server's `CalibrationRequest` REQUIRES
+  `expected_revision` (Field(ge=1)), so the concrete failure is a 422, not a silent success — the
+  invariant holds a fortiori. The probe still flips the test RED (revision banner never renders); the
+  test was NOT weakened. Disposition: accepted; frozen page reconciled here.
+
+## 2026-09-14 — Bead 8: design-doc internal inconsistency (expired banner copy §4b vs §4c)
+- **Where:** docs/operator-console-ux-design.md §4b (line ~342): "Panel is back on committed.
+  Re-preview to keep trying." vs §4c/J2 table (line ~456): "Preview expired — panel is back on
+  committed. Re-preview to keep trying." (with prefix).
+- **Resolution:** implemented the §4b-verbatim form (no prefix) per the fix brief. §4c should be
+  reconciled to match §4b (a doc edit, non-blocking). Disposition: accepted; noted for a future
+  design-doc touch-up. Not a code defect.
+- **Also (Bead 8 blocking finding, now FIXED):** the previewing-branch overtake detection ignored a
+  foreign preview (which advances only configuration_revision). Fixed: record own self-bump
+  (baseline.configuration_revision + 1) at preview-issue; any FURTHER config_revision advance while the
+  slot stays occupied → "overtaken"; timer unmounts. Covered by
+  test_calibration_foreign_preview_overtakes_by_inventory_poll (red before fix, green after).

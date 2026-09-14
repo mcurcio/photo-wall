@@ -3,8 +3,42 @@ import React, { useRef, useState } from "react";
 import { boundOutput, connectivity } from "./join.js";
 import { derive } from "./capability.js";
 import { GatedArea } from "./GatedArea.jsx";
+import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
+
+// Operator-facing lease/conflict copy, verbatim from design §4b / J2 (the
+// authoritative decision table). The countdown banner is display; the panel's
+// actual expiry is server-authoritative and surfaced by the overtake poll.
+const EXPIRED_MESSAGE = "Panel is back on committed. Re-preview to keep trying.";
+const OVERTAKEN_MESSAGE =
+  "Committed elsewhere / your preview was superseded — re-review.";
+const CONFLICT_MESSAGES = {
+  // Stale expected_revision → calibration_revision_conflict (design §4b).
+  revision: "Another session changed this frame's calibration — reload and re-review.",
+  // Stale expected_generation → binding_generation_conflict (design §4b).
+  generation:
+    "This Frame's binding changed — its display is no longer under your control; reload.",
+  // preview/commit refused because the frame is no longer bound.
+  unbound: "This Frame is no longer bound to a display — bind it before calibrating.",
+  // A non-token failure (validation/network); never mapped to a token conflict,
+  // and deliberately worded so it cannot be mistaken for a specific conflict.
+  error: "Calibration request failed — reload and try again.",
+};
+
+/** The banner text for the current lease state, or null when there is none. */
+function leaseBanner(status, conflict) {
+  if (status === "expired") {
+    return EXPIRED_MESSAGE;
+  }
+  if (status === "overtaken") {
+    return OVERTAKEN_MESSAGE;
+  }
+  if (status === "conflict" && conflict) {
+    return CONFLICT_MESSAGES[conflict] ?? CONFLICT_MESSAGES.error;
+  }
+  return null;
+}
 
 // The calibration editor draws normalized output space `[0, 1]` onto a square of
 // SIZE px, inset by PAD so the four full-frame corner handles sit comfortably
@@ -62,6 +96,13 @@ export function Commissioning({ snapshot, frameId }) {
   // hook is called unconditionally (before the early return) to keep hook order
   // stable; when the frame is absent the draft simply seeds from defaults.
   const { trying, updateHandles } = useDraft(frameId, calibration);
+  // Bead 8 (Plane B network writes): preview/commit/revert under the 30s lease,
+  // the server-driven countdown, and the overtake/expiry/conflict states. The
+  // draft (trying) is threaded in so preview/commit carry the operator's values.
+  const { calibrate, countdown, status: leaseStatus } = useCalibration(frameId, trying);
+  // The last conflict kind returned by an op; the poll-driven states (expired,
+  // overtaken) are read from `status` and need no extra bookkeeping.
+  const [conflict, setConflict] = useState(/** @type {string|null} */ (null));
   const [error, setError] = useState(/** @type {string|null} */ (null));
   const svgRef = useRef(/** @type {SVGSVGElement|null} */ (null));
   const dragRef = useRef(/** @type {{kind: string, index?: number}|null} */ (null));
@@ -154,6 +195,16 @@ export function Commissioning({ snapshot, frameId }) {
   const endDrag = () => {
     dragRef.current = null;
   };
+
+  // Run a calibration op and reflect its result. A conflict return sets the
+  // banner kind; a success clears it. The poll independently drives expired /
+  // overtaken through `status`.
+  const runOp = async (op) => {
+    const result = await calibrate(op);
+    setConflict(result.ok ? null : result.conflict);
+  };
+
+  const banner = leaseBanner(leaseStatus, conflict);
 
   const handles = cornerHandles(trying.corners, SIZE);
   const crop = cropHandles(trying.crop, SIZE);
@@ -316,6 +367,71 @@ export function Commissioning({ snapshot, frameId }) {
             </label>
           ))}
         </div>
+      </section>
+
+      <section
+        className="facet__section facet__section--lease"
+        role="group"
+        aria-label="Preview and commit"
+      >
+        <h4 className="facet__subtitle">Preview and commit</h4>
+        <p className="facet__note">
+          Preview pushes the draft to the panel under a 30-second server lease;
+          Commit saves it as a new revision. There is no auto-renew — on expiry
+          the panel returns to committed and the draft is kept for Re-preview.
+        </p>
+
+        <div className="calib__actions">
+          <button
+            type="button"
+            className="calib__action"
+            disabled={!bound}
+            onClick={() => runOp("preview")}
+          >
+            Preview
+          </button>
+          <button
+            type="button"
+            className="calib__action"
+            disabled={!bound}
+            onClick={() => runOp("commit")}
+          >
+            Commit
+          </button>
+          <button
+            type="button"
+            className="calib__action"
+            onClick={() => runOp("revert")}
+          >
+            Revert
+          </button>
+          {leaseStatus === "expired" ? (
+            <button
+              type="button"
+              className="calib__action calib__action--re-preview"
+              disabled={!bound}
+              onClick={() => runOp("preview")}
+            >
+              Re-preview
+            </button>
+          ) : null}
+        </div>
+
+        {leaseStatus === "previewing" && countdown !== null ? (
+          <p
+            className="calib__countdown"
+            role="timer"
+            aria-label="Preview lease countdown"
+          >
+            {`Previewing on the panel — lease expires in ${countdown}s.`}
+          </p>
+        ) : null}
+
+        {banner !== null ? (
+          <p className="calib__lease-banner" role="alert">
+            {banner}
+          </p>
+        ) : null}
       </section>
 
       <section className="facet__section" role="group" aria-label="Frame facts">

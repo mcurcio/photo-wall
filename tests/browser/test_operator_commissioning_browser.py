@@ -12,10 +12,11 @@ the two hardware areas are default-closed by the derived capability gate (§7.6)
 """
 
 import os
+import time
 
 import pytest
 from playwright.sync_api import expect
-from test_operator_browser import operator_server
+from test_operator_browser import inventory, operator_server
 from test_registry import ADMIN, enroll
 
 from central.registry import FrameCreate
@@ -275,3 +276,228 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
         page.get_by_role("button", name="Connect", exact=True).click()
         expect(committed).to_contain_text("1.2")
         expect(gain).to_have_value("1.9")
+
+
+# --- Bead 8: preview/commit/revert + honest lease countdown + conflict states ---
+#
+# Plane B gains NETWORK writes against the existing
+# POST /v1/operator/frames/{id}/calibration (design §4b/§6b/J2). The 30s lease is
+# exercised DETERMINISTICALLY via the ManualClock the `registry` fixture builds
+# (conftest.py:40) and that operator_server hands straight to create_app — so
+# advancing `registry.clock` advances the server's clock, and lease expiry is
+# observed through the SERVER state a poll reads (effective_calibration reverting
+# to committed once preview_expires <= clock.utc()), never by a wall-clock wait.
+#
+# HIGH-RISK concurrency invariants proven here: both tokens ride every op (a stale
+# commit 409s, never silently succeeds); the countdown is the server's expires_at
+# (advancing the server clock past it does NOT tick the client countdown to zero —
+# only the poll flips the panel to expired); a refresh never clobbers Plane B
+# (Re-preview reuses the retained trying values).
+
+
+def _sync_clock(registry):
+    """Advance the fixture's ManualClock (starts at 1000) to real wall time.
+
+    The lease countdown displays `expires_at - Date.now()` (design §6b): with the
+    server clock parked at 1000 the browser's real-time clock would read the lease
+    as long expired. Syncing to time.time() (the same wall clock the browser reads)
+    makes the countdown honest (~30s) while leaving the deterministic
+    `clock.advance(31)` expiry mechanism intact.
+    """
+    delta = time.time() - registry.clock.utc()
+    if delta > 0:
+        registry.clock.advance(delta)
+
+
+def _lease(inspector):
+    return inspector.get_by_role("group", name="Preview and commit")
+
+
+def test_calibration_preview_shows_server_lease_countdown(page, registry):
+    """Preview holds the lease and shows a visible, server-driven countdown.
+
+    Status is "previewing" (the countdown timer is present) and the countdown is
+    derived from the server's expires_at (= now + 30), not a hardcoded per-tab
+    timer.
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        lease.get_by_role("button", name="Preview", exact=True).click()
+
+        timer = inspector.get_by_role("timer", name="Preview lease countdown")
+        expect(timer).to_be_visible()
+        expect(timer).to_contain_text("lease expires in")
+        # The panel is genuinely previewing on the server (preview slot set).
+        assert inventory(page, origin).frames[0].preview is not None
+
+
+def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, registry):
+    """On lease expiry the panel reverts to committed and the UI says so.
+
+    The server clock is advanced past preview_expires; the poll's /inventory then
+    reads preview == null (the lease lapsed), so status flips to "expired" and the
+    explicit "panel is back on committed" banner appears. The trying values remain
+    in Plane B (Re-preview is offered) and committed is unchanged.
+
+    Mutation probe (no-auto-renew): make the expiry branch of useCalibration
+    re-issue `preview` instead of setting status "expired" -> the panel does not
+    revert, the "panel is back on committed" banner never renders -> this test goes
+    RED. Restore -> GREEN.
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        lease.get_by_role("button", name="Preview", exact=True).click()
+        expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_be_visible()
+
+        # Advance the SERVER clock past the 30s lease. The client countdown does
+        # not move (server-authoritative expiry, not countdown-driven).
+        registry.clock.advance(31)
+        # Deterministically drive the overtake/expiry poll via a Plane A refresh.
+        page.get_by_role("button", name="Connect", exact=True).click()
+
+        expect(lease.get_by_role("alert")).to_contain_text("Panel is back on committed")
+        # Trying retained in Plane B -> Re-preview offered.
+        expect(lease.get_by_role("button", name="Re-preview", exact=True)).to_be_visible()
+        # Committed calibration is unchanged; the server reverted the preview.
+        expect(inspector.get_by_role("group", name="Committed calibration")).to_contain_text(str(GAIN))
+        assert inventory(page, origin).frames[0].preview is None
+
+
+def test_calibration_stale_commit_conflicts_on_revision(page, registry):
+    """A commit against a stale revision is refused with the exact 409 message.
+
+    Another session commits (revision 2 -> 3) under the open facet; this session
+    still holds baseline revision 2, so its commit carries expected_revision=2 and
+    the server returns calibration_revision_conflict.
+
+    Mutation probe (both-tokens): drop expected_revision from the commit payload in
+    useCalibration -> the server 422s (invalid_request) instead of returning the
+    revision conflict -> the revision-specific banner never renders -> this test
+    goes RED. Restore -> GREEN. (A required server token means the concrete failure
+    is a 422 rather than a silent success; the invariant — a stale commit is never
+    accepted — holds either way.)
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        # Out-of-band commit advances revision under this session.
+        registry.calibrate(
+            FRAME, "commit", expected_revision=2,
+            calibration=Calibration(gain=1.2), expected_generation=1)
+
+        lease.get_by_role("button", name="Commit", exact=True).click()
+
+        # The revision-specific copy (design §4b), unique to this conflict.
+        expect(lease.get_by_role("alert")).to_contain_text(
+            "Another session changed this frame's calibration"
+        )
+
+
+def test_calibration_stale_commit_conflicts_on_generation(page, registry):
+    """A commit after a binding change is refused with the generation 409 message.
+
+    An unbind bumps generation 1 -> 2 under the open facet; this session's commit
+    still carries expected_generation=1, so the server returns
+    binding_generation_conflict (checked before the binding/frame_unbound guard).
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        # A binding change bumps generation under this session.
+        registry.unbind(FRAME, expected_generation=1)
+
+        lease.get_by_role("button", name="Commit", exact=True).click()
+
+        expect(lease.get_by_role("alert")).to_contain_text("no longer under your control")
+
+
+def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
+    """An out-of-band revision advance is surfaced by the poll as "overtaken".
+
+    While previewing, another session commits (revision 2 -> 3). The inventory
+    poll (driven here by a Plane A refresh) sees the token advance under the
+    baseline and flips status to "overtaken" with the design §4b copy.
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        lease.get_by_role("button", name="Preview", exact=True).click()
+        expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_be_visible()
+
+        registry.calibrate(
+            FRAME, "commit", expected_revision=2,
+            calibration=Calibration(gain=1.2), expected_generation=1)
+        # Drive the overtake poll deterministically via a Plane A refresh.
+        page.get_by_role("button", name="Connect", exact=True).click()
+
+        expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
+
+
+def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry):
+    """A SECOND tab's preview overtaking the single slot is surfaced as "overtaken".
+
+    The overtake trigger in design §4b includes `configuration_revision` advancing
+    during calibration — not just `revision`/`generation`. A foreign PREVIEW takes
+    the single, last-writer-wins preview slot (registry.py:327-331): it advances
+    ONLY `configuration_revision` (registry.py:339) while `preview` stays non-null
+    and `revision`/`generation` are untouched — so the optimistic-token check the
+    other overtaken/conflict paths rely on never fires. Our own preview causes
+    exactly ONE `configuration_revision` bump; a FURTHER advance beyond that, with
+    the slot still occupied, is a foreign write that took the panel from us.
+
+    The poll must therefore flip to "overtaken" (§4b: "your preview was
+    superseded") and STOP asserting we own the panel (§4c: never imply exclusive
+    control) — the countdown timer must disappear.
+
+    This test is RED against the pre-fix hook (which treated any non-null
+    `live.preview` as our own preview still active and silently absorbed the
+    foreign `configuration_revision` bump, keeping status "previewing" and the
+    timer lying) and GREEN after the fix.
+    """
+    _seed(registry)
+    _sync_clock(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        lease = _lease(inspector)
+
+        lease.get_by_role("button", name="Preview", exact=True).click()
+        expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_be_visible()
+
+        # A second tab previews the SAME frame: it overtakes the single preview
+        # slot, advancing ONLY configuration_revision (not revision/generation)
+        # and leaving `preview` non-null (last-writer-wins).
+        registry.calibrate(
+            FRAME, "preview", expected_revision=2,
+            calibration=Calibration(gain=1.7), expected_generation=1)
+        # Drive the overtake poll deterministically via a Plane A refresh.
+        page.get_by_role("button", name="Connect", exact=True).click()
+
+        # The overtaken banner shows (§4b copy)...
+        expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
+        # ...and the timer no longer claims the panel (§4c: no false exclusivity).
+        expect(inspector.get_by_role("timer", name="Preview lease countdown")).to_have_count(0)
+        # The single preview slot is still occupied — by the FOREIGN preview.
+        assert inventory(page, origin).frames[0].preview is not None

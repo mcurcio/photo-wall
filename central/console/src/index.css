@@ -331,3 +331,22 @@ body {
 .calib__control select {
   width: 92px;
 }
+
+.calib__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.calib__countdown {
+  margin: 8px 0 0;
+  color: #6fdc9c;
+  font-weight: 600;
+}
+
+.calib__lease-banner {
+  margin: 8px 0 0;
+  color: #f5a623;
+  font-weight: 600;
+}
