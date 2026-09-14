@@ -74,6 +74,59 @@ body {
   cursor: pointer;
 }
 
+.console__statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #9dabb5;
+  margin-bottom: 16px;
+}
+
+.console__refresh {
+  padding: 4px 12px;
+  background: #1c2a34;
+  color: #e9edf0;
+  border: 1px solid #32404a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.console__health {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid #32404a;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+}
+
+.console__guidance {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  background: #16232c;
+  border: 1px solid #32404a;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+.console__guidance-text {
+  margin: 0;
+  flex: 1;
+}
+
+.console__guidance-dismiss {
+  padding: 4px 12px;
+  background: transparent;
+  color: #9dabb5;
+  border: 1px solid #32404a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
 .console__surface-filter {
   margin-bottom: 20px;
 }

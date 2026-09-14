@@ -2,13 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import "./index.css";
 import { EquipmentRail } from "./EquipmentRail.jsx";
+import { Guidance } from "./Guidance.jsx";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
 import { detectRecovery } from "./recovery.js";
 import { Showrunner } from "./Showrunner.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { useMode } from "./useMode.js";
-import { setToken, useSnapshot } from "./useSnapshot.js";
+import { setToken, useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
 
 /**
  * The console app shell.
@@ -26,6 +27,11 @@ export default function App() {
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
+  // Bead 18: the global snapshot-age clock (advances each second, resets on
+  // refresh) and the ~10s /healthz reachability pill. Both are global, so they
+  // read one age/one health regardless of Wall/Showrunner mode.
+  const age = useSnapshotAge();
+  const health = useHealth();
   const [tokenInput, setTokenInput] = useState("");
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
@@ -153,6 +159,35 @@ export default function App() {
           Operator token was not accepted. Re-enter the token to connect.
         </p>
       )}
+
+      {snapshot !== null && (
+        <div
+          className="console__statusbar"
+          role="group"
+          aria-label="Snapshot status"
+        >
+          <span className="console__age">
+            {age === null ? "never updated" : `updated ${age} s ago`}
+          </span>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            className="console__refresh"
+            onClick={() => refresh().catch(() => {})}
+          >
+            Refresh
+          </button>
+          <span
+            className="console__health"
+            role="status"
+            aria-label={`Central health: ${health}`}
+          >
+            {health}
+          </span>
+        </div>
+      )}
+
+      {snapshot !== null && <Guidance snapshot={snapshot} />}
 
       <main className="console__body">
         {snapshot === null ? (
