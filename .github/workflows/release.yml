@@ -374,3 +374,72 @@ jobs:
           # 4. Publish (creates nothing new; the tag already exists). Only now is
           #    it discoverable to the watcher.
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  # The Kubernetes-hosted control plane (the iac repo's external cluster) cannot
+  # `build:` the compose `central`/`media-worker` targets the way local/CI does --
+  # it pulls prebuilt images. So at every release we publish those two targets to
+  # GHCR under the immutable release tag. These jobs run independently of the
+  # appliance build/publish above: they need only the plan's tag + revision, so
+  # they cover BOTH triggers (push-to-main auto release AND workflow_dispatch of
+  # an existing tag -- the path the owner uses to backfill images for v0.2.0).
+  # See docs/decisions/0011-central-service-images.md.
+
+  # media-worker's target is `FROM ${MEDIA_BASE_IMAGE}` (Dockerfile), so it needs
+  # the shared media OS base image. Reuse the same reusable workflow checks.yml
+  # consumes; amd64 only (the control plane runs on x86 cluster nodes, not the
+  # arm Pis -- multi-arch is deferred per 0011). `central` is `FROM runtime` and
+  # needs no base image, so it does not depend on this.
+  service-base:
+    needs: plan
+    if: needs.plan.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/service-base.yml
+    with:
+      architecture: amd64
+
+  service-images:
+    needs: [plan, service-base]
+    if: needs.plan.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Build the exact released commit, not whatever ref dispatch selected.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Set up the container build cache
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      # Reuse checks.yml's amd64 build cache so a release does not rebuild from
+      # scratch. Immutable `:${tag}` only -- no `:latest`/mutable tag, matching
+      # the repo's pin-everything philosophy. github.repository is already
+      # lowercase (mcurcio/photo-wall), which ghcr requires.
+      - name: Publish the central service image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: central
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/central:${{ needs.plan.outputs.tag }}
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+      - name: Publish the media worker service image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-worker
+          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/media-worker:${{ needs.plan.outputs.tag }}
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+          cache-to: type=gha,scope=photo-wall-checks-amd64-v1,mode=max,ignore-error=true
