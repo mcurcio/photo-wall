@@ -15,7 +15,7 @@ def test_every_hosted_media_build_supplies_the_retained_base():
                 consumers.append(workflow.name)
                 assert 'build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}' in step
                 assert 'uses: ./.github/workflows/service-base.yml' in text
-    assert sorted(consumers) == ['checks.yml', 'checks.yml', 'software-e2e.yml']
+    assert sorted(consumers) == ['checks.yml', 'checks.yml', 'release.yml', 'software-e2e.yml']
 
 
 def test_shared_producer_queues_all_callers_and_requires_published_output():
