@@ -37,8 +37,27 @@ COPY pyproject.toml uv.lock ./
 # Keep locked third-party dependencies reusable when application code changes.
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Build the operator console (React/Vite) bundle so EVERY image build path --
+# release.yml's service-images publish, checks.yml, `docker compose up`, and a
+# bare `docker build` -- ships central/console/dist/, independent of any
+# workspace pre-build. This is the fix for the published central image 500ing on
+# `GET /`: previously dist/ only reached the image when a caller happened to have
+# pre-built it into the build context (checks.yml did; the publish path did not).
+# Digest-pinned to match the python base's rigor (node:20-bookworm-slim,
+# multi-arch index digest resolved 2026-09).
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS console-builder
+WORKDIR /console
+COPY central/console/package.json central/console/package-lock.json ./
+RUN npm ci
+COPY central/console/ ./
+RUN npm run build
+
 FROM deps AS runtime
 COPY central ./central
+# The built console bundle always comes from the console-builder stage above,
+# never from the build context (central/console/dist/ is .dockerignore'd), so no
+# build path can smuggle in a stale dist or ship none at all.
+COPY --from=console-builder /console/dist ./central/console/dist
 COPY contracts ./contracts
 COPY media ./media
 COPY player ./player
