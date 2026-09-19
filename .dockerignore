@@ -5,7 +5,16 @@
 __pycache__
 **/__pycache__
 **/*.pyc
+# Host node_modules (e.g. central/console/) must never overlay the image's own
+# `npm ci`: a macOS/arm64 dev's darwin native binaries would break the
+# linux/amd64 console-builder `vite build`. The stage installs deps itself.
+**/node_modules
 .pytest_cache
 .ruff_cache
 artifacts
 docs
+# The console bundle is built inside the image by the console-builder stage, and
+# is git-ignored on the host. Excluding it from the build context guarantees a
+# stray host-built dist can never enter the image via `COPY central ./central` --
+# the console-builder stage is the SOLE source of central/console/dist/.
+central/console/dist
