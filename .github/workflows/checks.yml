@@ -127,6 +127,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - run: curl --fail http://127.0.0.1:8000/healthz
+        # GET / must serve the console shell (HTTP 200), not 500. Because
+        # central/console/dist/ is .dockerignore'd, the compose central image
+        # gets its bundle SOLELY from the Dockerfile's console-builder stage --
+        # the same dist-free build context the release publish path uses. This
+        # curl fails CI if that stage ever stops producing dist, which is exactly
+        # the regression that shipped a broken published image.
+      - run: curl --fail http://127.0.0.1:8000/ | grep -q '/console/assets/'
       - name: Service diagnostics
         if: failure()
         run: docker compose logs --no-color --tail 100
