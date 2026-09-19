@@ -39,6 +39,24 @@ Photo Wall records bounded last-activity/error status when these domain tasks ru
 
 The entry point is `python -m media.worker`. It reads `PHOTO_WALL_DATABASE_URL`, `PHOTO_WALL_MEDIA_ROOT`, and `PHOTO_WALL_CONNECTIONS_FILE`, applies Photo Wall migrations and Procrastinate's versioned schema, then runs the Procrastinate worker. SIGINT/SIGTERM use the task runner's graceful shutdown behavior.
 
+### Storage ownership on shared-storage platforms
+
+The image runs the worker as the baked non-root `wall` user (uid 10001), and `MediaStore._directory` tightens the media root to `0700`. Under Compose the `media` volume is seeded from the image's `wall:wall 0700` path, so the worker owns its root and nothing further is needed. On a platform that mounts a pre-existing, differently-owned export over the media root — a Kubernetes NFS PVC root is owned by uid 0 — the worker cannot take ownership of its own storage and would otherwise crash at startup with `media_io`.
+
+The supported shared-storage deployment runs the worker container **as root and lets it drop itself**: the `media-worker` image ships `docker-entrypoint.sh` (installed with `gosu`) that wraps the `python -m media.worker` command, plus two environment variables:
+
+- `PHOTO_WALL_PUID` — worker uid to own storage and run as (default `10001`).
+- `PHOTO_WALL_PGID` — worker gid (default `10001`).
+
+The entrypoint is conditional on the container's starting euid:
+
+- **Started as root** (a `securityContext` choice, not a Compose one — e.g. `runAsUser: 0` on the pod): it validates that `PHOTO_WALL_PUID`/`PHOTO_WALL_PGID` are positive integers (a non-numeric or `0` value is refused with a message and a non-zero exit, so a misconfiguration can never silently keep the worker running as root), `chown`s `PHOTO_WALL_MEDIA_ROOT` and, when set and present, `PHOTO_WALL_APP_ROOT` to `PHOTO_WALL_PUID:PHOTO_WALL_PGID`, then drops to that uid via `gosu` before exec'ing the command. The dropped worker now **owns** its roots, so `_directory` performs the strict `0700` tighten normally. This is the path a Kubernetes deployment on shared storage should use.
+- **Started non-root** (Compose keeps the baked `USER wall`, `cap_drop:[ALL]`, `no-new-privileges:true`): it execs the command directly with no chown, no gosu, and no new privilege — byte-for-byte the prior behavior.
+
+**A pure non-root + `fsGroup` deployment is not sufficient on its own.** `_directory` tolerates a root-owned, group-owned root only when it carries no OTHER-access bits, but kubelet's `fsGroup` recursively *adds* group access (`g+rwxs`, i.e. `0o2770`) and never *clears* existing OTHER bits. On storage that arrives with OTHER access (a pre-existing export, or a driver/`fsGroupChangePolicy` that leaves the world bits set), a non-root worker can neither tighten the root (it does not own it) nor safely serve from it, so `_directory` deliberately refuses with `media_perms` (500) rather than the misleading `media_io`. Starting as root and dropping via the entrypoint sidesteps this entirely: after the chown the worker owns the root and enforces `0700` itself, independent of how the volume arrived. That refusal is correct and is not reached on the root-entrypoint path.
+
+Whether the single-writer `flock` on `.worker.lock` then succeeds is a separate property of the NFS/mount configuration (version and `lock`/`nolock`), independent of ownership, and is validated per deployment.
+
 ## Retry and failure behavior
 
 Each acquisition retains the existing 330-second outer deadline, with tighter adapter and preparation bounds. A repository lease is at least 30 seconds longer. Original integrity, size, invalid metadata, and unsupported preparation results are permanent for that original/recipe. Operational failures raise the typed `RetryableMediaTask`; Procrastinate retries after 5, 15, and 60 seconds, then stops after the fourth failed attempt. Retries are new queue attempts and new repository leases, never recursion or an independent `retry_at` dispatcher.

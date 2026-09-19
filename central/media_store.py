@@ -148,9 +148,29 @@ class MediaStore:
     @staticmethod
     def _directory(path: Path):
         path.mkdir(mode=0o700, exist_ok=True)
-        if not stat.S_ISDIR(path.lstat().st_mode):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
             raise MediaStoreError("media_path", 503)
-        path.chmod(0o700)
+        # Security invariant: the store is never accessible to OTHER users.
+        # GROUP access is permitted because shared-storage platforms grant the
+        # pod its own group -- a Kubernetes fsGroup mount hands us a root-owned
+        # directory that is group-owned by the pod gid, mode g+rwxs, and the
+        # worker reads/writes through that group.
+        if info.st_uid == os.geteuid():
+            # We own it (compose; a gosu-dropped worker after the entrypoint
+            # chown). Enforce the strict owner-only posture, exactly as before.
+            path.chmod(0o700)
+        elif info.st_mode & 0o007:
+            # Platform storage we do not own AND world-accessible: we can neither
+            # tighten it (chmod needs ownership) nor safely serve media from it.
+            # Surface the misconfiguration loudly instead of the misleading
+            # media_io -- the expected fsGroup posture has no OTHER bits and
+            # never reaches here.
+            raise MediaStoreError("media_perms", 500)
+        # else: not owned, no OTHER bits -- the expected fsGroup posture. Group
+        # write lets us create the lock file and subdirectories; there is
+        # nothing to tighten (we cannot chmod what we do not own) and nothing
+        # to reject, so proceed without a chmod the process cannot perform.
 
     @contextmanager
     def worker_lock(self):

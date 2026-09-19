@@ -51,9 +51,24 @@ COPY --from=deps /usr/local/bin/uv /usr/local/bin/uv
 FROM media-system AS media-worker
 # Both branches share the same Python base and absolute environment path.
 COPY --from=runtime /app /app
+# gosu drops the entrypoint back to an unprivileged uid after it takes
+# ownership of platform-supplied storage (see docker-entrypoint.sh). Installed
+# in the worker layer, AFTER the media OS definition boundary, so it never
+# alters the shared base image's definition hash (scripts/service_base.py).
+# The snapshot apt sources persist from the base; only its package lists were
+# pruned, so refresh them for this one install and prune again.
+USER root
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends gosu \
+    && gosu nobody true \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# The baked non-root default is retained so Compose runs exactly as before; a
+# root-start platform (k8s securityContext) opts into the chown+gosu path.
 USER wall
 ENV PHOTO_WALL_MEDIA_ROOT="/var/lib/photo-wall/media" \
     PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "media.worker"]
 
 FROM media-worker AS media-test
