@@ -15,7 +15,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
        > /etc/apt/sources.list \
     && attempt=1 \
     && until apt-get -o Acquire::Retries=5 update \
-          && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg; do \
+          && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg gosu; do \
          if [ "$attempt" -ge 4 ]; then exit 1; fi; \
          sleep $((attempt * 15)); \
          attempt=$((attempt + 1)); \
@@ -26,6 +26,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && chown wall:wall /etc/photo-wall/private/connections.json \
     && chmod 0600 /etc/photo-wall/private/connections.json \
     && ffmpeg -version > /dev/null && ffprobe -version > /dev/null \
+    && gosu nobody true \
     && rm -rf /var/lib/apt/lists/*
 
 # END MEDIA OS DEFINITION
@@ -51,20 +52,13 @@ COPY --from=deps /usr/local/bin/uv /usr/local/bin/uv
 FROM media-system AS media-worker
 # Both branches share the same Python base and absolute environment path.
 COPY --from=runtime /app /app
-# gosu drops the entrypoint back to an unprivileged uid after it takes
-# ownership of platform-supplied storage (see docker-entrypoint.sh). Installed
-# in the worker layer, AFTER the media OS definition boundary, so it never
-# alters the shared base image's definition hash (scripts/service_base.py).
-# The snapshot apt sources persist from the base; only its package lists were
-# pruned, so refresh them for this one install and prune again.
-USER root
-RUN apt-get -o Acquire::Retries=5 update \
-    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends gosu \
-    && gosu nobody true \
-    && rm -rf /var/lib/apt/lists/*
+# gosu ships in the shared media OS base (installed before the definition
+# boundary, alongside ffmpeg, per the repo's "all apt lives in the hashed base"
+# invariant). docker-entrypoint.sh uses it to drop back to an unprivileged uid
+# after it takes ownership of platform-supplied storage. The baked non-root
+# `USER wall` default is retained so Compose runs exactly as before; a root-start
+# platform (k8s securityContext) opts into the chown+gosu path.
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# The baked non-root default is retained so Compose runs exactly as before; a
-# root-start platform (k8s securityContext) opts into the chown+gosu path.
 USER wall
 ENV PHOTO_WALL_MEDIA_ROOT="/var/lib/photo-wall/media" \
     PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
