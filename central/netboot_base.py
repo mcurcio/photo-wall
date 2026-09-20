@@ -27,8 +27,13 @@ version owns its own row and file, and the squashfs sha256 is an integrity /
 `Digest` attribute only. sha256 is a corruption check (0009 home-LAN); nothing is
 signed.
 
-Rollback / sticky recovery (`failed_tag`), the poll-tail pending sweep, GC, and
-boot re-hydrate are LATER beads (2/3/4); this module builds only the tracer arc.
+Server-side rollback / sticky recovery (bead 2) lives on the read side of the
+netboot seam: `select_base_for_serial` detects a 200-served target that never
+reported base-healthy, fences it in `failed_tag`, and serves the device's
+known-good instead -- sticking there until the desired target changes. The
+poll-tail `sweep_failed_boots` fails a device left `pending` past
+`PENDING_HEALTH_TIMEOUT` so a powered-off device does not hold the frontier. GC
+and boot re-hydrate are LATER beads (3/4).
 """
 
 from __future__ import annotations
@@ -76,6 +81,11 @@ MAX_SQUASHFS_BYTES = MAX_ROOTFS_BYTES  # 1 GiB; the same bound the initrd fetch 
 # path separators, whitespace) at the seam -- the serial is unauthenticated,
 # client-controlled input.
 _SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+# A 200-served target that has not reported base-healthy within this window is
+# swept `failed` (bead 2 poll-tail), so a powered-off / stuck device does not hold
+# the latest-verified frontier or a cache entry indefinitely. Placeholder cadence
+# (0012 gate); nothing structural depends on the exact value.
+PENDING_HEALTH_TIMEOUT = 15 * 60
 
 
 class NetbootBaseError(Exception):
@@ -224,18 +234,21 @@ def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecis
     """Resolve + (on a 200 only) record the base a Pi should be served.
 
     Runs the read-modify-write under `SELECT ... FOR UPDATE` on the `devices`
-    row (E1). Precedence (bead 1; recovery/`failed_tag` is bead 2): the device's
-    pin (`attached_tag`), else latest-verified, else -- only when the frontier is
-    empty -- latest-discovered. On the cached (200) branch it records
-    `last_served_tag`/`boot_outcome='pending'`/`last_served_at`; on a miss it
-    records NOTHING (the fetch is enqueued by the caller and the Pi retries)."""
+    row (E1). Precedence: the device's pin (`attached_tag`), else latest-verified,
+    else -- only when the frontier is empty -- latest-discovered. On top of that
+    (bead 2) the recovery-aware arm keyed off `failed_tag` detects a failed boot,
+    releases a stale stick, or serves known-good (`_resolve_recovery_aware`). On
+    the cached (200) branch it records `last_served_tag`/`boot_outcome='pending'`/
+    `last_served_at`; on a miss it records NOTHING (the fetch is enqueued by the
+    caller and the Pi retries)."""
     serial = sanitize_serial(serial)
     device_id = device_id_for_serial(serial)
     now = clock.utc()
 
     if device_id is None:
         # Invalid/absent serial: no device row, serve the unpinned target
-        # best-effort, record nothing (there is no row to record on).
+        # best-effort, record nothing (there is no row to record on -- so no
+        # detection/recovery either, which key off the row's boot state).
         desired = latest_verified(conn) or latest_discovered(conn)
         return _decision(conn, desired, device_id=None, now=now)
 
@@ -248,11 +261,60 @@ def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecis
         "SELECT * FROM devices WHERE device_id=%s FOR UPDATE", (device_id,)
     ).fetchone()
 
-    if device["attached_tag"] is not None:
-        desired = device["attached_tag"]                 # pin overrides
-    else:
-        desired = latest_verified(conn) or latest_discovered(conn)
-    return _decision(conn, desired, device_id=device_id, now=now)
+    served = _resolve_recovery_aware(conn, device, device_id=device_id)
+    return _decision(conn, served, device_id=device_id, now=now)
+
+
+def _resolve_recovery_aware(conn, device, *, device_id: str) -> str | None:
+    """The served tag by recovery-aware precedence, under the caller's FOR UPDATE.
+
+    Bead 2 -- splits the served tag from the fenced `failed_tag` (r8). A pin always
+    wins and clears any stick (the operator's explicit choice supersedes it);
+    otherwise the desired target is latest-verified (else, empty state only,
+    latest-discovered). Three sticky-recovery arms key off `failed_tag`, never off
+    `last_served_tag`:
+
+      * DETECT -- a diskless device that 200-booted `desired` (`last_served_tag ==
+        desired`) and never posted it healthy (`boot_outcome == 'pending'`) is back
+        asking, so that boot failed: fence it (`failed_tag = desired`,
+        `boot_outcome = 'failed'`). A 503 miss wrote no `pending` record, so a
+        fetch-retry is never mis-detected as a failed boot (bead-1 invariant).
+      * RELEASE -- the desired target moved off the fence (a newer latest-verified,
+        or the pin cleared it above) => clear `failed_tag`, one fresh attempt.
+      * RECOVER -- still fenced (`failed_tag == desired`) with a known-good => serve
+        known-good, recorded truthfully by `_decision` as `last_served_tag`; the
+        stick (`failed_tag`) is LEFT INTACT so the failing tag is not re-served and
+        the detector stays quiet next boot (`last_served_tag` != `desired`).
+    """
+    if device["attached_tag"] is not None:               # pin overrides
+        if device["failed_tag"] is not None:
+            conn.execute(
+                "UPDATE devices SET failed_tag=NULL WHERE device_id=%s", (device_id,)
+            )
+        return device["attached_tag"]
+
+    desired = latest_verified(conn) or latest_discovered(conn)
+    failed = device["failed_tag"]
+
+    if (
+        device["last_served_tag"] is not None
+        and device["last_served_tag"] == desired
+        and device["boot_outcome"] == "pending"
+    ):                                                    # DETECT
+        conn.execute(
+            "UPDATE devices SET failed_tag=%s, boot_outcome='failed' WHERE device_id=%s",
+            (desired, device_id),
+        )
+        failed = desired
+
+    if failed is None or desired is None:
+        return desired
+    if desired != failed:                                # RELEASE
+        conn.execute("UPDATE devices SET failed_tag=NULL WHERE device_id=%s", (device_id,))
+        return desired
+    if device["known_good_tag"] is not None:             # RECOVER (stick holds)
+        return device["known_good_tag"]
+    return desired  # fenced but no known-good: boot-loops until an operator pins it
 
 
 def _decision(conn, served: str | None, *, device_id: str | None, now: float) -> BaseServeDecision:
@@ -316,6 +378,37 @@ def record_base_health(conn, device_id: str, report: "BaseHealth", *, clock) -> 
         (report.running_tag, clock.utc(), report.running_tag, device_id, report.running_tag),
     ).rowcount
     return updated == 1
+
+
+# -- poll-tail pending sweep (bead 2) ----------------------------------------
+
+
+def sweep_failed_boots(conn, *, clock, timeout: float = PENDING_HEALTH_TIMEOUT) -> int:
+    """Fail any non-retired device left `pending` past `timeout`; return the count.
+
+    Runs at the poll tail. A device 200-served a target it never posts base-healthy
+    would otherwise hold the latest-verified frontier and a cache entry forever
+    (e.g. it was powered off before reporting). It sets `boot_outcome = 'failed'`
+    and -- ONLY WHEN `failed_tag IS NULL` (E2: never overwrite a live stick, and
+    never with the recovery boot's known-good tag) -- fences the tag the device
+    ACTUALLY ATTEMPTED: its pin, else `last_served_tag` (E2b). This mirrors the live
+    DETECT arm, which only ever fences the served tag. Using a recomputed frontier
+    would be wrong precisely when the frontier has drifted past what this device
+    served (another device pushed latest-verified higher): it would fence a tag the
+    device never attempted, so its next boot would `RECOVER` and silently skip a
+    legitimate already-verified upgrade. If the device never served anything and has
+    no pin (`COALESCE` is NULL) `failed_tag` stays NULL -- no bogus fence, just the
+    `failed` outcome. A recovery boot already carries a non-NULL `failed_tag`, so the
+    guard leaves its stick untouched while still recording the timeout as `failed`.
+    """
+    return conn.execute(
+        "UPDATE devices SET boot_outcome='failed', "
+        "failed_tag = CASE WHEN failed_tag IS NULL "
+        "THEN COALESCE(attached_tag, last_served_tag) ELSE failed_tag END "
+        "WHERE boot_outcome='pending' AND retired_at IS NULL "
+        "AND last_served_at IS NOT NULL AND last_served_at < %s",
+        (clock.utc() - timeout,),
+    ).rowcount
 
 
 # -- base fetch (worker task body) -------------------------------------------

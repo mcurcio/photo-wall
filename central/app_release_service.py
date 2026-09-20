@@ -162,7 +162,17 @@ class AppReleaseService:
         # Poll-tail reconcile is the convergence backstop; it needs no network and
         # runs whether or not the list call succeeded.
         result["reconcile"] = await asyncio.to_thread(self.releases.reconcile, self.packages)
+        # Poll-tail base sweep (0012 bead 2): fail any device left `pending` past
+        # PENDING_HEALTH_TIMEOUT so a powered-off / stuck device stops holding the
+        # latest-verified frontier and a cache entry. Pure local DB state, like
+        # reconcile -- no network, always runs.
+        result["base_sweep"] = await asyncio.to_thread(self._sweep_failed_boots)
         return result
+
+    def _sweep_failed_boots(self) -> int:
+        """Fail stale-`pending` base boots (bead 2), off-loop under one txn."""
+        with self.db.transaction() as conn:
+            return netboot_base.sweep_failed_boots(conn, clock=self.releases.clock)
 
     def _apply(self, record: DiscoveredRelease) -> None:
         """Feed one discovered release into the store (blocking; runs off-loop)."""

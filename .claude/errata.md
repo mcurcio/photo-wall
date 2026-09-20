@@ -395,6 +395,28 @@ ONLY when `failed_tag` is currently NULL — never overwrites a live stick, and 
 `last_served_tag` (which after the r8 split is the known-good tag on a recovery boot).
 Folded into 0012 bead 2 page + the two prose sites (lines ~543, ~723).
 
+E2a (2026-09-20, bead 2 impl): a THIRD prose site the E2 fold missed — §"How it hooks
+the existing machinery", the "Failed-boot detection + poll sweep" bullet (~line 994) —
+still reads "setting `failed_tag = last_served_tag`", directly contradicting E2. E2 is
+authoritative and BINDING. See E2b for the fence value bead 2 actually implements. The
+docs bead (9) should correct that stale line. No code divergence.
+
+E2b (2026-09-20, bead 2 review fix): within the sweep's `failed_tag IS NULL` branch
+(E2's NULL-guard, kept intact), fence the tag the device ACTUALLY ATTEMPTED —
+`COALESCE(attached_tag, last_served_tag)` — NOT a recomputed latest-verified/discovered
+frontier. This mirrors the live DETECT arm, which only ever fences the served tag.
+WHY: the frontier can drift past what a stale device served (another device pushes
+latest-verified higher); fencing against that higher tag would fence a tag the device
+never attempted, so its next boot would satisfy `desired == failed_tag` ⇒ RECOVER and
+the device would silently, indefinitely skip a legitimate already-verified upgrade. If
+`COALESCE` is NULL (never served, no pin) `failed_tag` stays NULL — no bogus fence, just
+the `failed` outcome. E2's "never overwrite a live stick" NULL-guard and "never the
+recovery boot's known-good tag" both still hold (a recovery boot's failed_tag is
+non-NULL, so the guard skips it). This supersedes E2's "= desired" phrasing for the
+sweep's fence value: the correct value is the served/pinned tag, which in the guarded
+(non-recovery) branch is exactly what the device attempted (`last_served_tag` there is
+NOT a known-good recovery tag).
+
 E3 (2026-09-20, bead 1): the design's migration-018 storage enumeration (§"Storage,
 lifecycle, migration") lists ONLY `app_releases` base cols + `base_cache` + `devices`,
 but the base-health seam requires per-epoch `sequence` MONOTONICITY (bead 1 page;
