@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -16,10 +17,12 @@ from typing import Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
-from central.app_release_queue import APP_RELEASE_QUEUE
+from central.app_release_boot import boot_autopull
+from central.app_release_queue import APP_RELEASE_QUEUE, ProcrastinateAppReleaseQueue
 from central.app_release_service import AppReleaseService
 from central.catalog import CatalogSnapshot
 from central.db import Database
+from central.installation_repository import PostgresInstallationRepository
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore
@@ -342,6 +345,18 @@ class MediaWorker:
         await asyncio.gather(*(close(client) for client in self._clients.values()))
         self._clients.clear()
 
+def _log_boot_autopull(task: asyncio.Task) -> None:
+    """Log the boot auto-pull outcome and SWALLOW it -- a boot-pull failure or
+    cancellation must never propagate into (and kill) the worker."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("boot autopull failed: %s", error)
+    else:
+        logger.info("boot autopull: %s", task.result())
+
+
 async def _entry():
     try:
         dsn, root, connection_file = (os.environ[name] for name in
@@ -374,11 +389,38 @@ async def _entry():
             await worker.maintain()
             await worker.refresh_once()
             async with app.open_async():
-                await app.run_worker_async(
-                    queues=worker_queues(release_service is not None),
-                    concurrency=4,
-                    additional_context=additional_context,
-                )
+                # Boot-time release auto-pull (0010): a fire-and-forget task so it
+                # never delays the worker loop or blocks serving. Its done-callback
+                # logs and SWALLOWS the outcome -- a pull failure must never kill
+                # the worker. Cancelled + awaited in the finally.
+                autopull_task: asyncio.Task | None = None
+                if release_service is not None:
+                    # Defer boot's mirror onto the SAME tag-serialized queue the
+                    # operator promote route uses (ProcrastinateAppReleaseQueue),
+                    # constructed from the same dsn -- so boot never mirrors inline
+                    # and cannot race an operator-queued mirror of the same tag.
+                    # The run loop below drains APP_RELEASE_QUEUE, so the deferred
+                    # mirror actually completes.
+                    autopull_task = asyncio.create_task(
+                        boot_autopull(
+                            release_service,
+                            release_service.packages,
+                            PostgresInstallationRepository(clock),
+                            ProcrastinateAppReleaseQueue(dsn),
+                        )
+                    )
+                    autopull_task.add_done_callback(_log_boot_autopull)
+                try:
+                    await app.run_worker_async(
+                        queues=worker_queues(release_service is not None),
+                        concurrency=4,
+                        additional_context=additional_context,
+                    )
+                finally:
+                    if autopull_task is not None:
+                        autopull_task.cancel()
+                        with contextlib.suppress(BaseException):
+                            await autopull_task
     finally:
         await worker._close_clients()
 
