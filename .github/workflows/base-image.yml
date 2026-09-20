@@ -667,6 +667,26 @@ jobs:
             violation "signed material present in bundle: $signed"
           fi
 
+          # cmdline.txt template contract (central-discovery model,
+          # build_netboot_bundle.sh): exactly ONE non-comment kernel command
+          # line, carrying the static tokens + the central ROOT placeholder, and
+          # NONE of the retired base_url/base_sha256 params. The operator deletes
+          # the leading comment lines and substitutes @@PHOTOWALL_CENTRAL@@. This
+          # catches a template regression in build_netboot_bundle.sh.
+          cmd=$(grep -v '^#' "$BUNDLE/boot/cmdline.txt" | grep -v '^[[:space:]]*$' || true)
+          cmd_lines=$(printf '%s\n' "$cmd" | grep -c . || true)
+          [ "$cmd_lines" = "1" ] \
+            || violation "cmdline.txt has $cmd_lines command lines, expected exactly 1"
+          printf '%s' "$cmd" | grep -q 'photowall.central=@@PHOTOWALL_CENTRAL@@' \
+            || violation "cmdline.txt missing photowall.central=@@PHOTOWALL_CENTRAL@@"
+          for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10'; do
+            printf '%s' "$cmd" | grep -q -- "$tok" \
+              || violation "cmdline.txt missing static token $tok"
+          done
+          if grep -Eq 'base_url|base_sha256' "$BUNDLE/boot/cmdline.txt"; then
+            violation "cmdline.txt still references retired base_url/base_sha256"
+          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "FAIL: assembled bundle does not satisfy the s2b contract" >&2
             find "$BUNDLE" -type f -printf '%10s %p\n' >&2 || true

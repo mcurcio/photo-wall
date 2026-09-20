@@ -10,7 +10,7 @@
 #   photo-wall-base-bundle/
 #     boot/
 #       config.txt              (firmware directives; kernel + initramfs + dtb)
-#       cmdline.txt             (TEMPLATE -- operator injects base_url/base_sha256)
+#       cmdline.txt             (TEMPLATE -- operator sets Central's root ONCE)
 #       kernel_2712.img         (rpi-2712 kernel the Pi 5 SPI-EEPROM bootloader fetches)
 #       initrd.img              (mkinitramfs output carrying the slim netboot init)
 #       bcm2712-rpi-5-b.dtb     (Pi 5 device tree)
@@ -156,18 +156,24 @@ device_tree=bcm2712-rpi-5-b.dtb
 disable_overscan=1
 EOF
 
-# cmdline.txt is a TEMPLATE, not a bootable command line: the operator boot
-# server MUST substitute the two @@...@@ placeholders before serving it over
-# TFTP (base_url/base_sha256 are injected by the operator, never baked -- the
-# transport-split decision). NOTE: the Pi firmware passes cmdline.txt verbatim
-# to the kernel and does NOT support comments, so the leading comment line MUST
-# be deleted; cmdline.txt must end up a single line. The @@ placeholders also
-# guarantee this file cannot be booted unedited.
+# cmdline.txt is a TEMPLATE, not a bootable command line: the operator sets the
+# ONE @@PHOTOWALL_CENTRAL@@ placeholder to Central's ROOT URL before serving it
+# over TFTP, once per site. This line is then STATIC and fleet-wide immortal:
+# everything after the root -- the netboot request path (/v1/netboot/base), the
+# Pi's identity (its serial, self-supplied in the X-PhotoWall-Serial header),
+# and the expected corruption digest (the HTTP Digest response header) -- is
+# auto-discovered by the initrd, so the base image never changes as the served
+# squashfs is revised. NOTE: the Pi firmware passes cmdline.txt verbatim to the
+# kernel and does NOT support comments, so the leading comment lines MUST be
+# deleted; cmdline.txt must end up a single line. The @@ placeholder also
+# guarantees this file cannot be booted unedited.
+#
+# Optional: append `photowall.debug=1` to raise console verbosity and lengthen
+# the pre-reboot pause on failure (field debugging on an HDMI/serial console).
 cat > "$boot_dir/cmdline.txt" <<'EOF'
-# TEMPLATE -- delete this comment line, keep ONE command line. Substitute:
-#   @@PHOTOWALL_BASE_URL@@    -> http(s) URL of photo-wall-base.squashfs (required)
-#   @@PHOTOWALL_BASE_SHA256@@ -> 64-hex corruption checksum of it (optional; else drop the token)
-console=tty1 ip=dhcp boot=photowall-netboot panic=10 photowall.base_url=@@PHOTOWALL_BASE_URL@@ photowall.base_sha256=@@PHOTOWALL_BASE_SHA256@@
+# TEMPLATE -- delete these comment lines, keep ONE command line. Substitute:
+#   @@PHOTOWALL_CENTRAL@@ -> Central's ROOT URL, e.g. http://photo-wall/ or http://10.0.20.5/ (required)
+console=tty1 ip=dhcp boot=photowall-netboot panic=10 photowall.central=@@PHOTOWALL_CENTRAL@@
 EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).
