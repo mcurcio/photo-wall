@@ -22,6 +22,21 @@ class PostgresInstallationRepository:
             (digest,),
         ).fetchone()
 
+    @staticmethod
+    def bound_player_count_in(conn) -> int:
+        """Number of players adopted into a frame (owning a `bindings` row).
+
+        A `bindings` row is the sole "bound" signal: a player that netboots or
+        enrolls but is never adopted into a frame has no row and is excluded, and
+        `Registry.retire` deletes a retired player's bindings, so retired players
+        are excluded too. This is the same table `configuration_in`/`inventory`
+        derive `is_bound` from -- the count is not re-deriving that logic, it
+        aggregates the same rows.
+        """
+        return conn.execute(
+            "SELECT count(DISTINCT player_id) AS n FROM bindings"
+        ).fetchone()["n"]
+
     def active_sessions_in(self, conn) -> tuple[dict, ...]:
         return tuple(
             conn.execute(

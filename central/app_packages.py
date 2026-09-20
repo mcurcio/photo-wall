@@ -63,6 +63,21 @@ class AppPackages:
                 raise AppPackageError("app_package_immutable")
 
     @staticmethod
+    def count_in(conn) -> int:
+        """Number of registered (mirrored) Player packages, on a caller's conn.
+
+        Exposed as a ``*_in`` primitive so the boot auto-pull can read this count
+        and the bound-player count under a single transaction for a consistent
+        snapshot; ``count`` is the self-contained convenience wrapper.
+        """
+        return conn.execute("SELECT count(*) AS n FROM app_packages").fetchone()["n"]
+
+    def count(self) -> int:
+        """Number of registered (mirrored) Player packages."""
+        with self.db.transaction() as conn:
+            return self.count_in(conn)
+
+    @staticmethod
     def _package(conn, sha256: str):
         row = conn.execute(
             "SELECT * FROM app_packages WHERE sha256=%s", (sha256,)
