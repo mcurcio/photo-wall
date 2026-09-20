@@ -542,7 +542,17 @@ def create_app(
                 if release_queue is not None and AppReleases.deb_mirrorable_in(conn, served_tag):
                     release_queue.enqueue_mirror_in(conn, served_tag)
                 raise AppPackageError("app_manifest_uncached", 503)
-        return manifest
+        # Carry the served tag back to the appliance (0012 bead 6, errata E7).
+        # `served_tag` IS `devices.last_served_tag` -- the tag whose base bytes
+        # this device was actually served this boot. Returning it lets the
+        # enrolled player report it as base-health `running_tag`; because it is
+        # the recorded served tag (not a client guess), central's
+        # `running_tag == last_served_tag` validation passes by construction and
+        # known-good/latest-verified advance. The base serve (bytes + Digest)
+        # never exposes the tag, and the diskless initrd persists nothing, so
+        # this per-device `.deb` manifest -- fetched by the booted OS that also
+        # posts base-health -- is where the tag crosses to the appliance.
+        return {**manifest, "tag": served_tag}
 
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):

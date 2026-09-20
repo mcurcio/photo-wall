@@ -462,3 +462,39 @@ reintroduce base/`.deb` divergence, F4). A carried tag whose `.deb` is deployabl
 not yet mirrored => 503 `app_manifest_uncached` + lazy `enqueue_mirror_in` (coalesced
 by the tag lock), symmetric to the base serve's lazy backstop. No code divergence from
 beads 1-4; no change to promoted_tag/current_sha256/reconcile/migration 016.
+
+E7 (2026-09-20, bead 6): the doc's bead-6 page requires base-health `running_tag` to
+equal `devices.last_served_tag`, but never says HOW the diskless appliance learns the
+tag: `GET /v1/netboot/base` returns bytes + `Digest` only (no tag), the initrd persists
+nothing across the initrd->OS handoff, and the per-device manifest primitive returned
+only `{version, sha256, size}`. RESOLVED: `GET /v1/netboot/manifest` now ALSO returns
+the served `tag` (`{**manifest, "tag": served_tag}`, central/app.py). `served_tag` IS
+the value `served_tag_for_serial` read from `devices.last_served_tag`, so
+`running_tag == last_served_tag` holds BY CONSTRUCTION -- never a client guess, never
+derived from the `Digest`. This route (not the base serve) carries the tag because it is
+fetched by the SAME booted OS that enrolls and posts base-health; a base-serve response
+header would strand the tag in the initrd. Additive: 0010's global `GET /v1/app/manifest`
+is unchanged and returns no tag. BINDING for docs bead 9.
+
+E8 (2026-09-20, bead 6): the doc's "Packages touched" line attributes "post base-health
+after boot" to `appliance/provision.py`, but base-health requires the ENROLLED player
+token, and the bootstrapper explicitly never enrolls (0009 gate #2); the import-linter
+also FORBIDS `player -> appliance`, so an appliance-hosted poster the player calls is
+impossible. Base-health is therefore posted by the enrolled player (player/service.py
+`_report_base_health`, symmetric to how readiness is posted there), fed the served tag
+via the appliance's existing origin-handoff file (`PlayerConfig.base_running_tag` in
+public.json). The appliance's bead-6 role is the per-device manifest fetch + the tag
+handoff; the base-health POST lives in `player/`. Opt-in gate for the per-device path is
+the `PHOTO_WALL_PER_DEVICE_DEB` env var (unset => unchanged 0010 global `.deb`, no
+base-health). Docs bead 9 should correct the package attribution.
+
+E9 (2026-09-20, bead 6 review — for docs bead 9, non-blocking):
+1. base-health's server-side `running_tag == last_served_tag` check binds to the LIVE
+   devices.last_served_tag column, not a value pinned at manifest-fetch time. Document
+   the assumption that no concurrent re-serve of the same device interleaves between the
+   manifest fetch and the base-health post (a genuine reboot restarts the whole squashfs
+   fetch, so this holds on the diskless netboot target).
+2. write_public_config preserves existing keys and does not explicitly clear
+   base_running_tag on a global-path boot. Harmless on the diskless netboot target (RAM
+   overlay rebuilt fresh each boot). If this code is ever reused on a persistent-disk
+   (D0) install path, add `else: payload.pop("base_running_tag", None)`. Note in docs.

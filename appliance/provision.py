@@ -78,6 +78,18 @@ MAX_MANIFEST_BYTES = 64 * 1024
 # bound is restated here rather than shared.
 MAX_APP_PACKAGE_BYTES = 1024**3
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# Release tag shape, mirrors contracts.models.BaseHealth.running_tag by value
+# (the base bootstrapper must not import `contracts`/`central`, so the pattern
+# is restated here, like MAX_APP_PACKAGE_BYTES above).
+_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*")
+# Pinned by value on both sides (central.netboot_base.SERIAL_HEADER,
+# appliance.netboot_init.SERIAL_HEADER); the appliance sends its Pi serial so
+# central resolves the per-device tag it was served this boot.
+SERIAL_HEADER = "X-PhotoWall-Serial"
+# Opt-in env gate for the per-device `.deb` path (0012 bead 6): unset -> the
+# device keeps 0010's global `.deb` (GET /v1/app/manifest) and posts no
+# base-health, so an appliance that has not opted in is unchanged.
+PER_DEVICE_ENV = "PHOTO_WALL_PER_DEVICE_DEB"
 DEFAULT_UNIT = "photo-wall-player.service"
 DEFAULT_PUBLIC_CONFIG = Path("/etc/photo-wall/public.json")
 
@@ -192,23 +204,47 @@ class AppFetcher:
         except (OSError, urllib.error.URLError, ValueError):
             raise ProvisionError("provision_network") from None
 
-    def get(self, path: str, maximum: int) -> bytes:
-        return b"".join(self.chunks(path, maximum))
+    def get(self, path: str, maximum: int, *, headers=None) -> bytes:
+        return b"".join(self.chunks(path, maximum, headers=headers))
 
 
-def fetch_manifest(origin: str, *, seconds: float = 30, opener=None) -> dict:
-    """`GET /v1/app/manifest` -> `{version, sha256, size}`; raises
-    `AppUnconfigured` on a 503 (no app promoted -- caller retries)."""
+def fetch_manifest(origin: str, *, serial: str | None = None, seconds: float = 30,
+                   opener=None) -> dict:
+    """Fetch the app `.deb` manifest; raises `AppUnconfigured` on a 503.
+
+    Two modes, chosen by `serial` (0012 bead 6):
+
+    - **Global (default, `serial is None`)** -- `GET /v1/app/manifest` ->
+      `{version, sha256, size}`, the unchanged 0010 path. An appliance that has
+      not opted into the per-device path keeps this exactly.
+    - **Per-device (`serial` set, opt-in)** -- `GET /v1/netboot/manifest` with
+      the `X-PhotoWall-Serial` header (E6), so the `.deb` rides the exact tag
+      whose base bytes this device was served this boot (F4). Central returns
+      that served tag as `tag`, which the enrolled player reports as base-health
+      `running_tag` -- guaranteed to equal `devices.last_served_tag`, never a
+      guess, because it IS the recorded served tag.
+    """
     fetcher = AppFetcher(origin, seconds=seconds, opener=opener)
-    manifest = _json(fetcher.get("/v1/app/manifest", MAX_MANIFEST_BYTES))
+    if serial is None:
+        manifest = _json(fetcher.get("/v1/app/manifest", MAX_MANIFEST_BYTES))
+        required = {"version", "sha256", "size"}
+    else:
+        manifest = _json(fetcher.get("/v1/netboot/manifest", MAX_MANIFEST_BYTES,
+                                     headers={SERIAL_HEADER: serial}))
+        required = {"version", "sha256", "size", "tag"}
     if (
-        set(manifest) != {"version", "sha256", "size"}
+        set(manifest) != required
         or not isinstance(manifest["version"], str)
         or not 0 < len(manifest["version"]) <= 256
         or not isinstance(manifest["sha256"], str)
         or not _SHA256.fullmatch(manifest["sha256"])
         or type(manifest["size"]) is not int
         or not 0 < manifest["size"] <= MAX_APP_PACKAGE_BYTES
+        or (serial is not None and (
+            not isinstance(manifest["tag"], str)
+            or not _TAG.fullmatch(manifest["tag"])
+            or len(manifest["tag"]) > 256
+        ))
     ):
         raise ProvisionError("provision_manifest_invalid")
     return manifest
@@ -248,7 +284,8 @@ def apt_install(package: bytes, manifest: dict) -> None:
         deb_path.unlink(missing_ok=True)
 
 
-def write_public_config(origin: str, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> None:
+def write_public_config(origin: str, *, path: Path = DEFAULT_PUBLIC_CONFIG,
+                        base_running_tag: str | None = None) -> None:
     """The origin handoff ("the hard part", 0009): write the bootstrapper's
     resolved central origin as the app's explicit `central_origin` in the
     file `player.service.load_config` reads
@@ -269,6 +306,11 @@ def write_public_config(origin: str, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> N
     `PlayerConfig` fail to load. Existing keys in `path` (if any) are
     preserved; only `schema`, `central_origin`, and (when needed)
     `allow_http` are set.
+
+    On the opt-in per-device path (0012 bead 6) the bootstrapper also hands the
+    booted tag forward as `base_running_tag` (the `PlayerConfig` field the
+    enrolled player reads to post base-health for the exact tag it was served);
+    on the global path it is absent and no base-health is posted.
     """
     existing: dict = {}
     if path.exists():
@@ -281,6 +323,8 @@ def write_public_config(origin: str, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> N
     payload = {**existing, "schema": 1, "central_origin": origin}
     if urlsplit(origin).scheme == "http":
         payload["allow_http"] = True
+    if base_running_tag is not None:
+        payload["base_running_tag"] = base_running_tag
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True))
 
@@ -317,19 +361,34 @@ class Bootstrapper:
         fetch_manifest=fetch_manifest,
         fetch_package=fetch_package,
         install=apt_install,
-        write_origin=write_public_config,
+        write_origin=None,
         start_unit=start_player_unit,
         sleep=asyncio.sleep,
         backoff=_default_backoff,
+        serial_reader=None,
+        public_config_path: Path = DEFAULT_PUBLIC_CONFIG,
     ):
         self.discovery = discovery
         self.fetch_manifest = fetch_manifest
         self.fetch_package = fetch_package
         self.install = install
-        self.write_origin = write_origin
+        # `serial_reader` opts the device into the per-device `.deb` path (0012
+        # bead 6): when set, the manifest fetch carries the serial and central
+        # returns the served tag, which is handed forward for base-health.
+        # Unset (default) keeps 0010's global `.deb` and posts no base-health.
+        self.serial_reader = serial_reader
+        self.public_config_path = public_config_path
+        self.running_tag: str | None = None
+        self.write_origin = write_origin if write_origin is not None else self._default_write_origin
         self.start_unit = start_unit
         self.sleep = sleep
         self.backoff = backoff
+
+    def _default_write_origin(self, origin: str) -> None:
+        # Production handoff: write the origin AND (on the opt-in per-device
+        # path) the served tag so the enrolled player can post base-health.
+        write_public_config(origin, path=self.public_config_path,
+                             base_running_tag=self.running_tag)
 
     async def run(self, *, max_attempts: int | None = None) -> bool:
         """Runs the provisioning state machine to completion.
@@ -349,8 +408,15 @@ class Bootstrapper:
                 LOG.info("provision: no central discovered (attempt %d)", attempt)
                 await self.sleep(self.backoff(attempt))
                 continue
+            serial = None
+            if self.serial_reader is not None:
+                try:
+                    serial = self.serial_reader()
+                except OSError:
+                    serial = None
             try:
-                manifest = self.fetch_manifest(origin)
+                manifest = (self.fetch_manifest(origin, serial=serial)
+                            if serial else self.fetch_manifest(origin))
             except AppUnconfigured:
                 LOG.info("provision: app_unconfigured, retrying (attempt %d)", attempt)
                 await self.sleep(self.backoff(attempt))
@@ -359,6 +425,9 @@ class Bootstrapper:
                 LOG.warning("provision: manifest fetch failed: %s (attempt %d)", error, attempt)
                 await self.sleep(self.backoff(attempt))
                 continue
+            # Carry the served tag forward for base-health (0012 bead 6): present
+            # only on the per-device path, absent (None) on the global path.
+            self.running_tag = manifest.get("tag")
             try:
                 package = self.fetch_package(origin, manifest)
             except ProvisionError as error:
@@ -386,11 +455,18 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
+    from appliance.bootstrap import read_pi_serial
     from player.mdns_discovery import MdnsCentralDiscovery
+
+    # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB
+    # is set does the appliance send its serial on the manifest fetch and hand the
+    # served tag forward for base-health. Unset -> unchanged 0010 global `.deb`.
+    serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
 
     bootstrapper = Bootstrapper(
         discovery=MdnsCentralDiscovery(),
-        write_origin=lambda origin: write_public_config(origin, path=args.config),
+        serial_reader=serial_reader,
+        public_config_path=args.config,
         start_unit=lambda: start_player_unit(unit=args.unit),
     )
     asyncio.run(bootstrapper.run())
