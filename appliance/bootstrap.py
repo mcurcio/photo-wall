@@ -58,7 +58,14 @@ def read_pi_serial(path: str = PI_SERIAL_PATH) -> str | None:
     if raw is None:
         return None
     serial = raw.strip(b"\x00\r\n\t ").decode("ascii", "ignore")
-    return serial or None
+    # Normalize once, here: a serial with an embedded control character (a NUL
+    # mid-string, a stray \x07, DEL, ...) is treated as ABSENT, not sanitized
+    # in place, so the console log, the X-PhotoWall-Serial header, and the
+    # server all see the same safe value (or none) rather than three different
+    # strippings of a malformed one.
+    if not serial or any(ord(character) < 0x20 or ord(character) == 0x7f for character in serial):
+        return None
+    return serial
 
 
 class BootstrapError(ValueError):

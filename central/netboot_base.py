@@ -23,7 +23,11 @@ through here.
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
+
+from central.artifact_io import HardenedOpenError, open_regular
 
 BASE_IMAGE_NAME = "photo-wall-base.squashfs"
 SHA256SUMS_NAME = "SHA256SUMS"
@@ -33,6 +37,21 @@ SHA256SUMS_NAME = "SHA256SUMS"
 # so this wire constant is restated rather than shared, like the route strings.
 SERIAL_HEADER = "X-PhotoWall-Serial"
 _MAX_SUMS_BYTES = 4 * 1024 * 1024
+# The only shape a client serial may take before it can select an image or be
+# logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
+# future per-serial scheme has room, and reject everything else (control chars,
+# path separators, whitespace) at the seam -- the serial is unauthenticated,
+# client-controlled input.
+_SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+
+
+def sanitize_serial(serial: str | None) -> str | None:
+    """The serial if it matches the safe charset, else None. Used both to bound
+    what the route logs AND (inside `select_base_for_serial`) to guard the
+    selection seam, so the guarantee holds regardless of caller."""
+    if serial is not None and _SAFE_SERIAL.fullmatch(serial):
+        return serial
+    return None
 
 
 def select_base_for_serial(base_root: Path, serial: str | None) -> Path:
@@ -40,13 +59,16 @@ def select_base_for_serial(base_root: Path, serial: str | None) -> Path:
 
     SELECTION SEAM: there is no per-serial binding registry yet, so every
     serial gets the single registered base (`BASE_IMAGE_NAME` under
-    `base_root`). `serial` is accepted (and logged/used by the caller) so the
-    wiring is already in place.
+    `base_root`). The serial is validated HERE (`sanitize_serial`) before it
+    can ever touch a path or key -- the guarantee lives at the seam, not at the
+    caller's log line, because this is unauthenticated client input that a
+    future binding lookup would consume.
 
     TODO(0009 per-serial base binding): when a binding model exists, look the
-    serial up here and return its bound image; keep the single-base return as
-    the unbound default.
+    sanitized serial up here and return its bound image; keep the single-base
+    return as the unbound default.
     """
+    serial = sanitize_serial(serial)
     return base_root / BASE_IMAGE_NAME
 
 
@@ -56,14 +78,18 @@ def base_digest(base_root: Path) -> str | None:
 
     Not a per-request recompute: `scripts/build_netboot_bundle.sh` computes
     `SHA256SUMS` over every artifact (paths relative to the bundle root, e.g.
-    `./photo-wall-base.squashfs`); this reads that pre-computed line back."""
-    sums = base_root / SHA256SUMS_NAME
+    `./photo-wall-base.squashfs`); this reads that pre-computed line back. The
+    read goes through the same hardened primitive the served bytes do
+    (`O_NOFOLLOW`/`fstat`/regular-file), so an attacker cannot swap `SHA256SUMS`
+    for a symlink or device to skew the advertised digest."""
     try:
-        with sums.open("rb") as handle:
+        descriptor, _ = open_regular(base_root / SHA256SUMS_NAME, max_size=_MAX_SUMS_BYTES)
+    except HardenedOpenError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
             raw = handle.read(_MAX_SUMS_BYTES + 1)
     except OSError:
-        return None
-    if len(raw) > _MAX_SUMS_BYTES:
         return None
     for line in raw.decode("utf-8", "replace").splitlines():
         digest, _, name = line.partition("  ")

@@ -7,9 +7,7 @@ import base64
 import json
 import logging
 import os
-import re
 import secrets
-import stat
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
@@ -24,6 +22,7 @@ from pydantic import Field, model_validator
 from central.app_packages import AppPackageError, AppPackages
 from central.app_release_queue import AppReleaseTaskQueue, ProcrastinateAppReleaseQueue
 from central.app_releases import AppReleaseError, AppReleases
+from central.artifact_io import HardenedOpenError, open_regular
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
@@ -34,7 +33,12 @@ from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigur
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.netboot_base import SERIAL_HEADER, base_digest, select_base_for_serial
+from central.netboot_base import (
+    SERIAL_HEADER,
+    base_digest,
+    sanitize_serial,
+    select_base_for_serial,
+)
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
@@ -46,19 +50,19 @@ from contracts.models import (
     PlayerTime,
     Readiness,
 )
+from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-# Server-side sanity bound on the netboot base squashfs, matching the client's
-# fetch cap (appliance/netboot_init.py -> contracts.release.MAX_ROOTFS_BYTES):
-# a base larger than the initrd will accept can never be booted anyway.
-MAX_NETBOOT_BASE_BYTES = 1024**3
-# A serial arriving on the netboot base fetch is client-supplied; keep the
-# logged form bounded and to a safe charset so it cannot inject console noise.
-_SERIAL_LOG = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+# Server-side sanity bound on the netboot base squashfs. This IS the client's
+# fetch cap, not a coincidentally-equal copy: the initrd passes
+# contracts.release.MAX_ROOTFS_BYTES as its download bound, so a base larger
+# than this can never be booted anyway. Sharing the one constant means nudging
+# the cap can't silently desync the server bound from the client's.
+MAX_NETBOOT_BASE_BYTES = MAX_ROOTFS_BYTES
 
 
 class Challenge(Model):
@@ -424,18 +428,10 @@ def create_app(
         if app_root is None:
             raise AppPackageError("app_artifact_unavailable", 503)
         path = app_root / f"app-{sha256}.deb"
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
-        except (FileNotFoundError, OSError):
-            raise AppPackageError("app_artifact_unavailable", 503) from None
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != package["size"]:
-                raise AppPackageError("app_artifact_invalid", 503)
-        except Exception:
-            os.close(descriptor)
-            raise
+            descriptor, metadata = open_regular(path, expected_size=package["size"])
+        except HardenedOpenError as error:
+            raise AppPackageError(f"app_artifact_{error.reason}", 503) from None
 
         def content():
             with os.fdopen(descriptor, "rb") as source:
@@ -460,9 +456,11 @@ def create_app(
         # fstat regular-file + size check, bounded 1 MiB streaming, and a
         # base64 `Digest` header. The Pi self-identifies by serial; central picks
         # the image (single default today -- select_base_for_serial is the seam).
-        raw_serial = request.headers.get(SERIAL_HEADER)
-        match = _SERIAL_LOG.fullmatch(raw_serial) if raw_serial is not None else None
-        LOG.info("netboot base fetch: serial=%s", match.group(0) if match else "<absent-or-invalid>")
+        # Sanitize BEFORE anything consumes it: the same validated value feeds
+        # the log AND the selection seam, so no route can pass raw client input
+        # to a future per-serial lookup (select_base_for_serial re-validates too).
+        serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
+        LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
         if base_root is None:
             raise AppPackageError("base_artifact_unavailable", 503)
         digest = base_digest(base_root)
@@ -470,19 +468,11 @@ def create_app(
             # No stored digest -> we cannot advertise the corruption gate the Pi
             # requires (it fails closed on a missing Digest); refuse to serve.
             raise AppPackageError("base_artifact_unavailable", 503)
-        path = select_base_for_serial(base_root, raw_serial)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        path = select_base_for_serial(base_root, serial)
         try:
-            descriptor = os.open(path, flags)
-        except (FileNotFoundError, OSError):
-            raise AppPackageError("base_artifact_unavailable", 503) from None
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= MAX_NETBOOT_BASE_BYTES:
-                raise AppPackageError("base_artifact_invalid", 503)
-        except Exception:
-            os.close(descriptor)
-            raise
+            descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
+        except HardenedOpenError as error:
+            raise AppPackageError(f"base_artifact_{error.reason}", 503) from None
 
         def content():
             with os.fdopen(descriptor, "rb") as source:

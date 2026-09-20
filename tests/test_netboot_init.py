@@ -13,8 +13,9 @@ import stat
 
 import pytest
 
-from appliance.bootstrap import LinuxOps
+from appliance.bootstrap import LinuxOps, read_pi_serial
 from appliance.netboot_init import (
+    BASE_FETCH_SECONDS,
     NETBOOT_BASE_PATH,
     SERIAL_HEADER,
     NetbootError,
@@ -106,8 +107,9 @@ class Fetcher:
     body = BODY
     digest_header = DIGEST_HEADER
 
-    def __init__(self, origin):
+    def __init__(self, origin, *, seconds=None):
         self.origin = origin
+        self.seconds = seconds
         self.sent_headers = None
 
     def chunks(self, path, maximum, *, headers=None, on_response=None):
@@ -132,8 +134,8 @@ def capturing_factory(fetcher_cls=Fetcher):
     the request headers the initrd sent."""
     created = {}
 
-    def factory(origin):
-        created["fetcher"] = fetcher_cls(origin)
+    def factory(origin, *, seconds=None):
+        created["fetcher"] = fetcher_cls(origin, seconds=seconds)
         return created["fetcher"]
 
     factory.created = created
@@ -160,6 +162,31 @@ def test_serial_is_sent_as_request_header(tmp_path):
     factory = capturing_factory()
     run(cmdline(), tmp_path / "root", ops=ops, fetcher_factory=factory)
     assert factory.created["fetcher"].sent_headers == {SERIAL_HEADER: SERIAL}
+
+
+def test_base_fetch_uses_the_generous_deadline_not_the_60s_default(tmp_path):
+    # A <=1 GiB base over a slow LAN exceeds AppFetcher's 60s default; the initrd
+    # must construct the fetcher with the wider deadline.
+    ops = Ops(tmp_path)
+    factory = capturing_factory()
+    run(cmdline(), tmp_path / "root", ops=ops, fetcher_factory=factory)
+    assert factory.created["fetcher"].seconds == BASE_FETCH_SECONDS
+    assert BASE_FETCH_SECONDS > 60
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (b"10000000abcd1234\x00", "10000000abcd1234"),   # trailing NUL stripped
+    (b"  10000000abcd1234\n", "10000000abcd1234"),   # surrounding whitespace
+    (b"1000\x07abcd", None),                          # embedded control char -> absent
+    (b"abcd\x00ef", None),                            # embedded NUL -> absent
+    (b"abcd\x7f", None),                              # DEL -> absent
+    (b"\x00\x00", None),                              # nothing but NULs -> absent
+    (b"", None),                                      # empty -> absent
+])
+def test_read_pi_serial_normalizes_and_rejects_control_chars(tmp_path, raw, expected):
+    path = tmp_path / "serial-number"
+    path.write_bytes(raw)
+    assert read_pi_serial(str(path)) == expected
 
 
 def test_netboot_path_is_the_code_constant_not_from_cmdline(tmp_path):

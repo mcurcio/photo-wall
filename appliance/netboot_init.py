@@ -69,8 +69,15 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from appliance.bootstrap import CHUNK, BootstrapFatal, LinuxOps, read_pi_serial
-from appliance.provision import AppFetcher, ProvisionError
+from appliance.provision import MAX_APP_PACKAGE_BYTES, AppFetcher, ProvisionError
 from contracts.release import MAX_ROOTFS_BYTES
+
+# The base fetch passes MAX_ROOTFS_BYTES as AppFetcher's `maximum`, which the
+# fetcher requires to be <= MAX_APP_PACKAGE_BYTES. Assert the ordering at import
+# so nudging either cap fails the initrd loudly at boot (it runs `python3 -I`,
+# not `-O`, so this assert is live) rather than silently making every base fetch
+# raise `provision_limit` before a byte is read.
+assert MAX_ROOTFS_BYTES <= MAX_APP_PACKAGE_BYTES
 
 RAM_IMAGE_NAME = "photo-wall-base.squashfs"
 # The netboot request path is a CODE CONSTANT appended by the initrd, never
@@ -84,6 +91,13 @@ KMSG_PATH = "/dev/kmsg"
 LOG_PREFIX = "photo-wall[netboot]"
 PROGRESS_INTERVAL = 50 * 1024 * 1024
 DEBUG_PAUSE_SECONDS = 60
+# Whole-acquisition deadline for the base fetch. AppFetcher's default is 60s and
+# its hard ceiling is 300s; a <=1 GiB base needs more than 60s on a slow LAN, and
+# its size is no longer on the (now static) cmdline, so it cannot be sized
+# per-boot. Designed against a link floor of ~30 Mbit/s: 1 GiB / 30 Mbit ~= 286s,
+# under the 300s ceiling. A slower link fails closed (provision_deadline ->
+# reboot -> retry), never a truncated mount.
+BASE_FETCH_SECONDS = 300
 
 
 class NetbootError(ValueError):
@@ -408,7 +422,7 @@ def _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log) -> 
     headers = {SERIAL_HEADER: serial} if serial else {}
     log.info(f"phase 5/9 GET {url} headers={headers}")
 
-    fetcher = fetcher_factory(origin)
+    fetcher = fetcher_factory(origin, seconds=BASE_FETCH_SECONDS)
     ram = ops.ram()
     image = ram / RAM_IMAGE_NAME
     captured: dict[str, str | None] = {}

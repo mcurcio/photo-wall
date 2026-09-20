@@ -37,6 +37,51 @@ def test_serves_bytes_with_digest_and_length_reads_serial_unauthenticated(regist
         assert response.headers["digest"] == expected
 
 
+def test_serial_header_is_read_and_passed_to_the_selection_seam(registry, tmp_path, monkeypatch):
+    # The route must actually READ the serial and feed it to selection -- not
+    # merely accept one it then ignores. Spy on the seam central.app calls.
+    _stage_base(tmp_path)
+    import central.app as appmod
+
+    seen = {}
+    real = appmod.select_base_for_serial
+
+    def spy(base_root, serial):
+        seen["serial"] = serial
+        return real(base_root, serial)
+
+    monkeypatch.setattr(appmod, "select_base_for_serial", spy)
+    app = create_app(registry.db, registry.clock, ADMIN, base_root=tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: "10000000abcd1234"})
+        assert response.status_code == 200
+    assert seen["serial"] == "10000000abcd1234"
+
+
+def test_unsafe_serial_is_sanitized_to_none_before_selection(registry, tmp_path, monkeypatch):
+    # A path-separator-bearing serial reaches the route but must be sanitized to
+    # None before the seam sees it (guarantee at the seam, not the log line).
+    _stage_base(tmp_path)
+    import central.app as appmod
+
+    seen = {}
+    real = appmod.select_base_for_serial
+
+    def spy(base_root, serial):
+        seen["serial"] = serial
+        return real(base_root, serial)
+
+    monkeypatch.setattr(appmod, "select_base_for_serial", spy)
+    app = create_app(registry.db, registry.clock, ADMIN, base_root=tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: "../../etc/passwd"})
+        # Still serves the single default base -- the unsafe serial is dropped,
+        # not an error.
+        assert response.status_code == 200
+        assert response.content == BODY
+    assert seen["serial"] is None
+
+
 def test_no_base_root_configured_is_503(registry):
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
