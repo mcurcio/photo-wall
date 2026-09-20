@@ -22,3 +22,15 @@ Verify gate (from repo runbook):
 | 9 | observability + docs | open | — | docs bead |
 
 Budget: per bead 90 min wall / 8 agents; stop-and-report on cap.
+
+## Delivery process (learned on bead 1 — binding for beads 2–9)
+- **No local Docker.** This sandbox's Docker VM can't reach container registries,
+  so the DB/e2e gate CANNOT run locally — CI is the DB gate. Every bead brief must
+  say: verify with ruff/lint-imports/check_docs/pytest-collection + non-DB tests only;
+  DB tests must COLLECT clean; CI executes them. Never spawn docker/compose/until-loops.
+- **Grep every consumer.** Any bead changing a signature/symbol must grep the WHOLE
+  tree (src + all tests) for every call site before reporting — bead 1 wasted a CI
+  round on one missed pre-existing test file. List the sweep in the report.
+- **CI latency is the floor** (~10–15 min/round: queue + image build + Postgres suite +
+  software-e2e). Beads gate on the prior bead's CI-green (serial file netboot_base.py
+  can't safely parallelize). Expect ~15–25 min/bead when CI passes first try.
