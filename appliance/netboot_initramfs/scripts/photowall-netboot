@@ -18,8 +18,15 @@ mountroot()
     # itself (NetbootOps.configure_networking sources /scripts/functions and
     # runs configure_networking) before it fetches the base squashfs. Calling it
     # here too would only duplicate that step.
-    if ! /usr/bin/python3 -I -m appliance.netboot_init --rootmnt "$rootmnt"; then
-        echo "photo-wall: netboot_failed" >&2
+    #
+    # Redirect the init's stdout+stderr to /dev/console so its per-phase
+    # ConsoleLog lines AND any Python traceback surface on the HDMI/serial
+    # console for field debugging (the init also writes /dev/console directly;
+    # this catches anything that reaches fd 1/2 instead). photowall.debug=1
+    # makes the init itself pause ~60s before returning so the console is
+    # readable before the reboot below.
+    if ! /usr/bin/python3 -I -m appliance.netboot_init --rootmnt "$rootmnt" >/dev/console 2>&1; then
+        echo "photo-wall: netboot_failed" > /dev/console 2>&1
         sleep 5
         reboot -f
         # Fail closed if reboot is unavailable; never enter an interactive shell.

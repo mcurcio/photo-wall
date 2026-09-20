@@ -139,14 +139,24 @@ class AppFetcher:
             urllib.request.ProxyHandler({}), _NoRedirect()
         )
 
-    def chunks(self, path: str, maximum: int):
+    def chunks(self, path: str, maximum: int, *, headers=None, on_response=None):
+        """Stream `path`'s body in bounded blocks.
+
+        `headers` are merged into the request (the netboot base fetch sends the
+        Pi serial as `X-PhotoWall-Serial`); `on_response`, if given, is called
+        once with the response headers as soon as the 200 response opens --
+        before the body streams -- so the caller can read the `Digest`/
+        `Content-Length` the base fetch verifies against while it streams.
+        Both are optional; the manifest/`.deb` callers pass neither and are
+        unaffected."""
         if type(maximum) is not int or not 0 < maximum <= MAX_APP_PACKAGE_BYTES:
             raise ProvisionError("provision_limit")
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
             raise ProvisionError("provision_deadline")
         request = urllib.request.Request(
-            self.origin + path, headers={"Accept-Encoding": "identity"}
+            self.origin + path,
+            headers={"Accept-Encoding": "identity", **(headers or {})},
         )
         total = 0
         try:
@@ -155,6 +165,8 @@ class AppFetcher:
                     raise AppUnconfigured()
                 if response.status != 200:
                     raise ProvisionError("provision_http")
+                if on_response is not None:
+                    on_response(response.headers)
                 length = response.headers.get("Content-Length")
                 if length is not None and (
                     not re.fullmatch(r"[0-9]{1,12}", length) or not 0 < int(length) <= maximum

@@ -19,6 +19,46 @@ from contracts.equipment import READ_CAP, equipment_device_id
 
 CHUNK = 64 * 1024
 ROOT_UID = 0
+PI_SERIAL_PATH = "/sys/firmware/devicetree/base/serial-number"
+
+
+def read_equipment_raw(name: str) -> bytes | None:
+    """Read up to `READ_CAP` raw bytes of a hardware-identity file, or None if
+    it is absent/unreadable.
+
+    Shared by `LinuxOps.device_id` (every equipment-observation source) and
+    `read_pi_serial` (the netboot base fetch's `X-PhotoWall-Serial` header) so
+    both read the pi serial-number file the one, capped way -- an oversized
+    file is detected by normalization downstream rather than silently
+    truncated (see contracts.equipment.READ_CAP)."""
+    try:
+        with Path(name).open("rb") as stream:
+            return stream.read(READ_CAP)
+    except OSError:
+        return None
+
+
+def read_pi_serial(path: str = PI_SERIAL_PATH) -> str | None:
+    """The Pi's raw hardware serial as a string, trailing NULs/whitespace
+    stripped, for the netboot base fetch's `X-PhotoWall-Serial` header.
+
+    Reads the SAME devicetree file `LinuxOps.device_id` hashes into the pi
+    `device_id` (via `read_equipment_raw`), but returns the serial verbatim:
+    central selects the per-serial base image from the un-hashed serial, while
+    `device_id` needs the hashed form. Returns None off a Pi (no such file) so
+    the caller can proceed unbound rather than fabricate an identity.
+
+    Distinct from `player.service.read_pi_serial`, which returns raw bytes for
+    the device_id hash and adds a `/proc/cpuinfo` fallback: that lives across
+    the import boundary (player must not import appliance, and appliance must
+    not pull player.service's GTK/GStreamer deps), so the read cannot be
+    literally shared; the byte-level normalization it does share lives in
+    contracts.equipment."""
+    raw = read_equipment_raw(path)
+    if raw is None:
+        return None
+    serial = raw.strip(b"\x00\r\n\t ").decode("ascii", "ignore")
+    return serial or None
 
 
 class BootstrapError(ValueError):
@@ -33,7 +73,7 @@ class LinuxOps:
     """Linux mount/device operations, injectable for portable state/fault tests."""
 
     equipment_observations = (
-        ("pi", "/sys/firmware/devicetree/base/serial-number"),
+        ("pi", PI_SERIAL_PATH),
         ("dmi", "/sys/class/dmi/id/product_uuid"),
         ("qemu", "/sys/firmware/qemu_fw_cfg/by_name/opt/photo-wall/equipment-id/raw"),
     )
@@ -66,10 +106,8 @@ class LinuxOps:
         # fallback (player/service.py hardware_boot_context) derives the SAME
         # device_id for the SAME Pi (0008: device_id is the immutable serial).
         for kind, name in self.equipment_observations:
-            try:
-                with Path(name).open("rb") as stream:
-                    raw = stream.read(READ_CAP)
-            except OSError:
+            raw = read_equipment_raw(name)
+            if raw is None:
                 continue
             candidate = equipment_device_id(kind, raw)
             if candidate is not None:
