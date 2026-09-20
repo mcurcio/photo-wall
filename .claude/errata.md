@@ -381,3 +381,16 @@ Append-only. Read with `grep -a`.
 - Both were needed to close content-parity GAP 3 (manual revert) and GAP 4 (token-rejection recovery). The
   legacy same-token websocket-fencing test (test_operator_browser.py:185-226) is architecture-specific (old
   page's operator websocket); the console is REST with per-request bearer auth — NO console equivalent, by design.
+
+## 0012 netboot base auto-mirror
+
+E1 (2026-09-20, bead 1/2): both DB write seams on the `devices` row — netboot serve
+AND base-health — must run their read-modify-write under `SELECT ... FOR UPDATE` (or
+base-health commits as `UPDATE ... WHERE last_served_tag = running_tag`). r8 review found
+Fix-3 was one-sided; a lost update could record `healthy` on a tag the device was just
+rolled off. Folded into 0012 bead 1 page; add a base-health mutation probe symmetric to 18b.
+
+E2 (2026-09-20, bead 2): the PENDING_HEALTH_TIMEOUT poll sweep sets `failed_tag = desired`
+ONLY when `failed_tag` is currently NULL — never overwrites a live stick, and never uses
+`last_served_tag` (which after the r8 split is the known-good tag on a recovery boot).
+Folded into 0012 bead 2 page + the two prose sites (lines ~543, ~723).
