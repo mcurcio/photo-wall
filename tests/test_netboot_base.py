@@ -1,5 +1,11 @@
-"""Unit coverage for central.netboot_base (no DB): the SHA256SUMS digest read
-and the per-serial selection seam."""
+"""Unit coverage for central.netboot_base (no DB): the retained legacy
+single-bundle SHA256SUMS digest read (`base_digest`) and the serial sanitizer.
+
+The per-device selection seam `select_base_for_serial` is now DB-backed (it
+upserts a `devices` row and records the served tag), so its coverage -- including
+the seam-validation guarantee that a raw/unsafe serial keys NO lookup -- lives in
+the Postgres-backed suites (tests/test_netboot_base_http.py and
+tests/test_netboot_base_tracer.py), not here."""
 
 import hashlib
 import os
@@ -10,7 +16,6 @@ from central.netboot_base import (
     BASE_IMAGE_NAME,
     base_digest,
     sanitize_serial,
-    select_base_for_serial,
 )
 
 BODY = b"a base squashfs"
@@ -57,13 +62,6 @@ def test_base_digest_uses_hardened_open_refuses_a_symlinked_sums(tmp_path):
     assert base_digest(root) is None
 
 
-def test_select_base_for_serial_returns_single_default_for_every_serial(tmp_path):
-    # Selection seam: no per-serial binding yet, so any safe serial (incl. None)
-    # maps to the one registered base under base_root.
-    for serial in (None, "10000000abcd1234", "another-serial"):
-        assert select_base_for_serial(tmp_path, serial) == tmp_path / BASE_IMAGE_NAME
-
-
 @pytest.mark.parametrize("safe", ["10000000abcd1234", "a.b:c_d-1", "A" * 128])
 def test_sanitize_serial_accepts_safe_charset(safe):
     assert sanitize_serial(safe) == safe
@@ -81,12 +79,3 @@ def test_sanitize_serial_accepts_safe_charset(safe):
 ])
 def test_sanitize_serial_rejects_unsafe_input(unsafe):
     assert sanitize_serial(unsafe) is None
-
-
-def test_select_base_for_serial_validates_at_the_seam_not_just_the_caller(tmp_path):
-    # An attacker-controlled serial passed straight in (bypassing the route's
-    # own sanitize) must still be rejected HERE before it can key a lookup.
-    # Today the return is the single default either way; the guarantee is that
-    # the seam does not trust raw input.
-    assert sanitize_serial("../../etc/passwd") is None
-    assert select_base_for_serial(tmp_path, "../../etc/passwd") == tmp_path / BASE_IMAGE_NAME

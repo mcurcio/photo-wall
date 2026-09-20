@@ -140,19 +140,32 @@ def test_symlinked_base_file_is_refused(registry, tmp_path):
         assert response.json() == {"error": "base_artifact_unavailable"}
 
 
-def test_unsafe_serial_is_dropped_and_served_best_effort(registry, tmp_path):
-    # A path-separator serial is sanitized to None before the seam; with a live
-    # frontier it still resolves latest-verified and serves, creating no row.
-    sha = _seed_cached(registry, tmp_path, TAG)
+def test_unsafe_serial_validated_at_the_seam_creates_no_row_and_serves_best_effort(
+    registry, tmp_path
+):
+    # Seam-validation guarantee (folded here from the old no-DB unit test): a
+    # raw/attacker-controlled serial reaching select_base_for_serial -- even
+    # bypassing the route's own sanitize -- must NOT key a device lookup or create
+    # a row. It is sanitized to None at the seam; with a live frontier the request
+    # still resolves latest-verified and serves best-effort.
+    sha = _seed_cached(registry, tmp_path, TAG)  # pins the SERIAL device (1 row)
     with registry.db.transaction() as conn:
         conn.execute(
             "INSERT INTO devices(device_id,first_seen,last_seen,known_good_tag,known_good_at) "
             "VALUES('device-frontier',%s,%s,%s,%s)",
             (registry.clock.utc(), registry.clock.utc(), TAG, registry.clock.utc()),
         )
+        before = conn.execute("SELECT count(*) AS n FROM devices").fetchone()["n"]
     with TestClient(_app(registry, tmp_path)) as client:
         response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: "../../etc/passwd"})
         assert response.status_code == 200
         assert response.headers["digest"] == "sha-256=" + base64.b64encode(
             bytes.fromhex(sha)
         ).decode()
+    with registry.db.transaction() as conn:
+        after = conn.execute("SELECT count(*) AS n FROM devices").fetchone()["n"]
+        # No new row keyed on the unsafe serial: the seam did not trust raw input.
+        assert after == before
+        assert conn.execute(
+            "SELECT count(*) AS n FROM devices WHERE serial=%s", ("../../etc/passwd",)
+        ).fetchone()["n"] == 0
