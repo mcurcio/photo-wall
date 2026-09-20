@@ -11,7 +11,7 @@ Verify gate (from repo runbook):
 
 | Bead | Intent | Status | SHA / branch | Notes |
 |---|---|---|---|---|
-| 1 | TRACER: migration 018 + discovery + resolve_base_root + boot assert + select_base_for_serial(conn,serial) + fetch_base + latest-verified/discovered + base-health endpoint + second device follows; compose base volume | open | — | includes compose.yaml + sig-change callers/tests |
+| 1 | TRACER: migration 018 + discovery + resolve_base_root + boot assert + select_base_for_serial(conn,serial) + fetch_base + latest-verified/discovered + base-health endpoint + second device follows; compose base volume | landed | f50738a | security+static-verify clean; fix cycle 1 added FETCH_BASE_TASK consumer; DB gate deferred to CI (E1/E3 applied) |
 | 2 | server-side rollback + sticky recovery | open | — | E1 (both-seam FOR UPDATE), E2 (sweep NULL-guard) |
 | 3 | empty-state bootstrap + boot re-hydrate | open | — | |
 | 4 | GC (gc_base_cache, keep-set, eviction_reason) | open | — | |
