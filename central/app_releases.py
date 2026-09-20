@@ -196,6 +196,58 @@ class AppReleases:
             promoted_tag, current_sha = self._pointers(conn)
             return self._view(row, promoted_tag, current_sha)
 
+    # -- per-device .deb resolution (0012 bead 5, F4) -----------------------
+
+    @staticmethod
+    def deb_manifest_for_tag_in(conn, tag: str) -> dict | None:
+        """The `{version, sha256, size}` of the `.deb` mirrored for `tag`, or None.
+
+        The 0012 per-device (F4) `.deb` resolution: a device's `.deb` rides the
+        exact tag whose base bytes it was served this boot
+        (`devices.last_served_tag`), read back here, so base and `.deb` never
+        diverge even if the frontier moved between the two requests. It consults
+        ONLY the per-release `mirrored_sha256` link and its `app_packages` row --
+        never 0010's global `promoted_tag`/`current_sha256` pointer, which this
+        feature leaves completely untouched. Returns None when the tag is unknown
+        or its `.deb` is not yet mirrored (the caller 503s + enqueues a mirror).
+
+        Exposed as a ``*_in`` primitive (like `AppPackages.count_in`) so the
+        netboot manifest route resolves the served tag, the manifest, and any
+        lazy mirror enqueue under a single transaction. The FK
+        `app_releases.mirrored_sha256 -> app_packages.sha256` (016) guarantees the
+        join finds the row whenever `mirrored_sha256` is set.
+        """
+        row = conn.execute(
+            "SELECT r.mirrored_sha256 AS sha256, p.version AS version, p.size AS size "
+            "FROM app_releases r LEFT JOIN app_packages p ON p.sha256 = r.mirrored_sha256 "
+            "WHERE r.tag=%s",
+            (tag,),
+        ).fetchone()
+        if row is None or row["sha256"] is None or row["version"] is None:
+            return None
+        return {"version": row["version"], "sha256": row["sha256"], "size": row["size"]}
+
+    @staticmethod
+    def deb_mirrorable_in(conn, tag: str) -> bool:
+        """Whether `tag` is deployable but not yet mirrored -- i.e. a lazy `.deb`
+        mirror enqueue on a per-device manifest miss is warranted (0012 bead 5).
+
+        True only for a known, deployable release (`asset_sha256` present,
+        `mirror_state != 'undeployable'`) whose bytes are not yet linked
+        (`mirrored_sha256 IS NULL`). A tag with no `.deb` asset, or one already
+        mirrored, returns False, so the netboot manifest route never enqueues a
+        useless mirror. Reuses the same deployability predicate as `_deployable`.
+        """
+        row = conn.execute(
+            "SELECT asset_sha256, mirror_state, mirrored_sha256 FROM app_releases WHERE tag=%s",
+            (tag,),
+        ).fetchone()
+        return (
+            row is not None
+            and row["mirrored_sha256"] is None
+            and AppReleases._deployable(row)
+        )
+
     # -- promotion + convergence --------------------------------------------
 
     def set_promoted(self, tag: str) -> bool:

@@ -351,6 +351,34 @@ def _decision(conn, served: str | None, *, device_id: str | None, now: float) ->
     return BaseServeDecision(served, True, row["squashfs_sha256"])
 
 
+# -- per-device .deb carried tag (bead 5) ------------------------------------
+
+
+def served_tag_for_serial(conn, serial: str | None) -> str | None:
+    """The tag whose base bytes this device was ACTUALLY served this boot, or None.
+
+    Read-only lookup of `devices.last_served_tag` for the serial's device row
+    (F4): the per-device `.deb` rides the exact tag its base was served this
+    boot -- never a fresh `latest_verified`/`latest_discovered` re-resolve -- so
+    base and `.deb` cannot diverge even if the frontier moved between the base
+    serve and the `.deb` fetch. On a recovery boot `last_served_tag` is the
+    known-good tag, so the recovery boot's base and `.deb` agree on it too.
+
+    Returns None when the serial is absent/unsafe, no device row exists, or the
+    device has never been served a base on a 200 (`last_served_tag IS NULL`) --
+    there is no carried tag, so there is no per-device `.deb` answer. The caller
+    fails closed (503); it must NOT fall back to 0010's global `current()`, which
+    could name a different tag and reintroduce the divergence this closes.
+    """
+    device_id = device_id_for_serial(sanitize_serial(serial))
+    if device_id is None:
+        return None
+    row = conn.execute(
+        "SELECT last_served_tag FROM devices WHERE device_id=%s", (device_id,)
+    ).fetchone()
+    return row["last_served_tag"] if row is not None else None
+
+
 # -- base-health seam --------------------------------------------------------
 
 

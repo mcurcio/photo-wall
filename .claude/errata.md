@@ -445,3 +445,20 @@ E5 (2026-09-20, bead 7): GC (gc_base_cache) is wired to the poll tail only in be
 The doc also calls for GC after pin/health changes; that trigger belongs to bead 7's
 attachment surface (and the base-health path). Bead 7 MUST invoke gc_base_cache after a
 pin set/clear so freed bytes are reclaimed promptly rather than at the next poll.
+
+E6 (2026-09-20, bead 5): the doc mandates the per-device `.deb` be resolved on the
+per-device serve path off `last_served_tag`, ADDITIVE, with 0010's global
+`GET /v1/app/manifest` "not modified and not repurposed" -- but never names the new
+route's URL string. Bead 5 implements it as a NEW unauthenticated route
+`GET /v1/netboot/manifest` (serial-keyed, symmetric to `GET /v1/netboot/base`), NOT a
+serial-aware branch on `/v1/app/manifest` (which would repurpose the untouched 0010
+route). BINDING for bead 6: wire the appliance's `fetch_manifest` to
+`GET /v1/netboot/manifest` (sending `X-PhotoWall-Serial`), not to `/v1/app/manifest`;
+the `.deb` bytes fetch stays `GET /v1/app/package/{sha}.deb` (sha-keyed, unchanged).
+Miss behavior (chosen among the doc's "503 + enqueue, or a documented gap"): a
+never-served device (`last_served_tag IS NULL`) or unknown/absent serial => 503
+`app_manifest_unresolved`, NO fallback to the global `current()` (a fallback would
+reintroduce base/`.deb` divergence, F4). A carried tag whose `.deb` is deployable but
+not yet mirrored => 503 `app_manifest_uncached` + lazy `enqueue_mirror_in` (coalesced
+by the tag lock), symmetric to the base serve's lazy backstop. No code divergence from
+beads 1-4; no change to promoted_tag/current_sha256/reconcile/migration 016.

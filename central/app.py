@@ -39,6 +39,7 @@ from central.netboot_base import (
     record_base_health,
     sanitize_serial,
     select_base_for_serial,
+    served_tag_for_serial,
 )
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
@@ -508,6 +509,40 @@ def create_app(
                 + base64.b64encode(bytes.fromhex(decision.squashfs_sha256)).decode(),
             },
         )
+
+    @app.get("/v1/netboot/manifest")
+    def netboot_manifest(request: Request):
+        # Per-device `.deb` manifest (0012 bead 5, F4): additive, serial-keyed,
+        # symmetric to /v1/netboot/base and UNAUTHENTICATED (trusted LAN, 0009 --
+        # a Pi still holds no credential when its booted OS fetches its `.deb`).
+        # Resolves the `.deb` from the tag whose base bytes this device was
+        # ACTUALLY served this boot (`devices.last_served_tag`), NOT a fresh
+        # re-resolve -- so base and `.deb` ride one boot's tag even if
+        # latest-verified moved between the two requests. On a recovery boot that
+        # recorded tag is the known-good tag, so base + `.deb` agree there too.
+        #
+        # This is ADDITIVE: 0010's global GET /v1/app/manifest route and its
+        # promoted_tag/current_sha256/reconcile machinery (migration 016) are
+        # neither read nor written here; the content-addressed
+        # GET /v1/app/package/{sha}.deb bytes route stays sha-keyed. Bead 6 wires
+        # the appliance's manifest fetch (serial header) to this route.
+        serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
+        with db.transaction() as conn:
+            served_tag = served_tag_for_serial(conn, serial)
+            if served_tag is None:
+                # No device row / never served a base on a 200 this boot: there
+                # is no carried tag, so there is no per-device answer. Fail closed
+                # rather than fall back to a global pointer that could diverge.
+                raise AppPackageError("app_manifest_unresolved", 503)
+            manifest = AppReleases.deb_manifest_for_tag_in(conn, served_tag)
+            if manifest is None:
+                # The carried tag's `.deb` is not yet mirrored: enqueue the mirror
+                # as a lazy backstop (coalesced by the tag lock) when the tag is
+                # deployable, then 503 -- the Pi retries on its next boot cycle.
+                if release_queue is not None and AppReleases.deb_mirrorable_in(conn, served_tag):
+                    release_queue.enqueue_mirror_in(conn, served_tag)
+                raise AppPackageError("app_manifest_uncached", 503)
+        return manifest
 
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):

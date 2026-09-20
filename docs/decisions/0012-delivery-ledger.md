@@ -13,9 +13,9 @@ Verify gate (from repo runbook):
 |---|---|---|---|---|
 | 1 | TRACER: migration 018 + discovery + resolve_base_root + boot assert + select_base_for_serial(conn,serial) + fetch_base + latest-verified/discovered + base-health endpoint + second device follows; compose base volume | **CI-GREEN** | f50738a, ci-fix 62f39b0 | portable-and-postgres + linux-media + software-e2e all pass; E1/E3 applied |
 | 2 | server-side rollback + sticky recovery | **CI-GREEN** | 78a3256 (rebuilt 8da167a) | MVP checks + software-e2e pass; review caught sweep fencing a never-served tag (fixed); E2b |
-| 3 | empty-state bootstrap + boot re-hydrate | landing | — | fail-loud assertion is fail-LOGGED not crash (E4; bead 9 surfaces it) |
-| 4 | GC (gc_base_cache, keep-set, eviction_reason) | landing | — | poll-tail only; bead 7 must add post-attachment GC trigger |
-| 5 | per-device .deb carrying served tag (F4) | open | — | 0010 global path untouched |
+| 3 | empty-state bootstrap + boot re-hydrate | **CI-GREEN** | ede8109 (test-fix 4680f4f) | fail-loud assertion is fail-LOGGED not crash (E4; bead 9 surfaces it) |
+| 4 | GC (gc_base_cache, keep-set, eviction_reason) | **CI-GREEN** | ede8109 (test-fix 4680f4f) | poll-tail only; bead 7 must add post-attachment GC trigger (E5) |
+| 5 | per-device .deb carrying served tag (F4) | landing | — | new GET /v1/netboot/manifest (E6); review clean (F4 strict, 0010 untouched); bead 6 wires appliance to it |
 | 6 | appliance wiring (serial on .deb + post base-health) | open | — | fires netboot-e2e.yml |
 | 7 | attachment surface (set/clear attached_tag) | open | — | |
 | 8 | genuine fresh-install e2e | open | — | MockTransport gate CI-runnable; real-GitHub needs a secret |
