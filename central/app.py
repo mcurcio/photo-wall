@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
+import re
 import secrets
 import stat
 from contextlib import asynccontextmanager, suppress
@@ -32,6 +34,7 @@ from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigur
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
+from central.netboot_base import SERIAL_HEADER, base_digest, select_base_for_serial
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
@@ -46,7 +49,16 @@ from contracts.models import (
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
+LOG = logging.getLogger("central.app")
+
 SCHEDULER_MAX_AGE = 10.0
+# Server-side sanity bound on the netboot base squashfs, matching the client's
+# fetch cap (appliance/netboot_init.py -> contracts.release.MAX_ROOTFS_BYTES):
+# a base larger than the initrd will accept can never be booted anyway.
+MAX_NETBOOT_BASE_BYTES = 1024**3
+# A serial arriving on the netboot base fetch is client-supplied; keep the
+# logged form bounded and to a safe charset so it cannot inject console noise.
+_SERIAL_LOG = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
 
 
 class Challenge(Model):
@@ -116,6 +128,7 @@ def create_app(
     media_queue: MediaTaskQueue | None = None,
     release_queue: AppReleaseTaskQueue | None = None,
     app_root: Path | None = None,
+    base_root: Path | None = None,
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
@@ -146,6 +159,12 @@ def create_app(
     )
     app_root = app_root or (
         Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
+    )
+    # Where the netboot base squashfs + its build-time SHA256SUMS are staged out
+    # of band (same stage-by-reference division of labor as PHOTO_WALL_APP_ROOT);
+    # unset -> GET /v1/netboot/base answers 503, never crashes create_app.
+    base_root = base_root or (
+        Path(os.environ["PHOTO_WALL_BASE_ROOT"]) if "PHOTO_WALL_BASE_ROOT" in os.environ else None
     )
     app_packages = AppPackages(db, clock)
     # GitHub release sourcing (0010) is the same OPT-IN gate the worker uses
@@ -430,6 +449,53 @@ def create_app(
                 "Cache-Control": "public, immutable",
                 "Content-Length": str(package["size"]),
                 "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode()}",
+            },
+        )
+
+    @app.get("/v1/netboot/base")
+    def netboot_base(request: Request):
+        # Player-facing, UNAUTHENTICATED (trusted LAN, 0009 -- same posture as
+        # /v1/app/manifest and the .deb route): a Pi has no credential before it
+        # boots. Modelled line-for-line on the .deb route above: O_NOFOLLOW open,
+        # fstat regular-file + size check, bounded 1 MiB streaming, and a
+        # base64 `Digest` header. The Pi self-identifies by serial; central picks
+        # the image (single default today -- select_base_for_serial is the seam).
+        raw_serial = request.headers.get(SERIAL_HEADER)
+        match = _SERIAL_LOG.fullmatch(raw_serial) if raw_serial is not None else None
+        LOG.info("netboot base fetch: serial=%s", match.group(0) if match else "<absent-or-invalid>")
+        if base_root is None:
+            raise AppPackageError("base_artifact_unavailable", 503)
+        digest = base_digest(base_root)
+        if digest is None:
+            # No stored digest -> we cannot advertise the corruption gate the Pi
+            # requires (it fails closed on a missing Digest); refuse to serve.
+            raise AppPackageError("base_artifact_unavailable", 503)
+        path = select_base_for_serial(base_root, raw_serial)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except (FileNotFoundError, OSError):
+            raise AppPackageError("base_artifact_unavailable", 503) from None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= MAX_NETBOOT_BASE_BYTES:
+                raise AppPackageError("base_artifact_invalid", 503)
+        except Exception:
+            os.close(descriptor)
+            raise
+
+        def content():
+            with os.fdopen(descriptor, "rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    yield chunk
+
+        return StreamingResponse(
+            content(),
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "public, immutable",
+                "Content-Length": str(metadata.st_size),
+                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(digest)).decode()}",
             },
         )
 
