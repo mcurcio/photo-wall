@@ -43,6 +43,7 @@ from appliance.provision import (
     fetch_package,
 )
 from central.app import create_app
+from central.app_release_queue import QueueReceipt
 from central.app_releases import AppReleases
 from central.netboot_base import base_file_path, device_id_for_serial
 from scripts.test_netboot_e2e import _FixedDiscovery, _NoSleep  # reuse tracer helpers
@@ -63,12 +64,13 @@ class _FakeQueue:
 
     def enqueue_base_fetch_in(self, conn, tag):
         self.base_fetches.append(tag)
+        return QueueReceipt(coalesced=False)
 
     def enqueue_mirror_in(self, conn, tag):  # pragma: no cover
-        pass
+        return QueueReceipt(coalesced=False)
 
     def enqueue_poll_in(self, conn):  # pragma: no cover
-        pass
+        return QueueReceipt(coalesced=False)
 
 
 class _Log:

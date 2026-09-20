@@ -26,6 +26,7 @@ from test_github_releases import Server  # offline GitHub double
 
 from central.app import create_app
 from central.app_release_boot import boot_autopull
+from central.app_release_queue import QueueReceipt
 from central.app_releases import AppReleases
 from central.github_releases import GithubReleaseSource
 from central.installation_repository import PostgresInstallationRepository
@@ -43,20 +44,24 @@ SERIAL = "10000000abcd0030"
 class _RecordingQueue:
     """Records every enqueue the boot path makes -- base fetches (bead 3) and the
     unchanged 0010 .deb mirror -- with no worker, so a test can assert WHAT boot
-    scheduled."""
+    scheduled. Every method returns a `QueueReceipt`, faithful to the real
+    `AppReleaseTaskQueue` / `ProcrastinateAppReleaseQueue` contract (which the
+    0010 mirror-queued path reads `.coalesced` off) -- never None."""
 
     def __init__(self) -> None:
         self.base_fetches: list[str] = []
         self.mirrors: list[str] = []
 
-    def enqueue_base_fetch_in(self, conn, tag: str):
+    def enqueue_base_fetch_in(self, conn, tag: str) -> QueueReceipt:
         self.base_fetches.append(tag)
+        return QueueReceipt(coalesced=False)
 
-    def enqueue_mirror_in(self, conn, tag: str):
+    def enqueue_mirror_in(self, conn, tag: str) -> QueueReceipt:
         self.mirrors.append(tag)
+        return QueueReceipt(coalesced=False)
 
-    def enqueue_poll_in(self, conn):  # pragma: no cover - unused by boot
-        pass
+    def enqueue_poll_in(self, conn) -> QueueReceipt:  # unused by boot; protocol completeness
+        return QueueReceipt(coalesced=False)
 
 
 def _add(tar, name, data):

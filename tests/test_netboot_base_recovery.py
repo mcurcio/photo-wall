@@ -24,6 +24,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from central.app import create_app
+from central.app_release_queue import QueueReceipt
 from central.app_releases import AppReleases
 from central.github_releases import GithubReleaseSource
 from central.netboot_base import (
@@ -47,12 +48,13 @@ class _FakeQueue:
 
     def enqueue_base_fetch_in(self, conn, tag):
         self.base_fetches.append(tag)
+        return QueueReceipt(coalesced=False)
 
     def enqueue_mirror_in(self, conn, tag):  # pragma: no cover - unused here
-        pass
+        return QueueReceipt(coalesced=False)
 
     def enqueue_poll_in(self, conn):  # pragma: no cover - unused here
-        pass
+        return QueueReceipt(coalesced=False)
 
 
 def _add(tar, name, data):
