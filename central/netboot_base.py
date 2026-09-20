@@ -32,8 +32,14 @@ netboot seam: `select_base_for_serial` detects a 200-served target that never
 reported base-healthy, fences it in `failed_tag`, and serves the device's
 known-good instead -- sticking there until the desired target changes. The
 poll-tail `sweep_failed_boots` fails a device left `pending` past
-`PENDING_HEALTH_TIMEOUT` so a powered-off device does not hold the frontier. GC
-and boot re-hydrate are LATER beads (3/4).
+`PENDING_HEALTH_TIMEOUT` so a powered-off device does not hold the frontier.
+
+Boot re-hydrate + stray-temp sweep (bead 3) and need-driven GC (bead 4) close
+the cache lifecycle: `boot_rehydrate_targets`/`empty_state_bootstrap_tag`/
+`sweep_stray_temps` self-heal the on-disk cache at worker boot, and
+`gc_base_cache` evicts bytes whose tag has left the keep-set (latest-verified U
+non-retired pins U non-retired known-good U in-flight `caching`). Both key off
+the release TAG and the uniform `retired_at IS NULL` device filter.
 """
 
 from __future__ import annotations
@@ -75,6 +81,16 @@ SERIAL_HEADER = "X-PhotoWall-Serial"
 DEVICE_KIND = "pi"
 _MAX_SUMS_BYTES = 4 * 1024 * 1024
 MAX_SQUASHFS_BYTES = MAX_ROOTFS_BYTES  # 1 GiB; the same bound the initrd fetch enforces
+# The one naming convention for a fetch's in-progress temp files (both the
+# streamed tarball and the extracted-squashfs mkstemp). The final immutable file
+# is `base-<tag>.squashfs` (no leading dot), so it never matches this prefix --
+# which is exactly what lets the boot-time stray-temp sweep (bead 3) delete an
+# orphaned temp from a crash-before-rename without ever touching a served file.
+_TEMP_PREFIX = ".base-"
+_TEMP_SUFFIX = ".tmp"
+# Recorded on a `base_cache` row when GC (bead 4) unlinks its bytes: the tag left
+# the keep-set. Observability only; the row (and its integrity sha) survive.
+_GC_EVICTION_REASON = "not_in_keep_set"
 # The only shape a client serial may take before it can select an image or be
 # logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
 # future per-serial scheme has room, and reject everything else (control chars,
@@ -459,7 +475,7 @@ def _extract_squashfs(tar_path: Path, base_root: Path) -> tuple[str, str, int]:
         if expected is None:
             raise BaseFetchError("base_sums_no_squashfs")
 
-        descriptor, temp_name = tempfile.mkstemp(dir=base_root, prefix=".base-", suffix=".tmp")
+        descriptor, temp_name = tempfile.mkstemp(dir=base_root, prefix=_TEMP_PREFIX, suffix=_TEMP_SUFFIX)
         digest = hashlib.sha256()
         size = 0
         try:
@@ -517,7 +533,7 @@ async def fetch_base(source, db, clock, tag: str, base_root: Path) -> str:
         raise BaseFetchError("base_facts_missing")
 
     _set_cache_state(db, clock, tag, "caching")
-    tarball = base_root / f".base-{tag}.tar.{secrets.token_hex(8)}.tmp"
+    tarball = base_root / f"{_TEMP_PREFIX}{tag}.tar.{secrets.token_hex(8)}{_TEMP_SUFFIX}"
     squashfs_temp: str | None = None
     try:
         await source.download(
@@ -541,6 +557,141 @@ async def fetch_base(source, db, clock, tag: str, base_root: Path) -> str:
         tarball.unlink(missing_ok=True)
         if squashfs_temp is not None:
             Path(squashfs_temp).unlink(missing_ok=True)
+
+
+# -- keep-set (shared by boot re-hydrate + GC) -------------------------------
+
+
+def _nonretired_device_tags(conn) -> set[str]:
+    """Every tag any NON-RETIRED device pins or ran known-good.
+
+    The uniform device terms of BOTH the GC keep-set (bead 4) and the boot
+    re-hydrate target set (bead 3): a retired device contributes nothing to
+    either (it never boots again), so its versions become evictable and stop
+    holding the frontier -- the single `retired_at IS NULL` filter the design
+    requires on every device term. NULL columns are ignored."""
+    rows = conn.execute(
+        "SELECT attached_tag, known_good_tag FROM devices WHERE retired_at IS NULL"
+    ).fetchall()
+    tags: set[str] = set()
+    for row in rows:
+        for tag in (row["attached_tag"], row["known_good_tag"]):
+            if tag is not None:
+                tags.add(tag)
+    return tags
+
+
+# -- boot re-hydrate + stray-temp sweep (bead 3) -----------------------------
+
+
+def empty_state_bootstrap_tag(conn) -> str | None:
+    """The latest-discovered tag to fetch on an EMPTY cluster, or None.
+
+    Empty state = no non-retired device has ever reported base-healthy (the live
+    frontier `latest_verified` is empty). Only then does a fresh cluster fetch
+    latest-discovered so it can serve an (unverified) bootstrap image -- the one
+    unverified serve the design ever makes. Once any device is healthy the
+    frontier is non-empty and this returns None (bootstrap never overrides a
+    verified fleet)."""
+    if latest_verified(conn) is not None:
+        return None
+    return latest_discovered(conn)
+
+
+def boot_rehydrate_targets(conn, base_root: Path) -> list[str]:
+    """Tags to re-enqueue at boot: a `cached` cache row whose file is ABSENT.
+
+    The persistent-volume-wiped / cold-start self-heal (the fix for the root
+    503): the cache row says the bytes should exist but they do not, so re-fetch
+    them before the common serve path 503s. Restricted to the NEEDED set --
+    latest-verified U every non-retired device's pin/known-good (its resolved
+    targets and rollback target), else the empty-state bootstrap tag -- so a
+    no-longer-needed stale row is left for GC rather than re-fetched. The
+    absent-file check is load-bearing: a present file is NOT re-enqueued (an
+    idempotent, coalesced fetch is cheap, but a needless one is still avoided).
+    """
+    needed = _nonretired_device_tags(conn)
+    verified = latest_verified(conn)
+    if verified is not None:
+        needed.add(verified)
+    else:
+        bootstrap = latest_discovered(conn)
+        if bootstrap is not None:
+            needed.add(bootstrap)
+    missing: list[str] = []
+    for tag in sorted(needed):
+        row = _cache_row(conn, tag)
+        if (
+            row is not None
+            and row["state"] == "cached"
+            and not base_file_path(base_root, tag).exists()
+        ):
+            missing.append(tag)
+    return missing
+
+
+def sweep_stray_temps(base_root: Path) -> int:
+    """Delete orphaned fetch temps from BASE_ROOT at boot; return the count.
+
+    A fetch that crashed before its atomic rename leaves a uniquely-named
+    `_TEMP_PREFIX...(_TEMP_SUFFIX)` temp (the streamed tarball or the
+    extracted-squashfs mkstemp). The final served file is `base-<tag>.squashfs`
+    (no leading dot), which by construction never matches this prefix, so the
+    sweep can never remove a live served file -- only crash orphans."""
+    removed = 0
+    for entry in Path(base_root).iterdir():
+        if (
+            entry.name.startswith(_TEMP_PREFIX)
+            and entry.name.endswith(_TEMP_SUFFIX)
+            and entry.is_file()
+        ):
+            entry.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+# -- garbage collection (bead 4) ---------------------------------------------
+
+
+def gc_base_cache(conn, base_root: Path, *, clock) -> list[str]:
+    """Evict cache bytes whose tag has left the keep-set; return evicted tags.
+
+    keep = {latest-verified} U {non-retired pins} U {non-retired known-good} U
+    {rows currently `caching`}. For each `cached` row NOT in keep: unlink
+    `base-<tag>.squashfs` and set `state='evicted'` with an `eviction_reason`
+    (the row and its integrity sha survive -- a later need re-fetches). An
+    in-use tag is NEVER evicted. Safety notes carried from the design:
+      * uniform `retired_at IS NULL` on every device term, so a decommissioned
+        device pins no bytes forever;
+      * an in-flight `caching` tag is kept so GC never races the fetch landing
+        its bytes;
+      * open-fd-safe: a serve already streaming an unlinked file completes;
+      * decision + eventual under READ COMMITTED -- a tag needed AFTER the
+        keep-set read may still be unlinked, then re-fetched on next need (a
+        transient 503 + reboot-retry, never a wrong or torn serve).
+    """
+    keep = _nonretired_device_tags(conn)
+    verified = latest_verified(conn)
+    if verified is not None:
+        keep.add(verified)
+    keep.update(
+        row["tag"]
+        for row in conn.execute("SELECT tag FROM base_cache WHERE state='caching'").fetchall()
+    )
+    cached = conn.execute("SELECT tag FROM base_cache WHERE state='cached'").fetchall()
+    evicted: list[str] = []
+    for row in cached:
+        tag = row["tag"]
+        if tag in keep:
+            continue
+        base_file_path(base_root, tag).unlink(missing_ok=True)
+        conn.execute(
+            "UPDATE base_cache SET state='evicted', eviction_reason=%s, updated_at=%s "
+            "WHERE tag=%s",
+            (_GC_EVICTION_REASON, clock.utc(), tag),
+        )
+        evicted.append(tag)
+    return evicted
 
 
 # -- legacy single-base helpers (retained; superseded by per-version serving) --

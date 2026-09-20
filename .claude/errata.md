@@ -431,3 +431,17 @@ Also (minor, no divergence): the `base_cache` row is created by `fetch_base` at 
 lifecycle diagram (`catalog_known --needed--> caching`) and the page's own parenthetical
 "(caching/absent until first fetched)". Discovery writes only the `app_releases` base
 facts.
+
+E4 (2026-09-20, bead 3 / residual for bead 9): the BASE_ROOT boot-time writability
+assertion is wired in _boot_base (central/app_release_boot.py) but is FAIL-LOGGED, not
+fail-crash — boot_autopull runs as a fire-and-forget task whose exceptions are
+swallowed+logged. Deliberate: a hard crash would couple a base-volume misconfig to
+killing 0010's .deb mirroring in the same worker. The design's "fail loud" guarantee is
+satisfied by (a) the ERROR log at boot and (b) bead 9 MUST surface the base-root
+assertion failure in operator-visible status/observability, not only logs. If bead 9
+does not surface it, reopen this as a hard-fail decision.
+
+E5 (2026-09-20, bead 7): GC (gc_base_cache) is wired to the poll tail only in bead 4.
+The doc also calls for GC after pin/health changes; that trigger belongs to bead 7's
+attachment surface (and the base-health path). Bead 7 MUST invoke gc_base_cache after a
+pin set/clear so freed bytes are reclaimed promptly rather than at the next poll.

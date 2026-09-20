@@ -167,12 +167,33 @@ class AppReleaseService:
         # latest-verified frontier and a cache entry. Pure local DB state, like
         # reconcile -- no network, always runs.
         result["base_sweep"] = await asyncio.to_thread(self._sweep_failed_boots)
+        # Poll-tail base GC (0012 bead 4): evict cache bytes whose tag has left the
+        # keep-set (latest-verified U non-retired pins U non-retired known-good U
+        # in-flight `caching`). Off-loop under one txn, exactly like the sweep and
+        # reconcile -- no network, always runs. Skipped when BASE_ROOT is
+        # unconfigured (base serving off), so a non-base worker is unchanged. The
+        # pin/health-change triggers land with their own beads (attachment surface);
+        # the poll tail is the always-on backstop, mirroring `sweep_failed_boots`.
+        result["base_gc"] = await asyncio.to_thread(self._gc_base_cache)
         return result
 
     def _sweep_failed_boots(self) -> int:
         """Fail stale-`pending` base boots (bead 2), off-loop under one txn."""
         with self.db.transaction() as conn:
             return netboot_base.sweep_failed_boots(conn, clock=self.releases.clock)
+
+    def _gc_base_cache(self) -> int:
+        """Evict cache bytes no non-retired device needs (bead 4), off-loop.
+
+        Reads the SAME base dir the serve route resolves (`resolve_base_root`) so
+        the eviction unlinks the very files the serve side would open. A None base
+        root (PHOTO_WALL_BASE_ROOT unset) means base serving is off -- nothing to
+        collect -- so GC is a no-op rather than a fault."""
+        base_root = netboot_base.resolve_base_root()
+        if base_root is None:
+            return 0
+        with self.db.transaction() as conn:
+            return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
 
     def _apply(self, record: DiscoveredRelease) -> None:
         """Feed one discovered release into the store (blocking; runs off-loop)."""

@@ -47,7 +47,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
+from central import netboot_base
 from central.app_packages import AppPackages
 from central.app_release_queue import AppReleaseTaskQueue
 from central.app_release_service import AppReleaseService
@@ -75,16 +77,40 @@ async def boot_autopull(
     packages: AppPackages,
     installations: PostgresInstallationRepository,
     queue: AppReleaseTaskQueue,
+    *,
+    base_root: Path | None = None,
 ) -> dict:
-    """Auto-pull the latest deployable release at boot, per the OR predicate.
+    """Auto-pull the latest deployable ``.deb`` at boot AND self-heal the base cache.
 
-    Reads ``cached`` and ``bound`` in one round trip, suppresses only a
-    fully-configured fleet, and otherwise polls GitHub and either advances the
-    served pointer (bytes present) or defers a tag-serialized mirror. Never
-    raises for the ordinary offline / empty-DB paths -- ``poll`` backs off
-    cleanly and an absent release returns a reason -- so the caller can treat any
-    escaping exception as a bug.
+    The ``.deb``/``promoted_tag`` path (0010) is UNCHANGED: it reads ``cached``
+    and ``bound`` in one round trip, suppresses only a fully-configured fleet,
+    and otherwise polls GitHub and either advances the served pointer (bytes
+    present) or defers a tag-serialized mirror. Its return dict is untouched.
+
+    0012 bead 3 ADDS a base role, gated on ``base_root`` (``None`` -> the base
+    steps are skipped and the return is byte-for-byte the 0010 outcome, so a
+    worker with no ``PHOTO_WALL_BASE_ROOT`` behaves exactly as before). When a
+    base root is given, ``_boot_base`` runs on EVERY boot -- independent of the
+    ``.deb`` suppress/pull decision -- to fetch an empty cluster's bootstrap
+    image, re-hydrate any cached-but-absent bytes, and sweep crash-orphaned
+    temps; its outcome is reported under a ``base`` key alongside the unchanged
+    ``.deb`` outcome. Never raises for the ordinary offline / empty-DB ``.deb``
+    paths; a mis-configured (unwritable) base root DOES raise, which is the
+    intended fail-loud on the base volume.
     """
+    result = await _autopull_deb(service, packages, installations, queue)
+    if base_root is not None:
+        result["base"] = await _boot_base(service, queue, base_root)
+    return result
+
+
+async def _autopull_deb(
+    service: AppReleaseService,
+    packages: AppPackages,
+    installations: PostgresInstallationRepository,
+    queue: AppReleaseTaskQueue,
+) -> dict:
+    """The unchanged 0010 ``.deb``/``promoted_tag`` auto-pull (see boot_autopull)."""
 
     def _snapshot() -> tuple[int, int]:
         # Both counts are read in ONE transaction (one round trip), but
@@ -133,3 +159,38 @@ async def boot_autopull(
         "tag": tag,
         "coalesced": receipt.coalesced,
     }
+
+
+async def _boot_base(
+    service: AppReleaseService, queue: AppReleaseTaskQueue, base_root: Path
+) -> dict:
+    """Empty-state bootstrap + boot re-hydrate + stray-temp sweep (0012 bead 3).
+
+    Runs on every boot when BASE_ROOT is configured. Steps, all idempotent and
+    off-loop:
+      1. Assert BASE_ROOT is writable -- the design's fail-loud boot assertion
+         (raises ``BaseRootError`` on a missing/unwritable volume rather than a
+         silent later 503).
+      2. Sweep crash-orphaned fetch temps (never a served ``base-<tag>.squashfs``).
+      3. Enqueue a coalesced ``fetch_base`` for the empty-state bootstrap tag (a
+         fresh cluster's latest-discovered) and for every re-hydrate target (a
+         cached-but-absent needed tag). Each defers through the SAME
+         ``base:<tag>`` queueing lock the serve-miss path uses, so a duplicate
+         need folds into one in-flight job.
+    """
+    path = await asyncio.to_thread(netboot_base.assert_base_root_writable, base_root)
+    stray = await asyncio.to_thread(netboot_base.sweep_stray_temps, path)
+
+    def _plan() -> tuple[str | None, list[str]]:
+        with service.db.transaction() as conn:
+            bootstrap = netboot_base.empty_state_bootstrap_tag(conn)
+            rehydrate = netboot_base.boot_rehydrate_targets(conn, path)
+            # dict.fromkeys de-dupes (bootstrap may also be a re-hydrate target)
+            # while preserving a deterministic order for the log/return.
+            enqueued = list(dict.fromkeys([*( [bootstrap] if bootstrap else []), *rehydrate]))
+            for tag in enqueued:
+                queue.enqueue_base_fetch_in(conn, tag)
+            return bootstrap, rehydrate
+
+    bootstrap, rehydrate = await asyncio.to_thread(_plan)
+    return {"bootstrap": bootstrap, "rehydrated": rehydrate, "stray_temps": stray}
