@@ -35,13 +35,15 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import (
     SERIAL_HEADER,
-    base_digest,
+    base_file_path,
+    record_base_health,
     sanitize_serial,
     select_base_for_serial,
 )
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
+    BaseHealth,
     Calibration,
     Digest,
     Identifier,
@@ -181,9 +183,13 @@ def create_app(
     # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
     # and injected above: promote defers a tag-keyed mirror, refresh defers a
     # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker.
+    # The same enqueue port also defers the 0012 per-version base fetch, so it is
+    # built when EITHER the `.deb` mirror (PHOTO_WALL_APP_ROOT) or base serving
+    # (PHOTO_WALL_BASE_ROOT) is configured. The `.deb` operator routes still gate
+    # independently on `app_root`, so a base-only deployment does not expose them.
     release_queue = release_queue or (
         ProcrastinateAppReleaseQueue(db.dsn)
-        if isinstance(db, Database) and app_root is not None
+        if isinstance(db, Database) and (app_root is not None or base_root is not None)
         else None
     )
     media_gateway = (
@@ -452,23 +458,36 @@ def create_app(
     def netboot_base(request: Request):
         # Player-facing, UNAUTHENTICATED (trusted LAN, 0009 -- same posture as
         # /v1/app/manifest and the .deb route): a Pi has no credential before it
-        # boots. Modelled line-for-line on the .deb route above: O_NOFOLLOW open,
-        # fstat regular-file + size check, bounded 1 MiB streaming, and a
-        # base64 `Digest` header. The Pi self-identifies by serial; central picks
-        # the image (single default today -- select_base_for_serial is the seam).
-        # Sanitize BEFORE anything consumes it: the same validated value feeds
-        # the log AND the selection seam, so no route can pass raw client input
-        # to a future per-serial lookup (select_base_for_serial re-validates too).
+        # boots. The Pi self-identifies by serial; Central maps it to a canonical
+        # `devices` row and resolves ONE tag by per-device precedence (pin, else
+        # latest-verified, else -- empty state only -- latest-discovered), then
+        # serves that version's immutable base-<tag>.squashfs. Sanitize BEFORE
+        # anything consumes the serial: the validated value feeds both the log and
+        # the selection seam. The read-modify-write (device upsert + a 200-only
+        # last-served record) runs inside the transaction; a miss enqueues a
+        # coalesced fetch and 503s, writing NO last-served record so a self-healing
+        # retry is never mistaken for a failed boot.
         serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
         LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
         if base_root is None:
             raise AppPackageError("base_artifact_unavailable", 503)
-        digest = base_digest(base_root)
-        if digest is None:
-            # No stored digest -> we cannot advertise the corruption gate the Pi
-            # requires (it fails closed on a missing Digest); refuse to serve.
+        with db.transaction() as conn:
+            decision = select_base_for_serial(conn, serial, clock=clock)
+            if decision.fetch_tag is not None and release_queue is not None:
+                # Lazy backstop: coalesced by the base:<tag> queueing lock so a
+                # burst of retrying Pis collapses to one in-flight fetch.
+                release_queue.enqueue_base_fetch_in(conn, decision.fetch_tag)
+        if decision.served_tag is None:
+            # Nothing resolvable yet (no frontier, no discoverable base).
             raise AppPackageError("base_artifact_unavailable", 503)
-        path = select_base_for_serial(base_root, serial)
+        if not decision.cached:
+            # Bytes not yet cached: fail closed, the Pi reboots and retries.
+            raise AppPackageError("base_artifact_uncached", 503)
+        # O_NOFOLLOW open, fstat regular-file + size bound, bounded 1 MiB
+        # streaming, and a base64 `Digest` header -- the same discipline as the
+        # .deb route. The Digest is the version's recorded squashfs sha, so bytes
+        # and Digest agree by construction.
+        path = base_file_path(base_root, decision.served_tag)
         try:
             descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
         except HardenedOpenError as error:
@@ -485,7 +504,8 @@ def create_app(
             headers={
                 "Cache-Control": "public, immutable",
                 "Content-Length": str(metadata.st_size),
-                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(digest)).decode()}",
+                "Digest": "sha-256="
+                + base64.b64encode(bytes.fromhex(decision.squashfs_sha256)).decode(),
             },
         )
 
@@ -525,6 +545,29 @@ def create_app(
         if request.authority_epoch != identity["authority_epoch"]:
             raise RegistryError("stale_authority", 403)
         return {"accepted": coordinator.readiness(identity["id"], request)}
+
+    @app.post("/v1/player/base-health")
+    def base_health(request: BaseHealth, identity: dict = Depends(player)):
+        # Authenticated by the enrolled-device token (the `player` dependency),
+        # but -- unlike readiness -- requires NO live plan offer (0012 r7), so an
+        # enrolled-but-unbound, base-booted device can move the latest-verified
+        # frontier. Join player_id -> players.device_id -> devices, then advance
+        # known-good only for a genuinely healthy, monotonic report whose
+        # running_tag equals the tag Central recorded as last-served (E1: the
+        # write is a single conditional UPDATE under FOR UPDATE, so a concurrent
+        # recovery serve that moved the served tag invalidates a stale write).
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        with db.transaction() as conn:
+            row = conn.execute(
+                "SELECT device_id FROM players WHERE id=%s", (identity["id"],)
+            ).fetchone()
+            accepted = (
+                record_base_health(conn, row["device_id"], request, clock=clock)
+                if row is not None
+                else False
+            )
+        return {"accepted": accepted}
 
     @app.post("/v1/player/observations")
     def observation(request: Observation, identity: dict = Depends(player)):

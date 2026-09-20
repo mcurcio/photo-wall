@@ -287,3 +287,51 @@ def test_release_tasks_register_on_the_worker_app_with_a_valid_periodic():
     assert POLL_RELEASES_TASK in app.tasks and MIRROR_RELEASE_TASK in app.tasks
     assert app.tasks[POLL_RELEASES_TASK].queue == APP_RELEASE_QUEUE
     assert app.tasks[MIRROR_RELEASE_TASK].queue == APP_RELEASE_QUEUE
+
+
+def test_fetch_base_task_is_wired_to_the_service_consumer():
+    # The netboot serve seam enqueues FETCH_BASE_TASK on every cache miss; without
+    # a registered consumer a cold base cache would 503 forever. Prove the WIRED
+    # path: the task is registered on the worker app AND the registered body
+    # forwards the enqueued tag to AppReleaseService.fetch_base (not fetch_base
+    # directly). No DB / no real Procrastinate dispatch -- create_worker_app never
+    # connects with a dummy DSN, and we invoke the task's own callable.
+    from central.app_release_queue import APP_RELEASE_QUEUE, FETCH_BASE_TASK
+    from media.app_release_tasks import RetryableAppReleaseTask, register_app_release_tasks
+    from media.task_queue import create_worker_app
+
+    app = create_worker_app("postgresql:///photo_wall_unused")
+    register_app_release_tasks(app)
+    assert FETCH_BASE_TASK in app.tasks
+    task = app.tasks[FETCH_BASE_TASK]
+    assert task.queue == APP_RELEASE_QUEUE
+    # Tag-serialization lives at enqueue (base:<tag>), mirroring the .deb mirror;
+    # the consumer carries no queueing_lock of its own.
+    assert task.queueing_lock is None
+
+    class _Ctx:
+        def __init__(self, service):
+            self.additional_context = {"app_release_service": service}
+
+    class _Service:
+        def __init__(self, result):
+            self.calls = []
+            self._result = result
+
+        async def fetch_base(self, tag):
+            self.calls.append(tag)
+            return self._result
+
+    # The enqueue side defers `.defer(tag=tag)`; the consumer receives `tag=` and
+    # forwards it verbatim -- names + arg shape agree end to end.
+    ok = _Service({"cached": True, "tag": "v0.0.2", "sha256": "d" * 64})
+    asyncio.run(task.func(_Ctx(ok), tag="v0.0.2"))
+    assert ok.calls == ["v0.0.2"]
+
+    # A transient (retryable) fault raises so Procrastinate re-runs it, exactly as
+    # the .deb mirror task does; a terminal one completes silently.
+    retry = _Service({"cached": False, "tag": "v0.0.2", "retryable": True, "reason": "download_io"})
+    with pytest.raises(RetryableAppReleaseTask):
+        asyncio.run(task.func(_Ctx(retry), tag="v0.0.2"))
+    terminal = _Service({"cached": False, "tag": "v0.0.2", "retryable": False, "reason": "base_facts_missing"})
+    asyncio.run(task.func(_Ctx(terminal), tag="v0.0.2"))  # no raise

@@ -22,6 +22,16 @@ import procrastinate
 APP_RELEASE_QUEUE = "photo-wall-app-release"
 POLL_RELEASES_TASK = "photo_wall.app_release.poll"
 MIRROR_RELEASE_TASK = "photo_wall.app_release.mirror"
+# 0012: the per-version base squashfs fetch. Keyed by `base:<tag>` so a repeat
+# need for the same tag (a proactive pin change + a lazy serve-miss) coalesces
+# into one in-flight job, while distinct tags each get their own -- mirroring the
+# `.deb` mirror's tag-keyed lock, but namespaced so a base fetch and a `.deb`
+# mirror for the same tag never collide on one lock.
+FETCH_BASE_TASK = "photo_wall.app_release.fetch_base"
+
+
+def base_fetch_lock(tag: str) -> str:
+    return f"base:{tag}"
 
 # 0010 gate #3: poll cadence is a placeholder (~900s) behind a named constant.
 # Overridable per deployment via PHOTO_WALL_RELEASE_POLL_SECONDS (read where the
@@ -60,6 +70,7 @@ class AppReleaseTaskQueue(Protocol):
 
     def enqueue_mirror_in(self, conn: Any, tag: str) -> "QueueReceipt": ...
     def enqueue_poll_in(self, conn: Any) -> "QueueReceipt": ...
+    def enqueue_base_fetch_in(self, conn: Any, tag: str) -> "QueueReceipt": ...
 
 
 class ProcrastinateAppReleaseQueue:
@@ -81,6 +92,24 @@ class ProcrastinateAppReleaseQueue:
                 MIRROR_RELEASE_TASK,
                 queue=APP_RELEASE_QUEUE,
                 queueing_lock=tag,
+                connection=conn,
+            ).defer(tag=tag)
+            return QueueReceipt(coalesced=False)
+        except procrastinate.exceptions.AlreadyEnqueued:
+            return QueueReceipt(coalesced=True)
+
+    def enqueue_base_fetch_in(self, conn: Any, tag: str) -> QueueReceipt:
+        """Enqueue `fetch_base(tag)`; coalesce a duplicate onto the in-flight job.
+
+        Namespaced `queueing_lock` (`base:<tag>`) so a repeat need for the same
+        tag folds into the existing fetch, while a base fetch and a `.deb` mirror
+        for the same tag never collide on one lock.
+        """
+        try:
+            self.app.configure_task(
+                FETCH_BASE_TASK,
+                queue=APP_RELEASE_QUEUE,
+                queueing_lock=base_fetch_lock(tag),
                 connection=conn,
             ).defer(tag=tag)
             return QueueReceipt(coalesced=False)

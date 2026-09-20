@@ -43,13 +43,32 @@ from appliance.provision import (
     fetch_package,
 )
 from central.app import create_app
-from central.netboot_base import BASE_IMAGE_NAME
+from central.app_releases import AppReleases
+from central.netboot_base import base_file_path, device_id_for_serial
 from scripts.test_netboot_e2e import _FixedDiscovery, _NoSleep  # reuse tracer helpers
 
 ADMIN = "e2e-netboot-admin-" + "x" * 32
 SQUASHFS = b"rpi-image-gen base squashfs payload, streamed over a real socket" * 64
 SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
 SERIAL = "10000000cafef00d"
+TAG = "v9.9.9"
+
+
+class _FakeQueue:
+    """No procrastinate schema in the wire harness; the happy path never enqueues
+    (cached + pinned) and the uncached case only records the enqueue."""
+
+    def __init__(self):
+        self.base_fetches = []
+
+    def enqueue_base_fetch_in(self, conn, tag):
+        self.base_fetches.append(tag)
+
+    def enqueue_mirror_in(self, conn, tag):  # pragma: no cover
+        pass
+
+    def enqueue_poll_in(self, conn):  # pragma: no cover
+        pass
 
 
 class _Log:
@@ -111,13 +130,53 @@ class _InstallCapture:
         self.starts += 1
 
 
-def _stage_base(base_root, *, squashfs=SQUASHFS):
+def _seed_base(registry, base_root, *, tag=TAG, squashfs=SQUASHFS, pin_serial=SERIAL):
+    """Cache one version's base for a pinned device: the release row, a cached
+    base_cache row (Digest = sha of the bytes), the per-version file, and a pin so
+    the serial resolves deterministically to it."""
     base_root.mkdir(parents=True, exist_ok=True)
-    (base_root / BASE_IMAGE_NAME).write_bytes(squashfs)
-    (base_root / "SHA256SUMS").write_text(
-        f"{'a' * 64}  ./boot/initrd.img\n"
-        f"{hashlib.sha256(squashfs).hexdigest()}  ./{BASE_IMAGE_NAME}\n"
+    base_file_path(base_root, tag).write_bytes(squashfs)
+    sha = hashlib.sha256(squashfs).hexdigest()
+    db, clock = registry.db, registry.clock
+    AppReleases(db, clock).upsert_discovered(
+        tag,
+        asset_sha256="a" * 64,
+        asset_size=10,
+        asset_url="https://example.test/app.deb",
+        base_tarball_sha256="b" * 64,
+        base_tarball_size=len(squashfs),
+        base_tarball_url="https://example.test/base.tgz",
     )
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO base_cache(tag,state,squashfs_sha256,size,updated_at) "
+            "VALUES(%s,'cached',%s,%s,%s)",
+            (tag, sha, len(squashfs), clock.utc()),
+        )
+        conn.execute(
+            "INSERT INTO devices(device_id,first_seen,last_seen,attached_tag) VALUES(%s,%s,%s,%s)",
+            (device_id_for_serial(pin_serial), clock.utc(), clock.utc(), tag),
+        )
+    return sha
+
+
+def _seed_release_only(registry, *, tag=TAG, pin_serial=SERIAL):
+    """A pinned device resolving to a discovered-but-uncached tag: serving 503s."""
+    db, clock = registry.db, registry.clock
+    AppReleases(db, clock).upsert_discovered(
+        tag,
+        asset_sha256="a" * 64,
+        asset_size=10,
+        asset_url="https://example.test/app.deb",
+        base_tarball_sha256="b" * 64,
+        base_tarball_size=len(SQUASHFS),
+        base_tarball_url="https://example.test/base.tgz",
+    )
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO devices(device_id,first_seen,last_seen,attached_tag) VALUES(%s,%s,%s,%s)",
+            (device_id_for_serial(pin_serial), clock.utc(), clock.utc(), tag),
+        )
 
 
 @contextlib.contextmanager
@@ -162,7 +221,7 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
     base_root = tmp_path / "base"
     app_root = tmp_path / "app"
     app_root.mkdir()
-    _stage_base(base_root)
+    _seed_base(registry, base_root)
 
     # Instrument the selection seam so we can assert the serial actually reached
     # the SERVER (not just that the client sent a header) -- central.app calls
@@ -172,13 +231,16 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
     seen = {}
     real_select = appmod.select_base_for_serial
 
-    def spy(root, serial):
+    def spy(conn, serial, **kwargs):
         seen["serial"] = serial
-        return real_select(root, serial)
+        return real_select(conn, serial, **kwargs)
 
     monkeypatch.setattr(appmod, "select_base_for_serial", spy)
 
-    app = create_app(registry.db, registry.clock, ADMIN, app_root=app_root, base_root=base_root)
+    app = create_app(
+        registry.db, registry.clock, ADMIN,
+        app_root=app_root, base_root=base_root, release_queue=_FakeQueue(),
+    )
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         # --- Phase 1: REAL netboot base fetch over the wire ---
@@ -220,14 +282,16 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
 
 def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
     base_root = tmp_path / "base"
-    _stage_base(base_root)
-    app = create_app(registry.db, registry.clock, ADMIN, base_root=base_root)
+    _seed_base(registry, base_root)
+    app = create_app(
+        registry.db, registry.clock, ADMIN, base_root=base_root, release_queue=_FakeQueue()
+    )
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
-        # Tamper the squashfs bytes WITHOUT touching SHA256SUMS: central serves
-        # the tampered bytes with the stored (now-mismatching) Digest header, and
-        # the client's streamed sha256 must refuse.
-        (base_root / BASE_IMAGE_NAME).write_bytes(SQUASHFS + b"tampered")
+        # Tamper the served bytes WITHOUT touching the recorded base_cache sha:
+        # central serves the tampered bytes with the stored (now-mismatching)
+        # Digest header, and the client's streamed sha256 must refuse.
+        base_file_path(base_root, TAG).write_bytes(SQUASHFS + b"tampered")
         with pytest.raises(NetbootError, match="netboot_integrity"):
             netboot(
                 {"photowall.central": origin + "/"},
@@ -239,13 +303,15 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
         assert ops.mounted == []
 
 
-def test_real_central_missing_sha256sums_yields_no_digest_503_over_the_wire(registry, tmp_path):
-    # Real Central refuses to serve when it has no stored digest (503), so the
+def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
+    # Real Central fails closed (503) for a discovered-but-uncached tag, so the
     # client sees a transport-level ProvisionError rather than a Digest-less 200.
     base_root = tmp_path / "base"
     base_root.mkdir()
-    (base_root / BASE_IMAGE_NAME).write_bytes(SQUASHFS)  # bytes present, no SHA256SUMS
-    app = create_app(registry.db, registry.clock, ADMIN, base_root=base_root)
+    _seed_release_only(registry)  # release + pin, but no cached bytes
+    app = create_app(
+        registry.db, registry.clock, ADMIN, base_root=base_root, release_queue=_FakeQueue()
+    )
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         with pytest.raises(ProvisionError):

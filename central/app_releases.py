@@ -97,6 +97,10 @@ class AppReleases:
         asset_sha256: str | None = None,
         asset_size: int | None = None,
         asset_url: str | None = None,
+        base_revision: str | None = None,
+        base_tarball_sha256: str | None = None,
+        base_tarball_size: int | None = None,
+        base_tarball_url: str | None = None,
     ) -> str:
         """Insert or refresh a discovered release; return the resulting state.
 
@@ -106,13 +110,27 @@ class AppReleases:
         re-cut heals. A `mirrored` row re-cut to a *different* sha256 goes
         `divergent` and its served bytes are never overwritten;
         `divergent`/`withdrawn`/`undeployable` rows are otherwise frozen.
+
+        Base facts (0012) ride along on both the insert and the refreshable
+        update -- orthogonal to `.deb` deployability, since base OS and `.deb` are
+        independently versioned. They do NOT create a `base_cache` row: the cache
+        row appears only when a fetch begins (state `caching`), per the 0012 cache
+        lifecycle (there is no discovery-time cache state). `mirror_state` is a
+        `.deb` concern and base facts never touch it.
         """
         major, minor, patch, prerelease = parse_semver(tag)
         if asset_sha256 is not None and not _SHA256.fullmatch(asset_sha256):
             raise AppReleaseError("invalid_asset_sha256", 422)
         if asset_size is not None and (type(asset_size) is not int or asset_size <= 0):
             raise AppReleaseError("invalid_asset_size", 422)
+        if base_tarball_sha256 is not None and not _SHA256.fullmatch(base_tarball_sha256):
+            raise AppReleaseError("invalid_base_tarball_sha256", 422)
+        if base_tarball_size is not None and (
+            type(base_tarball_size) is not int or base_tarball_size <= 0
+        ):
+            raise AppReleaseError("invalid_base_tarball_size", 422)
         have_asset = asset_sha256 is not None and asset_size is not None and asset_url is not None
+        base_cols = (base_revision, base_tarball_sha256, base_tarball_size, base_tarball_url)
         now = self.clock.utc()
         with self.db.transaction() as conn:
             existing = conn.execute(
@@ -122,10 +140,11 @@ class AppReleases:
                 state = "discovered" if have_asset else "undeployable"
                 conn.execute(
                     "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
-                    "asset_sha256,asset_size,asset_url,mirror_state,discovered_at,updated_at) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "asset_sha256,asset_size,asset_url,base_revision,base_tarball_sha256,"
+                    "base_tarball_size,base_tarball_url,mirror_state,discovered_at,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (tag, major, minor, patch, prerelease, is_prerelease,
-                     asset_sha256, asset_size, asset_url, state, now, now),
+                     asset_sha256, asset_size, asset_url, *base_cols, state, now, now),
                 )
                 return state
             state = existing["mirror_state"]
@@ -133,13 +152,16 @@ class AppReleases:
                 if have_asset:
                     conn.execute(
                         "UPDATE app_releases SET asset_sha256=%s,asset_size=%s,asset_url=%s,"
-                        "is_prerelease=%s,updated_at=%s WHERE tag=%s",
-                        (asset_sha256, asset_size, asset_url, is_prerelease, now, tag),
+                        "base_revision=%s,base_tarball_sha256=%s,base_tarball_size=%s,"
+                        "base_tarball_url=%s,is_prerelease=%s,updated_at=%s WHERE tag=%s",
+                        (asset_sha256, asset_size, asset_url, *base_cols, is_prerelease, now, tag),
                     )
                 else:
                     conn.execute(
-                        "UPDATE app_releases SET is_prerelease=%s,updated_at=%s WHERE tag=%s",
-                        (is_prerelease, now, tag),
+                        "UPDATE app_releases SET base_revision=%s,base_tarball_sha256=%s,"
+                        "base_tarball_size=%s,base_tarball_url=%s,is_prerelease=%s,updated_at=%s "
+                        "WHERE tag=%s",
+                        (*base_cols, is_prerelease, now, tag),
                     )
                 return state
             if state == "mirrored" and have_asset and asset_sha256 != existing["asset_sha256"]:

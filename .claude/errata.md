@@ -394,3 +394,18 @@ E2 (2026-09-20, bead 2): the PENDING_HEALTH_TIMEOUT poll sweep sets `failed_tag 
 ONLY when `failed_tag` is currently NULL — never overwrites a live stick, and never uses
 `last_served_tag` (which after the r8 split is the known-good tag on a recovery boot).
 Folded into 0012 bead 2 page + the two prose sites (lines ~543, ~723).
+
+E3 (2026-09-20, bead 1): the design's migration-018 storage enumeration (§"Storage,
+lifecycle, migration") lists ONLY `app_releases` base cols + `base_cache` + `devices`,
+but the base-health seam requires per-epoch `sequence` MONOTONICITY (bead 1 page;
+probe 13) and the r8 `devices` schema is frozen with EXACTLY its listed columns (no
+sequence column). Monotonicity is impossible without a persisted last-sequence, so bead
+1 adds a small `device_base_health(device_id, authority_epoch, sequence)` table in
+migration 018 — the direct analogue of `player_feedback` (003), which is exactly the
+"reuse the readiness sequence pattern" the bead page calls for. It touches no `devices`
+column. Rollback adds `DROP TABLE device_base_health;` before `DROP TABLE devices;`.
+Also (minor, no divergence): the `base_cache` row is created by `fetch_base` at state
+`caching`, NOT at discovery — the state CHECK has no discovery-time value, matching the
+lifecycle diagram (`catalog_known --needed--> caching`) and the page's own parenthetical
+"(caching/absent until first fetched)". Discovery writes only the `app_releases` base
+facts.
