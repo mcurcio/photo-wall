@@ -18,8 +18,11 @@ Verify gate (from repo runbook):
 | 5 | per-device .deb carrying served tag (F4) | **CI-GREEN** | 4911d9b | new GET /v1/netboot/manifest (E6); review clean (F4 strict, 0010 untouched) |
 | 6 | appliance wiring (serial on .deb + post base-health) | **CI-GREEN** | e193ca7 | E7 (manifest returns tag) + E8 (player posts base-health); opt-in PHOTO_WALL_PER_DEVICE_DEB; netboot-e2e docker job passed; E9 docs notes |
 | 7 | attachment surface (set/clear attached_tag) | **CI-GREEN** | 28c7b1e | admin-gated PUT/DELETE pin; proactive fetch_base + warranted .deb mirror; E5 GC; review clean |
-| 8 | genuine fresh-install e2e | landing | — | un-over-mocked (only GitHub boundary); empty-BASE_ROOT 503 negative + self-heal; review clean; gate(b) real-GitHub skips (E10 secret) |
-| 9 | observability + docs | landing | — | migration 019 base_boot_status; GET /v1/operator/netboot; README/runbook/modules; E4/E5/E8/E9 resolved, E10 new |
+| 8 | genuine fresh-install e2e | **CI-GREEN** | 6d7b485 | un-over-mocked (only GitHub boundary); empty-BASE_ROOT 503 negative + self-heal; gate(b) real-GitHub skips (E10 secret) |
+| 9 | observability + docs | **CI-GREEN** | 6d7b485 | migration 019 base_boot_status; GET /v1/operator/netboot; README/runbook/modules; E4/E5/E8/E9 resolved, E10 new |
+
+## Status: ALL 9 BEADS CI-GREEN (feature complete on PR #18)
+Full arc verified end-to-end in CI (MVP checks / Postgres suite, software-e2e, netboot boot-chain e2e). Open follow-ups: **E10** — add the `PHOTO_WALL_RELEASE_TOKEN` secret to the DB-harness CI job so the real-GitHub e2e gate (b) runs (currently skips). Deferred by design: operator UI over `/v1/operator/netboot` (backend fields shipped); auto-rollback for a device with no known-good (new device boot-loops until pinned — accepted).
 
 Budget: per bead 90 min wall / 8 agents; stop-and-report on cap.
 
