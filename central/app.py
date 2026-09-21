@@ -796,8 +796,7 @@ def create_app(
                 release_queue.enqueue_base_fetch_in(conn, request.tag)
                 if AppReleases.deb_mirrorable_in(conn, request.tag):
                     release_queue.enqueue_mirror_in(conn, request.tag)
-            if base_root is not None:
-                gc_base_cache(conn, base_root, clock=clock)
+            gc_base_cache(conn, base_root, clock=clock)
         return {"status": "pinned"}
 
     @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
@@ -811,8 +810,7 @@ def create_app(
         with db.transaction() as conn:
             if not clear_device_pin(conn, device_id):
                 raise RegistryError("device_not_found", 404)
-            if base_root is not None:
-                gc_base_cache(conn, base_root, clock=clock)
+            gc_base_cache(conn, base_root, clock=clock)
         return {"status": "cleared"}
 
     @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])

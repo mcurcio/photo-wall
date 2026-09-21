@@ -220,7 +220,13 @@ PHOTO_WALL_CACHE_ROOT (default /var/cache/photo-wall)   0700 PUID:PGID   VOLUME
   204,715`). With one always-present cache root they become **unconditional** —
   consistent with base-on-by-default. The now-dead `503 release_sourcing_unconfigured`
   branch and the `app_root is None` operator gates are removed/repurposed, not left
-  dangling.
+  dangling. **Reconciled (erratum E16, Slice-1 residual cleanup):** the symmetric
+  base-root always-true gates were made unconditional / const — the `base_root is not
+  None` guards around `gc_base_cache` in `pin_device`/`unpin_device` (`app.py`) are now
+  unconditional, and `operator_base_status`'s `base_root_configured` (`netboot_base.py`)
+  is the literal `True` (field kept for operator API back-compat). The
+  `boot_autopull(base_root=None)` test-seam guard (`app_release_boot.py`) is legitimately
+  retained.
 - **Quota + GC + orphan sweep, every domain (req 9):** each GC is a **filesystem
   enumeration** — list the domain's files, unlink any whose key has no owning DB row
   (media already does this in `recover`; `.deb` and os-images gain it) — not a

@@ -333,7 +333,10 @@ def operator_base_status(conn, base_root: Path | None) -> dict:
         ).fetchall()
     ]
     return {
-        "base_root_configured": base_root is not None,
+        # 0013: base serving is always-on (resolve_base_root always returns a
+        # path), so base_root is always configured. Field kept for API/operator
+        # back-compat, now a literal True.
+        "base_root_configured": True,
         "boot_status": read_base_boot_status(conn),
         "frontier": latest_verified(conn),
         "devices": devices,
@@ -1091,7 +1094,8 @@ def _sweep_orphans(
         _fsync_dir(entry.parent)
         removed.append(tag)
         LOG.info(
-            "base cache orphan removed: path=%s bytes=%s reason=%s",
+            "base cache orphan removed: tag=%s path=%s bytes=%s reason=%s",
+            tag,
             entry,
             size if size is not None else "unknown",
             _ORPHAN_REASON,

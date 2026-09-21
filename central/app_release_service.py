@@ -166,10 +166,9 @@ class AppReleaseService:
         # Poll-tail base GC (0012 bead 4): evict cache bytes whose tag has left the
         # keep-set (latest-verified U non-retired pins U non-retired known-good U
         # in-flight `caching`). Off-loop under one txn, exactly like the sweep and
-        # reconcile -- no network, always runs. Skipped when BASE_ROOT is
-        # unconfigured (base serving off), so a non-base worker is unchanged. The
-        # pin/health-change triggers land with their own beads (attachment surface);
-        # the poll tail is the always-on backstop, mirroring `sweep_failed_boots`.
+        # reconcile -- no network, always runs. The pin/health-change triggers land
+        # with their own beads (attachment surface); the poll tail is the always-on
+        # backstop, mirroring `sweep_failed_boots`.
         result["base_gc"] = await asyncio.to_thread(self._gc_base_cache)
         # Poll-tail os-images orphan sweep (0013 B4): unlink any
         # `base-<tag>.squashfs` with no owning `base_cache` row (an in-flight

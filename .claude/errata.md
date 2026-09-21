@@ -661,3 +661,20 @@ os-images dir is absent (matching `gc_base_cache`'s tolerance) instead of lettin
 state the snapshot is NOT the exclusion; the two guards are. Tests: 4 no-DB unit
 probes (missing-dir tolerance; fresh-mtime spared; aged orphan swept; became-owned
 re-confirm) + the existing DB orphan-sweep test's orphan aged past the grace.
+
+E16 (2026-09-21, bead 0013 Slice-1 residual cleanup): the always-on flip
+(`base_root = base_root or cache_layout.os_images_root()`, central/app.py:184)
+makes `base_root` always non-None past that line, so the base-root gates the design
+promised would be "removed/repurposed, not left dangling" (design:220-223) were
+still present as always-true branches. This residual bead reconciles them without
+behavior change: the `if base_root is not None:` guards around `gc_base_cache` in
+`pin_device` (central/app.py:799) and `unpin_device` (central/app.py:814) are made
+UNCONDITIONAL (base_root is always a path, so the GC always ran anyway — E5's
+pin/unpin prompt-GC is unchanged), and `operator_base_status`'s
+`"base_root_configured": base_root is not None` (central/netboot_base.py:336) is set
+to the literal `True` (field KEPT for the `GET /v1/operator/netboot` API/operator
+back-compat, base serving is always configured now). NOT touched:
+`central/app_release_boot.py:102`'s `if base_root is not None` — that guards a
+reachable `boot_autopull(base_root=None)` test seam per its docstring and is
+legitimate. No code divergence; honors design:220-223. Mirrors the E13/E14/E15
+doc softenings.
