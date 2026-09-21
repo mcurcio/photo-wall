@@ -27,6 +27,24 @@ Budget: per bead 90 min wall / 8 agents; stop-and-report on cap; failed work →
 
 OTEL metrics = explicitly a **separate post-Slice-1 bead** (no metrics seam in central/ today; only logging). Structured log fields ship inside each op-bead now.
 
+## Tracer (T) review outcome
+
+Verifier: **PASS** (locally-verifiable scope) — 8/8 gates, fast suite 996/328/0, entrypoint 12/12, all mutation probes reversed→red→restored. Security review: **ship it** — no P0/P1; privilege drop, VOLUME ordering, empty-cache miss-tolerance, cache_layout, media_gateway gate, compose all attacked and cleared.
+
+Fixed in the tracer:
+- **P2-1** — zero-uid guard admitted `010`; tightened the `case` to reject leading-zero multi-digit (canonical positive decimal now construction-time) — matches design:191. Errata **E12** (closes E11's flagged gap).
+- **probe-3 gap** (verifier) — added a positive regression test: legacy `PHOTO_WALL_{MEDIA,APP,BASE}_ROOT` set alongside `CACHE_ROOT` → resolved paths unaffected.
+
+Deferred to the **docs bead** (never fail a code bead on docs, §3.6):
+- `README.md:110` (`PHOTO_WALL_BASE_ROOT` "required/off" — now false), `docs/runbook.md:172` (`503 release_sourcing_unconfigured` — branch deleted).
+- `.github/workflows/release.yml:288` — release-notes still tell operators to copy `.deb` to `PHOTO_WALL_APP_ROOT`; tied to hand-staging → fold into **B5**.
+
+CI watch-items (not code defects — verify when the PR runs):
+- **W1 (primary)** — worker boot now polls GitHub unconditionally (always-on flip). Previously-sealed e2e/demo jobs may make live GitHub calls / hit the 60/hr unauth rate limit. Failures are swallowed (non-fatal), but watch netboot-e2e/software-e2e/demo for boot-time GitHub flakiness.
+- **W2** — `release.yml` retained-native media base: a stale cached base predating 0013 lacks the `PHOTO_WALL_PUID/PGID` ENV → `install -d -o ''` build fail. PR gate is safe (service-base rebuilds fresh from the current Dockerfile, ENV confirmed at Dockerfile:13-16); **release-time** watch only.
+- **W3 (minor)** — central-only topology (unsupported per design:194-195): promote now enqueues with no worker consumer → silent hang instead of the old 503. By-design; note for the operator runbook.
+- **W4 (minor)** — vestigial always-true `base_root is not None` conditionals (app.py:778,793; netboot_base.py:283 `base_root_configured` now constant; dead None-branch in `assert_base_root_writable`). Cleanup candidate, not a bug → `residual:` if worth it.
+
 ## Precondition SQL (decision 5 — owner/CI must run against live DB)
 
 Must return **0 rows** before B5 deletes the operator routes; non-empty → STOP, drain first.
