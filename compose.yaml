@@ -24,11 +24,6 @@ services:
     environment:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
       PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
-      PHOTO_WALL_MEDIA_ROOT: /var/lib/photo-wall/media
-      # 0012: the dedicated base-image volume, mounted READ-ONLY here (Central
-      # serves; the worker writes). Separate from `media` and asserted writable
-      # only by the worker at boot.
-      PHOTO_WALL_BASE_ROOT: /var/lib/photo-wall/base
       PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
     ports:
       - "127.0.0.1:${PHOTO_WALL_PORT:-8000}:8000"
@@ -37,8 +32,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
     volumes:
-      - media:/var/lib/photo-wall/media:ro
-      - base:/var/lib/photo-wall/base:ro
+      # 0013: the one cache volume, mounted READ-ONLY here. Central serves and
+      # creates nothing; the colocated worker is the single writer that
+      # materializes the layout (see docs/decisions/0013-unified-cache-root.md).
+      # Path matches the baked ENV PHOTO_WALL_CACHE_ROOT default, so no env set.
+      - cache:/var/cache/photo-wall:ro
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -55,14 +53,13 @@ services:
       target: media-worker
     environment:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
-      # 0012: same dedicated base volume as Central, but mounted READ-WRITE here
-      # -- the worker is the single writer (base fetch + boot re-hydrate) and
-      # asserts this path writable at boot, failing loud otherwise. This writable
-      # mount is what lets the boot assertion pass under read_only rootfs.
-      PHOTO_WALL_BASE_ROOT: /var/lib/photo-wall/base
     volumes:
-      - media:/var/lib/photo-wall/media
-      - base:/var/lib/photo-wall/base
+      # 0013: the one cache volume, mounted READ-WRITE -- the worker is the
+      # single writer (media variants + base/app mirror) and materializes the
+      # media/ apps/ os-images/ subdirs. Path matches the baked ENV
+      # PHOTO_WALL_CACHE_ROOT default, so no env override needed. The writable
+      # mount is what lets the boot assertions pass under read_only rootfs.
+      - cache:/var/cache/photo-wall
       - connections:/etc/photo-wall/private
     depends_on:
       database:
@@ -83,6 +80,5 @@ services:
       retries: 3
 volumes:
   database:
-  media:
-  base:
+  cache:
   connections:

@@ -556,3 +556,36 @@ falsy) — the correct safe behavior, never an error. REMAINING PRECONDITION: ga
 (b) still SKIPS (not fails) until a published `mcurcio/photo-wall` release carries
 a `base_image` manifest asset; once such a release exists, CI exercises the real
 discover→download→verify→extract→serve path end to end.
+
+E11 (2026-09-21, bead 0013-T2): the entrypoint zero-uid guard was NOT actually
+numeric. The T2 spec's grounded-state called the existing `case "$PUID" in
+''|*[!0-9]*|0)` guard the "numeric zero-uid guard" and said KEEP IT VERBATIM,
+but that glob rejects only the single literal spelling `0` — it lets `00`/`000`
+(and `010`) through. The 0013 design (docs/decisions/0013-unified-cache-root.md
+§"How ownership and writability work") is explicit that the guard is NUMERIC
+(`[ "$PUID" -eq 0 ]`) precisely "so `00`/`000`/`010` cannot run it as root/wrong
+uid", and the T2 test spec mandates exit 78 on PUID=0/00/000. Code and spec
+disagreed; the design + test are the source of truth, so the guard was
+STRENGTHENED (not kept verbatim): keep the `case` for empty/non-numeric, then add
+an arithmetic `[ "$PUID" -eq 0 ]` (and the PGID twin) that rejects every zero
+spelling. `[ ... ] && { exit 78; }` is set -e-safe (non-last AND-OR operand is
+exempt) and only runs after the `case` has guaranteed an all-digit operand, so
+the arithmetic never errors. Note: `010` is still accepted as a positive uid (=10
+decimal); the design's mention of `010` is not enforced because the T2 test only
+requires 0/00/000 and `010` is a legitimate identity — flag if a later bead needs
+leading-zero/octal rejection too.
+
+E12 (2026-09-21, bead 0013-T2 fix pass): E11's flagged `010` gap is now CLOSED.
+The adversarial review (P2-1) and the design (docs/decisions/0013-unified-cache-root.md:191)
+both require `010` to be rejected too ("so `00`/`000`/`010` cannot run it as
+root/wrong uid"), so E11's "`010` is a legitimate identity" carve-out is overruled
+by the design's canonical-decimal requirement. The guard is tightened from a
+`case` for empty/non-numeric plus a separate arithmetic `-eq 0` to a SINGLE `case`
+reject-pattern `''|*[!0-9]*|0|0?*` on both PUID and PGID: it rejects empty, any
+non-digit, bare `0`, and any leading-zero multi-digit spelling (`00`/`000`/`010`/`007`)
+in one construct — accepting only `[1-9][0-9]*`. Canonical-decimal identity is now
+a CONSTRUCTION-TIME property (no octal/leading-zero spelling can name a uid at all),
+so design line 191's guarantee holds. The arithmetic `-eq 0` twin is removed as
+redundant. tests/test_entrypoint.py rejection params extended with `010` and `007`
+(exit 78); the canonical `10001` boot assertion is unchanged. Supersedes E11's
+closing "flag if a later bead needs leading-zero/octal rejection" note.

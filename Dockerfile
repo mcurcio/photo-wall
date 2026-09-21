@@ -3,9 +3,20 @@
 ARG MEDIA_BASE_IMAGE=media-os
 FROM python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f AS python-system
 WORKDIR /app
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
-RUN useradd --system --uid 10001 --create-home wall \
-    && install -d -o wall -g wall -m 0700 /var/lib/photo-wall/media /etc/photo-wall/private
+# 0013: identity is a build arg so a platform can pin PUID/PGID to its storage;
+# the GID is pinned via groupadd so the leaf-stage `install -d -g` and the
+# entrypoint's runtime chown resolve the same numeric group everywhere. The args
+# are re-exported as runtime ENV so the entrypoint and leaf-stage RUNs inherit
+# them without redeclaring the ARG.
+ARG PHOTO_WALL_PUID=10001
+ARG PHOTO_WALL_PGID=10001
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 \
+    PHOTO_WALL_CACHE_ROOT=/var/cache/photo-wall \
+    PHOTO_WALL_PUID=${PHOTO_WALL_PUID} \
+    PHOTO_WALL_PGID=${PHOTO_WALL_PGID}
+RUN groupadd --gid "$PHOTO_WALL_PGID" wall \
+    && useradd --system --uid "$PHOTO_WALL_PUID" --gid "$PHOTO_WALL_PGID" --create-home wall \
+    && install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 /etc/photo-wall/private
 
 FROM python-system AS media-os
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
@@ -78,9 +89,18 @@ COPY --from=runtime /app /app
 # `USER wall` default is retained so Compose runs exactly as before; a root-start
 # platform (k8s securityContext) opts into the chown+gosu path.
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# 0013: materialize the single cache root and its domain subdirs owned by the
+# runtime identity BEFORE `VOLUME` (writes to a declared volume path are
+# discarded), so a Docker volume is populated writable with no boot step. Runs
+# as root -- this stage's base sets no USER; the `USER wall` default follows.
+RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
+    "$PHOTO_WALL_CACHE_ROOT" \
+    "$PHOTO_WALL_CACHE_ROOT/media" \
+    "$PHOTO_WALL_CACHE_ROOT/apps" \
+    "$PHOTO_WALL_CACHE_ROOT/os-images"
+VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
-ENV PHOTO_WALL_MEDIA_ROOT="/var/lib/photo-wall/media" \
-    PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
+ENV PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "media.worker"]
 
@@ -92,5 +112,18 @@ USER wall
 CMD ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", "tests/test_prepare.py"]
 
 FROM runtime AS central
+# 0013: central mounts the cache RO and creates NOTHING at runtime (the worker
+# is the single writer -- see docs/decisions/0013-unified-cache-root.md "How
+# ownership and writability work"). It still bakes the dir + `VOLUME` so the
+# image path exists; `install -d` precedes `VOLUME` and runs as root (runtime
+# left `USER wall`), then drops back to `wall`. No dir-creating entrypoint here.
+USER root
+RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
+    "$PHOTO_WALL_CACHE_ROOT" \
+    "$PHOTO_WALL_CACHE_ROOT/media" \
+    "$PHOTO_WALL_CACHE_ROOT/apps" \
+    "$PHOTO_WALL_CACHE_ROOT/os-images"
+VOLUME ${PHOTO_WALL_CACHE_ROOT}
+USER wall
 EXPOSE 8000
 CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576"]
