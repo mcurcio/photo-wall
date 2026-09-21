@@ -178,7 +178,16 @@ async def _boot_base(
          ``base:<tag>`` queueing lock the serve-miss path uses, so a duplicate
          need folds into one in-flight job.
     """
-    path = await asyncio.to_thread(netboot_base.assert_base_root_writable, base_root)
+    try:
+        path = await asyncio.to_thread(netboot_base.assert_base_root_writable, base_root)
+    except netboot_base.BaseRootError as error:
+        # E4: the assertion fails loud (raises), but the worker's done-callback
+        # swallows+logs it (a hard crash would couple a base-volume misconfig to
+        # killing 0010's .deb mirroring). Record the failure FIRST so it is
+        # operator-visible at GET /v1/operator/netboot, then re-raise for the log.
+        await asyncio.to_thread(_record_base_boot_status, service, ok=False, code=error.code)
+        raise
+    await asyncio.to_thread(_record_base_boot_status, service, ok=True, code=None)
     stray = await asyncio.to_thread(netboot_base.sweep_stray_temps, path)
 
     def _plan() -> tuple[str | None, list[str]]:
@@ -194,3 +203,16 @@ async def _boot_base(
 
     bootstrap, rehydrate = await asyncio.to_thread(_plan)
     return {"bootstrap": bootstrap, "rehydrated": rehydrate, "stray_temps": stray}
+
+
+def _record_base_boot_status(
+    service: AppReleaseService, *, ok: bool, code: str | None
+) -> None:
+    """Persist the BASE_ROOT boot-assertion outcome (0012 bead 9, E4), off-loop.
+
+    Its own transaction so the failure path records BEFORE re-raising, and so an
+    ``ok=True`` write is durable even if a later re-hydrate step faults."""
+    with service.db.transaction() as conn:
+        netboot_base.record_base_boot_status(
+            conn, ok=ok, code=code, clock=service.releases.clock
+        )

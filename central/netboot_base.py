@@ -195,6 +195,98 @@ def assert_base_root_writable(base_root: Path | None) -> Path:
     return path
 
 
+# -- base-root boot status (bead 9 observability, errata E4) ------------------
+
+
+def record_base_boot_status(conn, *, ok: bool, code: str | None, clock) -> None:
+    """Upsert the single-row BASE_ROOT boot-assertion outcome (0012 bead 9, E4).
+
+    Written by the worker's boot path on EVERY base boot -- ``ok=True`` when
+    ``assert_base_root_writable`` passed, ``ok=False`` + the ``BaseRootError``
+    code when it raised. The fail-loud assertion otherwise only logs and the
+    worker swallows the exception (E4); this row is what makes a misconfigured
+    base volume operator-visible at ``GET /v1/operator/netboot`` rather than a
+    silent later 503."""
+    conn.execute(
+        "INSERT INTO base_boot_status(singleton, ok, code, checked_at) VALUES(TRUE,%s,%s,%s) "
+        "ON CONFLICT(singleton) DO UPDATE SET ok=EXCLUDED.ok, code=EXCLUDED.code, "
+        "checked_at=EXCLUDED.checked_at",
+        (ok, code, clock.utc()),
+    )
+
+
+def read_base_boot_status(conn) -> dict | None:
+    """The last recorded BASE_ROOT boot-assertion outcome, or None if never run.
+
+    None means no worker with ``PHOTO_WALL_BASE_ROOT`` configured has booted yet
+    (base serving off, or a base-less worker) -- distinct from ``ok=False`` (a
+    configured volume that failed its assertion)."""
+    row = conn.execute(
+        "SELECT ok, code, checked_at FROM base_boot_status WHERE singleton"
+    ).fetchone()
+    if row is None:
+        return None
+    return {"ok": row["ok"], "code": row["code"], "checked_at": row["checked_at"]}
+
+
+def operator_base_status(conn, base_root: Path | None) -> dict:
+    """The read-only operator observability view for the base-mirror (0012 bead 9).
+
+    Answers the three questions the design's bead-9 page names: "why did this
+    device get this image / why won't it advance / why were bytes evicted."
+      * ``boot_status`` -- the BASE_ROOT boot assertion outcome (E4), so a failed
+        base volume is visible, not only logged.
+      * ``frontier`` -- the live ``latest_verified`` (the unpinned target every
+        device follows), so an operator can see WHY an unpinned device resolves a
+        given image.
+      * ``devices`` -- each device's pin, known-good, last-served tag + boot
+        outcome, and sticky ``failed_tag`` (why it won't advance / rolled back).
+      * ``cache`` -- each ``base_cache`` row's state and ``eviction_reason`` (why
+        bytes were evicted; the row and its integrity sha survive an eviction).
+    All read-only; no state is changed. The operator UI over this is deferred
+    (0012 out-of-scope: "backend fields ship")."""
+    devices = [
+        {
+            "device_id": row["device_id"],
+            "serial": row["serial"],
+            "attached_tag": row["attached_tag"],
+            "known_good_tag": row["known_good_tag"],
+            "last_served_tag": row["last_served_tag"],
+            "boot_outcome": row["boot_outcome"],
+            "failed_tag": row["failed_tag"],
+            "last_served_at": row["last_served_at"],
+            "retired_at": row["retired_at"],
+        }
+        for row in conn.execute(
+            "SELECT device_id, serial, attached_tag, known_good_tag, last_served_tag, "
+            "boot_outcome, failed_tag, last_served_at, retired_at FROM devices "
+            "ORDER BY device_id"
+        ).fetchall()
+    ]
+    cache = [
+        {
+            "tag": row["tag"],
+            "state": row["state"],
+            "squashfs_sha256": row["squashfs_sha256"],
+            "size": row["size"],
+            "error": row["error"],
+            "eviction_reason": row["eviction_reason"],
+            "updated_at": row["updated_at"],
+        }
+        for row in conn.execute(
+            "SELECT tag, state, squashfs_sha256, size, error, eviction_reason, updated_at "
+            "FROM base_cache ORDER BY tag"
+        ).fetchall()
+    ]
+    return {
+        "base_root_configured": base_root is not None,
+        "boot_status": read_base_boot_status(conn),
+        "frontier": latest_verified(conn),
+        "devices": devices,
+        "cache": cache,
+    }
+
+
 # -- selection (netboot seam) ------------------------------------------------
 
 

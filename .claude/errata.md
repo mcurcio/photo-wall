@@ -440,11 +440,24 @@ killing 0010's .deb mirroring in the same worker. The design's "fail loud" guara
 satisfied by (a) the ERROR log at boot and (b) bead 9 MUST surface the base-root
 assertion failure in operator-visible status/observability, not only logs. If bead 9
 does not surface it, reopen this as a hard-fail decision.
+RESOLVED (2026-09-20, bead 9): the boot path now records the assertion outcome to a
+single-row `base_boot_status` (migration 019_base_boot_status.sql) — `_boot_base`
+(central/app_release_boot.py) writes ok=True on a passed assertion and ok=False + the
+BaseRootError code before re-raising a failed one — and it is surfaced read-only at
+`GET /v1/operator/netboot` (`netboot_base.operator_base_status` -> `boot_status`). The
+fail-loud guarantee is thus operator-visible, not only logged; the fail-log posture
+(no hard crash coupling base-volume misconfig to killing the .deb mirror) stands. Not
+reopened as hard-fail.
 
 E5 (2026-09-20, bead 7): GC (gc_base_cache) is wired to the poll tail only in bead 4.
 The doc also calls for GC after pin/health changes; that trigger belongs to bead 7's
 attachment surface (and the base-health path). Bead 7 MUST invoke gc_base_cache after a
 pin set/clear so freed bytes are reclaimed promptly rather than at the next poll.
+RESOLVED (2026-09-20, bead 9): bead 7 landed this — both `PUT` and `DELETE`
+`/v1/operator/devices/{device_id}/pin` (central/app.py) invoke `gc_base_cache` in the
+same transaction as the pin set/clear (the just-pinned tag is in the keep-set, so GC
+never evicts what the pin just enqueued). Verified in the merged bead-7 code; no
+further action.
 
 E6 (2026-09-20, bead 5): the doc mandates the per-device `.deb` be resolved on the
 per-device serve path off `last_served_tag`, ADDITIVE, with 0010's global
@@ -487,6 +500,11 @@ public.json). The appliance's bead-6 role is the per-device manifest fetch + the
 handoff; the base-health POST lives in `player/`. Opt-in gate for the per-device path is
 the `PHOTO_WALL_PER_DEVICE_DEB` env var (unset => unchanged 0010 global `.deb`, no
 base-health). Docs bead 9 should correct the package attribution.
+RESOLVED (2026-09-20, bead 9): the package attribution is corrected in the decision
+doc's "Packages touched" line (base-health moved from `appliance/provision.py` to
+`player/service.py` `_report_base_health`, with the enroll/import-forbidden rationale
+and the `PHOTO_WALL_PER_DEVICE_DEB` gate) and documented in
+docs/module-appliance-release.md ("The auto-mirror and per-device release path (0012)").
 
 E9 (2026-09-20, bead 6 review — for docs bead 9, non-blocking):
 1. base-health's server-side `running_tag == last_served_tag` check binds to the LIVE
@@ -498,3 +516,25 @@ E9 (2026-09-20, bead 6 review — for docs bead 9, non-blocking):
    base_running_tag on a global-path boot. Harmless on the diskless netboot target (RAM
    overlay rebuilt fresh each boot). If this code is ever reused on a persistent-disk
    (D0) install path, add `else: payload.pop("base_running_tag", None)`. Note in docs.
+RESOLVED (2026-09-20, bead 9): both notes are folded into the runbook's "Base-image
+auto-mirror (0012)" section (the closing "Two assumptions worth stating (0012 errata
+E9)" paragraph) — (1) the live-`last_served_tag` binding assumption and (2) the
+`base_running_tag` non-clear-on-global-path note with the persistent-disk caveat.
+Documented, no code change required on the diskless target.
+
+E10 (2026-09-20, bead 8): the genuine fresh-install e2e ships two gates
+(tests/test_netboot_fresh_install_e2e.py). Gate (a),
+`test_fresh_install_arc_deterministic`, is the CI PR-blocker: it drives the whole arc
+(empty-BASE_ROOT `base_artifact_unavailable` 503 -> real discovery via `service.poll`
+-> real `service.fetch_base` -> 200 with correct Digest -> base-health -> frontier
+advance -> second device follows) with ONLY the GitHub network boundary mocked
+(httpx.MockTransport on GithubReleaseSource); it runs under the DB harness (real
+Postgres) like every other DB-backed test. Gate (b),
+`test_fresh_install_arc_against_real_github`, exercises the REAL mcurcio/photo-wall
+Releases API and is gated on `PHOTO_WALL_RELEASE_TOKEN` (pytest.skip when unset). ACTION
+FOR THE OWNER: that secret is NOT wired into any CI workflow today, so gate (b) SKIPS in
+CI — the real-GitHub API/asset/CDN/redirect shapes are NOT exercised by CI until the
+owner adds a `PHOTO_WALL_RELEASE_TOKEN` secret to the relevant workflow (the DB-harness
+pytest job) and passes it through to the test env. Until then only gate (a) (the
+deterministic MockTransport path) gates PRs. Gate (b) also skips (not fails) when the
+real repo has no released `base_image` asset yet.

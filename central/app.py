@@ -38,6 +38,7 @@ from central.netboot_base import (
     base_file_path,
     clear_device_pin,
     gc_base_cache,
+    operator_base_status,
     record_base_health,
     sanitize_serial,
     select_base_for_serial,
@@ -805,6 +806,19 @@ def create_app(
             if base_root is not None:
                 gc_base_cache(conn, base_root, clock=clock)
         return {"status": "cleared"}
+
+    @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])
+    def netboot_status():
+        # 0012 bead 9 observability: a READ-ONLY operator view of the base-mirror
+        # so an operator can answer "why did this device get this image / why
+        # won't it advance / why were bytes evicted", and SEE a failed BASE_ROOT
+        # boot assertion (E4) rather than only find it in a log. Same admin-bearer
+        # posture as every other /v1/operator/* route. The operator UI over these
+        # fields is deferred (0012: "backend fields ship"); this endpoint is that
+        # backend surface. `base_root` here is create_app's configured RO base
+        # dir, so the view reports whether base serving is even configured.
+        with db.transaction() as conn:
+            return operator_base_status(conn, base_root)
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):

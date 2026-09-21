@@ -1351,11 +1351,16 @@ device upsert + `resolve_base_root`; the known-good/last-served writes; new
 fetch/GC/re-hydrate module; `github_releases.py` base+`revision` parse; `app_releases.py`
 catalog + base facts; reworked `app_release_boot.py`; migration `018`), `media/`
 (`fetch_base` + `gc_base_cache` tasks; boot assertion + re-hydrate + pending-sweep
-wiring), **`appliance/`** (`provision.py` serial on the manifest fetch; post base-health
-after boot — **no** rollback logic), **`contracts/`** (the new `BaseHealth` model;
-optional shared serial-header constant; **`Readiness` unchanged**), `scripts/` (docstring
-corrections; optional manifest `squashfs_sha256` per gate #4), `tests/` (the genuine
-fresh-install e2e; de-mock the pre-staged siblings).
+wiring), **`appliance/`** (`provision.py` serial on the per-device manifest fetch + the
+served-tag handoff into `public.json`; **no** rollback logic), **`player/`** (`service.py`
+`_report_base_health` posts base-health after boot with the **enrolled player token** —
+**E8 correction:** base-health is NOT posted by `appliance/provision.py`; the
+bootstrapper never enrolls (0009 gate #2) and `player → appliance` is import-forbidden, so
+the poster lives in `player/`, fed the served tag via the appliance's origin-handoff; the
+per-device path is gated by `PHOTO_WALL_PER_DEVICE_DEB`), **`contracts/`** (the new
+`BaseHealth` model; optional shared serial-header constant; **`Readiness` unchanged**),
+`scripts/` (docstring corrections; optional manifest `squashfs_sha256` per gate #4),
+`tests/` (the genuine fresh-install e2e; de-mock the pre-staged siblings).
 
 ### The genuine fresh-install e2e (bead 8)
 
