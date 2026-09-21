@@ -171,6 +171,12 @@ class AppReleaseService:
         # pin/health-change triggers land with their own beads (attachment surface);
         # the poll tail is the always-on backstop, mirroring `sweep_failed_boots`.
         result["base_gc"] = await asyncio.to_thread(self._gc_base_cache)
+        # Poll-tail os-images orphan sweep (0013 B4): unlink any
+        # `base-<tag>.squashfs` with no owning `base_cache` row (an in-flight
+        # `caching` row OWNS its file, so a fetch is never swept mid-flight). The
+        # always-on filesystem backstop next to GC -- GC removes bytes whose ROW
+        # left the keep-set; the sweep removes FILES that have no row at all.
+        result["base_orphans"] = await asyncio.to_thread(self._sweep_base_orphans)
         return result
 
     def _sweep_failed_boots(self) -> int:
@@ -188,6 +194,20 @@ class AppReleaseService:
         base_root = netboot_base.resolve_base_root()
         with self.db.transaction() as conn:
             return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
+
+    def _sweep_base_orphans(self) -> int:
+        """Unlink os-images files with no owning `base_cache` row (0013 B4), off-loop.
+
+        Reads the SAME base dir the serve route resolves and GC collects
+        (`resolve_base_root`), so the sweep unlinks exactly the files the serve
+        side would open. `sweep_base_orphans` enforces the frozen single-writer
+        exclusion -- a per-tag ownership re-confirm plus an mtime grace on the
+        landing file -- so a concurrent `fetch_base` that `os.replace`s bytes
+        after the owned-set snapshot is never swept mid-flight (the owned-set
+        snapshot alone is NOT that exclusion; the two guards are)."""
+        base_root = netboot_base.resolve_base_root()
+        with self.db.transaction() as conn:
+            return len(netboot_base.sweep_base_orphans(conn, base_root))
 
     def _apply(self, record: DiscoveredRelease) -> None:
         """Feed one discovered release into the store (blocking; runs off-loop)."""

@@ -605,3 +605,59 @@ enqueue_base_fetch_in on the cached-row open-failure), which the design's
 specified (reorder + serve-seam self-heal); no code divergence — this is a
 precision note on the reorder's stated guarantee strength (it is window-shrinking,
 not "never"). No action needed unless a later doc pass wants to soften line 149.
+
+E14 (2026-09-21, bead 0013-B4): the design (req 2 / §Storage "Quota + GC + orphan
+sweep") frames gc_base_cache as actively enforcing BOTH a reserved floor AND a byte
+cap ("never evict below the reserved floor ... enforce a byte cap best-effort below
+the keep-set"). In code the two are NOT symmetric active checks, and cannot be,
+because the committed keep-set semantics (0012 bead 4, tests/test_netboot_base_gc.py
+test_d/e) evict EVERY non-keep-set ("surplus") tag UNCONDITIONALLY for correctness
+(an orphaned / retired-device tag), regardless of byte budget. So:
+  * The CAP is enforced best-effort below the keep-set: all surplus bytes are
+    already evicted, so the only bytes that can exceed the cap are the protected
+    keep-set itself -> an ALARM (`keepset_over_cap`, sizes logged), never eviction
+    of a protected tag. This is an active check.
+  * The FLOOR is enforced BY CONSTRUCTION, not as an active byte-gate: GC only ever
+    removes surplus/orphan bytes and never a keep-set member, so os-images always
+    retains its bootable working set; the 4Gi floor is the reserved capacity that
+    guarantees that working set fits (protecting netboot from other domains). An
+    ACTIVE floor-gate on eviction was rejected: gating surplus eviction on a byte
+    floor would retain orphaned/retired-tag files below the floor, contradicting
+    the frozen keep-set-departure eviction (reds test_d). Floor/cap are named
+    placeholders (OS_IMAGES_RESERVED_FLOOR_BYTES=4Gi, OS_IMAGES_BYTE_CAP_BYTES=12Gi)
+    pending owner confirmation (decision 2). No code divergence from intent; this
+    records that "never evict below the floor" is a construction guarantee, and a
+    later doc pass may state it as such.
+
+E15 (2026-09-21, bead 0013-B4): the orphan sweep's ORIGINAL implementation did NOT
+enforce the design's frozen "Sweep invariant" single-writer exclusion. It read the
+owned set (`cached` U `caching`) ONCE as a snapshot and never re-checked at unlink
+time, and the code + docstrings claimed that snapshot WAS "the single-writer
+exclusion media uses" -- FALSE: media uses a real `fcntl.flock(LOCK_EX)` writer
+lock (`media_store.py` worker_lock), the sweep had no lock at all. A concurrent
+`fetch_base` that `os.replace`d its landing bytes (netboot_base.py ~:764) AFTER the
+sweep's SELECT but BEFORE it reached that tag's `unlink` -- including the real
+leftover-generator where `os.replace` succeeds then the `state='cached'` write
+throws, leaving the row `failed` with a fresh file present -- would be deleted
+mid-fetch. FIX: the invariant is now ENFORCED (not by a lock -- fetch's `os.replace`
+runs on the event loop inside async `fetch_base` while the sweep runs in
+`asyncio.to_thread`; no lock object is shared across that split, and an in-process
+`threading.Lock` would be weaker than media's cross-process flock and would block
+the loop) but by defense-in-depth BOTH, per B4's "Acceptable" clause:
+  * (a) a per-tag ownership RE-CONFIRM (`_base_tag_owned`) re-SELECTs the row state
+    immediately before each unlink, so a fetch that COMMITTED its `caching`/`cached`
+    row after the snapshot is honoured;
+  * (b) an MTIME GRACE (`_ORPHAN_MTIME_GRACE_SECONDS` = 10x the 30s fetch download
+    timeout = 300s): never unlink a `base-<tag>.squashfs` whose mtime is within the
+    grace of now (wall-clock `time.time()`, compared against the filesystem's own
+    mtime -- NOT the injectable logical clock). A just-`os.replace`d file has a
+    fresh mtime even when its `cached` row is uncommitted or the write threw, so
+    this closes the `unlink`-vs-`os.replace` race the re-confirm alone leaves open;
+    a genuine orphan ages past the grace and is swept on a later tick.
+F-2 (crash on missing dir) also fixed: `_sweep_orphans` now returns [] when the
+os-images dir is absent (matching `gc_base_cache`'s tolerance) instead of letting
+`iterdir` raise FileNotFoundError and crash the poll tail every tick. Docstrings in
+`_owned_base_tags`, `sweep_base_orphans`, and `_sweep_base_orphans` corrected to
+state the snapshot is NOT the exclusion; the two guards are. Tests: 4 no-DB unit
+probes (missing-dir tolerance; fresh-mtime spared; aged orphan swept; became-owned
+re-confirm) + the existing DB orphan-sweep test's orphan aged past the grace.
