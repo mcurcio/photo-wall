@@ -351,6 +351,46 @@ def _decision(conn, served: str | None, *, device_id: str | None, now: float) ->
     return BaseServeDecision(served, True, row["squashfs_sha256"])
 
 
+# -- operator pin / attachment surface (bead 7) ------------------------------
+
+
+def set_device_pin(conn, device_id: str, tag: str) -> bool:
+    """Set `devices.attached_tag = tag` (the operator pin); return whether a row
+    matched.
+
+    The pin is the precedence WINNER at the serve seam (`_resolve_recovery_aware`
+    serves a pinned device its pin and releases any sticky `failed_tag` on the
+    next netboot -- the operator's explicit choice supersedes the stick), so this
+    write only records the tag; the failed-tag release composes at serve time.
+    Validates `tag` exists in `app_releases` (the `attached_tag` FK target) FIRST,
+    raising `AppReleaseError('release_not_found', 404)` rather than surfacing a raw
+    FK violation as a 500 -- so a bad tag is a clean rejection with NO mutation.
+    Returns False when no `devices` row matches `device_id` (a row is auto-created
+    only at the netboot seam), so the caller 404s an unknown device."""
+    if conn.execute("SELECT 1 FROM app_releases WHERE tag=%s", (tag,)).fetchone() is None:
+        raise AppReleaseError("release_not_found", 404)
+    return (
+        conn.execute(
+            "UPDATE devices SET attached_tag=%s WHERE device_id=%s", (tag, device_id)
+        ).rowcount
+        == 1
+    )
+
+
+def clear_device_pin(conn, device_id: str) -> bool:
+    """Clear `devices.attached_tag` (NULL => unpinned); return whether a row matched.
+
+    The device then falls back to the unpinned precedence at the serve seam --
+    latest-verified, else (empty state only) latest-discovered. Returns False when
+    no `devices` row matches `device_id`, so the caller 404s an unknown device."""
+    return (
+        conn.execute(
+            "UPDATE devices SET attached_tag=NULL WHERE device_id=%s", (device_id,)
+        ).rowcount
+        == 1
+    )
+
+
 # -- per-device .deb carried tag (bead 5) ------------------------------------
 
 

@@ -16,8 +16,8 @@ Verify gate (from repo runbook):
 | 3 | empty-state bootstrap + boot re-hydrate | **CI-GREEN** | ede8109 (test-fix 4680f4f) | fail-loud assertion is fail-LOGGED not crash (E4; bead 9 surfaces it) |
 | 4 | GC (gc_base_cache, keep-set, eviction_reason) | **CI-GREEN** | ede8109 (test-fix 4680f4f) | poll-tail only; bead 7 must add post-attachment GC trigger (E5) |
 | 5 | per-device .deb carrying served tag (F4) | **CI-GREEN** | 4911d9b | new GET /v1/netboot/manifest (E6); review clean (F4 strict, 0010 untouched) |
-| 6 | appliance wiring (serial on .deb + post base-health) | landing | — | E7 (manifest returns tag=last_served_tag) + E8 (player posts base-health, not appliance); opt-in PHOTO_WALL_PER_DEVICE_DEB; review clean; E9 docs notes; fires netboot-e2e.yml |
-| 7 | attachment surface (set/clear attached_tag) | open | — | |
+| 6 | appliance wiring (serial on .deb + post base-health) | **CI-GREEN** | e193ca7 | E7 (manifest returns tag) + E8 (player posts base-health); opt-in PHOTO_WALL_PER_DEVICE_DEB; netboot-e2e docker job passed; E9 docs notes |
+| 7 | attachment surface (set/clear attached_tag) | landing | — | admin-gated PUT/DELETE pin; proactive fetch_base + warranted .deb mirror; E5 GC; review clean (authz+atomicity+GC-safety) |
 | 8 | genuine fresh-install e2e | open | — | MockTransport gate CI-runnable; real-GitHub needs a secret |
 | 9 | observability + docs | open | — | docs bead |
 

@@ -36,10 +36,13 @@ from central.media_store import MediaStore
 from central.netboot_base import (
     SERIAL_HEADER,
     base_file_path,
+    clear_device_pin,
+    gc_base_cache,
     record_base_health,
     sanitize_serial,
     select_base_for_serial,
     served_tag_for_serial,
+    set_device_pin,
 )
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
@@ -123,6 +126,13 @@ class AppPackageRegistration(Model):
 
 class AppPackagePromotion(Model):
     sha256: Digest
+
+
+class DevicePin(Model):
+    # The tag to pin a device to (0012 bead 7). Bounded here; real existence is
+    # validated against `app_releases` (the `attached_tag` FK target) in
+    # `set_device_pin`, which 404s an unknown tag rather than 500-ing on the FK.
+    tag: str = Field(min_length=1, max_length=128)
 
 
 def create_app(
@@ -746,6 +756,55 @@ def create_app(
         with db.transaction() as conn:
             queue.enqueue_poll_in(conn)
         return JSONResponse({"status": "polling"}, status_code=202)
+
+    @app.put("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
+    def pin_device(device_id: Identifier, request: DevicePin):
+        # Operator pin (0012 bead 7, decision gate row 3): admin-token-gated with
+        # the SAME bearer posture as every other /v1/operator/* route (the shared
+        # `admin` dependency). Sets `devices.attached_tag` -- the precedence winner
+        # the serve seam resolves (pin > latest-verified > bootstrap), which also
+        # releases any sticky `failed_tag` on the device's next netboot. One
+        # transaction:
+        #   1. set the pin (404 on a bad tag via the FK check, 404 on an unknown
+        #      device -- either way NO mutation);
+        #   2. PROACTIVE fetch (design gate row): enqueue BOTH the base fetch
+        #      (base:<tag>) and -- when warranted -- the `.deb` mirror (tag lock)
+        #      for the pinned tag, so a RECOVERY pin (operator pinning a broken
+        #      device to a known-good) comes up on its NEXT netboot rather than
+        #      paying an extra netboot -> manifest-503 -> reboot cycle for the lazy
+        #      `.deb` backstop. The `.deb` mirror is enqueued only when the tag is
+        #      deployable-but-unmirrored (`deb_mirrorable_in`) -- the SAME guard the
+        #      /v1/netboot/manifest miss path uses -- so an already-mirrored (or
+        #      undeployable / `.deb`-less) tag never gets a redundant mirror.
+        #   3. E5 post-attachment GC: reclaim bytes freed by the pin change (e.g.
+        #      the previously-pinned tag now unreferenced) promptly instead of at
+        #      the next poll tail. The just-pinned tag is in the keep-set (a
+        #      non-retired pin), so GC never evicts what we just enqueued.
+        with db.transaction() as conn:
+            if not set_device_pin(conn, device_id, request.tag):
+                raise RegistryError("device_not_found", 404)
+            if release_queue is not None:
+                release_queue.enqueue_base_fetch_in(conn, request.tag)
+                if AppReleases.deb_mirrorable_in(conn, request.tag):
+                    release_queue.enqueue_mirror_in(conn, request.tag)
+            if base_root is not None:
+                gc_base_cache(conn, base_root, clock=clock)
+        return {"status": "pinned"}
+
+    @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
+    def unpin_device(device_id: Identifier):
+        # Clear the pin (0012 bead 7): the device falls back to the unpinned
+        # precedence at the serve seam (latest-verified, else empty-state
+        # latest-discovered). E5 post-attachment GC: after the clear, a
+        # previously-pinned tag that is now unreferenced (not latest-verified, not
+        # any non-retired known-good/pin, not in-flight) has its bytes reclaimed
+        # promptly rather than at the next poll tail.
+        with db.transaction() as conn:
+            if not clear_device_pin(conn, device_id):
+                raise RegistryError("device_not_found", 404)
+            if base_root is not None:
+                gc_base_cache(conn, base_root, clock=clock)
+        return {"status": "cleared"}
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
