@@ -88,6 +88,16 @@ class DiscoveredRelease:
     asset_url: str | None
     deployable: bool
     reason: str | None
+    # Base-image facts (0012), learned from the same manifest without a download:
+    # manifest.base_image {filename, sha256 (of the TARBALL, not the squashfs),
+    # size} joined to the release's assets[].name for the tarball URL, plus the
+    # top-level `revision` (a git sha, informational). All None when the manifest
+    # carries no valid base_image -- that release is base-undeployable, not an
+    # error, exactly as a missing player_deb is .deb-undeployable.
+    base_revision: str | None = None
+    base_tarball_sha256: str | None = None
+    base_tarball_size: int | None = None
+    base_tarball_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +274,10 @@ class GithubReleaseSource:
             # Runtime schema guard: the design is pinned to schema 1 and refuses,
             # gracefully, anything else rather than crashing the poll (0010).
             return undeployable("schema_mismatch")
+        # Base facts are orthogonal to .deb deployability: parse them off the same
+        # manifest regardless of the player_deb outcome so the catalog records
+        # every base a release carries (base OS + .deb are independently versioned).
+        base_revision, base_sha, base_size, base_url = self._base_image(manifest, assets)
         player = self._player_deb(manifest)
         if player is None:
             return undeployable("manifest_invalid")
@@ -274,7 +288,39 @@ class GithubReleaseSource:
             # and (for an already-mirrored tag) the store's `divergent` signal --
             # so the sha256/size are still reported.
             return undeployable("asset_missing", sha=sha256, size=size)
-        return DiscoveredRelease(tag, is_prerelease, sha256, size, asset_url, True, None)
+        return DiscoveredRelease(
+            tag, is_prerelease, sha256, size, asset_url, True, None,
+            base_revision=base_revision, base_tarball_sha256=base_sha,
+            base_tarball_size=base_size, base_tarball_url=base_url,
+        )
+
+    @staticmethod
+    def _base_image(
+        manifest: dict, assets: dict[str, str]
+    ) -> tuple[str | None, str | None, int | None, str | None]:
+        """Extract (revision, tarball sha256, tarball size, tarball url) or all-None.
+
+        The manifest's `base_image.sha256` is the TARBALL digest (the served
+        squashfs `Digest` is learned only at first cache, from inside the
+        tarball). The download URL is not in the manifest: it is the release
+        asset whose name equals `base_image.filename` (same filename-join the
+        `.deb` uses). Any malformed/absent field yields all-None -- the release
+        is base-undeployable, never a poll error."""
+        revision = manifest.get("revision")
+        revision = revision if isinstance(revision, str) and revision else None
+        base = manifest.get("base_image")
+        if not isinstance(base, dict):
+            return revision, None, None, None
+        filename, sha256, size = base.get("filename"), base.get("sha256"), base.get("size")
+        if (
+            not isinstance(filename, str)
+            or not isinstance(sha256, str)
+            or not _SHA256.fullmatch(sha256)
+            or type(size) is not int
+            or size <= 0
+        ):
+            return revision, None, None, None
+        return revision, sha256, size, assets.get(filename)
 
     async def _fetch_manifest(self, url: str) -> bytes | None:
         """Return the manifest bytes, or None when the asset is absent (404/410).

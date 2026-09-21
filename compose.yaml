@@ -25,6 +25,10 @@ services:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
       PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
       PHOTO_WALL_MEDIA_ROOT: /var/lib/photo-wall/media
+      # 0012: the dedicated base-image volume, mounted READ-ONLY here (Central
+      # serves; the worker writes). Separate from `media` and asserted writable
+      # only by the worker at boot.
+      PHOTO_WALL_BASE_ROOT: /var/lib/photo-wall/base
       PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
     ports:
       - "127.0.0.1:${PHOTO_WALL_PORT:-8000}:8000"
@@ -34,6 +38,7 @@ services:
     restart: unless-stopped
     volumes:
       - media:/var/lib/photo-wall/media:ro
+      - base:/var/lib/photo-wall/base:ro
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -50,8 +55,14 @@ services:
       target: media-worker
     environment:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
+      # 0012: same dedicated base volume as Central, but mounted READ-WRITE here
+      # -- the worker is the single writer (base fetch + boot re-hydrate) and
+      # asserts this path writable at boot, failing loud otherwise. This writable
+      # mount is what lets the boot assertion pass under read_only rootfs.
+      PHOTO_WALL_BASE_ROOT: /var/lib/photo-wall/base
     volumes:
       - media:/var/lib/photo-wall/media
+      - base:/var/lib/photo-wall/base
       - connections:/etc/photo-wall/private
     depends_on:
       database:
@@ -73,4 +84,5 @@ services:
 volumes:
   database:
   media:
+  base:
   connections:

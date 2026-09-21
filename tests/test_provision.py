@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from appliance.provision import (
+    SERIAL_HEADER,
     AppUnconfigured,
     Bootstrapper,
     ProvisionError,
@@ -371,3 +372,116 @@ def test_apt_install_and_start_unit_are_real_but_easily_stubbed(monkeypatch, tmp
     # Non-interactive so the boot-time install never blocks on a prompt.
     assert kwargs["env"]["DEBIAN_FRONTEND"] == "noninteractive"
     assert calls[1][0][0] == ["systemctl", "start", "photo-wall-player.service"]
+
+
+# --- 0012 bead 6: opt-in per-device `.deb` manifest + served-tag handoff ------
+
+SERIAL = "10000000cafef00d"
+TAG = "v9.9.9"
+
+
+class PerDeviceCentral:
+    """Fake central serving BOTH the global (`/v1/app/manifest`) and the
+    per-device (`/v1/netboot/manifest`, serial-keyed, carries `tag`) manifest
+    routes; records the serial header the per-device request carried so we prove
+    it reached the server, and which route each request hit."""
+
+    def __init__(self, *, tag=TAG):
+        self.tag = tag
+        self.requests = []
+        self.serials = []
+
+    def open(self, request, **kwargs):
+        path = urlsplit(request.full_url).path
+        self.requests.append(path)
+        if path == "/v1/netboot/manifest":
+            serial = next((v for k, v in request.header_items()
+                           if k.lower() == SERIAL_HEADER.lower()), None)
+            self.serials.append(serial)
+            body = json.dumps({"version": "1.2.3+gabc", "sha256": SHA256,
+                               "size": len(BODY), "tag": self.tag}).encode()
+        elif path == "/v1/app/manifest":
+            body = manifest_json()
+        elif path.startswith("/v1/app/package/"):
+            body = BODY
+        else:
+            raise AssertionError(f"unexpected path {path}")
+        return Response(body, headers={"Content-Length": str(len(body))})
+
+
+def test_per_device_manifest_fetch_sends_serial_and_returns_served_tag():
+    # (criterion a) The opt-in fetch hits /v1/netboot/manifest with the serial
+    # header and returns the served tag central recorded -- the running_tag the
+    # player will echo. (criterion b) proof it is the served tag, not a guess:
+    # the value comes from the server response, keyed by the serial we sent.
+    central = PerDeviceCentral()
+    manifest = fetch_manifest(ORIGIN, serial=SERIAL, opener=central)
+    assert manifest == {"version": "1.2.3+gabc", "sha256": SHA256,
+                        "size": len(BODY), "tag": TAG}
+    assert central.requests == ["/v1/netboot/manifest"]
+    assert central.serials == [SERIAL]
+
+
+def test_global_manifest_fetch_unchanged_hits_app_route_no_tag():
+    # (criterion d) A device that has NOT opted in (serial=None) keeps 0010's
+    # global route and gets no tag -- the regression guard on existing appliances.
+    central = PerDeviceCentral()
+    manifest = fetch_manifest(ORIGIN, opener=central)
+    assert manifest == {"version": "1.2.3+gabc", "sha256": SHA256, "size": len(BODY)}
+    assert "tag" not in manifest
+    assert central.requests == ["/v1/app/manifest"]
+
+
+def test_per_device_manifest_missing_or_malformed_tag_is_rejected():
+    class NoTag(PerDeviceCentral):
+        def open(self, request, **kwargs):
+            self.requests.append("/v1/netboot/manifest")
+            body = json.dumps({"version": "v", "sha256": SHA256, "size": len(BODY)}).encode()
+            return Response(body, headers={"Content-Length": str(len(body))})
+
+    with pytest.raises(ProvisionError, match="provision_manifest_invalid"):
+        fetch_manifest(ORIGIN, serial=SERIAL, opener=NoTag())
+
+    class BadTag(PerDeviceCentral):
+        def open(self, request, **kwargs):
+            body = json.dumps({"version": "v", "sha256": SHA256, "size": len(BODY),
+                               "tag": "not-a-tag"}).encode()
+            return Response(body, headers={"Content-Length": str(len(body))})
+
+    with pytest.raises(ProvisionError, match="provision_manifest_invalid"):
+        fetch_manifest(ORIGIN, serial=SERIAL, opener=BadTag())
+
+
+def test_write_public_config_hands_the_served_tag_forward(tmp_path):
+    path = tmp_path / "public.json"
+    write_public_config(ORIGIN, path=path, base_running_tag=TAG)
+    written = json.loads(path.read_text())
+    assert written["base_running_tag"] == TAG
+    # The player reads it as PlayerConfig.base_running_tag.
+    assert load_config(path).base_running_tag == TAG
+    # Global path (no tag) writes no key -- existing appliances unaffected.
+    path2 = tmp_path / "public2.json"
+    write_public_config(ORIGIN, path=path2)
+    assert "base_running_tag" not in json.loads(path2.read_text())
+
+
+def test_bootstrapper_opt_in_fetches_per_device_manifest_and_hands_tag_forward(tmp_path):
+    # End-to-end through the Bootstrapper: a serial_reader opts in, the manifest
+    # fetch carries the serial, the served tag is captured on the bootstrapper
+    # AND handed forward via the default public.json handoff for base-health.
+    central = PerDeviceCentral()
+    public = tmp_path / "public.json"
+    bootstrapper = Bootstrapper(
+        discovery=FakeDiscovery(ORIGIN),
+        fetch_manifest=functools.partial(fetch_manifest, opener=central),
+        fetch_package=functools.partial(fetch_package, opener=central),
+        install=lambda package, manifest: None,
+        start_unit=lambda: None,
+        sleep=Sleeps(),
+        serial_reader=lambda: SERIAL,
+        public_config_path=public,
+    )
+    assert asyncio.run(bootstrapper.run(max_attempts=1)) is True
+    assert bootstrapper.running_tag == TAG
+    assert central.serials == [SERIAL]
+    assert json.loads(public.read_text())["base_running_tag"] == TAG

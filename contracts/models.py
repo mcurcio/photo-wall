@@ -251,6 +251,22 @@ class Readiness(Model):
         return self
 
 
+class BaseHealth(Model):
+    """A base-image health check-in an ENROLLED device posts after its base boots
+    (0012 r7). Distinct from `Readiness`: it carries no plan/assignment fields and
+    the endpoint requires NO live plan offer, so an enrolled-but-unbound device can
+    move the latest-verified frontier. `running_tag` is the base tag the device
+    booted; Central accepts it only when it equals the tag it recorded as
+    last-served to that device and `healthy` is true (the sole writer of
+    known-good). `Readiness` is deliberately left untouched -- the running tag
+    lives here, not there."""
+
+    authority_epoch: int = Field(ge=1)
+    sequence: int = Field(ge=1)                    # monotonicity guard: known-good only advances
+    running_tag: Annotated[str, Field(pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$", max_length=256)]
+    healthy: bool
+
+
 class Commit(Model):
     plan_id: Identifier
     revision: int = Field(ge=1)

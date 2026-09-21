@@ -35,13 +35,20 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import (
     SERIAL_HEADER,
-    base_digest,
+    base_file_path,
+    clear_device_pin,
+    gc_base_cache,
+    operator_base_status,
+    record_base_health,
     sanitize_serial,
     select_base_for_serial,
+    served_tag_for_serial,
+    set_device_pin,
 )
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
+    BaseHealth,
     Calibration,
     Digest,
     Identifier,
@@ -122,6 +129,13 @@ class AppPackagePromotion(Model):
     sha256: Digest
 
 
+class DevicePin(Model):
+    # The tag to pin a device to (0012 bead 7). Bounded here; real existence is
+    # validated against `app_releases` (the `attached_tag` FK target) in
+    # `set_device_pin`, which 404s an unknown tag rather than 500-ing on the FK.
+    tag: str = Field(min_length=1, max_length=128)
+
+
 def create_app(
     db: Database | None = None,
     clock: Clock | None = None,
@@ -181,9 +195,13 @@ def create_app(
     # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
     # and injected above: promote defers a tag-keyed mirror, refresh defers a
     # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker.
+    # The same enqueue port also defers the 0012 per-version base fetch, so it is
+    # built when EITHER the `.deb` mirror (PHOTO_WALL_APP_ROOT) or base serving
+    # (PHOTO_WALL_BASE_ROOT) is configured. The `.deb` operator routes still gate
+    # independently on `app_root`, so a base-only deployment does not expose them.
     release_queue = release_queue or (
         ProcrastinateAppReleaseQueue(db.dsn)
-        if isinstance(db, Database) and app_root is not None
+        if isinstance(db, Database) and (app_root is not None or base_root is not None)
         else None
     )
     media_gateway = (
@@ -452,23 +470,36 @@ def create_app(
     def netboot_base(request: Request):
         # Player-facing, UNAUTHENTICATED (trusted LAN, 0009 -- same posture as
         # /v1/app/manifest and the .deb route): a Pi has no credential before it
-        # boots. Modelled line-for-line on the .deb route above: O_NOFOLLOW open,
-        # fstat regular-file + size check, bounded 1 MiB streaming, and a
-        # base64 `Digest` header. The Pi self-identifies by serial; central picks
-        # the image (single default today -- select_base_for_serial is the seam).
-        # Sanitize BEFORE anything consumes it: the same validated value feeds
-        # the log AND the selection seam, so no route can pass raw client input
-        # to a future per-serial lookup (select_base_for_serial re-validates too).
+        # boots. The Pi self-identifies by serial; Central maps it to a canonical
+        # `devices` row and resolves ONE tag by per-device precedence (pin, else
+        # latest-verified, else -- empty state only -- latest-discovered), then
+        # serves that version's immutable base-<tag>.squashfs. Sanitize BEFORE
+        # anything consumes the serial: the validated value feeds both the log and
+        # the selection seam. The read-modify-write (device upsert + a 200-only
+        # last-served record) runs inside the transaction; a miss enqueues a
+        # coalesced fetch and 503s, writing NO last-served record so a self-healing
+        # retry is never mistaken for a failed boot.
         serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
         LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
         if base_root is None:
             raise AppPackageError("base_artifact_unavailable", 503)
-        digest = base_digest(base_root)
-        if digest is None:
-            # No stored digest -> we cannot advertise the corruption gate the Pi
-            # requires (it fails closed on a missing Digest); refuse to serve.
+        with db.transaction() as conn:
+            decision = select_base_for_serial(conn, serial, clock=clock)
+            if decision.fetch_tag is not None and release_queue is not None:
+                # Lazy backstop: coalesced by the base:<tag> queueing lock so a
+                # burst of retrying Pis collapses to one in-flight fetch.
+                release_queue.enqueue_base_fetch_in(conn, decision.fetch_tag)
+        if decision.served_tag is None:
+            # Nothing resolvable yet (no frontier, no discoverable base).
             raise AppPackageError("base_artifact_unavailable", 503)
-        path = select_base_for_serial(base_root, serial)
+        if not decision.cached:
+            # Bytes not yet cached: fail closed, the Pi reboots and retries.
+            raise AppPackageError("base_artifact_uncached", 503)
+        # O_NOFOLLOW open, fstat regular-file + size bound, bounded 1 MiB
+        # streaming, and a base64 `Digest` header -- the same discipline as the
+        # .deb route. The Digest is the version's recorded squashfs sha, so bytes
+        # and Digest agree by construction.
+        path = base_file_path(base_root, decision.served_tag)
         try:
             descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
         except HardenedOpenError as error:
@@ -485,9 +516,54 @@ def create_app(
             headers={
                 "Cache-Control": "public, immutable",
                 "Content-Length": str(metadata.st_size),
-                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(digest)).decode()}",
+                "Digest": "sha-256="
+                + base64.b64encode(bytes.fromhex(decision.squashfs_sha256)).decode(),
             },
         )
+
+    @app.get("/v1/netboot/manifest")
+    def netboot_manifest(request: Request):
+        # Per-device `.deb` manifest (0012 bead 5, F4): additive, serial-keyed,
+        # symmetric to /v1/netboot/base and UNAUTHENTICATED (trusted LAN, 0009 --
+        # a Pi still holds no credential when its booted OS fetches its `.deb`).
+        # Resolves the `.deb` from the tag whose base bytes this device was
+        # ACTUALLY served this boot (`devices.last_served_tag`), NOT a fresh
+        # re-resolve -- so base and `.deb` ride one boot's tag even if
+        # latest-verified moved between the two requests. On a recovery boot that
+        # recorded tag is the known-good tag, so base + `.deb` agree there too.
+        #
+        # This is ADDITIVE: 0010's global GET /v1/app/manifest route and its
+        # promoted_tag/current_sha256/reconcile machinery (migration 016) are
+        # neither read nor written here; the content-addressed
+        # GET /v1/app/package/{sha}.deb bytes route stays sha-keyed. Bead 6 wires
+        # the appliance's manifest fetch (serial header) to this route.
+        serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
+        with db.transaction() as conn:
+            served_tag = served_tag_for_serial(conn, serial)
+            if served_tag is None:
+                # No device row / never served a base on a 200 this boot: there
+                # is no carried tag, so there is no per-device answer. Fail closed
+                # rather than fall back to a global pointer that could diverge.
+                raise AppPackageError("app_manifest_unresolved", 503)
+            manifest = AppReleases.deb_manifest_for_tag_in(conn, served_tag)
+            if manifest is None:
+                # The carried tag's `.deb` is not yet mirrored: enqueue the mirror
+                # as a lazy backstop (coalesced by the tag lock) when the tag is
+                # deployable, then 503 -- the Pi retries on its next boot cycle.
+                if release_queue is not None and AppReleases.deb_mirrorable_in(conn, served_tag):
+                    release_queue.enqueue_mirror_in(conn, served_tag)
+                raise AppPackageError("app_manifest_uncached", 503)
+        # Carry the served tag back to the appliance (0012 bead 6, errata E7).
+        # `served_tag` IS `devices.last_served_tag` -- the tag whose base bytes
+        # this device was actually served this boot. Returning it lets the
+        # enrolled player report it as base-health `running_tag`; because it is
+        # the recorded served tag (not a client guess), central's
+        # `running_tag == last_served_tag` validation passes by construction and
+        # known-good/latest-verified advance. The base serve (bytes + Digest)
+        # never exposes the tag, and the diskless initrd persists nothing, so
+        # this per-device `.deb` manifest -- fetched by the booted OS that also
+        # posts base-health -- is where the tag crosses to the appliance.
+        return {**manifest, "tag": served_tag}
 
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):
@@ -525,6 +601,29 @@ def create_app(
         if request.authority_epoch != identity["authority_epoch"]:
             raise RegistryError("stale_authority", 403)
         return {"accepted": coordinator.readiness(identity["id"], request)}
+
+    @app.post("/v1/player/base-health")
+    def base_health(request: BaseHealth, identity: dict = Depends(player)):
+        # Authenticated by the enrolled-device token (the `player` dependency),
+        # but -- unlike readiness -- requires NO live plan offer (0012 r7), so an
+        # enrolled-but-unbound, base-booted device can move the latest-verified
+        # frontier. Join player_id -> players.device_id -> devices, then advance
+        # known-good only for a genuinely healthy, monotonic report whose
+        # running_tag equals the tag Central recorded as last-served (E1: the
+        # write is a single conditional UPDATE under FOR UPDATE, so a concurrent
+        # recovery serve that moved the served tag invalidates a stale write).
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        with db.transaction() as conn:
+            row = conn.execute(
+                "SELECT device_id FROM players WHERE id=%s", (identity["id"],)
+            ).fetchone()
+            accepted = (
+                record_base_health(conn, row["device_id"], request, clock=clock)
+                if row is not None
+                else False
+            )
+        return {"accepted": accepted}
 
     @app.post("/v1/player/observations")
     def observation(request: Observation, identity: dict = Depends(player)):
@@ -658,6 +757,68 @@ def create_app(
         with db.transaction() as conn:
             queue.enqueue_poll_in(conn)
         return JSONResponse({"status": "polling"}, status_code=202)
+
+    @app.put("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
+    def pin_device(device_id: Identifier, request: DevicePin):
+        # Operator pin (0012 bead 7, decision gate row 3): admin-token-gated with
+        # the SAME bearer posture as every other /v1/operator/* route (the shared
+        # `admin` dependency). Sets `devices.attached_tag` -- the precedence winner
+        # the serve seam resolves (pin > latest-verified > bootstrap), which also
+        # releases any sticky `failed_tag` on the device's next netboot. One
+        # transaction:
+        #   1. set the pin (404 on a bad tag via the FK check, 404 on an unknown
+        #      device -- either way NO mutation);
+        #   2. PROACTIVE fetch (design gate row): enqueue BOTH the base fetch
+        #      (base:<tag>) and -- when warranted -- the `.deb` mirror (tag lock)
+        #      for the pinned tag, so a RECOVERY pin (operator pinning a broken
+        #      device to a known-good) comes up on its NEXT netboot rather than
+        #      paying an extra netboot -> manifest-503 -> reboot cycle for the lazy
+        #      `.deb` backstop. The `.deb` mirror is enqueued only when the tag is
+        #      deployable-but-unmirrored (`deb_mirrorable_in`) -- the SAME guard the
+        #      /v1/netboot/manifest miss path uses -- so an already-mirrored (or
+        #      undeployable / `.deb`-less) tag never gets a redundant mirror.
+        #   3. E5 post-attachment GC: reclaim bytes freed by the pin change (e.g.
+        #      the previously-pinned tag now unreferenced) promptly instead of at
+        #      the next poll tail. The just-pinned tag is in the keep-set (a
+        #      non-retired pin), so GC never evicts what we just enqueued.
+        with db.transaction() as conn:
+            if not set_device_pin(conn, device_id, request.tag):
+                raise RegistryError("device_not_found", 404)
+            if release_queue is not None:
+                release_queue.enqueue_base_fetch_in(conn, request.tag)
+                if AppReleases.deb_mirrorable_in(conn, request.tag):
+                    release_queue.enqueue_mirror_in(conn, request.tag)
+            if base_root is not None:
+                gc_base_cache(conn, base_root, clock=clock)
+        return {"status": "pinned"}
+
+    @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
+    def unpin_device(device_id: Identifier):
+        # Clear the pin (0012 bead 7): the device falls back to the unpinned
+        # precedence at the serve seam (latest-verified, else empty-state
+        # latest-discovered). E5 post-attachment GC: after the clear, a
+        # previously-pinned tag that is now unreferenced (not latest-verified, not
+        # any non-retired known-good/pin, not in-flight) has its bytes reclaimed
+        # promptly rather than at the next poll tail.
+        with db.transaction() as conn:
+            if not clear_device_pin(conn, device_id):
+                raise RegistryError("device_not_found", 404)
+            if base_root is not None:
+                gc_base_cache(conn, base_root, clock=clock)
+        return {"status": "cleared"}
+
+    @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])
+    def netboot_status():
+        # 0012 bead 9 observability: a READ-ONLY operator view of the base-mirror
+        # so an operator can answer "why did this device get this image / why
+        # won't it advance / why were bytes evicted", and SEE a failed BASE_ROOT
+        # boot assertion (E4) rather than only find it in a log. Same admin-bearer
+        # posture as every other /v1/operator/* route. The operator UI over these
+        # fields is deferred (0012: "backend fields ship"); this endpoint is that
+        # backend surface. `base_root` here is create_app's configured RO base
+        # dir, so the view reports whether base serving is even configured.
+        with db.transaction() as conn:
+            return operator_base_status(conn, base_root)
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):

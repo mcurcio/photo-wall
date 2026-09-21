@@ -39,6 +39,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from central import netboot_base
 from central.app_packages import AppPackageError, AppPackages
 from central.app_releases import AppReleaseError, AppReleases
 from central.db import Database
@@ -161,10 +162,47 @@ class AppReleaseService:
         # Poll-tail reconcile is the convergence backstop; it needs no network and
         # runs whether or not the list call succeeded.
         result["reconcile"] = await asyncio.to_thread(self.releases.reconcile, self.packages)
+        # Poll-tail base sweep (0012 bead 2): fail any device left `pending` past
+        # PENDING_HEALTH_TIMEOUT so a powered-off / stuck device stops holding the
+        # latest-verified frontier and a cache entry. Pure local DB state, like
+        # reconcile -- no network, always runs.
+        result["base_sweep"] = await asyncio.to_thread(self._sweep_failed_boots)
+        # Poll-tail base GC (0012 bead 4): evict cache bytes whose tag has left the
+        # keep-set (latest-verified U non-retired pins U non-retired known-good U
+        # in-flight `caching`). Off-loop under one txn, exactly like the sweep and
+        # reconcile -- no network, always runs. Skipped when BASE_ROOT is
+        # unconfigured (base serving off), so a non-base worker is unchanged. The
+        # pin/health-change triggers land with their own beads (attachment surface);
+        # the poll tail is the always-on backstop, mirroring `sweep_failed_boots`.
+        result["base_gc"] = await asyncio.to_thread(self._gc_base_cache)
         return result
+
+    def _sweep_failed_boots(self) -> int:
+        """Fail stale-`pending` base boots (bead 2), off-loop under one txn."""
+        with self.db.transaction() as conn:
+            return netboot_base.sweep_failed_boots(conn, clock=self.releases.clock)
+
+    def _gc_base_cache(self) -> int:
+        """Evict cache bytes no non-retired device needs (bead 4), off-loop.
+
+        Reads the SAME base dir the serve route resolves (`resolve_base_root`) so
+        the eviction unlinks the very files the serve side would open. A None base
+        root (PHOTO_WALL_BASE_ROOT unset) means base serving is off -- nothing to
+        collect -- so GC is a no-op rather than a fault."""
+        base_root = netboot_base.resolve_base_root()
+        if base_root is None:
+            return 0
+        with self.db.transaction() as conn:
+            return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
 
     def _apply(self, record: DiscoveredRelease) -> None:
         """Feed one discovered release into the store (blocking; runs off-loop)."""
+        base = {
+            "base_revision": record.base_revision,
+            "base_tarball_sha256": record.base_tarball_sha256,
+            "base_tarball_size": record.base_tarball_size,
+            "base_tarball_url": record.base_tarball_url,
+        }
         if record.deployable:
             self.releases.upsert_discovered(
                 record.tag,
@@ -172,12 +210,17 @@ class AppReleaseService:
                 asset_sha256=record.asset_sha256,
                 asset_size=record.asset_size,
                 asset_url=record.asset_url,
+                **base,
             )
             return
         # Non-deployable per the client's marker: ensure a row exists, then mark it
         # undeployable (recording the reason) unless it already holds/references
         # bytes. A mirrored/divergent/withdrawn row is frozen and left untouched.
-        state = self.releases.upsert_discovered(record.tag, is_prerelease=record.is_prerelease)
+        # Base facts (0012) still ride along -- base OS is versioned independently
+        # of the `.deb`, so a `.deb`-undeployable release can still carry a base.
+        state = self.releases.upsert_discovered(
+            record.tag, is_prerelease=record.is_prerelease, **base
+        )
         if state in _UNDEPLOYABLE_FROM:
             self.releases.mark_undeployable(record.tag, reason=record.reason)
 
@@ -244,6 +287,37 @@ class AppReleaseService:
             "sha256": downloaded.sha256,
             "reconcile": reconcile,
         }
+
+    # -- base fetch (0012) ---------------------------------------------------
+
+    async def fetch_base(self, tag: str) -> dict:
+        """Download + verify + install one version's base squashfs (0012).
+
+        The worker consumer for FETCH_BASE_TASK, enqueued by the netboot serve
+        seam on a cache miss (and, later, boot re-hydrate). Reuses the SAME
+        GithubReleaseSource config as the `.deb` mirror (`source_factory`) and the
+        SAME base dir the serve route resolves (`resolve_base_root`), so the write
+        and serve sides never diverge. `netboot_base.fetch_base` owns the
+        cache-state writes and the atomic per-version file (it marks the row
+        `failed` on any fault); this wrapper only classifies the failure so a
+        transient network fault retries and a terminal one (missing base facts,
+        hostile/inconsistent archive, unwritable BASE_ROOT) completes. Fail-closed:
+        no partial file, no cache row left `caching`.
+        """
+        base_root = netboot_base.resolve_base_root()
+        try:
+            async with self.source_factory() as source:
+                sha256 = await netboot_base.fetch_base(
+                    source, self.db, self.releases.clock, tag, base_root
+                )
+        except netboot_base.NetbootBaseError as error:
+            logger.warning("base fetch failed for %s: %s", tag, error.code)
+            return {"cached": False, "tag": tag, "reason": error.code, "retryable": False}
+        except GithubReleaseError as error:
+            retryable = error.code in _TRANSIENT_MIRROR_CODES
+            logger.warning("base fetch failed for %s: %s", tag, error.code)
+            return {"cached": False, "tag": tag, "reason": error.code, "retryable": retryable}
+        return {"cached": True, "tag": tag, "sha256": sha256}
 
     # -- ETag persistence ----------------------------------------------------
     # 0010 mandates conditional-request hygiene but names no ETag store; this is

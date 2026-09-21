@@ -26,6 +26,7 @@ from central.installation_repository import PostgresInstallationRepository
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore
+from central.netboot_base import resolve_base_root
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
@@ -401,12 +402,18 @@ async def _entry():
                     # and cannot race an operator-queued mirror of the same tag.
                     # The run loop below drains APP_RELEASE_QUEUE, so the deferred
                     # mirror actually completes.
+                    # 0012 bead 3: pass BASE_ROOT so boot also fetches an empty
+                    # cluster's bootstrap image, re-hydrates cached-but-absent
+                    # bytes (the persistent-volume-wiped 503 self-heal), and sweeps
+                    # crash-orphaned temps. None (PHOTO_WALL_BASE_ROOT unset) leaves
+                    # the 0010 .deb autopull behaviour byte-for-byte unchanged.
                     autopull_task = asyncio.create_task(
                         boot_autopull(
                             release_service,
                             release_service.packages,
                             PostgresInstallationRepository(clock),
                             ProcrastinateAppReleaseQueue(dsn),
+                            base_root=resolve_base_root(),
                         )
                     )
                     autopull_task.add_done_callback(_log_boot_autopull)

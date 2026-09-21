@@ -19,6 +19,7 @@ import procrastinate
 
 from central.app_release_queue import (
     APP_RELEASE_QUEUE,
+    FETCH_BASE_TASK,
     MIRROR_RELEASE_TASK,
     POLL_QUEUEING_LOCK,
     POLL_RELEASES_TASK,
@@ -46,7 +47,7 @@ class AppReleaseRetryStrategy(procrastinate.BaseRetryStrategy):
 
 
 def register_app_release_tasks(app: procrastinate.App, *, poll_seconds: int = POLL_SECONDS) -> None:
-    """Register the poll (periodic) and mirror tasks on an existing worker app.
+    """Register the poll (periodic), mirror, and base-fetch tasks on a worker app.
 
     Called after `create_worker_app` so both media and release tasks share one
     app and one `run_worker_async` call. `poll_seconds` sets the periodic cadence
@@ -79,3 +80,24 @@ def register_app_release_tasks(app: procrastinate.App, *, poll_seconds: int = PO
         # the promote heals automatically once connectivity returns.
         if result.get("retryable"):
             raise RetryableAppReleaseTask(result.get("reason", "mirror_failed"))
+
+    # 0012: the per-version base squashfs fetch, deferred by the netboot serve
+    # seam's cache miss (and, later, boot re-hydrate). Same queue, same retry
+    # policy, and same tag-serialization convention as the `.deb` mirror -- the
+    # `base:<tag>` queueing lock is applied at enqueue (enqueue_base_fetch_in),
+    # exactly as MIRROR_RELEASE_TASK's tag lock is. Without this consumer a
+    # deferred fetch would never run and a cold base cache would 503 forever.
+    @app.task(
+        name=FETCH_BASE_TASK,
+        queue=APP_RELEASE_QUEUE,
+        pass_context=True,
+        retry=AppReleaseRetryStrategy(),
+    )
+    async def fetch_base(context, tag: str):
+        result = await context.additional_context["app_release_service"].fetch_base(tag)
+        # Terminal faults (missing base facts, hostile/inconsistent archive,
+        # unwritable BASE_ROOT) are recorded as a `failed` cache row and the task
+        # completes; only a transient network fault raises so the fetch heals once
+        # connectivity returns and the Pi's retry then serves 200.
+        if result.get("retryable"):
+            raise RetryableAppReleaseTask(result.get("reason", "base_fetch_failed"))

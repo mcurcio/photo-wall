@@ -381,3 +381,178 @@ Append-only. Read with `grep -a`.
 - Both were needed to close content-parity GAP 3 (manual revert) and GAP 4 (token-rejection recovery). The
   legacy same-token websocket-fencing test (test_operator_browser.py:185-226) is architecture-specific (old
   page's operator websocket); the console is REST with per-request bearer auth — NO console equivalent, by design.
+
+## 0012 netboot base auto-mirror
+
+E1 (2026-09-20, bead 1/2): both DB write seams on the `devices` row — netboot serve
+AND base-health — must run their read-modify-write under `SELECT ... FOR UPDATE` (or
+base-health commits as `UPDATE ... WHERE last_served_tag = running_tag`). r8 review found
+Fix-3 was one-sided; a lost update could record `healthy` on a tag the device was just
+rolled off. Folded into 0012 bead 1 page; add a base-health mutation probe symmetric to 18b.
+
+E2 (2026-09-20, bead 2): the PENDING_HEALTH_TIMEOUT poll sweep sets `failed_tag = desired`
+ONLY when `failed_tag` is currently NULL — never overwrites a live stick, and never uses
+`last_served_tag` (which after the r8 split is the known-good tag on a recovery boot).
+Folded into 0012 bead 2 page + the two prose sites (lines ~543, ~723).
+
+E2a (2026-09-20, bead 2 impl): a THIRD prose site the E2 fold missed — §"How it hooks
+the existing machinery", the "Failed-boot detection + poll sweep" bullet (~line 994) —
+still reads "setting `failed_tag = last_served_tag`", directly contradicting E2. E2 is
+authoritative and BINDING. See E2b for the fence value bead 2 actually implements. The
+docs bead (9) should correct that stale line. No code divergence.
+
+E2b (2026-09-20, bead 2 review fix): within the sweep's `failed_tag IS NULL` branch
+(E2's NULL-guard, kept intact), fence the tag the device ACTUALLY ATTEMPTED —
+`COALESCE(attached_tag, last_served_tag)` — NOT a recomputed latest-verified/discovered
+frontier. This mirrors the live DETECT arm, which only ever fences the served tag.
+WHY: the frontier can drift past what a stale device served (another device pushes
+latest-verified higher); fencing against that higher tag would fence a tag the device
+never attempted, so its next boot would satisfy `desired == failed_tag` ⇒ RECOVER and
+the device would silently, indefinitely skip a legitimate already-verified upgrade. If
+`COALESCE` is NULL (never served, no pin) `failed_tag` stays NULL — no bogus fence, just
+the `failed` outcome. E2's "never overwrite a live stick" NULL-guard and "never the
+recovery boot's known-good tag" both still hold (a recovery boot's failed_tag is
+non-NULL, so the guard skips it). This supersedes E2's "= desired" phrasing for the
+sweep's fence value: the correct value is the served/pinned tag, which in the guarded
+(non-recovery) branch is exactly what the device attempted (`last_served_tag` there is
+NOT a known-good recovery tag).
+
+E3 (2026-09-20, bead 1): the design's migration-018 storage enumeration (§"Storage,
+lifecycle, migration") lists ONLY `app_releases` base cols + `base_cache` + `devices`,
+but the base-health seam requires per-epoch `sequence` MONOTONICITY (bead 1 page;
+probe 13) and the r8 `devices` schema is frozen with EXACTLY its listed columns (no
+sequence column). Monotonicity is impossible without a persisted last-sequence, so bead
+1 adds a small `device_base_health(device_id, authority_epoch, sequence)` table in
+migration 018 — the direct analogue of `player_feedback` (003), which is exactly the
+"reuse the readiness sequence pattern" the bead page calls for. It touches no `devices`
+column. Rollback adds `DROP TABLE device_base_health;` before `DROP TABLE devices;`.
+Also (minor, no divergence): the `base_cache` row is created by `fetch_base` at state
+`caching`, NOT at discovery — the state CHECK has no discovery-time value, matching the
+lifecycle diagram (`catalog_known --needed--> caching`) and the page's own parenthetical
+"(caching/absent until first fetched)". Discovery writes only the `app_releases` base
+facts.
+
+E4 (2026-09-20, bead 3 / residual for bead 9): the BASE_ROOT boot-time writability
+assertion is wired in _boot_base (central/app_release_boot.py) but is FAIL-LOGGED, not
+fail-crash — boot_autopull runs as a fire-and-forget task whose exceptions are
+swallowed+logged. Deliberate: a hard crash would couple a base-volume misconfig to
+killing 0010's .deb mirroring in the same worker. The design's "fail loud" guarantee is
+satisfied by (a) the ERROR log at boot and (b) bead 9 MUST surface the base-root
+assertion failure in operator-visible status/observability, not only logs. If bead 9
+does not surface it, reopen this as a hard-fail decision.
+RESOLVED (2026-09-20, bead 9): the boot path now records the assertion outcome to a
+single-row `base_boot_status` (migration 019_base_boot_status.sql) — `_boot_base`
+(central/app_release_boot.py) writes ok=True on a passed assertion and ok=False + the
+BaseRootError code before re-raising a failed one — and it is surfaced read-only at
+`GET /v1/operator/netboot` (`netboot_base.operator_base_status` -> `boot_status`). The
+fail-loud guarantee is thus operator-visible, not only logged; the fail-log posture
+(no hard crash coupling base-volume misconfig to killing the .deb mirror) stands. Not
+reopened as hard-fail.
+
+E5 (2026-09-20, bead 7): GC (gc_base_cache) is wired to the poll tail only in bead 4.
+The doc also calls for GC after pin/health changes; that trigger belongs to bead 7's
+attachment surface (and the base-health path). Bead 7 MUST invoke gc_base_cache after a
+pin set/clear so freed bytes are reclaimed promptly rather than at the next poll.
+RESOLVED (2026-09-20, bead 9): bead 7 landed this — both `PUT` and `DELETE`
+`/v1/operator/devices/{device_id}/pin` (central/app.py) invoke `gc_base_cache` in the
+same transaction as the pin set/clear (the just-pinned tag is in the keep-set, so GC
+never evicts what the pin just enqueued). Verified in the merged bead-7 code; no
+further action.
+
+E6 (2026-09-20, bead 5): the doc mandates the per-device `.deb` be resolved on the
+per-device serve path off `last_served_tag`, ADDITIVE, with 0010's global
+`GET /v1/app/manifest` "not modified and not repurposed" -- but never names the new
+route's URL string. Bead 5 implements it as a NEW unauthenticated route
+`GET /v1/netboot/manifest` (serial-keyed, symmetric to `GET /v1/netboot/base`), NOT a
+serial-aware branch on `/v1/app/manifest` (which would repurpose the untouched 0010
+route). BINDING for bead 6: wire the appliance's `fetch_manifest` to
+`GET /v1/netboot/manifest` (sending `X-PhotoWall-Serial`), not to `/v1/app/manifest`;
+the `.deb` bytes fetch stays `GET /v1/app/package/{sha}.deb` (sha-keyed, unchanged).
+Miss behavior (chosen among the doc's "503 + enqueue, or a documented gap"): a
+never-served device (`last_served_tag IS NULL`) or unknown/absent serial => 503
+`app_manifest_unresolved`, NO fallback to the global `current()` (a fallback would
+reintroduce base/`.deb` divergence, F4). A carried tag whose `.deb` is deployable but
+not yet mirrored => 503 `app_manifest_uncached` + lazy `enqueue_mirror_in` (coalesced
+by the tag lock), symmetric to the base serve's lazy backstop. No code divergence from
+beads 1-4; no change to promoted_tag/current_sha256/reconcile/migration 016.
+
+E7 (2026-09-20, bead 6): the doc's bead-6 page requires base-health `running_tag` to
+equal `devices.last_served_tag`, but never says HOW the diskless appliance learns the
+tag: `GET /v1/netboot/base` returns bytes + `Digest` only (no tag), the initrd persists
+nothing across the initrd->OS handoff, and the per-device manifest primitive returned
+only `{version, sha256, size}`. RESOLVED: `GET /v1/netboot/manifest` now ALSO returns
+the served `tag` (`{**manifest, "tag": served_tag}`, central/app.py). `served_tag` IS
+the value `served_tag_for_serial` read from `devices.last_served_tag`, so
+`running_tag == last_served_tag` holds BY CONSTRUCTION -- never a client guess, never
+derived from the `Digest`. This route (not the base serve) carries the tag because it is
+fetched by the SAME booted OS that enrolls and posts base-health; a base-serve response
+header would strand the tag in the initrd. Additive: 0010's global `GET /v1/app/manifest`
+is unchanged and returns no tag. BINDING for docs bead 9.
+
+E8 (2026-09-20, bead 6): the doc's "Packages touched" line attributes "post base-health
+after boot" to `appliance/provision.py`, but base-health requires the ENROLLED player
+token, and the bootstrapper explicitly never enrolls (0009 gate #2); the import-linter
+also FORBIDS `player -> appliance`, so an appliance-hosted poster the player calls is
+impossible. Base-health is therefore posted by the enrolled player (player/service.py
+`_report_base_health`, symmetric to how readiness is posted there), fed the served tag
+via the appliance's existing origin-handoff file (`PlayerConfig.base_running_tag` in
+public.json). The appliance's bead-6 role is the per-device manifest fetch + the tag
+handoff; the base-health POST lives in `player/`. Opt-in gate for the per-device path is
+the `PHOTO_WALL_PER_DEVICE_DEB` env var (unset => unchanged 0010 global `.deb`, no
+base-health). Docs bead 9 should correct the package attribution.
+RESOLVED (2026-09-20, bead 9): the package attribution is corrected in the decision
+doc's "Packages touched" line (base-health moved from `appliance/provision.py` to
+`player/service.py` `_report_base_health`, with the enroll/import-forbidden rationale
+and the `PHOTO_WALL_PER_DEVICE_DEB` gate) and documented in
+docs/module-appliance-release.md ("The auto-mirror and per-device release path (0012)").
+
+E9 (2026-09-20, bead 6 review — for docs bead 9, non-blocking):
+1. base-health's server-side `running_tag == last_served_tag` check binds to the LIVE
+   devices.last_served_tag column, not a value pinned at manifest-fetch time. Document
+   the assumption that no concurrent re-serve of the same device interleaves between the
+   manifest fetch and the base-health post (a genuine reboot restarts the whole squashfs
+   fetch, so this holds on the diskless netboot target).
+2. write_public_config preserves existing keys and does not explicitly clear
+   base_running_tag on a global-path boot. Harmless on the diskless netboot target (RAM
+   overlay rebuilt fresh each boot). If this code is ever reused on a persistent-disk
+   (D0) install path, add `else: payload.pop("base_running_tag", None)`. Note in docs.
+RESOLVED (2026-09-20, bead 9): both notes are folded into the runbook's "Base-image
+auto-mirror (0012)" section (the closing "Two assumptions worth stating (0012 errata
+E9)" paragraph) — (1) the live-`last_served_tag` binding assumption and (2) the
+`base_running_tag` non-clear-on-global-path note with the persistent-disk caveat.
+Documented, no code change required on the diskless target.
+
+E10 (2026-09-20, bead 8): the genuine fresh-install e2e ships two gates
+(tests/test_netboot_fresh_install_e2e.py). Gate (a),
+`test_fresh_install_arc_deterministic`, is the CI PR-blocker: it drives the whole arc
+(empty-BASE_ROOT `base_artifact_unavailable` 503 -> real discovery via `service.poll`
+-> real `service.fetch_base` -> 200 with correct Digest -> base-health -> frontier
+advance -> second device follows) with ONLY the GitHub network boundary mocked
+(httpx.MockTransport on GithubReleaseSource); it runs under the DB harness (real
+Postgres) like every other DB-backed test. Gate (b),
+`test_fresh_install_arc_against_real_github`, exercises the REAL mcurcio/photo-wall
+Releases API and is gated on `PHOTO_WALL_RELEASE_TOKEN` (pytest.skip when unset). ACTION
+FOR THE OWNER: that secret is NOT wired into any CI workflow today, so gate (b) SKIPS in
+CI — the real-GitHub API/asset/CDN/redirect shapes are NOT exercised by CI until the
+owner adds a `PHOTO_WALL_RELEASE_TOKEN` secret to the relevant workflow (the DB-harness
+pytest job) and passes it through to the test env. Until then only gate (a) (the
+deterministic MockTransport path) gates PRs. Gate (b) also skips (not fails) when the
+real repo has no released `base_image` asset yet.
+RESOLVED (2026-09-20): gate (b)'s token is now wired in CI via the built-in
+GHA token — `.github/workflows/checks.yml` job `portable-and-postgres` sets
+`PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}` on the "Run the Postgres
+pytest suite" step (the `.venv/bin/python scripts/test_local.py` step), matching
+the existing `REGISTRY_TOKEN` step-env pattern. NO manually-managed secret and
+NO broadened permissions: the workflow's `permissions: contents: read` already
+covers reading this repo's own releases + release assets, which is all gate (b)
+needs against `mcurcio/photo-wall`. The token flows to GitHub only —
+`GithubReleaseSource` sends it as an `Authorization: Bearer` header to
+`api.github.com` and httpx strips it on the cross-host CDN redirect
+(central/github_releases.py:152-155). No test change was required: gate (b)
+already reads `PHOTO_WALL_RELEASE_TOKEN` (tests/test_netboot_fresh_install_e2e.py:321)
+and skips gracefully when it is unset/empty. FORK-PR / empty-token: on a fork PR
+`secrets.GITHUB_TOKEN` is restricted/empty, so gate (b) skips (empty string is
+falsy) — the correct safe behavior, never an error. REMAINING PRECONDITION: gate
+(b) still SKIPS (not fails) until a published `mcurcio/photo-wall` release carries
+a `base_image` manifest asset; once such a release exists, CI exercises the real
+discover→download→verify→extract→serve path end to end.

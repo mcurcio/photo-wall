@@ -103,6 +103,13 @@ Both are GitHub release assets — or build them yourself on any host with `dpkg
 1. **The base bundle** — `config.txt`, a `cmdline.txt` template (fill in your central's base-image URL), the Pi 5 kernel, the initrd, the device tree, and the base squashfs. Stage it in your boot server's tree. It carries no application and almost never changes.
 2. **The Player `.deb`** — central discovers it from your GitHub releases; you promote the version you want as current. This is the only thing you re-publish to ship an app update.
 
+### Central's base-image storage and the per-device `.deb` (0012)
+
+Central **auto-mirrors** the base squashfs so you never hand-stage it: the worker discovers every release from GitHub, and when a Pi needs a version's base image the worker downloads that release's base tarball, verifies it, extracts the squashfs, and serves it at `GET /v1/netboot/base`. Two environment variables govern this ([decision 0012](docs/decisions/0012-netboot-base-auto-mirror.md); the operational model is in the [runbook](docs/runbook.md#base-image-auto-mirror-0012)):
+
+- **`PHOTO_WALL_BASE_ROOT` (required for base serving) — a dedicated, persistent directory, separate from the media volume, that holds the cached `base-<tag>.squashfs` files.** It must be **mounted RW on the worker and RO on central**, the same dual-mount posture the `.deb` mirror uses on `PHOTO_WALL_APP_ROOT`, but on **its own** volume. The worker **asserts it exists and is writable at boot and fails loud** if not — the fix for the original outage class, where nothing populated the served directory and `GET /v1/netboot/base` returned a silent, permanent `503`. A base miss now returns a **transient** `503` that self-heals: the worker fetches the bytes and the Pi retries on its next boot. If the volume is on **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. When `PHOTO_WALL_BASE_ROOT` is **unset**, base serving is off and the worker behaves exactly as before.
+- **`PHOTO_WALL_PER_DEVICE_DEB` (opt-in) — enables the per-device `.deb` path** so a Pi fetches the `.deb` of the exact release its base was served this boot (via `GET /v1/netboot/manifest`, serial-keyed), keeping base and `.deb` from diverging. **Unset ⇒ unchanged 0010 behavior**: the Pi fetches the single globally promoted `.deb` and posts no base-health.
+
 ### How a Player comes online
 
 1. The Pi netboots the base bundle; the initrd fetches the base image over HTTP (corruption-checked) and RAM-mounts it — no local storage, no state left behind.

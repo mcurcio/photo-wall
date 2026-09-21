@@ -175,6 +175,48 @@ All three return **503 `release_sourcing_unconfigured`** when `PHOTO_WALL_APP_RO
 
 **Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
 
+## Base-image auto-mirror (0012)
+
+[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
+
+**Storage (the root of the old outage).** Base bytes live at **`PHOTO_WALL_BASE_ROOT/base-<tag>.squashfs`** on a **dedicated, persistent** volume, separate from the media and `.deb` volumes, **mounted RW on the worker and RO on central**. The worker **asserts `PHOTO_WALL_BASE_ROOT` exists and is writable at boot** and fails loud (an ERROR log) if not, and re-hydrates any cached-but-absent file — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Unset ⇒ base serving is off and the worker is byte-for-byte its pre-0012 self.
+
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `PHOTO_WALL_BASE_ROOT` | worker (RW) + central (RO) | (unset) | Dedicated persistent dir holding the per-version `base-<tag>.squashfs`; required for base serving; asserted writable at worker boot |
+| `PHOTO_WALL_PER_DEVICE_DEB` | player | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
+
+**Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.
+
+**A `503` is transient and self-heals — it is never a dead end.** The design does **not** promise "never `503`"; it promises a `503` is **bounded and self-heals**. A base a device needs but that is not yet cached returns a `503`, the worker fetches it in the background, and the diskless Pi retries on its next boot (fails-closed-and-reboots). A boot re-hydrate refills any file that went missing. The one accepted exception: a **fresh cluster's very first image** is `latest-discovered` and therefore **unverified** — a bad first image bricks initial bring-up until you pin a known-good version.
+
+**Per-device selection.** A Pi sends its serial; central resolves **one** tag by precedence: the device's **pin**, else **latest-verified** (the highest semver any non-retired device has reported base-healthy — a live query, never a stored pointer), else — empty cluster only — **latest-discovered**. Both the base and (with `PHOTO_WALL_PER_DEVICE_DEB`) the `.deb` come from that one tag.
+
+**Pin a canary / recover a device (admin-authenticated).** Rollout is emergent: pin one device to a candidate version; when it boots and posts base-health, `latest-verified` climbs and unpinned devices follow on their next boot — no separate promote step. The same route rolls a broken device back by pinning it to a known-good tag.
+
+```sh
+# Pin device <device-id> to <tag> (a canary, or a manual rollback). Proactively
+# fetches that tag's base (and .deb) so the device comes up on its next netboot.
+curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -d '{"tag":"<tag>"}' http://<central>/v1/operator/devices/<device-id>/pin
+
+# Clear the pin: the device falls back to latest-verified.
+curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
+  http://<central>/v1/operator/devices/<device-id>/pin
+```
+
+**Server-side rollback (the Pi is diskless).** The Pi persists nothing and cannot choose a tag, so rollback lives on central. When a device is served a target (a 200) but never posts it base-healthy and re-netboots, central marks that boot failed, fences the tag, and serves the device its own **known-good** on the next boot — **sticking** there (never re-serving the failing tag) until a newer tag appears or you pin it, so it cannot oscillate. A device with **no** prior known-good that cannot boot its served image boot-loops until you pin it (accepted).
+
+**Garbage collection.** Cache bytes are need-driven: a `base-<tag>.squashfs` is kept while its tag is `latest-verified`, any non-retired device's pin, any non-retired device's known-good, or a fetch is in flight; otherwise GC unlinks the bytes and records an **eviction reason** on the `base_cache` row (the row and its integrity sha survive; a later need re-fetches). GC runs at the poll tail and after a pin change. A **retired** device holds nothing — its versions become evictable and stop holding the frontier.
+
+**Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
+
+```sh
+curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/netboot
+```
+
+**Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+
 ## Operator API: reposition and remove Frames
 
 The operator console edits the wall plan through two admin-authenticated routes on central (both `Depends(admin)`, like every `/v1/operator/*` route). They change no schema and add no migration — the placement columns (`surface_id`, `x_mm`, `y_mm`, `width_mm`, `height_mm`) already exist on the `frames` row.

@@ -97,6 +97,10 @@ class AppReleases:
         asset_sha256: str | None = None,
         asset_size: int | None = None,
         asset_url: str | None = None,
+        base_revision: str | None = None,
+        base_tarball_sha256: str | None = None,
+        base_tarball_size: int | None = None,
+        base_tarball_url: str | None = None,
     ) -> str:
         """Insert or refresh a discovered release; return the resulting state.
 
@@ -106,13 +110,27 @@ class AppReleases:
         re-cut heals. A `mirrored` row re-cut to a *different* sha256 goes
         `divergent` and its served bytes are never overwritten;
         `divergent`/`withdrawn`/`undeployable` rows are otherwise frozen.
+
+        Base facts (0012) ride along on both the insert and the refreshable
+        update -- orthogonal to `.deb` deployability, since base OS and `.deb` are
+        independently versioned. They do NOT create a `base_cache` row: the cache
+        row appears only when a fetch begins (state `caching`), per the 0012 cache
+        lifecycle (there is no discovery-time cache state). `mirror_state` is a
+        `.deb` concern and base facts never touch it.
         """
         major, minor, patch, prerelease = parse_semver(tag)
         if asset_sha256 is not None and not _SHA256.fullmatch(asset_sha256):
             raise AppReleaseError("invalid_asset_sha256", 422)
         if asset_size is not None and (type(asset_size) is not int or asset_size <= 0):
             raise AppReleaseError("invalid_asset_size", 422)
+        if base_tarball_sha256 is not None and not _SHA256.fullmatch(base_tarball_sha256):
+            raise AppReleaseError("invalid_base_tarball_sha256", 422)
+        if base_tarball_size is not None and (
+            type(base_tarball_size) is not int or base_tarball_size <= 0
+        ):
+            raise AppReleaseError("invalid_base_tarball_size", 422)
         have_asset = asset_sha256 is not None and asset_size is not None and asset_url is not None
+        base_cols = (base_revision, base_tarball_sha256, base_tarball_size, base_tarball_url)
         now = self.clock.utc()
         with self.db.transaction() as conn:
             existing = conn.execute(
@@ -122,10 +140,11 @@ class AppReleases:
                 state = "discovered" if have_asset else "undeployable"
                 conn.execute(
                     "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
-                    "asset_sha256,asset_size,asset_url,mirror_state,discovered_at,updated_at) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "asset_sha256,asset_size,asset_url,base_revision,base_tarball_sha256,"
+                    "base_tarball_size,base_tarball_url,mirror_state,discovered_at,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (tag, major, minor, patch, prerelease, is_prerelease,
-                     asset_sha256, asset_size, asset_url, state, now, now),
+                     asset_sha256, asset_size, asset_url, *base_cols, state, now, now),
                 )
                 return state
             state = existing["mirror_state"]
@@ -133,13 +152,16 @@ class AppReleases:
                 if have_asset:
                     conn.execute(
                         "UPDATE app_releases SET asset_sha256=%s,asset_size=%s,asset_url=%s,"
-                        "is_prerelease=%s,updated_at=%s WHERE tag=%s",
-                        (asset_sha256, asset_size, asset_url, is_prerelease, now, tag),
+                        "base_revision=%s,base_tarball_sha256=%s,base_tarball_size=%s,"
+                        "base_tarball_url=%s,is_prerelease=%s,updated_at=%s WHERE tag=%s",
+                        (asset_sha256, asset_size, asset_url, *base_cols, is_prerelease, now, tag),
                     )
                 else:
                     conn.execute(
-                        "UPDATE app_releases SET is_prerelease=%s,updated_at=%s WHERE tag=%s",
-                        (is_prerelease, now, tag),
+                        "UPDATE app_releases SET base_revision=%s,base_tarball_sha256=%s,"
+                        "base_tarball_size=%s,base_tarball_url=%s,is_prerelease=%s,updated_at=%s "
+                        "WHERE tag=%s",
+                        (*base_cols, is_prerelease, now, tag),
                     )
                 return state
             if state == "mirrored" and have_asset and asset_sha256 != existing["asset_sha256"]:
@@ -173,6 +195,58 @@ class AppReleases:
                 return None
             promoted_tag, current_sha = self._pointers(conn)
             return self._view(row, promoted_tag, current_sha)
+
+    # -- per-device .deb resolution (0012 bead 5, F4) -----------------------
+
+    @staticmethod
+    def deb_manifest_for_tag_in(conn, tag: str) -> dict | None:
+        """The `{version, sha256, size}` of the `.deb` mirrored for `tag`, or None.
+
+        The 0012 per-device (F4) `.deb` resolution: a device's `.deb` rides the
+        exact tag whose base bytes it was served this boot
+        (`devices.last_served_tag`), read back here, so base and `.deb` never
+        diverge even if the frontier moved between the two requests. It consults
+        ONLY the per-release `mirrored_sha256` link and its `app_packages` row --
+        never 0010's global `promoted_tag`/`current_sha256` pointer, which this
+        feature leaves completely untouched. Returns None when the tag is unknown
+        or its `.deb` is not yet mirrored (the caller 503s + enqueues a mirror).
+
+        Exposed as a ``*_in`` primitive (like `AppPackages.count_in`) so the
+        netboot manifest route resolves the served tag, the manifest, and any
+        lazy mirror enqueue under a single transaction. The FK
+        `app_releases.mirrored_sha256 -> app_packages.sha256` (016) guarantees the
+        join finds the row whenever `mirrored_sha256` is set.
+        """
+        row = conn.execute(
+            "SELECT r.mirrored_sha256 AS sha256, p.version AS version, p.size AS size "
+            "FROM app_releases r LEFT JOIN app_packages p ON p.sha256 = r.mirrored_sha256 "
+            "WHERE r.tag=%s",
+            (tag,),
+        ).fetchone()
+        if row is None or row["sha256"] is None or row["version"] is None:
+            return None
+        return {"version": row["version"], "sha256": row["sha256"], "size": row["size"]}
+
+    @staticmethod
+    def deb_mirrorable_in(conn, tag: str) -> bool:
+        """Whether `tag` is deployable but not yet mirrored -- i.e. a lazy `.deb`
+        mirror enqueue on a per-device manifest miss is warranted (0012 bead 5).
+
+        True only for a known, deployable release (`asset_sha256` present,
+        `mirror_state != 'undeployable'`) whose bytes are not yet linked
+        (`mirrored_sha256 IS NULL`). A tag with no `.deb` asset, or one already
+        mirrored, returns False, so the netboot manifest route never enqueues a
+        useless mirror. Reuses the same deployability predicate as `_deployable`.
+        """
+        row = conn.execute(
+            "SELECT asset_sha256, mirror_state, mirrored_sha256 FROM app_releases WHERE tag=%s",
+            (tag,),
+        ).fetchone()
+        return (
+            row is not None
+            and row["mirrored_sha256"] is None
+            and AppReleases._deployable(row)
+        )
 
     # -- promotion + convergence --------------------------------------------
 

@@ -89,6 +89,12 @@ class PlayerConfig(Model):
     # resolves its origin from a discovery provider at run time instead.
     # When present, it is explicit and always wins over discovery.
     central_origin: str | None = Field(default=None, max_length=2048)
+    # The base tag this boot's diskless base was served, handed forward by the
+    # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
+    # set, the enrolled player reports it healthy on /v1/player/base-health so
+    # the latest-verified frontier advances. Absent on the flashed/D0 baseline
+    # and on the 0010 global `.deb` path -- no base-health is posted there.
+    base_running_tag: str | None = Field(default=None, max_length=256)
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
     boot_context_file: str = Field(
@@ -372,6 +378,10 @@ class PlayerService:
         self._loop = None
         self._task = None
         self.last_fault: str | None = None
+        # The authority epoch whose base-health has been reported (0012 bead 6);
+        # None until a check-in lands, then one report per epoch (a re-enroll
+        # bumps the epoch and re-reports; central is monotonic per epoch).
+        self._base_health_epoch: int | None = None
 
     def fault(self, code: str):
         if self.last_fault != code:
@@ -511,6 +521,39 @@ class PlayerService:
                 self.cache = self.executor = None
                 self.registration = None
                 raise ServiceError("player_initialization") from error
+
+    async def _report_base_health(self):
+        """One-shot base-image health check-in after enroll (0012 bead 6).
+
+        The diskless base is served per-device by tag; the appliance
+        bootstrapper hands the tag it booted forward as
+        `PlayerConfig.base_running_tag` (public.json). Once enrolled, the player
+        reports that tag healthy on `POST /v1/player/base-health` -- an
+        enrolled-token endpoint that requires NO live plan offer, so even an
+        unbound device advances the latest-verified frontier. Central validates
+        `running_tag == devices.last_served_tag` (the tag it recorded serving
+        this device this boot), so the reported tag is the served tag, never a
+        guess. Best-effort and idempotent per authority epoch: a failed or
+        repeated check-in never disturbs the coordination loop -- it retries on
+        the next enroll. A player with no handed-forward tag (flashed/D0 or the
+        0010 global path) reports nothing.
+        """
+        tag = self.config.base_running_tag
+        if not tag or self.registration is None:
+            return
+        if self._base_health_epoch == self.registration.authority_epoch:
+            return
+        try:
+            await self.request("POST", "/v1/player/base-health", body={
+                "authority_epoch": self.registration.authority_epoch,
+                "sequence": 1,
+                "running_tag": tag,
+                "healthy": True,
+            })
+            self._base_health_epoch = self.registration.authority_epoch
+        except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
+                asyncio.TimeoutError):
+            LOG.info("player base-health check-in deferred")
 
     def _apply_state(self, state: State):
         self._main()
@@ -856,6 +899,7 @@ class PlayerService:
                     if self.registration is None:
                         await self.resolve_origin()
                         await self.enroll()
+                        await self._report_base_health()
                     # Reconnection reconciles authority before any download work.
                     await self.probe_time()
                     await self.poll_state()
