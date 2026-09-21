@@ -589,3 +589,19 @@ so design line 191's guarantee holds. The arithmetic `-eq 0` twin is removed as
 redundant. tests/test_entrypoint.py rejection params extended with `010` and `007`
 (exit 78); the canonical `10001` boot assertion is unchanged. Supersedes E11's
 closing "flag if a later bead needs leading-zero/octal rejection" note.
+
+E13 (2026-09-21, bead 0013-B3): the design's GC-reorder claim is slightly too
+strong. docs/decisions/0013-unified-cache-root.md:149/206 says setting
+base_cache.state='evicted' BEFORE the unlink in gc_base_cache's txn makes an
+interrupted GC "leave a demoted (regenerable) row, never a dangling cached one."
+But unlink() is a filesystem side effect, NOT transactional: a crash AFTER the
+unlink but BEFORE the txn commits rolls back the state='evicted' UPDATE while the
+file stays gone, so a dangling `cached` row is still POSSIBLE in that window. The
+reorder only shrinks the dangerous window (a crash between the two ops now leaves
+file-present + row-cached, which is consistent) — it does not eliminate the class.
+The class is actually closed by the B3 SERVE-SEAM self-heal (demote +
+enqueue_base_fetch_in on the cached-row open-failure), which the design's
+"Honest scope of rule 1" already names as the real guarantee. Implemented both as
+specified (reorder + serve-seam self-heal); no code divergence — this is a
+precision note on the reorder's stated guarantee strength (it is window-shrinking,
+not "never"). No action needed unless a later doc pass wants to soften line 149.

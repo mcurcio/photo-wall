@@ -15,6 +15,7 @@ import pytest
 from central.netboot_base import (
     BASE_IMAGE_NAME,
     base_digest,
+    demote_dangling_base_row,
     sanitize_serial,
 )
 
@@ -79,3 +80,35 @@ def test_sanitize_serial_accepts_safe_charset(safe):
 ])
 def test_sanitize_serial_rejects_unsafe_input(unsafe):
     assert sanitize_serial(unsafe) is None
+
+
+class _RecordingConn:
+    """A no-DB stand-in that records the SQL + params it is handed."""
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        return self
+
+
+class _FrozenClock:
+    def utc(self):
+        return "2026-09-21T00:00:00Z"
+
+
+def test_demote_dangling_base_row_evicts_only_a_still_cached_row():
+    # B3: the serve seam demotes a `cached` row whose file vanished so it stops
+    # 503ing forever. This is the DB half (mockable without a real DB): it must
+    # (a) transition state to `evicted` with the `dangling_row` reason, and
+    # (b) carry the `AND state='cached'` guard so a concurrent re-cache that
+    # already re-landed the bytes is NEVER clobbered.
+    conn = _RecordingConn()
+    demote_dangling_base_row(conn, "v1.2.3", clock=_FrozenClock())
+    assert len(conn.calls) == 1
+    sql, params = conn.calls[0]
+    assert "UPDATE base_cache SET state='evicted'" in sql
+    assert "WHERE tag=%s AND state='cached'" in sql  # never clobber a re-cache
+    assert "dangling_row" in params      # the eviction_reason distinguishing B3
+    assert "v1.2.3" in params            # scoped to the requested tag

@@ -38,6 +38,7 @@ from central.netboot_base import (
     SERIAL_HEADER,
     base_file_path,
     clear_device_pin,
+    demote_dangling_base_row,
     gc_base_cache,
     operator_base_status,
     record_base_health,
@@ -491,6 +492,26 @@ def create_app(
         try:
             descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
         except HardenedOpenError as error:
+            # Dangling-row self-heal (B3, req 6). We are PAST the `not
+            # decision.cached` guard above, so an open-failure here can only be a
+            # row the DB says is `cached` whose bytes are gone/unreadable --
+            # external eviction, admin delete, or a GC that crashed after unlink.
+            # (`cached` is a DB flag, never a filesystem stat, so this row would
+            # otherwise 503 forever.) Demote the row out of `cached` and
+            # re-enqueue the base fetch so the next read regenerates -- distinct
+            # from the empty/not-yet-cached state, which the `base_artifact_uncached`
+            # 503 above handles WITHOUT demoting a row that was never `cached`.
+            with db.transaction() as conn:
+                demote_dangling_base_row(conn, decision.served_tag, clock=clock)
+                if release_queue is not None:
+                    release_queue.enqueue_base_fetch_in(conn, decision.served_tag)
+            LOG.info(
+                "netboot base self-heal: tag=%s serial=%s reason=dangling_row "
+                "action=reenqueue_demote open_reason=%s",
+                decision.served_tag,
+                serial or "<absent-or-invalid>",
+                error.reason,
+            )
             raise AppPackageError(f"base_artifact_{error.reason}", 503) from None
 
         def content():

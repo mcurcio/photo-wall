@@ -45,6 +45,7 @@ the release TAG and the uniform `retired_at IS NULL` device filter.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -62,6 +63,8 @@ from contracts.release import MAX_ROOTFS_BYTES
 
 if TYPE_CHECKING:  # avoid a hard import cycle at module load; only for type hints
     from contracts.models import BaseHealth
+
+LOG = logging.getLogger("central.netboot_base")
 
 BASE_IMAGE_NAME = "photo-wall-base.squashfs"
 SHA256SUMS_NAME = "SHA256SUMS"
@@ -92,6 +95,11 @@ _TEMP_SUFFIX = ".tmp"
 # Recorded on a `base_cache` row when GC (bead 4) unlinks its bytes: the tag left
 # the keep-set. Observability only; the row (and its integrity sha) survive.
 _GC_EVICTION_REASON = "not_in_keep_set"
+# Recorded on a `base_cache` row when the serve seam self-heals a dangling row
+# (B3): the DB said `cached` but the file was gone/unreadable at open. The row is
+# demoted to `evicted` so the next read regenerates; the serve seam also
+# re-enqueues the fetch. Observability only; the row + integrity sha survive.
+_DANGLING_EVICTION_REASON = "dangling_row"
 # The only shape a client serial may take before it can select an image or be
 # logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
 # future per-serial scheme has room, and reject everything else (control chars,
@@ -337,6 +345,28 @@ def _cache_row(conn, tag: str):
     return conn.execute(
         "SELECT state, squashfs_sha256 FROM base_cache WHERE tag=%s", (tag,)
     ).fetchone()
+
+
+def demote_dangling_base_row(conn, tag: str, *, clock) -> None:
+    """Demote a `cached` row whose file vanished externally out of `cached` (B3).
+
+    The serve seam reaches an open-failure ONLY after the `cached` guard has
+    passed, so a failed open there means the DB row says `cached` while the bytes
+    are gone or unreadable -- an external eviction / admin delete / backend loss,
+    or a GC that crashed after `unlink` but before its `evicted` write. Such a
+    dangling row would otherwise 503 forever, because `cached` is a DB flag,
+    never a filesystem stat. Demote it to `evicted` with a `dangling_row` reason
+    so the lazy fetch backstop regenerates it on the next read; the caller
+    re-enqueues the base fetch to self-heal now rather than on the next request.
+
+    The `AND state='cached'` guard makes this a no-op if a concurrent re-cache
+    already advanced the row, so a self-heal never clobbers freshly-landed bytes.
+    Runs in the caller's transaction (paired with the re-enqueue)."""
+    conn.execute(
+        "UPDATE base_cache SET state='evicted', eviction_reason=%s, updated_at=%s "
+        "WHERE tag=%s AND state='cached'",
+        (_DANGLING_EVICTION_REASON, clock.utc(), tag),
+    )
 
 
 def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecision:
@@ -839,19 +869,32 @@ def gc_base_cache(conn, base_root: Path, *, clock) -> list[str]:
         row["tag"]
         for row in conn.execute("SELECT tag FROM base_cache WHERE state='caching'").fetchall()
     )
-    cached = conn.execute("SELECT tag FROM base_cache WHERE state='cached'").fetchall()
+    cached = conn.execute("SELECT tag, size FROM base_cache WHERE state='cached'").fetchall()
     evicted: list[str] = []
     for row in cached:
         tag = row["tag"]
         if tag in keep:
             continue
-        base_file_path(base_root, tag).unlink(missing_ok=True)
+        # Demote the row FIRST, then unlink, both inside this one transaction
+        # (B3): an interrupted GC then leaves a `evicted` (regenerable) row, never
+        # a dangling `cached` row whose file is gone -- which would 503 forever
+        # at the serve seam. If the txn commits, the file is gone and the row
+        # agrees; if it aborts before commit, the unlink's filesystem effect is
+        # not rolled back, but the row stays `cached` and the serve seam's
+        # dangling-row self-heal (demote + re-enqueue) recovers it on next read.
         conn.execute(
             "UPDATE base_cache SET state='evicted', eviction_reason=%s, updated_at=%s "
             "WHERE tag=%s",
             (_GC_EVICTION_REASON, clock.utc(), tag),
         )
+        base_file_path(base_root, tag).unlink(missing_ok=True)
         evicted.append(tag)
+        LOG.info(
+            "base cache eviction: tag=%s bytes=%s reason=%s",
+            tag,
+            row["size"] if row["size"] is not None else "unknown",
+            _GC_EVICTION_REASON,
+        )
     return evicted
 
 
