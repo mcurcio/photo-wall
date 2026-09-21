@@ -146,7 +146,7 @@ Rule 1 is load-bearing. Its status per read path, and the work to close it:
 
 | Read path | Today | Work |
 | --- | --- | --- |
-| OS serve `/v1/netboot/base` | **partially** miss-tolerant — the `cached` flag is a DB row, never a filesystem stat, so a **dangling row (row says `cached`, file gone externally)** 503s forever with no re-enqueue | **Slice 1, end-state (not a crash-race):** on an open-failure of a `cached` row, **re-enqueue the tag and demote the row** at the serve seam, so the next read regenerates. (Also set `base_cache.state` before unlink in GC's txn.) |
+| OS serve `/v1/netboot/base` | **partially** miss-tolerant — the `cached` flag is a DB row, never a filesystem stat, so a **dangling row (row says `cached`, file gone externally)** 503s forever with no re-enqueue | **Slice 1, end-state (not a crash-race):** on an open-failure of a `cached` row, **re-enqueue the tag and demote the row** at the serve seam, so the next read regenerates. (Also set `base_cache.state` before unlink in GC's txn.) **Correction (erratum E13, B3 as-built):** the GC reorder alone does **not** guarantee "never a dangling `cached` row" — `unlink` is a non-transactional filesystem side effect, so a crash after the unlink but before the txn commits still leaves the row `cached` with the file gone. The reorder only **shrinks** the dangerous window; the class is closed by the **serve-seam self-heal** in this row (demote + re-enqueue on the open-failure), which the "Honest scope of rule 1" note below already names as the real guarantee. |
 | `.deb` per-device manifest | tolerant (metadata) | none |
 | **`.deb` bytes** `/v1/app/package/{sha}.deb` | **assumes-present** | on absence: reverse-lookup `app_releases.mirrored_sha256 = sha` → tag → `enqueue_mirror_in(tag)` → 503 |
 | **Media serve** `/v1/media/{digest}` | **assumes-present**: post-eviction the row is **deleted** → `blob is None → 404`; a `ready`-row/vanished-file marks the blob **`corrupt`** | requeue on **`blob is None`** (the common post-eviction miss) via the real `evicted→queued` transition (`media_repository.py:419`); AND split `FileNotFoundError` (→ requeue, not corrupt) from a short/mismatched read (→ corrupt); give the serve path a queue handle |
@@ -227,10 +227,30 @@ PHOTO_WALL_CACHE_ROOT (default /var/cache/photo-wall)   0700 PUID:PGID   VOLUME
   DB-row walk that ignores orphans. **Sweep invariant (frozen):** "owning row"
   includes in-flight states (`caching`/`mirroring`), and the sweep runs under the
   same single-writer exclusion media uses (`recover`'s writer lock + staging split),
-  so it never unlinks a file mid-fetch. `os-images` and `apps` get explicit byte
+  so it never unlinks a file mid-fetch. **Correction (erratum E15, B4 as-built):**
+  the os-images sweep does **not** hold media's shared `flock` writer lock — base's
+  `fetch_base` does its `os.replace` on the event loop while the sweep runs in
+  `asyncio.to_thread`, so no lock object spans that split (and an in-process lock
+  would be weaker than media's cross-process `flock` and would block the loop).
+  The frozen invariant is instead enforced by **defence-in-depth**: a **per-tag
+  ownership re-confirm** (re-`SELECT` each row immediately before its `unlink`) plus
+  an **mtime grace** (never unlink a `base-<tag>.squashfs` whose mtime is within
+  300s — 10× the fetch timeout — of now, so a just-`os.replace`d file is spared even
+  when its `cached` write is uncommitted or threw). The one-time snapshot is **not**
+  the exclusion; these two guards are. `os-images` and `apps` get explicit byte
   **caps** as well as the `os-images` floor — but the cap is **best-effort below the
   keep-set**: `gc_base_cache` never evicts a pinned/known-good tag, so a keep-set
   larger than the cap surfaces an **alarm**, it does not silently overflow.
+  **Correction (erratum E14, B4 as-built):** the reserved **floor** and the byte
+  **cap** are **not** symmetric active checks. The cap is an active check (the
+  `keepset_over_cap` alarm above). The **floor is enforced by construction, not an
+  active eviction gate**: `gc_base_cache` only ever removes surplus/orphan bytes and
+  never a keep-set member (0012's frozen keep-set semantics evict every non-keep tag
+  unconditionally), so os-images always retains its bootable working set and the
+  4Gi floor is the reserved capacity that guarantees it fits. An **active floor-gate
+  was rejected** — gating surplus eviction on a byte floor would retain
+  orphaned/retired-device tags below the floor, contradicting 0012's frozen
+  keep-set-departure eviction.
 - **`.deb` GC protect set:** every `app-<sha>.deb` whose sha is
   `app_package_policy.current_sha256`, any non-null `app_releases.mirrored_sha256`
   (per-device via `devices.{attached,known_good,last_served}_tag`), or an in-flight
@@ -414,6 +434,13 @@ graph LR
   costed bead** (no seam exists), with log fields as the interim floor; the release
   split names `package_release_artifacts.py`, the manifest schema bump + parser
   rewrite, and the `base_tarball_*` column repurposing.
+- **v10→Slice-1 as-built (errata E13/E14/E15, corrections inline above):** three
+  guarantee-strength claims softened to match the code — the GC reorder only
+  **shrinks** the dangling-`cached` window (the serve-seam self-heal closes the
+  class, E13); the os-images reserved floor is **by construction**, not an active
+  eviction gate symmetric with the cap (E14); the orphan sweep's single-writer
+  exclusion is a **per-tag re-confirm + mtime grace**, not a shared `flock` (E15).
+  No design intent changed; only the stated strength.
 
 **What survived every attack:** app owns layout, k8s owns placement (now by
 construction); boot step mandatory under Kubernetes; collapsing roots widens blast
