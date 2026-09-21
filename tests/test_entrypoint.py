@@ -35,8 +35,9 @@ def _run(tmp_path, env_overrides):
         script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IRUSR)
     env = {
         "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
-        # Point at a real, existing dir so the chown branch is actually entered.
-        "PHOTO_WALL_MEDIA_ROOT": str(tmp_path),
+        # 0013: one cache root; point it at a real, existing dir so the boot
+        # step's chown/install branch has a target to operate on.
+        "PHOTO_WALL_CACHE_ROOT": str(tmp_path),
         **env_overrides,
     }
     return subprocess.run(

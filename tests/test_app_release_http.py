@@ -1,7 +1,7 @@
 """Operator-API HTTP tests for GitHub release sourcing (0010, bead 4).
 
 The list / promote / refresh routes and the create_app producer wiring
-(release store + enqueue port, gated on PHOTO_WALL_APP_ROOT) are exercised
+(release store + enqueue port, always-on since 0013) are exercised
 against real PostgreSQL (conftest's `registry` fixture, schema-per-test,
 skipped when PHOTO_WALL_TEST_DATABASE_URL is unset -- the same gate as
 test_app_releases / test_app_release_tasks) and a FAKE enqueue port, so no
@@ -11,7 +11,7 @@ enqueues; it never polls or downloads inline (0010).
 The final test is 0010's tracer bullet: a real AppReleaseService driving a
 FAKE GitHub (httpx.MockTransport, the `Server` double reused from
 test_github_releases) discovers a release, the operator promotes it over HTTP,
-the worker's mirror streams the real bytes onto a tmp PHOTO_WALL_APP_ROOT, and
+the worker's mirror streams the real bytes into a tmp apps cache dir, and
 GET /v1/app/manifest + GET /v1/app/package/<sha>.deb serve that exact version.
 """
 
@@ -179,21 +179,21 @@ def test_release_routes_require_admin(registry, tmp_path):
         assert client.post("/v1/operator/app/releases/refresh").status_code == 401
 
 
-# -- unconfigured gate ------------------------------------------------------
+# -- always-on (0013) -------------------------------------------------------
 
 
-def test_release_routes_503_when_release_sourcing_unconfigured(registry):
-    # No app_root and no enqueue port: create_app builds cleanly (no crash) and
-    # every release route answers a clean 503, while manual staging still works.
+def test_release_routes_are_always_on(registry):
+    # 0013: release sourcing is unconditional -- the apps cache dir is always
+    # derived from the one cache root, so there is no "unconfigured" 503. Even
+    # with no per-domain env and no injected enqueue port, create_app builds a
+    # real port and the routes are live: list is a clean 200, and an unknown tag
+    # is a domain 404 (not a "sourcing unconfigured" 503).
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
-        for response in (
-            client.get("/v1/operator/app/releases", headers=HEADERS),
-            client.post("/v1/operator/app/releases/v1.0.0/promote", headers=HEADERS),
-            client.post("/v1/operator/app/releases/refresh", headers=HEADERS),
-        ):
-            assert response.status_code == 503
-            assert response.json() == {"error": "release_sourcing_unconfigured"}
+        listed = client.get("/v1/operator/app/releases", headers=HEADERS)
+        assert listed.status_code == 200
+        promoted = client.post("/v1/operator/app/releases/v1.0.0/promote", headers=HEADERS)
+        assert promoted.status_code == 404
 
 
 # -- tracer bullet (0010) ---------------------------------------------------

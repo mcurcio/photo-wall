@@ -5,10 +5,9 @@ Independent of the (retiring) release authority: no shared tables, no
 LAN, no threat model), the sha256 recorded here is a **corruption check
 only** -- it lets a downloader detect a truncated/garbled `.deb` in transit,
 never an authorship or authenticity proof. Registration is by reference: the
-operator stages the `.deb` bytes under `PHOTO_WALL_APP_ROOT` out of band (the
-same division of labor as the existing release artifact, whose bytes are
-staged under `PHOTO_WALL_RELEASE_ROOT` before `ReleaseAuthority.register`
-ever runs) and this module records/promotes the pointer to it.
+`.deb` bytes are staged in the apps cache directory (0013, derived from the one
+cache root) out of band -- by the GitHub mirror or the operator route -- and
+this module records/promotes the pointer to it.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ class AppPackages:
         self.db, self.clock = db, clock
 
     def register(self, version: str, sha256: str, size: int) -> None:
-        """Record a package already staged under PHOTO_WALL_APP_ROOT by sha256.
+        """Record a package already staged in the apps cache directory by sha256.
 
         Mirrors ReleaseAuthority.register: metadata only, immutable once
         stored. Existence/size of the staged bytes is verified lazily, at

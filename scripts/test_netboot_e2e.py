@@ -157,12 +157,13 @@ def compose_document(*, central_image: str, password: str, admin_token: str,
                 "environment": {
                     "PHOTO_WALL_DATABASE_URL": dsn,
                     "PHOTO_WALL_ADMIN_TOKEN": admin_token,
-                    "PHOTO_WALL_APP_ROOT": "/app-packages",
-                    "PHOTO_WALL_MEDIA_ROOT": "/tmp",
+                    # 0013: one cache root; central derives apps/ from it and
+                    # serves the staged `.deb` mounted at that subpath.
+                    "PHOTO_WALL_CACHE_ROOT": "/var/cache/photo-wall",
                     "PHOTO_WALL_MDNS_ADVERTISE": "false",
                     "PHOTO_WALL_HORIZON_SECONDS": "15",
                 },
-                "volumes": [f"{app_root}:/app-packages:ro"],
+                "volumes": [f"{app_root}:/var/cache/photo-wall/apps:ro"],
                 "ports": [f"127.0.0.1:{port}:8000"],
                 "networks": ["pw"],
                 "restart": "no", "mem_limit": "384m",

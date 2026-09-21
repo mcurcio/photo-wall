@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
+from central import cache_layout
 from central.app_release_boot import boot_autopull
 from central.app_release_queue import APP_RELEASE_QUEUE, ProcrastinateAppReleaseQueue
 from central.app_release_service import AppReleaseService
@@ -52,10 +53,11 @@ def worker_queues(release_enabled: bool) -> list[str]:
     """The queues this worker consumes, given whether release sourcing is on.
 
     MEDIA_QUEUE is always consumed. A task deferred onto a queue absent here is
-    never dispatched, so gating APP_RELEASE_QUEUE on `release_enabled` is exactly
-    what keeps an unconfigured worker (PHOTO_WALL_APP_ROOT unset) from ever
-    polling GitHub (0010 bead-3 opt-in wiring; the wiring test mutation-probes
-    both the presence when enabled and the absence when disabled).
+    never dispatched, so gating APP_RELEASE_QUEUE on `release_enabled` is what
+    decides whether the worker polls GitHub. 0013 flips release sourcing
+    always-on, so the worker now passes ``True``; the disabled branch is retained
+    as the pure-function contract the wiring test mutation-probes (presence when
+    enabled, absence when disabled).
     """
     queues = [MEDIA_QUEUE]
     if release_enabled:
@@ -360,30 +362,31 @@ def _log_boot_autopull(task: asyncio.Task) -> None:
 
 async def _entry():
     try:
-        dsn, root, connection_file = (os.environ[name] for name in
-            ("PHOTO_WALL_DATABASE_URL", "PHOTO_WALL_MEDIA_ROOT", "PHOTO_WALL_CONNECTIONS_FILE"))
+        dsn, connection_file = (os.environ[name] for name in
+            ("PHOTO_WALL_DATABASE_URL", "PHOTO_WALL_CONNECTIONS_FILE"))
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
+    # 0013: the media store lives at the media/ subdir of the one cache root
+    # (PHOTO_WALL_CACHE_ROOT, baked default) -- derived internally, no per-domain
+    # env.
+    root = cache_layout.media_root()
     clock = SystemClock()
     db = Database(dsn)
     queue = ProcrastinateMediaQueue(dsn)
     repository = MediaRepository(db, clock, queue=queue)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
-    # Release sourcing (0010) is OPT-IN: enabled only when PHOTO_WALL_APP_ROOT is
-    # set (the shared storage the mirror lands bytes into, read by the serving
-    # route). from_env returns None when unset, so an unconfigured worker
-    # (compose, software-e2e) starts unchanged -- no service, no tasks, no queue,
-    # no GitHub polling. When present it shares the media worker's DB pool.
+    # 0013: release sourcing is always-on. from_env derives the apps cache dir
+    # from the same cache root and never returns None, so the worker always
+    # builds the service and shares its DB pool.
     release_service = AppReleaseService.from_env(db, clock)
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     additional_context = {"media_worker": worker}
-    if release_service is not None:
-        register_app_release_tasks(app)
-        additional_context["app_release_service"] = release_service
-    else:
-        logger.info("release sourcing disabled: PHOTO_WALL_APP_ROOT unset")
+    # 0013: release sourcing is always-on, so the release tasks are always
+    # registered and the worker always consumes APP_RELEASE_QUEUE.
+    register_app_release_tasks(app)
+    additional_context["app_release_service"] = release_service
     try:
         with worker.store.worker_lock():
             await worker._register_recipe()
@@ -394,32 +397,29 @@ async def _entry():
                 # never delays the worker loop or blocks serving. Its done-callback
                 # logs and SWALLOWS the outcome -- a pull failure must never kill
                 # the worker. Cancelled + awaited in the finally.
-                autopull_task: asyncio.Task | None = None
-                if release_service is not None:
-                    # Defer boot's mirror onto the SAME tag-serialized queue the
-                    # operator promote route uses (ProcrastinateAppReleaseQueue),
-                    # constructed from the same dsn -- so boot never mirrors inline
-                    # and cannot race an operator-queued mirror of the same tag.
-                    # The run loop below drains APP_RELEASE_QUEUE, so the deferred
-                    # mirror actually completes.
-                    # 0012 bead 3: pass BASE_ROOT so boot also fetches an empty
-                    # cluster's bootstrap image, re-hydrates cached-but-absent
-                    # bytes (the persistent-volume-wiped 503 self-heal), and sweeps
-                    # crash-orphaned temps. None (PHOTO_WALL_BASE_ROOT unset) leaves
-                    # the 0010 .deb autopull behaviour byte-for-byte unchanged.
-                    autopull_task = asyncio.create_task(
-                        boot_autopull(
-                            release_service,
-                            release_service.packages,
-                            PostgresInstallationRepository(clock),
-                            ProcrastinateAppReleaseQueue(dsn),
-                            base_root=resolve_base_root(),
-                        )
+                # Defer boot's mirror onto the SAME tag-serialized queue the
+                # operator promote route uses (ProcrastinateAppReleaseQueue),
+                # constructed from the same dsn -- so boot never mirrors inline
+                # and cannot race an operator-queued mirror of the same tag. The
+                # run loop below drains APP_RELEASE_QUEUE, so the deferred mirror
+                # actually completes. 0013: the os-images cache dir is derived
+                # from the same cache root, so boot ALWAYS also fetches an empty
+                # cluster's bootstrap image, re-hydrates cached-but-absent bytes
+                # (the persistent-volume-wiped 503 self-heal), and sweeps
+                # crash-orphaned temps.
+                autopull_task = asyncio.create_task(
+                    boot_autopull(
+                        release_service,
+                        release_service.packages,
+                        PostgresInstallationRepository(clock),
+                        ProcrastinateAppReleaseQueue(dsn),
+                        base_root=resolve_base_root(),
                     )
-                    autopull_task.add_done_callback(_log_boot_autopull)
+                )
+                autopull_task.add_done_callback(_log_boot_autopull)
                 try:
                     await app.run_worker_async(
-                        queues=worker_queues(release_service is not None),
+                        queues=worker_queues(True),
                         concurrency=4,
                         additional_context=additional_context,
                     )

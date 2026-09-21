@@ -4,8 +4,8 @@
 mirror tasks. It owns no queue and no HTTP client of its own: it builds a fresh
 `GithubReleaseSource` per call from injected config (so every call is offline in
 tests via a fake transport), drives the `AppReleases` store (bead 1) and
-`AppPackages` registry (014), and writes the mirrored bytes under
-`PHOTO_WALL_APP_ROOT`. It never reimplements the pointer logic -- `reconcile` is
+`AppPackages` registry (014), and writes the mirrored bytes into the apps cache
+directory (0013). It never reimplements the pointer logic -- `reconcile` is
 the single advance path for the current pointer, always under the store's
 `FOR UPDATE` serialization.
 
@@ -39,7 +39,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from central import netboot_base
+from central import cache_layout, netboot_base
 from central.app_packages import AppPackageError, AppPackages
 from central.app_releases import AppReleaseError, AppReleases
 from central.db import Database
@@ -94,24 +94,20 @@ class AppReleaseService:
     # -- construction from env ----------------------------------------------
 
     @classmethod
-    def from_env(cls, db: Database, clock: Clock | None = None) -> AppReleaseService | None:
-        """Build the worker collaborator from the environment (0010 gate #4).
+    def from_env(cls, db: Database, clock: Clock | None = None) -> AppReleaseService:
+        """Build the worker collaborator from the environment (0013: always-on).
 
-        Release sourcing is OPT-IN: it is enabled only when PHOTO_WALL_APP_ROOT is
-        set (the shared storage the mirror lands `.deb` bytes into). When that var
-        is UNSET this returns ``None`` and the worker runs with release sourcing
-        off -- no service, no tasks, no GitHub polling. When set: repo via
+        Release sourcing is UNCONDITIONAL: the apps cache directory is derived
+        from the one cache root (PHOTO_WALL_CACHE_ROOT, baked default), so this
+        NEVER returns ``None`` -- there is no opt-in env. Repo via
         PHOTO_WALL_RELEASE_REPO (default mcurcio/photo-wall); optional
         PHOTO_WALL_RELEASE_TOKEN; prereleases excluded unless
         PHOTO_WALL_RELEASE_PRERELEASES is truthy.
         """
-        app_root_env = os.environ.get("PHOTO_WALL_APP_ROOT")
-        if not app_root_env:
-            return None
         clock = clock or SystemClock()
         repo = os.environ.get("PHOTO_WALL_RELEASE_REPO", "mcurcio/photo-wall")
         token = os.environ.get("PHOTO_WALL_RELEASE_TOKEN") or None
-        app_root = Path(app_root_env)
+        app_root = cache_layout.apps_root()
         include_prereleases = os.environ.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in (
             "1", "true", "yes", "on",
         )
@@ -186,12 +182,10 @@ class AppReleaseService:
         """Evict cache bytes no non-retired device needs (bead 4), off-loop.
 
         Reads the SAME base dir the serve route resolves (`resolve_base_root`) so
-        the eviction unlinks the very files the serve side would open. A None base
-        root (PHOTO_WALL_BASE_ROOT unset) means base serving is off -- nothing to
-        collect -- so GC is a no-op rather than a fault."""
+        the eviction unlinks the very files the serve side would open. 0013: the
+        os-images cache dir is always derived from the one cache root, so base
+        serving is always-on and GC always has a directory to collect."""
         base_root = netboot_base.resolve_base_root()
-        if base_root is None:
-            return 0
         with self.db.transaction() as conn:
             return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
 

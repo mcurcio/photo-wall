@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from central import cache_layout
 from central.app_releases import AppReleaseError, parse_semver
 from central.artifact_io import HardenedOpenError, open_regular
 from contracts.equipment import equipment_device_id
@@ -169,15 +170,15 @@ def base_file_path(base_root: Path, tag: str) -> Path:
     return Path(base_root) / f"base-{tag}.squashfs"
 
 
-def resolve_base_root(env: dict | None = None) -> Path | None:
-    """The dedicated base-image directory from PHOTO_WALL_BASE_ROOT, or None.
+def resolve_base_root(env: dict | None = None) -> Path:
+    """The os-images cache directory, derived from the one cache root (0013).
 
     Shared by `create_app` (serve, RO) and the worker (write, RW) so the two
-    never drift on the path. Returning None (unset) is distinct from "set but
-    unwritable" -- the writability assertion below is the worker's FAIL-LOUD."""
-    env = os.environ if env is None else env
-    value = env.get("PHOTO_WALL_BASE_ROOT")
-    return Path(value) if value else None
+    never drift on the path. The cache root is optional-with-default, so this
+    ALWAYS returns a path -- base serving is unconditional (always-on); the
+    writability assertion below is the worker's FAIL-LOUD on a missing/unwritable
+    volume."""
+    return cache_layout.os_images_root(env)
 
 
 def assert_base_root_writable(base_root: Path | None) -> Path:
@@ -218,9 +219,9 @@ def record_base_boot_status(conn, *, ok: bool, code: str | None, clock) -> None:
 def read_base_boot_status(conn) -> dict | None:
     """The last recorded BASE_ROOT boot-assertion outcome, or None if never run.
 
-    None means no worker with ``PHOTO_WALL_BASE_ROOT`` configured has booted yet
-    (base serving off, or a base-less worker) -- distinct from ``ok=False`` (a
-    configured volume that failed its assertion)."""
+    None means no worker has recorded a base boot-assertion outcome yet (no
+    worker has booted against the cache volume) -- distinct from ``ok=False`` (a
+    volume that failed its assertion)."""
     row = conn.execute(
         "SELECT ok, code, checked_at FROM base_boot_status WHERE singleton"
     ).fetchone()
