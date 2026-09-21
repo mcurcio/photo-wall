@@ -22,7 +22,7 @@ Verify gate (from repo runbook):
 | 9 | observability + docs | **CI-GREEN** | 6d7b485 | migration 019 base_boot_status; GET /v1/operator/netboot; README/runbook/modules; E4/E5/E8/E9 resolved, E10 new |
 
 ## Status: ALL 9 BEADS CI-GREEN (feature complete on PR #18)
-Full arc verified end-to-end in CI (MVP checks / Postgres suite, software-e2e, netboot boot-chain e2e). Open follow-ups: **E10** — add the `PHOTO_WALL_RELEASE_TOKEN` secret to the DB-harness CI job so the real-GitHub e2e gate (b) runs (currently skips). Deferred by design: operator UI over `/v1/operator/netboot` (backend fields shipped); auto-rollback for a device with no known-good (new device boot-loops until pinned — accepted).
+Full arc verified end-to-end in CI (MVP checks / Postgres suite, software-e2e, netboot boot-chain e2e). **E10 RESOLVED** — the real-GitHub e2e gate (b) is wired to the built-in `secrets.GITHUB_TOKEN` (repo-scoped `contents: read`, token flows only to GitHub, fork PRs skip safely); it runs in CI once a published release carries a `base_image` asset, else skips. Deferred by design: operator UI over `/v1/operator/netboot` (backend fields shipped); auto-rollback for a device with no known-good (new device boot-loops until pinned — accepted).
 
 Budget: per bead 90 min wall / 8 agents; stop-and-report on cap.
 

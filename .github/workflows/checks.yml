@@ -93,7 +93,18 @@ jobs:
           tags: photo-wall-ci-central
           cache-from: type=gha,scope=photo-wall-checks-amd64-v1
       - run: docker compose up -d --no-build --wait
-      - run: .venv/bin/python scripts/test_local.py -q --tb=short
+      - name: Run the Postgres pytest suite
+        env:
+          # The built-in, repo-scoped GHA token (no manually-managed secret): the
+          # workflow's `permissions: contents: read` lets it read THIS repo's own
+          # releases + release assets, which is all the fresh-install e2e gate (b)
+          # (test_fresh_install_arc_against_real_github) needs to exercise the real
+          # GitHub path. httpx strips this Authorization header on the cross-host CDN
+          # redirect, so it reaches api.github.com only. On a fork PR the token is
+          # empty/restricted, so gate (b) skips (its guard treats an empty token as
+          # unset) -- the correct safe behavior.
+          PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .venv/bin/python scripts/test_local.py -q --tb=short
       - name: Walk through the operator interface in the pinned browser image
         run: |
           install -d "$RUNNER_TEMP/operator-browser"

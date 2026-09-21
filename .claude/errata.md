@@ -538,3 +538,21 @@ owner adds a `PHOTO_WALL_RELEASE_TOKEN` secret to the relevant workflow (the DB-
 pytest job) and passes it through to the test env. Until then only gate (a) (the
 deterministic MockTransport path) gates PRs. Gate (b) also skips (not fails) when the
 real repo has no released `base_image` asset yet.
+RESOLVED (2026-09-20): gate (b)'s token is now wired in CI via the built-in
+GHA token — `.github/workflows/checks.yml` job `portable-and-postgres` sets
+`PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}` on the "Run the Postgres
+pytest suite" step (the `.venv/bin/python scripts/test_local.py` step), matching
+the existing `REGISTRY_TOKEN` step-env pattern. NO manually-managed secret and
+NO broadened permissions: the workflow's `permissions: contents: read` already
+covers reading this repo's own releases + release assets, which is all gate (b)
+needs against `mcurcio/photo-wall`. The token flows to GitHub only —
+`GithubReleaseSource` sends it as an `Authorization: Bearer` header to
+`api.github.com` and httpx strips it on the cross-host CDN redirect
+(central/github_releases.py:152-155). No test change was required: gate (b)
+already reads `PHOTO_WALL_RELEASE_TOKEN` (tests/test_netboot_fresh_install_e2e.py:321)
+and skips gracefully when it is unset/empty. FORK-PR / empty-token: on a fork PR
+`secrets.GITHUB_TOKEN` is restricted/empty, so gate (b) skips (empty string is
+falsy) — the correct safe behavior, never an error. REMAINING PRECONDITION: gate
+(b) still SKIPS (not fails) until a published `mcurcio/photo-wall` release carries
+a `base_image` manifest asset; once such a release exists, CI exercises the real
+discover→download→verify→extract→serve path end to end.
