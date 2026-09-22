@@ -195,14 +195,14 @@ def _enroll(db, clock, device_id, token, *, epoch=1):
 
 
 def _base(origin_path, tmp_path, monkeypatch):
-    """A configured, EMPTY BASE_ROOT and APP_ROOT, wired into resolve_base_root
-    (the shared seam create_app and the worker both read)."""
-    base_root = tmp_path / origin_path
-    base_root.mkdir()
-    app_root = tmp_path / "app"
-    app_root.mkdir()
-    monkeypatch.setenv("PHOTO_WALL_BASE_ROOT", str(base_root))
-    monkeypatch.setenv("PHOTO_WALL_APP_ROOT", str(app_root))
+    """A configured, EMPTY cache root; its os-images/ and apps/ subdirs are the
+    domain roots the serve seam and the worker both derive (0013)."""
+    cache_root = tmp_path / origin_path
+    base_root = cache_root / "os-images"
+    app_root = cache_root / "apps"
+    base_root.mkdir(parents=True)
+    app_root.mkdir(parents=True)
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(cache_root))
     assert resolve_base_root() == base_root  # the serve + worker share this path
     return base_root, app_root
 

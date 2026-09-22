@@ -115,7 +115,10 @@ def test_no_base_root_configured_is_503(registry):
 
 def test_known_but_uncached_tag_is_503_uncached(registry, tmp_path):
     # A release is discovered (a pinned device resolves to it) but its bytes are
-    # not yet cached: fail closed with the uncached code, not a crash.
+    # not yet cached: fail closed with the uncached code, not a crash. B3
+    # distinction guard: the empty/never-cached state 503s at the `not cached`
+    # gate BEFORE the open, so it must NOT demote a row (there is nothing cached
+    # to demote) -- only the dangling-cached-row open-failure self-heals.
     _seed_release(registry, TAG)
     with registry.db.transaction() as conn:
         conn.execute(
@@ -126,6 +129,38 @@ def test_known_but_uncached_tag_is_503_uncached(registry, tmp_path):
         response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: SERIAL})
         assert response.status_code == 503
         assert response.json() == {"error": "base_artifact_uncached"}
+    with registry.db.transaction() as conn:
+        dangling = conn.execute(
+            "SELECT COUNT(*) AS n FROM base_cache WHERE eviction_reason='dangling_row'"
+        ).fetchone()
+    assert dangling["n"] == 0  # never-cached state must not be misread as dangling
+
+
+def test_dangling_cached_row_self_heals_reenqueue_and_demote(registry, tmp_path):
+    # B3 / tracer probe 6: a `cached` row whose squashfs vanished out-of-band
+    # (external eviction, admin delete, or a GC that crashed after unlink) must
+    # NOT 503 forever -- `cached` is a DB flag, never a filesystem stat. On the
+    # open-failure the serve seam self-heals: demote the row out of `cached` and
+    # re-enqueue the base fetch (reusing enqueue_base_fetch_in), returning a
+    # transient 503 the Pi retries into a regenerated file.
+    _seed_cached(registry, tmp_path, TAG)
+    base_file_path(tmp_path, TAG).unlink()  # the file vanishes; the row still says cached
+    queue = _FakeQueue()
+    app = create_app(
+        registry.db, registry.clock, ADMIN, base_root=tmp_path, release_queue=queue
+    )
+    with TestClient(app) as client:
+        response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: SERIAL})
+    assert response.status_code == 503
+    assert response.json() == {"error": "base_artifact_unavailable"}
+    # (a) re-enqueued the tag for base mirroring via the existing helper ...
+    assert queue.base_fetches == [TAG]
+    # ... and (b) demoted the dangling row so the next read regenerates.
+    with registry.db.transaction() as conn:
+        row = conn.execute(
+            "SELECT state, eviction_reason FROM base_cache WHERE tag=%s", (TAG,)
+        ).fetchone()
+    assert row["state"] == "evicted" and row["eviction_reason"] == "dangling_row"
 
 
 def test_symlinked_base_file_is_refused(registry, tmp_path):

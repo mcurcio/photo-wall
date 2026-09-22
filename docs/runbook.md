@@ -140,13 +140,13 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 
 ## Player provisioning: promote a release from GitHub (0010)
 
-[Decision 0010](decisions/0010-github-release-sourcing.md) removes the manual sha256 dance above for the common case: central **watches the project's GitHub Releases**, records every semver release as a candidate, and lazily mirrors the `.deb` into the same `PHOTO_WALL_APP_ROOT` store Players already fetch from — but only when *you* promote a version. Discovery is automatic; promotion is a deliberate operator action. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
+[Decision 0010](decisions/0010-github-release-sourcing.md) removes the manual sha256 dance above for the common case: central **watches the project's GitHub Releases**, records every semver release as a candidate, and lazily mirrors the `.deb` into the shared `.deb` store Players already fetch from — but only when *you* promote a version. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic; promotion is a deliberate operator action. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
 
-**Enable it (config env).** Release sourcing is opt-in: it activates only when `PHOTO_WALL_APP_ROOT` is set on the **worker** (it is the worker that reaches the internet and mirrors bytes). Central and the worker must point `PHOTO_WALL_APP_ROOT` at the **same shared `.deb` store** (the worker writes `app-<sha256>.deb`; central serves it), exactly as the manual path already requires.
+**Configuration.** Release sourcing is **always-on** (0013 retired the opt-in gate): the worker polls GitHub and mirrors bytes into `<cache-root>/apps/` unconditionally; central serves them RO. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)); there is no separate `.deb`-store env to wire.
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_APP_ROOT` | central + worker | (unset) | Shared `.deb` store; setting it on the worker enables release sourcing |
+| `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root; the `.deb` store is its derived `apps/` subdir. Optional (baked default) |
 | `PHOTO_WALL_RELEASE_REPO` | worker | `mcurcio/photo-wall` | `owner/name` of the GitHub repo whose releases are polled |
 | `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
 | `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Truthy to also track GitHub prereleases (drafts are always skipped) |
@@ -169,7 +169,7 @@ curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/refresh
 ```
 
-All three return **503 `release_sourcing_unconfigured`** when `PHOTO_WALL_APP_ROOT`/the release queue is not wired.
+All three routes are always available: release sourcing is unconditional as of [decision 0013](decisions/0013-unified-cache-root.md), so the former **503 `release_sourcing_unconfigured`** branch (gated on the old `PHOTO_WALL_APP_ROOT`) has been removed.
 
 **Promoted vs. current (pending).** A promote records your **chosen tag** immediately. If that release is already mirrored, the served **current** pointer advances in the same request (`200 promoted`). If it is not yet mirrored, the request returns `202 pending`: the worker downloads and verifies the `.deb`, and `current` advances only once those bytes are on disk — the previously current version keeps serving until then, so Players are never broken. A pending promote whose uplink is down stays pending; it completes automatically when connectivity returns (no re-promote needed). Watch `mirror_state` in the list to see it move `discovered → mirroring → mirrored`, and `current` flip to the new tag.
 
@@ -179,11 +179,11 @@ All three return **503 `release_sourcing_unconfigured`** when `PHOTO_WALL_APP_RO
 
 [Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
 
-**Storage (the root of the old outage).** Base bytes live at **`PHOTO_WALL_BASE_ROOT/base-<tag>.squashfs`** on a **dedicated, persistent** volume, separate from the media and `.deb` volumes, **mounted RW on the worker and RO on central**. The worker **asserts `PHOTO_WALL_BASE_ROOT` exists and is writable at boot** and fails loud (an ERROR log) if not, and re-hydrates any cached-but-absent file — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Unset ⇒ base serving is off and the worker is byte-for-byte its pre-0012 self.
+**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tag>.squashfs`** under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a cached-but-absent file at the serve seam (a dangling `cached` row demotes and re-enqueues) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_BASE_ROOT` | worker (RW) + central (RO) | (unset) | Dedicated persistent dir holding the per-version `base-<tag>.squashfs`; required for base serving; asserted writable at worker boot |
+| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; per-version `base-<tag>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
 | `PHOTO_WALL_PER_DEVICE_DEB` | player | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
 
 **Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.

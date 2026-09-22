@@ -88,9 +88,9 @@ async def boot_autopull(
     present) or defers a tag-serialized mirror. Its return dict is untouched.
 
     0012 bead 3 ADDS a base role, gated on ``base_root`` (``None`` -> the base
-    steps are skipped and the return is byte-for-byte the 0010 outcome, so a
-    worker with no ``PHOTO_WALL_BASE_ROOT`` behaves exactly as before). When a
-    base root is given, ``_boot_base`` runs on EVERY boot -- independent of the
+    steps are skipped and the return is byte-for-byte the 0010 outcome). 0013
+    derives the os-images cache dir from the one cache root, so the worker always
+    passes a base root and ``_boot_base`` runs on EVERY boot -- independent of the
     ``.deb`` suppress/pull decision -- to fetch an empty cluster's bootstrap
     image, re-hydrate any cached-but-absent bytes, and sweep crash-orphaned
     temps; its outcome is reported under a ``base`` key alongside the unchanged

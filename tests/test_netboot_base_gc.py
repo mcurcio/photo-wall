@@ -15,8 +15,21 @@ keeps bytes latest-verified never would.
 
 from __future__ import annotations
 
+import logging
+import os
+import time
+
 from central.app_releases import AppReleases
-from central.netboot_base import base_file_path, gc_base_cache
+from central.netboot_base import (
+    OS_IMAGES_BYTE_CAP_BYTES,
+    base_file_path,
+    gc_base_cache,
+    sweep_base_orphans,
+)
+
+# Comfortably past _ORPHAN_MTIME_GRACE_SECONDS (300s): a file this old is a
+# genuine orphan the sweep must reclaim, not a fetch's just-landed bytes.
+_AGED = 3600
 
 KG_LOW = "v0.0.1"     # device A known-good (low); held ONLY by the known-good union
 PIN_LOW = "v0.0.2"    # device C pin (low semver); held ONLY by the pin union
@@ -153,3 +166,63 @@ def test_e_gc_never_unlinks_a_keep_set_file(registry, tmp_path):
     for tag, data in kept_bytes.items():
         path = base_file_path(tmp_path, tag)
         assert path.exists() and path.read_bytes() == data
+
+
+# -- (B4) os-images orphan sweep ---------------------------------------------
+
+
+def test_orphan_sweep_unlinks_files_with_no_owning_row(registry, tmp_path):
+    # The filesystem-enumerating sweep (0013 B4): a `base-<tag>.squashfs` whose
+    # tag owns NO base_cache row is unlinked; a `cached` row's file and an
+    # in-flight `caching` row's file (owned) both survive.
+    db, clock = registry.db, registry.clock
+    _seed_release(db, clock, KG_HIGH)
+    _seed_release(db, clock, CACHING)
+    _cache_row(db, clock, KG_HIGH, tmp_path)                       # 'cached' + file
+    _cache_row(db, clock, CACHING, tmp_path, state="caching")     # in-flight row...
+    base_file_path(tmp_path, CACHING).write_bytes(b"mid-fetch")   # ...its landing file
+    orphan = base_file_path(tmp_path, ORPHAN)                     # NO row at all
+    orphan.write_bytes(b"orphaned bytes")
+    # Age the orphan past the mtime grace so it reads as a genuine orphan, not a
+    # fetch's freshly-landed bytes (which the grace protects -- see the fresh-mtime
+    # and became-owned unit probes in tests/test_netboot_base.py).
+    aged = time.time() - _AGED
+    os.utime(orphan, (aged, aged))
+
+    with db.transaction() as conn:
+        removed = sweep_base_orphans(conn, tmp_path)
+
+    assert removed == [ORPHAN]
+    assert not orphan.exists()
+    # Owned files survive: a cached tag AND an in-flight caching tag (never swept
+    # mid-fetch -- the frozen invariant that `caching` rows own their file).
+    assert base_file_path(tmp_path, KG_HIGH).exists()
+    assert base_file_path(tmp_path, CACHING).exists()
+
+
+# -- (B4) byte cap alarm ------------------------------------------------------
+
+
+def test_gc_alarms_when_keepset_alone_exceeds_the_cap(registry, tmp_path, caplog):
+    # (B4) If the protected keep-set alone exceeds the byte cap, GC must NOT evict
+    # a protected tag to satisfy the cap -- it emits a structured `keepset_over_cap`
+    # alarm and retains the keep-set (never drops below the reserved floor).
+    db, clock = registry.db, registry.clock
+    _seed_release(db, clock, KG_HIGH)
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO base_cache(tag, squashfs_sha256, size, state, updated_at) "
+            "VALUES(%s,%s,%s,%s,%s)",
+            (KG_HIGH, "c" * 64, OS_IMAGES_BYTE_CAP_BYTES + 1, "cached", clock.utc()),
+        )
+    base_file_path(tmp_path, KG_HIGH).write_bytes(b"a big kept base")
+    _insert_device(db, "device-b", known_good_tag=KG_HIGH, known_good_at=1000.0)
+
+    with caplog.at_level(logging.WARNING, logger="central.netboot_base"):
+        with db.transaction() as conn:
+            evicted = gc_base_cache(conn, tmp_path, clock=clock)
+
+    # The over-cap keep-set member is KEPT (not evicted), and the alarm fired.
+    assert KG_HIGH not in evicted
+    assert base_file_path(tmp_path, KG_HIGH).exists()
+    assert "keepset_over_cap" in caplog.text

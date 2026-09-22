@@ -4,8 +4,8 @@
 mirror tasks. It owns no queue and no HTTP client of its own: it builds a fresh
 `GithubReleaseSource` per call from injected config (so every call is offline in
 tests via a fake transport), drives the `AppReleases` store (bead 1) and
-`AppPackages` registry (014), and writes the mirrored bytes under
-`PHOTO_WALL_APP_ROOT`. It never reimplements the pointer logic -- `reconcile` is
+`AppPackages` registry (014), and writes the mirrored bytes into the apps cache
+directory (0013). It never reimplements the pointer logic -- `reconcile` is
 the single advance path for the current pointer, always under the store's
 `FOR UPDATE` serialization.
 
@@ -39,7 +39,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from central import netboot_base
+from central import cache_layout, netboot_base
 from central.app_packages import AppPackageError, AppPackages
 from central.app_releases import AppReleaseError, AppReleases
 from central.db import Database
@@ -94,24 +94,20 @@ class AppReleaseService:
     # -- construction from env ----------------------------------------------
 
     @classmethod
-    def from_env(cls, db: Database, clock: Clock | None = None) -> AppReleaseService | None:
-        """Build the worker collaborator from the environment (0010 gate #4).
+    def from_env(cls, db: Database, clock: Clock | None = None) -> AppReleaseService:
+        """Build the worker collaborator from the environment (0013: always-on).
 
-        Release sourcing is OPT-IN: it is enabled only when PHOTO_WALL_APP_ROOT is
-        set (the shared storage the mirror lands `.deb` bytes into). When that var
-        is UNSET this returns ``None`` and the worker runs with release sourcing
-        off -- no service, no tasks, no GitHub polling. When set: repo via
+        Release sourcing is UNCONDITIONAL: the apps cache directory is derived
+        from the one cache root (PHOTO_WALL_CACHE_ROOT, baked default), so this
+        NEVER returns ``None`` -- there is no opt-in env. Repo via
         PHOTO_WALL_RELEASE_REPO (default mcurcio/photo-wall); optional
         PHOTO_WALL_RELEASE_TOKEN; prereleases excluded unless
         PHOTO_WALL_RELEASE_PRERELEASES is truthy.
         """
-        app_root_env = os.environ.get("PHOTO_WALL_APP_ROOT")
-        if not app_root_env:
-            return None
         clock = clock or SystemClock()
         repo = os.environ.get("PHOTO_WALL_RELEASE_REPO", "mcurcio/photo-wall")
         token = os.environ.get("PHOTO_WALL_RELEASE_TOKEN") or None
-        app_root = Path(app_root_env)
+        app_root = cache_layout.apps_root()
         include_prereleases = os.environ.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in (
             "1", "true", "yes", "on",
         )
@@ -170,11 +166,16 @@ class AppReleaseService:
         # Poll-tail base GC (0012 bead 4): evict cache bytes whose tag has left the
         # keep-set (latest-verified U non-retired pins U non-retired known-good U
         # in-flight `caching`). Off-loop under one txn, exactly like the sweep and
-        # reconcile -- no network, always runs. Skipped when BASE_ROOT is
-        # unconfigured (base serving off), so a non-base worker is unchanged. The
-        # pin/health-change triggers land with their own beads (attachment surface);
-        # the poll tail is the always-on backstop, mirroring `sweep_failed_boots`.
+        # reconcile -- no network, always runs. The pin/health-change triggers land
+        # with their own beads (attachment surface); the poll tail is the always-on
+        # backstop, mirroring `sweep_failed_boots`.
         result["base_gc"] = await asyncio.to_thread(self._gc_base_cache)
+        # Poll-tail os-images orphan sweep (0013 B4): unlink any
+        # `base-<tag>.squashfs` with no owning `base_cache` row (an in-flight
+        # `caching` row OWNS its file, so a fetch is never swept mid-flight). The
+        # always-on filesystem backstop next to GC -- GC removes bytes whose ROW
+        # left the keep-set; the sweep removes FILES that have no row at all.
+        result["base_orphans"] = await asyncio.to_thread(self._sweep_base_orphans)
         return result
 
     def _sweep_failed_boots(self) -> int:
@@ -186,14 +187,26 @@ class AppReleaseService:
         """Evict cache bytes no non-retired device needs (bead 4), off-loop.
 
         Reads the SAME base dir the serve route resolves (`resolve_base_root`) so
-        the eviction unlinks the very files the serve side would open. A None base
-        root (PHOTO_WALL_BASE_ROOT unset) means base serving is off -- nothing to
-        collect -- so GC is a no-op rather than a fault."""
+        the eviction unlinks the very files the serve side would open. 0013: the
+        os-images cache dir is always derived from the one cache root, so base
+        serving is always-on and GC always has a directory to collect."""
         base_root = netboot_base.resolve_base_root()
-        if base_root is None:
-            return 0
         with self.db.transaction() as conn:
             return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
+
+    def _sweep_base_orphans(self) -> int:
+        """Unlink os-images files with no owning `base_cache` row (0013 B4), off-loop.
+
+        Reads the SAME base dir the serve route resolves and GC collects
+        (`resolve_base_root`), so the sweep unlinks exactly the files the serve
+        side would open. `sweep_base_orphans` enforces the frozen single-writer
+        exclusion -- a per-tag ownership re-confirm plus an mtime grace on the
+        landing file -- so a concurrent `fetch_base` that `os.replace`s bytes
+        after the owned-set snapshot is never swept mid-flight (the owned-set
+        snapshot alone is NOT that exclusion; the two guards are)."""
+        base_root = netboot_base.resolve_base_root()
+        with self.db.transaction() as conn:
+            return len(netboot_base.sweep_base_orphans(conn, base_root))
 
     def _apply(self, record: DiscoveredRelease) -> None:
         """Feed one discovered release into the store (blocking; runs off-loop)."""

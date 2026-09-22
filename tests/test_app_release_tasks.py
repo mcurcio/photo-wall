@@ -5,8 +5,8 @@ PostgreSQL (conftest's `registry` fixture, schema-per-test, skipped when
 PHOTO_WALL_TEST_DATABASE_URL is unset -- the same gate as test_app_releases) and
 a FAKE GitHub served by `httpx.MockTransport`: the `Server` double reused from
 test_github_releases. No network. The mirror path uses the REAL
-`GithubReleaseSource.download`, so bytes actually stream to a tmp
-PHOTO_WALL_APP_ROOT and are registered through the real `AppPackages` -- the
+`GithubReleaseSource.download`, so bytes actually stream to a tmp apps cache
+dir and are registered through the real `AppPackages` -- the
 serving invariant (`current` names bytes present on disk) is exercised end to end.
 
 Mutation-probe intent: dropping the streaming oversize abort, the sha256 check,
@@ -246,29 +246,33 @@ def test_worker_consumes_the_app_release_queue_only_when_enabled():
     enabled = worker_queues(True)
     disabled = worker_queues(False)
     assert MEDIA_QUEUE in enabled and MEDIA_QUEUE in disabled
-    assert APP_RELEASE_QUEUE in enabled  # existing wiring probe (release sourcing on)
-    assert APP_RELEASE_QUEUE not in disabled  # opt-in: unset PHOTO_WALL_APP_ROOT
+    assert APP_RELEASE_QUEUE in enabled  # release sourcing on -> queue consumed
+    assert APP_RELEASE_QUEUE not in disabled  # off -> the worker never polls GitHub
 
 
-def test_from_env_disables_release_sourcing_without_app_root(monkeypatch):
-    # With PHOTO_WALL_APP_ROOT unset, from_env returns None: no service is built,
-    # so no GitHub source is ever constructed and the worker skips task
-    # registration and the release queue. No DB connection or network occurs.
+def test_from_env_defaults_the_cache_root_when_unset(monkeypatch):
+    # 0013: release sourcing is always-on. With no cache-root env, from_env still
+    # builds the service (never None) against the baked default cache root, with
+    # the apps subdir derived. No DB connection or network occurs.
+    from pathlib import Path
+
     from central.app_release_service import AppReleaseService
     from central.db import Database
 
-    monkeypatch.delenv("PHOTO_WALL_APP_ROOT", raising=False)
-    assert AppReleaseService.from_env(Database("postgresql:///photo_wall_unused")) is None
-
-
-def test_from_env_enables_release_sourcing_with_app_root(monkeypatch, tmp_path):
-    # With PHOTO_WALL_APP_ROOT set, from_env builds the service (mirrors bead 3).
-    from central.app_release_service import AppReleaseService
-    from central.db import Database
-
-    monkeypatch.setenv("PHOTO_WALL_APP_ROOT", str(tmp_path))
+    monkeypatch.delenv("PHOTO_WALL_CACHE_ROOT", raising=False)
     svc = AppReleaseService.from_env(Database("postgresql:///photo_wall_unused"))
-    assert svc is not None and svc.app_root == tmp_path
+    assert svc is not None and svc.app_root == Path("/var/cache/photo-wall/apps")
+
+
+def test_from_env_derives_apps_root_from_the_cache_root(monkeypatch, tmp_path):
+    # With PHOTO_WALL_CACHE_ROOT set, from_env derives the apps/ subdir from it --
+    # there is no per-domain app-root env any more.
+    from central.app_release_service import AppReleaseService
+    from central.db import Database
+
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
+    svc = AppReleaseService.from_env(Database("postgresql:///photo_wall_unused"))
+    assert svc is not None and svc.app_root == tmp_path / "apps"
 
 
 def test_release_tasks_register_on_the_worker_app_with_a_valid_periodic():

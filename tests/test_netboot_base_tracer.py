@@ -14,6 +14,7 @@ import base64
 import hashlib
 import io
 import tarfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -234,10 +235,10 @@ def test_criterion4_second_unpinned_device_follows_latest_verified(registry, tmp
 
 
 def test_criterion5_boot_assertion_fails_loud_when_base_root_absent_or_unwritable(tmp_path):
-    # Resolve is a pure env read; the assertion is the FAIL-LOUD (raises, never a
-    # silent later 503).
-    assert resolve_base_root({}) is None
-    assert resolve_base_root({"PHOTO_WALL_BASE_ROOT": str(tmp_path)}) == tmp_path
+    # 0013: resolve derives os-images/ from the one cache root (always a path,
+    # never None); the assertion is the FAIL-LOUD (raises, never a silent 503).
+    assert resolve_base_root({}) == Path("/var/cache/photo-wall") / "os-images"
+    assert resolve_base_root({"PHOTO_WALL_CACHE_ROOT": str(tmp_path)}) == tmp_path / "os-images"
     with pytest.raises(BaseRootError):
         assert_base_root_writable(None)
     with pytest.raises(BaseRootError):

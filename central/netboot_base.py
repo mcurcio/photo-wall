@@ -45,22 +45,29 @@ the release TAG and the uniform `retired_at IS NULL` device filter.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import secrets
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from central import cache_layout
 from central.app_releases import AppReleaseError, parse_semver
 from central.artifact_io import HardenedOpenError, open_regular
 from contracts.equipment import equipment_device_id
 from contracts.release import MAX_ROOTFS_BYTES
 
 if TYPE_CHECKING:  # avoid a hard import cycle at module load; only for type hints
+    from collections.abc import Callable
+
     from contracts.models import BaseHealth
+
+LOG = logging.getLogger("central.netboot_base")
 
 BASE_IMAGE_NAME = "photo-wall-base.squashfs"
 SHA256SUMS_NAME = "SHA256SUMS"
@@ -91,6 +98,53 @@ _TEMP_SUFFIX = ".tmp"
 # Recorded on a `base_cache` row when GC (bead 4) unlinks its bytes: the tag left
 # the keep-set. Observability only; the row (and its integrity sha) survive.
 _GC_EVICTION_REASON = "not_in_keep_set"
+# Recorded on a `base_cache` row when the serve seam self-heals a dangling row
+# (B3): the DB said `cached` but the file was gone/unreadable at open. The row is
+# demoted to `evicted` so the next read regenerates; the serve seam also
+# re-enqueues the fetch. Observability only; the row + integrity sha survive.
+_DANGLING_EVICTION_REASON = "dangling_row"
+# Structured-log reason for a swept os-images orphan (0013 B4): a
+# `base-<tag>.squashfs` on disk whose tag owns no `base_cache` row. Log-only --
+# there is (by definition) no row to update.
+_ORPHAN_REASON = "orphan"
+# Structured-log reason for the keep-set-over-cap ALARM (0013 B4): the protected
+# keep-set alone exceeds the byte cap. GC never evicts a protected tag to satisfy
+# the cap, so this surfaces the overflow rather than silently breaching it.
+_KEEPSET_OVER_CAP_REASON = "keepset_over_cap"
+# os-images byte budget (0013 decision 2). PLACEHOLDERS pending owner confirmation
+# -- named constants, never magic literals, so the owner flips one line.
+#   * The reserved FLOOR is the capacity guaranteed to os-images so a burst in
+#     another cache domain never starves netboot. GC never evicts a keep-set
+#     member, so os-images always retains its bootable working set: the floor is
+#     the reserved capacity that guarantees that working set fits. "Never evict
+#     below the floor" therefore holds BY CONSTRUCTION -- GC only ever removes
+#     surplus (non-keep-set / orphan) bytes.
+#   * The CAP bounds the domain, enforced BEST-EFFORT below the keep-set: GC
+#     evicts only surplus bytes, so a keep-set larger than the cap surfaces an
+#     ALARM (`_KEEPSET_OVER_CAP_REASON`) rather than evicting a protected tag.
+OS_IMAGES_RESERVED_FLOOR_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB (placeholder)
+OS_IMAGES_BYTE_CAP_BYTES = 12 * 1024 * 1024 * 1024  # 12 GiB (placeholder)
+# Construction-time guard: a reservation larger than the ceiling is a
+# contradiction (it could never hold), so the two bounds are checked at import.
+assert OS_IMAGES_RESERVED_FLOOR_BYTES < OS_IMAGES_BYTE_CAP_BYTES
+# A pathological os-images/ directory bound for the orphan sweep enumeration,
+# mirroring media_store._SCAN_LIMIT so one runaway domain cannot block the poll.
+_ORPHAN_SCAN_LIMIT = 20000
+# The GithubReleaseSource download runs under a 30s per-operation (connect / read
+# / write) timeout (github_releases.GithubReleaseSource.timeout_seconds default);
+# a fetch's terminal `os.replace` + `state='cached'` write completes well within a
+# small multiple of it. Keep in sync if that default moves.
+_BASE_FETCH_TIMEOUT_SECONDS = 30.0
+# Orphan-sweep mtime grace (0013 B4, single-writer exclusion). `fetch_base`'s
+# `os.replace` stamps a FRESH mtime on the landing `base-<tag>.squashfs`; the
+# sweep NEVER unlinks a file whose mtime is within this grace of now. That closes
+# the `os.replace`-vs-`unlink` race the owned-set snapshot alone cannot: a fetch
+# that landed its bytes AFTER the snapshot -- even one whose `cached` row write
+# then threw, leaving the row `failed` -- is protected because its bytes are
+# fresh, while a genuine orphan ages past the grace and is swept on a later tick.
+# Tied to the fetch timeout (a generous multiple) so it scales with it rather than
+# being a magic number.
+_ORPHAN_MTIME_GRACE_SECONDS = 10 * _BASE_FETCH_TIMEOUT_SECONDS  # 300s
 # The only shape a client serial may take before it can select an image or be
 # logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
 # future per-serial scheme has room, and reject everything else (control chars,
@@ -169,15 +223,15 @@ def base_file_path(base_root: Path, tag: str) -> Path:
     return Path(base_root) / f"base-{tag}.squashfs"
 
 
-def resolve_base_root(env: dict | None = None) -> Path | None:
-    """The dedicated base-image directory from PHOTO_WALL_BASE_ROOT, or None.
+def resolve_base_root(env: dict | None = None) -> Path:
+    """The os-images cache directory, derived from the one cache root (0013).
 
     Shared by `create_app` (serve, RO) and the worker (write, RW) so the two
-    never drift on the path. Returning None (unset) is distinct from "set but
-    unwritable" -- the writability assertion below is the worker's FAIL-LOUD."""
-    env = os.environ if env is None else env
-    value = env.get("PHOTO_WALL_BASE_ROOT")
-    return Path(value) if value else None
+    never drift on the path. The cache root is optional-with-default, so this
+    ALWAYS returns a path -- base serving is unconditional (always-on); the
+    writability assertion below is the worker's FAIL-LOUD on a missing/unwritable
+    volume."""
+    return cache_layout.os_images_root(env)
 
 
 def assert_base_root_writable(base_root: Path | None) -> Path:
@@ -218,9 +272,9 @@ def record_base_boot_status(conn, *, ok: bool, code: str | None, clock) -> None:
 def read_base_boot_status(conn) -> dict | None:
     """The last recorded BASE_ROOT boot-assertion outcome, or None if never run.
 
-    None means no worker with ``PHOTO_WALL_BASE_ROOT`` configured has booted yet
-    (base serving off, or a base-less worker) -- distinct from ``ok=False`` (a
-    configured volume that failed its assertion)."""
+    None means no worker has recorded a base boot-assertion outcome yet (no
+    worker has booted against the cache volume) -- distinct from ``ok=False`` (a
+    volume that failed its assertion)."""
     row = conn.execute(
         "SELECT ok, code, checked_at FROM base_boot_status WHERE singleton"
     ).fetchone()
@@ -279,7 +333,10 @@ def operator_base_status(conn, base_root: Path | None) -> dict:
         ).fetchall()
     ]
     return {
-        "base_root_configured": base_root is not None,
+        # 0013: base serving is always-on (resolve_base_root always returns a
+        # path), so base_root is always configured. Field kept for API/operator
+        # back-compat, now a literal True.
+        "base_root_configured": True,
         "boot_status": read_base_boot_status(conn),
         "frontier": latest_verified(conn),
         "devices": devices,
@@ -336,6 +393,28 @@ def _cache_row(conn, tag: str):
     return conn.execute(
         "SELECT state, squashfs_sha256 FROM base_cache WHERE tag=%s", (tag,)
     ).fetchone()
+
+
+def demote_dangling_base_row(conn, tag: str, *, clock) -> None:
+    """Demote a `cached` row whose file vanished externally out of `cached` (B3).
+
+    The serve seam reaches an open-failure ONLY after the `cached` guard has
+    passed, so a failed open there means the DB row says `cached` while the bytes
+    are gone or unreadable -- an external eviction / admin delete / backend loss,
+    or a GC that crashed after `unlink` but before its `evicted` write. Such a
+    dangling row would otherwise 503 forever, because `cached` is a DB flag,
+    never a filesystem stat. Demote it to `evicted` with a `dangling_row` reason
+    so the lazy fetch backstop regenerates it on the next read; the caller
+    re-enqueues the base fetch to self-heal now rather than on the next request.
+
+    The `AND state='cached'` guard makes this a no-op if a concurrent re-cache
+    already advanced the row, so a self-heal never clobbers freshly-landed bytes.
+    Runs in the caller's transaction (paired with the re-enqueue)."""
+    conn.execute(
+        "UPDATE base_cache SET state='evicted', eviction_reason=%s, updated_at=%s "
+        "WHERE tag=%s AND state='cached'",
+        (_DANGLING_EVICTION_REASON, clock.utc(), tag),
+    )
 
 
 def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecision:
@@ -829,6 +908,12 @@ def gc_base_cache(conn, base_root: Path, *, clock) -> list[str]:
       * decision + eventual under READ COMMITTED -- a tag needed AFTER the
         keep-set read may still be unlinked, then re-fetched on next need (a
         transient 503 + reboot-retry, never a wrong or torn serve).
+
+    0013 B4 adds the os-images byte CAP on top of the keep-set eviction: after
+    every surplus tag is evicted, if the protected keep-set ALONE still exceeds
+    `OS_IMAGES_BYTE_CAP_BYTES` an ALARM is logged (`_KEEPSET_OVER_CAP_REASON`) --
+    GC never evicts a protected tag to satisfy the cap, so the overflow surfaces
+    rather than breaching the reserved floor that protects netboot.
     """
     keep = _nonretired_device_tags(conn)
     verified = latest_verified(conn)
@@ -838,20 +923,231 @@ def gc_base_cache(conn, base_root: Path, *, clock) -> list[str]:
         row["tag"]
         for row in conn.execute("SELECT tag FROM base_cache WHERE state='caching'").fetchall()
     )
-    cached = conn.execute("SELECT tag FROM base_cache WHERE state='cached'").fetchall()
+    cached = conn.execute("SELECT tag, size FROM base_cache WHERE state='cached'").fetchall()
     evicted: list[str] = []
+    kept_bytes = 0
     for row in cached:
         tag = row["tag"]
         if tag in keep:
+            # A protected (keep-set) tag is NEVER evicted; tally its on-disk bytes
+            # so the cap can be checked best-effort BELOW the keep-set below.
+            kept_bytes += row["size"] or 0
             continue
-        base_file_path(base_root, tag).unlink(missing_ok=True)
+        # Demote the row FIRST, then unlink, both inside this one transaction
+        # (B3): an interrupted GC then leaves a `evicted` (regenerable) row, never
+        # a dangling `cached` row whose file is gone -- which would 503 forever
+        # at the serve seam. If the txn commits, the file is gone and the row
+        # agrees; if it aborts before commit, the unlink's filesystem effect is
+        # not rolled back, but the row stays `cached` and the serve seam's
+        # dangling-row self-heal (demote + re-enqueue) recovers it on next read.
         conn.execute(
             "UPDATE base_cache SET state='evicted', eviction_reason=%s, updated_at=%s "
             "WHERE tag=%s",
             (_GC_EVICTION_REASON, clock.utc(), tag),
         )
+        base_file_path(base_root, tag).unlink(missing_ok=True)
         evicted.append(tag)
+        LOG.info(
+            "base cache eviction: tag=%s bytes=%s reason=%s",
+            tag,
+            row["size"] if row["size"] is not None else "unknown",
+            _GC_EVICTION_REASON,
+        )
+    # Byte cap, best-effort below the keep-set (0013 B4). Every surplus
+    # (non-keep-set) byte is already evicted above, so the only bytes that can
+    # exceed the cap are the protected keep-set itself -- and GC must NOT evict a
+    # protected tag to satisfy the cap (that would starve netboot / drop below the
+    # reserved floor). Surface the overflow as an ALARM instead of breaching it
+    # silently; the keep-set is retained intact. Under the cap this is quiet.
+    if kept_bytes > OS_IMAGES_BYTE_CAP_BYTES:
+        LOG.warning(
+            "base cache keep-set over cap: keepset_bytes=%s cap_bytes=%s "
+            "floor_bytes=%s reason=%s",
+            kept_bytes,
+            OS_IMAGES_BYTE_CAP_BYTES,
+            OS_IMAGES_RESERVED_FLOOR_BYTES,
+            _KEEPSET_OVER_CAP_REASON,
+        )
     return evicted
+
+
+# -- os-images orphan sweep (0013 B4) ----------------------------------------
+
+# The one shape a SERVED base file takes: `base-<tag>.squashfs` (no leading dot).
+# A fetch's in-progress temps carry the `.base-` prefix, so they never match this
+# -- they are the boot-time `sweep_stray_temps`'s job, not the orphan sweep's.
+_BASE_FILE_RE = re.compile(r"base-(?P<tag>.+)\.squashfs")
+
+
+def _base_file_tag(name: str) -> str | None:
+    """The release tag a served base filename encodes, or None if not one.
+
+    `base-<tag>.squashfs` -> `<tag>`; anything else (a `.base-...tmp` fetch temp,
+    a stray file) -> None. `fullmatch` anchors both ends so only the exact served
+    shape is ever a sweep candidate."""
+    match = _BASE_FILE_RE.fullmatch(name)
+    return match.group("tag") if match else None
+
+
+def _owned_base_tags(conn) -> set[str]:
+    """Every tag whose `base_cache` row OWNS a file: `cached` (present bytes) OR
+    in-flight `caching` (bytes mid-fetch).
+
+    The frozen sweep invariant (0013): an in-flight `caching` row owns its
+    not-yet-renamed file. This is the os-images analog of media `recover`'s
+    `active` set (its in-flight staging attempts). NOTE: this is a SNAPSHOT read
+    once at sweep start; it is NOT by itself the single-writer exclusion (a fetch
+    that commits its row AFTER this read is invisible to it). The exclusion is
+    enforced in `sweep_base_orphans` by a per-tag re-confirm (`_base_tag_owned`)
+    plus an mtime grace, which together bracket the `os.replace`-vs-`unlink`
+    race the snapshot leaves open."""
+    return {
+        row["tag"]
+        for row in conn.execute(
+            "SELECT tag FROM base_cache WHERE state IN ('cached','caching')"
+        ).fetchall()
+    }
+
+
+def _base_tag_owned(conn, tag: str) -> bool:
+    """Re-confirm, immediately before an unlink, that `tag` owns its file NOW.
+
+    `_owned_base_tags` is a snapshot read once at sweep start; a `fetch_base` that
+    commits its `caching`/`cached` row AFTER that snapshot but BEFORE the sweep
+    reaches this entry is invisible to it. This per-tag re-SELECT under the sweep's
+    own transaction closes that gap for a COMMITTED row (defense-in-depth (a)); the
+    mtime grace closes the residual where the file has landed (`os.replace`) but
+    the row write has not yet committed -- or threw, leaving the row `failed`."""
+    row = conn.execute("SELECT state FROM base_cache WHERE tag=%s", (tag,)).fetchone()
+    return row is not None and row["state"] in ("cached", "caching")
+
+
+def _sweep_orphans(
+    base_root: Path,
+    owned_tags: set[str],
+    *,
+    budget: int,
+    now: float | None = None,
+    grace_seconds: float = 0.0,
+    reconfirm_owned: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """Unlink every `base-<tag>.squashfs` whose tag is NOT in `owned_tags`; return
+    the removed tags. The filesystem half, DB-free (so it is unit-testable without
+    a database): the caller supplies `owned_tags` from `_owned_base_tags`, plus the
+    single-writer-exclusion guards it enforces (below).
+
+    Two-phase like media `_orphan` -> `_remove` + `_fsync_directory`: unlink then
+    fsync the directory so the removal is durable. Base needs no orphan-tracking
+    row (unlike media's `media_orphans`) because an orphan is trivially
+    re-detectable -- a crash before the fsync just leaves it for the next
+    (idempotent) sweep. Only a regular, non-symlink file is ever unlinked.
+
+    Single-writer exclusion (0013 frozen "Sweep invariant"), enforced so a
+    concurrent `fetch_base` landing (`os.replace`) is NEVER unlinked mid-flight:
+      * `reconfirm_owned` (defense-in-depth (a)): a per-tag re-check, immediately
+        before each unlink, that the tag's row has not become owned since the
+        `owned_tags` snapshot -- so a fetch that committed its row mid-sweep is
+        skipped;
+      * `grace_seconds` + `now` (defense-in-depth (b)): a file whose mtime is
+        within `grace_seconds` of `now` is skipped -- a just-`os.replace`d file has
+        a fresh mtime even when its `cached` row is not yet committed (or the write
+        threw, leaving `failed`), so the unlink-vs-replace race is closed; a
+        genuine orphan ages past the grace and is swept on a later tick.
+    Both default to inert (no reconfirm; grace disabled unless `now` is supplied),
+    so the DB-free unit callers exercise the pure enumeration in isolation."""
+    removed: list[str] = []
+    # No os-images dir yet (a fresh cache root before the first fetch): nothing to
+    # sweep. Tolerate it like `gc_base_cache` does rather than letting `iterdir`
+    # raise FileNotFoundError and crash the poll tail every tick (0013 B4 / F-2).
+    if not Path(base_root).is_dir():
+        return removed
+    # Snapshot the listing (bounded) BEFORE unlinking, so removing a child never
+    # perturbs an in-progress directory scan.
+    entries = []
+    for scanned, entry in enumerate(Path(base_root).iterdir(), start=1):
+        if scanned > budget:
+            LOG.warning(
+                "base cache orphan sweep scan budget exhausted: budget=%s", budget
+            )
+            break
+        entries.append(entry)
+    for entry in entries:
+        tag = _base_file_tag(entry.name)
+        if tag is None or tag in owned_tags:
+            continue  # not a served base file, or a file its (in-flight) row owns
+        if not entry.is_file() or entry.is_symlink():
+            continue  # only a real squashfs file is a sweepable orphan
+        if reconfirm_owned is not None and reconfirm_owned(tag):
+            continue  # became owned since the snapshot -- a fetch just claimed it
+        try:
+            info: os.stat_result | None = entry.stat()
+        except OSError:
+            info = None
+        if (
+            now is not None
+            and info is not None
+            and now - info.st_mtime < grace_seconds
+        ):
+            continue  # freshly (re)written bytes -- a landing `os.replace`, not an orphan
+        size = info.st_size if info is not None else None
+        entry.unlink(missing_ok=True)
+        _fsync_dir(entry.parent)
+        removed.append(tag)
+        LOG.info(
+            "base cache orphan removed: tag=%s path=%s bytes=%s reason=%s",
+            tag,
+            entry,
+            size if size is not None else "unknown",
+            _ORPHAN_REASON,
+        )
+    return removed
+
+
+def sweep_base_orphans(
+    conn, base_root: Path, *, budget: int = _ORPHAN_SCAN_LIMIT, now: float | None = None
+) -> list[str]:
+    """Unlink os-images files with no owning `base_cache` row; return removed tags.
+
+    The filesystem-enumerating orphan sweep the design requires per domain (0013
+    req 9), modeled on `media_store.recover`'s dir enumeration + owned-set split.
+    Reads the owned-tag snapshot (`cached` U in-flight `caching`) and unlinks the
+    rest under the caller's transaction, ENFORCING the frozen single-writer
+    exclusion so a concurrent `fetch_base` landing is never swept mid-flight:
+      * a per-tag re-confirm (`_base_tag_owned`) immediately before each unlink,
+        so a fetch that commits its row after the snapshot is honoured; AND
+      * an mtime grace (`_ORPHAN_MTIME_GRACE_SECONDS`), so a file a fetch just
+        `os.replace`d -- whose `cached` row may not be committed yet -- is left
+        for a later tick, closing the `unlink`-vs-`os.replace` race.
+    The snapshot alone is NOT the exclusion (media uses a real `fcntl.flock`
+    writer lock); these two guards are what make the invariant hold across the
+    async-fetch / `to_thread`-sweep split. `now` defaults to wall-clock time
+    (compared against the filesystem's own mtime, NOT the injectable logical
+    clock); it is a seam for tests."""
+    return _sweep_orphans(
+        base_root,
+        _owned_base_tags(conn),
+        budget=budget,
+        now=time.time() if now is None else now,
+        grace_seconds=_ORPHAN_MTIME_GRACE_SECONDS,
+        reconfirm_owned=lambda tag: _base_tag_owned(conn, tag),
+    )
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory so a child unlink is durable. Best-effort: a filesystem
+    that rejects a directory fsync (or a vanished dir) is non-fatal here -- the
+    orphan is re-detectable, so durability is an optimization, not a correctness
+    dependency."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 # -- legacy single-base helpers (retained; superseded by per-version serving) --

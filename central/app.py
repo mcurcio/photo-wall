@@ -19,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
+from central import cache_layout
 from central.app_packages import AppPackageError, AppPackages
 from central.app_release_queue import AppReleaseTaskQueue, ProcrastinateAppReleaseQueue
 from central.app_releases import AppReleaseError, AppReleases
@@ -37,6 +38,7 @@ from central.netboot_base import (
     SERIAL_HEADER,
     base_file_path,
     clear_device_pin,
+    demote_dangling_base_row,
     gc_base_cache,
     operator_base_status,
     record_base_health,
@@ -118,7 +120,7 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
 
 
 class AppPackageRegistration(Model):
-    """Records a `.deb` already staged under PHOTO_WALL_APP_ROOT by sha256."""
+    """Records a `.deb` already staged in the apps cache directory by sha256."""
 
     version: str = Field(min_length=1, max_length=256)
     sha256: Digest
@@ -172,38 +174,29 @@ def create_app(
         ),
         media=media_repository,
     )
-    media_root = media_root or (
-        Path(os.environ["PHOTO_WALL_MEDIA_ROOT"]) if "PHOTO_WALL_MEDIA_ROOT" in os.environ else None
-    )
-    app_root = app_root or (
-        Path(os.environ["PHOTO_WALL_APP_ROOT"]) if "PHOTO_WALL_APP_ROOT" in os.environ else None
-    )
-    # Where the netboot base squashfs + its build-time SHA256SUMS are staged out
-    # of band (same stage-by-reference division of labor as PHOTO_WALL_APP_ROOT);
-    # unset -> GET /v1/netboot/base answers 503, never crashes create_app.
-    base_root = base_root or (
-        Path(os.environ["PHOTO_WALL_BASE_ROOT"]) if "PHOTO_WALL_BASE_ROOT" in os.environ else None
-    )
+    # 0013: the app owns the layout. All three domain roots are derived from the
+    # ONE optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
+    # constants -- there are no per-domain path envs. A caller may still inject an
+    # explicit root (tests); otherwise the cache-root derivation always supplies
+    # one, so release sourcing and base serving are UNCONDITIONAL (always-on).
+    media_root = media_root or cache_layout.media_root()
+    app_root = app_root or cache_layout.apps_root()
+    base_root = base_root or cache_layout.os_images_root()
     app_packages = AppPackages(db, clock)
-    # GitHub release sourcing (0010) is the same OPT-IN gate the worker uses
-    # (bead 3): the feature is live only when PHOTO_WALL_APP_ROOT is set (the
-    # shared storage the mirror lands `.deb` bytes into and the serving route
-    # reads). When unset, `app_root` is None, no enqueue port is built, and the
-    # operator release routes answer 503 "release sourcing not configured"
-    # rather than crashing create_app.
     app_releases = AppReleases(db, clock)
     # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
     # and injected above: promote defers a tag-keyed mirror, refresh defers a
-    # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker.
-    # The same enqueue port also defers the 0012 per-version base fetch, so it is
-    # built when EITHER the `.deb` mirror (PHOTO_WALL_APP_ROOT) or base serving
-    # (PHOTO_WALL_BASE_ROOT) is configured. The `.deb` operator routes still gate
-    # independently on `app_root`, so a base-only deployment does not expose them.
+    # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker. The
+    # same enqueue port also defers the 0012 per-version base fetch. 0013: with
+    # the cache root always present, release sourcing is always-on, so the port
+    # is built whenever the app runs against a real Database.
     release_queue = release_queue or (
-        ProcrastinateAppReleaseQueue(db.dsn)
-        if isinstance(db, Database) and (app_root is not None or base_root is not None)
-        else None
+        ProcrastinateAppReleaseQueue(db.dsn) if isinstance(db, Database) else None
     )
+    # 0013: media_root is now always derived from the cache root, so the gateway
+    # is built whenever the app runs against a real Database -- the same gate the
+    # media/release queues use above. (Unit tests that stub the DB out entirely
+    # get no gateway, exactly as when media_root was env-gated.)
     media_gateway = (
         MediaGateway(
             MediaStore(
@@ -213,7 +206,7 @@ def create_app(
                 execution=PostgresExecutionRepository(),
             )
         )
-        if media_root
+        if media_root and isinstance(db, Database)
         else None
     )
     mdns_enabled = (
@@ -443,8 +436,6 @@ def create_app(
         # is a corruption check only (0009 owner ruling) -- this route proves
         # the bytes match what central registered, not who authored them.
         package = app_packages.package(sha256)
-        if app_root is None:
-            raise AppPackageError("app_artifact_unavailable", 503)
         path = app_root / f"app-{sha256}.deb"
         try:
             descriptor, metadata = open_regular(path, expected_size=package["size"])
@@ -481,8 +472,6 @@ def create_app(
         # retry is never mistaken for a failed boot.
         serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
         LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
-        if base_root is None:
-            raise AppPackageError("base_artifact_unavailable", 503)
         with db.transaction() as conn:
             decision = select_base_for_serial(conn, serial, clock=clock)
             if decision.fetch_tag is not None and release_queue is not None:
@@ -503,6 +492,26 @@ def create_app(
         try:
             descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
         except HardenedOpenError as error:
+            # Dangling-row self-heal (B3, req 6). We are PAST the `not
+            # decision.cached` guard above, so an open-failure here can only be a
+            # row the DB says is `cached` whose bytes are gone/unreadable --
+            # external eviction, admin delete, or a GC that crashed after unlink.
+            # (`cached` is a DB flag, never a filesystem stat, so this row would
+            # otherwise 503 forever.) Demote the row out of `cached` and
+            # re-enqueue the base fetch so the next read regenerates -- distinct
+            # from the empty/not-yet-cached state, which the `base_artifact_uncached`
+            # 503 above handles WITHOUT demoting a row that was never `cached`.
+            with db.transaction() as conn:
+                demote_dangling_base_row(conn, decision.served_tag, clock=clock)
+                if release_queue is not None:
+                    release_queue.enqueue_base_fetch_in(conn, decision.served_tag)
+            LOG.info(
+                "netboot base self-heal: tag=%s serial=%s reason=dangling_row "
+                "action=reenqueue_demote open_reason=%s",
+                decision.served_tag,
+                serial or "<absent-or-invalid>",
+                error.reason,
+            )
             raise AppPackageError(f"base_artifact_{error.reason}", 503) from None
 
         def content():
@@ -700,7 +709,7 @@ def create_app(
     @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
     def register_app(request: AppPackageRegistration):
         # Stage-by-reference, mirroring register_release above: the operator
-        # places the `.deb` bytes under PHOTO_WALL_APP_ROOT out of band, and
+        # places the `.deb` bytes in the apps cache directory out of band, and
         # this call records the {version, sha256, size} pointer to them. No
         # bytes cross this request body.
         app_packages.register(request.version, request.sha256, request.size)
@@ -712,12 +721,11 @@ def create_app(
         return {"status": "configured"}
 
     def _release_sourcing() -> AppReleaseTaskQueue:
-        # 0010 gate: the release routes exist only when PHOTO_WALL_APP_ROOT is
-        # configured (app_root + an enqueue port). Unconfigured -> a clean 503,
-        # never a crash. This coexists with the manual POST /v1/operator/app and
-        # PUT /v1/operator/app/current escape hatches (0010 decision #6).
-        if app_root is None or release_queue is None:
-            raise AppReleaseError("release_sourcing_unconfigured", 503)
+        # 0013: release sourcing is always-on. The apps cache directory is always
+        # derived from the one cache root, so there is no "unconfigured" state --
+        # the enqueue port exists whenever the app runs against a real Database.
+        # Coexists with the manual POST /v1/operator/app and PUT
+        # /v1/operator/app/current escape hatches (0010 decision #6).
         return release_queue
 
     @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
@@ -788,8 +796,7 @@ def create_app(
                 release_queue.enqueue_base_fetch_in(conn, request.tag)
                 if AppReleases.deb_mirrorable_in(conn, request.tag):
                     release_queue.enqueue_mirror_in(conn, request.tag)
-            if base_root is not None:
-                gc_base_cache(conn, base_root, clock=clock)
+            gc_base_cache(conn, base_root, clock=clock)
         return {"status": "pinned"}
 
     @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
@@ -803,8 +810,7 @@ def create_app(
         with db.transaction() as conn:
             if not clear_device_pin(conn, device_id):
                 raise RegistryError("device_not_found", 404)
-            if base_root is not None:
-                gc_base_cache(conn, base_root, clock=clock)
+            gc_base_cache(conn, base_root, clock=clock)
         return {"status": "cleared"}
 
     @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])

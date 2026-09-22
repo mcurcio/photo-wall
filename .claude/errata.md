@@ -556,3 +556,125 @@ falsy) — the correct safe behavior, never an error. REMAINING PRECONDITION: ga
 (b) still SKIPS (not fails) until a published `mcurcio/photo-wall` release carries
 a `base_image` manifest asset; once such a release exists, CI exercises the real
 discover→download→verify→extract→serve path end to end.
+
+E11 (2026-09-21, bead 0013-T2): the entrypoint zero-uid guard was NOT actually
+numeric. The T2 spec's grounded-state called the existing `case "$PUID" in
+''|*[!0-9]*|0)` guard the "numeric zero-uid guard" and said KEEP IT VERBATIM,
+but that glob rejects only the single literal spelling `0` — it lets `00`/`000`
+(and `010`) through. The 0013 design (docs/decisions/0013-unified-cache-root.md
+§"How ownership and writability work") is explicit that the guard is NUMERIC
+(`[ "$PUID" -eq 0 ]`) precisely "so `00`/`000`/`010` cannot run it as root/wrong
+uid", and the T2 test spec mandates exit 78 on PUID=0/00/000. Code and spec
+disagreed; the design + test are the source of truth, so the guard was
+STRENGTHENED (not kept verbatim): keep the `case` for empty/non-numeric, then add
+an arithmetic `[ "$PUID" -eq 0 ]` (and the PGID twin) that rejects every zero
+spelling. `[ ... ] && { exit 78; }` is set -e-safe (non-last AND-OR operand is
+exempt) and only runs after the `case` has guaranteed an all-digit operand, so
+the arithmetic never errors. Note: `010` is still accepted as a positive uid (=10
+decimal); the design's mention of `010` is not enforced because the T2 test only
+requires 0/00/000 and `010` is a legitimate identity — flag if a later bead needs
+leading-zero/octal rejection too.
+
+E12 (2026-09-21, bead 0013-T2 fix pass): E11's flagged `010` gap is now CLOSED.
+The adversarial review (P2-1) and the design (docs/decisions/0013-unified-cache-root.md:191)
+both require `010` to be rejected too ("so `00`/`000`/`010` cannot run it as
+root/wrong uid"), so E11's "`010` is a legitimate identity" carve-out is overruled
+by the design's canonical-decimal requirement. The guard is tightened from a
+`case` for empty/non-numeric plus a separate arithmetic `-eq 0` to a SINGLE `case`
+reject-pattern `''|*[!0-9]*|0|0?*` on both PUID and PGID: it rejects empty, any
+non-digit, bare `0`, and any leading-zero multi-digit spelling (`00`/`000`/`010`/`007`)
+in one construct — accepting only `[1-9][0-9]*`. Canonical-decimal identity is now
+a CONSTRUCTION-TIME property (no octal/leading-zero spelling can name a uid at all),
+so design line 191's guarantee holds. The arithmetic `-eq 0` twin is removed as
+redundant. tests/test_entrypoint.py rejection params extended with `010` and `007`
+(exit 78); the canonical `10001` boot assertion is unchanged. Supersedes E11's
+closing "flag if a later bead needs leading-zero/octal rejection" note.
+
+E13 (2026-09-21, bead 0013-B3): the design's GC-reorder claim is slightly too
+strong. docs/decisions/0013-unified-cache-root.md:149/206 says setting
+base_cache.state='evicted' BEFORE the unlink in gc_base_cache's txn makes an
+interrupted GC "leave a demoted (regenerable) row, never a dangling cached one."
+But unlink() is a filesystem side effect, NOT transactional: a crash AFTER the
+unlink but BEFORE the txn commits rolls back the state='evicted' UPDATE while the
+file stays gone, so a dangling `cached` row is still POSSIBLE in that window. The
+reorder only shrinks the dangerous window (a crash between the two ops now leaves
+file-present + row-cached, which is consistent) — it does not eliminate the class.
+The class is actually closed by the B3 SERVE-SEAM self-heal (demote +
+enqueue_base_fetch_in on the cached-row open-failure), which the design's
+"Honest scope of rule 1" already names as the real guarantee. Implemented both as
+specified (reorder + serve-seam self-heal); no code divergence — this is a
+precision note on the reorder's stated guarantee strength (it is window-shrinking,
+not "never"). No action needed unless a later doc pass wants to soften line 149.
+
+E14 (2026-09-21, bead 0013-B4): the design (req 2 / §Storage "Quota + GC + orphan
+sweep") frames gc_base_cache as actively enforcing BOTH a reserved floor AND a byte
+cap ("never evict below the reserved floor ... enforce a byte cap best-effort below
+the keep-set"). In code the two are NOT symmetric active checks, and cannot be,
+because the committed keep-set semantics (0012 bead 4, tests/test_netboot_base_gc.py
+test_d/e) evict EVERY non-keep-set ("surplus") tag UNCONDITIONALLY for correctness
+(an orphaned / retired-device tag), regardless of byte budget. So:
+  * The CAP is enforced best-effort below the keep-set: all surplus bytes are
+    already evicted, so the only bytes that can exceed the cap are the protected
+    keep-set itself -> an ALARM (`keepset_over_cap`, sizes logged), never eviction
+    of a protected tag. This is an active check.
+  * The FLOOR is enforced BY CONSTRUCTION, not as an active byte-gate: GC only ever
+    removes surplus/orphan bytes and never a keep-set member, so os-images always
+    retains its bootable working set; the 4Gi floor is the reserved capacity that
+    guarantees that working set fits (protecting netboot from other domains). An
+    ACTIVE floor-gate on eviction was rejected: gating surplus eviction on a byte
+    floor would retain orphaned/retired-tag files below the floor, contradicting
+    the frozen keep-set-departure eviction (reds test_d). Floor/cap are named
+    placeholders (OS_IMAGES_RESERVED_FLOOR_BYTES=4Gi, OS_IMAGES_BYTE_CAP_BYTES=12Gi)
+    pending owner confirmation (decision 2). No code divergence from intent; this
+    records that "never evict below the floor" is a construction guarantee, and a
+    later doc pass may state it as such.
+
+E15 (2026-09-21, bead 0013-B4): the orphan sweep's ORIGINAL implementation did NOT
+enforce the design's frozen "Sweep invariant" single-writer exclusion. It read the
+owned set (`cached` U `caching`) ONCE as a snapshot and never re-checked at unlink
+time, and the code + docstrings claimed that snapshot WAS "the single-writer
+exclusion media uses" -- FALSE: media uses a real `fcntl.flock(LOCK_EX)` writer
+lock (`media_store.py` worker_lock), the sweep had no lock at all. A concurrent
+`fetch_base` that `os.replace`d its landing bytes (netboot_base.py ~:764) AFTER the
+sweep's SELECT but BEFORE it reached that tag's `unlink` -- including the real
+leftover-generator where `os.replace` succeeds then the `state='cached'` write
+throws, leaving the row `failed` with a fresh file present -- would be deleted
+mid-fetch. FIX: the invariant is now ENFORCED (not by a lock -- fetch's `os.replace`
+runs on the event loop inside async `fetch_base` while the sweep runs in
+`asyncio.to_thread`; no lock object is shared across that split, and an in-process
+`threading.Lock` would be weaker than media's cross-process flock and would block
+the loop) but by defense-in-depth BOTH, per B4's "Acceptable" clause:
+  * (a) a per-tag ownership RE-CONFIRM (`_base_tag_owned`) re-SELECTs the row state
+    immediately before each unlink, so a fetch that COMMITTED its `caching`/`cached`
+    row after the snapshot is honoured;
+  * (b) an MTIME GRACE (`_ORPHAN_MTIME_GRACE_SECONDS` = 10x the 30s fetch download
+    timeout = 300s): never unlink a `base-<tag>.squashfs` whose mtime is within the
+    grace of now (wall-clock `time.time()`, compared against the filesystem's own
+    mtime -- NOT the injectable logical clock). A just-`os.replace`d file has a
+    fresh mtime even when its `cached` row is uncommitted or the write threw, so
+    this closes the `unlink`-vs-`os.replace` race the re-confirm alone leaves open;
+    a genuine orphan ages past the grace and is swept on a later tick.
+F-2 (crash on missing dir) also fixed: `_sweep_orphans` now returns [] when the
+os-images dir is absent (matching `gc_base_cache`'s tolerance) instead of letting
+`iterdir` raise FileNotFoundError and crash the poll tail every tick. Docstrings in
+`_owned_base_tags`, `sweep_base_orphans`, and `_sweep_base_orphans` corrected to
+state the snapshot is NOT the exclusion; the two guards are. Tests: 4 no-DB unit
+probes (missing-dir tolerance; fresh-mtime spared; aged orphan swept; became-owned
+re-confirm) + the existing DB orphan-sweep test's orphan aged past the grace.
+
+E16 (2026-09-21, bead 0013 Slice-1 residual cleanup): the always-on flip
+(`base_root = base_root or cache_layout.os_images_root()`, central/app.py:184)
+makes `base_root` always non-None past that line, so the base-root gates the design
+promised would be "removed/repurposed, not left dangling" (design:220-223) were
+still present as always-true branches. This residual bead reconciles them without
+behavior change: the `if base_root is not None:` guards around `gc_base_cache` in
+`pin_device` (central/app.py:799) and `unpin_device` (central/app.py:814) are made
+UNCONDITIONAL (base_root is always a path, so the GC always ran anyway — E5's
+pin/unpin prompt-GC is unchanged), and `operator_base_status`'s
+`"base_root_configured": base_root is not None` (central/netboot_base.py:336) is set
+to the literal `True` (field KEPT for the `GET /v1/operator/netboot` API/operator
+back-compat, base serving is always configured now). NOT touched:
+`central/app_release_boot.py:102`'s `if base_root is not None` — that guards a
+reachable `boot_autopull(base_root=None)` test seam per its docstring and is
+legitimate. No code divergence; honors design:220-223. Mirrors the E13/E14/E15
+doc softenings.
