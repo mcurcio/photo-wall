@@ -209,13 +209,47 @@ curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
 
 **Garbage collection.** Cache bytes are need-driven: a `base-<tag>.squashfs` is kept while its tag is `latest-verified`, any non-retired device's pin, any non-retired device's known-good, or a fetch is in flight; otherwise GC unlinks the bytes and records an **eviction reason** on the `base_cache` row (the row and its integrity sha survive; a later need re-fetches). GC runs at the poll tail and after a pin change. A **retired** device holds nothing — its versions become evictable and stop holding the frontier.
 
-**Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
+**Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason + **retry gate** (`fetch_attempts`, `next_retry_at`, `failure_terminal` — 0013 tracer, migration `020`). The retry-gate fields are how you see that the newest discovered base is **backing off or terminally failed** while `/readyz` still reports Ready because an older cached base is serving as the fallback. (An operator UI over these fields is deferred; the backend fields ship here.)
 
 ```sh
 curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/netboot
 ```
 
 **Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+
+**Readiness vs liveness, and the k8s probe wiring (0013 device-less-fleet tracer).**
+Central exposes **two** health endpoints with different jobs, and each must be wired to
+the matching Kubernetes probe:
+
+- **`/healthz` — liveness (unchanged).** Green only when the database is reachable and
+  a scheduler tick completed recently. It reports that the process is alive; it says
+  **nothing** about whether any Pi can boot.
+- **`/readyz` — readiness (new).** The same DB + scheduler checks **plus
+  netboot-servability**: it returns **503** when a deployable base release exists but
+  no base is servable (the device-less-outage state), and **200** when a base is
+  servable **or** the catalog is legitimately empty (an empty cluster is Ready, not a
+  fault). Servability is resolved through the same one resolver serve and GC use, so
+  the three never disagree.
+
+The split is deliberate: a base-fetch delay must **not** trip a liveness restart
+(restarting cannot fetch a missing artifact — it only thrashes); "cannot serve boots"
+is a **drop-from-rotation + alarm** condition, which is exactly what a 503 on `/readyz`
+signals. **Known limitation:** `/readyz` is a global signal and cannot see a device
+**pinned to an uncached tag** — that device 503s on serve while `/readyz` still reports
+Ready. Closing that gap needs the deferred serve-precedence reorder (Shape B; see the
+[Central cache subsystem](module-central-cache.md#device-less-fleet-boot-one-resolver-eligibility-retry-backoff-and-readiness-0013-tracer)).
+
+**Operator follow-up after this fix merges** (outside this repo — the deploy and the
+Kubernetes manifests live in `mcurcio/iac`):
+
+1. **Deploy the merged build** to the cluster to heal the live outage — the code fix
+   alone does not serve boots until the new image is running.
+2. **Apply the probe wiring**: a `readinessProbe` `httpGet` on `/readyz` and a
+   `livenessProbe` `httpGet` on `/healthz`, replacing the **TCP-only** probes the
+   cluster runs today. A TCP probe only proves the port is open, never that a boot can
+   be served — which is why the live outage never alarmed. With `/readyz` wired, a
+   future unservable-boot state drops the pod from rotation and alarms instead of
+   silently 503ing PXE clients.
 
 ## Operator API: reposition and remove Frames
 

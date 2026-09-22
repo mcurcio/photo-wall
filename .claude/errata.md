@@ -678,3 +678,26 @@ back-compat, base serving is always configured now). NOT touched:
 reachable `boot_autopull(base_root=None)` test seam per its docstring and is
 legitimate. No code divergence; honors design:220-223. Mirrors the E13/E14/E15
 doc softenings.
+
+E17 (2026-09-21, bead 0013 device-less-fleet tracer): the frozen page for marker
+(d) says "reset failure_terminal=FALSE when upsert_discovered refreshes a row's
+base facts (app_releases.py:151-165)". Implemented CONDITIONALLY on the base
+bytes actually CHANGING (`base_tarball_sha256 != existing["base_tarball_sha256"]`),
+NOT on every refresh. Reason: the refresh UPDATE writes base_cols on EVERY
+re-discovery, and a steady-state poll re-discovers the same (unchanged) release
+whenever the GitHub ETag is absent/rotated — so an unconditional clear would
+reopen an archive-integrity terminal every tick and the terminal gate (the whole
+point of marker (d): stop re-fetching bytes that can only reproduce the fault)
+would never hold across polls. Clearing only on a genuine sha change preserves
+the belt-and-suspenders (new bytes => re-attempt) while keeping the gate durable.
+A later bead touching the terminal gate MUST honor this: terminal reopens on a
+base_tarball_sha256 change, not on any refresh. (central/app_releases.py refresh
+branch; central/netboot_base.py `_mark_base_failed`/`_TERMINAL_FETCH_CODES`.)
+
+Also flagged (plumbing, not a contradiction): the poll-tail self-heal (e) needs a
+tag-keyed enqueue port that `AppReleaseService` did not carry. Added an optional
+`release_queue: AppReleaseTaskQueue | None` constructor arg (None => the self-heal
+step no-ops; a serve-miss / boot re-hydrate still enqueue), wired in `from_env` to
+`ProcrastinateAppReleaseQueue(db.dsn)`. The tracer's frozen `resolve_unpinned`
+(served_tag, want_tag) contract and marker semantics are otherwise implemented as
+specified.

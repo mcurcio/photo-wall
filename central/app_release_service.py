@@ -41,6 +41,10 @@ from pathlib import Path
 
 from central import cache_layout, netboot_base
 from central.app_packages import AppPackageError, AppPackages
+from central.app_release_queue import (
+    AppReleaseTaskQueue,
+    ProcrastinateAppReleaseQueue,
+)
 from central.app_releases import AppReleaseError, AppReleases
 from central.db import Database
 from central.github_releases import (
@@ -83,6 +87,7 @@ class AppReleaseService:
         source_factory: Callable[[], GithubReleaseSource],
         *,
         include_prereleases: bool = False,
+        release_queue: AppReleaseTaskQueue | None = None,
     ) -> None:
         self.db = db
         self.releases = releases
@@ -90,6 +95,12 @@ class AppReleaseService:
         self.app_root = Path(app_root)
         self.source_factory = source_factory
         self.include_prereleases = include_prereleases
+        # The tag-keyed enqueue port the poll-tail base self-heal defers a
+        # coalesced fetch_base onto (the SAME base:<tag> lock the serve-miss and
+        # boot re-hydrate paths use). Optional: an injected fake in tests, and
+        # None disables the self-heal step (a serve-miss / boot re-hydrate still
+        # enqueue), so a caller that never wants the poll to enqueue omits it.
+        self.release_queue = release_queue
 
     # -- construction from env ----------------------------------------------
 
@@ -122,6 +133,10 @@ class AppReleaseService:
             app_root,
             factory,
             include_prereleases=include_prereleases,
+            # Always-on in the worker: the poll-tail self-heal defers base fetches
+            # onto the same release queue the boot re-hydrate + serve-miss paths
+            # use, constructed from the shared DB dsn.
+            release_queue=ProcrastinateAppReleaseQueue(db.dsn),
         )
 
     # -- poll + reconcile ----------------------------------------------------
@@ -163,6 +178,15 @@ class AppReleaseService:
         # latest-verified frontier and a cache entry. Pure local DB state, like
         # reconcile -- no network, always runs.
         result["base_sweep"] = await asyncio.to_thread(self._sweep_failed_boots)
+        # Poll-tail base self-heal (tracer e): the always-on backstop that keeps a
+        # device-less fleet bootable. Resolve the unpinned (served, want) via the
+        # ONE resolver and enqueue a coalesced fetch of `want` when it is not
+        # servable and its fetch is not gated (in-flight / terminal / backing off).
+        # SUBSUMES boot re-hydrate's cached-but-absent check and additionally
+        # covers evicted / transient-failed-past-backoff / no-row -- runs BEFORE
+        # GC so the same tick that would notice a gap re-fetches it. Pure local DB
+        # state + a transactional enqueue, like the sweep -- no network.
+        result["base_selfheal"] = await asyncio.to_thread(self._self_heal_base)
         # Poll-tail base GC (0012 bead 4): evict cache bytes whose tag has left the
         # keep-set (latest-verified U non-retired pins U non-retired known-good U
         # in-flight `caching`). Off-loop under one txn, exactly like the sweep and
@@ -182,6 +206,27 @@ class AppReleaseService:
         """Fail stale-`pending` base boots (bead 2), off-loop under one txn."""
         with self.db.transaction() as conn:
             return netboot_base.sweep_failed_boots(conn, clock=self.releases.clock)
+
+    def _self_heal_base(self) -> str | None:
+        """Enqueue a coalesced base fetch for the unpinned WANT tag when it needs
+        one (tracer e), off-loop under one txn. Returns the enqueued tag or None.
+
+        No-op when no queue is wired (the tests' no-enqueue path, and any caller
+        that omits `release_queue`). Reads the SAME base dir the serve route
+        resolves and GC collects, and coalesces on the `base:<tag>` lock, so a
+        burst of ticks / a concurrent serve-miss folds into one in-flight fetch."""
+        if self.release_queue is None:
+            return None
+        base_root = netboot_base.resolve_base_root()
+        now = self.releases.clock.utc()
+        with self.db.transaction() as conn:
+            _served, want = netboot_base.resolve_unpinned(conn, base_root)
+            if want is None or not netboot_base.base_want_needs_fetch(
+                conn, base_root, want, now=now
+            ):
+                return None
+            self.release_queue.enqueue_base_fetch_in(conn, want)
+            return want
 
     def _gc_base_cache(self) -> int:
         """Evict cache bytes no non-retired device needs (bead 4), off-loop.

@@ -36,12 +36,14 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import (
     SERIAL_HEADER,
+    _base_servable,
     base_file_path,
     clear_device_pin,
     demote_dangling_base_row,
     gc_base_cache,
     operator_base_status,
     record_base_health,
+    resolve_unpinned,
     sanitize_serial,
     select_base_for_serial,
     served_tag_for_serial,
@@ -376,6 +378,98 @@ def create_app(
             status_code=200 if healthy else 503,
         )
 
+    def _liveness() -> tuple[bool, bool, dict]:
+        # The SAME DB + scheduler liveness computation /healthz performs, factored
+        # out ONLY so /readyz can layer netboot-servability on top of it. /healthz
+        # deliberately keeps its own inline copy (it must stay byte-for-byte a
+        # pure liveness signal); this helper feeds /readyz alone.
+        try:
+            database = db.healthy()
+        except Exception:
+            database = False
+        scheduler = dict(scheduler_health)
+        last_tick_monotonic = scheduler["last_tick_monotonic"]
+        scheduler.pop("last_tick_monotonic", None)
+        if scheduler["enabled"]:
+            if scheduler["status"] == "stopped":
+                scheduler["status"] = "stopped"
+            elif scheduler["error"] is not None:
+                scheduler["status"] = scheduler["error"]
+            elif last_tick_monotonic is None:
+                scheduler["status"] = "starting"
+            elif not scheduler["running"]:
+                scheduler["status"] = "stopped"
+            else:
+                try:
+                    age = clock.monotonic() - last_tick_monotonic
+                except Exception:
+                    age = SCHEDULER_MAX_AGE + 1
+                scheduler["status"] = "ok" if 0 <= age <= SCHEDULER_MAX_AGE else "stale"
+            healthy = database and scheduler["status"] == "ok"
+        else:
+            scheduler["status"] = "disabled"
+            healthy = database
+        return healthy, database, scheduler
+
+    @app.get("/readyz")
+    def ready():
+        # READINESS, not liveness. The same DB + scheduler preconditions /healthz
+        # checks, PLUS netboot-servability -- so k8s drops a pod that can serve NO
+        # boots from rotation instead of routing PXE requests it will only 503.
+        #
+        # NOT a liveness signal on purpose: a base-fetch delay must NEVER trip a
+        # liveness restart -- a restart cannot fetch a missing artifact, it only
+        # thrashes. "Cannot serve boots" is a drop-from-rotation + alarm
+        # condition, which is exactly what a 503 here signals to k8s.
+        #
+        # Servability is resolved through resolve_unpinned -- the SAME resolver the
+        # serve route (select_base_for_serial) and GC use -- so serve, /readyz, and
+        # GC can never disagree on what is servable. Ready iff liveness holds AND
+        # either the resolved served_tag's bytes are servable (base_cache
+        # state='cached' and base-<tag>.squashfs present) OR the catalog is
+        # legitimately empty (resolve_unpinned -> (None, None): an empty cluster is
+        # Ready, not a fault). NotReady only when a deployable release exists but
+        # nothing is servable -- the exact prod-bug state.
+        #
+        # KNOWN LIMITATION (deferred Shape B): /readyz is a GLOBAL signal. It
+        # cannot see a device PINNED to an uncached tag -- that device would 503
+        # on serve while /readyz still reports Ready, because a per-device pin is
+        # outside the unpinned resolve_unpinned result this predicate reads.
+        healthy, database, scheduler = _liveness()
+        with db.transaction() as conn:
+            served, want = resolve_unpinned(conn, base_root)
+            servable = served is not None and _base_servable(conn, base_root, served)
+        empty = served is None and want is None
+        is_ready = healthy and (servable or empty)
+        if is_ready:
+            return JSONResponse(
+                {
+                    "ready": True,
+                    "served_tag": served,
+                    "want_tag": want,
+                    "database": database,
+                    "scheduler": scheduler,
+                },
+                status_code=200,
+            )
+        if not database:
+            reason = "database_unavailable"
+        elif scheduler["status"] not in ("ok", "disabled"):
+            reason = f"scheduler_{scheduler['status']}"
+        else:
+            reason = "base_unservable"
+        return JSONResponse(
+            {
+                "ready": False,
+                "reason": reason,
+                "want_tag": want,
+                "served_tag": served,
+                "database": database,
+                "scheduler": scheduler,
+            },
+            status_code=503,
+        )
+
     # The redesigned React console (delivery plan Bead 17 cutover) is now the
     # operator surface at `/`. The bundle is BUILT (Vite) into
     # central/console/dist/ locally and in CI, and is git-ignored — never
@@ -473,7 +567,7 @@ def create_app(
         serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
         LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
         with db.transaction() as conn:
-            decision = select_base_for_serial(conn, serial, clock=clock)
+            decision = select_base_for_serial(conn, serial, clock=clock, base_root=base_root)
             if decision.fetch_tag is not None and release_queue is not None:
                 # Lazy backstop: coalesced by the base:<tag> queueing lock so a
                 # burst of retrying Pis collapses to one in-flight fetch.
