@@ -280,26 +280,22 @@ jobs:
 
           ## Player application (revs independently of the base)
 
-          Central serves the `.deb` by reference, the same way it already
-          serves release artifacts: stage the bytes, then register and
-          promote the pointer.
+          Central sources the `.deb` **solely from GitHub releases** -- hand-staging
+          is retired (decision 0013). Central discovers this release, and on an
+          operator promote it mirrors `{manifest['player_deb']['filename']}`
+          (sha256 `{manifest['player_deb']['sha256']}`) into the `apps/` subdir of
+          its cache root and serves it. There is no copy-to-disk step and no
+          `PHOTO_WALL_APP_ROOT`.
 
-          1. Copy `{manifest['player_deb']['filename']}` to central's
-             `PHOTO_WALL_APP_ROOT` as `app-{manifest['player_deb']['sha256']}.deb`.
-          2. Register it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
+          Promote this version (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
 
-                 curl -X POST http://<central>/v1/operator/app \\
-                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
-                   -d '{{"version": "{manifest['player_deb']['version']}", "sha256": "{manifest['player_deb']['sha256']}", "size": {manifest['player_deb']['size']}}}'
+                 curl -X POST http://<central>/v1/operator/app/releases/<this-release-tag>/promote \\
+                   -H 'Authorization: Bearer <admin-token>'
 
-          3. Promote it as the current version:
-
-                 curl -X PUT http://<central>/v1/operator/app/current \\
-                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
-                   -d '{{"sha256": "{manifest['player_deb']['sha256']}"}}'
-
-          Every Player fetches the newly promoted `.deb` on its next reboot;
-          running Players are unaffected until then.
+          Central mirrors the `.deb` if needed (202 pending) or advances the
+          current pointer immediately if already mirrored (200). Every Player
+          fetches the newly promoted `.deb` on its next reboot; running Players are
+          unaffected until then.
 
           See the [setup and recovery runbook]({repo_blob}/docs/runbook.md) for
           the full operator procedure.

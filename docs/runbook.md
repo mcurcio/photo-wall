@@ -121,20 +121,9 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 
 1. **Stage the base image in your TFTP tree.** Unpack the published base OS bundle (kernel, DTBs, initramfs, `base-<revision>.squashfs`) beneath the boot-server root exactly as any other boot tree — see [PXE service setup](module-pxe-service.md). The base carries no Player code and no deployment config; it exists to run the bootstrapper (`appliance/provision.py`) that fetches everything else.
 2. **Boot the Pi and watch the pending queue.** The bootstrapper discovers central by mDNS, downloads the app manifest and the `.deb`, installs it, and starts the Player, which enrolls by serial — it appears **unbound** in the same operator inventory (`/v1/operator/inventory`) as the flash path.
-3. **Register and promote the app in central.** Copy the `.deb` bytes to central's `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` out of band (central never accepts the bytes over the request body — this mirrors how a signed release artifact is staged today), then:
-
-   ```sh
-   curl -X POST http://<central>/v1/operator/app \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"version": "<version>", "sha256": "<sha256>", "size": <size>}'
-   curl -X PUT http://<central>/v1/operator/app/current \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"sha256": "<sha256>"}'
-   ```
-
-   `POST /v1/operator/app` records the `{version, sha256, size}` pointer (422 on malformed input); `PUT /v1/operator/app/current` promotes it as the one global "current app" (404 if that sha256 was never registered). Every Player fetches the newly promoted `.deb` on its next reboot; already-running Players are unaffected until then.
+3. **Promote the app in central.** Hand-staging is **retired** ([decision 0013](decisions/0013-unified-cache-root.md), decision 5): the `.deb` is sourced solely from GitHub releases, so there is no operator copy-to-disk + register step and no `PHOTO_WALL_APP_ROOT`. The former manual routes (`POST /v1/operator/app`, `PUT /v1/operator/app/current`) now return **410 Gone**. Promote a version through the GitHub release-sourcing flow below ([Promote a release from GitHub](#player-provisioning-promote-a-release-from-github-0010)): central discovers the release, mirrors its `.deb` into the `apps/` subdir of the cache root, and serves it. Every Player fetches the newly promoted `.deb` on its next reboot; already-running Players are unaffected until then.
 4. **Bind** the pending Player to a Frame and calibrate, exactly as in the flash-and-go flow above.
-5. **Update the app later** by repeating step 3 with a new `.deb` — no re-imaging, no re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot, the dark screen is the signal, and recovery is re-promoting the previous sha256.
+5. **Update the app later** by promoting a new GitHub release (step 3) — no re-imaging, no re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot, the dark screen is the signal, and recovery is re-promoting the previous release.
 
 **Where this actually stands.** Central's app-package endpoints (`central/app_packages.py`, `central/app.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
 
@@ -173,7 +162,7 @@ All three routes are always available: release sourcing is unconditional as of [
 
 **Promoted vs. current (pending).** A promote records your **chosen tag** immediately. If that release is already mirrored, the served **current** pointer advances in the same request (`200 promoted`). If it is not yet mirrored, the request returns `202 pending`: the worker downloads and verifies the `.deb`, and `current` advances only once those bytes are on disk — the previously current version keeps serving until then, so Players are never broken. A pending promote whose uplink is down stays pending; it completes automatically when connectivity returns (no re-promote needed). Watch `mirror_state` in the list to see it move `discovered → mirroring → mirrored`, and `current` flip to the new tag.
 
-**Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
+**Offline / air-gapped.** Hand-staging is retired ([decision 0013](decisions/0013-unified-cache-root.md), decision 5): GitHub is the sole `.deb` source, so every served `.deb` is re-fetchable and the `apps/` store is a true cache. The former manual escape hatch (`POST /v1/operator/app` + `PUT /v1/operator/app/current`) now returns **410 Gone** — a sticky, un-refetchable file in the cache root is no longer allowed. Central must be able to reach GitHub (or an authenticated mirror via `PHOTO_WALL_RELEASE_REPO`/`PHOTO_WALL_RELEASE_TOKEN`) to source a new `.deb`.
 
 ## Base-image auto-mirror (0012)
 

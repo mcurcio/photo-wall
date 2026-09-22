@@ -149,10 +149,13 @@ so the log fields are the interim observability floor.
   the release-asset split and the withdraw half of the release-list sync.
 - **media (`media/`)** — serve-time regeneration (distinguishing a miss from
   corruption, adding the requeue transition) lands in **Slice 3**.
-- **Hand-staging removal is pending (bead B5)** — GitHub is the intended sole
-  `.deb` source, but the operator hand-staging routes (`POST /v1/operator/app`,
-  `PUT /v1/operator/app/current`) are **still live**; their removal is gated on a
-  live-DB precondition and is not done here. Do not treat hand-staging as gone.
+- **Hand-staging is retired (bead B5)** — GitHub is the sole `.deb` source, so
+  every served `.deb` is re-fetchable and `apps/` is a true cache. The operator
+  hand-staging routes (`POST /v1/operator/app`, `PUT /v1/operator/app/current`)
+  now return **410 Gone**; the domain methods `AppPackages.register`/`.promote`
+  are kept (the GitHub mirror and reconcile call them). The route retirement was
+  gated on a live-DB precondition (no promoted sha may be un-refetchable) that an
+  owner/CI clears before merge.
 
 Between slices, an out-of-band loss in an unlanded domain (`.deb`, media) still
 errors rather than self-healing — the one disclosed interim cost.

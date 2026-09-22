@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -52,7 +52,6 @@ from central.runtime import Program, Scene
 from contracts.models import (
     BaseHealth,
     Calibration,
-    Digest,
     Identifier,
     Model,
     Observation,
@@ -117,18 +116,6 @@ class AuthoredCandidatesRequest(Model):
 
 class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
-
-
-class AppPackageRegistration(Model):
-    """Records a `.deb` already staged in the apps cache directory by sha256."""
-
-    version: str = Field(min_length=1, max_length=256)
-    sha256: Digest
-    size: int = Field(gt=0)
-
-
-class AppPackagePromotion(Model):
-    sha256: Digest
 
 
 class DevicePin(Model):
@@ -706,26 +693,30 @@ def create_app(
     def inventory():
         return registry.inventory()
 
-    @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
-    def register_app(request: AppPackageRegistration):
-        # Stage-by-reference, mirroring register_release above: the operator
-        # places the `.deb` bytes in the apps cache directory out of band, and
-        # this call records the {version, sha256, size} pointer to them. No
-        # bytes cross this request body.
-        app_packages.register(request.version, request.sha256, request.size)
-        return {"status": "registered"}
+    # 0013 (decision 5): hand-staging is retired -- GitHub Releases are the sole
+    # `.deb` source, so every served `.deb` is re-fetchable and the apps cache is
+    # a true cache. The two former operator routes are kept only as 410 tombstones
+    # (a bare deletion would 404/405 and lose the explicit "gone" signal); they
+    # take no request body and no auth, returning 410 for any caller. The domain
+    # methods AppPackages.register/.promote are KEPT -- the GitHub mirror and
+    # reconcile still call them (app_release_service.py, app_releases.py).
+    _HAND_STAGING_GONE = "hand-staging retired; the Player .deb is sourced solely from GitHub releases"
 
-    @app.put("/v1/operator/app/current", dependencies=[Depends(admin)])
-    def promote_app(request: AppPackagePromotion):
-        app_packages.promote(request.sha256)
-        return {"status": "configured"}
+    @app.post("/v1/operator/app")
+    def register_app():
+        raise HTTPException(status_code=410, detail=_HAND_STAGING_GONE)
+
+    @app.put("/v1/operator/app/current")
+    def promote_app():
+        raise HTTPException(status_code=410, detail=_HAND_STAGING_GONE)
 
     def _release_sourcing() -> AppReleaseTaskQueue:
         # 0013: release sourcing is always-on. The apps cache directory is always
         # derived from the one cache root, so there is no "unconfigured" state --
         # the enqueue port exists whenever the app runs against a real Database.
-        # Coexists with the manual POST /v1/operator/app and PUT
-        # /v1/operator/app/current escape hatches (0010 decision #6).
+        # The former manual POST /v1/operator/app / PUT /v1/operator/app/current
+        # hand-staging escape hatches are retired (410); GitHub is the sole `.deb`
+        # source (decision 5).
         return release_queue
 
     @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])

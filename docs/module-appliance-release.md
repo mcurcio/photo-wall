@@ -85,8 +85,8 @@ Acceptance still requires the exact built image to boot a candidate, fail health
 |---|---|---|
 | `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; 503 `app_unconfigured` if nothing is promoted yet. |
 | `GET /v1/app/package/{sha256}.deb` | none | Streams the `.deb` bytes (same `O_NOFOLLOW`/`fstat`/size-match/streaming discipline as the rootfs route above); 404 unknown sha256, 503 if the bytes are missing or the wrong size. |
-| `POST /v1/operator/app` | admin token | Registers `{version, sha256, size}` for a `.deb` already staged by the operator under `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` — **stage-by-reference, like the rootfs route above, not a file upload**; central never accepts `.deb` bytes over this request body. 422 on malformed input; immutable once registered (re-registering the same sha256 with different metadata fails). |
-| `PUT /v1/operator/app/current` | admin token | Promotes a previously registered sha256 as the current app. 404 if that sha256 was never registered. |
+| `POST /v1/operator/app` | none | **Retired — 410 Gone.** Hand-staging is removed ([decision 0013](decisions/0013-unified-cache-root.md), decision 5); the `.deb` is sourced solely from GitHub releases (there is no `PHOTO_WALL_APP_ROOT`). Promote via the [auto-mirror release path](#the-auto-mirror-and-per-device-release-path-0012) instead. |
+| `PUT /v1/operator/app/current` | none | **Retired — 410 Gone.** See above; direct sha256 promotion is gone with hand-staging. |
 
 The sha256 this contract carries is, by the owner's explicit home-LAN ruling, **a corruption check only** — it lets a downloader detect a truncated or garbled `.deb`, never an authorship or authenticity proof; there is no boot-tree hash and no signing key backing it. There is also no auto-rollback: a promoted `.deb` that crashes on boot has no health signal analogous to `/v1/player/boot-health` above, so recovery from a bad promote is manual (re-promote a prior sha256). See 0009's ["What can go wrong"](decisions/0009-minimal-base-and-app-package.md#what-can-go-wrong) table for the full list of accepted risks this design trades for simplicity.
 
