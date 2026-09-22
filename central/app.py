@@ -424,12 +424,19 @@ def create_app(
         #
         # Servability is resolved through resolve_unpinned -- the SAME resolver the
         # serve route (select_base_for_serial) and GC use -- so serve, /readyz, and
-        # GC can never disagree on what is servable. Ready iff liveness holds AND
-        # either the resolved served_tag's bytes are servable (base_cache
-        # state='cached' and base-<tag>.squashfs present) OR the catalog is
-        # legitimately empty (resolve_unpinned -> (None, None): an empty cluster is
-        # Ready, not a fault). NotReady only when a deployable release exists but
-        # nothing is servable -- the exact prod-bug state.
+        # GC never disagree on the TAG SELECTION (there is no parallel resolver to
+        # drift on WHICH tag is chosen). They do NOT share the byte-level check, by
+        # design: /readyz here stats the file (_base_servable: state='cached' AND the
+        # file present), while the serve gate (_decision) checks the DB flag only
+        # (state='cached' AND a non-null squashfs_sha256, no file stat -- `cached` is
+        # a DB flag, never a filesystem stat). So in the dangling-row window (row
+        # cached, bytes vanished) /readyz reports NotReady while serve proceeds on the
+        # flag then 503s via the dangling-row self-heal; both end in a 503, never a
+        # wrong serve. Ready iff liveness holds AND either the resolved served_tag's
+        # bytes are servable (base_cache state='cached' and base-<tag>.squashfs
+        # present) OR the catalog is legitimately empty (resolve_unpinned -> (None,
+        # None): an empty cluster is Ready, not a fault). NotReady only when a
+        # deployable release exists but nothing is servable -- the exact prod-bug state.
         #
         # KNOWN LIMITATION (deferred Shape B): /readyz is a GLOBAL signal. It
         # cannot see a device PINNED to an uncached tag -- that device would 503

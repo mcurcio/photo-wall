@@ -228,8 +228,11 @@ the matching Kubernetes probe:
   netboot-servability**: it returns **503** when a deployable base release exists but
   no base is servable (the device-less-outage state), and **200** when a base is
   servable **or** the catalog is legitimately empty (an empty cluster is Ready, not a
-  fault). Servability is resolved through the same one resolver serve and GC use, so
-  the three never disagree.
+  fault). The tag selection is resolved through the same one resolver serve and GC use,
+  so the three never disagree on **which** tag to serve. The byte-level check differs by
+  design: `/readyz` stats the file while the serve gate trusts the `base_cache` DB flag,
+  so in the brief dangling-row window (row `cached`, bytes vanished) `/readyz` reports
+  NotReady while serve 503s via its self-heal — both a 503, never a wrong serve.
 
 The split is deliberate: a base-fetch delay must **not** trip a liveness restart
 (restarting cannot fetch a missing artifact — it only thrashes); "cannot serve boots"

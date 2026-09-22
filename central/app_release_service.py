@@ -88,6 +88,7 @@ class AppReleaseService:
         *,
         include_prereleases: bool = False,
         release_queue: AppReleaseTaskQueue | None = None,
+        base_root: Path | None = None,
     ) -> None:
         self.db = db
         self.releases = releases
@@ -95,6 +96,17 @@ class AppReleaseService:
         self.app_root = Path(app_root)
         self.source_factory = source_factory
         self.include_prereleases = include_prereleases
+        # The ONE os-images base root every base step of this worker reads
+        # (self-heal, GC, orphan-sweep, fetch_base, and boot re-hydrate via
+        # `.base_root`). Resolved ONCE at construction rather than re-derived per
+        # call, so the four base sites cannot drift on the path within a worker --
+        # a construction-time single source, not a per-call `resolve_base_root()`
+        # convention. Defaults to the shared cache-root derivation the serve seam
+        # also uses (`create_app`'s `base_root`), so worker and app agree by that
+        # one derivation; an explicit inject (tests) pins a tmp dir.
+        self.base_root = (
+            Path(base_root) if base_root is not None else netboot_base.resolve_base_root()
+        )
         # The tag-keyed enqueue port the poll-tail base self-heal defers a
         # coalesced fetch_base onto (the SAME base:<tag> lock the serve-miss and
         # boot re-hydrate paths use). Optional: an injected fake in tests, and
@@ -137,6 +149,9 @@ class AppReleaseService:
             # onto the same release queue the boot re-hydrate + serve-miss paths
             # use, constructed from the shared DB dsn.
             release_queue=ProcrastinateAppReleaseQueue(db.dsn),
+            # Resolve the os-images base root ONCE here so every base step reads
+            # the same threaded value (single-source; see __init__).
+            base_root=netboot_base.resolve_base_root(),
         )
 
     # -- poll + reconcile ----------------------------------------------------
@@ -217,7 +232,7 @@ class AppReleaseService:
         burst of ticks / a concurrent serve-miss folds into one in-flight fetch."""
         if self.release_queue is None:
             return None
-        base_root = netboot_base.resolve_base_root()
+        base_root = self.base_root
         now = self.releases.clock.utc()
         with self.db.transaction() as conn:
             _served, want = netboot_base.resolve_unpinned(conn, base_root)
@@ -235,7 +250,7 @@ class AppReleaseService:
         the eviction unlinks the very files the serve side would open. 0013: the
         os-images cache dir is always derived from the one cache root, so base
         serving is always-on and GC always has a directory to collect."""
-        base_root = netboot_base.resolve_base_root()
+        base_root = self.base_root
         with self.db.transaction() as conn:
             return len(netboot_base.gc_base_cache(conn, base_root, clock=self.releases.clock))
 
@@ -249,7 +264,7 @@ class AppReleaseService:
         landing file -- so a concurrent `fetch_base` that `os.replace`s bytes
         after the owned-set snapshot is never swept mid-flight (the owned-set
         snapshot alone is NOT that exclusion; the two guards are)."""
-        base_root = netboot_base.resolve_base_root()
+        base_root = self.base_root
         with self.db.transaction() as conn:
             return len(netboot_base.sweep_base_orphans(conn, base_root))
 
@@ -362,7 +377,7 @@ class AppReleaseService:
         hostile/inconsistent archive, unwritable BASE_ROOT) completes. Fail-closed:
         no partial file, no cache row left `caching`.
         """
-        base_root = netboot_base.resolve_base_root()
+        base_root = self.base_root
         try:
             async with self.source_factory() as source:
                 sha256 = await netboot_base.fetch_base(

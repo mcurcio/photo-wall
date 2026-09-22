@@ -145,6 +145,20 @@ _BASE_FETCH_TIMEOUT_SECONDS = 30.0
 # Tied to the fetch timeout (a generous multiple) so it scales with it rather than
 # being a magic number.
 _ORPHAN_MTIME_GRACE_SECONDS = 10 * _BASE_FETCH_TIMEOUT_SECONDS  # 300s
+# Abandoned-`caching` staleness bound (device-less-fleet liveness). `fetch_base`
+# writes `state='caching'` (stamping `updated_at`) BEFORE the download, then flips
+# the row to `cached`/`failed` in its terminal write. A hard worker crash (SIGKILL
+# / OOM / power loss) or a task cancel (`CancelledError` is a `BaseException`, so
+# NEITHER `except` in `fetch_base` runs) between those two writes leaves the row
+# wedged at `caching` with no live job -- Procrastinate does not re-queue a stalled
+# `doing` job, and there is no `caching` reaper. Left unguarded, `base_want_needs_fetch`
+# would treat that wedge as in-flight forever and the poll-tail self-heal would never
+# re-enqueue, re-opening the device-less-fleet outage. A `caching` row whose
+# `updated_at` has not advanced within this window is therefore treated as abandoned
+# and re-fetched; a genuinely in-flight fetch stamps `updated_at` well within it and
+# is left alone, and the re-enqueue coalesces on the `base:<tag>` queueing lock. Tied
+# to the fetch timeout as a generous multiple, mirroring the orphan-sweep grace.
+_CACHING_STALE_SECONDS = 10 * _BASE_FETCH_TIMEOUT_SECONDS  # 300s
 # The only shape a client serial may take before it can select an image or be
 # logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
 # future per-serial scheme has room, and reject everything else (control chars,
@@ -491,22 +505,35 @@ def _newest_servable_eligible(conn, base_root: Path) -> str | None:
 def base_want_needs_fetch(conn, base_root: Path, tag: str, *, now: float) -> bool:
     """Whether the poll-tail self-heal should enqueue a fetch for the WANT tag.
 
-    True iff `tag` is NOT servable AND its `base_cache` row is not in-flight
-    (`caching`) AND not `failure_terminal` AND its backoff has elapsed
-    (`next_retry_at` NULL or <= now). A missing row (never fetched / evicted with
-    no row) always needs a fetch. This SUBSUMES boot_rehydrate_targets'
-    cached-but-absent check and additionally covers evicted / transient-failed-
-    past-backoff / no-row -- the everything-pressure the tracer must survive."""
+    True iff `tag` is NOT servable AND not `failure_terminal` AND EITHER its
+    backoff has elapsed (`next_retry_at` NULL or <= now) OR it is an ABANDONED
+    `caching` row (see below). A missing row (never fetched / evicted with no row)
+    always needs a fetch. This SUBSUMES boot_rehydrate_targets' cached-but-absent
+    check and additionally covers evicted / transient-failed-past-backoff / no-row
+    -- the everything-pressure the tracer must survive.
+
+    A `caching` row is normally in-flight and is NOT re-enqueued. But a worker
+    crash / task-cancel between `fetch_base`'s `caching` write and its terminal
+    `cached`/`failed` write leaves the row wedged at `caching` with no live job
+    (Procrastinate does not re-queue a stalled job; there is no `caching` reaper),
+    which would strand this always-on self-heal forever on a device-less fleet.
+    So a `caching` row whose `updated_at` has not advanced within
+    `_CACHING_STALE_SECONDS` is treated as ABANDONED and needs a fresh fetch; a
+    genuinely in-flight fetch stamped `updated_at` well within the window and is
+    left alone, and the re-enqueue coalesces on the `base:<tag>` queueing lock."""
     if _base_servable(conn, base_root, tag):
         return False
     row = conn.execute(
-        "SELECT state, failure_terminal, next_retry_at FROM base_cache WHERE tag=%s",
+        "SELECT state, failure_terminal, next_retry_at, updated_at FROM base_cache WHERE tag=%s",
         (tag,),
     ).fetchone()
     if row is None:
         return True
-    if row["state"] == "caching" or row["failure_terminal"]:
+    if row["failure_terminal"]:
         return False
+    if row["state"] == "caching":
+        updated_at = row["updated_at"]
+        return updated_at is None or updated_at <= now - _CACHING_STALE_SECONDS
     return row["next_retry_at"] is None or row["next_retry_at"] <= now
 
 

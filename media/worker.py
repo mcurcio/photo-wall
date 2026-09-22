@@ -27,7 +27,6 @@ from central.installation_repository import PostgresInstallationRepository
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore
-from central.netboot_base import resolve_base_root
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
@@ -413,7 +412,10 @@ async def _entry():
                         release_service.packages,
                         PostgresInstallationRepository(clock),
                         ProcrastinateAppReleaseQueue(dsn),
-                        base_root=resolve_base_root(),
+                        # Thread the service's ONE resolved base root (single-source)
+                        # so boot re-hydrate reads the same path the poll-tail
+                        # self-heal / GC / orphan-sweep and fetch_base do.
+                        base_root=release_service.base_root,
                     )
                 )
                 autopull_task.add_done_callback(_log_boot_autopull)

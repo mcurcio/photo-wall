@@ -60,6 +60,7 @@ from central.app_release_service import AppReleaseService
 from central.app_releases import AppReleases
 from central.github_releases import GithubReleaseSource
 from central.netboot_base import (
+    _CACHING_STALE_SECONDS,
     SERIAL_HEADER,
     base_file_path,
     base_want_needs_fetch,
@@ -600,11 +601,18 @@ def test_proof_c_serve_falls_back_to_cached_eligible(registry, tmp_path, monkeyp
 
 def test_proof_d_terminal_fetch_gate_stops_re_enqueue(registry, tmp_path, monkeypatch):
     # Proof D (terminal gate, (d)): an archive-integrity fault (base_digest_mismatch)
-    # marks the row failure_terminal=TRUE, and the poll-tail self-heal must NOT
-    # re-enqueue it across ticks (re-fetching the same bytes only reproduces the
-    # fault). FAILS if the terminal classification/gating is reverted: the fault is
-    # transient, so every tick re-enqueues it (a hot loop) and failure_terminal is
-    # FALSE.
+    # marks the row failure_terminal=TRUE with NO backoff (next_retry_at IS NULL),
+    # and the poll-tail self-heal must NOT re-enqueue it (re-fetching the same bytes
+    # only reproduces the fault). FAILS if the terminal classification is reverted
+    # (the fault mis-classified as transient): the row would then be
+    # failure_terminal=FALSE with next_retry_at = now + backoff, which the DB-state
+    # assertions below (failure_terminal is True; next_retry_at is None) catch
+    # directly. NOTE: the `base_fetches == []` check alone does NOT distinguish the
+    # two under this test's FROZEN ManualClock -- a reverted-to-transient row's
+    # next_retry_at (now+30s) sits in the future of every (frozen, now=1000) tick, so
+    # base_want_needs_fetch would gate it during backoff too; there is no re-enqueue
+    # "hot loop" to observe. It is the DB-state assertions, not the enqueue count,
+    # that prove the revert.
     db, clock = registry.db, registry.clock
     base_root, app_root = _base("proof-d", tmp_path, monkeypatch)
     now = clock.utc()
@@ -682,6 +690,38 @@ def test_transient_fetch_backs_off_then_re_enqueues(registry, tmp_path, monkeypa
         ) is False
         assert base_want_needs_fetch(
             conn, base_root, TAG, now=row["next_retry_at"]
+        ) is True
+
+
+def test_abandoned_caching_row_re_enqueued_after_stale_window(registry, tmp_path, monkeypatch):
+    # Wedged-`caching` self-heal: a worker crash / task-cancel between fetch_base's
+    # `caching` write and its terminal cached/failed write leaves the row stuck at
+    # `caching` with no live job -- Procrastinate does not re-queue a stalled job and
+    # there is no `caching` reaper, so on a device-less fleet the poll-tail self-heal
+    # would otherwise never re-fetch and the boot stays 503 forever. base_want_needs_fetch
+    # must treat a `caching` row whose updated_at is older than _CACHING_STALE_SECONDS
+    # as ABANDONED (needs a fresh, lock-coalesced fetch) while leaving a genuinely
+    # FRESH (in-flight) `caching` row alone. FAILS if the staleness guard is reverted
+    # (caching -> always False): the abandoned assertion re-opens the outage.
+    db, clock = registry.db, registry.clock
+    base_root, _app_root = _base("caching-stale", tmp_path, monkeypatch)
+    now = clock.utc()
+    with db.transaction() as conn:
+        _seed_release_row(conn, TAG, 1, 2, 3, now)
+        conn.execute(                                    # a wedged in-flight fetch
+            "INSERT INTO base_cache(tag,state,updated_at) VALUES(%s,'caching',%s)",
+            (TAG, now),
+        )
+    with db.transaction() as conn:
+        # FRESH (updated_at == now): genuinely in-flight -> NOT re-enqueued.
+        assert base_want_needs_fetch(conn, base_root, TAG, now=now) is False
+        # One second before the window elapses: still treated as in-flight.
+        assert base_want_needs_fetch(
+            conn, base_root, TAG, now=now + _CACHING_STALE_SECONDS - 1
+        ) is False
+        # ABANDONED: updated_at has not advanced within the window -> needs a fetch.
+        assert base_want_needs_fetch(
+            conn, base_root, TAG, now=now + _CACHING_STALE_SECONDS
         ) is True
 
 

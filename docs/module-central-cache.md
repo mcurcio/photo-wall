@@ -203,8 +203,17 @@ warrant a fresh attempt, so the belt-and-suspenders clear fires only then.
 pure **liveness** signal (database reachable + a recent scheduler tick); it says the
 process is alive, nothing about whether any Pi can boot. `/readyz` is **new**: the same
 DB + scheduler preconditions **plus netboot-servability**, resolved through the same
-`resolve_unpinned`, so serve, GC, and `/readyz` can never disagree on what is
-servable. Ready (200) iff liveness holds **and** either the resolved `served_tag`'s
+`resolve_unpinned`. The resolver unifies **tag selection** across the four consumers
+(serve, GC, self-heal, `/readyz`) — there is no parallel resolver to drift on *which*
+tag is chosen. It does **not** unify the byte-level servability check, and by design:
+`/readyz` (and `resolve_unpinned`'s fallback) stat the file (`_base_servable`:
+`cached` **and** the file present on disk), while the final serve gate (`_decision`)
+checks the **DB flag only** (`cached` **and** a non-null `squashfs_sha256`, no file
+stat) — `cached` is a DB flag, never a filesystem stat. So in the **dangling-row
+window** (row `cached`, bytes vanished) the two legitimately differ: `/readyz` reports
+NotReady while serve proceeds on the DB flag and then 503s via the dangling-row
+self-heal (demote + re-enqueue). Both resolve to a **503**, never a wrong serve, so the
+divergence is safe and intentional. Ready (200) iff liveness holds **and** either the resolved `served_tag`'s
 bytes are servable (`base_cache` `cached` **and** the file present on disk) **or** the
 catalog is legitimately empty (`(None, None)` — an empty cluster is Ready, not a
 fault). NotReady (503) **only** when a deployable release exists but nothing is
