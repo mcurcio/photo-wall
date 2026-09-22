@@ -27,6 +27,18 @@ Budget: per bead 90 min wall / 8 agents; stop-and-report on cap; failed work →
 
 OTEL metrics = explicitly a **separate post-Slice-1 bead** (no metrics seam in central/ today; only logging). Structured log fields ship inside each op-bead now.
 
+## Slice 1 milestone status
+
+**Probes 1–6 landed + CI-green** (T1 87c9a0b, T2 91b9c21, B3 176e73d, B4 f9f4a0a, docs 29f4a72, residual c7bf675) on PR #19. Milestone **coherence review: SHIP** — no cross-bead correctness defect; self-heal / GC / orphan-sweep interlock safe by construction, cache-root contract uniform app↔image, eviction os-images-only. Three P2 cosmetics landed as the residual bead (E16). Design doc reconciled with as-built via E13/E14/E15/E16 softenings.
+
+**Remaining (owner-gated):**
+- **B5 (probe 7)** — hand-staging route removal, BLOCKED on the precondition SQL (below). Verified the bypass is real & live: `register_app` (app.py:709) stages `.deb` bytes out-of-band + records a pointer with no `app_releases` link; `promote` will promote such a sha. So a served sha CAN be un-refetchable — the SQL must confirm none is before the routes are deleted and eviction (B4) is trusted.
+- **iac** (separate repo) — one `cache` PVC; needs Slice 1 merged + the published image tag. Brief grounded (scratchpad `iac-brief.md`).
+
+**Follow-up test (coherence reviewer's ask, CI/DB):** an integration test of the E15 leftover-generator race — `fetch_base` lands `os.replace` then `state='cached'` throws (row `failed`, file fresh) while a concurrent `sweep_base_orphans` runs; assert the fresh file is spared (mtime grace + re-confirm) and swept on a later aged tick. Unit probes stub the clock; only a DB+FS test exercises the real `time.time()`-vs-mtime path.
+
+| Residual | 3 P2 coherence cosmetics: dead base_root gates, base_root_configured const, orphan log tag=, stale comment | — | **committed** | c7bf675 | E16 |
+
 ## Tracer (T) review outcome
 
 Verifier: **PASS** (locally-verifiable scope) — 8/8 gates, fast suite 996/328/0, entrypoint 12/12, all mutation probes reversed→red→restored. Security review: **ship it** — no P0/P1; privilege drop, VOLUME ordering, empty-cache miss-tolerance, cache_layout, media_gateway gate, compose all attacked and cleared.
