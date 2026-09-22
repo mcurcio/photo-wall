@@ -163,6 +163,22 @@ class AppReleases:
                         "WHERE tag=%s",
                         (*base_cols, is_prerelease, now, tag),
                     )
+                # Belt-and-suspenders for the terminal-fetch gate (tracer F5):
+                # NEW base bytes (a changed base_tarball_sha256) mean a prior
+                # archive-integrity terminal no longer applies, so clear it and let
+                # the poll-tail self-heal re-attempt the fetch. Guarded on an actual
+                # sha CHANGE, so an unchanged re-discovery (the steady-state poll)
+                # never reopens a terminal fault -- the gate holds until the bytes
+                # genuinely change. No-op when the tag has no terminal base_cache row.
+                if (
+                    base_tarball_sha256 is not None
+                    and base_tarball_sha256 != existing["base_tarball_sha256"]
+                ):
+                    conn.execute(
+                        "UPDATE base_cache SET failure_terminal=FALSE "
+                        "WHERE tag=%s AND failure_terminal",
+                        (tag,),
+                    )
                 return state
             if state == "mirrored" and have_asset and asset_sha256 != existing["asset_sha256"]:
                 # Re-cut of an already-mirrored tag: freeze the served bytes,

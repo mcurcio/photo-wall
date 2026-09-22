@@ -145,6 +145,20 @@ _BASE_FETCH_TIMEOUT_SECONDS = 30.0
 # Tied to the fetch timeout (a generous multiple) so it scales with it rather than
 # being a magic number.
 _ORPHAN_MTIME_GRACE_SECONDS = 10 * _BASE_FETCH_TIMEOUT_SECONDS  # 300s
+# Abandoned-`caching` staleness bound (device-less-fleet liveness). `fetch_base`
+# writes `state='caching'` (stamping `updated_at`) BEFORE the download, then flips
+# the row to `cached`/`failed` in its terminal write. A hard worker crash (SIGKILL
+# / OOM / power loss) or a task cancel (`CancelledError` is a `BaseException`, so
+# NEITHER `except` in `fetch_base` runs) between those two writes leaves the row
+# wedged at `caching` with no live job -- Procrastinate does not re-queue a stalled
+# `doing` job, and there is no `caching` reaper. Left unguarded, `base_want_needs_fetch`
+# would treat that wedge as in-flight forever and the poll-tail self-heal would never
+# re-enqueue, re-opening the device-less-fleet outage. A `caching` row whose
+# `updated_at` has not advanced within this window is therefore treated as abandoned
+# and re-fetched; a genuinely in-flight fetch stamps `updated_at` well within it and
+# is left alone, and the re-enqueue coalesces on the `base:<tag>` queueing lock. Tied
+# to the fetch timeout as a generous multiple, mirroring the orphan-sweep grace.
+_CACHING_STALE_SECONDS = 10 * _BASE_FETCH_TIMEOUT_SECONDS  # 300s
 # The only shape a client serial may take before it can select an image or be
 # logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
 # future per-serial scheme has room, and reject everything else (control chars,
@@ -325,10 +339,20 @@ def operator_base_status(conn, base_root: Path | None) -> dict:
             "size": row["size"],
             "error": row["error"],
             "eviction_reason": row["eviction_reason"],
+            # Retry-gate observability (0013): a `want` tag can be stuck backing
+            # off or terminally failed while /readyz reports Ready because a
+            # fallback base is serving, so surface the gate here where /readyz
+            # cannot show it -- fetch_attempts drives the backoff, next_retry_at is
+            # the earliest re-fetch wall-clock, failure_terminal flags an
+            # archive-integrity fault the self-heal will not retry.
+            "fetch_attempts": row["fetch_attempts"],
+            "next_retry_at": row["next_retry_at"],
+            "failure_terminal": row["failure_terminal"],
             "updated_at": row["updated_at"],
         }
         for row in conn.execute(
-            "SELECT tag, state, squashfs_sha256, size, error, eviction_reason, updated_at "
+            "SELECT tag, state, squashfs_sha256, size, error, eviction_reason, "
+            "fetch_attempts, next_retry_at, failure_terminal, updated_at "
             "FROM base_cache ORDER BY tag"
         ).fetchall()
     ]
@@ -377,22 +401,140 @@ def latest_verified(conn) -> str | None:
     return _max_semver(row["known_good_tag"] for row in rows)
 
 
+# The SINGLE eligibility predicate for an unverified base target, shared by
+# latest_discovered and resolve_unpinned (so every downstream consumer -- serve,
+# poll-tail self-heal, GC keep-set -- inherits the same rule). An EXCLUDE-LIST:
+# a release is eligible when it carries base facts, is not a prerelease, and its
+# mirror_state is NOT one of the two FROZEN-bytes states 'withdrawn'/'divergent'.
+# Undeployable/mirror_failed/mirroring stay eligible ON PURPOSE -- the base OS is
+# versioned independently of the `.deb` (a `.deb`-undeployable release can still
+# carry a bootable base), so gating base eligibility on the `.deb` mirror state
+# would re-introduce the outage this fixes.
+_ELIGIBLE_DISCOVERED_SQL = (
+    "SELECT tag FROM app_releases "
+    "WHERE base_tarball_sha256 IS NOT NULL AND base_tarball_url IS NOT NULL "
+    "AND is_prerelease = FALSE "
+    "AND mirror_state NOT IN ('withdrawn','divergent')"
+)
+
+
+def _eligible_discovered_tags(conn) -> list[str]:
+    """Every release tag that passes the shared base-eligibility filter (unordered)."""
+    return [row["tag"] for row in conn.execute(_ELIGIBLE_DISCOVERED_SQL).fetchall()]
+
+
 def latest_discovered(conn) -> str | None:
-    """The highest semver release that carries base facts and is not a
-    prerelease -- the EMPTY-STATE bootstrap target only (the one unverified base
-    the design ever serves). Non-semver tags are excluded."""
-    rows = conn.execute(
-        "SELECT tag FROM app_releases "
-        "WHERE base_tarball_sha256 IS NOT NULL AND base_tarball_url IS NOT NULL "
-        "AND is_prerelease = FALSE"
-    ).fetchall()
-    return _max_semver(row["tag"] for row in rows)
+    """The highest semver release that carries base facts, is not a prerelease,
+    and whose bytes are not frozen (withdrawn/divergent) -- the EMPTY-STATE
+    bootstrap target only (the one unverified base the design ever serves).
+    Non-semver tags are excluded."""
+    return _max_semver(_eligible_discovered_tags(conn))
 
 
 def _cache_row(conn, tag: str):
     return conn.execute(
         "SELECT state, squashfs_sha256 FROM base_cache WHERE tag=%s", (tag,)
     ).fetchone()
+
+
+def _base_servable(conn, base_root: Path, tag: str) -> bool:
+    """Whether `tag`'s bytes can be served RIGHT NOW: its `base_cache` row is
+    `cached` AND its `base-<tag>.squashfs` exists on disk. Both halves are
+    load-bearing -- `cached` is a DB flag, never a filesystem stat, so a dangling
+    row (cached in the DB, bytes gone) is NOT servable and must not be resolved."""
+    row = conn.execute("SELECT state FROM base_cache WHERE tag=%s", (tag,)).fetchone()
+    return (
+        row is not None
+        and row["state"] == "cached"
+        and base_file_path(base_root, tag).exists()
+    )
+
+
+def resolve_unpinned(conn, base_root: Path) -> tuple[str | None, str | None]:
+    """The ONE resolver for the unpinned / no-serial serve path, the poll-tail
+    self-heal, and the GC keep-set -- returns ``(served_tag, want_tag)``.
+
+    ``served_tag`` is the tag whose bytes to actually serve (or key GC on) NOW;
+    ``want_tag`` is the tag the fleet is converging TO (drives self-heal only, is
+    NEVER written to a device row). They differ only in the fallback case: newer
+    bytes are still being fetched, so we serve an older-but-cached base while
+    wanting the newer one. Logic (device-less-fleet boot + stay-bootable):
+
+      * latest_verified present -> ``(v, v)``: a verified tag's bytes are always
+        cached (a device only reports healthy on a tag it 200-booted), so it is
+        both served and wanted.
+      * else no discoverable base -> ``(None, None)``: genuine empty catalog.
+      * else t_new (latest_discovered) servable -> ``(t_new, t_new)``.
+      * else the newest ELIGIBLE tag that is servable -> ``(fb, t_new)``: serve the
+        cached fallback (200) while still wanting t_new (self-heal fetches it).
+      * else ``(t_new, t_new)``: genuine first boot -- 503-miss + enqueue t_new.
+
+    Eligibility for the fallback is the SAME filter latest_discovered applies
+    (`_eligible_discovered_tags`), so serve, self-heal, and GC never disagree on
+    what counts as a candidate."""
+    verified = latest_verified(conn)
+    if verified is not None:
+        return (verified, verified)
+    t_new = latest_discovered(conn)
+    if t_new is None:
+        return (None, None)
+    if _base_servable(conn, base_root, t_new):
+        return (t_new, t_new)
+    fb = _newest_servable_eligible(conn, base_root)
+    if fb is not None:
+        return (fb, t_new)
+    return (t_new, t_new)
+
+
+def _newest_servable_eligible(conn, base_root: Path) -> str | None:
+    """The newest (by semver rank) ELIGIBLE discovered tag whose bytes are
+    servable now, or None. Iterates eligible tags newest-first and returns the
+    first that is servable -- the cached fallback resolve_unpinned serves while a
+    newer base is still being fetched."""
+    ranked = []
+    for tag in _eligible_discovered_tags(conn):
+        key = _rank(tag)
+        if key is not None:
+            ranked.append((key, tag))
+    for _key, tag in sorted(ranked, key=lambda item: item[0], reverse=True):
+        if _base_servable(conn, base_root, tag):
+            return tag
+    return None
+
+
+def base_want_needs_fetch(conn, base_root: Path, tag: str, *, now: float) -> bool:
+    """Whether the poll-tail self-heal should enqueue a fetch for the WANT tag.
+
+    True iff `tag` is NOT servable AND not `failure_terminal` AND EITHER its
+    backoff has elapsed (`next_retry_at` NULL or <= now) OR it is an ABANDONED
+    `caching` row (see below). A missing row (never fetched / evicted with no row)
+    always needs a fetch. This SUBSUMES boot_rehydrate_targets' cached-but-absent
+    check and additionally covers evicted / transient-failed-past-backoff / no-row
+    -- the everything-pressure the tracer must survive.
+
+    A `caching` row is normally in-flight and is NOT re-enqueued. But a worker
+    crash / task-cancel between `fetch_base`'s `caching` write and its terminal
+    `cached`/`failed` write leaves the row wedged at `caching` with no live job
+    (Procrastinate does not re-queue a stalled job; there is no `caching` reaper),
+    which would strand this always-on self-heal forever on a device-less fleet.
+    So a `caching` row whose `updated_at` has not advanced within
+    `_CACHING_STALE_SECONDS` is treated as ABANDONED and needs a fresh fetch; a
+    genuinely in-flight fetch stamped `updated_at` well within the window and is
+    left alone, and the re-enqueue coalesces on the `base:<tag>` queueing lock."""
+    if _base_servable(conn, base_root, tag):
+        return False
+    row = conn.execute(
+        "SELECT state, failure_terminal, next_retry_at, updated_at FROM base_cache WHERE tag=%s",
+        (tag,),
+    ).fetchone()
+    if row is None:
+        return True
+    if row["failure_terminal"]:
+        return False
+    if row["state"] == "caching":
+        updated_at = row["updated_at"]
+        return updated_at is None or updated_at <= now - _CACHING_STALE_SECONDS
+    return row["next_retry_at"] is None or row["next_retry_at"] <= now
 
 
 def demote_dangling_base_row(conn, tag: str, *, clock) -> None:
@@ -417,7 +559,9 @@ def demote_dangling_base_row(conn, tag: str, *, clock) -> None:
     )
 
 
-def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecision:
+def select_base_for_serial(
+    conn, serial: str | None, *, clock, base_root: Path
+) -> BaseServeDecision:
     """Resolve + (on a 200 only) record the base a Pi should be served.
 
     Runs the read-modify-write under `SELECT ... FOR UPDATE` on the `devices`
@@ -435,9 +579,11 @@ def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecis
     if device_id is None:
         # Invalid/absent serial: no device row, serve the unpinned target
         # best-effort, record nothing (there is no row to record on -- so no
-        # detection/recovery either, which key off the row's boot state).
-        desired = latest_verified(conn) or latest_discovered(conn)
-        return _decision(conn, desired, device_id=None, now=now)
+        # detection/recovery either, which key off the row's boot state). Uses the
+        # ONE resolver so a no-serial boot serves the same cached fallback the
+        # keyed path does when the newest base is still being fetched.
+        served, _want = resolve_unpinned(conn, base_root)
+        return _decision(conn, served, device_id=None, now=now)
 
     conn.execute(
         "INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES(%s,%s,%s,%s) "
@@ -448,11 +594,13 @@ def select_base_for_serial(conn, serial: str | None, *, clock) -> BaseServeDecis
         "SELECT * FROM devices WHERE device_id=%s FOR UPDATE", (device_id,)
     ).fetchone()
 
-    served = _resolve_recovery_aware(conn, device, device_id=device_id)
+    served = _resolve_recovery_aware(conn, device, device_id=device_id, base_root=base_root)
     return _decision(conn, served, device_id=device_id, now=now)
 
 
-def _resolve_recovery_aware(conn, device, *, device_id: str) -> str | None:
+def _resolve_recovery_aware(
+    conn, device, *, device_id: str, base_root: Path
+) -> str | None:
     """The served tag by recovery-aware precedence, under the caller's FOR UPDATE.
 
     Bead 2 -- splits the served tag from the fenced `failed_tag` (r8). A pin always
@@ -480,7 +628,14 @@ def _resolve_recovery_aware(conn, device, *, device_id: str) -> str | None:
             )
         return device["attached_tag"]
 
-    desired = latest_verified(conn) or latest_discovered(conn)
+    # The unpinned desired target is the resolver's served_tag: latest-verified,
+    # else t_new, else -- when t_new's bytes are still being fetched -- the newest
+    # cached eligible fallback (strictly more correct than the old
+    # latest_verified-or-latest_discovered, which could 503 on an uncached t_new
+    # while a good older base sat cached). The recovery arms below are unchanged;
+    # they now key off this served_tag.
+    served, _want = resolve_unpinned(conn, base_root)
+    desired = served
     failed = device["failed_tag"]
 
     if (
@@ -736,6 +891,34 @@ def _extract_squashfs(tar_path: Path, base_root: Path) -> tuple[str, str, int]:
     return temp_name, computed, size
 
 
+# Archive-INTEGRITY faults: re-fetching the exact same tarball bytes could only
+# reproduce them, so the base_cache row is marked failure_terminal=TRUE and the
+# poll-tail self-heal skips it until upsert_discovered refreshes the row's base
+# facts (new bytes). EVERY OTHER fault (unwritable base root, missing base facts,
+# transport/OS errors) is TRANSIENT -- recoverable/environmental -- and retries
+# after an exponential backoff, so a repaired volume / restored uplink heals.
+_TERMINAL_FETCH_CODES = frozenset({
+    "base_digest_mismatch",
+    "base_member_missing",
+    "base_member_not_file",
+    "base_too_large",
+    "base_sums_too_large",
+    "base_sums_no_squashfs",
+})
+# Transient-retry backoff: exponential from 30s, capped at 1h. attempts=1 -> 30s,
+# 2 -> 60s, ... so a wedged environment is rate-limited, not hammered every tick.
+_BASE_RETRY_BACKOFF_BASE_SECONDS = 30.0
+_BASE_RETRY_BACKOFF_CAP_SECONDS = 60 * 60.0
+
+
+def _base_retry_backoff(attempts: int) -> float:
+    """Seconds to defer the next transient retry after `attempts` failures."""
+    exponent = min(max(attempts - 1, 0), 30)  # cap the shift so 2**exponent never overflows
+    return min(
+        _BASE_RETRY_BACKOFF_BASE_SECONDS * (2**exponent), _BASE_RETRY_BACKOFF_CAP_SECONDS
+    )
+
+
 def _set_cache_state(
     db, clock, tag: str, state: str, *, squashfs_sha256=None, size=None, error=None
 ) -> None:
@@ -751,6 +934,63 @@ def _set_cache_state(
         )
 
 
+def _mark_base_cached(db, clock, tag: str, *, squashfs_sha256: str, size: int) -> None:
+    """Land a successful fetch: state='cached' AND reset the retry gate
+    (fetch_attempts=0, next_retry_at=NULL, failure_terminal=FALSE) in ONE write,
+    so a tag that failed transiently before is fully cleared the moment its bytes
+    land -- transactional with the landing, never a second transaction (F2)."""
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO base_cache(tag, state, squashfs_sha256, size, error, updated_at, "
+            "fetch_attempts, next_retry_at, failure_terminal) "
+            "VALUES(%s,'cached',%s,%s,NULL,%s,0,NULL,FALSE) "
+            "ON CONFLICT(tag) DO UPDATE SET state='cached', "
+            "squashfs_sha256=COALESCE(EXCLUDED.squashfs_sha256, base_cache.squashfs_sha256), "
+            "size=COALESCE(EXCLUDED.size, base_cache.size), error=NULL, "
+            "updated_at=EXCLUDED.updated_at, fetch_attempts=0, next_retry_at=NULL, "
+            "failure_terminal=FALSE",
+            (tag, squashfs_sha256, size, clock.utc()),
+        )
+
+
+def _mark_base_failed(db, clock, tag: str, code: str) -> None:
+    """Record a failed fetch, classifying terminal vs transient IN THE SAME write
+    as state='failed' (F2 -- no second transaction). An archive-integrity code
+    sets failure_terminal=TRUE with no backoff; every other code increments
+    fetch_attempts and sets next_retry_at = now + backoff. UPSERTs so a fault
+    raised BEFORE any `caching` row exists (base_root_unwritable at the writability
+    assert, or base_facts_missing) still lands a rate-limited `failed` row rather
+    than being re-attempted every tick (F5)."""
+    terminal = code in _TERMINAL_FETCH_CODES
+    now = clock.utc()
+    with db.transaction() as conn:
+        if conn.execute("SELECT 1 FROM app_releases WHERE tag=%s", (tag,)).fetchone() is None:
+            # base_cache.tag FKs app_releases(tag): a fetch for a tag with no
+            # release row (base_facts_missing with release is None -- not reachable
+            # via any real enqueue path) has nowhere to record a failed row. Leave
+            # it unrecorded (the raise still propagates) rather than raise an FK
+            # violation that would mask the original fault.
+            return
+        row = conn.execute(
+            "SELECT fetch_attempts FROM base_cache WHERE tag=%s", (tag,)
+        ).fetchone()
+        prior_attempts = row["fetch_attempts"] if row is not None else 0
+        if terminal:
+            attempts, next_retry_at = prior_attempts, None
+        else:
+            attempts = prior_attempts + 1
+            next_retry_at = now + _base_retry_backoff(attempts)
+        conn.execute(
+            "INSERT INTO base_cache(tag, state, error, updated_at, "
+            "fetch_attempts, next_retry_at, failure_terminal) "
+            "VALUES(%s,'failed',%s,%s,%s,%s,%s) "
+            "ON CONFLICT(tag) DO UPDATE SET state='failed', error=EXCLUDED.error, "
+            "updated_at=EXCLUDED.updated_at, fetch_attempts=EXCLUDED.fetch_attempts, "
+            "next_retry_at=EXCLUDED.next_retry_at, failure_terminal=EXCLUDED.failure_terminal",
+            (tag, code, now, attempts, next_retry_at, terminal),
+        )
+
+
 async def fetch_base(source, db, clock, tag: str, base_root: Path) -> str:
     """Download, verify, allowlist-extract, and atomically install one version's
     base squashfs; return its sha256. The per-version worker task body.
@@ -761,41 +1001,47 @@ async def fetch_base(source, db, clock, tag: str, base_root: Path) -> str:
     records `base_cache.squashfs_sha256` + `state='cached'`. The enqueue side
     coalesces duplicate fetches under a `base:<tag>` queueing lock; this body is
     also idempotent (write-once-per-tag file; a re-fetch reproduces the bytes)."""
-    base_root = assert_base_root_writable(base_root)
-    with db.transaction() as conn:
-        release = conn.execute(
-            "SELECT base_tarball_url, base_tarball_sha256, base_tarball_size "
-            "FROM app_releases WHERE tag=%s",
-            (tag,),
-        ).fetchone()
-    if release is None or not release["base_tarball_url"] or not release["base_tarball_sha256"]:
-        raise BaseFetchError("base_facts_missing")
-
-    _set_cache_state(db, clock, tag, "caching")
-    tarball = base_root / f"{_TEMP_PREFIX}{tag}.tar.{secrets.token_hex(8)}{_TEMP_SUFFIX}"
-    squashfs_temp: str | None = None
+    # One outer try classifies EVERY fault (including base_root_unwritable at the
+    # writability assert and base_facts_missing, both of which raise BEFORE a
+    # `caching` row exists) into a single failed-row write via _mark_base_failed,
+    # so an unwritable volume / missing facts is rate-limited (backoff), not
+    # hammered every tick, and self-heals when the environment returns (F5).
     try:
-        await source.download(
-            release["base_tarball_url"],
-            tarball,
-            sha256=release["base_tarball_sha256"],
-            max_bytes=source.max_deb_bytes,
-        )
-        squashfs_temp, sha256, size = _extract_squashfs(tarball, base_root)
-        os.replace(squashfs_temp, base_file_path(base_root, tag))
-        squashfs_temp = None
-        _set_cache_state(db, clock, tag, "cached", squashfs_sha256=sha256, size=size)
-        return sha256
+        base_root = assert_base_root_writable(base_root)
+        with db.transaction() as conn:
+            release = conn.execute(
+                "SELECT base_tarball_url, base_tarball_sha256, base_tarball_size "
+                "FROM app_releases WHERE tag=%s",
+                (tag,),
+            ).fetchone()
+        if release is None or not release["base_tarball_url"] or not release["base_tarball_sha256"]:
+            raise BaseFetchError("base_facts_missing")
+
+        _set_cache_state(db, clock, tag, "caching")
+        tarball = base_root / f"{_TEMP_PREFIX}{tag}.tar.{secrets.token_hex(8)}{_TEMP_SUFFIX}"
+        squashfs_temp: str | None = None
+        try:
+            await source.download(
+                release["base_tarball_url"],
+                tarball,
+                sha256=release["base_tarball_sha256"],
+                max_bytes=source.max_deb_bytes,
+            )
+            squashfs_temp, sha256, size = _extract_squashfs(tarball, base_root)
+            os.replace(squashfs_temp, base_file_path(base_root, tag))
+            squashfs_temp = None
+            _mark_base_cached(db, clock, tag, squashfs_sha256=sha256, size=size)
+            return sha256
+        finally:
+            tarball.unlink(missing_ok=True)
+            if squashfs_temp is not None:
+                Path(squashfs_temp).unlink(missing_ok=True)
     except NetbootBaseError as error:
-        _set_cache_state(db, clock, tag, "failed", error=error.code)
+        _mark_base_failed(db, clock, tag, error.code)
         raise
     except Exception as error:
-        _set_cache_state(db, clock, tag, "failed", error=type(error).__name__)
+        _mark_base_failed(db, clock, tag, type(error).__name__)
         raise
-    finally:
-        tarball.unlink(missing_ok=True)
-        if squashfs_temp is not None:
-            Path(squashfs_temp).unlink(missing_ok=True)
 
 
 # -- keep-set (shared by boot re-hydrate + GC) -------------------------------
@@ -919,6 +1165,14 @@ def gc_base_cache(conn, base_root: Path, *, clock) -> list[str]:
     verified = latest_verified(conn)
     if verified is not None:
         keep.add(verified)
+    # The unpinned served+want tags from the SAME resolver the serve path and the
+    # poll-tail self-heal use (no parallel resolver), so GC keeps EXACTLY what
+    # serve would return -- including the cached fallback (served) and the tag
+    # being fetched toward (want) even before want's fetch flips its row to
+    # `caching`. On a device-less fleet this is what stops GC evicting the only
+    # bootable base and re-opening the outage.
+    served, want = resolve_unpinned(conn, base_root)
+    keep.update(tag for tag in (served, want) if tag is not None)
     keep.update(
         row["tag"]
         for row in conn.execute("SELECT tag FROM base_cache WHERE state='caching'").fetchall()
