@@ -35,8 +35,17 @@ services:
       # 0013: the one cache volume, mounted READ-ONLY here. Central serves and
       # creates nothing; the colocated worker is the single writer that
       # materializes the layout (see docs/decisions/0013-unified-cache-root.md).
-      # Path matches the baked ENV PHOTO_WALL_CACHE_ROOT default, so no env set.
-      - cache:/var/cache/photo-wall:ro
+      # nocopy: central must NOT auto-populate the shared volume from its image
+      # -- otherwise it races the worker's populate on a fresh volume
+      # (mkdir <subdir>: file exists). Worker is the sole populator, matching the
+      # K8s model where a RO PVC consumer never populates. Path matches the baked
+      # ENV PHOTO_WALL_CACHE_ROOT default, so no env set.
+      - type: volume
+        source: cache
+        target: /var/cache/photo-wall
+        read_only: true
+        volume:
+          nocopy: true
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
