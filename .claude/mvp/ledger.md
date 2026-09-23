@@ -11,3 +11,5 @@ Only the orchestrator edits this file. Status is one of `open`, `in_progress`, `
 | C-1..C-4 | C assets | landed | 1ddcac9 |
 | A-1..A-4 | A job runtime | landed | f8b9e3f |
 | P2.1..P2.3 | P2 wiring | landed | ca75879 |
+| review-fix-X | catalog + migrations | landed | 7a06c2a |
+| review-fix-Y | runtime + worker | landed | 6d93dc7 |
