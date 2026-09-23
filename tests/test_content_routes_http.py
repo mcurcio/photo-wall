@@ -1,8 +1,11 @@
-"""P2.2 + P2.3: the content routes and the operator content routes over HTTP.
+"""The content routes and the operator content routes over HTTP.
 
-`create_app(db=<stub>, content=...)`, where the content services are the real `ReleaseCatalog`
-and `AssetReader` over in-memory records, `RecordingPublisher` and a `CacheStore` on `tmp_path`.
-`RecordingPublisher.record_outcome` stands in for the worker finishing a fetch.
+What is tested here is the HTTP layer: status codes, headers, bodies and the wiring to the
+catalog and the reader. Selection, fallback and slot rules are the catalog's and the reader's
+own suites. `create_app(db=<stub>, content=...)`, where the content services are the real
+`ReleaseCatalog` and `AssetReader` over the real records (PostgreSQL, the `registry` fixture),
+`RecordingPublisher` and a `CacheStore` on `tmp_path`. `RecordingPublisher.record_outcome` stands
+in for the worker finishing a fetch; the stub database only answers `/readyz`.
 """
 
 from __future__ import annotations
@@ -17,10 +20,8 @@ import time
 from datetime import timedelta
 
 import pytest
-from catalog_fakes import InMemoryDeviceRecords, InMemoryReleaseRecords, device
-from fakes.asset_records import InMemoryAssetRecords
+from content_db import Reads, insert_device, put_file, seed_releases
 from fakes.publisher import RecordingPublisher
-from fakes.transactions import FakeTransaction, FakeTransactions
 from fastapi.testclient import TestClient
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
@@ -33,7 +34,10 @@ from central.content_catalog.ports import ReleaseRow
 from central.content_wiring import ContentServices
 from central.db import Database
 from central.health.probe import PodProbe
+from central.infra.asset_records import PgAssetRecords
+from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
+from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
 from central.kernel.jobs import asset_key
@@ -71,8 +75,12 @@ def release(tag: str, *, package: bool = True, os_image: bool = True,
         tag, pre,
         OriginLocator(f"https://example.test/{tag}.deb", sha(deb(tag)), len(deb(tag)))
         if package else None,
-        OriginLocator(f"https://example.test/{tag}.tgz", None, None) if os_image else None,
+        OriginLocator(f"https://example.test/{tag}.tgz", sha(image(tag)), 64) if os_image else None,
     )
+
+
+def dev(device_id: str, **fields) -> dict:
+    return {"device_id": device_id, **fields}
 
 
 class StubDatabase:
@@ -89,16 +97,18 @@ class StubDatabase:
 
 
 class World:
-    def __init__(self, tmp_path, *, releases=(), devices=(), promoted=None, capacity=4,
+    def __init__(self, registry, tmp_path, *, releases=(), devices=(), promoted=None, capacity=4,
                  wait: float = 5.0) -> None:
         self.clock = ManualClock(1000.0)
-        self.records = InMemoryAssetRecords()
-        self.transactions = FakeTransactions()
-        self.publisher = RecordingPublisher(self.clock, assets=self.records)
-        self.releases = InMemoryReleaseRecords(tuple(releases), promoted=promoted)
-        self.devices = InMemoryDeviceRecords(tuple(devices))
+        self.records = PgAssetRecords(self.clock)
+        self.transactions = PgTransactions(registry.db)
+        self.reads = Reads(self.transactions)
+        self.publisher = RecordingPublisher(self.clock, self.records, self.transactions)
+        seed_releases(self.transactions, releases, promoted=promoted)
+        for fields in devices:
+            insert_device(registry.db, **fields)
         self.store = CacheStore(CacheLayout(tmp_path))
-        self.catalog = ReleaseCatalog(releases=self.releases, devices=self.devices,
+        self.catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
                                       stored=DiskStoredAssets(records=self.records,
                                                               store=self.store),
                                       transactions=self.transactions, publisher=self.publisher,
@@ -114,16 +124,16 @@ class World:
         self.app = create_app(self.db, self.clock, ADMIN, content=self.content)
 
     def reference(self, job, *, owner: str) -> None:
-        self.records.reference(FakeTransaction(), asset_key(job), AssetReference(
-            owner, OriginLocator("https://example.test/x", None, None), None, None))
+        with self.transactions.begin() as tx:
+            self.records.reference(tx, asset_key(job), AssetReference(
+                owner, OriginLocator("https://example.test/x", None, None), None, None))
 
     def produce(self, job, data: bytes) -> AssetReady:
         """The worker's effect: the verified file on disk plus its produced facts."""
         facts = AssetReady(size=len(data), sha256=sha(data))
-        path = self.store.layout.path(asset_key(job))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        self.records.record_produced(FakeTransaction(), asset_key(job), facts)
+        put_file(self.store, asset_key(job), data)
+        with self.transactions.begin() as tx:
+            self.records.record_produced(tx, asset_key(job), facts)
         return facts
 
     def cached_image(self, tag: str) -> bytes:
@@ -133,7 +143,12 @@ class World:
         return image(tag)
 
     def row(self):
-        return self.devices.rows.get(DEVICE_ID)
+        return self.reads.device(DEVICE_ID)
+
+
+@pytest.fixture
+def world(registry, tmp_path):
+    return lambda **options: World(registry, tmp_path, **options)
 
 
 def base(client, serial: str | None = SERIAL):
@@ -150,8 +165,8 @@ def until(predicate, seconds: float = 5.0) -> None:
 # -- GET /v1/netboot/base --------------------------------------------------------------------------
 
 
-def test_a_cached_base_streams_with_its_digest_and_records_the_served_tag(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_a_cached_base_streams_with_its_digest_and_records_the_served_tag(world):
+    w = world(releases=[release(T1)])
     data = w.cached_image(T1)
     with TestClient(w.app) as client:
         response = base(client)
@@ -166,9 +181,9 @@ def test_a_cached_base_streams_with_its_digest_and_records_the_served_tag(tmp_pa
 
 
 @pytest.mark.parametrize("releases", [[], [release(T1, os_image=False)]])
-def test_nothing_to_boot_is_404_base_unknown(tmp_path, releases):
+def test_nothing_to_boot_is_404_base_unknown(world, releases):
     # Decision 4: unknown content is a 404, including an empty catalog at netboot.
-    w = World(tmp_path, releases=releases)
+    w = world(releases=releases)
     with TestClient(w.app) as client:
         response = base(client)
     assert response.status_code == 404
@@ -176,8 +191,8 @@ def test_nothing_to_boot_is_404_base_unknown(tmp_path, releases):
     assert w.publisher.calls == []
 
 
-def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], wait=0.2)
+def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(world):
+    w = world(releases=[release(T1)], wait=0.2)
     w.reference(FetchOsImage(tag=T1), owner=T1)
     with TestClient(w.app) as client:
         response = base(client)
@@ -190,8 +205,8 @@ def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(tmp_path):
     assert w.slots.in_use == 0
 
 
-def test_a_miss_is_served_once_the_fetch_lands(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_a_miss_is_served_once_the_fetch_lands(world):
+    w = world(releases=[release(T1)])
     job = FetchOsImage(tag=T1)
     w.reference(job, owner=T1)
     with TestClient(w.app) as client:
@@ -212,8 +227,8 @@ def test_a_miss_is_served_once_the_fetch_lands(tmp_path):
     (Failed(False, "origin_unreachable", timedelta(seconds=7)), "base_origin_unreachable", "7"),
     (Failed(True, "download_not_found", None), "base_download_not_found", "30"),
 ])
-def test_a_failed_fetch_is_503_with_its_reason(tmp_path, outcome, code, retry_after):
-    w = World(tmp_path, releases=[release(T1)])
+def test_a_failed_fetch_is_503_with_its_reason(world, outcome, code, retry_after):
+    w = world(releases=[release(T1)])
     job = FetchOsImage(tag=T1)
     w.reference(job, owner=T1)
     with TestClient(w.app) as client:
@@ -230,36 +245,10 @@ def test_a_failed_fetch_is_503_with_its_reason(tmp_path, outcome, code, retry_af
     assert w.row().last_served_tag is None
 
 
-def test_a_full_waiter_bulkhead_is_503_busy(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], capacity=1)
-    w.reference(FetchOsImage(tag=T1), owner=T1)
-    with TestClient(w.app) as client, w.slots.claim():
-        response = base(client)
-    assert response.status_code == 503
-    assert response.json() == {"error": "base_busy"}
-    assert response.headers["retry-after"] == "5"
-    assert w.publisher.calls == []
-
-
-def test_a_pinned_device_is_never_served_another_tag(tmp_path):
-    # T2 is the frontier and on disk; the device is pinned to T1, which is not.
-    w = World(tmp_path, releases=[release(T1), release(T2)], wait=0.2, devices=[
-        device(DEVICE_ID, serial=SERIAL, attached_tag=T1),
-        device("device-other", known_good_tag=T2)])
-    w.reference(FetchOsImage(tag=T1), owner=T1)
-    w.cached_image(T2)
-    with TestClient(w.app) as client:
-        response = base(client)
-    assert response.status_code == 503
-    assert response.json() == {"error": "base_timeout"}
-    assert [c.job for c in w.publisher.calls] == [FetchOsImage(tag=T1)]
-    assert w.row().last_served_tag is None
-
-
-def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(tmp_path):
-    w = World(tmp_path, releases=[release(T1), release(T2)], devices=[
-        device(DEVICE_ID, serial=SERIAL, known_good_tag=T1),
-        device("device-other", known_good_tag=T2)])
+def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(world):
+    w = world(releases=[release(T1), release(T2)], devices=[
+        dev(DEVICE_ID, serial=SERIAL, known_good_tag=T1),
+        dev("device-other", known_good_tag=T2)])
     w.reference(FetchOsImage(tag=T2), owner=T2)
     data = w.cached_image(T1)
     with TestClient(w.app) as client:
@@ -280,8 +269,8 @@ def _asgi_get(path: str, headers: dict[str, str]):
     return scope
 
 
-def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], wait=30)
+def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(world):
+    w = world(releases=[release(T1)], wait=30)
     w.reference(FetchOsImage(tag=T1), owner=T1)
     sent: list[dict] = []
 
@@ -317,8 +306,8 @@ def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(tmp_path):
     assert w.row().last_served_tag is None
 
 
-def test_the_serial_log_line_carries_only_the_sanitized_serial(tmp_path, caplog):
-    w = World(tmp_path)
+def test_the_serial_log_line_carries_only_the_sanitized_serial(world, caplog):
+    w = world()
     with TestClient(w.app) as client, caplog.at_level("INFO", logger="central.app"):
         base(client, "bad serial\nforged")
         base(client)
@@ -330,8 +319,8 @@ def test_the_serial_log_line_carries_only_the_sanitized_serial(tmp_path, caplog)
 # -- GET /v1/app/package/{sha256}.deb --------------------------------------------------------------
 
 
-def test_a_cached_package_streams_with_todays_headers(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_a_cached_package_streams_with_todays_headers(world):
+    w = world(releases=[release(T1)])
     data = deb(T1)
     job = FetchPackage(sha256=sha(data))
     w.reference(job, owner=T1)
@@ -346,8 +335,8 @@ def test_a_cached_package_streams_with_todays_headers(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["not-a-sha", "A" * 64, sha(b"unknown package")])
-def test_a_malformed_or_unknown_package_is_404(tmp_path, name):
-    w = World(tmp_path, releases=[release(T1)])
+def test_a_malformed_or_unknown_package_is_404(world, name):
+    w = world(releases=[release(T1)])
     with TestClient(w.app) as client:
         response = client.get(f"/v1/app/package/{name}.deb")
     assert response.status_code == 404
@@ -355,8 +344,8 @@ def test_a_malformed_or_unknown_package_is_404(tmp_path, name):
     assert w.publisher.calls == []
 
 
-def test_a_missing_package_is_503_with_retry_after(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], wait=0.2)
+def test_a_missing_package_is_503_with_retry_after(world):
+    w = world(releases=[release(T1)], wait=0.2)
     w.reference(FetchPackage(sha256=sha(deb(T1))), owner=T1)
     with TestClient(w.app) as client:
         response = client.get(f"/v1/app/package/{sha(deb(T1))}.deb")
@@ -365,36 +354,12 @@ def test_a_missing_package_is_503_with_retry_after(tmp_path):
     assert response.headers["retry-after"] == "5"
 
 
-def test_a_known_but_undesired_package_not_on_disk_is_404_and_fetches_nothing(tmp_path):
-    # P1: any historical `.deb` is known, but only a desired one may be fetched on a miss.
-    w = World(tmp_path, releases=[release(T1), release(T2)], wait=0.2)  # T2 is desired
-    w.reference(FetchPackage(sha256=sha(deb(T1))), owner=T1)
-    with TestClient(w.app) as client:
-        response = client.get(f"/v1/app/package/{sha(deb(T1))}.deb")
-    assert response.status_code == 404
-    assert response.json() == {"error": "app_package_not_found"}
-    assert w.publisher.calls == []
-
-
-def test_the_app_manifest_keeps_the_last_good_package_while_the_promoted_one_is_absent(
-        tmp_path):
-    w = World(tmp_path, releases=[release(T1), release(T2)], promoted=T2)
-    w.releases.last_good = T1
-    job = FetchPackage(sha256=sha(deb(T1)))
-    w.reference(job, owner=T1)
-    w.produce(job, deb(T1))
-    with TestClient(w.app) as client:
-        response = client.get("/v1/app/manifest")
-    assert response.status_code == 200
-    assert response.json() == {"version": T1, "sha256": sha(deb(T1)), "size": len(deb(T1))}
-
-
 # -- manifests -------------------------------------------------------------------------------------
 
 
-def test_the_netboot_manifest_is_the_served_tags_package(tmp_path):
-    w = World(tmp_path, releases=[release(T1), release(T2)], devices=[
-        device(DEVICE_ID, serial=SERIAL, last_served_tag=T1)])
+def test_the_netboot_manifest_is_the_served_tags_package(world):
+    w = world(releases=[release(T1), release(T2)], devices=[
+        dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1)])
     with TestClient(w.app) as client:
         response = client.get("/v1/netboot/manifest", headers={SERIAL_HEADER: SERIAL})
     assert response.status_code == 200
@@ -404,28 +369,28 @@ def test_the_netboot_manifest_is_the_served_tags_package(tmp_path):
 
 @pytest.mark.parametrize(("devices", "releases", "code"), [
     ([], [release(T1)], "app_manifest_unresolved"),
-    ([device(DEVICE_ID, serial=SERIAL, last_served_tag=T1)], [release(T1, package=False)],
+    ([dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1)], [release(T1, package=False)],
      "app_manifest_undeployable"),
 ])
-def test_an_unresolvable_netboot_manifest_is_503(tmp_path, devices, releases, code):
-    w = World(tmp_path, releases=releases, devices=devices)
+def test_an_unresolvable_netboot_manifest_is_503(world, devices, releases, code):
+    w = world(releases=releases, devices=devices)
     with TestClient(w.app) as client:
         response = client.get("/v1/netboot/manifest", headers={SERIAL_HEADER: SERIAL})
     assert response.status_code == 503
     assert response.json() == {"error": code}
 
 
-def test_the_app_manifest_is_the_promoted_package_without_its_bytes(tmp_path):
+def test_the_app_manifest_is_the_promoted_package_without_its_bytes(world):
     # No longer gated on the `.deb` being present: the bytes route reads through the cache.
-    w = World(tmp_path, releases=[release(T1)], promoted=T1)
+    w = world(releases=[release(T1)], promoted=T1)
     with TestClient(w.app) as client:
         response = client.get("/v1/app/manifest")
     assert response.status_code == 200
     assert response.json() == {"version": T1, "sha256": sha(deb(T1)), "size": len(deb(T1))}
 
 
-def test_nothing_promoted_is_503_app_unconfigured(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_nothing_promoted_is_503_app_unconfigured(world):
+    w = world(releases=[release(T1)])
     with TestClient(w.app) as client:
         response = client.get("/v1/app/manifest")
     assert response.status_code == 503
@@ -435,8 +400,8 @@ def test_nothing_promoted_is_503_app_unconfigured(tmp_path):
 # -- probes ----------------------------------------------------------------------------------------
 
 
-def test_livez_needs_nothing_and_readyz_is_the_database(tmp_path):
-    w = World(tmp_path)
+def test_livez_needs_nothing_and_readyz_is_the_database(world):
+    w = world()
     with TestClient(w.app) as client:
         assert client.get("/livez").json() == {"status": "ok"}
         assert client.get("/readyz").status_code == 200
@@ -513,11 +478,11 @@ def test_readyz_follows_the_real_database_through_the_real_content_services(
         db.close()
 
 
-# -- operator routes (P2.3) ------------------------------------------------------------------------
+# -- operator routes -------------------------------------------------------------------------------
 
 
-def test_operator_content_routes_are_admin_gated(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_operator_content_routes_are_admin_gated(world):
+    w = world(releases=[release(T1)])
     with TestClient(w.app) as client:
         for method, path in [("GET", "/v1/operator/app/releases"),
                              ("POST", f"/v1/operator/app/releases/{T1}/promote"),
@@ -528,8 +493,8 @@ def test_operator_content_routes_are_admin_gated(tmp_path):
             assert client.request(method, path, json={"tag": T1}).status_code == 401, path
 
 
-def test_the_hand_upload_routes_are_gone(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_the_hand_upload_routes_are_gone(world):
+    w = world(releases=[release(T1)])
     with TestClient(w.app) as client:
         assert client.post("/v1/operator/app", headers=AUTH, json={
             "version": "1", "sha256": sha(b"x"), "size": 1}).status_code == 404
@@ -537,8 +502,8 @@ def test_the_hand_upload_routes_are_gone(tmp_path):
                           json={"sha256": sha(b"x")}).status_code == 404
 
 
-def test_releases_view_lists_semver_descending(tmp_path):
-    w = World(tmp_path, releases=[release(T1), release(T2, os_image=False)], promoted=T1)
+def test_releases_view_lists_semver_descending(world):
+    w = world(releases=[release(T1), release(T2, os_image=False)], promoted=T1)
     with TestClient(w.app) as client:
         response = client.get("/v1/operator/app/releases", headers=AUTH)
     assert response.status_code == 200
@@ -550,12 +515,12 @@ def test_releases_view_lists_semver_descending(tmp_path):
     ]
 
 
-def test_promote_publishes_the_fetch_and_answers_promoted(tmp_path):
-    w = World(tmp_path, releases=[release(T1)])
+def test_promote_publishes_the_fetch_and_answers_promoted(world):
+    w = world(releases=[release(T1)])
     with TestClient(w.app) as client:
         response = client.post(f"/v1/operator/app/releases/{T1}/promote", headers=AUTH)
     assert response.status_code == 200 and response.json() == {"status": "promoted"}
-    assert w.releases.promoted == T1
+    assert w.reads.promoted() == T1
     assert FetchPackage(sha256=sha(deb(T1))) in w.publisher.inserted
 
 
@@ -564,25 +529,25 @@ def test_promote_publishes_the_fetch_and_answers_promoted(tmp_path):
     (T2, 409, "release_undeployable"),
     ("not-a-tag", 422, "invalid_tag"),
 ])
-def test_promote_refusals_map_catalog_errors(tmp_path, tag, status, code):
-    w = World(tmp_path, releases=[release(T1), release(T2, package=False)])
+def test_promote_refusals_map_catalog_errors(world, tag, status, code):
+    w = world(releases=[release(T1), release(T2, package=False)])
     with TestClient(w.app) as client:
         response = client.post(f"/v1/operator/app/releases/{tag}/promote", headers=AUTH)
     assert response.status_code == status
     assert response.json() == {"error": code}
-    assert w.releases.promoted is None
+    assert w.reads.promoted() is None
 
 
-def test_refresh_publishes_a_sync(tmp_path):
-    w = World(tmp_path)
+def test_refresh_publishes_a_sync(world):
+    w = world()
     with TestClient(w.app) as client:
         response = client.post("/v1/operator/app/releases/refresh", headers=AUTH)
     assert response.status_code == 202 and response.json() == {"status": "polling"}
     assert SyncReleases() in w.publisher.inserted and Prefetch() in w.publisher.inserted
 
 
-def test_pin_and_unpin(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], devices=[device(DEVICE_ID, serial=SERIAL)])
+def test_pin_and_unpin(world):
+    w = world(releases=[release(T1)], devices=[dev(DEVICE_ID, serial=SERIAL)])
     with TestClient(w.app) as client:
         pinned = client.put(f"/v1/operator/devices/{DEVICE_ID}/pin", headers=AUTH,
                             json={"tag": T1})
@@ -598,8 +563,8 @@ def test_pin_and_unpin(tmp_path):
     ("device-unknown", T1, "device_not_found"),
     (DEVICE_ID, "v9.9.9", "release_not_found"),
 ])
-def test_pin_refusals_are_404_with_no_write(tmp_path, device_id, tag, code):
-    w = World(tmp_path, releases=[release(T1)], devices=[device(DEVICE_ID, serial=SERIAL)])
+def test_pin_refusals_are_404_with_no_write(world, device_id, tag, code):
+    w = world(releases=[release(T1)], devices=[dev(DEVICE_ID, serial=SERIAL)])
     with TestClient(w.app) as client:
         response = client.put(f"/v1/operator/devices/{device_id}/pin", headers=AUTH,
                               json={"tag": tag})
@@ -609,9 +574,9 @@ def test_pin_refusals_are_404_with_no_write(tmp_path, device_id, tag, code):
     assert w.row().attached_tag is None
 
 
-def test_the_netboot_view_is_frontier_and_devices_only(tmp_path):
-    w = World(tmp_path, releases=[release(T1)], devices=[
-        device(DEVICE_ID, serial=SERIAL, known_good_tag=T1)])
+def test_the_netboot_view_is_frontier_and_devices_only(world):
+    w = world(releases=[release(T1)], devices=[
+        dev(DEVICE_ID, serial=SERIAL, known_good_tag=T1)])
     with TestClient(w.app) as client:
         response = client.get("/v1/operator/netboot", headers=AUTH)
     assert response.status_code == 200

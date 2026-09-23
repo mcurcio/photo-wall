@@ -1,4 +1,4 @@
-"""A3 (runtime boot and loops, no DB) and A7 (the worker-side retry effect, PostgreSQL in CI)."""
+"""Runtime boot and loops (no DB), and the worker-side retry and completion effects (PostgreSQL)."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from types import SimpleNamespace
 
 import procrastinate
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
 from fakes.transactions import FakeTransactions
 from runtime_fakes import FetchPackageStub, PrefetchStub, apply_procrastinate_schema, catalog_stubs
 
 from central.infra import runtime as runtime_module
+from central.infra.asset_records import PgAssetRecords
 from central.infra.execution import Redelivery
 from central.infra.job_queue import build_app, defer, task_name
 from central.infra.outcomes import JobOutcomes
@@ -32,7 +32,7 @@ BOTH = {QueueName.FETCH: 2, QueueName.UPKEEP: 1}
 def make(handlers=None, concurrency=None, **kwargs):
     return JobRuntime(DSN, catalog_stubs() if handlers is None else handlers,
                       BOTH if concurrency is None else concurrency,
-                      transactions=FakeTransactions(), assets=InMemoryAssetRecords(),
+                      transactions=FakeTransactions(), assets=PgAssetRecords(ManualClock(0.0)),
                       clock=ManualClock(0.0), **kwargs)
 
 
@@ -227,10 +227,24 @@ class FlakyFinish:
             raise procrastinate.exceptions.ConnectorException("db blip")
 
 
-def guard(monkeypatch, failures):
+class RowStatus:
+    """Stands in for the connector's status read: a status, None (no row) or an exception."""
+
+    def __init__(self, status):
+        self.status = status
+
+    async def execute_query_one_async(self, query, **kwargs):
+        if self.status is None:
+            raise procrastinate.exceptions.NoResult
+        if isinstance(self.status, Exception):
+            raise self.status
+        return {"status": self.status}
+
+
+def guard(monkeypatch, failures, row_status="doing"):
     monkeypatch.setattr(runtime_module, "COMPLETION_RETRY_DELAYS", (0, 0, 0))
     lost = []
-    manager = runtime_module._CompletionGuard(None, lambda: lost.append(True))
+    manager = runtime_module._CompletionGuard(RowStatus(row_status), lambda: lost.append(True))
     finish = FlakyFinish(failures)
     monkeypatch.setattr(manager, "finish_job_by_id_async", finish)
     job = SimpleNamespace(id=5)
@@ -248,6 +262,28 @@ def test_a_completion_that_cannot_be_written_stops_the_runtime(monkeypatch):
     with pytest.raises(procrastinate.exceptions.ConnectorException):
         asyncio.run(manager.finish_job(job, "succeeded", False))
     assert finish.calls == 4 and lost == [True]
+
+
+@pytest.mark.parametrize("row_status", [
+    procrastinate.exceptions.ConnectorException("db down"),  # the status is unreadable too
+    "todo",
+])
+def test_a_completion_that_cannot_be_written_to_an_open_or_unreadable_row_stops(monkeypatch,
+                                                                                 row_status):
+    manager, finish, lost, job = guard(monkeypatch, failures=99, row_status=row_status)
+    with pytest.raises(procrastinate.exceptions.ConnectorException):
+        asyncio.run(manager.finish_job(job, "succeeded", False))
+    assert lost == [True]
+
+
+@pytest.mark.parametrize("row_status", ["failed", "succeeded", "cancelled", None])
+def test_a_completion_refused_because_the_row_was_already_closed_is_dropped(monkeypatch,
+                                                                            row_status):
+    # Rescue closed the row while this delivery ran (finish_job_v1 accepts only todo/doing):
+    # nothing is lost, so the worker (and its media loop) keeps running.
+    manager, finish, lost, job = guard(monkeypatch, failures=99, row_status=row_status)
+    asyncio.run(manager.finish_job(job, "succeeded", False))
+    assert finish.calls == 1 and lost == []
 
 
 def test_a_lost_completion_ends_run_with_an_error(monkeypatch):
@@ -320,7 +356,7 @@ def test_the_task_body_is_wired_to_the_executor(monkeypatch):
     assert seen == [(SyncReleases(), 0)]
 
 
-# -- A7: the worker-side retry effect (PostgreSQL; CI) ---------------------------------------------
+# -- the worker-side retry effect (PostgreSQL) ----------------------------------------------------
 
 
 class Flaky(Job[None], name="test.runtime_flaky",
@@ -344,7 +380,7 @@ def test_transient_failures_retry_by_republishing_never_in_place(registry):
     apply_procrastinate_schema(dsn)
     transactions, handler = PgTransactions(registry.db), FlakyHandler()
     runtime = JobRuntime(dsn, [handler], {QueueName.UPKEEP: 1}, transactions=transactions,
-                         assets=InMemoryAssetRecords(), clock=SystemClock(), catalog=(Flaky,))
+                         assets=PgAssetRecords(SystemClock()), clock=SystemClock(), catalog=(Flaky,))
     publisher_app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), (Flaky,), None)
     with transactions.begin() as tx:
         assert defer(publisher_app, Flaky(), attempt=0, connection=pg_connection(tx))
@@ -374,7 +410,6 @@ def test_transient_failures_retry_by_republishing_never_in_place(registry):
     max_todo, outcome = asyncio.run(scenario())
     assert max_todo <= 1
     assert handler.calls == 3
-    assert outcome.failing_since is None
     with registry.db.transaction() as conn:
         rows = conn.execute("SELECT status::text AS status, attempts, args FROM procrastinate_jobs "
                             "ORDER BY id").fetchall()
@@ -399,7 +434,7 @@ def pg_runtime(registry, handler, job_type):
     apply_procrastinate_schema(dsn)
     transactions = PgTransactions(registry.db)
     runtime = JobRuntime(dsn, [handler], {QueueName.UPKEEP: 1}, transactions=transactions,
-                         assets=InMemoryAssetRecords(), clock=SystemClock(), catalog=(job_type,))
+                         assets=PgAssetRecords(SystemClock()), clock=SystemClock(), catalog=(job_type,))
     publisher_app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), (job_type,), None)
     return runtime, transactions, publisher_app
 
@@ -427,6 +462,51 @@ def test_a_lost_completion_write_leaves_a_row_rescue_can_reach(registry, monkeyp
             await admin.aclose()
 
     assert [(s.job, s.attempt) for s in asyncio.run(stalled())] == [(Quick(), 0)]
+
+
+class ClosedMidRunHandler:
+    """Closes its own row as rescue does (re-publish, then close as failed) while it runs."""
+
+    def __init__(self, db):
+        self.db, self.calls = db, 0
+
+    async def handle(self, job: Quick) -> None:
+        self.calls += 1
+
+        def close_own_row():
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE procrastinate_jobs SET status = 'failed' "
+                             "WHERE status = 'doing'")
+
+        await asyncio.to_thread(close_own_row)
+
+
+def test_a_completion_for_a_row_rescue_already_closed_keeps_the_runtime_running(registry,
+                                                                                monkeypatch):
+    # Before: the refused completion write stopped the whole worker process (media loop too).
+    monkeypatch.setattr(runtime_module, "COMPLETION_RETRY_DELAYS", (0, 0, 0))
+    handler = ClosedMidRunHandler(registry.db)
+    runtime, transactions, publisher_app = pg_runtime(registry, handler, Quick)
+    with transactions.begin() as tx:
+        assert defer(publisher_app, Quick(), attempt=0, connection=pg_connection(tx))
+
+    def outcome():
+        with transactions.begin() as tx:
+            return JobOutcomes().get(tx, job_keys(Quick()).lock)
+
+    async def scenario():
+        running = asyncio.create_task(runtime.run())
+        deadline = time.monotonic() + 30
+        while await asyncio.to_thread(outcome) is None:
+            assert time.monotonic() < deadline, "the job never ran"
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.5)  # the refused completion write has been handled by now
+        assert not running.done()
+        runtime.stop()
+        await asyncio.wait_for(running, 30)  # no completion_not_recorded
+
+    asyncio.run(scenario())
+    assert handler.calls == 1
 
 
 def test_a_merged_redelivery_carries_its_attempt_into_the_pending_copy(registry):

@@ -1,7 +1,7 @@
-"""A5: the process-wide outcome feed.
+"""The process-wide outcome feed.
 
-Local cases run the feed against in-memory outcomes with an unreachable LISTEN DSN, so only the
-recheck can resolve a waiter. The PostgreSQL cases (CI) cover the real LISTEN connection.
+The "recheck" cases run the feed over the real `job_outcomes` (PostgreSQL) with an unreachable
+LISTEN DSN, so only the recheck can resolve a waiter; the others cover the real LISTEN connection.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from datetime import timedelta
 import psycopg
 import pytest
 from fakes.transactions import FakeTransactions
-from runtime_fakes import InMemoryOutcomes
 
 from central.infra.outcome_feed import APPLICATION_NAME, OutcomeFeed
 from central.infra.outcomes import JobOutcomes
@@ -33,9 +32,9 @@ def record(outcomes, transactions, job=None, status="ok", reason=None, now=1.0):
 
 
 class Local:
-    def __init__(self, recheck=timedelta(milliseconds=50)):
-        self.transactions = FakeTransactions()
-        self.outcomes = InMemoryOutcomes()
+    def __init__(self, registry, recheck=timedelta(milliseconds=50)):
+        self.transactions = PgTransactions(registry.db)
+        self.outcomes = JobOutcomes()
         self.feed = OutcomeFeed(UNREACHABLE, transactions=self.transactions,
                                 outcomes=self.outcomes, recheck=recheck)
 
@@ -52,34 +51,34 @@ class Local:
 
 
 def test_wait_requires_a_started_feed():
-    feed = Local().feed
+    feed = OutcomeFeed(UNREACHABLE, transactions=FakeTransactions(), outcomes=JobOutcomes())
     with pytest.raises(RuntimeError, match="not_started"):
         asyncio.run(feed.wait_for(LOCK, since=0, timeout=SOON))
 
 
 def test_recheck_must_be_positive():
     with pytest.raises(ValueError):
-        OutcomeFeed(UNREACHABLE, transactions=FakeTransactions(), outcomes=InMemoryOutcomes(),
+        OutcomeFeed(UNREACHABLE, transactions=FakeTransactions(), outcomes=JobOutcomes(),
                     recheck=timedelta(0))
 
 
-def test_a_stored_newer_outcome_returns_at_once():
-    local = Local(recheck=timedelta(hours=1))
+def test_a_stored_newer_outcome_returns_at_once(registry):
+    local = Local(registry, recheck=timedelta(hours=1))
     row = record(local.outcomes, local.transactions)
     assert local.run(lambda: local.feed.wait_for(LOCK, since=0, timeout=timedelta(0))) == row
     assert local.feed._entries == {}
 
 
-def test_an_older_outcome_times_out_to_none():
-    local = Local()
+def test_an_older_outcome_times_out_to_none(registry):
+    local = Local(registry)
     row = record(local.outcomes, local.transactions)
     assert local.run(lambda: local.feed.wait_for(
         LOCK, since=row.seq, timeout=timedelta(milliseconds=120))) is None
     assert local.feed._entries == {}
 
 
-def test_the_recheck_resolves_waiters_without_any_notify():
-    local = Local()
+def test_the_recheck_resolves_waiters_without_any_notify(registry):
+    local = Local(registry)
 
     async def scenario():
         waits = [asyncio.create_task(local.feed.wait_for(LOCK, since=0, timeout=SOON))
@@ -95,8 +94,8 @@ def test_the_recheck_resolves_waiters_without_any_notify():
     assert local.feed._entries == {}
 
 
-def test_cancelling_a_waiter_only_unregisters_it():
-    local = Local()
+def test_cancelling_a_waiter_only_unregisters_it(registry):
+    local = Local(registry)
 
     async def scenario():
         cancelled = asyncio.create_task(local.feed.wait_for(LOCK, since=0, timeout=SOON))
@@ -113,8 +112,8 @@ def test_cancelling_a_waiter_only_unregisters_it():
     assert local.feed._entries == {}
 
 
-def test_waiters_with_different_since_share_the_entry():
-    local = Local()
+def test_waiters_with_different_since_share_the_entry(registry):
+    local = Local(registry)
     first = record(local.outcomes, local.transactions)
 
     async def scenario():

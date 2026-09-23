@@ -1,17 +1,16 @@
-"""`AssetProduction.produce` (C1) on a real `CacheStore` with in-memory records."""
+"""`AssetProduction.produce` on a real `CacheStore` and the real Asset records (PostgreSQL)."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
-from fakes.transactions import FakeTransaction, FakeTransactions
+from content_db import Reads, RecordingTransactions, facts_of, put_file
 
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
+from central.infra.asset_records import PgAssetRecords
 from central.kernel.assets import (
     AssetKey,
     AssetKind,
@@ -22,15 +21,12 @@ from central.kernel.assets import (
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import FetchOsImage, FetchPackage
 from central.kernel.publishing import ASSET_NOT_RECORDED
+from contracts.time import ManualClock
 
 TAG = "v1.2.3"
 GOOD = b"the produced bytes " * 50
 OTHER = b"some other bytes " * 50
-
-
-def facts(data: bytes) -> AssetReady:
-    return AssetReady(size=len(data), sha256=hashlib.sha256(data).hexdigest())
-
+facts = facts_of
 
 DEB_SHA = facts(GOOD).sha256
 OS_JOB = FetchOsImage(tag=TAG)
@@ -57,26 +53,28 @@ class Writer:
 
 
 class World:
-    def __init__(self, tmp_path) -> None:
+    def __init__(self, registry, tmp_path) -> None:
         self.store = CacheStore(CacheLayout(tmp_path))
-        self.records = InMemoryAssetRecords()
-        self.transactions = FakeTransactions()
+        self.records = PgAssetRecords(ManualClock(1000.0))
+        self.transactions = RecordingTransactions(registry.db)
+        self.reads = Reads(RecordingTransactions(registry.db))
         self.production = AssetProduction(store=self.store, records=self.records,
                                            transactions=self.transactions)
 
-    def reference(self, key, owner=TAG, expected: AssetReady | None = None) -> None:
-        ref = AssetReference(owner, LOCATOR,
+    def reference(self, key, owner=TAG, expected: AssetReady | None = None,
+                  locator: OriginLocator = LOCATOR) -> None:
+        ref = AssetReference(owner, locator,
                              expected_size=expected.size if expected else None,
                              expected_sha256=expected.sha256 if expected else None)
-        self.records.reference(FakeTransaction(), key, ref)
+        with self.reads.transactions.begin() as tx:
+            self.records.reference(tx, key, ref)
 
     def produced(self, key, value: AssetReady) -> None:
-        self.records.record_produced(FakeTransaction(), key, value)
+        with self.reads.transactions.begin() as tx:
+            self.records.record_produced(tx, key, value)
 
     def put(self, key, data: bytes) -> None:
-        path = self.store.layout.path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        put_file(self.store, key, data)
 
     def final(self, key) -> bytes | None:
         path = self.store.layout.path(key)
@@ -93,8 +91,8 @@ class World:
 
 
 @pytest.fixture
-def world(tmp_path):
-    return World(tmp_path)
+def world(registry, tmp_path):
+    return World(registry, tmp_path)
 
 
 def test_unknown_asset_is_transient_asset_not_recorded_and_writes_nothing(world):
@@ -115,7 +113,7 @@ def test_absent_file_is_written_measured_installed_and_no_record_written(world):
     assert len(writer.calls) == 1
     assert world.final(OS_KEY) == GOOD
     assert world.temps(AssetKind.OS_IMAGE) == []
-    assert world.records.assets[OS_KEY].produced is None  # the runtime records it, not produce
+    assert world.reads.asset(OS_KEY).produced is None  # the runtime records it, not produce
 
 
 def test_present_file_equal_to_produced_returns_without_writing(world):
@@ -237,3 +235,30 @@ def test_cancellation_mid_write_discards_the_temp(world):
     asyncio.run(run())
     assert world.temps(AssetKind.OS_IMAGE) == []
     assert world.final(OS_KEY) is None
+
+
+def test_a_build_from_a_locator_recut_meanwhile_is_discarded_and_retried(world):
+    # The sync replaced the image's locator (and forgot its produced facts) while this
+    # production downloaded the old one: installing it would record the old build's facts.
+    world.reference(OS_KEY)
+    recut = OriginLocator("https://example.test/rebuilt", sha256=None, size=None)
+
+    async def write(temp, asset):
+        world.reference(OS_KEY, locator=recut)  # the sync, mid-production
+        temp.write_bytes(GOOD)
+
+    with pytest.raises(TransientFailure) as raised:
+        asyncio.run(world.production.produce(OS_JOB, write))
+    assert raised.value.reason == "reference_changed"
+    assert world.final(OS_KEY) is None
+    assert world.temps(AssetKind.OS_IMAGE) == []
+
+
+def test_after_a_recut_forgot_the_facts_the_new_build_is_produced(world):
+    # The reviewer's probe (PR #22 P1), at the records seam: without `forget_produced` this is
+    # TerminalFailure("not_reproducible") for good.
+    world.reference(OS_KEY)
+    world.produced(OS_KEY, facts(GOOD))
+    with world.reads.transactions.begin() as tx:
+        world.records.forget_produced(tx, OS_KEY)
+    assert world.produce(OS_JOB, Writer(OTHER)) == facts(OTHER)

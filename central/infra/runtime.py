@@ -18,7 +18,10 @@ process. Raising instead makes the process exit non-zero and be restarted.
 sees it and its lock blocks the key forever. `_CompletionGuard` retries the write
 (`COMPLETION_RETRY_DELAYS`); if it still fails, `run()` raises `completion_not_recorded`. The
 process exits, its worker row is unregistered (or its heartbeat lapses), and rescue re-publishes
-the row exactly like any dead worker's.
+the row exactly like any dead worker's. A write refused because the row is already closed (rescue
+closed it while this delivery ran; `procrastinate_finish_job_v1` accepts only `todo`/`doing`) is
+not a failure: the row holds no lock any more, rescue already re-published the job, and the
+result is dropped. Only a row still open (or an unreadable one) stops the runtime.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, Protocol
 
 import procrastinate
+from procrastinate import sql
 from procrastinate.manager import JobManager
 
 from central.infra.execution import JobExecutor, Redelivery
@@ -86,6 +90,10 @@ class _CompletionGuard(JobManager):
                 await super().finish_job(job, status, delete_job)
                 return
             except Exception:
+                if await self._closed_elsewhere(job):
+                    logger.warning("job %s: its row was already closed (rescued); dropping the "
+                                   "completion", job.id)
+                    return
                 if delay is None:
                     logger.exception("job %s: completion not recorded; stopping the runtime",
                                      job.id)
@@ -94,6 +102,17 @@ class _CompletionGuard(JobManager):
                 logger.warning("job %s: completion write failed; retrying", job.id,
                                exc_info=True)
                 await asyncio.sleep(delay)
+
+    async def _closed_elsewhere(self, job: Any) -> bool:
+        """True iff the row is gone or no longer `todo`/`doing`; False when it cannot be read."""
+        try:
+            row = await self.connector.execute_query_one_async(
+                query=sql.queries["get_job_status"], job_id=job.id)
+        except procrastinate.exceptions.NoResult:
+            return True
+        except Exception:
+            return False  # the database itself is failing: a genuine failure
+        return row["status"] not in ("todo", "doing")
 
 
 class JobRuntime:

@@ -11,7 +11,8 @@ and `Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
 
 A `.deb` re-cut upstream after its bytes were produced is FROZEN, as main froze a `mirrored`
 tag as `divergent` (`central/app_releases.py` `upsert_discovered`, removed by the MVP): the
-tag keeps the sha it was produced with, and the new sha is neither referenced nor fetched.
+tag keeps the sha it was produced with, and the new sha is neither referenced nor fetched. An OS
+image re-cut is taken instead (its old bytes are gone upstream): its produced facts are forgotten.
 """
 
 from __future__ import annotations
@@ -82,6 +83,7 @@ class SyncReleasesHandler:
                                    expected_size=None, expected_sha256=None)
             if self._assets.reference(tx, image_key, image):
                 changed.add(image_key)
+                self._forget_recut_image(tx, previous, release)
         elif previous is not None and previous.os_image is not None:
             self._assets.retire(tx, image_key, tag)  # the release dropped its image
         package = release.package
@@ -97,6 +99,20 @@ class SyncReleasesHandler:
                 package is None or package.sha256 != old.sha256):
             self._assets.retire(tx, asset_key(FetchPackage(sha256=old.sha256)), tag)  # re-cut
         return changed
+
+    def _forget_recut_image(self, tx: Transaction, previous: ReleaseRow | None,
+                            release: PublishedRelease) -> None:
+        """An OS image rebuilt under its tag (release.yml re-uploads with `--clobber`) replaces
+        the old build, whose bytes are gone upstream: clear the produced facts so the next fetch
+        records the new build instead of failing `not_reproducible` for good. Main overwrote the
+        stored hash on every fetch. A `.deb` never needs this: its key is its sha."""
+        old = previous.os_image if previous is not None else None
+        new = release.os_image
+        if old is None or new is None or (old.sha256, old.size) == (new.sha256, new.size):
+            return
+        LOG.warning("release %s: OS image re-cut upstream (%s -> %s); its produced facts are "
+                    "cleared so the new build is fetched", release.tag, old.sha256, new.sha256)
+        self._assets.forget_produced(tx, asset_key(FetchOsImage(tag=release.tag)))
 
     def _frozen_package(self, tx: Transaction, release: PublishedRelease) -> OriginLocator | None:
         """The `.deb` the tag must keep, or None when the upstream facts may be taken.

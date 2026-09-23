@@ -51,9 +51,10 @@ from fastapi.testclient import TestClient
 
 from central import content_wiring
 from central.app import create_app
+from central.content_catalog.catalog import device_id_for_serial
 from central.content_wiring import build_content_services, build_job_runtime
 from central.kernel.job_types import FetchOsImage, FetchPackage, SyncReleases
-from central.netboot_base import SERIAL_HEADER, device_id_for_serial
+from central.netboot_base import SERIAL_HEADER
 from central.origins.github import GitHubReleaseOrigin
 
 ADMIN = "netboot-fresh-install-operator-" + "x" * 32

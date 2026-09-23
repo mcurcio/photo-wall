@@ -1,10 +1,11 @@
-"""The legacy netboot seams that stay in the MVP: the serial wire helpers and base-health.
+"""The legacy netboot seams that stay in the MVP: the serial header and base-health.
 
 Selection, serving, fetch, cache and GC moved behind the content catalog and the asset read path
 (`central.content_catalog`, `central.assets`; design §6). What remains:
 
-* `SERIAL_HEADER`, `sanitize_serial`, `device_id_for_serial`: the netboot serial on the wire and
-  its canonical `devices` id.
+* `SERIAL_HEADER`: the netboot serial on the wire. The safe-serial rule and the canonical
+  `devices` id derivation live in `central.content_catalog.catalog` (`sanitize_serial`,
+  `device_id_for_serial`).
 * `record_base_health` (authenticated base-health): advances `known_good_tag` only for a
   genuinely healthy check-in whose `running_tag` equals the tag Central recorded as last-served --
   the sole writer of the frontier input. Its move into the catalog is an MVP cut.
@@ -12,10 +13,7 @@ Selection, serving, fetch, cache and GC moved behind the content catalog and the
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
-
-from contracts.equipment import equipment_device_id
 
 if TYPE_CHECKING:  # avoid a hard import cycle at module load; only for type hints
     from contracts.models import BaseHealth
@@ -25,36 +23,6 @@ if TYPE_CHECKING:  # avoid a hard import cycle at module load; only for type hin
 # independent (central must not import appliance, and vice versa), so this wire
 # constant is restated rather than shared, like the route strings.
 SERIAL_HEADER = "X-PhotoWall-Serial"
-# The `device_id` derivation kind, shared with appliance/bootstrap.py and
-# player/service.py via contracts.equipment so one Pi resolves to one device_id.
-DEVICE_KIND = "pi"
-# The only shape a client serial may take before it can select an image or be
-# logged: a Pi serial is 16 hex digits, but keep a small safe superset so a
-# future per-serial scheme has room, and reject everything else (control chars,
-# path separators, whitespace) at the seam -- the serial is unauthenticated,
-# client-controlled input.
-_SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
-
-
-def sanitize_serial(serial: str | None) -> str | None:
-    """The serial if it matches the safe charset, else None. Bounds what the
-    route logs AND guards the selection seam, so the guarantee holds regardless
-    of caller."""
-    if serial is not None and _SAFE_SERIAL.fullmatch(serial):
-        return serial
-    return None
-
-
-def device_id_for_serial(serial: str | None) -> str | None:
-    """Map a (sanitized) serial to its canonical `device-<64hex>` id, or None.
-
-    Uses the one shared derivation (`contracts.equipment.equipment_device_id`,
-    `kind="pi"`) the appliance and the flashed-image fallback use, so a given Pi
-    resolves to the SAME `device_id` at the netboot seam as it does at
-    enrollment (which is how `players.device_id` later joins the row)."""
-    if serial is None:
-        return None
-    return equipment_device_id(DEVICE_KIND, serial.encode())
 
 
 # -- base-health seam --------------------------------------------------------

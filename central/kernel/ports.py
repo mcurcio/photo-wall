@@ -85,6 +85,14 @@ class AssetRecords(Protocol):
         """Write-once: equal facts -> no-op; different -> ProducedFactsConflict; absent -> no-op."""
         ...
 
+    def forget_produced(self, tx: Transaction, key: AssetKey) -> None:
+        """Clear the produced facts: the origin rebuilt the asset under the same identity (a
+        release re-cut), so the next production records the new build; absent -> no-op.
+
+        The only way produced facts change. The release sync calls it; nothing else does.
+        """
+        ...
+
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
         """Set last_served_at; absent -> no-op."""
         ...

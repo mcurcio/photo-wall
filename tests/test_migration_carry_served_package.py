@@ -1,7 +1,8 @@
 """Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across.
 
-Each test builds a schema at migration 022 (main's tables as the MVP found them), seeds main's
-state, then runs `Database.migrate()`, which applies 023 onward. Skips without
+Each test builds a schema at main's last migration (019), seeds main's state, then runs
+`Database.migrate()`, which applies the MVP's 020 onward as an upgrade does: 021 seeds the Asset
+records from main's tables and 023 carries the served `.deb`. Skips without
 PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
 """
 
@@ -15,15 +16,19 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from catalog_fakes import InMemoryStoredAssets
+from content_db import put_file
 from fakes.publisher import RecordingPublisher
 from psycopg.conninfo import make_conninfo
 
+from central.assets.layout import CacheLayout
+from central.assets.store import CacheStore
 from central.content_catalog.catalog import DevicePackage, ReleaseCatalog
 from central.db import Database
+from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
-from central.kernel.job_types import FetchPackage
+from central.kernel.assets import AssetKey, AssetKind
 from contracts.time import ManualClock
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
@@ -36,7 +41,7 @@ def sha(text: str) -> str:
 
 @pytest.fixture
 def legacy():
-    """A schema migrated to 022 only, and the `Database` over it (not yet migrated further)."""
+    """A schema migrated to main's 019 only, and the `Database` over it (not yet upgraded)."""
     dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
@@ -51,7 +56,7 @@ def legacy():
                 name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
                 applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
             for path in sorted(MIGRATIONS.glob("*.sql")):
-                if path.name >= "023":
+                if path.name >= "020":
                     break
                 sql = path.read_text()
                 conn.execute(sql)
@@ -94,30 +99,34 @@ def _pointers(db: Database) -> tuple[str | None, str | None]:
         return releases.promoted_tag(tx), releases.last_good_tag(tx)
 
 
-def _manifest(db: Database, *, on_disk: tuple[str, ...]):
+def _manifest(db: Database, cache: Path, *, on_disk: tuple[str, ...]):
+    """`/v1/app/manifest` with these tags' `.deb`s on disk (021 seeded their Asset records)."""
     clock = ManualClock(1000.0)
+    store = CacheStore(CacheLayout(cache))
+    for tag in on_disk:
+        put_file(store, AssetKey(AssetKind.PLAYER_DEB, sha(tag)), b"d" * 10)
     catalog = ReleaseCatalog(
         releases=PgReleaseRecords(), devices=PgDeviceRecords(),
-        stored=InMemoryStoredAssets([FetchPackage(sha256=sha(tag)) for tag in on_disk]),
+        stored=DiskStoredAssets(records=PgAssetRecords(clock), store=store),
         transactions=PgTransactions(db), publisher=RecordingPublisher(clock), clock=clock)
     return asyncio.run(catalog.promoted_package())
 
 
-def test_a_never_promoted_served_deb_becomes_promoted_and_last_good(legacy):
+def test_a_never_promoted_served_deb_becomes_promoted_and_last_good(legacy, tmp_path):
     # P0: main served current_sha256 with nothing promoted; the MVP reads only the policy row.
     _main_state(legacy, current=sha(V2), promoted=None)
     legacy.migrate()
     assert _pointers(legacy) == (V2, V2)
-    assert _manifest(legacy, on_disk=(V2,)) == DevicePackage(V2, V2, sha(V2), 10)
+    assert _manifest(legacy, tmp_path, on_disk=(V2,)) == DevicePackage(V2, V2, sha(V2), 10)
 
 
-def test_a_pending_promotion_is_kept_and_the_served_deb_is_its_fallback(legacy):
+def test_a_pending_promotion_is_kept_and_the_served_deb_is_its_fallback(legacy, tmp_path):
     # Main: promoted V3 was still mirroring, current stayed on V2 until V3's bytes arrived.
     _main_state(legacy, current=sha(V2), promoted=V3)
     legacy.migrate()
     assert _pointers(legacy) == (V3, V2)
-    assert _manifest(legacy, on_disk=(V2,)) == DevicePackage(V2, V2, sha(V2), 10)
-    assert _manifest(legacy, on_disk=(V2, V3)) == DevicePackage(V3, V3, sha(V3), 10)
+    assert _manifest(legacy, tmp_path, on_disk=(V2,)) == DevicePackage(V2, V2, sha(V2), 10)
+    assert _manifest(legacy, tmp_path, on_disk=(V2, V3)) == DevicePackage(V3, V3, sha(V3), 10)
 
 
 def test_a_converged_promotion_is_its_own_last_good(legacy):

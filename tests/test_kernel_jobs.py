@@ -29,7 +29,7 @@ class Colour(StrEnum):
     BLUE = "blue"
 
 
-class TwoFields(Job[None], name="test.two_fields", subject=("a",), delivery=FETCH):
+class TwoFields(Job[None], name="test.two_fields", delivery=FETCH):
     a: str
     b: str
 
@@ -121,13 +121,13 @@ def test_check_5_unkeyable_field():
             x: IntStrEnum
 
 
-def test_check_6_subject_unknown_or_repeated():
-    with pytest.raises(TypeError, match="unknown fields"):
-        class A(Job[None], name="test.subject_a", subject=("zzz",), delivery=FETCH):
+@pytest.mark.parametrize("keyword", ["subject", "lock", "queueing_lock"])
+def test_check_6_a_declaration_cannot_choose_its_keys(keyword):
+    # The keys are derived from the fields (`job_keys`); no class keyword can narrow them.
+    with pytest.raises(TypeError):
+        class A(Job[None], name=f"test.keys_{keyword}", delivery=FETCH, **{keyword: ("a",)}):
             a: str
-    with pytest.raises(TypeError, match="repeats"):
-        class B(Job[None], name="test.subject_b", subject=("a", "a"), delivery=FETCH):
-            a: str
+    assert f"test.keys_{keyword}" not in jobs_module._REGISTRY
 
 
 def test_check_7_periodic_with_fields():
@@ -152,7 +152,7 @@ def test_check_8_asset_needs_asset_ready_result():
             a: str
 
 
-def test_check_8_asset_subject_is_one_field():
+def test_check_8_an_asset_job_has_one_field():
     with pytest.raises(TypeError, match="exactly one field"):
         class A(Job[AssetReady], name="test.asset_two", asset=AssetKind.OS_IMAGE, delivery=FETCH):
             a: str
@@ -203,11 +203,10 @@ def test_catalog_types_are_registered_with_their_declarations():
 # -- keys ----------------------------------------------------------------------------------------
 
 
-def test_subject_lock_and_all_fields_queueing_lock():
+def test_both_locks_are_every_field_in_declaration_order():
     keys = job_keys(TwoFields(a="x", b="y"))
-    assert keys.lock == 'test.two_fields["x"]'
-    assert keys.queueing_lock == 'test.two_fields["x","y"]'
-    assert job_keys(TwoFields(a="x", b="z")).lock == keys.lock
+    assert keys.lock == keys.queueing_lock == 'test.two_fields["x","y"]'
+    assert job_keys(TwoFields(a="x", b="z")).lock != keys.lock
 
 
 @given(st.tuples(st.text(), st.text()), st.tuples(st.text(), st.text()))
@@ -215,8 +214,7 @@ def test_keys_are_injective(p, q):
     left, right = TwoFields(a=p[0], b=p[1]), TwoFields(a=q[0], b=q[1])
     same_lock = job_keys(left).lock == job_keys(right).lock
     same_queueing = job_keys(left).queueing_lock == job_keys(right).queueing_lock
-    assert same_lock == (p[0] == q[0])
-    assert same_queueing == (p == q)
+    assert same_lock == same_queueing == (p == q)
 
 
 @pytest.mark.parametrize("p, q", [

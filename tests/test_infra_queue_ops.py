@@ -1,4 +1,4 @@
-"""A6: queue operations — stalled-job rescue and purging (unit, then PostgreSQL in CI)."""
+"""Queue operations — stalled-job rescue and purging (unit, then PostgreSQL in CI)."""
 
 from __future__ import annotations
 
@@ -8,20 +8,19 @@ from types import SimpleNamespace
 
 import procrastinate
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
 from fakes.transactions import FakeTransactions
 from procrastinate.jobs import Job as ProcrastinateJob
 from procrastinate.jobs import Status
 from runtime_fakes import (
     FetchOsImageStub,
     FetchPackageStub,
-    InMemoryOutcomes,
     PrefetchStub,
     SyncReleasesStub,
     apply_procrastinate_schema,
 )
 
 from central.infra import queue_ops
+from central.infra.asset_records import PgAssetRecords
 from central.infra.execution import JobExecutor
 from central.infra.job_queue import build_app, defer, job_kwargs, task_name
 from central.infra.outcomes import JobOutcomes
@@ -91,30 +90,16 @@ def test_one_row_failing_to_close_does_not_abort_the_rescue_of_the_others():
     assert admin.calls[1:] == [("republish", 7), ("close", 7), ("republish", 9), ("close", 9)]
 
 
-def test_purge_deletes_finished_jobs_and_stale_outcomes():
-    admin, transactions, outcomes = RecordingAdmin(), FakeTransactions(), InMemoryOutcomes()
-    clock = ManualClock(100 * DAY)
-    for now, tag in ((60 * DAY, "v1.0.0"), (71 * DAY, "v2.0.0")):
-        with transactions.begin() as tx:
-            outcomes.record(tx, FetchOsImage(tag=tag), status="ok", reason=None,
-                            retry_not_before=None, now=now)
-    handler = PurgeFinishedJobsHandler(admin, transactions=transactions, outcomes=outcomes,
-                                       clock=clock)
-    asyncio.run(handler.handle(PurgeFinishedJobs()))
-    assert admin.calls == [("delete_finished", timedelta(days=7))]
-    assert [row.lock_key for row in outcomes.rows.values()] == ['os_image.fetch["v2.0.0"]']
-
-
 def test_the_handlers_dispatch_by_their_hints_and_fill_the_catalog():
     admin = RecordingAdmin()
     rescue = RescueStalledJobsHandler(admin)
     purge = PurgeFinishedJobsHandler(admin, transactions=FakeTransactions(),
-                                     outcomes=InMemoryOutcomes(), clock=ManualClock(0.0))
+                                     outcomes=JobOutcomes(), clock=ManualClock(0.0))
     assert handler_job_type(rescue) is RescueStalledJobs
     assert handler_job_type(purge) is PurgeFinishedJobs
     JobExecutor([FetchOsImageStub(), FetchPackageStub(), SyncReleasesStub(), PrefetchStub(),
-                 rescue, purge], transactions=FakeTransactions(), outcomes=InMemoryOutcomes(),
-                assets=InMemoryAssetRecords(), clock=ManualClock(0.0), redeliver=None)
+                 rescue, purge], transactions=FakeTransactions(), outcomes=JobOutcomes(),
+                assets=PgAssetRecords(ManualClock(0.0)), clock=ManualClock(0.0), redeliver=None)
 
 
 # -- QueueAdmin against a faked procrastinate job manager (no DB) ----------------------------------

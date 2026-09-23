@@ -3,7 +3,8 @@
 The asset record holds what was produced; this table holds only how the latest run of each
 `(job type, subject)` ended, because a late waiter misses a NOTIFY. `record` upserts, takes a
 new global sequence number (`since` compares against it), and sends `NOTIFY job_outcome,
-<lock key>` in the same transaction, so a waiter is woken only by a committed outcome.
+<lock key>` in the same transaction, so a waiter is woken only by a committed outcome. The table's
+CHECKs (migration 020) refuse an inconsistent status/reason/retry row.
 """
 
 from __future__ import annotations
@@ -16,13 +17,10 @@ from typing import Any, Literal, TypeAlias
 from central.infra.transactions import pg_connection
 from central.kernel.jobs import Job, job_keys
 from central.kernel.transactions import Transaction
-from central.kernel.types import require_reason
 
 OutcomeStatus: TypeAlias = Literal["ok", "transient", "terminal"]
 OUTCOME_CHANNEL = "job_outcome"
-_STATUSES = frozenset({"ok", "transient", "terminal"})
-_COLUMNS = ("lock_key, job_name, status, reason, retry_not_before, failing_since, seq, "
-            "updated_at")
+_COLUMNS = "lock_key, job_name, status, reason, retry_not_before, seq, updated_at"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +30,6 @@ class OutcomeRow:
     status: OutcomeStatus
     reason: str | None
     retry_not_before: float | None
-    failing_since: float | None
     seq: int
     updated_at: float
 
@@ -42,24 +39,10 @@ def _row(values: dict[str, Any]) -> OutcomeRow:
 
 
 def _finite(value: object, what: str) -> float:
+    """DOUBLE PRECISION stores NaN and infinity, which no retry window or purge can compare."""
     if type(value) not in (int, float) or not math.isfinite(value):  # type: ignore[arg-type]
         raise ValueError(f"invalid_{what}")
     return float(value)  # type: ignore[arg-type]
-
-
-def _check(status: object, reason: object, retry_not_before: object) -> None:
-    """The table's CHECKs, raised before any SQL runs."""
-    if status not in _STATUSES:
-        raise ValueError("invalid_status")
-    if status == "ok":
-        if reason is not None:
-            raise ValueError("invalid_reason")
-    else:
-        require_reason(reason)  # type: ignore[arg-type]
-    if retry_not_before is not None:
-        if status != "transient":
-            raise ValueError("invalid_retry_not_before")
-        _finite(retry_not_before, "retry_not_before")
 
 
 class JobOutcomes:
@@ -81,26 +64,21 @@ class JobOutcomes:
 
     def record(self, tx: Transaction, job: Job[Any], *, status: OutcomeStatus,
                reason: str | None, retry_not_before: float | None, now: float) -> OutcomeRow:
-        """Upsert the key's latest outcome and NOTIFY it, in the caller's transaction.
-
-        `failing_since` is kept while the key keeps failing and cleared by an `ok`.
-        """
-        _check(status, reason, retry_not_before)
+        """Upsert the key's latest outcome and NOTIFY it, in the caller's transaction."""
+        if retry_not_before is not None:
+            _finite(retry_not_before, "retry_not_before")
         now = _finite(now, "now")
         lock = job_keys(job).lock
         conn = pg_connection(tx)
         row = conn.execute(
             f"""INSERT INTO job_outcomes ({_COLUMNS})
                 VALUES (%(lock)s, %(name)s, %(status)s, %(reason)s, %(retry_not_before)s,
-                        CASE WHEN %(status)s = 'ok' THEN NULL ELSE %(now)s END,
                         nextval('job_outcome_seq'), %(now)s)
                 ON CONFLICT (lock_key) DO UPDATE SET
                     job_name = EXCLUDED.job_name,
                     status = EXCLUDED.status,
                     reason = EXCLUDED.reason,
                     retry_not_before = EXCLUDED.retry_not_before,
-                    failing_since = CASE WHEN EXCLUDED.status = 'ok' THEN NULL
-                        ELSE COALESCE(job_outcomes.failing_since, EXCLUDED.failing_since) END,
                     seq = EXCLUDED.seq,
                     updated_at = EXCLUDED.updated_at
                 RETURNING {_COLUMNS}""",

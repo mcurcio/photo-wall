@@ -1,4 +1,4 @@
-"""Unit tests for the pod probe (MVP lane D, bead D-2): ready = process + DB, never more."""
+"""Unit tests for the pod probe: ready = process + DB, never more."""
 
 import pytest
 

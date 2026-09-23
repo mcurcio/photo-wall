@@ -1,4 +1,4 @@
-"""`PgAssetRecords` and the 021 backfill against real PostgreSQL (C5).
+"""`PgAssetRecords` and the 021 backfill against real PostgreSQL.
 
 The DB tests skip without `PHOTO_WALL_TEST_DATABASE_URL` (the `registry` fixture convention in
 `tests/conftest.py`) and run in CI.
@@ -109,6 +109,17 @@ def test_record_produced_is_write_once(repo):
     with pytest.raises(ProducedFactsConflict):
         repo.record_produced(KEY, AssetReady(size=11, sha256=SHA_A))
     assert repo.get(KEY).produced == facts
+
+
+def test_forget_produced_clears_the_facts_so_a_new_build_can_be_recorded(repo):
+    repo.forget_produced(KEY)  # absent -> no-op
+    repo.reference(KEY, ref("v1.0.0"))
+    repo.record_produced(KEY, AssetReady(size=10, sha256=SHA_A))
+    repo.forget_produced(KEY)
+    assert repo.get(KEY).produced is None
+    assert [r.owner for r in repo.get(KEY).references] == ["v1.0.0"]  # references untouched
+    repo.record_produced(KEY, AssetReady(size=11, sha256=SHA_B))  # no ProducedFactsConflict
+    assert repo.get(KEY).produced == AssetReady(size=11, sha256=SHA_B)
 
 
 def test_touch_served_sets_last_served_at(repo):

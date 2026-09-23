@@ -1,4 +1,5 @@
-"""The assets fetch and prefetch handlers (C2) against the shared fakes and a real cache dir."""
+"""The assets fetch and prefetch handlers: a fake origin, a real cache dir, and the real
+Asset records (PostgreSQL, the `registry` fixture)."""
 
 from __future__ import annotations
 
@@ -10,11 +11,11 @@ import threading
 from pathlib import Path
 
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
+from content_db import RecordingTransactions
 from fakes.catalog import StaticContentCatalog
 from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
-from fakes.transactions import FakeTransaction, FakeTransactions
+from fakes.transactions import FakeTransactions
 
 from central.assets import handlers
 from central.assets.handlers import (
@@ -27,6 +28,7 @@ from central.assets.handlers import (
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
+from central.infra.asset_records import PgAssetRecords
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.handling import (
     OriginRejected,
@@ -75,23 +77,36 @@ class SpyOrigin(FakeReleaseOrigin):
 
 
 class World:
-    def __init__(self, tmp_path, blobs=None) -> None:
+    def __init__(self, registry, tmp_path, blobs=None) -> None:
         self.store = CacheStore(CacheLayout(tmp_path))
-        self.records = InMemoryAssetRecords()
-        self.transactions = FakeTransactions()
+        self.clock = ManualClock(1000.0)
+        self.records = PgAssetRecords(self.clock)
+        self.transactions = RecordingTransactions(registry.db)
         self.origin = SpyOrigin(blobs or {})
         self.production = AssetProduction(store=self.store, records=self.records,
                                           transactions=self.transactions)
 
     def reference(self, key, owner, locator, expected: AssetReady | None = None) -> None:
-        self.records.reference(FakeTransaction(), key, AssetReference(
-            owner, locator, expected_size=expected.size if expected else None,
-            expected_sha256=expected.sha256 if expected else None))
+        """Each reference is added one second after the previous one: the newest comes first."""
+        self.clock.advance(1)
+        with self.transactions.begin() as tx:
+            self.records.reference(tx, key, AssetReference(
+                owner, locator, expected_size=expected.size if expected else None,
+                expected_sha256=expected.sha256 if expected else None))
+
+    def record_produced(self, key, facts: AssetReady) -> None:
+        with self.transactions.begin() as tx:
+            self.records.record_produced(tx, key, facts)
 
     def temps(self) -> list[str]:
         root = self.store.layout
         return [p.name for kind in AssetKind if root.directory(kind).exists()
                 for p in root.directory(kind).iterdir() if p.name.startswith(TEMP_PREFIX)]
+
+
+@pytest.fixture
+def world_at(registry, tmp_path):
+    return lambda blobs=None: World(registry, tmp_path, blobs)
 
 
 # -- FetchOsImageHandler --------------------------------------------------------------------------
@@ -104,9 +119,9 @@ def os_locator(data: bytes, url: str = "https://example.test/base.tar.gz", sized
     return OriginLocator(url, sha256=sha(data), size=len(data) if sized else None)
 
 
-def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(tmp_path, monkeypatch):
+def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(world_at, monkeypatch):
     blob = tarball()
-    world = World(tmp_path, {"https://example.test/base.tar.gz": blob})
+    world = world_at({"https://example.test/base.tar.gz": blob})
     world.reference(OS_KEY, TAG, os_locator(blob))
     threads: list[bool] = []
     real_extract = handlers.extract_squashfs
@@ -125,9 +140,9 @@ def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(tmp_path,
     assert world.temps() == []  # the tarball temp is always discarded
 
 
-def test_os_image_handler_uses_the_newest_reference_and_caps_unsized_downloads(tmp_path):
+def test_os_image_handler_uses_the_newest_reference_and_caps_unsized_downloads(world_at):
     blob = tarball()
-    world = World(tmp_path, {"https://example.test/new.tar.gz": blob})
+    world = world_at({"https://example.test/new.tar.gz": blob})
     world.reference(OS_KEY, "old", os_locator(blob, "https://example.test/old.tar.gz"))
     world.reference(OS_KEY, "new", os_locator(blob, "https://example.test/new.tar.gz", sized=False))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
@@ -137,9 +152,9 @@ def test_os_image_handler_uses_the_newest_reference_and_caps_unsized_downloads(t
     assert world.origin.max_bytes == [MAX_TARBALL_BYTES]
 
 
-def test_os_image_handler_hostile_archive_is_terminal_and_leaves_no_temp(tmp_path):
+def test_os_image_handler_hostile_archive_is_terminal_and_leaves_no_temp(world_at):
     blob = tarball(listed=b"not the squashfs")
-    world = World(tmp_path, {"https://example.test/base.tar.gz": blob})
+    world = world_at({"https://example.test/base.tar.gz": blob})
     world.reference(OS_KEY, TAG, os_locator(blob))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
@@ -150,9 +165,9 @@ def test_os_image_handler_hostile_archive_is_terminal_and_leaves_no_temp(tmp_pat
     assert not world.store.layout.path(OS_KEY).exists()
 
 
-def test_os_image_handler_download_failure_leaves_no_temp(tmp_path):
+def test_os_image_handler_download_failure_leaves_no_temp(world_at):
     blob = tarball()
-    world = World(tmp_path, {"https://example.test/base.tar.gz": OriginUnavailable("http_503")})
+    world = world_at({"https://example.test/base.tar.gz": OriginUnavailable("http_503")})
     world.reference(OS_KEY, TAG, os_locator(blob))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
@@ -170,8 +185,8 @@ def deb_locator(url: str, data: bytes = DEB) -> OriginLocator:
     return OriginLocator(url, sha256=sha(data), size=len(data))
 
 
-def package_world(tmp_path, blobs, owners=("v1.0.0", "v1.1.0")) -> World:
-    world = World(tmp_path, blobs)
+def package_world(world_at, blobs, owners=("v1.0.0", "v1.1.0")) -> World:
+    world = world_at(blobs)
     for owner in owners:  # added in order, so the last is the newest
         world.reference(DEB_KEY, owner, deb_locator(f"https://example.test/{owner}.deb"),
                         expected=facts(DEB))
@@ -183,8 +198,8 @@ def run_package(world: World):
     return asyncio.run(handler.handle(FetchPackage(sha256=sha(DEB))))
 
 
-def test_package_handler_two_tags_share_one_file_and_one_producer(tmp_path):
-    world = package_world(tmp_path, {"https://example.test/v1.1.0.deb": DEB})
+def test_package_handler_two_tags_share_one_file_and_one_producer(world_at):
+    world = package_world(world_at, {"https://example.test/v1.1.0.deb": DEB})
     assert run_package(world) == facts(DEB)
     assert world.store.layout.path(DEB_KEY).read_bytes() == DEB
     assert [loc.url for loc in world.origin.downloads] == ["https://example.test/v1.1.0.deb"]
@@ -194,15 +209,15 @@ def test_package_handler_two_tags_share_one_file_and_one_producer(tmp_path):
     assert len(world.origin.downloads) == 1
 
 
-def test_package_handler_skips_a_rejected_reference(tmp_path):
-    world = package_world(tmp_path, {"https://example.test/v1.0.0.deb": DEB})  # newest -> 404
+def test_package_handler_skips_a_rejected_reference(world_at):
+    world = package_world(world_at, {"https://example.test/v1.0.0.deb": DEB})  # newest -> 404
     assert run_package(world) == facts(DEB)
     assert [loc.url for loc in world.origin.downloads] == [
         "https://example.test/v1.1.0.deb", "https://example.test/v1.0.0.deb"]
 
 
-def test_package_handler_raises_the_last_unavailable_after_trying_all(tmp_path):
-    world = package_world(tmp_path, {
+def test_package_handler_raises_the_last_unavailable_after_trying_all(world_at):
+    world = package_world(world_at, {
         "https://example.test/v1.1.0.deb": OriginUnavailable("http_503"),
         "https://example.test/v1.0.0.deb": OriginRejected("not_found"),
     })
@@ -213,8 +228,8 @@ def test_package_handler_raises_the_last_unavailable_after_trying_all(tmp_path):
     assert world.temps() == []
 
 
-def test_package_handler_all_rejected_is_terminal(tmp_path):
-    world = package_world(tmp_path, {})
+def test_package_handler_all_rejected_is_terminal(world_at):
+    world = package_world(world_at, {})
     with pytest.raises(TerminalFailure) as raised:
         run_package(world)
     assert raised.value.reason == "all_references_rejected"
@@ -222,8 +237,8 @@ def test_package_handler_all_rejected_is_terminal(tmp_path):
     assert world.temps() == []
 
 
-def test_package_handler_caps_an_unsized_locator(tmp_path):
-    world = World(tmp_path, {"https://example.test/x.deb": DEB})
+def test_package_handler_caps_an_unsized_locator(world_at):
+    world = world_at({"https://example.test/x.deb": DEB})
     world.reference(DEB_KEY, "v1.0.0",
                     OriginLocator("https://example.test/x.deb", sha256=sha(DEB), size=None))
     run_package(world)
@@ -232,14 +247,15 @@ def test_package_handler_caps_an_unsized_locator(tmp_path):
 
 def test_handlers_declare_their_job_types():
     store = CacheStore(CacheLayout(Path("/nonexistent")))
-    production = AssetProduction(store=store, records=InMemoryAssetRecords(),
+    production = AssetProduction(store=store, records=PgAssetRecords(ManualClock(0.0)),
                                  transactions=FakeTransactions())
     origin = SpyOrigin({})
     assert handler_job_type(FetchOsImageHandler(production=production, origin=origin,
                                                 store=store)) is FetchOsImage
     assert handler_job_type(FetchPackageHandler(production=production, origin=origin)) \
         is FetchPackage
-    prefetch = PrefetchHandler(catalog=StaticContentCatalog({}), records=InMemoryAssetRecords(),
+    prefetch = PrefetchHandler(catalog=StaticContentCatalog({}),
+                               records=PgAssetRecords(ManualClock(0.0)),
                                store=store, transactions=FakeTransactions(),
                                publisher=RecordingPublisher(ManualClock(0.0)))
     assert handler_job_type(prefetch) is Prefetch
@@ -248,8 +264,8 @@ def test_handlers_declare_their_job_types():
 # -- PrefetchHandler ------------------------------------------------------------------------------
 
 
-def test_prefetch_publishes_only_recorded_assets_missing_from_disk(tmp_path):
-    world = World(tmp_path)
+def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
+    world = world_at()
     present = FetchOsImage(tag="v1.0.0")
     absent_file = FetchOsImage(tag="v1.1.0")
     never_produced = FetchPackage(sha256=sha(DEB))
@@ -258,7 +274,7 @@ def test_prefetch_publishes_only_recorded_assets_missing_from_disk(tmp_path):
     for job in (present, absent_file):
         key = AssetKey(AssetKind.OS_IMAGE, job.tag)
         world.reference(key, job.tag, loc)
-        world.records.record_produced(FakeTransaction(), key, facts(SQUASHFS))
+        world.record_produced(key, facts(SQUASHFS))
     world.reference(DEB_KEY, "v1.0.0", deb_locator("https://example.test/a.deb"), facts(DEB))
     path = world.store.layout.path(AssetKey(AssetKind.OS_IMAGE, "v1.0.0"))
     path.parent.mkdir(parents=True)

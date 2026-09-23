@@ -842,3 +842,47 @@ doc softenings.
   database where the `central` container's own `OutcomeFeed` holds a LISTEN connection with the
   same `application_name`. The feed tests now count only pids that appeared after their feed
   started (and terminate only their own), with a foreign same-named connection in the test.
+
+## central-mvp PR #22 slimming and fresh-review fixes — 2026-09-23
+
+- **OS-image re-cut (review P1): `AssetRecords.forget_produced(tx, key)` is new** (design §10.2
+  and §10.4 updated). `SyncReleases` calls it when a tag's base tarball changes sha or size
+  (release.yml re-uploads with `--clobber`), so the next production records the new build
+  instead of failing `not_reproducible` for good after a cache wipe. It is the only caller;
+  media's write-once facts are untouched. `AssetProduction` re-reads the references before the
+  rename and discards a build from a replaced locator (`TransientFailure("reference_changed")`).
+  **Residual, not closed:** a build that passes that re-check and whose outcome commits just after
+  a concurrent re-cut still records the old build's facts (a window of milliseconds between the
+  re-check and the executor's commit). Closing it needs the produced facts keyed to the locator
+  they came from.
+- **Completion guard (review P2):** a completion write refused because the row is no longer
+  `todo`/`doing` (rescue closed it) is dropped with a warning; only an open or unreadable row
+  still stops the runtime. It reads procrastinate's own `get_job_status` query.
+- **Frozen `.deb` after a cache wipe (review P2): chosen fix is "a divergent tag's `.deb` is
+  desired only while its produced file is on disk"**, not a terminal `download_corrupt`. The
+  origin cannot tell a frozen tag from a sync that has not caught up yet, and making every
+  digest mismatch terminal would strand a release whose manifest landed before its `.deb`
+  (Prefetch never retries a terminal). Cost: a frozen `.deb` gone from disk now answers 404 on
+  the package route (was 503 and a re-download on every Prefetch); the manifests still name it.
+- **Serial rule (review P2):** `sanitize_serial` / `device_id_for_serial` live only in
+  `central/content_catalog/catalog.py`; `central/netboot_base.py` keeps `SERIAL_HEADER`.
+- **Kernel: the `subject=` class keyword is gone** (no job type used it). The subject is every
+  field; `lock == queueing_lock` for every job type, and "a waiter may resolve on another
+  payload's run under the same subject" (§10.2) no longer applies. **Kept** the one-field rule
+  for asset job types: `asset_key` names the file by that field, and dropping the rule would let
+  two jobs share one file. It still contradicts §10.1's two-field `PrepareMedia`; the media bead
+  must define a two-field identity first.
+- **`job_outcomes.failing_since` dropped by a new migration 025**, not by editing 020 (migrations
+  are forward-only and checksum-pinned; a database that already ran this branch would refuse to
+  boot). `JobOutcomes` no longer restates the table's CHECKs; it still refuses NaN/infinity, which
+  DOUBLE PRECISION would store.
+- **The SQL-recoding fakes are gone** (`tests/catalog_fakes.py`, `tests/fakes/asset_records.py`,
+  `InMemoryOutcomes`). Those suites run on PostgreSQL through `tests/content_db.py`. Converting
+  `test_migration_carry_served_package.py` exposed a test artifact: it stopped at 022, so 021's
+  Asset seed ran on an empty schema, and the in-memory stored-assets fake hid that no Asset rows
+  existed. It now upgrades from main's 019, as a real upgrade does.
+- **`.claude/mvp/` deleted.** Earlier entries cite `P0-kernel.md`, `lane-*.md` and
+  `P2-wiring.md`: read them at commit 90999e7. Migrations 021/022 still say "lane C"/"P2.1" in
+  their comments (checksum-pinned, left as is). The reviewer's probe
+  (`scratchpad/probe_recut.py`) imports the deleted fake; its scenario is now
+  `test_a_recut_os_image_is_produced_again_after_a_cache_wipe`.

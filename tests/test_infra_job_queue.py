@@ -1,4 +1,4 @@
-"""A2 (the kernel-job <-> procrastinate mapping) and the `job_outcomes` repository."""
+"""The kernel-job <-> procrastinate mapping and the `job_outcomes` repository."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class Colour(StrEnum):
     BLUE = "blue"
 
 
-class Mixed(Job[None], name="test.job_queue_mixed", subject=("s",),
+class Mixed(Job[None], name="test.job_queue_mixed",
             delivery=Delivery(queue=QueueName.UPKEEP, priority=7)):
     s: str
     i: int
@@ -287,10 +287,13 @@ def test_defer_refuses_a_type_the_app_was_not_built_with():
     ("ok", None, 5.0),
     ("transient", "busy", float("nan")),
 ])
-def test_record_refuses_rows_the_table_would_refuse(status, reason, retry_not_before):
-    with pytest.raises(ValueError):
-        JobOutcomes().record(FakeTransaction(), SyncReleases(), status=status, reason=reason,
-                             retry_not_before=retry_not_before, now=1.0)
+def test_record_refuses_inconsistent_rows(registry, status, reason, retry_not_before):
+    # The table's CHECKs refuse the inconsistent ones; the repository refuses NaN, which a
+    # DOUBLE PRECISION column would store.
+    with pytest.raises((ValueError, psycopg.errors.CheckViolation)):
+        with PgTransactions(registry.db).begin() as tx:
+            JobOutcomes().record(tx, SyncReleases(), status=status, reason=reason,
+                                 retry_not_before=retry_not_before, now=1.0)
 
 
 def test_repository_refuses_a_fake_transaction():
@@ -301,7 +304,7 @@ def test_repository_refuses_a_fake_transaction():
 # -- job_outcomes: PostgreSQL (CI) ---------------------------------------------------------------
 
 
-def test_outcomes_upsert_sequence_failing_since_and_purge(registry):
+def test_outcomes_upsert_sequence_and_purge(registry):
     transactions, outcomes = PgTransactions(registry.db), JobOutcomes()
     job, other = FetchOsImage(tag="v1.0.0"), SyncReleases()
     lock = job_keys(job).lock
@@ -309,17 +312,18 @@ def test_outcomes_upsert_sequence_failing_since_and_purge(registry):
         assert outcomes.get(tx, lock) is None
         first = outcomes.record(tx, job, status="transient", reason="origin_down",
                                 retry_not_before=110.0, now=100.0)
-    assert (first.status, first.failing_since, first.retry_not_before) == ("transient", 100.0, 110.0)
+    assert (first.status, first.reason, first.retry_not_before) == ("transient", "origin_down",
+                                                                   110.0)
     with transactions.begin() as tx:
         second = outcomes.record(tx, job, status="terminal", reason="not_found",
                                  retry_not_before=None, now=200.0)
         third = outcomes.record(tx, other, status="ok", reason=None, retry_not_before=None,
                                 now=50.0)
     assert second.seq > first.seq and third.seq > second.seq
-    assert (second.failing_since, second.retry_not_before) == (100.0, None)  # kept while failing
+    assert (second.status, second.retry_not_before) == ("terminal", None)
     with transactions.begin() as tx:
         ok = outcomes.record(tx, job, status="ok", reason=None, retry_not_before=None, now=300.0)
-        assert ok.failing_since is None and ok.reason is None
+        assert ok.reason is None
         assert outcomes.get(tx, lock) == ok
         assert outcomes.get_many(tx, [lock, job_keys(other).lock, "absent"]) == {
             lock: ok, job_keys(other).lock: third}

@@ -1,8 +1,9 @@
 """Job types: one pydantic model per real piece of work, checked when the class is defined.
 
-A job type declares its name, delivery, subject and (for asset jobs) asset kind as class
-keywords. Every rule a declaration can break raises `TypeError` at class definition, and a type
-is registered only after all rules pass. Keys are derived here and never written by callers.
+A job type declares its name, delivery and (for asset jobs) asset kind as class keywords. Every
+rule a declaration can break raises `TypeError` at class definition, and a type is registered only
+after all rules pass. Keys are derived here and never written by callers: the subject (the lock)
+is every field, in declaration order.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ class Job(BaseModel, Generic[R]):
 
     def __init_subclass__(
         cls, *, name: str | None = None, delivery: Delivery | None = None,
-        subject: tuple[str, ...] | None = None, asset: AssetKind | None = None, **kwargs: Any,
+        asset: AssetKind | None = None, **kwargs: Any,
     ) -> None:
         # Swallow the job keywords so object.__init_subclass__ does not reject them; pydantic
         # passes them again to __pydantic_init_subclass__ once the fields are built.
@@ -91,7 +92,7 @@ class Job(BaseModel, Generic[R]):
     @classmethod
     def __pydantic_init_subclass__(
         cls, *, name: str | None = None, delivery: Delivery | None = None,
-        subject: tuple[str, ...] | None = None, asset: AssetKind | None = None, **kwargs: Any,
+        asset: AssetKind | None = None, **kwargs: Any,
     ) -> None:
         super().__pydantic_init_subclass__(**kwargs)
         if cls.__pydantic_generic_metadata__["origin"] is not None:
@@ -104,14 +105,13 @@ class Job(BaseModel, Generic[R]):
         fields = tuple(cls.model_fields)
         for field in fields:
             _check_keyable(cls, field)
-        resolved_subject = _check_subject(cls, subject, fields)
         if delivery.every is not None and fields:
             raise TypeError(f"{cls.__name__}: a periodic job type has no fields")
-        _check_asset(cls, asset, result_type, resolved_subject, delivery)
+        _check_asset(cls, asset, result_type, fields, delivery)
 
         cls.job_name = name  # type: ignore[assignment]
         cls.delivery = delivery
-        cls.subject = resolved_subject
+        cls.subject = fields
         cls.asset_kind = asset
         cls.result_type = result_type
         _REGISTRY[name] = cls  # type: ignore[index]
@@ -171,25 +171,9 @@ def _check_keyable(cls: type[Job[Any]], field: str) -> None:
     raise TypeError(f"{cls.__name__}: field {field!r} has an unkeyable type {annotation!r}")
 
 
-def _check_subject(
-    cls: type[Job[Any]], subject: object, fields: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Check 6. `None` means every field, in declaration order."""
-    if subject is None:
-        return fields
-    if not isinstance(subject, tuple) or not all(isinstance(f, str) for f in subject):
-        raise TypeError(f"{cls.__name__}: subject must be a tuple of field names")
-    unknown = [f for f in subject if f not in fields]
-    if unknown:
-        raise TypeError(f"{cls.__name__}: subject names unknown fields {unknown}")
-    if len(set(subject)) != len(subject):
-        raise TypeError(f"{cls.__name__}: subject repeats a field")
-    return subject
-
-
 def _check_asset(
     cls: type[Job[Any]], asset: object, result_type: type[Any] | None,
-    subject: tuple[str, ...], delivery: Delivery,
+    fields: tuple[str, ...], delivery: Delivery,
 ) -> None:
     """Check 8: the result type and the asset kind agree."""
     if asset is None:
@@ -202,8 +186,10 @@ def _check_asset(
         raise TypeError(f"{cls.__name__}: an asset job's result must be AssetReady")
     if delivery.every is not None:
         raise TypeError(f"{cls.__name__}: an asset job is not periodic")
-    if len(subject) != 1:
-        raise TypeError(f"{cls.__name__}: an asset job's subject is exactly one field")
+    if len(fields) != 1:
+        # `asset_key` names the file by that one field; a second field would silently share
+        # the file. A multi-field asset job (media's PrepareMedia) needs an identity encoding.
+        raise TypeError(f"{cls.__name__}: an asset job has exactly one field")
     if asset in _ASSET_CLAIMS:
         raise TypeError(f"{cls.__name__}: asset kind {asset.value!r} is already claimed")
 

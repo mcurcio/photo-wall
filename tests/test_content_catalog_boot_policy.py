@@ -8,14 +8,20 @@ recovery suite: T1 = a device's known-good, T = a target that failed, T2 = a new
 from __future__ import annotations
 
 import pytest
-from catalog_fakes import device
 
 from central.content_catalog.boot_policy import BootChoice, choose_base, newest
-from central.content_catalog.ports import DeviceUpdate
+from central.content_catalog.ports import DeviceRow, DeviceUpdate
 
 T1, T, T2 = "v0.0.1", "v0.0.2", "v0.0.3"
 FENCE_T = DeviceUpdate(failed_tag=T, mark_boot_failed=True)
 CLEAR = DeviceUpdate(failed_tag=None, mark_boot_failed=False)
+
+
+def device(device_id: str, *, attached_tag=None, known_good_tag=None, last_served_tag=None,
+           boot_outcome=None, failed_tag=None, last_served_at=None) -> DeviceRow:
+    """A `DeviceRow` with every other field in the freshly-seen state."""
+    return DeviceRow(device_id, None, attached_tag, known_good_tag, last_served_tag, boot_outcome,
+                     failed_tag, last_served_at, False)
 
 
 # -- newest -------------------------------------------------------------------------------------

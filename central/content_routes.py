@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from central.assets.reader import Opened, Unavailable
-from central.content_catalog.catalog import DevicePackage, ManifestRefusal
+from central.content_catalog.catalog import DevicePackage, ManifestRefusal, sanitize_serial
 from central.content_wiring import ContentServices
 from central.kernel.ports import Candidates, NetbootBaseRequest, PackageRequest, Unknown
 from central.netboot_base import SERIAL_HEADER
@@ -121,7 +121,7 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         # line records only the sanitized value.
         header = request.headers.get(SERIAL_HEADER)
         LOG.info("netboot base fetch: serial=%s",
-                 catalog.sanitize_serial(header) or "<absent-or-invalid>")
+                 sanitize_serial(header) or "<absent-or-invalid>")
         base = NetbootBaseRequest(header)
         resolution = await catalog.resolve(base)
         if isinstance(resolution, Unknown):

@@ -1,11 +1,14 @@
-"""A4: PB1-PB9 over BOTH publishers.
+"""The one publisher conformance suite, PB1-PB9 over BOTH publishers.
 
-`RecordingPublisher` runs locally; `ProcrastinatePublisher` needs PostgreSQL
-(`PHOTO_WALL_TEST_DATABASE_URL`, via the shared `registry` fixture) and skips otherwise.
+Every case runs against `RecordingPublisher` (the fake the domain tests use) and
+`ProcrastinatePublisher`, so the two cannot drift. Both read the real Asset records, so the suite
+needs PostgreSQL (`PHOTO_WALL_TEST_DATABASE_URL`, the shared `registry` fixture) and skips
+otherwise.
 
 A harness gives each case the same verbs: `record_outcome` stands in for the job runtime (the
 outcome, the produced facts, and the end of the queued copy), `start_running` moves the pending
-copy to `doing`, and `inserted` lists what the queue received.
+copy to `doing`, and `inserted` lists what the queue received. The last sections cover what only
+one of them has: the fake's call record, and the adapter's refusals.
 """
 
 from __future__ import annotations
@@ -17,12 +20,11 @@ from typing import Any
 
 import procrastinate
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
-from fakes.publisher import RecordingPublisher
-from fakes.transactions import FakeTransactions
+from fakes.publisher import PublishedCall, RecordingPublisher
 from procrastinate.periodic import PeriodicDeferrer
 from runtime_fakes import apply_procrastinate_schema
 
+from central.infra.asset_records import PgAssetRecords
 from central.infra.job_queue import build_app, decode
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes
@@ -46,8 +48,7 @@ NOW = timedelta(0)
 SOON = timedelta(seconds=5)
 
 
-class Pair(Job[None], name="test.conformance_pair", subject=("a",),
-           delivery=Delivery(queue=QueueName.UPKEEP)):
+class Pair(Job[None], name="test.conformance_pair", delivery=Delivery(queue=QueueName.UPKEEP)):
     a: str
     b: str
 
@@ -59,11 +60,11 @@ def _status(outcome: Ready[Any] | Failed) -> tuple[str, str | None]:
 
 
 class RecordingHarness:
-    def __init__(self) -> None:
+    def __init__(self, registry) -> None:
         self.clock = ManualClock(1000.0)
-        self.assets = InMemoryAssetRecords()
-        self.transactions = FakeTransactions()
-        self.publisher = RecordingPublisher(self.clock, self.assets)
+        self.assets = PgAssetRecords(self.clock)
+        self.transactions = PgTransactions(registry.db)
+        self.publisher = RecordingPublisher(self.clock, self.assets, self.transactions)
         self._writes: list[Any] = []
 
     @asynccontextmanager
@@ -121,7 +122,7 @@ class ProcrastinateHarness:
         with self.db.transaction() as conn:
             conn.execute("CREATE TABLE pb5_probe (x INT)")
         self.clock = ManualClock(1000.0)
-        self.assets = InMemoryAssetRecords()
+        self.assets = PgAssetRecords(self.clock)
         self.transactions = PgTransactions(self.db)
         self.outcomes = RacingOutcomes()
         self.feed = OutcomeFeed(self.dsn, transactions=self.transactions, outcomes=self.outcomes,
@@ -195,9 +196,10 @@ class ProcrastinateHarness:
 
 @pytest.fixture(params=["recording", "procrastinate"])
 def h(request):
+    registry = request.getfixturevalue("registry")  # skips without a DB
     if request.param == "recording":
-        return RecordingHarness()
-    return ProcrastinateHarness(request.getfixturevalue("registry"))  # skips without a DB
+        return RecordingHarness(registry)
+    return ProcrastinateHarness(registry)
 
 
 def run(h, scenario):
@@ -282,16 +284,16 @@ def test_a_run_finishing_between_the_since_read_and_the_defer_resolves_the_handl
     assert run(h, lambda: handle.wait(timeout=NOW)) == Ready(None)
 
 
-def test_another_payload_under_the_same_subject_resolves_the_waiter(h):
+def test_another_payload_is_another_key(h):
     handle = publish_committed(h, Pair(a="x", b="1"))
 
     async def scenario():
-        wait = asyncio.create_task(handle.wait(timeout=SOON))
+        wait = asyncio.create_task(handle.wait(timeout=timedelta(milliseconds=300)))
         await until(lambda: h.waiters() == 1)
         await asyncio.to_thread(h.record_outcome, Pair(a="x", b="2"), Ready(None))
         return await wait
 
-    assert run(h, scenario) == Ready(None)
+    assert run(h, scenario) == Pending()
 
 
 # -- PB6: rollback and the open transaction -------------------------------------------------------
@@ -374,6 +376,15 @@ def test_a_retry_window_suppresses_publishing(h):
     assert h.inserted() == [job, job]
 
 
+def test_an_explicit_retry_not_before_sets_the_window(h):
+    job = SyncReleases()
+    h.record_outcome(job, Failed(False, "busy", timedelta(0)), retry_not_before=1100.0)
+    handle = publish_committed(h, job)
+    assert run(h, lambda: handle.wait(timeout=NOW)) == Failed(False, "busy",
+                                                              timedelta(seconds=100))
+    assert h.inserted() == []
+
+
 def test_a_terminal_outcome_suppresses_unless_retry_terminal(h):
     job = FetchOsImage(tag="v4.0.0")
     reference(h, job)
@@ -442,7 +453,44 @@ def test_publish_now_commits_its_own_transaction(h):
     assert h.inserted() == [SyncReleases()]
 
 
-# -- adapter-only behaviour (PostgreSQL; CI) --------------------------------------------------------
+# -- RecordingPublisher's own record of calls (what the domain tests assert on) ---------------------
+
+
+@pytest.fixture
+def recording(registry):
+    return RecordingHarness(registry)
+
+
+def test_the_fake_records_every_call_with_its_transaction(recording):
+    h, job = recording, FetchOsImage(tag="v1.0.0")
+    with h.transactions.begin() as tx:
+        h.publisher.publish(job, within=tx)
+        h.publisher.publish(job, within=tx, retry_terminal=True)  # merged, still recorded
+    run(h, lambda: h.publisher.publish_now(SyncReleases()))
+    assert h.publisher.calls == [PublishedCall(job, False, tx), PublishedCall(job, True, tx),
+                                 PublishedCall(SyncReleases(), False, None)]
+
+
+def test_the_fake_records_suppressed_calls_but_not_refused_ones(recording):
+    h, job = recording, FetchOsImage(tag="v4.0.0")
+    h.record_outcome(job, Failed(True, "not_found", None))
+    publish_committed(h, job)  # PB3: suppressed, still recorded
+    with h.transactions.begin() as tx:
+        with pytest.raises(TypeError):
+            h.publisher.publish(Job[None](), within=tx)  # PB1: refused, not recorded
+    assert [call.job for call in h.publisher.calls] == [job]
+    assert h.inserted() == []
+
+
+def test_the_fake_writes_an_asset_jobs_facts_onto_its_record(recording):
+    h, job = recording, FetchOsImage(tag="v5.0.0")
+    reference(h, job)
+    h.record_outcome(job, Ready(FACTS))
+    with h.transactions.begin() as tx:
+        assert h.assets.get(tx, asset_key(job)).produced == FACTS
+
+
+# -- adapter-only behaviour -----------------------------------------------------------------------
 
 
 def test_adapter_refuses_a_registered_type_it_does_not_publish(registry):

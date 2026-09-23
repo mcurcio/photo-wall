@@ -1,4 +1,4 @@
-"""`PgReleaseRecords` / `PgDeviceRecords` round-trip every method against a migrated schema (B7).
+"""`PgReleaseRecords` / `PgDeviceRecords` round-trip every method against a migrated schema.
 
 The DB tests use the `registry` fixture, which skips without PHOTO_WALL_TEST_DATABASE_URL (CI runs
 them). The SQL assertions are ported from `test_netboot_base_pin.py` and the sweep cases of

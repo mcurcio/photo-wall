@@ -75,6 +75,10 @@ class AssetProduction:
                 raise TerminalFailure("not_reproducible")
             if not _meets_references(asset, facts):
                 raise TerminalFailure("digest_mismatch")
+            if await asyncio.to_thread(self._recut_since, asset):
+                # Built from a locator the sync has since replaced (a re-cut): stale bytes whose
+                # facts would be recorded over the forgotten ones. Retry with the new locator.
+                raise TransientFailure("reference_changed")
             await asyncio.to_thread(self._store.install, temp, key)
             installed = True
             return facts
@@ -85,6 +89,15 @@ class AssetProduction:
     def _get(self, key: AssetKey) -> Asset | None:
         with self._transactions.begin() as tx:
             return self._records.get(tx, key)
+
+    def _recut_since(self, before: Asset) -> bool:
+        """Whether an owner's locator changed since `before` was read."""
+        now = self._get(before.key)
+        if now is None:
+            return False
+        locators = {ref.owner: ref.locator for ref in now.references}
+        return any(locators.get(ref.owner, ref.locator) != ref.locator
+                   for ref in before.references)
 
     def _measure_present(self, final: Path) -> AssetReady | None:
         """The facts of the file at `final`, or None when there is no valid regular file.

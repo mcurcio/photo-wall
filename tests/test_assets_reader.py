@@ -1,4 +1,7 @@
-"""`AssetReader.read` (C3) and `WaiterSlots`, with `RecordingPublisher` settling via `record_outcome`."""
+"""`AssetReader.read` and `WaiterSlots`, with `RecordingPublisher` settling via `record_outcome`.
+
+The Asset records are the real table (PostgreSQL, the `registry` fixture); `WaiterSlots` needs none.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +13,13 @@ import threading
 from datetime import timedelta
 
 import pytest
-from fakes.asset_records import InMemoryAssetRecords
+from content_db import Reads, RecordingTransactions, put_file
 from fakes.publisher import RecordingPublisher
-from fakes.transactions import FakeTransaction, FakeTransactions
 
 from central.assets.layout import CacheLayout
 from central.assets.reader import AssetReader, Opened, SlotsFull, Unavailable, WaiterSlots
 from central.assets.store import CacheStore
+from central.infra.asset_records import PgAssetRecords
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage
 from central.kernel.jobs import asset_key
@@ -40,14 +43,16 @@ def fd_closed(fd: int) -> bool:
 
 
 class World:
-    def __init__(self, tmp_path, *, capacity: int = 4, wait: float = 5.0,
-                 records: InMemoryAssetRecords | None = None,
+    def __init__(self, registry, tmp_path, *, capacity: int = 4, wait: float = 5.0,
+                 records: PgAssetRecords | None = None,
                  store: CacheStore | None = None) -> None:
         self.clock = ManualClock(1000.0)
         self.store = store or CacheStore(CacheLayout(tmp_path))
-        self.records = records or InMemoryAssetRecords()
-        self.transactions = FakeTransactions()
-        self.publisher = RecordingPublisher(self.clock, assets=self.records)
+        self.records = records or PgAssetRecords(self.clock)
+        self.transactions = RecordingTransactions(registry.db)
+        self.reads = Reads(RecordingTransactions(registry.db))
+        self.publisher = RecordingPublisher(self.clock, assets=self.records,
+                                            transactions=self.reads.transactions)
         self.slots = WaiterSlots(capacity)
         self.reader = AssetReader(store=self.store, records=self.records,
                                   transactions=self.transactions, publisher=self.publisher,
@@ -56,15 +61,19 @@ class World:
 
     def record(self, job, produced: AssetReady | None = None) -> None:
         key = asset_key(job)
-        self.records.reference(FakeTransaction(), key,
-                               AssetReference(job.tag, LOCATOR, None, None))
-        if produced is not None:
-            self.records.record_produced(FakeTransaction(), key, produced)
+        with self.reads.transactions.begin() as tx:
+            self.records.reference(tx, key, AssetReference(job.tag, LOCATOR, None, None))
+            if produced is not None:
+                self.records.record_produced(tx, key, produced)
 
     def put(self, job, data: bytes = DATA) -> None:
-        path = self.store.layout.path(asset_key(job))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        put_file(self.store, asset_key(job), data)
+
+
+@pytest.fixture
+def world_at(registry, tmp_path):
+    """`World(...)` over this test's schema and cache directory."""
+    return lambda **options: World(registry, tmp_path, **options)
 
 
 def served(result) -> bytes:
@@ -86,8 +95,8 @@ async def until(predicate) -> None:
 # -- fast path (flow b) ---------------------------------------------------------------------------
 
 
-def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(tmp_path):
-    world = World(tmp_path)
+def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(world_at):
+    world = world_at()
     world.record(NEW)  # recorded but never produced
     world.record(OLD, FACTS)
     world.put(OLD)
@@ -99,8 +108,8 @@ def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(
     assert world.transactions.begun[0].state == "committed"
 
 
-def test_a_candidate_whose_file_is_absent_or_wrong_is_skipped(tmp_path):
-    world = World(tmp_path)
+def test_a_candidate_whose_file_is_absent_or_wrong_is_skipped(world_at):
+    world = world_at()
     world.record(NEW, FACTS)
     world.put(NEW, DATA[:-1])  # wrong size: never served
     world.record(OLD, FACTS)
@@ -113,8 +122,8 @@ def test_a_candidate_whose_file_is_absent_or_wrong_is_skipped(tmp_path):
 # -- miss: publish and wait (flow c) --------------------------------------------------------------
 
 
-def test_miss_publishes_the_first_candidate_with_retry_terminal_and_serves_when_ready(tmp_path):
-    world = World(tmp_path)
+def test_miss_publishes_the_first_candidate_with_retry_terminal_and_serves_when_ready(world_at):
+    world = world_at()
     world.record(NEW)
     world.record(OLD)
 
@@ -134,8 +143,8 @@ def test_miss_publishes_the_first_candidate_with_retry_terminal_and_serves_when_
     assert world.slots.in_use == 0
 
 
-def test_ready_but_absent_file_is_unavailable(tmp_path):
-    world = World(tmp_path)
+def test_ready_but_absent_file_is_unavailable(world_at):
+    world = world_at()
     world.record(NEW)
 
     async def run():
@@ -152,8 +161,8 @@ def test_ready_but_absent_file_is_unavailable(tmp_path):
     (Failed(False, "http_503", timedelta(0)), Unavailable("http_503", 1)),
     (Failed(True, "base_digest_mismatch", None), Unavailable("base_digest_mismatch", 30)),
 ])
-def test_failed_outcomes_map_to_unavailable(tmp_path, outcome, expected):
-    world = World(tmp_path)
+def test_failed_outcomes_map_to_unavailable(world_at, outcome, expected):
+    world = world_at()
     world.record(NEW)
 
     async def run():
@@ -166,16 +175,16 @@ def test_failed_outcomes_map_to_unavailable(tmp_path, outcome, expected):
     assert world.slots.in_use == 0
 
 
-def test_a_terminal_outcome_is_retried_by_a_request(tmp_path):
-    world = World(tmp_path, wait=0.01)
+def test_a_terminal_outcome_is_retried_by_a_request(world_at):
+    world = world_at(wait=0.01)
     world.record(NEW)
     world.publisher.record_outcome(NEW, Failed(True, "base_digest_mismatch", None))
     asyncio.run(world.reader.read(Candidates((NEW,), pinned=True)))
     assert world.publisher.inserted == [NEW]  # retry_terminal re-publishes past PB3
 
 
-def test_timeout_is_unavailable_and_does_not_cancel_the_job(tmp_path):
-    world = World(tmp_path, wait=0.01)
+def test_timeout_is_unavailable_and_does_not_cancel_the_job(world_at):
+    world = world_at(wait=0.01)
     world.record(NEW)
     assert asyncio.run(world.reader.read(Candidates((NEW,), pinned=True))) == \
         Unavailable("timeout", 5)
@@ -183,8 +192,8 @@ def test_timeout_is_unavailable_and_does_not_cancel_the_job(tmp_path):
     assert world.slots.in_use == 0
 
 
-def test_full_slots_are_busy_and_publish_nothing(tmp_path):
-    world = World(tmp_path, capacity=1)
+def test_full_slots_are_busy_and_publish_nothing(world_at):
+    world = world_at(capacity=1)
     world.record(NEW)
     with world.slots.claim():
         result = asyncio.run(world.reader.read(Candidates((NEW,), pinned=True)))
@@ -192,8 +201,8 @@ def test_full_slots_are_busy_and_publish_nothing(tmp_path):
     assert world.publisher.calls == []
 
 
-def test_a_pinned_candidate_never_yields_another_job(tmp_path):
-    world = World(tmp_path, wait=0.01)
+def test_a_pinned_candidate_never_yields_another_job(world_at):
+    world = world_at(wait=0.01)
     world.record(OLD, FACTS)
     world.put(OLD)
     world.record(NEW)
@@ -205,8 +214,8 @@ def test_a_pinned_candidate_never_yields_another_job(tmp_path):
 # -- cancellation (the route's disconnect watcher) ------------------------------------------------
 
 
-def test_cancellation_while_waiting_releases_the_slot_and_keeps_the_job(tmp_path):
-    world = World(tmp_path)
+def test_cancellation_while_waiting_releases_the_slot_and_keeps_the_job(world_at):
+    world = world_at()
     world.record(NEW)
 
     async def run():
@@ -240,9 +249,9 @@ class BlockingStore(CacheStore):
         return opened
 
 
-def test_cancellation_during_the_open_closes_the_fd_it_produced(tmp_path):
+def test_cancellation_during_the_open_closes_the_fd_it_produced(world_at, tmp_path):
     store = BlockingStore(CacheLayout(tmp_path))
-    world = World(tmp_path, store=store)
+    world = world_at(store=store)
     world.record(NEW, FACTS)
     world.put(NEW)
 
@@ -262,29 +271,29 @@ def test_cancellation_during_the_open_closes_the_fd_it_produced(tmp_path):
 # -- last_served_at -------------------------------------------------------------------------------
 
 
-def test_touch_is_throttled_per_key(tmp_path):
-    world = World(tmp_path)
+def test_touch_is_throttled_per_key(world_at):
+    world = world_at()
     world.record(NEW, FACTS)
     world.put(NEW)
     candidates = Candidates((NEW,), pinned=True)
     key = asset_key(NEW)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.records.assets[key].last_served_at == 1000.0
+    assert world.reads.asset(key).last_served_at == 1000.0
     world.clock.advance(60)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.records.assets[key].last_served_at == 1000.0  # within 5 minutes
+    assert world.reads.asset(key).last_served_at == 1000.0  # within 5 minutes
     world.clock.advance(300)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.records.assets[key].last_served_at == 1360.0
+    assert world.reads.asset(key).last_served_at == 1360.0
 
 
-class FailingTouch(InMemoryAssetRecords):
+class FailingTouch(PgAssetRecords):
     def touch_served(self, tx, key, at):
         raise RuntimeError("db down")
 
 
-def test_a_touch_failure_is_logged_and_never_fails_the_serve(tmp_path, caplog):
-    world = World(tmp_path, records=FailingTouch())
+def test_a_touch_failure_is_logged_and_never_fails_the_serve(world_at, caplog):
+    world = world_at(records=FailingTouch(ManualClock(1000.0)))
     world.record(NEW, FACTS)
     world.put(NEW)
     with caplog.at_level(logging.WARNING, logger="central.assets.reader"):

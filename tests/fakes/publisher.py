@@ -1,8 +1,13 @@
 """An in-memory `Publisher` honouring PB1-PB9 (`central/kernel/publishing.py`).
 
 `record_outcome` stands in for the job runtime: it writes the key's latest outcome, consumes the
-job's pending copy, writes an asset job's produced facts to `assets` (when given), and wakes
-waiters. Waiters may live on any event loop; `record_outcome` may be called from any thread.
+job's pending copy, writes an asset job's produced facts to `assets` (when given, through
+`transactions`), and wakes waiters. Waiters may live on any event loop; `record_outcome` may be
+called from any thread.
+
+It is the `Publisher` port's test double: it models the PB1-PB9 contract, not the SQL, and the
+shared conformance suite (`test_publisher_conformance.py`) runs it beside `ProcrastinatePublisher`
+on PostgreSQL, so the two cannot drift.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from central.kernel.publishing import (
     Ready,
     SettledHandle,
 )
-from central.kernel.transactions import Transaction
+from central.kernel.transactions import Transaction, Transactions
 from contracts.time import Clock
 from fakes.transactions import FakeTransaction
 
@@ -59,9 +64,13 @@ class RecordingPublisher:
     rolled back with their transaction.
     """
 
-    def __init__(self, clock: Clock, assets: AssetRecords | None = None) -> None:
+    def __init__(self, clock: Clock, assets: AssetRecords | None = None,
+                 transactions: Transactions | None = None) -> None:
+        if (assets is None) != (transactions is None):
+            raise ValueError("assets and transactions go together")
         self.clock = clock
         self.assets = assets
+        self.transactions = transactions
         self.calls: list[PublishedCall] = []
         self._deferred: list[_Deferred] = []
         self._pending: dict[str, _Deferred] = {}  # queueing lock -> the pending copy
@@ -122,9 +131,8 @@ class RecordingPublisher:
                 raise ValueError("retry_not_before is only for transient outcomes")
             status: Literal["ok", "transient", "terminal"] = "ok"
             if self.assets is not None and type(job).asset_kind is not None:
-                tx = FakeTransaction()
-                self.assets.record_produced(tx, asset_key(job), outcome.result)
-                tx.state = "committed"
+                with self.transactions.begin() as tx:  # type: ignore[union-attr]
+                    self.assets.record_produced(tx, asset_key(job), outcome.result)
         elif isinstance(outcome, Failed) and outcome.terminal:
             if retry_not_before is not None:
                 raise ValueError("retry_not_before is only for transient outcomes")
@@ -186,9 +194,8 @@ class RecordingPublisher:
         an absent record (or one without produced facts) is `ASSET_NOT_RECORDED` (PB7)."""
         if self.assets is None or type(job).asset_kind is None:
             return Ready(result)
-        tx = FakeTransaction()
-        asset = self.assets.get(tx, asset_key(job))
-        tx.state = "committed"
+        with self.transactions.begin() as tx:  # type: ignore[union-attr]
+            asset = self.assets.get(tx, asset_key(job))
         if asset is None or asset.produced is None:
             return Failed(False, ASSET_NOT_RECORDED, timedelta(0))
         return Ready(asset.produced)

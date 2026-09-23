@@ -1,4 +1,4 @@
-"""P2.1: the composition helper, the worker root's one signal handler, and migration 022.
+"""The composition helper, the worker root's one signal handler, and migration 022.
 
 The wiring cases need no database: nothing in `central.content_wiring` connects at build time.
 The 022 case needs PostgreSQL (`PHOTO_WALL_TEST_DATABASE_URL`) and skips without it.

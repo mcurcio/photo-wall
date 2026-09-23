@@ -51,7 +51,7 @@ from media.models import SourceSpec
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-# CatalogError kinds -> HTTP status (P2.3); the body is always {"error": code}.
+# CatalogError kinds -> HTTP status; the body is always {"error": code}.
 CATALOG_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
 

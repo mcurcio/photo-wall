@@ -55,6 +55,7 @@ from central.app import create_app
 from central.assets.layout import CacheLayout
 from central.assets.reader import AssetReader, WaiterSlots
 from central.assets.store import CacheStore
+from central.content_catalog.catalog import device_id_for_serial
 from central.content_wiring import build_content_services
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgReleaseRecords
@@ -65,7 +66,6 @@ from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage, FetchPackage
 from central.kernel.jobs import asset_key
 from central.kernel.ports import PublishedRelease
-from central.netboot_base import device_id_for_serial
 from scripts.test_netboot_e2e import (  # reuse tracer helpers
     _FixedDiscovery,
     _NoSleep,

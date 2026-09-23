@@ -1,8 +1,8 @@
-"""Offline unit tests for the GitHub `ReleaseOrigin` (MVP lane D, bead D-1).
+"""Offline unit tests for the GitHub `ReleaseOrigin`.
 
-Ported from `tests/test_github_releases.py`, then extended with one test per D2 classification
-row. No network: every request is served by an `httpx.MockTransport` route double that serves
-the paginated releases API on `api.github.com` and each release asset on its
+Ported from `tests/test_github_releases.py`, then extended with one test per failure
+classification. No network: every request is served by an `httpx.MockTransport` route double
+that serves the paginated releases API on `api.github.com` and each release asset on its
 `browser_download_url`, including a CDN 302 hop.
 """
 
@@ -308,7 +308,7 @@ def test_pagination_is_capped():
     assert len([r for r in server.requests if r.url.host == "api.github.com"]) == 20
 
 
-# -- D2 classification (one test per row) --------------------------------------
+# -- failure classification (one test per case) --------------------------------
 
 
 def test_list_connect_error_is_origin_unreachable():

@@ -1,7 +1,7 @@
 """The PostgreSQL `AssetRecords` (tables `assets` and `asset_references`, migration 021).
 
-Semantics match `tests/fakes/asset_records.InMemoryAssetRecords`. Every method runs inside the
-caller's transaction (`pg_connection(tx)`), so it blocks: call it from a worker thread.
+Every method runs inside the caller's transaction (`pg_connection(tx)`), so it blocks: call it
+from a worker thread.
 
 Concurrency: `retire` locks the asset row `FOR UPDATE` before deleting, and `reference` takes a
 row lock through its upsert, so a reference added concurrently with the retirement of the last
@@ -122,6 +122,13 @@ class PgAssetRecords:
         recorded = _produced(row)
         if recorded != facts:
             raise ProducedFactsConflict(f"{key}: recorded {recorded}, given {facts}")
+
+    def forget_produced(self, tx: Transaction, key: AssetKey) -> None:
+        pg_connection(tx).execute(
+            "UPDATE assets SET produced_size=NULL, produced_sha256=NULL "
+            "WHERE kind=%s AND identity=%s",
+            (key.kind.value, key.identity),
+        )
 
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
         pg_connection(tx).execute(

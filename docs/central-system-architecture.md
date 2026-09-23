@@ -141,7 +141,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | --- | --- | --- | --- |
 | **Catalog entries** (per domain) | Release `tag`; media original (`asset_id`); device `device_id` | What exists upstream and who should get what (pin, promote, last served tag) | `Sync*` handlers; HTTP operator actions; HTTP netboot (device row) |
 | **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tag)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once; `last_served_at`. The row goes when its last reference is retired. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
-| **Job outcome** (one table, every job type) | `(job type, subject)` | The latest attempt's *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; `failing_since`; a global sequence number. Never facts, and never "is cached". | The job runtime only, with NOTIFY in the same transaction |
+| **Job outcome** (one table, every job type) | `(job type, subject)` | The latest attempt's *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
 | **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices; media that active plans reference | nobody (computed) |
 
@@ -322,7 +322,6 @@ class Delivery:
 class Job(BaseModel, Generic[R]):            # frozen, extra="forbid"; R = the handler's result type
     @classmethod
     def __pydantic_init_subclass__(cls, *, name: str | None = None, delivery: Delivery | None = None,
-                                   subject: tuple[str, ...] | None = None,
                                    asset: AssetKind | None = None, **kw: Any) -> None: ...
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
                    delivery=Delivery(queue=QueueName.FETCH, retry=(timedelta(seconds=5), timedelta(minutes=1)))):
@@ -330,16 +329,18 @@ class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IM
 AssetJob = FetchOsImage | FetchPackage | PrepareMedia   # also the typed reference to an asset
 ```
 
-**Keys are derived by kernel functions, never written or overridden.** `job_keys(job)` gives
-`lock` = task name + *subject* values (the subject defaults to every field) and `queueing_lock` =
-task name + **all** values, escaped so each key maps back to one job. An added field therefore
-makes a separate pending copy, never a second running one. `asset_key(job)` is
-`(asset, subject values)`, so an asset's lock and its disk key are the same.
+**Keys are derived by kernel functions, never written or overridden.** The *subject* is every
+field, in declaration order; no declaration can narrow it. `job_keys(job)` gives `lock` and
+`queueing_lock` = task name + those values, escaped so each key maps back to one job.
+`asset_key(job)` is `(asset, the job's one field)`, so an asset's lock and its disk key name the
+same thing.
 
-**Class definition raises `TypeError`** for a missing `name`/`delivery`, a bare `Job`, an unknown
-subject field, an unkeyable field type, a duplicate `name`/`asset`, `every` on a job with fields,
-`R` other than `None` without `asset=`, subclassing a job type, or redefining a `Job` member
-(probed on pydantic 2.11.4). With no type checker in CI, this is the strongest check available.
+**Class definition raises `TypeError`** for a missing `name`/`delivery`, a bare `Job`, a
+caller-chosen key (`subject=`, `lock=`), an unkeyable field type, a duplicate `name`/`asset`,
+`every` on a job with fields, `R` other than `None` without `asset=`, an asset job with more than
+one field (`asset_key` names the file by it; `PrepareMedia` first needs a two-field identity),
+subclassing a job type, or redefining a `Job` member (probed on pydantic 2.11.4). With no type
+checker in CI, this is the strongest check available.
 
 **Mapping** (`central/infra/job_queue.py`, the only importer of procrastinate): task
 `"photo_wall." + name`; kwargs `model_dump(mode="json")` plus the reserved `timestamp`/`_attempt`;
@@ -376,7 +377,10 @@ class Publisher(Protocol):
   record** says what it is: the runtime writes the handler's `R` there (`record_produced`,
   write-once). A re-production must match that digest before the rename, else
   `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and no
-  later failure erases facts. **`job_outcomes`** holds only the latest attempt's *status* per
+  later failure erases facts. The one exception is an OS image rebuilt under its tag (a release
+  re-cut; its old bytes are gone upstream): `SyncReleases` forgets its facts (`forget_produced`),
+  and a production built from the replaced locator is discarded as `reference_changed`.
+  **`job_outcomes`** holds only the latest attempt's *status* per
   `(job type, subject)`. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock
   key>` in one transaction, and `Ready.result` is read from the Asset record. Status is stored
   because a late waiter misses a NOTIFY. `PurgeFinishedJobs` drops rows unwritten for 30 days
@@ -384,7 +388,7 @@ class Publisher(Protocol):
 - **`since`.** `publish` reads the global sequence number, *then* defers: two statements,
   because `procrastinate_defer_jobs_v1` cannot return it. `wait` resolves on any newer outcome. An
   `ok` from before a wipe never counts; a run ending between the statements does, because it
-  produced the asset. A waiter may resolve on another payload's run under the same subject.
+  produced the asset.
 - **`publish` inserts nothing** inside a retry window (its handle is already
   `Failed(transient, retry_after)`) or after a terminal outcome (already `Failed(terminal)`),
   unless `retry_terminal` is set. The request path (`AssetReader`) always sets it, as do a sync
@@ -465,7 +469,7 @@ for an OS image the origin digest is the tarball's, not the squashfs's, so `expe
 | `Publisher`, `JobHandle`, `Transactions` (opaque `Transaction`), `Handler` | §10.2, §10.3 |
 | `ContentCatalog` | `async resolve(request) -> Resolution`; `desired_assets() -> frozenset[AssetJob]` |
 | `PlanMediaReferences` (playback implements it) | `referenced() -> frozenset[PrepareMedia]` |
-| `AssetRecords` (Catalog declares through it) | `get(tx, key)`; `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row goes with its last reference); `record_produced(tx, key, facts)` (write-once); `touch_served(tx, key, at)` |
+| `AssetRecords` (Catalog declares through it) | `get(tx, key)`; `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row goes with its last reference); `record_produced(tx, key, facts)` (write-once); `forget_produced(tx, key)` (a release re-cut only); `touch_served(tx, key, at)` |
 | `ReleaseOrigin` / `MediaOrigin` | `async list_releases(etag)` / `async list_source(spec)`; `async download(loc, into, *, max_bytes)` |
 
 **Concrete classes:**
@@ -497,5 +501,7 @@ every handler and runs `JobRuntime`, and its inline boot work (`:390-393`) becom
 
 **Tests.** A `RecordingPublisher` fake and the procrastinate adapter share one conformance suite
 (Postgres in CI): ENQUEUED/merged/running, `since`, rollback, cancellation, one test per rejection.
+A port implemented in SQL is tested against Postgres, never against an in-memory copy of its
+queries.
 
 **Stays out:** event bus, outbox, chaining DSL, caller-supplied keys, job history, our own scheduler.

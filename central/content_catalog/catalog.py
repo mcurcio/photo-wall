@@ -39,8 +39,13 @@ from central.kernel.types import release_version
 from contracts.equipment import equipment_device_id
 from contracts.time import Clock
 
-DEVICE_KIND = "pi"  # the equipment_device_id kind a netbooting Pi derives its id with
-_SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")  # ported from netboot_base
+# The `equipment_device_id` kind, shared with appliance/bootstrap.py and player/service.py via
+# contracts.equipment, so one Pi resolves to one device_id at netboot and at enrollment.
+DEVICE_KIND = "pi"
+# The only shape a client serial may take before it can select an image or be logged: a Pi serial
+# is 16 hex digits; a small safe superset leaves room for another scheme. The serial is
+# unauthenticated, so control characters, separators and whitespace are refused here.
+_SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
 
 T = TypeVar("T")
 
@@ -89,6 +94,19 @@ async def in_transaction(transactions: Transactions, body: Callable[[Transaction
             return body(tx)
 
     return await asyncio.to_thread(run)
+
+
+def sanitize_serial(serial: str | None) -> str | None:
+    """The serial if it matches the safe charset, else None (the route logs only this value)."""
+    if serial is not None and _SAFE_SERIAL.fullmatch(serial):
+        return serial
+    return None
+
+
+def device_id_for_serial(serial: str | None) -> str | None:
+    """The canonical `device-<64hex>` id of a safe serial, else None."""
+    serial = sanitize_serial(serial)
+    return None if serial is None else equipment_device_id(DEVICE_KIND, serial.encode())
 
 
 def _os_image_job(tag: str) -> FetchOsImage | None:
@@ -151,7 +169,8 @@ class ReleaseCatalog:
 
         OS images and `.deb`s for active devices' pins, known-goods and last-served tags (what
         they run now) and `frontier or bootstrap`; the `.deb` of the promoted and the last-good
-        tag. Tags without the locator are skipped.
+        tag. Tags without the locator are skipped, and so is a frozen (divergent) tag's `.deb`
+        once its file is gone: upstream serves other bytes for it, so fetching it can only fail.
         """
         named = self._devices.named_tags(tx)
         by_tag = {row.tag: row for row in self._releases.all(tx)}
@@ -166,12 +185,20 @@ class ReleaseCatalog:
                 continue
             if row.os_image is not None and (job := _os_image_job(tag)) is not None:
                 jobs.add(job)
-            if (package := _package(row)) is not None:
+            if (package := self._obtainable(tx, row)) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
         for tag in self._policy_tags(tx):
-            if (package := _package(by_tag.get(tag))) is not None:
+            if (package := self._obtainable(tx, by_tag.get(tag))) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
         return frozenset(jobs)
+
+    def _obtainable(self, tx: Transaction, row: ReleaseRow | None) -> DevicePackage | None:
+        """The row's `.deb`, unless the tag is frozen and its file is gone (unobtainable)."""
+        package = _package(row)
+        if package is not None and row is not None and row.divergent and not self._on_disk(
+                tx, package):
+            return None
+        return package
 
     def _policy_tags(self, tx: Transaction) -> set[str]:
         """The promoted and the last-good tag: the `.deb`s `/v1/app/manifest` may name."""
@@ -193,7 +220,7 @@ class ReleaseCatalog:
 
     async def record_served(self, request: NetbootBaseRequest, job: FetchOsImage) -> None:
         """After a 200 only: record the tag whose bytes were served (never on a 503 miss)."""
-        device_id = self._device_id(request.serial)
+        device_id = device_id_for_serial(request.serial)
         if device_id is None:
             return
 
@@ -204,7 +231,7 @@ class ReleaseCatalog:
 
     async def device_package(self, serial: str | None) -> DevicePackage | ManifestRefusal:
         """The `.deb` of the tag this device was actually served this boot (F4)."""
-        device_id = self._device_id(serial)
+        device_id = device_id_for_serial(serial)
         if device_id is None:
             return ManifestRefusal("app_manifest_unresolved")
 
@@ -322,21 +349,11 @@ class ReleaseCatalog:
 
         return await self._in_tx(read)
 
-    def sanitize_serial(self, serial: str | None) -> str | None:
-        """The serial if it matches the safe charset, else None (the route logs this value)."""
-        if serial is not None and _SAFE_SERIAL.fullmatch(serial):
-            return serial
-        return None
-
     # -- internals --------------------------------------------------------------------------------
 
-    def _device_id(self, serial: str | None) -> str | None:
-        serial = self.sanitize_serial(serial)
-        return None if serial is None else equipment_device_id(DEVICE_KIND, serial.encode())
-
     def _resolve_base(self, tx: Transaction, request: NetbootBaseRequest) -> Resolution:
-        serial = self.sanitize_serial(request.serial)
-        device_id = self._device_id(serial)
+        serial = sanitize_serial(request.serial)
+        device_id = device_id_for_serial(serial)
         device = None
         if serial is not None and device_id is not None:
             device = self._devices.lock(tx, device_id, serial, now=self._clock.utc())
@@ -361,13 +378,15 @@ class ReleaseCatalog:
 
         The on-disk answer is a snapshot: a file removed between here and the reader's open is
         still fetched once. No cache cleanup ships in the MVP, so today nothing removes one.
+        A frozen (divergent) tag never makes its `.deb` desired here (see `desired_in`).
         """
-        tags = frozenset(row.tag for row in self._releases.shipping(tx, request.sha256)
-                         if _package(row) is not None)
-        if not tags:
+        rows = [row for row in self._releases.shipping(tx, request.sha256)
+                if _package(row) is not None]
+        if not rows:
             return Unknown("unknown_package")
         job = FetchPackage(sha256=request.sha256)
-        if self._package_desired(tx, tags) or self._stored.present(tx, job):
+        live = frozenset(row.tag for row in rows if not row.divergent)
+        if (live and self._package_desired(tx, live)) or self._stored.present(tx, job):
             return Candidates((job,), pinned=True)
         return Unknown("unknown_package")
 
