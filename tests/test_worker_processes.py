@@ -22,6 +22,22 @@ JOB_LOOPS = 2  # the runtime's loops per process: fetch and upkeep
 MEDIA_LOOP = 1
 
 
+def fake_media_tools(directory: Path) -> Path:
+    """`ffmpeg`/`ffprobe` stand-ins so worker boot does not depend on the host's media tools.
+
+    The real `Preparer` resolves both on PATH at construction and runs `-version` for the recipe
+    identity at media-loop boot; nothing here prepares media. Same fake-executable-on-PATH style
+    as test_docker_diagnostics.py. They come first on PATH, so the test runs the same with or
+    without real tools installed (CI has none).
+    """
+    directory.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        tool = directory / name
+        tool.write_text(f"#!/bin/sh\necho '{name} version 0-test-stub'\n")
+        tool.chmod(0o755)
+    return directory
+
+
 def workers(db) -> int:
     with db.transaction() as conn:
         return conn.execute("SELECT count(*) AS n FROM procrastinate_workers").fetchone()["n"]
@@ -45,7 +61,8 @@ def test_two_worker_processes_on_one_cache_root_both_run_the_job_runtime(registr
     env = {**os.environ, "PHOTO_WALL_DATABASE_URL": registry.db.dsn,
            "PHOTO_WALL_CONNECTIONS_FILE": str(connections),
            "PHOTO_WALL_CACHE_ROOT": str(tmp_path / "cache"),
-           "PHOTO_WALL_RELEASE_REPO": "example.invalid/none"}
+           "PHOTO_WALL_RELEASE_REPO": "example.invalid/none",
+           "PATH": f"{fake_media_tools(tmp_path / 'bin')}{os.pathsep}{os.environ.get('PATH', '')}"}
 
     def spawn() -> subprocess.Popen:
         return subprocess.Popen([sys.executable, "-m", "media.worker"], cwd=ROOT, env=env,

@@ -22,7 +22,12 @@ from central import cache_layout
 from central.catalog import CatalogSnapshot
 from central.content_wiring import build_job_runtime
 from central.db import Database
-from central.infra.runtime import JobRuntime, until_stopped
+from central.infra.runtime import (
+    COMPLETION_NOT_RECORDED,
+    WORKER_EXITED,
+    JobRuntime,
+    until_stopped,
+)
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore, MediaStoreError
@@ -47,6 +52,8 @@ logger = logging.getLogger("photo_wall.worker")
 
 
 _FILE_LIMIT = 1024**2
+# The job runtime's process-ending conditions; any other RuntimeError stays `worker_internal`.
+_RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
 _PERMANENT = frozenset({
     "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
     "metadata_invalid", "metadata_mismatch", "preparation_limit", "preparation_invalid",
@@ -171,6 +178,8 @@ class MediaWorker:
             return error.code
         if isinstance(error, OSError):
             return "worker_io"
+        if type(error) is RuntimeError and error.args and error.args[0] in _RUNTIME_EXITS:
+            return error.args[0]
         return "worker_internal"
 
     def _utc(self) -> float:
