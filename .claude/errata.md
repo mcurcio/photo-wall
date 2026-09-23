@@ -702,3 +702,37 @@ doc softenings.
   filter, one bad legacy row would do one of two things. It would abort the migration (the
   `owner` CHECK), or it would make `PgAssetRecords.get` raise `ValueError` while building an
   `OriginLocator` (central/kernel/assets.py:62-67). A filtered row gets no asset.
+
+## central-mvp Lane A (job runtime) — 2026-09-22
+
+- **A-3 STOP-class, resolved locally: the savepoint cannot sit where the page puts it.**
+  `.claude/mvp/lane-A-job-runtime.md:212` has `publish` call
+  `defer(..., connection=...)` *inside* `conn.transaction()`, while `:66-67` has `defer`
+  itself report `AlreadyEnqueued` as `False`. Together, a merge's UniqueViolation is caught
+  INSIDE the savepoint block, which then exits normally and issues `RELEASE SAVEPOINT` on an
+  aborted transaction (psycopg `transaction.py` `_commit_gen`), so every merge aborts the
+  caller's transaction and PB5 fails. Probed on PostgreSQL 16: with the literal placement,
+  `test_infra_publisher_conformance.py::{test_enqueued_merged_and_joined_handles_are_equivalent,
+  test_a_merge_inside_within_leaves_the_caller_transaction_working}[procrastinate]` both FAIL.
+  Implemented: `job_queue.defer` opens the savepoint itself and catches `AlreadyEnqueued`
+  OUTSIDE it (the `central/media_queue.py:51-63` pattern); `publish` calls `defer` directly.
+  Frozen signatures unchanged. Page `:212` should read "defer opens the savepoint".
+- **PB4 "a running copy is joined, not duplicated" (`P0-kernel.md:235`) differs between the
+  two publishers.** procrastinate's queueing-lock index covers only `todo`
+  (`procrastinate/sql/schema.sql:100`), so publishing while a copy is `doing` INSERTS one
+  `todo` copy (it waits on the `lock`, then runs again). The handle still joins the running
+  copy (resolves on its outcome, `since` rule), so the conformance case asserts handle
+  equivalence only; `RecordingPublisher` inserts nothing in that case. Cost: one extra,
+  normally cheap re-run (an asset handler finds its verified file). Not changed; flag for the
+  kernel page if "not duplicated" was meant literally (it would need a `doing`-row lookup).
+- **Additive, not on the frozen page: `QueueAdmin.aclose()`.** `QueueAdmin(dsn)` owns an async
+  procrastinate pool (opened lazily, `min_size=0, max_size=2`) and the page gives it no
+  lifecycle. P2 wiring should `await admin.aclose()` at worker shutdown.
+- **Kernel gap: an `ok` outcome for an asset job whose Asset record is absent.**
+  `record_produced` is a no-op for an absent row (`central/kernel/ports.py` AssetRecords), so
+  `Ready.result` (read from the record, `P0-kernel.md:202`) has nothing to return. The adapter
+  returns `Failed(terminal=False, "asset_not_recorded", retry_after=0)`;
+  `RecordingPublisher` instead falls back to the in-memory result. Needs a kernel ruling.
+- **Minor: `RecordedFailure(reason)` (`lane-A-job-runtime.md:176`) carries the outcome STATUS**
+  (`"transient"`/`"terminal"`), because `JobExecutor.execute` returns only the status (frozen
+  signature). The reason is in `job_outcomes`; the exception only ends the row `failed`.
