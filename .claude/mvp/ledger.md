@@ -9,3 +9,4 @@ Only the orchestrator edits this file. Status is one of `open`, `in_progress`, `
 | D-1+D-2 | D origins + health | landed | eb266be |
 | B-1..B-4 | B content catalog | landed | 3cf5919 |
 | C-1..C-4 | C assets | landed | 1ddcac9 |
+| A-1..A-4 | A job runtime | landed | f8b9e3f |
