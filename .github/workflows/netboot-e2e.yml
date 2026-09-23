@@ -29,7 +29,10 @@ on:
       - scripts/test_netboot_e2e.py
       - appliance/provision.py
       - scripts/build_player_deb.py
-      - central/app_packages.py
+      - central/content_routes.py
+      - central/content_catalog/**
+      - central/assets/**
+      - central/infra/**
       - .github/workflows/netboot-e2e.yml
 
 permissions:

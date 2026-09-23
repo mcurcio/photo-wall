@@ -9,29 +9,31 @@ import logging
 import math
 import os
 import re
+import signal
 import stat
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
 from central import cache_layout
-from central.app_release_boot import boot_autopull
-from central.app_release_queue import APP_RELEASE_QUEUE, ProcrastinateAppReleaseQueue
-from central.app_release_service import AppReleaseService
 from central.catalog import CatalogSnapshot
+from central.content_wiring import build_job_runtime
 from central.db import Database
-from central.installation_repository import PostgresInstallationRepository
+from central.infra.runtime import (
+    COMPLETION_NOT_RECORDED,
+    WORKER_EXITED,
+    JobRuntime,
+    until_stopped,
+)
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
-from central.media_store import MediaStore
-from central.netboot_base import resolve_base_root
+from central.media_store import MediaStore, MediaStoreError
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
-from media.app_release_tasks import register_app_release_tasks
 from media.immich import ImmichClient
 from media.models import (
     ConnectionConfig,
@@ -49,23 +51,9 @@ from media.task_queue import MediaTaskFailed, RetryableMediaTask, create_worker_
 logger = logging.getLogger("photo_wall.worker")
 
 
-def worker_queues(release_enabled: bool) -> list[str]:
-    """The queues this worker consumes, given whether release sourcing is on.
-
-    MEDIA_QUEUE is always consumed. A task deferred onto a queue absent here is
-    never dispatched, so gating APP_RELEASE_QUEUE on `release_enabled` is what
-    decides whether the worker polls GitHub. 0013 flips release sourcing
-    always-on, so the worker now passes ``True``; the disabled branch is retained
-    as the pure-function contract the wiring test mutation-probes (presence when
-    enabled, absence when disabled).
-    """
-    queues = [MEDIA_QUEUE]
-    if release_enabled:
-        queues.append(APP_RELEASE_QUEUE)
-    return queues
-
-
 _FILE_LIMIT = 1024**2
+# The job runtime's process-ending conditions; any other RuntimeError stays `worker_internal`.
+_RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
 _PERMANENT = frozenset({
     "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
     "metadata_invalid", "metadata_mismatch", "preparation_limit", "preparation_invalid",
@@ -190,6 +178,8 @@ class MediaWorker:
             return error.code
         if isinstance(error, OSError):
             return "worker_io"
+        if type(error) is RuntimeError and error.args and error.args[0] in _RUNTIME_EXITS:
+            return error.args[0]
         return "worker_internal"
 
     def _utc(self) -> float:
@@ -348,16 +338,73 @@ class MediaWorker:
         await asyncio.gather(*(close(client) for client in self._clients.values()))
         self._clients.clear()
 
-def _log_boot_autopull(task: asyncio.Task) -> None:
-    """Log the boot auto-pull outcome and SWALLOW it -- a boot-pull failure or
-    cancellation must never propagate into (and kill) the worker."""
-    if task.cancelled():
-        return
-    error = task.exception()
-    if error is not None:
-        logger.warning("boot autopull failed: %s", error)
-    else:
-        logger.info("boot autopull: %s", task.result())
+
+_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+MEDIA_STANDBY_SECONDS: Final = 5.0
+
+
+async def _media_queue(app, additional_context: dict) -> None:
+    """The legacy media queue itself (procrastinate, `MEDIA_QUEUE` only)."""
+    await app.run_worker_async(
+        queues=[MEDIA_QUEUE],
+        concurrency=4,
+        additional_context=additional_context,
+        install_signal_handlers=False,
+    )
+
+
+async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]], *,
+                        standby_seconds: float = MEDIA_STANDBY_SECONDS) -> None:
+    """The legacy media loop, run only while this process holds the media writer lock.
+
+    The lock guards the media store's single writer, NOT the job runtime (design §2: every
+    worker process runs the job runtime). While another process holds it, this one stands by,
+    retrying every `standby_seconds`, and takes over when the holder exits.
+    """
+    with contextlib.ExitStack() as held:
+        while True:
+            try:
+                held.enter_context(worker.store.worker_lock())
+                break
+            except MediaStoreError as error:
+                if error.code != "media_writer_active":
+                    raise
+            await asyncio.sleep(standby_seconds)
+        await worker._register_recipe()
+        await worker.maintain()
+        await worker.refresh_once()
+        await run_queue()
+
+
+async def _run_workers(media: Awaitable[None], runtime: JobRuntime) -> None:
+    """The legacy media loop and the job runtime side by side, under ONE signal handler.
+
+    SIGTERM/SIGINT stops both gracefully (running jobs finish), then `_entry` returns and the
+    process exits 0. Neither installs its own handlers. A loop that fails, or ends without
+    being asked to stop (`until_stopped`), cancels the other and the process exits non-zero.
+    """
+    loop = asyncio.get_running_loop()
+    stopping = False
+
+    def stopped() -> bool:
+        return stopping
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            media_task = group.create_task(until_stopped(media, stopped), name="worker media")
+            group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
+
+            def stop() -> None:
+                nonlocal stopping
+                stopping = True
+                runtime.stop()
+                media_task.cancel()  # procrastinate stops a cancelled worker gracefully
+
+            for number in _STOP_SIGNALS:
+                loop.add_signal_handler(number, stop)
+    finally:
+        for number in _STOP_SIGNALS:
+            loop.remove_signal_handler(number)
 
 
 async def _entry():
@@ -375,59 +422,18 @@ async def _entry():
     queue = ProcrastinateMediaQueue(dsn)
     repository = MediaRepository(db, clock, queue=queue)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
-    # 0013: release sourcing is always-on. from_env derives the apps cache dir
-    # from the same cache root and never returns None, so the worker always
-    # builds the service and shares its DB pool.
-    release_service = AppReleaseService.from_env(db, clock)
+    # The one worker kind (design §10.5): every OS-image/`.deb` handler behind JobRuntime, in
+    # EVERY worker process; only the legacy media loop is single-writer. Its boot checks run
+    # here, so a wiring mistake fails before any job is claimed.
+    runtime = build_job_runtime(db, clock, cache_root=cache_layout.cache_root(), env=os.environ)
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     additional_context = {"media_worker": worker}
-    # 0013: release sourcing is always-on, so the release tasks are always
-    # registered and the worker always consumes APP_RELEASE_QUEUE.
-    register_app_release_tasks(app)
-    additional_context["app_release_service"] = release_service
     try:
-        with worker.store.worker_lock():
-            await worker._register_recipe()
-            await worker.maintain()
-            await worker.refresh_once()
-            async with app.open_async():
-                # Boot-time release auto-pull (0010): a fire-and-forget task so it
-                # never delays the worker loop or blocks serving. Its done-callback
-                # logs and SWALLOWS the outcome -- a pull failure must never kill
-                # the worker. Cancelled + awaited in the finally.
-                # Defer boot's mirror onto the SAME tag-serialized queue the
-                # operator promote route uses (ProcrastinateAppReleaseQueue),
-                # constructed from the same dsn -- so boot never mirrors inline
-                # and cannot race an operator-queued mirror of the same tag. The
-                # run loop below drains APP_RELEASE_QUEUE, so the deferred mirror
-                # actually completes. 0013: the os-images cache dir is derived
-                # from the same cache root, so boot ALWAYS also fetches an empty
-                # cluster's bootstrap image, re-hydrates cached-but-absent bytes
-                # (the persistent-volume-wiped 503 self-heal), and sweeps
-                # crash-orphaned temps.
-                autopull_task = asyncio.create_task(
-                    boot_autopull(
-                        release_service,
-                        release_service.packages,
-                        PostgresInstallationRepository(clock),
-                        ProcrastinateAppReleaseQueue(dsn),
-                        base_root=resolve_base_root(),
-                    )
-                )
-                autopull_task.add_done_callback(_log_boot_autopull)
-                try:
-                    await app.run_worker_async(
-                        queues=worker_queues(True),
-                        concurrency=4,
-                        additional_context=additional_context,
-                    )
-                finally:
-                    if autopull_task is not None:
-                        autopull_task.cancel()
-                        with contextlib.suppress(BaseException):
-                            await autopull_task
+        async with app.open_async():
+            await _run_workers(
+                _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime)
     finally:
         await worker._close_clients()
 
@@ -439,6 +445,8 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as error:
+        while isinstance(error, ExceptionGroup):  # the loop that failed first, not the group
+            error = error.exceptions[0]
         print(json.dumps({"error": MediaWorker._code(error)}), file=sys.stderr)
         return 1
 

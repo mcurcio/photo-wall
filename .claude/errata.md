@@ -678,3 +678,211 @@ back-compat, base serving is always configured now). NOT touched:
 reachable `boot_autopull(base_root=None)` test seam per its docstring and is
 legitimate. No code divergence; honors design:220-223. Mirrors the E13/E14/E15
 doc softenings.
+
+## 2026-09-22 — Central MVP lane C (assets), beads C-1..C-4
+
+- **C4's source pointer is wrong: `tests/test_netboot_base.py` has no hostile-archive tests.**
+  `grep -rn "base_member_not_file\|base_digest_mismatch\|SYMTYPE" tests/*.py` finds none for
+  `_extract_squashfs` (central/netboot_base.py:692). The only tar-type cases are for the player
+  package (tests/test_player_package.py:312). The named cases (traversal, symlink/hardlink,
+  device/fifo/dir, duplicate names, oversize, wrong digest, missing member) were written from
+  scratch in `tests/test_assets_os_image.py`. No behaviour change.
+- **`CacheStore` exposes a read-only `layout` property that is not on the frozen page.**
+  `AssetProduction.__init__(store, records, transactions)` gets no layout. But C1 step 2 ("if the
+  file is present, measure it ... discard it") needs the final path, and `measure`/`discard` take
+  a `Path`. Added `CacheStore.layout -> CacheLayout` (central/assets/store.py) instead of a new
+  store method. P2 wiring is unaffected.
+- **C1's "a reference's expected facts" is read as "every reference's stated expectation".**
+  Step 3 raises `digest_mismatch` unless the produced file satisfies each reference's
+  `expected_size`/`expected_sha256` where set. Step 2's early return also requires the newest
+  reference to state both. The steps share one predicate, so step 2 never accepts what step 3
+  would reject.
+- **The 021 backfill seeds only legacy rows that the kernel types accept:** an owner/tag of at
+  most 128 chars, and a locator URL matching `^https?://` of at most 2048 chars. Without this
+  filter, one bad legacy row would do one of two things. It would abort the migration (the
+  `owner` CHECK), or it would make `PgAssetRecords.get` raise `ValueError` while building an
+  `OriginLocator` (central/kernel/assets.py:62-67). A filtered row gets no asset.
+
+## central-mvp Lane A (job runtime) — 2026-09-22
+
+- **A-3 STOP-class, resolved locally: the savepoint cannot sit where the page puts it.**
+  `.claude/mvp/lane-A-job-runtime.md:212` has `publish` call
+  `defer(..., connection=...)` *inside* `conn.transaction()`, while `:66-67` has `defer`
+  itself report `AlreadyEnqueued` as `False`. Together, a merge's UniqueViolation is caught
+  INSIDE the savepoint block, which then exits normally and issues `RELEASE SAVEPOINT` on an
+  aborted transaction (psycopg `transaction.py` `_commit_gen`), so every merge aborts the
+  caller's transaction and PB5 fails. Probed on PostgreSQL 16: with the literal placement,
+  `test_infra_publisher_conformance.py::{test_enqueued_merged_and_joined_handles_are_equivalent,
+  test_a_merge_inside_within_leaves_the_caller_transaction_working}[procrastinate]` both FAIL.
+  Implemented: `job_queue.defer` opens the savepoint itself and catches `AlreadyEnqueued`
+  OUTSIDE it (the `central/media_queue.py:51-63` pattern); `publish` calls `defer` directly.
+  Frozen signatures unchanged. Page `:212` should read "defer opens the savepoint".
+- **PB4 "a running copy is joined, not duplicated" (`P0-kernel.md:235`) differs between the
+  two publishers.** procrastinate's queueing-lock index covers only `todo`
+  (`procrastinate/sql/schema.sql:100`), so publishing while a copy is `doing` INSERTS one
+  `todo` copy (it waits on the `lock`, then runs again). The handle still joins the running
+  copy (resolves on its outcome, `since` rule), so the conformance case asserts handle
+  equivalence only; `RecordingPublisher` inserts nothing in that case. Cost: one extra,
+  normally cheap re-run (an asset handler finds its verified file). Not changed; flag for the
+  kernel page if "not duplicated" was meant literally (it would need a `doing`-row lookup).
+- **Additive, not on the frozen page: `QueueAdmin.aclose()`.** `QueueAdmin(dsn)` owns an async
+  procrastinate pool (opened lazily, `min_size=0, max_size=2`) and the page gives it no
+  lifecycle. P2 wiring should `await admin.aclose()` at worker shutdown.
+- **Kernel gap: an `ok` outcome for an asset job whose Asset record is absent.**
+  `record_produced` is a no-op for an absent row (`central/kernel/ports.py` AssetRecords), so
+  `Ready.result` (read from the record, `P0-kernel.md:202`) has nothing to return. The adapter
+  returns `Failed(terminal=False, "asset_not_recorded", retry_after=0)`;
+  `RecordingPublisher` instead falls back to the in-memory result. Needs a kernel ruling.
+- **Minor: `RecordedFailure(reason)` (`lane-A-job-runtime.md:176`) carries the outcome STATUS**
+  (`"transient"`/`"terminal"`), because `JobExecutor.execute` returns only the status (frozen
+  signature). The reason is in `job_outcomes`; the exception only ends the row `failed`.
+
+## central-mvp P2 (wiring, route rewire, legacy removal) — 2026-09-22
+
+- **P2.3 acceptance grep cannot hold literally.** `grep -rn "app_release\|..." central media`
+  also matches the KEPT tables `app_releases`/`app_release_policy`/`app_release_poll`, which
+  lane B reads by design (`central/infra/catalog_records.py:72-134`), and provenance
+  docstrings in lane files (`central/origins/github.py:3`, `central/kernel/types.py:30`,
+  `central/content_catalog/catalog.py:4`). Read as "no import of a deleted module": verified
+  by grepping `from central.app_release|central.app_packages|central.app_releases|
+  central.github_releases|media.app_release_tasks` (no hits outside docs/.claude). The stale
+  lane docstrings were left for the docs bead.
+- **Unlisted consumer of the pruned `netboot_base`:** `tests/test_cache_layout.py:58` tested
+  `netboot_base.resolve_base_root`, which the prune removes. Replaced by the same property on
+  the new path (`CacheLayout(cache_layout.cache_root(env)).directory(...)` ignores the
+  retired `PHOTO_WALL_BASE_ROOT`/`PHOTO_WALL_APP_ROOT`). No production consumer existed.
+- **Deleting `central/app_packages.py` broke `scripts/check_docs.py` (CI `checks.yml:59`):**
+  `docs/decisions/0009-minimal-base-and-app-package.md:739` linked it. De-linked to plain
+  text ("since removed by the Central MVP"); the rest of the docs sweep stays the docs bead.
+- **Additive, not on the frozen page: `build_job_runtime(..., admin: QueueAdmin | None = None)`.**
+  The lane A erratum asks P2 to `await admin.aclose()` at worker shutdown, but the frozen
+  `build_job_runtime` hides the `QueueAdmin`. The worker passes its own and closes it in
+  `_entry`'s `finally`; the page's call shape still works (None builds one).
+- **`until_disconnect` raises `ClientDisconnected`, a `CancelledError` subclass,** so the routes
+  can tell a client disconnect from a real cancellation of the request task; they answer 499
+  to the gone client (nothing reads it) and the genuine cancellation still propagates.
+- **The lifespan installs procrastinate's schema whenever content services exist** (not only
+  when the media queue is procrastinate's): the content publisher defers into
+  `procrastinate_jobs`, and the page's lifespan order is migrate -> apply_schema -> feed.start.
+
+## central-mvp PR #22 review fixes, lane X (catalog, migrations, CI) — 2026-09-22
+
+- **P0 carry uses a second pointer, not only `promoted_tag`.** Migration 023 adds
+  `app_release_policy.last_good_tag` (main's `current_sha256` on the new model). The served tag
+  (`asset_sha256 = current_sha256`) becomes last-good, and becomes promoted only when nothing is
+  promoted. A pending promotion is kept (main would have converged to it). No match (a manual
+  upload the MVP cannot serve) writes nothing: a migration WARNING, a WARNING on every sync while
+  auto-promote is suppressed, and a 503 `app_unconfigured` until an operator promotes.
+- **The manifest's last-good fallback is that pointer** (`promoted_package`): promoted `.deb` on
+  disk, else last-good on disk, else promoted. `promote_in` (the operator route and auto-promote)
+  records the outgoing tag as last-good when its `.deb` is on disk.
+- **New catalog port `StoredAssets.present`** (`content_catalog/ports.py`; adapter
+  `central/infra/stored_assets.py`). It duplicates `PrefetchHandler._missing`'s check (lane Y
+  owns `central/assets`; it could use the adapter). The package rule's on-disk answer is a
+  snapshot: a file removed before the reader opens it is fetched once (nothing removes files
+  in the MVP).
+- **The desired set now also has active devices' `last_served_tag` and the last-good `.deb`.**
+  Without them, the per-device manifest could name a `.deb` that the package rule
+  refuses to fetch (after a substitute boot). This matches design §3 "current OS and `.deb` for
+  unpinned devices".
+- **Auto-promote "cached"** is now "some release's `.deb` has produced facts" (main counted
+  `app_packages`). Prereleases come from `origin.include_prereleases`.
+- **Substitute eligibility (owner ruling):** after `desired`, the device's known-good plus every
+  full release with an OS image older than `desired`, newest first, never the fenced tag. An
+  absent serial may substitute too. RECOVER (fenced on desired) still serves only the known-good.
+- **Divergence freeze** applies to a tag whose old `.deb` had produced facts (main: `mirrored`),
+  plus legacy `divergent` rows. Only the `.deb` facts freeze. Main also froze base facts; that
+  is out of scope here.
+- **Frontier:** `SELECT DISTINCT known_good_tag` (plus 024 partial indexes), with `newest()` in
+  Python. A SQL max would risk collation-dependent prerelease order against `order_key`.
+- **The frozen lane-B page changed:** `ReleaseRow.divergent`; `ReleaseRecords.shipping`,
+  `mark_divergent`, `last_good_tag`, `set_last_good`; `DeviceRecords.known_good_tags`,
+  `named_tags`, `names_any`; `ReleaseCatalog(stored=...)`; `SyncReleasesHandler(include_prereleases=)`.
+- **Docs not updated (docs bead):** `docs/module-appliance-release.md:86` still describes the
+  manifest as "the promoted package" without the last-good fallback.
+## central-mvp PR #22 review fixes, lane Y (runtime, worker, infra) — 2026-09-22
+
+- **P2 `_entry` "keep the media path byte-for-byte" (`P2-wiring.md:30`) was wrong for design §2.**
+  The media writer flock wrapped the WHOLE worker, so a second process exited
+  `media_writer_active` and only one JobRuntime ran fleet-wide. Now `JobRuntime` runs in every
+  process; only the legacy media loop (`_media_writer`: lock, recipe/maintain/refresh boot,
+  media queue) waits for the lock, standing by every `MEDIA_STANDBY_SECONDS` (5 s) and taking
+  over when the holder exits. `_run_workers(media, runtime)` now takes the media awaitable.
+- **Loops that return are failures** (`central/infra/runtime.py` `until_stopped`): procrastinate
+  ends a worker NORMALLY when a side task (LISTEN, heartbeat, periodic) fails. Any runtime or
+  media loop returning while not stopping raises `RuntimeError("worker_exited")`; `main()`
+  reports the first leaf of an ExceptionGroup and exits 1.
+- **Wedged key after a failed `finish_job`: chosen fix is retry, then fail the process** (not a
+  rescue-by-newer-outcome or a max-run-time bound). `JobRuntime` installs `_CompletionGuard`
+  as `app.job_manager`: the completion write retries at 0.5/1/2 s; if it still fails, the runtime
+  stops gracefully and `run()` raises `completion_not_recorded`. The worker's row is
+  unregistered (or its heartbeat lapses), so the existing dead-worker rescue re-publishes the
+  row. Why: it reuses the one rescue path; a "newer outcome" rule cannot tell a lost completion
+  from a legitimate re-run, and no handler has an enforced max run time to bound on. Cost: a
+  DB outage longer than ~3.5 s during a completion restarts the worker (running jobs finish
+  first); an already-`ok` job may re-run once (handlers are idempotent).
+- **`asset_not_recorded` is ONE transient condition** (kernel ruling asked for by the lane A
+  erratum). `ASSET_NOT_RECORDED` moved to `central/kernel/publishing.py` (PB7 text extended);
+  `AssetProduction.produce` raises `TransientFailure(ASSET_NOT_RECORDED)` instead of
+  `TerminalFailure("unknown_asset")` (a terminal outcome would stick via PB3 although the record
+  is catalog state a later reference re-creates); `RecordingPublisher` returns
+  `Failed(False, ASSET_NOT_RECORDED, 0)` instead of falling back to the in-memory result. The
+  case is now in the shared conformance suite. `lane-C-assets.md:142` should read
+  "TransientFailure(asset_not_recorded)".
+- **`build_job_runtime` back to the frozen page's signature** (drops the additive `admin=`
+  parameter recorded by the P2 erratum above). `JobRuntime(..., owned=(admin,))` owns the
+  `QueueAdmin` and closes it when `run()` ends; `run()` also closes its own pool when cancelled
+  mid-open (a half-opened pool reconnecting forever kept the process from exiting).
+- **Merged redelivery keeps its backoff:** when `_redeliver`'s defer merges into a pending copy,
+  `job_queue.carry_attempt_async` raises that copy's `_attempt` to the redelivery's (never
+  lowers it).
+- **Rescue is per row:** one row failing (`close` on a row no longer `doing`) no longer aborts
+  the batch; the run ends `TransientFailure("rescue_incomplete")`.
+- **CI "2 LISTEN connections" was the test, not the feed:** CI runs pytest against the Compose
+  database where the `central` container's own `OutcomeFeed` holds a LISTEN connection with the
+  same `application_name`. The feed tests now count only pids that appeared after their feed
+  started (and terminate only their own), with a foreign same-named connection in the test.
+
+## central-mvp PR #22 slimming and fresh-review fixes — 2026-09-23
+
+- **OS-image re-cut (review P1): `AssetRecords.forget_produced(tx, key)` is new** (design §10.2
+  and §10.4 updated). `SyncReleases` calls it when a tag's base tarball changes sha or size
+  (release.yml re-uploads with `--clobber`), so the next production records the new build
+  instead of failing `not_reproducible` for good after a cache wipe. It is the only caller;
+  media's write-once facts are untouched. `AssetProduction` re-reads the references before the
+  rename and discards a build from a replaced locator (`TransientFailure("reference_changed")`).
+  **Residual, not closed:** a build that passes that re-check and whose outcome commits just after
+  a concurrent re-cut still records the old build's facts (a window of milliseconds between the
+  re-check and the executor's commit). Closing it needs the produced facts keyed to the locator
+  they came from.
+- **Completion guard (review P2):** a completion write refused because the row is no longer
+  `todo`/`doing` (rescue closed it) is dropped with a warning; only an open or unreadable row
+  still stops the runtime. It reads procrastinate's own `get_job_status` query.
+- **Frozen `.deb` after a cache wipe (review P2): chosen fix is "a divergent tag's `.deb` is
+  desired only while its produced file is on disk"**, not a terminal `download_corrupt`. The
+  origin cannot tell a frozen tag from a sync that has not caught up yet, and making every
+  digest mismatch terminal would strand a release whose manifest landed before its `.deb`
+  (Prefetch never retries a terminal). Cost: a frozen `.deb` gone from disk now answers 404 on
+  the package route (was 503 and a re-download on every Prefetch); the manifests still name it.
+- **Serial rule (review P2):** `sanitize_serial` / `device_id_for_serial` live only in
+  `central/content_catalog/catalog.py`; `central/netboot_base.py` keeps `SERIAL_HEADER`.
+- **Kernel: the `subject=` class keyword is gone** (no job type used it). The subject is every
+  field; `lock == queueing_lock` for every job type, and "a waiter may resolve on another
+  payload's run under the same subject" (§10.2) no longer applies. **Kept** the one-field rule
+  for asset job types: `asset_key` names the file by that field, and dropping the rule would let
+  two jobs share one file. It still contradicts §10.1's two-field `PrepareMedia`; the media bead
+  must define a two-field identity first.
+- **`job_outcomes.failing_since` dropped by a new migration 025**, not by editing 020 (migrations
+  are forward-only and checksum-pinned; a database that already ran this branch would refuse to
+  boot). `JobOutcomes` no longer restates the table's CHECKs; it still refuses NaN/infinity, which
+  DOUBLE PRECISION would store.
+- **The SQL-recoding fakes are gone** (`tests/catalog_fakes.py`, `tests/fakes/asset_records.py`,
+  `InMemoryOutcomes`). Those suites run on PostgreSQL through `tests/content_db.py`. Converting
+  `test_migration_carry_served_package.py` exposed a test artifact: it stopped at 022, so 021's
+  Asset seed ran on an empty schema, and the in-memory stored-assets fake hid that no Asset rows
+  existed. It now upgrades from main's 019, as a real upgrade does.
+- **`.claude/mvp/` deleted.** Earlier entries cite `P0-kernel.md`, `lane-*.md` and
+  `P2-wiring.md`: read them at commit 90999e7. Migrations 021/022 still say "lane C"/"P2.1" in
+  their comments (checksum-pinned, left as is). The reviewer's probe
+  (`scratchpad/probe_recut.py`) imports the deleted fake; its scenario is now
+  `test_a_recut_os_image_is_produced_again_after_a_cache_wipe`.

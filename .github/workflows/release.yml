@@ -280,23 +280,16 @@ jobs:
 
           ## Player application (revs independently of the base)
 
-          Central serves the `.deb` by reference, the same way it already
-          serves release artifacts: stage the bytes, then register and
-          promote the pointer.
+          Central pulls `{manifest['player_deb']['filename']}` (sha256
+          `{manifest['player_deb']['sha256']}`) from this GitHub release
+          itself; there is nothing to copy or register by hand. It discovers
+          the release on its next release sync (every 15 minutes), or at once
+          after `POST /v1/operator/app/releases/refresh`. A fleet with no
+          bound Players follows the newest release automatically; otherwise
+          promote it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
 
-          1. Copy `{manifest['player_deb']['filename']}` to central's
-             `PHOTO_WALL_APP_ROOT` as `app-{manifest['player_deb']['sha256']}.deb`.
-          2. Register it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
-
-                 curl -X POST http://<central>/v1/operator/app \\
-                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
-                   -d '{{"version": "{manifest['player_deb']['version']}", "sha256": "{manifest['player_deb']['sha256']}", "size": {manifest['player_deb']['size']}}}'
-
-          3. Promote it as the current version:
-
-                 curl -X PUT http://<central>/v1/operator/app/current \\
-                   -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \\
-                   -d '{{"sha256": "{manifest['player_deb']['sha256']}"}}'
+                 curl -X POST http://<central>/v1/operator/app/releases/{os.environ['TAG']}/promote \\
+                   -H 'Authorization: Bearer <admin-token>'
 
           Every Player fetches the newly promoted `.deb` on its next reboot;
           running Players are unaffected until then.

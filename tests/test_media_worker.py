@@ -593,3 +593,22 @@ def test_command_startup_error_contains_no_environment_or_raw_exception(monkeypa
     output = capsys.readouterr()
     assert json.loads(output.err) == {"error": "worker_config"}
     assert not output.out
+
+
+@pytest.mark.parametrize(("error", "code"), [
+    (RuntimeError("worker_exited"), "worker_exited"),
+    (RuntimeError("completion_not_recorded"), "completion_not_recorded"),
+    (RuntimeError("something else"), "worker_internal"),
+])
+def test_command_reports_the_job_runtime_exit_code(monkeypatch, capsys, error, code):
+    """`until_stopped`/`JobRuntime.run` end the process with these codes; `main()` names them."""
+    import media.worker as module
+
+    async def failing_entry():
+        raise ExceptionGroup("worker loops", [error])
+
+    monkeypatch.setattr(module, "_entry", failing_entry)
+    assert module.main() == 1
+    output = capsys.readouterr()
+    assert json.loads(output.err) == {"error": code}
+    assert not output.out

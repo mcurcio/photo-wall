@@ -17,6 +17,12 @@ docker-compose tracer's job (scripts/test_netboot_e2e.py); here the package is a
 synthetic blob because this test proves the WIRE contract (fetch + streamed
 sha256 verify), not dependency resolution.
 
+P2: Central serves through the content catalog and the asset read path, built by
+the production wiring (`build_content_services`). The fixtures seed what a
+release sync and a finished fetch leave behind -- the release row, the Asset
+record with its produced facts, the file at its cache path -- instead of the
+retired `base_cache`/`app_packages` rows.
+
 Runs under the DB harness (scripts/test_local.py / PHOTO_WALL_TEST_DATABASE_URL);
 it skips only when no Postgres is configured, like every other DB-backed test --
 never a skip-by-default false green.
@@ -24,13 +30,16 @@ never a skip-by-default false green.
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import http.server
 import json
 import threading
 import time
 import urllib.request
+from datetime import timedelta
 
+import psycopg
 import pytest
 import uvicorn
 
@@ -43,35 +52,32 @@ from appliance.provision import (
     fetch_package,
 )
 from central.app import create_app
-from central.app_packages import AppPackages
-from central.app_release_queue import QueueReceipt
-from central.app_releases import AppReleases
-from central.netboot_base import SERIAL_HEADER, base_file_path, device_id_for_serial
-from scripts.test_netboot_e2e import _FixedDiscovery, _NoSleep  # reuse tracer helpers
+from central.assets.layout import CacheLayout
+from central.assets.reader import AssetReader, WaiterSlots
+from central.assets.store import CacheStore
+from central.content_catalog.catalog import device_id_for_serial
+from central.content_wiring import build_content_services
+from central.infra.asset_records import PgAssetRecords
+from central.infra.catalog_records import PgReleaseRecords
+from central.infra.outcomes import JobOutcomes
+from central.infra.publisher import ProcrastinatePublisher
+from central.infra.transactions import PgTransactions, pg_connection
+from central.kernel.assets import AssetReady, AssetReference, OriginLocator
+from central.kernel.job_types import FetchOsImage, FetchPackage
+from central.kernel.jobs import asset_key
+from central.kernel.ports import PublishedRelease
+from scripts.test_netboot_e2e import (  # reuse tracer helpers
+    _FixedDiscovery,
+    _NoSleep,
+    release_seed_sql,
+)
 
 ADMIN = "e2e-netboot-admin-" + "x" * 32
 SQUASHFS = b"rpi-image-gen base squashfs payload, streamed over a real socket" * 64
 SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
 SERIAL = "10000000cafef00d"
 TAG = "v9.9.9"
-
-
-class _FakeQueue:
-    """No procrastinate schema in the wire harness; the happy path never enqueues
-    (cached + pinned) and the uncached case only records the enqueue."""
-
-    def __init__(self):
-        self.base_fetches = []
-
-    def enqueue_base_fetch_in(self, conn, tag):
-        self.base_fetches.append(tag)
-        return QueueReceipt(coalesced=False)
-
-    def enqueue_mirror_in(self, conn, tag):  # pragma: no cover
-        return QueueReceipt(coalesced=False)
-
-    def enqueue_poll_in(self, conn):  # pragma: no cover
-        return QueueReceipt(coalesced=False)
+DEB_SHA = hashlib.sha256(("deb-" + TAG).encode()).hexdigest()  # TAG's `.deb` (manifest only)
 
 
 class _Log:
@@ -133,53 +139,55 @@ class _InstallCapture:
         self.starts += 1
 
 
-def _seed_base(registry, base_root, *, tag=TAG, squashfs=SQUASHFS, pin_serial=SERIAL):
-    """Cache one version's base for a pinned device: the release row, a cached
-    base_cache row (Digest = sha of the bytes), the per-version file, and a pin so
-    the serial resolves deterministically to it."""
-    base_root.mkdir(parents=True, exist_ok=True)
-    base_file_path(base_root, tag).write_bytes(squashfs)
-    sha = hashlib.sha256(squashfs).hexdigest()
+def _seed_base(registry, cache_root, *, tag=TAG, squashfs=SQUASHFS, cached=True,
+               pin_serial=SERIAL):
+    """What a release sync plus a finished FetchOsImage leave behind, for a pinned device.
+
+    The release row (with its `.deb` and base-tarball locators), the os-image Asset
+    with its reference and -- when `cached` -- its produced facts and the file at its
+    cache path, and a device pinned to `tag` so the serial resolves deterministically."""
     db, clock = registry.db, registry.clock
-    AppReleases(db, clock).upsert_discovered(
-        tag,
-        asset_sha256="a" * 64,
-        asset_size=10,
-        asset_url="https://example.test/app.deb",
-        base_tarball_sha256="b" * 64,
-        base_tarball_size=len(squashfs),
-        base_tarball_url="https://example.test/base.tgz",
-    )
-    with db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO base_cache(tag,state,squashfs_sha256,size,updated_at) "
-            "VALUES(%s,'cached',%s,%s,%s)",
-            (tag, sha, len(squashfs), clock.utc()),
-        )
-        conn.execute(
+    tarball = OriginLocator("https://example.test/base.tgz", "b" * 64, len(squashfs))
+    package = OriginLocator("https://example.test/app.deb", DEB_SHA, 4096)
+    key = asset_key(FetchOsImage(tag=tag))
+    assets = PgAssetRecords(clock)
+    with PgTransactions(db).begin() as tx:
+        PgReleaseRecords().upsert(tx, PublishedRelease(tag, False, package, None, tarball),
+                                  now=clock.utc())
+        assets.reference(tx, key, AssetReference(tag, tarball, None, None))
+        if cached:
+            assets.record_produced(
+                tx, key, AssetReady(len(squashfs), hashlib.sha256(squashfs).hexdigest()))
+        pg_connection(tx).execute(
             "INSERT INTO devices(device_id,first_seen,last_seen,attached_tag) VALUES(%s,%s,%s,%s)",
             (device_id_for_serial(pin_serial), clock.utc(), clock.utc(), tag),
         )
-    return sha
+    if cached:
+        _write(cache_root, key, squashfs)
 
 
-def _seed_release_only(registry, *, tag=TAG, pin_serial=SERIAL):
-    """A pinned device resolving to a discovered-but-uncached tag: serving 503s."""
+def _write(cache_root, key, data):
+    path = CacheLayout(cache_root).path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _app(registry, cache_root, *, wait=None):
+    """The real Central over the production content wiring; `wait` shortens the
+    read-through wait (30s in production) for the miss case."""
     db, clock = registry.db, registry.clock
-    AppReleases(db, clock).upsert_discovered(
-        tag,
-        asset_sha256="a" * 64,
-        asset_size=10,
-        asset_url="https://example.test/app.deb",
-        base_tarball_sha256="b" * 64,
-        base_tarball_size=len(SQUASHFS),
-        base_tarball_url="https://example.test/base.tgz",
-    )
-    with db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO devices(device_id,first_seen,last_seen,attached_tag) VALUES(%s,%s,%s,%s)",
-            (device_id_for_serial(pin_serial), clock.utc(), clock.utc(), tag),
-        )
+    content = build_content_services(db, clock, cache_root=cache_root)
+    if wait is not None:
+        transactions, assets = PgTransactions(db), PgAssetRecords(clock)
+        publisher = ProcrastinatePublisher(db.dsn, transactions=transactions,
+                                           outcomes=JobOutcomes(), assets=assets, clock=clock,
+                                           feed=content.feed)
+        content = dataclasses.replace(content, reader=AssetReader(
+            store=CacheStore(CacheLayout(cache_root)), records=assets,
+            transactions=transactions, publisher=publisher, slots=WaiterSlots(4), clock=clock,
+            wait_timeout=wait))
+    return create_app(db, clock, ADMIN, content=content)
 
 
 @contextlib.contextmanager
@@ -208,42 +216,18 @@ def _serial_reader(tmp_path):
     return lambda: read_pi_serial(str(path))
 
 
-def _post_json(origin, path, body, token):
-    request = urllib.request.Request(
-        origin + path,
-        data=json.dumps(body).encode(),
-        method="POST" if path.endswith("/app") else "PUT",
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=15) as response:
-        return response.status
+def _served_row(registry, serial=SERIAL):
+    with registry.db.transaction() as conn:
+        return conn.execute(
+            "SELECT last_served_tag, boot_outcome, known_good_tag FROM devices "
+            "WHERE device_id=%s", (device_id_for_serial(serial),)).fetchone()
 
 
-def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_path, monkeypatch):
-    base_root = tmp_path / "base"
-    app_root = tmp_path / "app"
-    app_root.mkdir()
-    _seed_base(registry, base_root)
+def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_path):
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root)
 
-    # Instrument the selection seam so we can assert the serial actually reached
-    # the SERVER (not just that the client sent a header) -- central.app calls
-    # the module-global name, so patching it here is seen by the live route.
-    import central.app as appmod
-
-    seen = {}
-    real_select = appmod.select_base_for_serial
-
-    def spy(conn, serial, **kwargs):
-        seen["serial"] = serial
-        return real_select(conn, serial, **kwargs)
-
-    monkeypatch.setattr(appmod, "select_base_for_serial", spy)
-
-    app = create_app(
-        registry.db, registry.clock, ADMIN,
-        app_root=app_root, base_root=base_root, release_queue=_FakeQueue(),
-    )
+    app = _app(registry, cache_root)
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         # --- Phase 1: REAL netboot base fetch over the wire ---
@@ -258,15 +242,19 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
         # bytes AND ran the server-side route), not a string-equality assert.
         assert ("resolve", "127.0.0.1") in ops.calls
         assert ops.mounted and ops.mounted[0][0] == SQUASHFS      # runtime downloaded
-        assert seen["serial"] == SERIAL                            # serial on the wire, server-side
+        # The serial reached the SERVER, not just the client's header: the 200
+        # recorded the served tag on the device row that serial derives.
+        row = _served_row(registry)
+        assert (row["last_served_tag"], row["boot_outcome"]) == (TAG, "pending")
 
         # --- Phase 2: chain the app .deb fetch via the Bootstrapper path ---
+        # A promoted release whose `.deb` is produced and on disk: the compose
+        # tracer's seed (scripts/test_netboot_e2e.py), proven here against a real schema.
         payload = b"synthetic photo-wall-player package bytes" * 32
         sha = hashlib.sha256(payload).hexdigest()
-        (app_root / f"app-{sha}.deb").write_bytes(payload)
-        assert _post_json(origin, "/v1/operator/app",
-                          {"version": "9.9.9", "sha256": sha, "size": len(payload)}, ADMIN) == 201
-        assert _post_json(origin, "/v1/operator/app/current", {"sha256": sha}, ADMIN) == 200
+        with psycopg.connect(registry.db.dsn, autocommit=True) as conn:
+            conn.execute(release_seed_sql("v9.9.8", sha, len(payload)))
+        _write(cache_root, asset_key(FetchPackage(sha256=sha)), payload)
 
         capture = _InstallCapture()
         bootstrapper = Bootstrapper(
@@ -283,14 +271,6 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
         assert capture.starts == 1
 
 
-def _mirror_deb(registry, tag):
-    """Register + mirror a `.deb` for `tag` so /v1/netboot/manifest resolves it."""
-    deb_sha = hashlib.sha256(("deb-" + tag).encode()).hexdigest()
-    AppPackages(registry.db, registry.clock).register(version=tag, sha256=deb_sha, size=4096)
-    AppReleases(registry.db, registry.clock).mark_mirrored(tag, deb_sha)
-    return deb_sha
-
-
 def _enroll_device(registry, serial, token, *, epoch=1):
     device_id = device_id_for_serial(serial)
     player_id = "p-" + hashlib.sha256(device_id.encode()).hexdigest()[:32]
@@ -302,14 +282,6 @@ def _enroll_device(registry, serial, token, *, epoch=1):
             (player_id, "pk-" + device_id, token_hash, epoch,
              registry.clock.utc(), registry.clock.utc(), device_id),
         )
-
-
-def _get_json(origin, path, *, serial=None):
-    headers = {SERIAL_HEADER: serial} if serial else {}
-    request = urllib.request.Request(origin + path, headers=headers)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=15) as response:
-        return json.loads(response.read())
 
 
 def _post_base_health(origin, body, token):
@@ -332,15 +304,13 @@ def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registr
     #   3. base-health on that learned tag validates (`running_tag ==
     #      last_served_tag`) and advances known-good, moving latest-verified.
     # Un-over-mocked: real uvicorn + Postgres, real fetch client, real HTTP.
-    base_root = tmp_path / "base"
-    _seed_base(registry, base_root)          # release + cached base + pin(SERIAL->TAG)
-    _mirror_deb(registry, TAG)               # so the per-device manifest resolves
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root)         # release (+ its .deb) + cached base + pin
     token = "wire-e2e-token-" + "z" * 32
     _enroll_device(registry, SERIAL, token)
 
     ops = _Ops(tmp_path / "run")
-    app = create_app(registry.db, registry.clock, ADMIN,
-                     base_root=base_root, release_queue=_FakeQueue())
+    app = _app(registry, cache_root)
     with _serve(app) as origin:
         # (1) real base serve over the wire -> records last_served_tag = TAG.
         netboot({"photowall.central": origin + "/"}, tmp_path / "root", ops=ops,
@@ -350,7 +320,7 @@ def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registr
         # (2) REAL appliance manifest client learns the served tag over the wire.
         manifest = fetch_manifest(origin, serial=SERIAL)
         assert manifest["tag"] == TAG          # the served tag, echoed by central
-        assert manifest["sha256"] == hashlib.sha256(("deb-" + TAG).encode()).hexdigest()
+        assert manifest["sha256"] == DEB_SHA
 
         # (3) base-health with the LEARNED tag advances the frontier.
         status, accepted = _post_base_health(
@@ -360,9 +330,7 @@ def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registr
         )
         assert status == 200 and accepted == {"accepted": True}
 
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT known_good_tag, boot_outcome FROM devices WHERE device_id=%s",
-                           (device_id_for_serial(SERIAL),)).fetchone()
+    row = _served_row(registry)
     assert row["known_good_tag"] == TAG        # frontier advanced on real evidence
     assert row["boot_outcome"] == "healthy"
 
@@ -371,14 +339,12 @@ def test_base_health_with_a_guessed_tag_is_rejected_over_the_wire(registry, tmp_
     # The negative: a tag that is NOT the served tag never advances the frontier
     # (central validates running_tag == last_served_tag). Proves criterion (b)'s
     # guarantee is enforced server-side, not merely honored by a cooperative client.
-    base_root = tmp_path / "base"
-    _seed_base(registry, base_root)
-    _mirror_deb(registry, TAG)
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root)
     token = "wire-e2e-token-" + "y" * 32
     _enroll_device(registry, SERIAL, token)
     ops = _Ops(tmp_path / "run")
-    app = create_app(registry.db, registry.clock, ADMIN,
-                     base_root=base_root, release_queue=_FakeQueue())
+    app = _app(registry, cache_root)
     with _serve(app) as origin:
         netboot({"photowall.central": origin + "/"}, tmp_path / "root", ops=ops,
                 serial_reader=_serial_reader(tmp_path), log=_Log())
@@ -388,24 +354,21 @@ def test_base_health_with_a_guessed_tag_is_rejected_over_the_wire(registry, tmp_
             token,
         )
         assert status == 200 and accepted == {"accepted": False}
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT known_good_tag FROM devices WHERE device_id=%s",
-                           (device_id_for_serial(SERIAL),)).fetchone()
-    assert row["known_good_tag"] is None       # a guessed tag never advances known-good
+    assert _served_row(registry)["known_good_tag"] is None  # a guessed tag never advances
 
 
 def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
-    base_root = tmp_path / "base"
-    _seed_base(registry, base_root)
-    app = create_app(
-        registry.db, registry.clock, ADMIN, base_root=base_root, release_queue=_FakeQueue()
-    )
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root)
+    app = _app(registry, cache_root)
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
-        # Tamper the served bytes WITHOUT touching the recorded base_cache sha:
-        # central serves the tampered bytes with the stored (now-mismatching)
-        # Digest header, and the client's streamed sha256 must refuse.
-        base_file_path(base_root, TAG).write_bytes(SQUASHFS + b"tampered")
+        # Tamper the served bytes WITHOUT touching the recorded produced facts, at the
+        # same length (the read path opens only a file of the recorded size): central
+        # serves the tampered bytes with the recorded (now-mismatching) Digest header,
+        # and the client's streamed sha256 must refuse.
+        tampered = SQUASHFS[:-1] + bytes([SQUASHFS[-1] ^ 0x01])
+        _write(cache_root, asset_key(FetchOsImage(tag=TAG)), tampered)
         with pytest.raises(NetbootError, match="netboot_integrity"):
             netboot(
                 {"photowall.central": origin + "/"},
@@ -418,14 +381,12 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
 
 
 def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
-    # Real Central fails closed (503) for a discovered-but-uncached tag, so the
-    # client sees a transport-level ProvisionError rather than a Digest-less 200.
-    base_root = tmp_path / "base"
-    base_root.mkdir()
-    _seed_release_only(registry)  # release + pin, but no cached bytes
-    app = create_app(
-        registry.db, registry.clock, ADMIN, base_root=base_root, release_queue=_FakeQueue()
-    )
+    # Real Central fails closed (503 after the read-through wait) for a known but
+    # uncached tag, so the client sees a transport-level ProvisionError rather than a
+    # Digest-less 200 -- and the miss published the tag's fetch for a worker to run.
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root, cached=False)  # release + reference + pin, no bytes
+    app = _app(registry, cache_root, wait=timedelta(seconds=1))
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         with pytest.raises(ProvisionError):
@@ -437,6 +398,12 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
                 log=_Log(),
             )
         assert ops.mounted == []
+    with registry.db.transaction() as conn:
+        queued = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
+                              "WHERE status = 'todo'").fetchall()
+    assert [(q["task_name"], q["args"]["tag"]) for q in queued] == [
+        ("photo_wall.os_image.fetch", TAG)]
+    assert _served_row(registry)["last_served_tag"] is None  # a miss records nothing
 
 
 class _NoDigestHandler(http.server.BaseHTTPRequestHandler):
