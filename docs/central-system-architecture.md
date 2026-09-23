@@ -236,7 +236,7 @@ work runs inside the serving process, and N pods multiply the load on the origin
   self-heal, OS GC and the orphan sweep (`app_release_service.py:190-217`). The target
   splits these into `SyncReleases`, `Prefetch` and `MaintainCache`.
 - **Each kind handles a miss differently, and none waits.** OS: enqueue + 503. `.deb`
-  bytes: 503 with no enqueue (`app.py:533-545`). Media: marks the blob `corrupt`, with no
+  bytes: 503 with no enqueue (`app.py:432-458`). Media: marks the blob `corrupt`, with no
   way back (`media_store.py:846-853`). The serve handlers are plain `def` and run on anyio's
   40-thread pool, which the waiter caps (32 + 8) would fill. Waits must be async.
 - **Workers are not yet safe as competing consumers.** OS extraction blocks the event loop
@@ -245,8 +245,9 @@ work runs inside the serving process, and N pods multiply the load on the origin
   name is fixed per tag (`app_release_service.py:330-334`), so two workers can collide. The
   release enqueue has no savepoint (`app_release_queue.py:83-136`; `media_queue.py:51`
   does it correctly).
-- **`/readyz` depends on the DB, the scheduler and whether the OS image is cached**
-  (`app.py:414-500`). The target keeps only the DB.
+- **There is no `/readyz`; `/healthz` depends on the DB and the playback scheduler**
+  (`app.py:341-377`). The target adds `/livez` and `/readyz` (process + DB) and leaves `/healthz` to
+  its existing pollers.
 - **The hand-upload route still exists, and there is no `.deb` budget or orphan sweep.**
   An unknown netboot serial gets 503 before any release exists; the target returns 404.
 - **Media is served by output hash (`/v1/media/{sha256}`).** The target uses
@@ -450,7 +451,9 @@ class JobRuntime:  # central.infra, concrete
 
 Kernel types (`central/kernel/assets.py`): `AssetKind`, `AssetKey`, `AssetReady(size, sha256)`,
 `MediaReady(AssetReady + media_type, width, height, duration)` (what a player manifest needs),
-`AssetReference(owner, locator, expected_size, expected_digest | None)`,
+`OriginLocator(url, sha256 | None, size | None)` (verifies the *download*),
+`AssetReference(owner, locator, expected_size | None, expected_digest | None)` (facts of the *produced file*;
+for an OS image the origin digest is the tarball's, not the squashfs's, so `expected_digest` is `None`),
 `Asset(key, references, produced: AssetReady | None, last_served_at)`,
 `Resolution = Candidates(jobs: non-empty tuple[AssetJob, ...], pinned) | Unknown(reason)`,
 `WorkerBeat`, `FailingOutcome`.
