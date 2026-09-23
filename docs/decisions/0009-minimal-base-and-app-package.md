@@ -736,7 +736,7 @@ by serial — no operator action.
 ## Phase 4 boot-chain + retirement plan
 
 Phases 1–3 have landed on this branch: the app-package service
-([central/app_packages.py](../../central/app_packages.py), routes
+(`central/app_packages.py`, since removed by the Central MVP, routes
 [central/app.py:458-500](../../central/app.py), migration
 [014_app_package.sql](../../central/migrations/014_app_package.sql)), the
 bootstrapper ([appliance/provision.py](../../appliance/provision.py)), the two

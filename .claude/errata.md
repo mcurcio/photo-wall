@@ -736,3 +736,31 @@ doc softenings.
 - **Minor: `RecordedFailure(reason)` (`lane-A-job-runtime.md:176`) carries the outcome STATUS**
   (`"transient"`/`"terminal"`), because `JobExecutor.execute` returns only the status (frozen
   signature). The reason is in `job_outcomes`; the exception only ends the row `failed`.
+
+## central-mvp P2 (wiring, route rewire, legacy removal) — 2026-09-22
+
+- **P2.3 acceptance grep cannot hold literally.** `grep -rn "app_release\|..." central media`
+  also matches the KEPT tables `app_releases`/`app_release_policy`/`app_release_poll`, which
+  lane B reads by design (`central/infra/catalog_records.py:72-134`), and provenance
+  docstrings in lane files (`central/origins/github.py:3`, `central/kernel/types.py:30`,
+  `central/content_catalog/catalog.py:4`). Read as "no import of a deleted module": verified
+  by grepping `from central.app_release|central.app_packages|central.app_releases|
+  central.github_releases|media.app_release_tasks` (no hits outside docs/.claude). The stale
+  lane docstrings were left for the docs bead.
+- **Unlisted consumer of the pruned `netboot_base`:** `tests/test_cache_layout.py:58` tested
+  `netboot_base.resolve_base_root`, which the prune removes. Replaced by the same property on
+  the new path (`CacheLayout(cache_layout.cache_root(env)).directory(...)` ignores the
+  retired `PHOTO_WALL_BASE_ROOT`/`PHOTO_WALL_APP_ROOT`). No production consumer existed.
+- **Deleting `central/app_packages.py` broke `scripts/check_docs.py` (CI `checks.yml:59`):**
+  `docs/decisions/0009-minimal-base-and-app-package.md:739` linked it. De-linked to plain
+  text ("since removed by the Central MVP"); the rest of the docs sweep stays the docs bead.
+- **Additive, not on the frozen page: `build_job_runtime(..., admin: QueueAdmin | None = None)`.**
+  The lane A erratum asks P2 to `await admin.aclose()` at worker shutdown, but the frozen
+  `build_job_runtime` hides the `QueueAdmin`. The worker passes its own and closes it in
+  `_entry`'s `finally`; the page's call shape still works (None builds one).
+- **`until_disconnect` raises `ClientDisconnected`, a `CancelledError` subclass,** so the routes
+  can tell a client disconnect from a real cancellation of the request task; they answer 499
+  to the gone client (nothing reads it) and the genuine cancellation still propagates.
+- **The lifespan installs procrastinate's schema whenever content services exist** (not only
+  when the media queue is procrastinate's): the content publisher defers into
+  `procrastinate_jobs`, and the page's lifespan order is migrate -> apply_schema -> feed.start.

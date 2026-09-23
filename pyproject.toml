@@ -85,7 +85,7 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "Central content-serving layers"
 type = "layers"
-layers = ["central.app", "central.infra",
+layers = ["central.app : central.content_wiring : central.content_routes", "central.infra",
           "central.content_catalog | central.assets | central.health",
           "central.origins", "central.kernel"]
 

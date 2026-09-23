@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from central import cache_layout, netboot_base
+from central import cache_layout
+from central.assets.layout import CacheLayout
+from central.kernel.assets import AssetKind
 
 # A path the resolvers must NEVER touch. If any resolver still read a legacy env,
 # a derived root would land under here and the assertions below would fail.
@@ -50,11 +52,14 @@ def test_cache_layout_ignores_retired_legacy_envs(tmp_path):
         assert _BOGUS_LEGACY not in str(resolved)
 
 
-def test_resolve_base_root_ignores_retired_base_root_env(tmp_path):
+def test_asset_layout_ignores_retired_base_and_app_root_envs(tmp_path):
     cache_root = tmp_path / "cache"
     env = _env(cache_root)
 
-    # BASE_ROOT is now <cache>/os-images, NOT the legacy PHOTO_WALL_BASE_ROOT.
-    resolved = netboot_base.resolve_base_root(env)
-    assert resolved == cache_root / "os-images"
-    assert _BOGUS_LEGACY not in str(resolved)
+    # The asset cache (P2: it replaced netboot_base.resolve_base_root) derives the
+    # os-images/ and apps/ dirs from PHOTO_WALL_CACHE_ROOT, NOT the legacy envs.
+    layout = CacheLayout(cache_layout.cache_root(env))
+    assert layout.directory(AssetKind.OS_IMAGE) == cache_root / "os-images"
+    assert layout.directory(AssetKind.PLAYER_DEB) == cache_root / "apps"
+    for kind in AssetKind:
+        assert _BOGUS_LEGACY not in str(layout.directory(kind))

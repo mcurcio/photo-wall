@@ -3,27 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import secrets
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central import cache_layout
-from central.app_packages import AppPackageError, AppPackages
-from central.app_release_queue import AppReleaseTaskQueue, ProcrastinateAppReleaseQueue
-from central.app_releases import AppReleaseError, AppReleases
-from central.artifact_io import HardenedOpenError, open_regular
+from central.content_catalog.catalog import CatalogError
+from central.content_routes import mount_content_routes
+from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
@@ -34,44 +33,26 @@ from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigur
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.netboot_base import (
-    SERIAL_HEADER,
-    base_file_path,
-    clear_device_pin,
-    demote_dangling_base_row,
-    gc_base_cache,
-    operator_base_status,
-    record_base_health,
-    sanitize_serial,
-    select_base_for_serial,
-    served_tag_for_serial,
-    set_device_pin,
-)
+from central.netboot_base import record_base_health
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
 from contracts.models import (
     BaseHealth,
     Calibration,
-    Digest,
     Identifier,
     Model,
     Observation,
     PlayerTime,
     Readiness,
 )
-from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import Clock, SystemClock
 from media.models import SourceSpec
 
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-# Server-side sanity bound on the netboot base squashfs. This IS the client's
-# fetch cap, not a coincidentally-equal copy: the initrd passes
-# contracts.release.MAX_ROOTFS_BYTES as its download bound, so a base larger
-# than this can never be booted anyway. Sharing the one constant means nudging
-# the cap can't silently desync the server bound from the client's.
-MAX_NETBOOT_BASE_BYTES = MAX_ROOTFS_BYTES
+# CatalogError kinds -> HTTP status (P2.3); the body is always {"error": code}.
+CATALOG_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
 
 class Challenge(Model):
@@ -119,22 +100,9 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
-class AppPackageRegistration(Model):
-    """Records a `.deb` already staged in the apps cache directory by sha256."""
-
-    version: str = Field(min_length=1, max_length=256)
-    sha256: Digest
-    size: int = Field(gt=0)
-
-
-class AppPackagePromotion(Model):
-    sha256: Digest
-
-
 class DevicePin(Model):
-    # The tag to pin a device to (0012 bead 7). Bounded here; real existence is
-    # validated against `app_releases` (the `attached_tag` FK target) in
-    # `set_device_pin`, which 404s an unknown tag rather than 500-ing on the FK.
+    # The tag to pin a device to (0012 bead 7). Bounded here; the catalog checks
+    # the tag's shape (422) and that the release and the device exist (404).
     tag: str = Field(min_length=1, max_length=128)
 
 
@@ -146,9 +114,7 @@ def create_app(
     run_scheduler: bool | None = None,
     media_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
-    release_queue: AppReleaseTaskQueue | None = None,
-    app_root: Path | None = None,
-    base_root: Path | None = None,
+    content: ContentServices | None = None,
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
@@ -174,25 +140,21 @@ def create_app(
         ),
         media=media_repository,
     )
-    # 0013: the app owns the layout. All three domain roots are derived from the
-    # ONE optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
+    # 0013: the app owns the layout. Every domain root is derived from the ONE
+    # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
-    # explicit root (tests); otherwise the cache-root derivation always supplies
-    # one, so release sourcing and base serving are UNCONDITIONAL (always-on).
+    # explicit media root (tests).
     media_root = media_root or cache_layout.media_root()
-    app_root = app_root or cache_layout.apps_root()
-    base_root = base_root or cache_layout.os_images_root()
-    app_packages = AppPackages(db, clock)
-    app_releases = AppReleases(db, clock)
-    # Producer-side enqueue port, mirroring how ProcrastinateMediaQueue is built
-    # and injected above: promote defers a tag-keyed mirror, refresh defers a
-    # coalesced poll -- both onto APP_RELEASE_QUEUE, executed by the worker. The
-    # same enqueue port also defers the 0012 per-version base fetch. 0013: with
-    # the cache root always present, release sourcing is always-on, so the port
-    # is built whenever the app runs against a real Database.
-    release_queue = release_queue or (
-        ProcrastinateAppReleaseQueue(db.dsn) if isinstance(db, Database) else None
+    # OS images and Player `.deb`s (design §10.5): the catalog, the read-through
+    # reader, the pod probe and this process's one OutcomeFeed. create_app binds
+    # no job handlers; the worker runs them. Built only against a real Database;
+    # tests inject fakes.
+    content = content or (
+        build_content_services(db, clock, cache_root=cache_layout.cache_root())
+        if isinstance(db, Database)
+        else None
     )
+    feed = content.feed if content is not None else None
     # 0013: media_root is now always derived from the cache root, so the gateway
     # is built whenever the app runs against a real Database -- the same gate the
     # media/release queues use above. (Unit tests that stub the DB out entirely
@@ -261,8 +223,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
-        if isinstance(media_queue, ProcrastinateMediaQueue):
-            media_queue.apply_schema(db.dsn)
+        if isinstance(media_queue, ProcrastinateMediaQueue) or (
+            content is not None and isinstance(db, Database)
+        ):
+            # The content publisher defers into procrastinate's tables too.
+            ProcrastinateMediaQueue.apply_schema(db.dsn)
+        if feed is not None:
+            await feed.start()
         # Real network registration (join multicast group, register the
         # service) can be slow -- or simply hang -- on a constrained Docker
         # bridge network. Advertising is a convenience for discovery, never
@@ -279,6 +246,8 @@ def create_app(
         try:
             yield
         finally:
+            if feed is not None:
+                await feed.stop()
             if task:
                 task.cancel()
                 try:
@@ -304,7 +273,7 @@ def create_app(
     )
     app.state.registry = registry
     app.state.coordinator = coordinator
-    app.state.app_packages = app_packages
+    app.state.content = content
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
 
@@ -321,13 +290,9 @@ def create_app(
     async def registry_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
 
-    @app.exception_handler(AppPackageError)
-    async def app_package_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=exc.status)
-
-    @app.exception_handler(AppReleaseError)
-    async def app_release_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=exc.status)
+    @app.exception_handler(CatalogError)
+    async def catalog_error(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=CATALOG_ERROR_STATUS[exc.kind])
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
@@ -422,157 +387,6 @@ def create_app(
     @app.post("/v1/enrollment/register")
     def register(request: Enrollment):
         return registry.enroll(request)
-
-    @app.get("/v1/app/manifest")
-    def app_manifest():
-        # Player-facing, unauthenticated (trusted LAN, 0009): the bootstrapper
-        # asks this before it has any app code to enroll with.
-        return app_packages.current()
-
-    @app.get("/v1/app/package/{sha256}.deb")
-    def app_package(sha256: str):
-        # Line-for-line analogue of the rootfs route above: same O_NOFOLLOW,
-        # fstat, size-match, and bounded streaming discipline. The sha256 here
-        # is a corruption check only (0009 owner ruling) -- this route proves
-        # the bytes match what central registered, not who authored them.
-        package = app_packages.package(sha256)
-        path = app_root / f"app-{sha256}.deb"
-        try:
-            descriptor, metadata = open_regular(path, expected_size=package["size"])
-        except HardenedOpenError as error:
-            raise AppPackageError(f"app_artifact_{error.reason}", 503) from None
-
-        def content():
-            with os.fdopen(descriptor, "rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    yield chunk
-
-        return StreamingResponse(
-            content(),
-            media_type="application/vnd.debian.binary-package",
-            headers={
-                "Cache-Control": "public, immutable",
-                "Content-Length": str(package["size"]),
-                "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode()}",
-            },
-        )
-
-    @app.get("/v1/netboot/base")
-    def netboot_base(request: Request):
-        # Player-facing, UNAUTHENTICATED (trusted LAN, 0009 -- same posture as
-        # /v1/app/manifest and the .deb route): a Pi has no credential before it
-        # boots. The Pi self-identifies by serial; Central maps it to a canonical
-        # `devices` row and resolves ONE tag by per-device precedence (pin, else
-        # latest-verified, else -- empty state only -- latest-discovered), then
-        # serves that version's immutable base-<tag>.squashfs. Sanitize BEFORE
-        # anything consumes the serial: the validated value feeds both the log and
-        # the selection seam. The read-modify-write (device upsert + a 200-only
-        # last-served record) runs inside the transaction; a miss enqueues a
-        # coalesced fetch and 503s, writing NO last-served record so a self-healing
-        # retry is never mistaken for a failed boot.
-        serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
-        LOG.info("netboot base fetch: serial=%s", serial or "<absent-or-invalid>")
-        with db.transaction() as conn:
-            decision = select_base_for_serial(conn, serial, clock=clock)
-            if decision.fetch_tag is not None and release_queue is not None:
-                # Lazy backstop: coalesced by the base:<tag> queueing lock so a
-                # burst of retrying Pis collapses to one in-flight fetch.
-                release_queue.enqueue_base_fetch_in(conn, decision.fetch_tag)
-        if decision.served_tag is None:
-            # Nothing resolvable yet (no frontier, no discoverable base).
-            raise AppPackageError("base_artifact_unavailable", 503)
-        if not decision.cached:
-            # Bytes not yet cached: fail closed, the Pi reboots and retries.
-            raise AppPackageError("base_artifact_uncached", 503)
-        # O_NOFOLLOW open, fstat regular-file + size bound, bounded 1 MiB
-        # streaming, and a base64 `Digest` header -- the same discipline as the
-        # .deb route. The Digest is the version's recorded squashfs sha, so bytes
-        # and Digest agree by construction.
-        path = base_file_path(base_root, decision.served_tag)
-        try:
-            descriptor, metadata = open_regular(path, max_size=MAX_NETBOOT_BASE_BYTES)
-        except HardenedOpenError as error:
-            # Dangling-row self-heal (B3, req 6). We are PAST the `not
-            # decision.cached` guard above, so an open-failure here can only be a
-            # row the DB says is `cached` whose bytes are gone/unreadable --
-            # external eviction, admin delete, or a GC that crashed after unlink.
-            # (`cached` is a DB flag, never a filesystem stat, so this row would
-            # otherwise 503 forever.) Demote the row out of `cached` and
-            # re-enqueue the base fetch so the next read regenerates -- distinct
-            # from the empty/not-yet-cached state, which the `base_artifact_uncached`
-            # 503 above handles WITHOUT demoting a row that was never `cached`.
-            with db.transaction() as conn:
-                demote_dangling_base_row(conn, decision.served_tag, clock=clock)
-                if release_queue is not None:
-                    release_queue.enqueue_base_fetch_in(conn, decision.served_tag)
-            LOG.info(
-                "netboot base self-heal: tag=%s serial=%s reason=dangling_row "
-                "action=reenqueue_demote open_reason=%s",
-                decision.served_tag,
-                serial or "<absent-or-invalid>",
-                error.reason,
-            )
-            raise AppPackageError(f"base_artifact_{error.reason}", 503) from None
-
-        def content():
-            with os.fdopen(descriptor, "rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    yield chunk
-
-        return StreamingResponse(
-            content(),
-            media_type="application/octet-stream",
-            headers={
-                "Cache-Control": "public, immutable",
-                "Content-Length": str(metadata.st_size),
-                "Digest": "sha-256="
-                + base64.b64encode(bytes.fromhex(decision.squashfs_sha256)).decode(),
-            },
-        )
-
-    @app.get("/v1/netboot/manifest")
-    def netboot_manifest(request: Request):
-        # Per-device `.deb` manifest (0012 bead 5, F4): additive, serial-keyed,
-        # symmetric to /v1/netboot/base and UNAUTHENTICATED (trusted LAN, 0009 --
-        # a Pi still holds no credential when its booted OS fetches its `.deb`).
-        # Resolves the `.deb` from the tag whose base bytes this device was
-        # ACTUALLY served this boot (`devices.last_served_tag`), NOT a fresh
-        # re-resolve -- so base and `.deb` ride one boot's tag even if
-        # latest-verified moved between the two requests. On a recovery boot that
-        # recorded tag is the known-good tag, so base + `.deb` agree there too.
-        #
-        # This is ADDITIVE: 0010's global GET /v1/app/manifest route and its
-        # promoted_tag/current_sha256/reconcile machinery (migration 016) are
-        # neither read nor written here; the content-addressed
-        # GET /v1/app/package/{sha}.deb bytes route stays sha-keyed. Bead 6 wires
-        # the appliance's manifest fetch (serial header) to this route.
-        serial = sanitize_serial(request.headers.get(SERIAL_HEADER))
-        with db.transaction() as conn:
-            served_tag = served_tag_for_serial(conn, serial)
-            if served_tag is None:
-                # No device row / never served a base on a 200 this boot: there
-                # is no carried tag, so there is no per-device answer. Fail closed
-                # rather than fall back to a global pointer that could diverge.
-                raise AppPackageError("app_manifest_unresolved", 503)
-            manifest = AppReleases.deb_manifest_for_tag_in(conn, served_tag)
-            if manifest is None:
-                # The carried tag's `.deb` is not yet mirrored: enqueue the mirror
-                # as a lazy backstop (coalesced by the tag lock) when the tag is
-                # deployable, then 503 -- the Pi retries on its next boot cycle.
-                if release_queue is not None and AppReleases.deb_mirrorable_in(conn, served_tag):
-                    release_queue.enqueue_mirror_in(conn, served_tag)
-                raise AppPackageError("app_manifest_uncached", 503)
-        # Carry the served tag back to the appliance (0012 bead 6, errata E7).
-        # `served_tag` IS `devices.last_served_tag` -- the tag whose base bytes
-        # this device was actually served this boot. Returning it lets the
-        # enrolled player report it as base-health `running_tag`; because it is
-        # the recorded served tag (not a client guess), central's
-        # `running_tag == last_served_tag` validation passes by construction and
-        # known-good/latest-verified advance. The base serve (bytes + Digest)
-        # never exposes the tag, and the diskless initrd persists nothing, so
-        # this per-device `.deb` manifest -- fetched by the booted OS that also
-        # posts base-health -- is where the tag crosses to the appliance.
-        return {**manifest, "tag": served_tag}
 
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):
@@ -706,125 +520,53 @@ def create_app(
     def inventory():
         return registry.inventory()
 
-    @app.post("/v1/operator/app", dependencies=[Depends(admin)], status_code=201)
-    def register_app(request: AppPackageRegistration):
-        # Stage-by-reference, mirroring register_release above: the operator
-        # places the `.deb` bytes in the apps cache directory out of band, and
-        # this call records the {version, sha256, size} pointer to them. No
-        # bytes cross this request body.
-        app_packages.register(request.version, request.sha256, request.size)
-        return {"status": "registered"}
-
-    @app.put("/v1/operator/app/current", dependencies=[Depends(admin)])
-    def promote_app(request: AppPackagePromotion):
-        app_packages.promote(request.sha256)
-        return {"status": "configured"}
-
-    def _release_sourcing() -> AppReleaseTaskQueue:
-        # 0013: release sourcing is always-on. The apps cache directory is always
-        # derived from the one cache root, so there is no "unconfigured" state --
-        # the enqueue port exists whenever the app runs against a real Database.
-        # Coexists with the manual POST /v1/operator/app and PUT
-        # /v1/operator/app/current escape hatches (0010 decision #6).
-        return release_queue
+    def _content() -> ContentServices:
+        if content is None:
+            raise RegistryError("content_unavailable", 503)
+        return content
 
     @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
-    def list_releases():
-        _release_sourcing()
-        # Discovered list, semver-ordered; each row flagged deployable/promoted/
-        # current (current = this row's mirrored bytes are the served ones).
-        return app_releases.list()
+    async def list_releases():
+        # Discovered releases, semver DESC, each flagged deployable/promoted/has_os_image.
+        return [asdict(view) for view in await _content().catalog.releases_view()]
 
     @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
-    def promote_release(tag: str):
-        queue = _release_sourcing()
-        # set_promoted records the operator's chosen tag under FOR UPDATE on the
-        # app_release_policy singleton (serializing against any concurrent promote
-        # or the worker's reconcile) and reports whether the bytes are already
-        # registered. Unknown tag -> 404, undeployable -> 409 (AppReleaseError).
-        already_mirrored = app_releases.set_promoted(tag)
-        if already_mirrored:
-            # Fast path: bytes present, so advance `current` in-request via the
-            # single reconcile path (a DB pointer flip under the same lock; no
-            # network, no worker). reconcile reads the *current* promoted_tag, so
-            # it never advances off a stale value.
-            app_releases.reconcile(app_packages)
-            return {"status": "promoted"}
-        # Lazy mirror: the bytes are absent, so defer a tag-keyed mirror onto the
-        # worker's queue and report pending. The worker downloads + verifies +
-        # registers, then its own reconcile advances `current` once the bytes land.
-        with db.transaction() as conn:
-            queue.enqueue_mirror_in(conn, tag)
-        return JSONResponse({"status": "pending"}, status_code=202)
+    async def promote_release(tag: str):
+        # Records the promoted tag and publishes its `.deb` fetch in one transaction
+        # (unknown tag -> 404, no `.deb` -> 409). The manifest never waits on the
+        # bytes: the package route reads them through the cache.
+        await _content().catalog.promote(tag)
+        return {"status": "promoted"}
 
     @app.post("/v1/operator/app/releases/refresh", dependencies=[Depends(admin)])
-    def refresh_releases():
-        queue = _release_sourcing()
-        # Defer an on-demand poll (coalesced with the periodic tick) so a
-        # newly-cut release appears without waiting for the next cadence.
-        with db.transaction() as conn:
-            queue.enqueue_poll_in(conn)
+    async def refresh_releases():
+        # Publishes SyncReleases now (merged with a pending tick) so a newly-cut
+        # release appears without waiting for the next cadence.
+        await _content().catalog.refresh()
         return JSONResponse({"status": "polling"}, status_code=202)
 
     @app.put("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    def pin_device(device_id: Identifier, request: DevicePin):
-        # Operator pin (0012 bead 7, decision gate row 3): admin-token-gated with
-        # the SAME bearer posture as every other /v1/operator/* route (the shared
-        # `admin` dependency). Sets `devices.attached_tag` -- the precedence winner
-        # the serve seam resolves (pin > latest-verified > bootstrap), which also
-        # releases any sticky `failed_tag` on the device's next netboot. One
-        # transaction:
-        #   1. set the pin (404 on a bad tag via the FK check, 404 on an unknown
-        #      device -- either way NO mutation);
-        #   2. PROACTIVE fetch (design gate row): enqueue BOTH the base fetch
-        #      (base:<tag>) and -- when warranted -- the `.deb` mirror (tag lock)
-        #      for the pinned tag, so a RECOVERY pin (operator pinning a broken
-        #      device to a known-good) comes up on its NEXT netboot rather than
-        #      paying an extra netboot -> manifest-503 -> reboot cycle for the lazy
-        #      `.deb` backstop. The `.deb` mirror is enqueued only when the tag is
-        #      deployable-but-unmirrored (`deb_mirrorable_in`) -- the SAME guard the
-        #      /v1/netboot/manifest miss path uses -- so an already-mirrored (or
-        #      undeployable / `.deb`-less) tag never gets a redundant mirror.
-        #   3. E5 post-attachment GC: reclaim bytes freed by the pin change (e.g.
-        #      the previously-pinned tag now unreferenced) promptly instead of at
-        #      the next poll tail. The just-pinned tag is in the keep-set (a
-        #      non-retired pin), so GC never evicts what we just enqueued.
-        with db.transaction() as conn:
-            if not set_device_pin(conn, device_id, request.tag):
-                raise RegistryError("device_not_found", 404)
-            if release_queue is not None:
-                release_queue.enqueue_base_fetch_in(conn, request.tag)
-                if AppReleases.deb_mirrorable_in(conn, request.tag):
-                    release_queue.enqueue_mirror_in(conn, request.tag)
-            gc_base_cache(conn, base_root, clock=clock)
+    async def pin_device(device_id: Identifier, request: DevicePin):
+        # Operator pin (0012 bead 7): sets `devices.attached_tag`, which the catalog
+        # resolves as the only candidate (a pinned device never gets a substitute),
+        # and publishes the tag's OS-image and `.deb` fetches in the same
+        # transaction, so a recovery pin comes up on the device's NEXT netboot.
+        # Unknown release or device -> 404 with no write.
+        await _content().catalog.pin(device_id, request.tag)
         return {"status": "pinned"}
 
     @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    def unpin_device(device_id: Identifier):
-        # Clear the pin (0012 bead 7): the device falls back to the unpinned
-        # precedence at the serve seam (latest-verified, else empty-state
-        # latest-discovered). E5 post-attachment GC: after the clear, a
-        # previously-pinned tag that is now unreferenced (not latest-verified, not
-        # any non-retired known-good/pin, not in-flight) has its bytes reclaimed
-        # promptly rather than at the next poll tail.
-        with db.transaction() as conn:
-            if not clear_device_pin(conn, device_id):
-                raise RegistryError("device_not_found", 404)
-            gc_base_cache(conn, base_root, clock=clock)
+    async def unpin_device(device_id: Identifier):
+        # Clear the pin: the device falls back to the unpinned precedence.
+        await _content().catalog.unpin(device_id)
         return {"status": "cleared"}
 
     @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])
-    def netboot_status():
-        # 0012 bead 9 observability: a READ-ONLY operator view of the base-mirror
-        # so an operator can answer "why did this device get this image / why
-        # won't it advance / why were bytes evicted", and SEE a failed BASE_ROOT
-        # boot assertion (E4) rather than only find it in a log. Same admin-bearer
-        # posture as every other /v1/operator/* route. The operator UI over these
-        # fields is deferred (0012: "backend fields ship"); this endpoint is that
-        # backend surface. `base_root` here is create_app's configured RO base
-        # dir, so the view reports whether base serving is even configured.
-        with db.transaction() as conn:
-            return operator_base_status(conn, base_root)
+    async def netboot_status():
+        # Read-only operator view: the live frontier and every active device's
+        # netboot state (pin, known-good, last served, boot outcome, fence).
+        view = await _content().catalog.netboot_view()
+        return {"frontier": view.frontier, "devices": [asdict(row) for row in view.devices]}
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
@@ -965,4 +707,6 @@ def create_app(
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
         return coordinator.runtime.command(operation, run_id, clock.utc())
 
+    if content is not None:
+        mount_content_routes(app, content)
     return app

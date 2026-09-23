@@ -20,8 +20,8 @@ old signed netboot/release-authority pipeline (s4/s5):
 What is REAL here vs captured
 -----------------------------
 - REAL: central + Postgres (docker compose, the production `central` image);
-  the app-package HTTP surface (`/v1/operator/app`, `/v1/operator/app/current`,
-  `/v1/app/manifest`, `/v1/app/package/{sha256}.deb`); the Bootstrapper's
+  the app-package HTTP surface (`/v1/app/manifest`,
+  `/v1/app/package/{sha256}.deb`, read through the asset cache); the Bootstrapper's
   fetch + streamed sha256 verification (appliance/provision.py, unmodified);
   the install -- a genuine `apt-get install -y <deb>` of the REAL production
   `.deb` inside a `debian:trixie-slim` arm64 container with real apt sources,
@@ -31,6 +31,11 @@ What is REAL here vs captured
   Player's first-party closure plus the GTK/GStreamer/OpenGL bindings import
   under trixie's Python 3.13 + distro package versions); the corruption
   refusal (a flipped byte in the served `.deb`).
+- SEEDED: the release catalog. There is no hand-uploaded `.deb` any more (the
+  design's catalog learns packages from releases), and this tracer runs no
+  worker and reaches no GitHub, so `release_seed_sql` writes what a release sync
+  plus a finished `FetchPackage` would have: one promoted release referencing
+  the staged `.deb`, and its Asset record with the produced facts.
 - CAPTURED: the systemd `start` step -- there is no systemd PID1 in the CI
   container, so `start_unit` is a recording stub; the tracer asserts the
   Bootstrapper *invoked* it exactly once, after a landed install. Real GTK/HDMI
@@ -81,6 +86,13 @@ from scripts.demo_wall import POSTGRES_IMAGE  # noqa: E402
 # be false precision -- the dependencies it resolves are not pinned anyway.
 TRIXIE_IMAGE = "debian:trixie-slim"
 
+# The synthetic release the tracer promotes. The manifest's `version` is the
+# release tag (the catalog's label), not the `.deb`'s own version.
+TRACER_TAG = "v0.0.1"
+TRACER_DEB_URL = "https://example.invalid/photo-wall-player_all.deb"  # never fetched
+_TAG_SHAPE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+_SHA256_SHAPE = re.compile(r"[0-9a-f]{64}")
+
 # The new-model `.deb` is Architecture: all (only `.py` files + units; the
 # native stack comes from apt Depends), so the filename ends in `_all.deb`.
 DEB_NAME = re.compile(r"photo-wall-player_(?P<version>[A-Za-z0-9][A-Za-z0-9.+~-]*)_all\.deb")
@@ -111,6 +123,39 @@ class TracerError(RuntimeError):
 def require(condition: object, code: str) -> None:
     if not condition:
         raise TracerError(code)
+
+
+def release_seed_sql(tag: str, sha256: str, size: int, url: str = TRACER_DEB_URL) -> str:
+    """One promoted release whose `.deb` is already produced (flow (b): served from disk).
+
+    It is the state a release sync plus a finished `FetchPackage` leave behind: the
+    `app_releases` row with the package locator, the `player-deb` Asset with its produced
+    facts and its reference, and the promoted tag. The values are validated here, so the
+    SQL text carries no untrusted input.
+    """
+    match = _TAG_SHAPE.fullmatch(tag)
+    require(match is not None, "seed_tag_invalid")
+    require(_SHA256_SHAPE.fullmatch(sha256) is not None, "seed_sha256_invalid")
+    require(type(size) is int and size > 0, "seed_size_invalid")
+    require(re.fullmatch(r"https://[A-Za-z0-9./_-]{1,256}", url) is not None, "seed_url_invalid")
+    major, minor, patch = match.groups()
+    now = "EXTRACT(EPOCH FROM now())"
+    return (
+        "BEGIN;\n"
+        "INSERT INTO app_releases(tag, major, minor, patch, prerelease, is_prerelease, "
+        "asset_sha256, asset_size, asset_url, mirror_state, discovered_at, updated_at) "
+        f"VALUES ('{tag}', {major}, {minor}, {patch}, '', FALSE, '{sha256}', {size}, '{url}', "
+        f"'discovered', {now}, {now});\n"
+        "INSERT INTO assets(kind, identity, produced_size, produced_sha256, created_at) "
+        f"VALUES ('player-deb', '{sha256}', {size}, '{sha256}', {now});\n"
+        "INSERT INTO asset_references(kind, identity, owner, locator_url, locator_sha256, "
+        "locator_size, expected_size, expected_sha256, added_at) "
+        f"VALUES ('player-deb', '{sha256}', '{tag}', '{url}', '{sha256}', {size}, {size}, "
+        f"'{sha256}', {now});\n"
+        f"INSERT INTO app_release_policy VALUES (TRUE, '{tag}') ON CONFLICT (singleton) "
+        "DO UPDATE SET promoted_tag = EXCLUDED.promoted_tag;\n"
+        "COMMIT;\n"
+    )
 
 
 def run(args: list[str], *, timeout: int = 120, capture: bool = True) -> str:
@@ -213,12 +258,10 @@ class Central:
                 require(time.monotonic() < deadline, "central_startup_timeout")
                 time.sleep(1)
 
-    def register_and_promote(self, version: str, sha256: str, size: int) -> None:
-        self._request("POST", "/v1/operator/app",
-                      {"version": version, "sha256": sha256, "size": size},
-                      authenticated=True, expect=201)
-        self._request("PUT", "/v1/operator/app/current", {"sha256": sha256},
-                      authenticated=True, expect=200)
+    def seed_promoted_release(self, tag: str, sha256: str, size: int) -> None:
+        # After central is healthy, so its migrations (the assets tables) have run.
+        self.compose("exec", "-T", "database", "psql", "-v", "ON_ERROR_STOP=1",
+                     "-U", "wall", "-d", "wall", "-c", release_seed_sql(tag, sha256, size))
 
     def manifest(self) -> dict:
         return self._request("GET", "/v1/app/manifest")
@@ -463,9 +506,10 @@ def run_tracer(state: Path, central_image: str, deb: Path, port: int, keep: bool
         staged = stage_deb(app_root, sha256, payload)
         central.compose("up", "-d", "database", "central", timeout=180, capture=False)
         central.wait_healthy()
-        central.register_and_promote(version, sha256, size)
+        evidence["player_deb_version"] = version
+        central.seed_promoted_release(TRACER_TAG, sha256, size)
         manifest = central.manifest()
-        require(manifest == {"version": version, "sha256": sha256, "size": size},
+        require(manifest == {"version": TRACER_TAG, "sha256": sha256, "size": size},
                 "manifest_mismatch")
         evidence["phases"]["manifest"] = manifest
         save()
