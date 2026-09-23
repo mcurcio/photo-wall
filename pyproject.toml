@@ -81,3 +81,23 @@ source_modules = ["player"]
 forbidden_modules = [
   "central", "media", "appliance", "psycopg", "psycopg_pool", "procrastinate", "sqlite3",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Central content-serving layers"
+type = "layers"
+layers = ["central.app", "central.infra",
+          "central.content_catalog | central.assets | central.health",
+          "central.origins", "central.kernel"]
+
+[[tool.importlinter.contracts]]
+name = "Kernel, origins and domains have no persistence, queue or HTTP-framework dependency"
+type = "forbidden"
+source_modules = ["central.kernel", "central.origins", "central.content_catalog",
+                  "central.assets", "central.health"]
+forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
+
+[[tool.importlinter.contracts]]
+name = "Kernel is vocabulary only"
+type = "forbidden"
+source_modules = ["central.kernel"]
+forbidden_modules = ["httpx", "media", "central.db", "central.cache_layout", "central.artifact_io"]
