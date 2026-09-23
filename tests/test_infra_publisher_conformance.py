@@ -31,7 +31,14 @@ from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import CATALOG, FetchOsImage, SyncReleases
 from central.kernel.jobs import Delivery, Job, QueueName, asset_key, job_keys
-from central.kernel.publishing import NOT_PUBLISHED, Failed, Pending, Ready, SettledHandle
+from central.kernel.publishing import (
+    ASSET_NOT_RECORDED,
+    NOT_PUBLISHED,
+    Failed,
+    Pending,
+    Ready,
+    SettledHandle,
+)
 from contracts.time import ManualClock
 
 FACTS = AssetReady(size=42, sha256="cd" * 32)
@@ -385,6 +392,15 @@ def test_a_terminal_outcome_suppresses_unless_retry_terminal(h):
     assert run(h, scenario) == Failed(True, "not_found", None)
 
 
+def test_an_ok_asset_outcome_without_an_asset_record_is_not_ready(h):
+    # PB7: nothing to serve. The same reason and class as `AssetProduction` raises for a
+    # missing record, so a waiter sees one condition however it arose.
+    job = FetchOsImage(tag="v9.0.0")  # never referenced: record_produced is a no-op
+    handle = publish_committed(h, job)
+    h.record_outcome(job, Ready(FACTS))
+    assert run(h, lambda: handle.wait(timeout=NOW)) == Failed(False, ASSET_NOT_RECORDED, NOW)
+
+
 # -- PB9: periodic types --------------------------------------------------------------------------
 
 
@@ -449,9 +465,3 @@ def test_the_worker_publisher_has_no_feed_to_wait_on(registry):
         asyncio.run(handle.wait(timeout=NOW))
 
 
-def test_an_ok_asset_outcome_without_an_asset_record_is_not_ready(registry):
-    h = ProcrastinateHarness(registry)
-    job = FetchOsImage(tag="v9.0.0")  # never referenced: record_produced is a no-op
-    handle = publish_committed(h, job)
-    h.record_outcome(job, Ready(FACTS))
-    assert run(h, lambda: handle.wait(timeout=NOW)) == Failed(False, "asset_not_recorded", NOW)

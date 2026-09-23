@@ -32,7 +32,7 @@ from central.infra.queue_ops import (
     StalledJob,
 )
 from central.infra.transactions import PgTransactions, pg_connection
-from central.kernel.handling import handler_job_type
+from central.kernel.handling import TransientFailure, handler_job_type
 from central.kernel.job_types import (
     FetchOsImage,
     PurgeFinishedJobs,
@@ -73,6 +73,22 @@ def test_rescue_republishes_each_stalled_job_then_closes_it():
     asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
     assert admin.calls == [("stalled", timedelta(seconds=30)), ("republish", 7), ("close", 7),
                            ("republish", 9), ("close", 9)]
+
+
+def test_one_row_failing_to_close_does_not_abort_the_rescue_of_the_others():
+    # e.g. procrastinate's "not in doing" when the row's worker came back and finished it.
+    class Refusing(RecordingAdmin):
+        async def close(self, stalled):
+            await super().close(stalled)
+            if stalled.id == 7:
+                raise procrastinate.exceptions.ConnectorException("not in doing")
+
+    stalled = [StalledJob(7, FetchOsImage(tag="v1.0.0"), 1), StalledJob(9, SyncReleases(), 0)]
+    admin = Refusing(stalled)
+    with pytest.raises(TransientFailure) as raised:
+        asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
+    assert raised.value.reason == queue_ops.RESCUE_INCOMPLETE  # the next run looks again
+    assert admin.calls[1:] == [("republish", 7), ("close", 7), ("republish", 9), ("close", 9)]
 
 
 def test_purge_deletes_finished_jobs_and_stale_outcomes():

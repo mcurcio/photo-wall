@@ -16,7 +16,9 @@ conformance suite):
 - PB7 `wait` resolves on the first outcome with a sequence > `since`: `ok` -> `Ready`;
   `transient` -> `Failed(False, reason, max(0, retry_not_before - now))`; `terminal` ->
   `Failed(True, reason, None)`; timeout -> `Pending`; cancellation -> unregister and re-raise.
-  Neither a timeout nor a cancellation cancels the job.
+  Neither a timeout nor a cancellation cancels the job. An asset job's `ok` whose Asset record
+  is absent (or has no produced facts) is `Failed(False, ASSET_NOT_RECORDED, 0)`: there is
+  nothing to serve, and a later reference can re-create the record.
 - PB8 `publish_now` uses its own transaction and commits it before returning.
 - PB9 Periodic job types may be published on demand; they merge into the pending tick.
 """
@@ -62,6 +64,8 @@ class Pending:
 
 
 NOT_PUBLISHED: Final[Failed] = Failed(terminal=True, reason="not_published", retry_after=None)
+# PB7, and an asset handler that finds no Asset record: one condition, one transient reason.
+ASSET_NOT_RECORDED: Final = "asset_not_recorded"
 
 
 class JobHandle(Protocol[R_co]):

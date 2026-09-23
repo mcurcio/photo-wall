@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any, Final
+from typing import Any
 
 import procrastinate
 
@@ -31,6 +31,7 @@ from central.kernel.job_types import CATALOG
 from central.kernel.jobs import Job, R, asset_key, job_keys
 from central.kernel.ports import AssetRecords
 from central.kernel.publishing import (
+    ASSET_NOT_RECORDED,
     NOT_PUBLISHED,
     Failed,
     JobHandle,
@@ -40,8 +41,6 @@ from central.kernel.publishing import (
 )
 from central.kernel.transactions import Transaction
 from contracts.time import Clock
-
-ASSET_NOT_RECORDED: Final = "asset_not_recorded"
 
 
 class ProcrastinatePublisher:

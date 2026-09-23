@@ -16,6 +16,7 @@ from typing import Any, Literal
 from central.kernel.jobs import Job, R, asset_key, job_keys
 from central.kernel.ports import AssetRecords
 from central.kernel.publishing import (
+    ASSET_NOT_RECORDED,
     NOT_PUBLISHED,
     Failed,
     JobHandle,
@@ -174,20 +175,23 @@ class RecordingPublisher:
         if latest is None or latest.seq <= since:
             return None
         if latest.status == "ok":
-            return Ready(self._produced(job, latest.result))
+            return self._ok(job, latest.result)
         if latest.status == "terminal":
             return Failed(True, latest.reason or "", None)
         remaining = max(0.0, (latest.retry_not_before or 0.0) - self.clock.utc())
         return Failed(False, latest.reason or "", timedelta(seconds=remaining))
 
-    def _produced(self, job: Job[Any], result: Any) -> Any:
-        """An asset job's `Ready.result` is read from the Asset record when records are given."""
+    def _ok(self, job: Job[Any], result: Any) -> Ready[Any] | Failed:
+        """An asset job's `Ready.result` is read from the Asset record when records are given;
+        an absent record (or one without produced facts) is `ASSET_NOT_RECORDED` (PB7)."""
         if self.assets is None or type(job).asset_kind is None:
-            return result
+            return Ready(result)
         tx = FakeTransaction()
         asset = self.assets.get(tx, asset_key(job))
         tx.state = "committed"
-        return asset.produced if asset is not None and asset.produced is not None else result
+        if asset is None or asset.produced is None:
+            return Failed(False, ASSET_NOT_RECORDED, timedelta(0))
+        return Ready(asset.produced)
 
 
 def _wake(future: asyncio.Future[None]) -> None:

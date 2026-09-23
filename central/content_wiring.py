@@ -89,18 +89,18 @@ def build_content_services(db: Database, clock: Clock, *, cache_root: Path) -> C
                            feed=core.feed)
 
 
-def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path, env: Mapping[str, str],
-                      admin: QueueAdmin | None = None) -> JobRuntime:
+def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
+                      env: Mapping[str, str]) -> JobRuntime:
     """Every CATALOG handler behind one `JobRuntime`; its boot checks run here.
 
-    `admin` is the queue-ops pool. The worker passes its own so it can `aclose()` it at shutdown
-    (lane A errata); left None, one is built over `db.dsn` and closes with the process.
+    The runtime owns the queue-ops pool (`QueueAdmin`, opened on first use) and closes it when
+    `run()` ends, so no caller has a pool to remember.
     """
     core = _core(db, clock, cache_root=cache_root, feed_wanted=False)
     origin = GitHubReleaseOrigin.from_env(env)
     production = AssetProduction(store=core.store, records=core.assets,
                                  transactions=core.transactions)
-    admin = admin if admin is not None else QueueAdmin(db.dsn)
+    admin = QueueAdmin(db.dsn)
     handlers = (
         SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(), devices=PgDeviceRecords(),
                             assets=core.assets, transactions=core.transactions,
@@ -115,4 +115,4 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path, env: Mapp
                                  clock=clock),
     )
     return JobRuntime(db.dsn, handlers, WORKER_CONCURRENCY, transactions=core.transactions,
-                      assets=core.assets, clock=clock)
+                      assets=core.assets, clock=clock, owned=(admin,))

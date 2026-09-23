@@ -12,11 +12,13 @@ Each call opens and closes its own `httpx.AsyncClient`, so there is no lifecycle
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -241,7 +243,7 @@ class GitHubReleaseOrigin:
             with os.fdopen(fd, "wb") as output:
                 await self._stream_into(locator, output, max_bytes)
                 output.flush()
-                os.fsync(output.fileno())
+                await _off_loop(os.fsync, output.fileno())
         except BaseException:
             into.unlink(missing_ok=True)
             raise
@@ -278,6 +280,20 @@ class GitHubReleaseOrigin:
 
 
 # -- parsing and streaming helpers ---------------------------------------------
+
+
+async def _off_loop(function: Callable[..., object], *args: object) -> None:
+    """Run blocking `function` on a worker thread; a cancellation still waits for it to end,
+    so the caller's file descriptor outlives the call."""
+    task = asyncio.ensure_future(asyncio.to_thread(function, *args))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        task.exception()  # retrieved: the cancellation is what propagates
+        raise
 
 
 def _asset_urls(raw_assets: object) -> dict[str, str]:

@@ -547,6 +547,25 @@ def test_download_streams_verifies_and_writes_mode_0600(tmp_path):
     assert stat.S_IMODE(into.stat().st_mode) == 0o600
 
 
+def test_download_fsyncs_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    import central.origins.github as module
+
+    synced = []
+    real = os.fsync
+
+    def fsync(fd):
+        synced.append(threading.current_thread() is threading.main_thread())
+        real(fd)
+
+    monkeypatch.setattr(module.os, "fsync", fsync)
+    server = Server()
+    server.blob(DOWNLOAD, chunks=[BODY])
+    run_download(server, locator(), tmp_path / "app.deb")
+    assert synced == [False]  # a worker thread, never the loop's
+
+
 def test_download_follows_cdn_redirect(tmp_path):
     server = Server()
     cdn = "https://objects.githubusercontent.com/signed/blob"

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
+import socket
 import threading
 import time
 from datetime import timedelta
@@ -20,6 +22,7 @@ from fakes.asset_records import InMemoryAssetRecords
 from fakes.publisher import RecordingPublisher
 from fakes.transactions import FakeTransaction, FakeTransactions
 from fastapi.testclient import TestClient
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
@@ -28,6 +31,7 @@ from central.assets.store import CacheStore
 from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.ports import ReleaseRow
 from central.content_wiring import ContentServices
+from central.db import Database
 from central.health.probe import PodProbe
 from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
@@ -442,6 +446,71 @@ def test_livez_needs_nothing_and_readyz_is_the_database(tmp_path):
         response = client.get("/readyz")
         assert response.status_code == 503 and "secret" not in response.text
         assert client.get("/livez").status_code == 200
+
+
+class TcpProxy:
+    """A local TCP forwarder to PostgreSQL that can be cut, making the database unreachable."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self._target = (host, port)
+        self._server = socket.create_server(("127.0.0.1", 0))
+        self.port = self._server.getsockname()[1]
+        self._sockets: list[socket.socket] = []
+        self._lock = threading.Lock()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                client, _ = self._server.accept()
+            except OSError:
+                return  # cut
+            upstream = socket.create_connection(self._target)
+            with self._lock:
+                self._sockets += [client, upstream]
+            for a, b in ((client, upstream), (upstream, client)):
+                threading.Thread(target=self._pipe, args=(a, b), daemon=True).start()
+
+    @staticmethod
+    def _pipe(source: socket.socket, sink: socket.socket) -> None:
+        try:
+            while data := source.recv(65536):
+                sink.sendall(data)
+        except OSError:
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                sink.shutdown(socket.SHUT_RDWR)
+
+    def cut(self) -> None:
+        self._server.close()
+        with self._lock:
+            for sock in self._sockets:
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+                sock.close()
+
+
+def test_readyz_follows_the_real_database_through_the_real_content_services(
+        registry, tmp_path, monkeypatch):
+    # `create_app` over a real `Database` builds the real content services itself
+    # (`build_content_services` -> `PodProbe(db.healthy)`); nothing here is stubbed.
+    target = conninfo_to_dict(registry.db.dsn)
+    proxy = TcpProxy(target.get("host") or "127.0.0.1", int(target.get("port") or 5432))
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
+    db = Database(make_conninfo(registry.db.dsn, host="127.0.0.1", port=str(proxy.port)))
+    app = create_app(db, ManualClock(1000.0), ADMIN, media_root=tmp_path / "media")
+    try:
+        with TestClient(app) as client:
+            assert client.get("/readyz").status_code == 200
+            proxy.cut()  # the database becomes unreachable
+            response = client.get("/readyz")
+            assert response.status_code == 503
+            assert response.json() == {"status": "unavailable"}
+            assert client.get("/livez").status_code == 200
+    finally:
+        proxy.cut()
+        db.close()
 
 
 # -- operator routes (P2.3) ------------------------------------------------------------------------

@@ -800,3 +800,45 @@ doc softenings.
   `named_tags`, `names_any`; `ReleaseCatalog(stored=...)`; `SyncReleasesHandler(include_prereleases=)`.
 - **Docs not updated (docs bead):** `docs/module-appliance-release.md:86` still describes the
   manifest as "the promoted package" without the last-good fallback.
+## central-mvp PR #22 review fixes, lane Y (runtime, worker, infra) — 2026-09-22
+
+- **P2 `_entry` "keep the media path byte-for-byte" (`P2-wiring.md:30`) was wrong for design §2.**
+  The media writer flock wrapped the WHOLE worker, so a second process exited
+  `media_writer_active` and only one JobRuntime ran fleet-wide. Now `JobRuntime` runs in every
+  process; only the legacy media loop (`_media_writer`: lock, recipe/maintain/refresh boot,
+  media queue) waits for the lock, standing by every `MEDIA_STANDBY_SECONDS` (5 s) and taking
+  over when the holder exits. `_run_workers(media, runtime)` now takes the media awaitable.
+- **Loops that return are failures** (`central/infra/runtime.py` `until_stopped`): procrastinate
+  ends a worker NORMALLY when a side task (LISTEN, heartbeat, periodic) fails. Any runtime or
+  media loop returning while not stopping raises `RuntimeError("worker_exited")`; `main()`
+  reports the first leaf of an ExceptionGroup and exits 1.
+- **Wedged key after a failed `finish_job`: chosen fix is retry, then fail the process** (not a
+  rescue-by-newer-outcome or a max-run-time bound). `JobRuntime` installs `_CompletionGuard`
+  as `app.job_manager`: the completion write retries at 0.5/1/2 s; if it still fails, the runtime
+  stops gracefully and `run()` raises `completion_not_recorded`. The worker's row is
+  unregistered (or its heartbeat lapses), so the existing dead-worker rescue re-publishes the
+  row. Why: it reuses the one rescue path; a "newer outcome" rule cannot tell a lost completion
+  from a legitimate re-run, and no handler has an enforced max run time to bound on. Cost: a
+  DB outage longer than ~3.5 s during a completion restarts the worker (running jobs finish
+  first); an already-`ok` job may re-run once (handlers are idempotent).
+- **`asset_not_recorded` is ONE transient condition** (kernel ruling asked for by the lane A
+  erratum). `ASSET_NOT_RECORDED` moved to `central/kernel/publishing.py` (PB7 text extended);
+  `AssetProduction.produce` raises `TransientFailure(ASSET_NOT_RECORDED)` instead of
+  `TerminalFailure("unknown_asset")` (a terminal outcome would stick via PB3 although the record
+  is catalog state a later reference re-creates); `RecordingPublisher` returns
+  `Failed(False, ASSET_NOT_RECORDED, 0)` instead of falling back to the in-memory result. The
+  case is now in the shared conformance suite. `lane-C-assets.md:142` should read
+  "TransientFailure(asset_not_recorded)".
+- **`build_job_runtime` back to the frozen page's signature** (drops the additive `admin=`
+  parameter recorded by the P2 erratum above). `JobRuntime(..., owned=(admin,))` owns the
+  `QueueAdmin` and closes it when `run()` ends; `run()` also closes its own pool when cancelled
+  mid-open (a half-opened pool reconnecting forever kept the process from exiting).
+- **Merged redelivery keeps its backoff:** when `_redeliver`'s defer merges into a pending copy,
+  `job_queue.carry_attempt_async` raises that copy's `_attempt` to the redelivery's (never
+  lowers it).
+- **Rescue is per row:** one row failing (`close` on a row no longer `doing`) no longer aborts
+  the batch; the run ends `TransientFailure("rescue_incomplete")`.
+- **CI "2 LISTEN connections" was the test, not the feed:** CI runs pytest against the Compose
+  database where the `central` container's own `OutcomeFeed` holds a LISTEN connection with the
+  same `application_name`. The feed tests now count only pids that appeared after their feed
+  started (and terminate only their own), with a foreign same-named connection in the test.

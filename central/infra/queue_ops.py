@@ -21,19 +21,22 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Final
 
 import procrastinate
 from procrastinate.jobs import Status
 
 from central.infra.job_queue import build_app, decode, defer_async, task_name
 from central.infra.outcomes import JobOutcomes
+from central.kernel.handling import TransientFailure
 from central.kernel.job_types import CATALOG, PurgeFinishedJobs, RescueStalledJobs
 from central.kernel.jobs import Job
 from central.kernel.transactions import Transactions
 from contracts.time import Clock
 
 logger = logging.getLogger(__name__)
+
+RESCUE_INCOMPLETE: Final = "rescue_incomplete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +113,23 @@ class RescueStalledJobsHandler:
         self._heartbeat_timeout = heartbeat_timeout
 
     async def handle(self, job: RescueStalledJobs) -> None:
+        """Rescue each stalled row on its own: one row's failure never skips the others.
+
+        A row can fail, e.g. `close` finds it no longer `doing` because its worker came back and
+        finished it. Any failure makes this run transient, so the next run looks again.
+        """
+        failed = 0
         for stalled in await self._admin.stalled(heartbeat_timeout=self._heartbeat_timeout):
             logger.warning("rescuing stalled job %s (%s, attempt %s)", stalled.id,
                            type(stalled.job).job_name, stalled.attempt)
-            await self._admin.republish(stalled)
-            await self._admin.close(stalled)
+            try:
+                await self._admin.republish(stalled)
+                await self._admin.close(stalled)
+            except Exception:
+                failed += 1
+                logger.exception("rescue of stalled job %s failed", stalled.id)
+        if failed:
+            raise TransientFailure(RESCUE_INCOMPLETE)
 
 
 class PurgeFinishedJobsHandler:

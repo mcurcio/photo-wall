@@ -17,10 +17,11 @@ from typing import TypeAlias
 from central.artifact_io import HardenedOpenError
 from central.assets.store import CacheStore
 from central.kernel.assets import Asset, AssetKey, AssetReady
-from central.kernel.handling import TerminalFailure
+from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords
+from central.kernel.publishing import ASSET_NOT_RECORDED
 from central.kernel.transactions import Transactions
 
 WriteFn: TypeAlias = Callable[[Path, Asset], Awaitable[None]]
@@ -48,7 +49,9 @@ class AssetProduction:
         key = asset_key(job)
         asset = await asyncio.to_thread(self._get, key)
         if asset is None:
-            raise TerminalFailure("unknown_asset")
+            # Transient, as a waiter sees the same condition (PB7): the record is catalog state
+            # that a later reference re-creates; a terminal outcome would stick (PB3).
+            raise TransientFailure(ASSET_NOT_RECORDED)
 
         final = self._store.layout.path(key)
         present = await asyncio.to_thread(self._measure_present, final)

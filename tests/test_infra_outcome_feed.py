@@ -133,10 +133,19 @@ def test_waiters_with_different_since_share_the_entry():
 
 
 def listeners(dsn):
+    """Pids of EVERY feed LISTEN connection on this database, owned by this test or not.
+
+    CI runs the suite beside the Compose `central` service, whose own feed holds one; compare
+    against `before` (the pids present before this test's feed started), never a raw count.
+    """
     with psycopg.connect(dsn, autocommit=True) as conn:
-        return conn.execute(
+        return {row[0] for row in conn.execute(
             "SELECT pid FROM pg_stat_activity WHERE application_name = %s "
-            "AND datname = current_database()", (APPLICATION_NAME,)).fetchall()
+            "AND datname = current_database()", (APPLICATION_NAME,)).fetchall()}
+
+
+def own_listeners(dsn, before):
+    return listeners(dsn) - before
 
 
 def pg_feed(registry, recheck):
@@ -157,11 +166,15 @@ def test_fifty_waiters_share_one_listen_connection_and_one_entry(registry):
     feed, transactions, outcomes = pg_feed(registry, timedelta(minutes=5))
     job = FetchPackage(sha256="ab" * 32)
     lock = job_keys(job).lock
+    dsn = registry.db.dsn
+    # Another process's feed on the same database (CI: the Compose `central`); not ours to count.
+    foreign = psycopg.connect(dsn, autocommit=True, application_name=APPLICATION_NAME)
+    before = listeners(dsn)
 
     async def scenario():
         await feed.start()
         try:
-            await until(lambda: len(listeners(registry.db.dsn)) == 1)
+            await until(lambda: len(own_listeners(dsn, before)) == 1)
             waits = [asyncio.create_task(feed.wait_for(lock, since=0, timeout=SOON))
                      for _ in range(50)]
             await until(lambda: lock in feed._entries and feed._entries[lock].waiters == 50)
@@ -169,12 +182,15 @@ def test_fifty_waiters_share_one_listen_connection_and_one_entry(registry):
             await asyncio.sleep(0.2)  # every waiter has made its initial read
             row = await asyncio.to_thread(record, outcomes, transactions, job)
             rows = await asyncio.wait_for(asyncio.gather(*waits), 3)
-            assert len(listeners(registry.db.dsn)) == 1
+            assert len(own_listeners(dsn, before)) == 1
             return row, rows
         finally:
             await feed.stop()
 
-    row, rows = asyncio.run(scenario())
+    try:
+        row, rows = asyncio.run(scenario())
+    finally:
+        foreign.close()
     assert rows == [row] * 50
     assert feed._entries == {}
 
@@ -197,17 +213,18 @@ def test_a_notify_before_the_waiter_registered_is_seen_through_the_stored_row(re
 
 def test_the_recheck_resolves_a_waiter_after_the_listen_connection_drops(registry):
     feed, transactions, outcomes = pg_feed(registry, timedelta(milliseconds=500))
+    dsn = registry.db.dsn
+    before = listeners(dsn)
 
     async def scenario():
         await feed.start()
         try:
-            await until(lambda: len(listeners(registry.db.dsn)) == 1)
+            await until(lambda: len(own_listeners(dsn, before)) == 1)
+            (pid,) = own_listeners(dsn, before)
             wait = asyncio.create_task(feed.wait_for(LOCK, since=0, timeout=SOON))
             await until(lambda: LOCK in feed._entries)
-            with psycopg.connect(registry.db.dsn, autocommit=True) as admin:
-                admin.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                              "WHERE application_name = %s AND datname = current_database()",
-                              (APPLICATION_NAME,))
+            with psycopg.connect(dsn, autocommit=True) as admin:
+                admin.execute("SELECT pg_terminate_backend(%s)", (pid,))  # only OUR feed's
                 # Written WITHOUT a NOTIFY: only a re-read can find it.
                 admin.execute(
                     "INSERT INTO job_outcomes (lock_key, job_name, status, seq, updated_at) "

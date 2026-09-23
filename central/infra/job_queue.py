@@ -148,3 +148,22 @@ async def defer_async(app: procrastinate.App, job: Job[Any], *, attempt: int,
     except AlreadyEnqueued:
         return False
     return True
+
+
+_CARRY_ATTEMPT: Final = (
+    "UPDATE procrastinate_jobs SET args = jsonb_set(args, '{" + ATTEMPT_KWARG + "}', "
+    "to_jsonb(%(attempt)s::int)) "
+    "WHERE status = 'todo' AND queueing_lock = %(queueing_lock)s AND task_name = %(task_name)s "
+    "AND COALESCE((args ->> '" + ATTEMPT_KWARG + "')::int, 0) < %(attempt)s")
+
+
+async def carry_attempt_async(app: procrastinate.App, job: Job[Any], *, attempt: int) -> None:
+    """Raise the key's pending (`todo`) copy to at least `attempt`, through the app's pool.
+
+    A redelivery that merged into a pending copy must not reset the backoff: that copy may carry
+    a lower attempt (a request's attempt 0). Called while the redelivering copy is still `doing`
+    and holds the key's lock, so the pending copy cannot be fetched in between.
+    """
+    await app.connector.execute_query_async(
+        _CARRY_ATTEMPT, attempt=_require_attempt(attempt),
+        queueing_lock=job_keys(job).queueing_lock, task_name=task_name(type(job)))

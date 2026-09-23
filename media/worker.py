@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -11,9 +12,9 @@ import re
 import signal
 import stat
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -21,11 +22,10 @@ from central import cache_layout
 from central.catalog import CatalogSnapshot
 from central.content_wiring import build_job_runtime
 from central.db import Database
-from central.infra.queue_ops import QueueAdmin
-from central.infra.runtime import JobRuntime
+from central.infra.runtime import JobRuntime, until_stopped
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
-from central.media_store import MediaStore
+from central.media_store import MediaStore, MediaStoreError
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
@@ -331,28 +331,65 @@ class MediaWorker:
 
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+MEDIA_STANDBY_SECONDS: Final = 5.0
 
 
-async def _run_workers(app, runtime: JobRuntime, additional_context: dict) -> None:
+async def _media_queue(app, additional_context: dict) -> None:
+    """The legacy media queue itself (procrastinate, `MEDIA_QUEUE` only)."""
+    await app.run_worker_async(
+        queues=[MEDIA_QUEUE],
+        concurrency=4,
+        additional_context=additional_context,
+        install_signal_handlers=False,
+    )
+
+
+async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]], *,
+                        standby_seconds: float = MEDIA_STANDBY_SECONDS) -> None:
+    """The legacy media loop, run only while this process holds the media writer lock.
+
+    The lock guards the media store's single writer, NOT the job runtime (design §2: every
+    worker process runs the job runtime). While another process holds it, this one stands by,
+    retrying every `standby_seconds`, and takes over when the holder exits.
+    """
+    with contextlib.ExitStack() as held:
+        while True:
+            try:
+                held.enter_context(worker.store.worker_lock())
+                break
+            except MediaStoreError as error:
+                if error.code != "media_writer_active":
+                    raise
+            await asyncio.sleep(standby_seconds)
+        await worker._register_recipe()
+        await worker.maintain()
+        await worker.refresh_once()
+        await run_queue()
+
+
+async def _run_workers(media: Awaitable[None], runtime: JobRuntime) -> None:
     """The legacy media loop and the job runtime side by side, under ONE signal handler.
 
     SIGTERM/SIGINT stops both gracefully (running jobs finish), then `_entry` returns and the
-    process exits 0. Neither installs its own handlers. A loop that fails cancels the other.
+    process exits 0. Neither installs its own handlers. A loop that fails, or ends without
+    being asked to stop (`until_stopped`), cancels the other and the process exits non-zero.
     """
     loop = asyncio.get_running_loop()
+    stopping = False
+
+    def stopped() -> bool:
+        return stopping
+
     try:
         async with asyncio.TaskGroup() as group:
-            media = group.create_task(app.run_worker_async(
-                queues=[MEDIA_QUEUE],
-                concurrency=4,
-                additional_context=additional_context,
-                install_signal_handlers=False,
-            ), name="worker media")
-            group.create_task(runtime.run(), name="worker jobs")
+            media_task = group.create_task(until_stopped(media, stopped), name="worker media")
+            group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
 
             def stop() -> None:
+                nonlocal stopping
+                stopping = True
                 runtime.stop()
-                media.cancel()  # procrastinate stops a cancelled worker gracefully
+                media_task.cancel()  # procrastinate stops a cancelled worker gracefully
 
             for number in _STOP_SIGNALS:
                 loop.add_signal_handler(number, stop)
@@ -376,24 +413,19 @@ async def _entry():
     queue = ProcrastinateMediaQueue(dsn)
     repository = MediaRepository(db, clock, queue=queue)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
-    # The one worker kind (design §10.5): every OS-image/`.deb` handler behind JobRuntime.
-    # Its boot checks run here, so a wiring mistake fails before any job is claimed.
-    admin = QueueAdmin(dsn)
-    runtime = build_job_runtime(db, clock, cache_root=cache_layout.cache_root(), env=os.environ,
-                                admin=admin)
+    # The one worker kind (design §10.5): every OS-image/`.deb` handler behind JobRuntime, in
+    # EVERY worker process; only the legacy media loop is single-writer. Its boot checks run
+    # here, so a wiring mistake fails before any job is claimed.
+    runtime = build_job_runtime(db, clock, cache_root=cache_layout.cache_root(), env=os.environ)
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     additional_context = {"media_worker": worker}
     try:
-        with worker.store.worker_lock():
-            await worker._register_recipe()
-            await worker.maintain()
-            await worker.refresh_once()
-            async with app.open_async():
-                await _run_workers(app, runtime, additional_context)
+        async with app.open_async():
+            await _run_workers(
+                _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime)
     finally:
-        await admin.aclose()
         await worker._close_clients()
 
 
@@ -404,6 +436,8 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as error:
+        while isinstance(error, ExceptionGroup):  # the loop that failed first, not the group
+            error = error.exceptions[0]
         print(json.dumps({"error": MediaWorker._code(error)}), file=sys.stderr)
         return 1
 

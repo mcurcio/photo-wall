@@ -19,8 +19,9 @@ from central.kernel.assets import (
     AssetReference,
     OriginLocator,
 )
-from central.kernel.handling import TerminalFailure
+from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import FetchOsImage, FetchPackage
+from central.kernel.publishing import ASSET_NOT_RECORDED
 
 TAG = "v1.2.3"
 GOOD = b"the produced bytes " * 50
@@ -96,11 +97,13 @@ def world(tmp_path):
     return World(tmp_path)
 
 
-def test_unknown_asset_is_terminal_and_writes_nothing(world):
+def test_unknown_asset_is_transient_asset_not_recorded_and_writes_nothing(world):
+    # The publisher's reading of the same condition (PB7): one reason, transient, never sticky.
     writer = Writer()
-    with pytest.raises(TerminalFailure) as raised:
+    with pytest.raises(TransientFailure) as raised:
         world.produce(OS_JOB, writer)
-    assert raised.value.reason == "unknown_asset"
+    assert raised.value.reason == ASSET_NOT_RECORDED
+    assert raised.value.retry_after is None
     assert writer.calls == []
     assert all(tx.state == "committed" for tx in world.transactions.begun)
 
