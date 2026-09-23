@@ -678,3 +678,27 @@ back-compat, base serving is always configured now). NOT touched:
 reachable `boot_autopull(base_root=None)` test seam per its docstring and is
 legitimate. No code divergence; honors design:220-223. Mirrors the E13/E14/E15
 doc softenings.
+
+## 2026-09-22 — Central MVP lane C (assets), beads C-1..C-4
+
+- **C4's source pointer is wrong: `tests/test_netboot_base.py` has no hostile-archive tests.**
+  `grep -rn "base_member_not_file\|base_digest_mismatch\|SYMTYPE" tests/*.py` finds none for
+  `_extract_squashfs` (central/netboot_base.py:692). The only tar-type cases are for the player
+  package (tests/test_player_package.py:312). The named cases (traversal, symlink/hardlink,
+  device/fifo/dir, duplicate names, oversize, wrong digest, missing member) were written from
+  scratch in `tests/test_assets_os_image.py`. No behaviour change.
+- **`CacheStore` exposes a read-only `layout` property that is not on the frozen page.**
+  `AssetProduction.__init__(store, records, transactions)` gets no layout. But C1 step 2 ("if the
+  file is present, measure it ... discard it") needs the final path, and `measure`/`discard` take
+  a `Path`. Added `CacheStore.layout -> CacheLayout` (central/assets/store.py) instead of a new
+  store method. P2 wiring is unaffected.
+- **C1's "a reference's expected facts" is read as "every reference's stated expectation".**
+  Step 3 raises `digest_mismatch` unless the produced file satisfies each reference's
+  `expected_size`/`expected_sha256` where set. Step 2's early return also requires the newest
+  reference to state both. The steps share one predicate, so step 2 never accepts what step 3
+  would reject.
+- **The 021 backfill seeds only legacy rows that the kernel types accept:** an owner/tag of at
+  most 128 chars, and a locator URL matching `^https?://` of at most 2048 chars. Without this
+  filter, one bad legacy row would do one of two things. It would abort the migration (the
+  `owner` CHECK), or it would make `PgAssetRecords.get` raise `ValueError` while building an
+  `OriginLocator` (central/kernel/assets.py:62-67). A filtered row gets no asset.
