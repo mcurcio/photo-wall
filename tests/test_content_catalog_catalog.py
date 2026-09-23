@@ -7,7 +7,12 @@ import hashlib
 from dataclasses import dataclass
 
 import pytest
-from catalog_fakes import InMemoryDeviceRecords, InMemoryReleaseRecords, device
+from catalog_fakes import (
+    InMemoryDeviceRecords,
+    InMemoryReleaseRecords,
+    InMemoryStoredAssets,
+    device,
+)
 from fakes.publisher import PublishedCall, RecordingPublisher
 from fakes.transactions import FakeTransactions
 
@@ -60,17 +65,19 @@ class World:
     transactions: FakeTransactions
     publisher: RecordingPublisher
     clock: ManualClock
+    stored: InMemoryStoredAssets
 
 
-def world(releases=(), devices=(), *, promoted=None) -> World:
+def world(releases=(), devices=(), *, promoted=None, last_good=None, on_disk=()) -> World:
     clock = ManualClock(1000.0)
-    records = InMemoryReleaseRecords(tuple(releases), promoted=promoted)
+    records = InMemoryReleaseRecords(tuple(releases), promoted=promoted, last_good=last_good)
     device_records = InMemoryDeviceRecords(tuple(devices))
     transactions = FakeTransactions()
     publisher = RecordingPublisher(clock)
-    catalog = ReleaseCatalog(releases=records, devices=device_records,
+    stored = InMemoryStoredAssets(on_disk)
+    catalog = ReleaseCatalog(releases=records, devices=device_records, stored=stored,
                              transactions=transactions, publisher=publisher, clock=clock)
-    return World(catalog, records, device_records, transactions, publisher, clock)
+    return World(catalog, records, device_records, transactions, publisher, clock, stored)
 
 
 def run(coro):
@@ -102,7 +109,7 @@ def test_empty_catalog_is_unknown_no_release_but_the_device_row_is_upserted():
 
 def test_fresh_device_bootstraps_newest_full_release_with_an_image_in_one_transaction():
     w = world([release(T1), release(T), release(T2, pre=True), release("v0.0.4", image=False)])
-    assert netboot(w) == Candidates(os_images(T), pinned=False)
+    assert netboot(w) == Candidates(os_images(T, T1), pinned=False)  # T1: an older substitute
     assert [tx.state for tx in w.transactions.begun] == ["committed"]
     assert w.devices.locked == [DEVICE_ID]
 
@@ -119,7 +126,23 @@ def test_frontier_of_active_known_goods_beats_bootstrap_and_ignores_retired():
     w = world([release(T1), release(T), release(T2)],
               [device("device-a", known_good_tag=T),
                device("device-retired", known_good_tag=T2, retired=True)])
-    assert netboot(w) == Candidates(os_images(T), pinned=False)
+    assert netboot(w) == Candidates(os_images(T, T1), pinned=False)
+
+
+def test_unpinned_device_may_get_the_newest_ready_eligible_version_not_only_its_known_good():
+    # Owner ruling: unpinned may be served the newest ready eligible version while `desired` is
+    # fetched. Eligible = full, with an OS image, older than desired (never the rc, never newer).
+    tags = ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0"]
+    w = world([*(release(t) for t in tags), release("v0.3.5-rc.1", pre=True)],
+              [device("frontier", known_good_tag="v0.3.0"),
+               device(DEVICE_ID, known_good_tag="v0.1.0")])
+    assert netboot(w) == Candidates(os_images("v0.3.0", "v0.2.0", "v0.1.0"), pinned=False)
+
+
+def test_pinned_device_never_gets_a_substitute():
+    w = world([release(T1), release(T), release(T2)],
+              [device("frontier", known_good_tag=T2), device(DEVICE_ID, attached_tag=T)])
+    assert netboot(w) == Candidates(os_images(T), pinned=True)
 
 
 def test_unpinned_device_gets_its_known_good_as_a_substitute():
@@ -175,6 +198,20 @@ def test_absent_or_unsafe_serial_serves_desired_and_creates_no_row(serial):
     assert w.devices.rows == {}
 
 
+class _CountingDevices(InMemoryDeviceRecords):
+    def active(self, tx):
+        raise AssertionError("a request path read every device row")
+
+
+def test_request_paths_never_read_every_device_row():
+    # Fake serials mint device rows, so neither netboot nor a package request may scan them all.
+    w = world([release(T1), release(T2)], promoted=T2)
+    w.catalog._devices = _CountingDevices(tuple(w.devices.rows.values()))
+    netboot(w)
+    run(w.catalog.resolve(PackageRequest(deb_sha(T1))))
+    run(w.catalog.desired_assets())
+
+
 def test_sanitize_serial_is_the_ported_safe_charset():
     catalog = world().catalog
     assert catalog.sanitize_serial(SERIAL) == SERIAL
@@ -201,10 +238,37 @@ def test_record_served_for_an_unsafe_serial_writes_nothing():
 # -- B2 resolve: package ------------------------------------------------------------------------
 
 
-def test_package_request_for_a_known_sha_is_a_pinned_single_candidate():
-    w = world([release(T1), release(T2)])
-    resolution = run(w.catalog.resolve(PackageRequest(deb_sha(T1))))
-    assert resolution == Candidates((FetchPackage(sha256=deb_sha(T1)),), pinned=True)
+def test_package_request_for_a_desired_sha_is_a_pinned_single_candidate():
+    w = world([release(T1), release(T2)])  # T2 is the bootstrap target: its .deb is desired
+    resolution = run(w.catalog.resolve(PackageRequest(deb_sha(T2))))
+    assert resolution == Candidates((FetchPackage(sha256=deb_sha(T2)),), pinned=True)
+
+
+@pytest.mark.parametrize("devices,policy", [
+    ([device("d", attached_tag=T1)], {}),
+    ([device("d", known_good_tag=T1)], {}),
+    ([device("d", last_served_tag=T1)], {}),
+    ([], {"promoted": T1}),
+    ([], {"promoted": T2, "last_good": T1}),
+])
+def test_package_request_for_a_sha_desired_by_any_source_resolves(devices, policy):
+    w = world([release(T1), release(T2)], devices, **policy)
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == Candidates(
+        (FetchPackage(sha256=deb_sha(T1)),), pinned=True)
+    assert FetchPackage(sha256=deb_sha(T1)) in run(w.catalog.desired_assets())  # same rule
+
+
+def test_package_request_for_a_known_undesired_sha_not_on_disk_is_unknown():
+    # P1: an unauthenticated client must not make Central fetch any historical .deb.
+    w = world([release(T1), release(T2)], [device("retired", attached_tag=T1, retired=True)])
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == Unknown("unknown_package")
+    assert w.publisher.calls == []
+
+
+def test_package_request_for_a_known_undesired_sha_on_disk_is_served():
+    w = world([release(T1), release(T2)], on_disk=[FetchPackage(sha256=deb_sha(T1))])
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == Candidates(
+        (FetchPackage(sha256=deb_sha(T1)),), pinned=True)
 
 
 def test_package_request_for_an_unknown_sha_is_unknown_package():
@@ -218,15 +282,17 @@ def test_package_request_for_an_unknown_sha_is_unknown_package():
 def test_desired_assets_is_pins_known_goods_target_and_promoted_deb():
     tags = ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0", "v0.6.0"]
     pin, kg, frontier, promoted, retired_pin, unrelated = tags
-    w = world([release(t) for t in tags],
+    served, last_good = "v0.0.8", "v0.0.9"
+    w = world([*(release(t) for t in tags), release(served), release(last_good)],
               [device("a", attached_tag=pin, known_good_tag=kg),
-               device("b", known_good_tag=frontier),
+               device("b", known_good_tag=frontier, last_served_tag=served),
                device("r", attached_tag=retired_pin, retired=True)],
-              promoted=promoted)
+              promoted=promoted, last_good=last_good)
     desired = run(w.catalog.desired_assets())
     assert desired == frozenset(
-        [*os_images(pin, kg, frontier),
-         *(FetchPackage(sha256=deb_sha(t)) for t in (pin, kg, frontier, promoted))])
+        [*os_images(pin, kg, frontier, served),
+         *(FetchPackage(sha256=deb_sha(t))
+           for t in (pin, kg, frontier, served, promoted, last_good))])
     assert unrelated not in {getattr(job, "tag", None) for job in desired}
 
 
@@ -280,6 +346,28 @@ def test_promoted_package():
         "app_unconfigured")
     assert run(world([release(T1, deb=False)], promoted=T1).catalog.promoted_package()) == (
         ManifestRefusal("app_unconfigured"))
+
+
+@pytest.mark.parametrize("on_disk,expected", [
+    ((T2, T1), T2),   # the promoted .deb is on disk: it is served
+    ((T1,), T1),      # promoted still fetching / failed: the last-good keeps serving (main)
+    ((), T2),         # neither on disk: the promoted one (the package route fetches it)
+])
+def test_promoted_package_falls_back_to_the_last_good_while_the_promoted_is_absent(
+        on_disk, expected):
+    w = world([release(T1), release(T2)], promoted=T2, last_good=T1,
+              on_disk=[FetchPackage(sha256=deb_sha(t)) for t in on_disk])
+    assert run(w.catalog.promoted_package()) == DevicePackage(
+        expected, expected, deb_sha(expected), 10)
+
+
+@pytest.mark.parametrize("outgoing_on_disk,last_good", [(True, T1), (False, "v0.0.0")])
+def test_promote_keeps_the_outgoing_tag_as_last_good_only_when_its_deb_is_on_disk(
+        outgoing_on_disk, last_good):
+    w = world([release("v0.0.0"), release(T1), release(T2)], promoted=T1, last_good="v0.0.0",
+              on_disk=[FetchPackage(sha256=deb_sha(T1))] if outgoing_on_disk else [])
+    run(w.catalog.promote(T2))
+    assert (w.releases.promoted, w.releases.last_good) == (T2, last_good)
 
 
 # -- B5 operator actions ------------------------------------------------------------------------

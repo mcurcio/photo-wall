@@ -33,6 +33,7 @@ from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
 from central.infra.queue_ops import PurgeFinishedJobsHandler, QueueAdmin, RescueStalledJobsHandler
 from central.infra.runtime import JobRuntime
+from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.jobs import QueueName
 from central.origins.github import GitHubReleaseOrigin
@@ -72,9 +73,10 @@ def _core(db: Database, clock: Clock, *, cache_root: Path, feed_wanted: bool) ->
             if feed_wanted else None)
     publisher = ProcrastinatePublisher(db.dsn, transactions=transactions, outcomes=outcomes,
                                        assets=assets, clock=clock, feed=feed)
-    catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
-                             transactions=transactions, publisher=publisher, clock=clock)
     store = CacheStore(CacheLayout(cache_root))
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+                             stored=DiskStoredAssets(records=assets, store=store),
+                             transactions=transactions, publisher=publisher, clock=clock)
     return _Core(transactions, assets, outcomes, publisher, catalog, store, feed)
 
 
@@ -102,7 +104,8 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path, env: Mapp
     handlers = (
         SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(), devices=PgDeviceRecords(),
                             assets=core.assets, transactions=core.transactions,
-                            publisher=core.publisher, catalog=core.catalog, clock=clock),
+                            publisher=core.publisher, catalog=core.catalog, clock=clock,
+                            include_prereleases=origin.include_prereleases),
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
         FetchPackageHandler(production=production, origin=origin),
         PrefetchHandler(catalog=core.catalog, records=core.assets, store=core.store,

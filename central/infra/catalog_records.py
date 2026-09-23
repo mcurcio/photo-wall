@@ -1,7 +1,8 @@
 """Postgres `ReleaseRecords` / `DeviceRecords` over the existing tables, unchanged.
 
-`app_releases` (016 + 018's base_* columns), `app_release_policy`, `app_release_poll`, `devices`
-(018) and `bindings` (001). The SQL is ported from `central/app_releases.py`,
+`app_releases` (016 + 018's base_* columns), `app_release_policy` (+ 023's last_good_tag),
+`app_release_poll`, `devices` (018; 024's partial indexes serve the DISTINCT tag reads) and
+`bindings` (001). The SQL is ported from `central/app_releases.py`,
 `central/app_release_service.py`, `central/installation_repository.py` and
 `central/netboot_base.py`. Each method runs in the caller's transaction; a fake transaction is a
 `TypeError` (`pg_connection`).
@@ -9,9 +10,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
-from central.content_catalog.ports import DeviceRow, DeviceUpdate, ReleaseRow
+from central.content_catalog.ports import DeviceRow, DeviceUpdate, NamedTags, ReleaseRow
 from central.infra.transactions import pg_connection
 from central.kernel.assets import OriginLocator
 from central.kernel.ports import PublishedRelease
@@ -20,7 +22,7 @@ from central.kernel.types import release_version
 
 _RELEASE_COLUMNS = (
     "tag, is_prerelease, asset_url, asset_sha256, asset_size, "
-    "base_tarball_url, base_tarball_sha256, base_tarball_size"
+    "base_tarball_url, base_tarball_sha256, base_tarball_size, mirror_state"
 )
 _DEVICE_COLUMNS = (
     "device_id, serial, attached_tag, known_good_tag, last_served_tag, boot_outcome, "
@@ -41,6 +43,7 @@ def _release(row: dict[str, Any]) -> ReleaseRow:
         package=_locator(row["asset_url"], row["asset_sha256"], row["asset_size"]),
         os_image=_locator(row["base_tarball_url"], row["base_tarball_sha256"],
                           row["base_tarball_size"]),
+        divergent=row["mirror_state"] == "divergent",
     )
 
 
@@ -79,6 +82,13 @@ class PgReleaseRecords:
         ).fetchall()
         return tuple(_release(row) for row in rows)
 
+    def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
+        rows = pg_connection(tx).execute(
+            f"SELECT {_RELEASE_COLUMNS} FROM app_releases WHERE asset_sha256=%s ORDER BY tag",
+            (sha256,),
+        ).fetchall()
+        return tuple(_release(row) for row in rows)
+
     def upsert(self, tx: Transaction, release: PublishedRelease, *,
                now: float) -> ReleaseRow | None:
         conn = pg_connection(tx)
@@ -89,7 +99,7 @@ class PgReleaseRecords:
         version = release_version(release.tag)
         asset = _facts(release.package)  # url, sha256, size
         base = _facts(release.os_image)
-        # mirror_state is a legacy NOT NULL column that nothing reads; written on insert only.
+        # mirror_state is written on insert only; afterwards only mark_divergent changes it.
         mirror_state = "discovered" if release.package is not None else "undeployable"
         conn.execute(
             "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
@@ -108,6 +118,13 @@ class PgReleaseRecords:
         )
         return None if previous is None else _release(previous)
 
+    def mark_divergent(self, tx: Transaction, tag: str) -> None:
+        pg_connection(tx).execute(
+            "UPDATE app_releases SET mirror_state='divergent', mirror_error='asset_changed' "
+            "WHERE tag=%s",
+            (tag,),
+        )
+
     def promoted_tag(self, tx: Transaction) -> str | None:
         row = pg_connection(tx).execute(
             "SELECT promoted_tag FROM app_release_policy WHERE singleton"
@@ -121,6 +138,17 @@ class PgReleaseRecords:
             "INSERT INTO app_release_policy VALUES(TRUE,%s) ON CONFLICT(singleton) "
             "DO UPDATE SET promoted_tag=EXCLUDED.promoted_tag",
             (tag,),
+        )
+
+    def last_good_tag(self, tx: Transaction) -> str | None:
+        row = pg_connection(tx).execute(
+            "SELECT last_good_tag FROM app_release_policy WHERE singleton"
+        ).fetchone()
+        return None if row is None else row["last_good_tag"]
+
+    def set_last_good(self, tx: Transaction, tag: str) -> None:
+        pg_connection(tx).execute(
+            "UPDATE app_release_policy SET last_good_tag=%s WHERE singleton", (tag,)
         )
 
     def load_etag(self, tx: Transaction) -> str | None:
@@ -164,6 +192,42 @@ class PgDeviceRecords:
             f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE retired_at IS NULL ORDER BY device_id"
         ).fetchall()
         return tuple(_device(row) for row in rows)
+
+    def known_good_tags(self, tx: Transaction) -> frozenset[str]:
+        rows = pg_connection(tx).execute(
+            "SELECT DISTINCT known_good_tag AS tag FROM devices "
+            "WHERE retired_at IS NULL AND known_good_tag IS NOT NULL"
+        ).fetchall()
+        return frozenset(row["tag"] for row in rows)
+
+    def named_tags(self, tx: Transaction) -> NamedTags:
+        rows = pg_connection(tx).execute(
+            "SELECT DISTINCT 'pinned' AS role, attached_tag AS tag FROM devices "
+            "WHERE retired_at IS NULL AND attached_tag IS NOT NULL "
+            "UNION SELECT DISTINCT 'known_good', known_good_tag FROM devices "
+            "WHERE retired_at IS NULL AND known_good_tag IS NOT NULL "
+            "UNION SELECT DISTINCT 'served', last_served_tag FROM devices "
+            "WHERE retired_at IS NULL AND last_served_tag IS NOT NULL"
+        ).fetchall()
+        by_role: dict[str, set[str]] = {"pinned": set(), "known_good": set(), "served": set()}
+        for row in rows:
+            by_role[row["role"]].add(row["tag"])
+        return NamedTags(frozenset(by_role["pinned"]), frozenset(by_role["known_good"]),
+                         frozenset(by_role["served"]))
+
+    def names_any(self, tx: Transaction, tags: Collection[str]) -> bool:
+        tags = sorted(tags)
+        if not tags:
+            return False
+        row = pg_connection(tx).execute(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL AND attached_tag = ANY(%s)) "
+            "OR EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL "
+            "AND known_good_tag = ANY(%s)) "
+            "OR EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL "
+            "AND last_served_tag = ANY(%s)) AS named",
+            (tags, tags, tags),
+        ).fetchone()
+        return bool(row["named"])
 
     def get(self, tx: Transaction, device_id: str) -> DeviceRow | None:
         row = pg_connection(tx).execute(

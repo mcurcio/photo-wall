@@ -764,3 +764,39 @@ doc softenings.
 - **The lifespan installs procrastinate's schema whenever content services exist** (not only
   when the media queue is procrastinate's): the content publisher defers into
   `procrastinate_jobs`, and the page's lifespan order is migrate -> apply_schema -> feed.start.
+
+## central-mvp PR #22 review fixes, lane X (catalog, migrations, CI) — 2026-09-22
+
+- **P0 carry uses a second pointer, not only `promoted_tag`.** Migration 023 adds
+  `app_release_policy.last_good_tag` (main's `current_sha256` on the new model). The served tag
+  (`asset_sha256 = current_sha256`) becomes last-good, and becomes promoted only when nothing is
+  promoted. A pending promotion is kept (main would have converged to it). No match (a manual
+  upload the MVP cannot serve) writes nothing: a migration WARNING, a WARNING on every sync while
+  auto-promote is suppressed, and a 503 `app_unconfigured` until an operator promotes.
+- **The manifest's last-good fallback is that pointer** (`promoted_package`): promoted `.deb` on
+  disk, else last-good on disk, else promoted. `promote_in` (the operator route and auto-promote)
+  records the outgoing tag as last-good when its `.deb` is on disk.
+- **New catalog port `StoredAssets.present`** (`content_catalog/ports.py`; adapter
+  `central/infra/stored_assets.py`). It duplicates `PrefetchHandler._missing`'s check (lane Y
+  owns `central/assets`; it could use the adapter). The package rule's on-disk answer is a
+  snapshot: a file removed before the reader opens it is fetched once (nothing removes files
+  in the MVP).
+- **The desired set now also has active devices' `last_served_tag` and the last-good `.deb`.**
+  Without them, the per-device manifest could name a `.deb` that the package rule
+  refuses to fetch (after a substitute boot). This matches design §3 "current OS and `.deb` for
+  unpinned devices".
+- **Auto-promote "cached"** is now "some release's `.deb` has produced facts" (main counted
+  `app_packages`). Prereleases come from `origin.include_prereleases`.
+- **Substitute eligibility (owner ruling):** after `desired`, the device's known-good plus every
+  full release with an OS image older than `desired`, newest first, never the fenced tag. An
+  absent serial may substitute too. RECOVER (fenced on desired) still serves only the known-good.
+- **Divergence freeze** applies to a tag whose old `.deb` had produced facts (main: `mirrored`),
+  plus legacy `divergent` rows. Only the `.deb` facts freeze. Main also froze base facts; that
+  is out of scope here.
+- **Frontier:** `SELECT DISTINCT known_good_tag` (plus 024 partial indexes), with `newest()` in
+  Python. A SQL max would risk collation-dependent prerelease order against `order_key`.
+- **The frozen lane-B page changed:** `ReleaseRow.divergent`; `ReleaseRecords.shipping`,
+  `mark_divergent`, `last_good_tag`, `set_last_good`; `DeviceRecords.known_good_tags`,
+  `named_tags`, `names_any`; `ReleaseCatalog(stored=...)`; `SyncReleasesHandler(include_prereleases=)`.
+- **Docs not updated (docs bead):** `docs/module-appliance-release.md:86` still describes the
+  manifest as "the promoted package" without the last-good fallback.

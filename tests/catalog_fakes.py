@@ -1,4 +1,4 @@
-"""In-memory `ReleaseRecords` / `DeviceRecords` for the content-catalog lane.
+"""In-memory `ReleaseRecords` / `DeviceRecords` / `StoredAssets` for the content-catalog lane.
 
 They follow the Postgres repositories' semantics (`central/infra/catalog_records.py`) and assert
 every call runs inside an open transaction. Writes apply immediately (there is no rollback).
@@ -6,9 +6,11 @@ every call runs inside an open transaction. Writes apply immediately (there is n
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import replace
 
-from central.content_catalog.ports import DeviceRow, DeviceUpdate, ReleaseRow
+from central.content_catalog.ports import DeviceRow, DeviceUpdate, NamedTags, ReleaseRow
+from central.kernel.job_types import AssetJob
 from central.kernel.ports import PublishedRelease
 from central.kernel.transactions import Transaction
 
@@ -23,12 +25,14 @@ def release_row(release: PublishedRelease) -> ReleaseRow:
 
 
 class InMemoryReleaseRecords:
-    """Implements `ReleaseRecords`; `rows`, `promoted`, `etag` and `bound` are the stored state."""
+    """Implements `ReleaseRecords`; `rows`, `promoted`, `last_good`, `etag` and `bound` are the
+    stored state."""
 
     def __init__(self, rows: tuple[ReleaseRow, ...] = (), *, promoted: str | None = None,
-                 etag: str | None = None, bound: int = 0) -> None:
+                 last_good: str | None = None, etag: str | None = None, bound: int = 0) -> None:
         self.rows: dict[str, ReleaseRow] = {row.tag: row for row in rows}
         self.promoted = promoted
+        self.last_good = last_good
         self.etag = etag
         self.bound = bound
         self.upserted_at: dict[str, float] = {}
@@ -41,13 +45,23 @@ class InMemoryReleaseRecords:
         _require_open(tx)
         return tuple(self.rows.values())
 
+    def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
+        _require_open(tx)
+        return tuple(row for _, row in sorted(self.rows.items())
+                     if row.package is not None and row.package.sha256 == sha256)
+
     def upsert(self, tx: Transaction, release: PublishedRelease, *,
                now: float) -> ReleaseRow | None:
         _require_open(tx)
         previous = self.rows.get(release.tag)
-        self.rows[release.tag] = release_row(release)
+        divergent = previous is not None and previous.divergent  # mirror_state survives updates
+        self.rows[release.tag] = replace(release_row(release), divergent=divergent)
         self.upserted_at[release.tag] = now
         return previous
+
+    def mark_divergent(self, tx: Transaction, tag: str) -> None:
+        _require_open(tx)
+        self.rows[tag] = replace(self.rows[tag], divergent=True)
 
     def promoted_tag(self, tx: Transaction) -> str | None:
         _require_open(tx)
@@ -58,6 +72,18 @@ class InMemoryReleaseRecords:
         if tag not in self.rows:  # the app_release_policy FK
             raise AssertionError(f"promoted tag {tag} is not a release")
         self.promoted = tag
+
+    def last_good_tag(self, tx: Transaction) -> str | None:
+        _require_open(tx)
+        return self.last_good
+
+    def set_last_good(self, tx: Transaction, tag: str) -> None:
+        _require_open(tx)
+        if self.promoted is None:  # the policy row exists only once something is promoted
+            raise AssertionError("no app_release_policy row")
+        if tag not in self.rows:
+            raise AssertionError(f"last-good tag {tag} is not a release")
+        self.last_good = tag
 
     def load_etag(self, tx: Transaction) -> str | None:
         _require_open(tx)
@@ -102,6 +128,21 @@ class InMemoryDeviceRecords:
         _require_open(tx)
         return tuple(row for _, row in sorted(self.rows.items()) if not row.retired)
 
+    def known_good_tags(self, tx: Transaction) -> frozenset[str]:
+        return self.named_tags(tx).known_good
+
+    def named_tags(self, tx: Transaction) -> NamedTags:
+        _require_open(tx)  # the Pg version is a DISTINCT per role, never a row-per-device read
+        active = [row for row in self.rows.values() if not row.retired]
+        return NamedTags(
+            frozenset(row.attached_tag for row in active if row.attached_tag is not None),
+            frozenset(row.known_good_tag for row in active if row.known_good_tag is not None),
+            frozenset(row.last_served_tag for row in active if row.last_served_tag is not None))
+
+    def names_any(self, tx: Transaction, tags: Collection[str]) -> bool:
+        named = self.named_tags(tx)
+        return bool(set(tags) & (named.pinned | named.known_good | named.served))
+
     def get(self, tx: Transaction, device_id: str) -> DeviceRow | None:
         _require_open(tx)
         return self.rows.get(device_id)
@@ -141,3 +182,14 @@ class InMemoryDeviceRecords:
                 self.rows[device_id] = replace(row, boot_outcome="failed", failed_tag=fence)
                 swept += 1
         return swept
+
+
+class InMemoryStoredAssets:
+    """Implements `StoredAssets`; `on_disk` is the set of jobs whose asset is present."""
+
+    def __init__(self, on_disk: Collection[AssetJob] = ()) -> None:
+        self.on_disk: set[AssetJob] = set(on_disk)
+
+    def present(self, tx: Transaction, job: AssetJob) -> bool:
+        _require_open(tx)
+        return job in self.on_disk

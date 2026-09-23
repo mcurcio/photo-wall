@@ -168,3 +168,38 @@ def test_boot_choice_invariants():
         BootChoice((T, T), False, None)
     with pytest.raises(ValueError):
         BootChoice((T, T1), True, None)
+
+
+# -- owner ruling: unpinned may get the newest ready eligible version; pinned never substitutes --
+
+V1, V2, V3, V4 = "v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0"
+BOOTABLE = (V1, V2, V3, V4)  # full releases with an OS image (the catalog passes these)
+
+
+def test_unpinned_offers_every_older_bootable_release_newest_first_not_only_its_known_good():
+    row = device("d", known_good_tag=V1)
+    assert choose_base(row, frontier=V3, bootstrap=None, substitutes=BOOTABLE) == BootChoice(
+        (V3, V2, V1), False, None)  # V4 is newer than desired: never validated, not eligible
+
+
+def test_unpinned_substitutes_never_include_the_fenced_tag():
+    row = device("d", known_good_tag=V1, failed_tag=V2)  # the fence names a non-desired tag
+    assert choose_base(row, frontier=V3, bootstrap=None, substitutes=BOOTABLE) == BootChoice(
+        (V3, V1), False, CLEAR)
+
+
+def test_absent_serial_may_substitute_too():
+    assert choose_base(None, frontier=None, bootstrap=V2, substitutes=BOOTABLE) == BootChoice(
+        (V2, V1), False, None)
+
+
+def test_pinned_never_gets_a_substitute():
+    row = device("d", attached_tag=V3, known_good_tag=V1)
+    assert choose_base(row, frontier=V4, bootstrap=None, substitutes=BOOTABLE) == BootChoice(
+        (V3,), True, None)
+
+
+def test_recovery_still_serves_only_the_known_good():
+    row = device("d", known_good_tag=V1, failed_tag=V3, boot_outcome="failed")
+    assert choose_base(row, frontier=V3, bootstrap=None, substitutes=BOOTABLE) == BootChoice(
+        (V1,), False, None)

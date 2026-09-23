@@ -29,6 +29,7 @@ from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.ports import ReleaseRow
 from central.content_wiring import ContentServices
 from central.health.probe import PodProbe
+from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
 from central.kernel.jobs import asset_key
@@ -92,10 +93,12 @@ class World:
         self.publisher = RecordingPublisher(self.clock, assets=self.records)
         self.releases = InMemoryReleaseRecords(tuple(releases), promoted=promoted)
         self.devices = InMemoryDeviceRecords(tuple(devices))
+        self.store = CacheStore(CacheLayout(tmp_path))
         self.catalog = ReleaseCatalog(releases=self.releases, devices=self.devices,
+                                      stored=DiskStoredAssets(records=self.records,
+                                                              store=self.store),
                                       transactions=self.transactions, publisher=self.publisher,
                                       clock=self.clock)
-        self.store = CacheStore(CacheLayout(tmp_path))
         self.slots = WaiterSlots(capacity)
         self.reader = AssetReader(store=self.store, records=self.records,
                                   transactions=self.transactions, publisher=self.publisher,
@@ -356,6 +359,30 @@ def test_a_missing_package_is_503_with_retry_after(tmp_path):
     assert response.status_code == 503
     assert response.json() == {"error": "app_timeout"}
     assert response.headers["retry-after"] == "5"
+
+
+def test_a_known_but_undesired_package_not_on_disk_is_404_and_fetches_nothing(tmp_path):
+    # P1: any historical `.deb` is known, but only a desired one may be fetched on a miss.
+    w = World(tmp_path, releases=[release(T1), release(T2)], wait=0.2)  # T2 is desired
+    w.reference(FetchPackage(sha256=sha(deb(T1))), owner=T1)
+    with TestClient(w.app) as client:
+        response = client.get(f"/v1/app/package/{sha(deb(T1))}.deb")
+    assert response.status_code == 404
+    assert response.json() == {"error": "app_package_not_found"}
+    assert w.publisher.calls == []
+
+
+def test_the_app_manifest_keeps_the_last_good_package_while_the_promoted_one_is_absent(
+        tmp_path):
+    w = World(tmp_path, releases=[release(T1), release(T2)], promoted=T2)
+    w.releases.last_good = T1
+    job = FetchPackage(sha256=sha(deb(T1)))
+    w.reference(job, owner=T1)
+    w.produce(job, deb(T1))
+    with TestClient(w.app) as client:
+        response = client.get("/v1/app/manifest")
+    assert response.status_code == 200
+    assert response.json() == {"version": T1, "sha256": sha(deb(T1)), "size": len(deb(T1))}
 
 
 # -- manifests -------------------------------------------------------------------------------------

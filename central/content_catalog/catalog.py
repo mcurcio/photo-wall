@@ -17,7 +17,13 @@ from typing import Literal, TypeVar
 from pydantic import ValidationError
 
 from central.content_catalog.boot_policy import choose_base, newest
-from central.content_catalog.ports import DeviceRecords, DeviceRow, ReleaseRecords, ReleaseRow
+from central.content_catalog.ports import (
+    DeviceRecords,
+    DeviceRow,
+    ReleaseRecords,
+    ReleaseRow,
+    StoredAssets,
+)
 from central.kernel.job_types import AssetJob, FetchOsImage, FetchPackage, Prefetch, SyncReleases
 from central.kernel.ports import (
     Candidates,
@@ -92,14 +98,14 @@ def _os_image_job(tag: str) -> FetchOsImage | None:
         return None
 
 
-def _frontier(active: Iterable[DeviceRow]) -> str | None:
-    """max(semver) over non-retired devices' known-good tags (the live frontier)."""
-    return newest(row.known_good_tag for row in active if row.known_good_tag is not None)
+def _bootable(releases: Iterable[ReleaseRow]) -> tuple[str, ...]:
+    """The full releases that ship an OS image: the bootstrap pool and the substitute pool."""
+    return tuple(r.tag for r in releases if not r.is_prerelease and r.os_image is not None)
 
 
 def _bootstrap(releases: Iterable[ReleaseRow]) -> str | None:
     """The newest full release that ships an OS image: the empty-frontier target only."""
-    return newest(r.tag for r in releases if not r.is_prerelease and r.os_image is not None)
+    return newest(_bootable(releases))
 
 
 def _package(row: ReleaseRow | None) -> DevicePackage | None:
@@ -119,9 +125,11 @@ class ReleaseCatalog:
     """Implements the kernel's `ContentCatalog` for OS images and Player `.deb`s."""
 
     def __init__(self, *, releases: ReleaseRecords, devices: DeviceRecords,
-                 transactions: Transactions, publisher: Publisher, clock: Clock) -> None:
+                 stored: StoredAssets, transactions: Transactions, publisher: Publisher,
+                 clock: Clock) -> None:
         self._releases = releases
         self._devices = devices
+        self._stored = stored
         self._transactions = transactions
         self._publisher = publisher
         self._clock = clock
@@ -141,14 +149,14 @@ class ReleaseCatalog:
     def desired_in(self, tx: Transaction) -> frozenset[AssetJob]:
         """The desired set, read inside the caller's transaction (the sync tail uses it).
 
-        OS images for active pins, active known-goods and `frontier or bootstrap`; the `.deb`
-        of each of those tags plus the promoted tag's. Tags without the locator are skipped.
+        OS images and `.deb`s for active devices' pins, known-goods and last-served tags (what
+        they run now) and `frontier or bootstrap`; the `.deb` of the promoted and the last-good
+        tag. Tags without the locator are skipped.
         """
-        active = self._devices.active(tx)
+        named = self._devices.named_tags(tx)
         by_tag = {row.tag: row for row in self._releases.all(tx)}
-        tags = {row.attached_tag for row in active if row.attached_tag is not None}
-        tags |= {row.known_good_tag for row in active if row.known_good_tag is not None}
-        target = _frontier(active) or _bootstrap(by_tag.values())
+        tags = set(named.pinned | named.known_good | named.served)
+        target = newest(named.known_good) or _bootstrap(by_tag.values())
         if target is not None:
             tags.add(target)
         jobs: set[AssetJob] = set()
@@ -160,10 +168,26 @@ class ReleaseCatalog:
                 jobs.add(job)
             if (package := _package(row)) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
-        promoted = self._releases.promoted_tag(tx)
-        if promoted is not None and (package := _package(by_tag.get(promoted))) is not None:
-            jobs.add(FetchPackage(sha256=package.sha256))
+        for tag in self._policy_tags(tx):
+            if (package := _package(by_tag.get(tag))) is not None:
+                jobs.add(FetchPackage(sha256=package.sha256))
         return frozenset(jobs)
+
+    def _policy_tags(self, tx: Transaction) -> set[str]:
+        """The promoted and the last-good tag: the `.deb`s `/v1/app/manifest` may name."""
+        tags = {self._releases.promoted_tag(tx), self._releases.last_good_tag(tx)}
+        return {tag for tag in tags if tag is not None}
+
+    def _package_desired(self, tx: Transaction, tags: frozenset[str]) -> bool:
+        """Whether `desired_in` names the `.deb` these tags ship, without computing the set.
+
+        The same three sources as `desired_in`: a device-named tag, a policy tag, or
+        `frontier or bootstrap`.
+        """
+        if self._devices.names_any(tx, tags) or tags & self._policy_tags(tx):
+            return True
+        frontier = newest(self._devices.known_good_tags(tx))
+        return (frontier or _bootstrap(self._releases.all(tx))) in tags
 
     # -- serving ----------------------------------------------------------------------------------
 
@@ -194,10 +218,25 @@ class ReleaseCatalog:
         return await self._in_tx(read)
 
     async def promoted_package(self) -> DevicePackage | ManifestRefusal:
+        """The promoted `.deb`; while its bytes are not on disk, the last-good one if they are.
+
+        Main's two-pointer rule (`app_package_policy.current_sha256` stayed on the previous
+        package until the promoted one was mirrored): a failed or in-flight fetch of a new
+        promotion never takes the served `.deb` away. With neither on disk, the promoted one
+        (the package route fetches it on demand, since it is desired).
+        """
         def read(tx: Transaction) -> DevicePackage | ManifestRefusal:
             promoted = self._releases.promoted_tag(tx)
             package = _package(self._releases.get(tx, promoted)) if promoted else None
-            return package if package is not None else ManifestRefusal("app_unconfigured")
+            if package is None:
+                return ManifestRefusal("app_unconfigured")
+            if self._on_disk(tx, package):
+                return package
+            last_good = self._releases.last_good_tag(tx)
+            fallback = _package(self._releases.get(tx, last_good)) if last_good else None
+            if fallback is not None and self._on_disk(tx, fallback):
+                return fallback
+            return package
 
         return await self._in_tx(read)
 
@@ -238,12 +277,25 @@ class ReleaseCatalog:
             package = _package(release)
             if package is None:
                 raise CatalogError("release_undeployable", "conflict")
-            self._releases.set_promoted(tx, tag)
+            self.promote_in(tx, tag)
             self._publisher.publish(FetchPackage(sha256=package.sha256), within=tx,
                                     retry_terminal=True)
             self._publisher.publish(Prefetch(), within=tx)
 
         await self._in_tx(write)
+
+    def promote_in(self, tx: Transaction, tag: str) -> None:
+        """Move the promoted pointer to a known tag with a `.deb` (the caller checked that).
+
+        The outgoing promoted tag becomes the last-good fallback when its `.deb` is on disk
+        (otherwise the older last-good stays). The operator route and auto-promote both use it.
+        """
+        outgoing = self._releases.promoted_tag(tx)
+        if outgoing is not None and outgoing != tag:
+            package = _package(self._releases.get(tx, outgoing))
+            if package is not None and self._on_disk(tx, package):
+                self._releases.set_last_good(tx, outgoing)
+        self._releases.set_promoted(tx, tag)
 
     async def refresh(self) -> None:
         await self._publisher.publish_now(SyncReleases(), retry_terminal=True)
@@ -265,8 +317,8 @@ class ReleaseCatalog:
 
     async def netboot_view(self) -> NetbootView:
         def read(tx: Transaction) -> NetbootView:
-            active = self._devices.active(tx)
-            return NetbootView(_frontier(active), active)
+            return NetbootView(newest(self._devices.known_good_tags(tx)),
+                               self._devices.active(tx))
 
         return await self._in_tx(read)
 
@@ -289,8 +341,8 @@ class ReleaseCatalog:
         if serial is not None and device_id is not None:
             device = self._devices.lock(tx, device_id, serial, now=self._clock.utc())
         releases = self._releases.all(tx)
-        choice = choose_base(device, frontier=_frontier(self._devices.active(tx)),
-                             bootstrap=_bootstrap(releases))
+        choice = choose_base(device, frontier=newest(self._devices.known_good_tags(tx)),
+                             bootstrap=_bootstrap(releases), substitutes=_bootable(releases))
         if choice is None:
             return Unknown("no_release")
         if choice.update is not None and device is not None:
@@ -303,10 +355,24 @@ class ReleaseCatalog:
         return Candidates(jobs, pinned=choice.pinned)
 
     def _resolve_package(self, tx: Transaction, request: PackageRequest) -> Resolution:
-        if any(row.package is not None and row.package.sha256 == request.sha256
-               for row in self._releases.all(tx)):
-            return Candidates((FetchPackage(sha256=request.sha256),), pinned=True)
+        """A desired `.deb` resolves (a miss fetches it); any other known one only while it is
+        on disk, so an unauthenticated client can never make Central download an arbitrary
+        historical `.deb`. An unknown sha costs one indexed lookup.
+
+        The on-disk answer is a snapshot: a file removed between here and the reader's open is
+        still fetched once. No cache cleanup ships in the MVP, so today nothing removes one.
+        """
+        tags = frozenset(row.tag for row in self._releases.shipping(tx, request.sha256)
+                         if _package(row) is not None)
+        if not tags:
+            return Unknown("unknown_package")
+        job = FetchPackage(sha256=request.sha256)
+        if self._package_desired(tx, tags) or self._stored.present(tx, job):
+            return Candidates((job,), pinned=True)
         return Unknown("unknown_package")
+
+    def _on_disk(self, tx: Transaction, package: DevicePackage) -> bool:
+        return self._stored.present(tx, FetchPackage(sha256=package.sha256))
 
     async def _in_tx(self, body: Callable[[Transaction], T]) -> T:
         return await in_transaction(self._transactions, body)

@@ -43,7 +43,7 @@ These shared files have exactly one owner:
 | Cut | Cost while it is cut |
 | --- | --- |
 | Media (`PrepareMedia`, media sync jobs, the `media-variant` kind, `/v1/media/{original}/{recipe}`, TRANSCODE queue) | Media stays on its current path, as a legacy procrastinate loop inside the same worker process |
-| **`MaintainCache`** (LRU under budget, orphan and temp sweep) | **Deferred: correctness does not need it.** The disk decides presence and no record claims a file. Cost: the cache only grows, and the old tag GC and orphan sweep are deleted in P2. Crash temps (`.tmp-*`) accumulate. The operator can wipe the cache at any time (it is ephemeral). |
+| **`MaintainCache`** (LRU under budget, orphan and temp sweep) | **Deferred; owner-accepted 2026-09-22: PR #22 ships without any cache cleanup.** Correctness does not need it. The disk decides presence and no record claims a file. Cost: the cache only grows, and the old tag GC and orphan sweep are deleted in P2. Crash temps (`.tmp-*`) accumulate. The operator can wipe the cache at any time (it is ephemeral). |
 | Release withdrawal (retiring tags gone upstream) | Stale references stay desired only if pinned or known-good; otherwise they are inert |
 | Fleet health (`WorkerBeat`, `FailingOutcome`, `FleetHealth`) and the "produced but absent" metric | `job_outcomes` already records everything they would read |
 | `/v1/operator/netboot` `cache` and `boot_status` sections | Operators lose the base-cache table view |
