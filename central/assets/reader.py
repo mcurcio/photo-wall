@@ -4,10 +4,12 @@ Open the first candidate on disk. When that is the first (wanted) candidate, pub
 when it is a substitute, publish the wanted candidate's fetch job in the same transaction as the
 open (PB5's savepoint keeps a failed publish from aborting it; the failure is logged, never
 served). Otherwise take a waiter slot, publish the first candidate's fetch job and await its
-handle up to `wait_timeout`, then open it or report why not. Every request publish sets
-`retry_terminal` (decision 3). The route cancels `read` when the client disconnects;
-cancellation releases the slot, closes any fd opened but not returned, and never cancels a job
-or the open's transaction (the open is shielded, so its publish still commits).
+handle up to `wait_timeout`, then open it from its recorded facts whatever the outcome, and
+report why not only when that fails: the data decides; an outcome only explains an absence
+(`docs/central-idempotent-jobs.md` rule 3). Every request publish sets `retry_terminal`
+(decision 3). The route cancels `read` when the client disconnects; cancellation releases the
+slot, closes any fd opened but not returned, and never cancels a job or the open's transaction
+(the open is shielded, so its publish still commits).
 """
 
 from __future__ import annotations
@@ -149,11 +151,12 @@ class AssetReader:
     async def _produce_and_open(self, job: AssetJob) -> Opened | Unavailable:
         handle = await self._publish_request(job)
         outcome = await handle.wait(timeout=self._wait_timeout)
-        if isinstance(outcome, Ready):
-            opened = await _open_in_thread(self._open, job, outcome.result)
-            if opened is None:
-                return Unavailable("absent_after_ready", _ABSENT_AFTER_READY_RETRY_SECONDS)
+        # The data decides: facts plus file serve whatever the outcome says (issue #26 defect 1).
+        opened = await _open_in_thread(self._open_first, (job,))
+        if opened is not None:
             return opened
+        if isinstance(outcome, Ready):
+            return Unavailable("absent_after_ready", _ABSENT_AFTER_READY_RETRY_SECONDS)
         if isinstance(outcome, Failed):
             if outcome.terminal:
                 return Unavailable(outcome.reason, _TERMINAL_RETRY_SECONDS)
