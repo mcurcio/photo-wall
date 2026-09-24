@@ -1044,3 +1044,15 @@ doc softenings.
   - The new setting `PHOTO_WALL_RELEASE_API_BASE` needs a row in the runbook (docs bead).
   - The media flock defect is pinned by a strict xfail.
   - Coalescing means "one pending copy at a time and one origin GET", not "one fetch row".
+
+## 2026-09-24 — #26 per-data design, review round 1: media variant identity (for the media design)
+
+- **Architecture §9 decision 1 says a media variant's digest is a write-once integrity check.**
+  That cannot survive a cache wipe while rendering is not reproducible
+  (`docs/module-media-preparation.md:33` disclaims a reproducible build): a re-render after a wipe
+  yields different bytes, and write-once facts would refuse them (`not_reproducible`) for good.
+- **Proposed for the media design (not built by #26):** keep the variant key `original + recipe`,
+  store its bytes under their own sha256, and let the variant row point at that digest. The pointer
+  is set if unset, or moved only when its file is gone (compare-and-set): an OCI tag pointing at a
+  digest. The digest stays write-once per FILE, not per variant. Whether a Pi can see a variant's
+  digest change after a wipe is a Pi-visible question for the media gate.
