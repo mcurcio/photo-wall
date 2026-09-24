@@ -1,83 +1,111 @@
-# Central: jobs run at least once, and every job is idempotent
+# Central: jobs may run in any order, because every piece of data converges
 
 **Date:** 2026-09-24 · **Status:** proposed amendment to the approved
-[Central system architecture](central-system-architecture.md), revised after review round 1 and the
-owner's scope ruling. It replaces the rejected fencing design and every note on issue #26.
-**Scope:** the owner chose a lean build now, four beads plus docs. The rest ships with the media
-programme (§7). **Asked of the reader:** approve. There are no product questions ([§9](#9-decisions)).
-**One residual heals slowly:** R2 can boot a tag's previous build until its next re-cut
-([§11](#11-what-can-go-wrong)).
+[Central system architecture](central-system-architecture.md). It replaces every earlier version of
+this document (the start-order design) and every note on issue #26.
+**Asked of the reader:** approve the three rules and one upgrade cost ([§9](#9-decisions)).
 
 ## 1. The problem in plain words
 
-A worker that is silent for 30s is declared dead, and its job runs again elsewhere. The worker may
-still be alive, after a pause or during a graceful drain longer than 30s, and it can finish later.
-The owner ruled that this is normal. What must be true:
-- A late run never replaces the result of a run that started after it.
+A worker that is silent for 30s is declared dead, and its job runs again elsewhere. The first run
+may still be alive and finish later. Jobs therefore run twice, late, and out of order. That is
+normal. What must be true:
+- Whatever order runs finish in, the files, the catalog and the promotion end up correct.
+- A Pi is never served bytes that differ from the facts recorded for them.
+- A late failure never hides data that is already there.
 - No worker, paused or killed, can stop rescue for the whole fleet.
-- The release catalog converges to what GitHub says, whatever order the syncs finish in.
-- Any case where running twice still does harm is named, with its time to heal (§11).
 
 | Owner decision this builds on | Source |
 | --- | --- |
-| At-least-once delivery. Every job must be idempotent (Celery `acks_late`, Sidekiq, Oban) | ruling 2026-09-24; fencing rejected |
-| A job recorded `terminal` may run once more if its worker dies after recording (3a) | ruling 2026-09-24 |
-| Build the lean scope now. The general handler split and content-keyed names ship with media | ruling 2026-09-24 |
+| Job order is not data order. Each data type gets an identity and an idempotent write rule | ruling 2026-09-24 |
+| No start-number sequence, fencing, ownership check or "newest run wins" | ruling 2026-09-24 |
+| Decision 3: a terminal failure is retried by the next request, never by a tick. 3a: a terminal may run once more if its worker dies after recording it | architecture §9; ruling 2026-09-24 |
+| The cache is ephemeral: it may be wiped at any time, and correctness must survive | owner, 2026-09 |
+| An automatic promotion never moves an operator's (#23) | ruling 2026-09-23 |
 
-| Fact (procrastinate 3.9.0; probes on PostgreSQL 16) | Where | Consequence |
+| Fact about today's code | Where | Consequence |
 | --- | --- | --- |
-| The outcome upsert has no condition. Rescue re-publishes at the SAME attempt | `central/infra/outcomes.py:77-83`; `central/infra/queue_ops.py:88-90` | A zombie's late `terminal` replaces the copy's `ok`, and attempt numbers cannot order the two runs |
-| Rescue runs under a running lock | `central/infra/job_queue.py:95-98`; `schema.sql:102` | P2: a stalled rescue blocks every later tick |
-| Retrying a running row in place fails while a copy is pending | `schema.sql:100`, `:386-394` | P1: `retry_job` raises, so rescue keeps re-publishing |
-| The sync commits each release, then the ETag, then the tail. Once frozen, a tag stays frozen | `central/content_catalog/sync.py:62-68`, `:127-128` | A stale sync freezes a tag for good. A crash before the tail loses the re-cut fetches for good |
-| The heartbeat stops before the drain. Prune at 30s sets `worker_id` NULL, and NULL counts as stalled | `worker.py:447-452`, `:552-570`; `queries.sql:53` | A drain longer than 30s re-runs its jobs. A pruned worker exits at its next fetch |
+| A `.deb` is already named by its sha256, and its facts are write-once | `central/assets/layout.py:22-25`; `central/infra/asset_records.py:107-124` | Two runs write the same bytes to the same name |
+| An OS image is named by its **tag**. A re-cut clears its facts | `central/kernel/job_types.py:19-21`; `central/content_catalog/sync.py:103-115` | A late run can write an old build under the new facts (old R2) |
+| A file with no facts and no expected digest is discarded and fetched again | `central/assets/production.py:56-67` | A stale sync that clears facts discards a good OS image |
+| Each release is committed on its own, with no upstream version | `central/content_catalog/sync.py:62-68`; `central/infra/catalog_records.py:114-141` | A stale listing that lands last reverts the catalog |
+| Once frozen, a tag stays frozen | `central/content_catalog/sync.py:127-128` | A stale listing can freeze a tag for good |
+| The outcome upsert has no condition | `central/infra/outcomes.py:73-88` | A late `terminal` replaces an `ok` |
+| A publish without `retry_terminal` skips a key whose outcome is `terminal` | `central/infra/publisher.py:79-80` | That stale `terminal` stops `Prefetch` refilling after a wipe |
+| GitHub gives every asset a required `id` and `updated_at`; a release's own `updated_at` is optional; the listing ETag covers a page, not a release | GitHub REST 2022-11-28, releases and assets; `central/origins/github.py:320-328` | A release's version is its `manifest.json` asset's `(updated_at, id)` |
+| Rescue runs under the one-runner lock like every job; a pending row cannot start while a running row holds it | `central/infra/job_queue.py:95-98`; procrastinate `schema.sql:102` | A stalled rescue blocks every later rescue |
+| Retrying a row in place fails while a copy is pending | procrastinate `schema.sql:100` (probe P1) | Rescue re-publishes, then closes the stalled row (`central/infra/queue_ops.py:88-96`) |
 
 ## 2. The answer in one picture
 
 ```mermaid
 graph LR
-  A["Run A<br/>started first, paused"] -- "late result refused, facts rolled back" --> O
-  B["Run B<br/>rescued copy, started later"] -- "result and facts stored" --> O[("Outcomes + start number")]
-  S["SyncReleases"] -- "one transaction: listing, ETag, tail; frozen recomputed" --> C[("Catalog")]
-  R["Rescue: queueing lock only"] -- "re-publish, close" --> Q[("Job rows")]
+  subgraph Upstream["GitHub"]
+    GR["Release<br/>tag, manifest asset (updated_at, id)"]
+  end
+  subgraph Catalog["Catalog rows"]
+    RR["Release row<br/>key: tag<br/>stores the upstream version"]
+    FZ["Frozen flag<br/>derived from the row"]
+    PR["Promotion<br/>derived each sync"]
+    REF["Reference<br/>key: kind, identity, tag"]
+  end
+  subgraph Content["Assets: facts in Postgres, file on the cache disk"]
+    DEB["Player .deb<br/>key: .deb sha256<br/>apps/app-SHA.deb"]
+    OS["OS image<br/>key: tarball sha256<br/>os-images/base-SHA.squashfs"]
+  end
+  OUT["Job outcome<br/>key: job key<br/>a note about the last try"]
+  GR -- "applied only if not older" --> RR
+  RR --> FZ
+  RR --> PR
+  RR --> REF
+  REF --> DEB
+  REF --> OS
+  DEB -. "a failure is kept only while the data is absent" .-> OUT
+  OS -.-> OUT
 ```
 
 **The three rules**
-1. **A result is stored only if no run that started later has stored one.** A refused result
-   rolls back its produced facts, sends no NOTIFY, and schedules nothing.
-2. **Nothing may stop rescue.** Rescue takes a queueing lock only, never a running lock.
-3. **A sync lands whole and recomputes what it derives.** The listing, the ETag and the tail commit
-   together, and "frozen" is recomputed from facts on every sync.
+1. **Name bytes by what they are made from.** Every file's key is the digest of its upstream
+   bytes. Its facts are written once and never cleared. A re-cut is a new key, so a late run can
+   only write the same bytes under the same name.
+2. **Apply an upstream observation only if it is not older.** A release row stores GitHub's
+   version with it, and an older observation is refused whole. Whatever is derived from rows
+   (the frozen flag, references, the automatic promotion) is recomputed, never carried over.
+3. **Readiness is the data. An outcome is a note.** Ready means facts recorded and the file on
+   disk. A failure is recorded only while the data is absent. A terminal failure stands until a
+   request withdraws it.
 
 ## 3. Glossary
 
-- **Run:** one execution of a job by a worker. **Zombie:** a run declared dead but still going.
-- **Start number:** drawn from `job_start_seq` (`CACHE 1`) when a run starts; later is larger.
-- **Run transaction:** a run's conditional result, plus an asset job's produced facts.
-- **Superseded:** a run whose result was refused because a later-started run stored first.
-- **Idle limit:** the worker's 2s `idle_in_transaction_session_timeout` (a placeholder).
-- **Frozen (divergent) tag:** keeps its produced `.deb` after upstream changed it.
+- **Run:** one execution of a job. **Zombie:** a run declared dead that is still going.
+- **Content key:** an asset's identity, the sha256 of the upstream file it is made from.
+- **Facts:** the produced file's size and sha256, recorded once per content key.
+- **Observation:** what one sync saw for one release. **Upstream version:** its manifest asset's
+  `(updated_at, id)`.
+- **Derived value:** a column computed from other rows on every write, never read back as input.
+- **Withdraw:** a request's publish deletes the key's standing `terminal` outcome before it
+  enqueues a new run.
 
-## 4. How the invariant holds
+## 4. How each data type converges
 
-**The audit.** For each job type: is running it twice, or a stale copy late, harmless?
-
-| Job type | Harmless today? | After the lean build | Left for media (§7) |
+| Data | Identity and where it lives | Write rule | Why any order of runs converges |
 | --- | --- | --- | --- |
-| `FetchPackage` | Bytes and facts yes; outcome no (`central/assets/production.py:74-77`) | Rule 1 | none |
-| `FetchOsImage` | **No**: named by tag; a re-cut forgets the facts; the re-check runs outside the write (`production.py:78-81`) | Rule 1: a superseded run's facts roll back | R2: a zombie that commits *first* after a re-cut, or renames late |
-| `SyncReleases` | **No**: commits per release, then the ETag, then the tail; sticky freeze | Rule 3; rule 1 for its outcome | R1: a stale listing that lands *last* |
-| `Prefetch` | Yes, apart from the outcome (`central/assets/handlers.py:97-113`) | Rule 1 | none |
-| `PurgeFinishedJobs` | Yes, apart from the outcome (`queue_ops.py:146-155`) | Rule 1 | none |
-| `RescueStalledJobs` | Twice yes; stalled **no** (running lock) | Rule 2 | none |
+| Player `.deb` | `.deb` sha256. `apps/app-<sha256>.deb`; `assets` row | Verified bytes are renamed onto the name. Facts are written once: equal is a no-op, different is refused | Every run writes the same bytes to the same name, and the same facts |
+| OS image (changed) | Base tarball sha256, from the manifest. `os-images/base-<tarball sha256>.squashfs` | As the `.deb`. A re-cut is a new key. Facts are never cleared | The squashfs is fixed by the tarball: extraction reads two exact members and checks the squashfs against the tarball's own `SHA256SUMS` (`central/assets/os_image.py:59-92`) |
+| Reference | `(kind, identity, tag)` in `asset_references` | Written only with an applied observation. Retiring a reference never deletes the asset's facts | Follows the release rows |
+| Release row (changed) | Tag, in `app_releases` | Applied only if its upstream version is not older than the stored one, with its references, in one transaction under the row lock | The row holds the newest observation, whatever order they land in. Equal versions re-apply as a no-op |
+| Listing ETag | Singleton, `app_release_poll` | Last writer wins. Stored only after the rows it vouches for | A stale ETag costs one full listing. The guarded rows make that listing a no-op |
+| Frozen flag (changed) | Tag, `app_releases.mirror_state` | Computed inside the guarded write: the stored `.deb` was produced and upstream's differs | Derived from the observation it belongs to. Upstream returning to the produced `.deb` unfreezes it |
+| Automatic promotion (changed) | Singleton, `app_release_policy` | Take the policy row lock, then read the rows, then write. An operator's promotion is never moved (#23) | The last writer read every row committed before it |
+| Job outcome (changed) | Job key, in `job_outcomes` | See §6 | An `ok` arrives with its data, so it wins over any failure in any order |
 
-**Why rule 1 matters to a user.** The outcome decides what a request is told. Without rule 1, a
-stale `transient` makes requests fail fast for up to an hour (PB2), and a stale `terminal` stops
-`Prefetch` refilling the asset after a wipe (PB3).
+**What a zombie can still do:** repeat a download; write the same bytes to the same name; record a
+failure for data that is truly absent. It cannot write another key's file, clear facts, revert a
+row, freeze a tag, or hide present data.
 
-**The invariant:** the stored result is the newest-started run's (transaction strength: one
-conditional upsert decides). A zombie can still repeat work. It cannot replace a newer result,
-record facts behind one, freeze a tag for good, or stop rescue.
+**The invariant:** every stored value is either a pure function of its key, the newest upstream
+observation, or recomputed from current rows. Enforced by construction (content keys) and by
+transactions (guarded writes).
 
 ## 5. Walkthroughs
 
@@ -85,177 +113,214 @@ record facts behind one, freeze a tag for good, or stop rescue.
 sequenceDiagram
   participant A as Worker A
   participant DB as Postgres
+  participant D as Cache disk
   participant B as Worker B
-  A->>DB: FetchOsImage(v1) starts, number 41
-  Note over A: paused 45s. Rescue re-publishes a copy and closes A's row
-  B->>DB: the copy starts, number 57
-  B->>DB: run transaction: ok (57) and facts, commit, NOTIFY
-  A->>DB: run transaction: terminal (41) refused, rolled back
-  Note over A: no NOTIFY, no redelivery. Its finish on the closed row is dropped
+  A->>DB: FetchOsImage(S1) starts for tag v1
+  Note over A: paused 45 s. Rescue re-publishes S1. v1 is re-cut to S2
+  B->>DB: sync: v1 now names S2 (newer version). Reference S2, retire S1
+  B->>D: install base-S2.squashfs
+  B->>DB: facts(S2) and ok(S2), one transaction
+  A->>D: install base-S1.squashfs (its own name)
+  A->>DB: facts(S1) and ok(S1)
+  Note over DB,D: v1 still boots S2. Nothing A wrote can reach S2
 ```
 
-1. If A had finished before B stored anything, A's real result would stand until B's replaced it.
-2. A sync is one transaction: the later commit's listing wins whole, and "frozen" is recomputed (T4).
+```mermaid
+sequenceDiagram
+  participant F as Fresh sync
+  participant DB as Postgres
+  participant Z as Stale sync
+  F->>DB: v1 at version 20 (S2): applied
+  Z->>DB: v1 at version 10 (S1): refused, no reference touched
+  Z->>DB: store its old ETag
+  Note over DB: the next sync sees a different ETag, re-lists, and applies nothing new
+```
 
 | Situation | What a Pi or an operator sees |
 | --- | --- |
-| A worker pauses for more than 30s mid-download | A 503 at worst, then success. The zombie changes nothing |
-| A graceful drain takes longer than 30s | The job runs twice: one extra download |
-| A worker pauses inside a transaction | Other writers wait up to 2s. The paused run records `commit_failed` |
+| A worker pauses past 30s mid-download | At worst one 503, then success. The zombie changes nothing |
+| A release is re-cut while a worker stalls | Pis boot the new build as soon as it is fetched. Never the old one under the new facts |
+| A stale sync lands last | Nothing changes |
+| A cache wipe | Files are fetched again. Facts stay, so a re-fetch is checked against them |
 
-## 6. The hard part: one run's lifecycle, and what the runtime keeps
+## 6. The hard part: the job outcome
+
+The outcome serves two things only: a waiter (`JobHandle` resolves to `Ready`, `Failed` or
+`Pending`, unchanged) and backoff (PB2 transient windows; PB3 terminal skips a tick's publish).
+It is never readiness: the reader and `Prefetch` already decide from facts plus file
+(`central/assets/reader.py:166-185`, `central/assets/handlers.py:103-113`).
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Running: draw start number (opening read)
-  Running --> Deferred: early copy inside a retry window
-  Running --> Recording: handler returned or raised
-  Recording --> Stored: upsert accepted, facts written, commit
-  Recording --> Superseded: upsert refused, roll back
-  Recording --> CommitFailed: transaction error, e.g. idle kill or lock timeout
-  CommitFailed --> Stored: transient commit_failed in a fresh transaction
-  CommitFailed --> Superseded: refused there too
-  Stored --> [*]: NOTIFY, redeliver if transient
-  Superseded --> [*]: nothing
-  Deferred --> [*]: re-published for the window's end
+  [*] --> None
+  None --> Ok: ok, with its facts
+  None --> Transient: failure, data absent
+  None --> Terminal: failure, data absent
+  Transient --> Ok: ok, with its facts
+  Transient --> Terminal: terminal
+  Transient --> Transient: transient
+  Terminal --> Ok: ok, with its facts
+  Terminal --> Terminal: terminal. A transient is refused
+  Terminal --> None: a request withdraws it
+  Ok --> Ok: a failure while the data is present is dropped
+  Ok --> Terminal: failure after a wipe removed the data
+  Ok --> Transient: failure after a wipe removed the data
 ```
+
+1. **`ok` is written with its data**, facts and outcome in one transaction, always.
+2. **A failure is written only while the data is absent.** The failure's transaction locks the
+   asset row, then checks for facts and the file. A present result makes the failure a no-op: no
+   NOTIFY, no redelivery, and the row ends `succeeded`. The result write takes the same lock
+   first, so the two cannot cross (probed on PostgreSQL 16 in both orders).
+3. **A terminal stands against a transient.** A transient never replaces a terminal, and refused
+   means no redelivery. A request's publish (`retry_terminal`) withdraws the terminal first.
+4. **A waiter checks the data before the outcome.** After any wait, the reader tries to open the
+   asset; it reports a failure only if nothing opens.
+
+**Decision 3 still holds.** Ticks (`Prefetch`, the periodic sync) never set `retry_terminal`, so a
+terminal key stays skipped. Requests (a miss, a substitute serve, pin, promote, refresh) withdraw
+it and run again. A zombie's late transient can no longer turn a terminal into something ticks
+retry. 3a stays: a terminal whose worker dies before closing its row runs once more. A sync
+publishes with `retry_terminal` only for a changed reference: a new key, which has no outcome
+yet, or the same bytes at a new URL, which is new input, not a retry.
+
+**Runtime: what stays and what goes**
 
 | Mechanism | Verdict | Why | Cost |
 | --- | --- | --- | --- |
-| Rescue's running lock | **Delete** | procrastinate's documented rescue takes a queueing lock only (P2) | Overlapping rescues make one extra, harmless copy |
-| Sticky freeze; per-release commits; separate tail | **Delete** | Rule 3 | A sync holds its row locks for its whole transaction. The idle limit bounds a pause |
-| Rescue and retry by re-publishing | Keep | An in-place retry raises when a copy is pending (P1). A new row keeps a zombie's close off the live copy | Two statements. The next tick finishes a half-done rescue |
-| Completion guard | Keep | Without it, a failed close leaves `doing` under a *live* worker, which rescue never sees (`queries.sql:39-53`) | Up to 3.5s of retries, then the worker exits |
-| Early-copy deferral; prune at 30s | Keep | These are backoff, not fencing. A pruned worker's jobs are already stalled | Its exit shows as a foreign-key error |
+| Rescue's one-runner lock | **Delete** | A stalled rescue blocked all rescue. procrastinate's documented rescue takes only the one-pending lock | Two overlapping rescues: the copy merges; the second close fails and logs `rescue_incomplete` |
+| Rescue re-publishes, then closes the row | Keep | Retrying in place fails while a copy is pending (P1) | Two statements. A crash between them leaves the row for the next tick |
+| Completion guard | Keep | A failed close under a live worker would hold the key's lock forever, and rescue never sees a live worker | Up to 3.5s of retries, then the worker exits |
+| One-runner lock on every other job | Keep, as a saving only | It stops a second 1 GB download. Correctness no longer depends on it | none |
+| Early-copy deferral | Keep | Backoff, not ordering | none |
+| Clearing facts on a re-cut, the re-check before rename, the sticky freeze | **Delete** | Rules 1 and 2 replace them | Old files stay on disk until the cache sweep |
+| Retire deleting the asset row | **Delete** | Facts of a content key are true forever | Unreferenced rows stay until the cache sweep |
 
-**The tail joins the sync's transaction.** Today, a crash between the ETag commit and the tail
-loses the re-cut's `retry_terminal` fetch for good: the next sync sees "unchanged" (`sync.py:62-68`,
-`:140-148`). *Cost:* the promotion and device rows are held for milliseconds, or up to 2s if paused.
+## 7. The next consumer: media (stated here, built there)
 
-## 7. The next consumer: the media programme (deferred design, kept)
+| Media data | Identity and rule |
+| --- | --- |
+| Original | Immich's `checksum` (content already, `media/immich.py:281`). Rule 1 |
+| Media catalog (`SyncMediaSource`) | `(source, Immich asset id)`, guarded by Immich's per-asset `updatedAt` (not read today). Rule 2 |
+| Variant | Key `original + recipe`. Rendering is not reproducible (`docs/module-media-preparation.md:33`), so the bytes live under their own sha256, and the variant row points at it. The pointer is set if unset, or if its file is gone (compare-and-set). The first installed file wins; later runs adopt it. This is an OCI tag pointing at a digest |
 
-Media needs both halves of the full design. `SyncMediaSource` needs the ordered record writes, and a
-variant needs a file that no late run can replace. These ship together, then:
+No new machinery: the same three rules, one handler each. **Finding for media:** architecture
+decision 1 calls a variant's digest write-once. That cannot survive a wipe while rendering is not
+reproducible. The pointer rule above is the fix.
 
-| Deferred piece | What it does | Closes |
-| --- | --- | --- |
-| Handler split: `prepare(job) -> P` and `apply(tx, job, P) -> R` | Outside work in prepare. Our record writes in apply, inside the run transaction | R1 |
-| The general rule: every record write commits in the run transaction | Generalises rule 1 to every job except queue maintenance | R1 |
-| Content-keyed names: `base-<tag>-<sha256>.squashfs`, and variants by digest; legacy-name adoption | Makes wrong bytes under a served name impossible by construction | R2 (the rename) |
-| Facts in the run: `record_produced(tx, key, facts, *, built_from)` with the `_recut_since` predicate | Refuses facts built from a replaced file | R2 (the facts) |
-| `handle` retired | Every handler is prepare/apply, and the boot check becomes total | none |
-| Orphan sweep | `MaintainCache` (programme item 2) removes files no record names | disk growth from content keys |
-| `residual: runtime-stop-reason` | Pool wait bounded to 5s, and the first stop reason raised | defect 3's lost reason |
-
-Media chooses content-keyed names over a reproducibility assumption: names guarantee it by
-construction, and the media spec disclaims a reproducible build (`docs/module-media-preparation.md:33`).
-
-**Shapes not chosen:** fencing every run (three failed reviews, and a lock cannot fence the disk);
-ordering by job id (monotone only by convention, because a manual retry reuses the id); Celery's
-sticky success (per task id, while our row is per key and a key legitimately re-runs).
-**Prior art adopted:** Oban's `attempted_at` as a per-key start order; River's `JobCompleteTx` (the
-media target); optimistic concurrency as in Kubernetes `resourceVersion`.
+**Shapes not chosen.** *Newest-started run wins* (a start sequence): rejected by the owner. It
+orders jobs, not data, cannot guard the disk, and refused true results. *Fencing:* three failed
+reviews. *No guards, heal at the next sync* (pure level-triggered): the cheapest shape, but a
+stale sync reverts the catalog for up to 15 minutes, and Pis can downgrade and upgrade again.
+**Prior art:** git, OCI and Nix content addressing; Kubernetes `resourceVersion`; OCI tag to
+digest; idempotent jobs in Oban and Sidekiq.
 
 ## 8. Storage, lifecycle, migration
 
-- **Migration 028:** sequence `job_start_seq CACHE 1`, plus
-  `job_outcomes.start_number BIGINT NOT NULL DEFAULT 0`, so existing rows lose to any new run.
-  Rollback is a code revert: old code ignores the column. During the rollout, see R4.
-- **No other schema change.** `mirror_state` already holds `divergent`, and recomputing it writes
-  that column both ways.
+- **Migration 028 (bead 1):** re-key `os-image` assets from tag to `base_tarball_sha256`. One
+  row per distinct sha, one reference per tag. **No facts are carried** (§9). Delete
+  `job_outcomes` rows named `os_image.fetch`. Pending job rows of the old shape fail to decode
+  once and are purged. *Rollback:* revert the code and clear `app_release_poll.etag`, so the old
+  sync re-references by tag. That costs one download per desired OS image.
+- **Migration 029 (bead 3):** `app_releases.upstream_changed_at DOUBLE PRECISION` and
+  `upstream_asset_id BIGINT`, both NULL or both set. Clear the ETag, so the first sync stamps
+  every row. A NULL stored version loses to any observation. *Rollback:* a code revert, since old
+  code never names the columns.
+- **Cleanup:** legacy `base-<tag>.squashfs` files and unreferenced asset rows are removed by
+  `MaintainCache` (programme item 2), or by hand before then.
 
 ## 9. Decisions
 
 | # | Question | Recommendation | Cost of the recommendation | Alternative |
 | --- | --- | --- | --- | --- |
-| 1 | Build the lean scope under the three rules | Approve | The residuals R1–R6 in §11 until media lands | Build the full design now (about 12 beads) |
+| 1 | After the upgrade, each OS image Pis want is downloaded once more. A Pi that reboots in those minutes fails its base fetch, reboots, and boots once the image lands | Accept; upgrade when no Pi is expected to reboot | One ~1 GB download per desired OS image, and at most a few extra reboot cycles | Carry the old files and facts across by tag. Cost: any tag re-cut while a worker stalled before the upgrade (old R2) keeps a wrong build, now permanently under a content key |
 
-**Assumptions made on your behalf** (say so if any is wrong): 1. Ruling 3a applies to every job
-type. 2. A waiter may see a zombie's real result if it lands before the copy's, as it can today.
-3. procrastinate stays at 3.9.0 (P1 and P2 are schema-pinned tests). 4. OS-image extraction from
-one locator is deterministic.
+**Assumptions made on your behalf** (say so if any is wrong):
+1. A re-uploaded GitHub asset is a new asset with a later `updated_at`, and a larger `id` on a tie.
+2. Deleting a manifest upstream without a replacement leaves the last facts (no withdrawal in MVP).
+3. Central and workers upgrade together (Compose replaces both).
+4. procrastinate stays 3.9.0; P1 and the lock indexes are pinned by tests.
 
 ## 10. Deliberately out of scope
 
-**Deferred to media:** every row of §7, and an idle limit on Central's own transactions.
-**Non-goals:** exactly-once; stopping duplicate work; a promise about recovery time.
+**Deferred:** the cache sweep (`MaintainCache`); a bound on a paused transaction's locks (R6); the
+worker's stop reason (defect 3); media's rules (§7).
+**Non-goals:** exactly-once runs; stopping duplicate work; any ordering of jobs.
 
 ## 11. What can go wrong
 
-Strength: **transaction** (Postgres enforces it) > **decision** (one code path) > **test** >
-**documented**.
+Strength: **construction** (unrepresentable) > **transaction** (Postgres enforces it) >
+**decision** (one code path) > **test** > **documented**.
 
-| # | Failure | Behaviour after the lean build | Strength |
-| --- | --- | --- | --- |
-| 1 | Defect 1: a late outcome overwrites (`ok` → `terminal`) | Refused, and its facts roll back (T1, T1a, T1b, T7) | transaction |
-| 2 | Defect 2: a pruned worker's heartbeat updates nothing and its fetch fails a foreign key | Harmless. Its jobs were stalled at 30s anyway. It exits at its next fetch (T7) | test |
-| 3 | Defect 3: an outage takes ~279s to stop a worker, and the reason is lost | Harmless for correctness: a worker with no database writes nothing. The reason is named with media | documented |
-| 4 | Defect 4: a stalled rescue blocks all rescue | Fixed: queueing lock only (T3) | decision + test |
-| 5 | Defect 5: rescue's close-by-id shuts a live row after a manual retry | One extra concurrent run, ordered by rule 1 | documented |
-| 6 | Defect 6: a zombie sync freezes a tag for good | Fixed: recomputed on the next sync (T4) | test |
-| 7 | A run pauses inside a transaction | Killed after 2s. Other writers proceed, and it records `commit_failed` (T5) | transaction |
+| Proven defect (#26) or old residual | After this design | Strength |
+| --- | --- | --- |
+| 1. A late outcome overwrites `ok` with `terminal` | Dropped: the data is present (rule 3) | transaction |
+| 2. A pruned worker's heartbeat updates nothing; its fetch fails a foreign key | Harmless. Its jobs were rescued, its late writes obey the rules, and it exits and restarts (T7) | test |
+| 3. An outage takes ~279s to stop a worker, and the reason is lost | Harmless to data: a worker with no database writes nothing. The lost reason is observability, deferred | documented |
+| 4. A stalled rescue blocks all rescue | Rescue has no one-runner lock | decision + test |
+| 5. Rescue's close-by-id shuts a live row | One extra concurrent run, which the rules make converge | construction + transaction |
+| 6a. A zombie sync freezes a tag | Refused as older. The flag is derived, not carried | transaction |
+| 6b. A zombie sync reverts the catalog | Refused as older | transaction |
+| 6c. A zombie sync discards a good OS image | Facts are never cleared; a re-cut is a new key | construction |
+| R1. A stale sync lands last | Gone (6b) | transaction |
+| R2. Old OS bytes after a re-cut | Gone: a late run writes only its own key | construction |
+| R3. A refused `ok` forces a re-download | Gone: an `ok` is never refused | construction |
+| R4. Rolling deploy with old workers | Old-shape rows fail to decode once. Old workers write unguarded until they stop; the next sync repairs the rows, and any tag-keyed row they add is never desired | documented |
+| R5. A late transient carries the backoff one step early | Unchanged, pacing only. A transient refused by a terminal no longer redelivers | documented |
+| R6. A paused process inside a transaction holds a row lock | Unchanged: writers of that row fail at the 5s lock timeout and retry next tick | documented |
 
-**Residuals the lean scope leaves open, stated plainly.** All but R2 heal on their own within one
-sync (15 minutes) or sooner. **R2 does not heal on its own:**
-
-> **R2 heals only at the tag's next re-cut, not within a sync.** When an OS-image re-cut and a
-> stalled worker coincide, Pis can keep booting that tag's previous build until the tag is next
-> re-cut upstream. No sync, request or cache wipe repairs the recorded facts. This is the price of
-> building the lean scope now. The media programme's facts-in-run closes it (§7).
-
-- **R1. A stale sync lands last** (it paused for more than 30s between its listing and its commit).
-  The catalog reverts. A cleared OS image's fetch can discard the good file (`production.py:66-67`),
-  giving a 503 or an older build. *Heals:* at the next sync (≤15 min), plus one download.
-- **R2. Stale or wrong OS bytes after a re-cut and a stalled worker.** An OS-image fetch pauses
-  between its re-check (`production.py:78-81`) and its commit or rename, across a re-cut.
-  - If it commits before the copy, the old build's facts are recorded and match its file.
-    **Pis boot the previous build. It heals only at that tag's next re-cut.**
-  - If it renames after the copy committed, the old bytes sit under the new facts. A different size
-    heals at the next fetch. **The same size is served under the new digest until a cache wipe or
-    the next re-cut.**
-  - *Closed by:* content-keyed names and facts in the run (§7).
-- **R3. A refused `ok` causes a re-download:** about 1 GB for an OS image (a `.deb` is adopted by
-  its sha). *Heals:* at once, in the redelivered copy.
-- **R4. Rolling deploy.** Until the last old worker stops, old workers still write unconditionally
-  and sync per release, so defects 1 and 6 remain possible. *Heals:* when the rollout completes.
-- **R5. The attempt carry.** A zombie's accepted `transient` ends that key's backoff one step early.
-  *Heals:* at the next publish.
-- **R6. A paused Central transaction** can hold a row lock past 2s, as today. *Heals:* when it wakes.
+**New residuals, stated plainly.**
+- **N1.** Stated plainly: if a wipe removes a file just after a copy produced it, and a zombie's
+  failure then lands, that failure is recorded. Ticks skip the key until a Pi or operator asks.
+- **N2.** Stated plainly: a release's prerelease flag has no upstream version of its own. With
+  prereleases enabled, a stale sync can revert the flag until the next sync (15 minutes).
+- **N3.** Stated plainly: a result write that fails (a database error) leaves no outcome. Waiters
+  time out and `Prefetch` retries within 5 minutes. An OS image installed without facts is
+  downloaded again.
+- **N4.** Stated plainly: two zombie syncs racing the very first automatic promotion can leave
+  an older tag until the next sync. Only the first promotion has no row to lock.
 
 ## 12. How the design got here
 
 ```mermaid
 graph LR
   P["Issue 26 probes"] -- "3 rounds FAIL" --> F["Fencing"]
-  F -- "owner: wrong premise" --> R0["Idempotent r0"]
-  R0 -- "round 1 FAIL" --> R1["Full design r1"]
-  R1 -- "owner: lean scope" --> L["This revision"]
+  F -- "owner: wrong premise" --> S["Start-order r0 to lean"]
+  S -- "owner: job order is not data order" --> D["Per-data rules (this)"]
 ```
 
-- **r0:** outcomes ordered by start, and rescue without a running lock.
-- **r1:** added the run transaction, the idle limit, content-keyed names and real tests.
-- **Lean:** built now: the ordering, the idle limit, lock-free rescue and a whole-sync commit. The
-  rest is kept for media, and its residuals (R1, R2) are named.
-- **Survived every attack:** the conditional upsert (probed in both orders), rescue by
-  re-publishing, and the completion guard.
-- **Spec found wrong:** architecture §6(c) says a publish "merges into a running copy". In fact it
-  inserts a pending row that runs afterwards.
+- **Fencing:** a run checked it still owned its row. Rejected: a lock cannot fence the disk.
+- **Start order:** the newest-started run's result won. Rejected by the owner.
+- **This revision:** each data type has an identity and a write rule, and the outcome defers to
+  the data.
+- **Survived every attack:** rescue by re-publishing, the completion guard, write-once facts.
+- **Spec found wrong:** architecture §6(c) says a publish "merges into a running copy". It inserts
+  a pending row that runs afterwards (harmless now).
 
 ## 13. What happens after the gate
 
-Each bead is green alone and carries every test it breaks. Its frozen page lives in its bead file.
+Each bead is green alone, carries every test it breaks, and has a frozen page in
+`.claude/idempotent/`.
 
-| # | Bead | What it makes true | Runs |
+| # | Bead | Makes true | Runs |
 | --- | --- | --- | --- |
-| 1 | `outcome-start-order` (tracer) | Rule 1: a late result is refused, and its facts roll back. Worker transactions get the 2s idle limit | worktree 1, first |
-| 2 | `rescue-lock-free` | Rule 2: rescue takes a queueing lock only | worktree 1, after 1 (they share a test file) |
-| 3 | `sync-converges` | Rule 3: one transaction per sync, and "frozen" recomputed | worktree 2, in parallel from the start |
-| 4 | `two-pod-pause` | T7: a real SIGSTOP/SIGCONT keeps the copy's `ok` | after 1, parallel with 2 |
-| 5 | `idempotent-jobs-docs` | The architecture, the errata and the runbook match the code | last |
+| 1 | `os-image-content-key` (tracer) | Rule 1 for OS images; retire keeps facts; migration 028 | first, alone |
+| 2 | `outcome-follows-data` | Rule 3 | after 1; parallel with 3 and 4 |
+| 3 | `catalog-follows-upstream` | Rule 2; migration 029 | after 1; parallel with 2 and 4 |
+| 4 | `rescue-lock-free` | Rescue takes no one-runner lock | after 1; parallel with 2 and 3 |
+| 5 | `two-pod-pause` | T7: a real SIGSTOP and SIGCONT keeps the copy's `ok` | after 2 and 3 |
+| 6 | `idempotent-jobs-docs` | Architecture, runbook and cache docs match the code | last |
 
-Bead 3's files are disjoint from the others, though it shares `central/infra` with bead 1. Its
-pause-safety arrives with bead 1's idle limit.
+Packages touched: `central/kernel`, `central/assets`, `central/content_catalog`, `central/infra`,
+`central/origins`, `central/migrations`, `central/content_routes.py`, `central/content_wiring.py`.
+Specs amended: [the architecture](central-system-architecture.md) §0, §4, §5, §6, §9, §10;
+[the runbook](runbook.md); [the cache module](module-central-cache.md).
 
-**Tracer T1** (two `JobRuntime`s on PostgreSQL): A blocks and is rescued, and B stores `ok`; A then
-returns `terminal`. B's `ok` stands, with one NOTIFY and no redelivery. *Probes:* no `WHERE`; the
-number drawn at write time; a NOTIFY, a redelivery, or facts kept on refusal.
+**Tracer T1-T6** (bead 1, PostgreSQL, fake origin): tag v1 at tarball S1 is produced. v1 is
+re-cut to S2 and synced; a `FetchOsImage(S1)` run held mid-download finishes after S2 is produced.
+The boot route serves S2's bytes with S2's digest; `base-S1` and its facts are intact. A
+stale-then-fresh listing never downloads S2 twice; two tags sharing a tarball give one candidate;
+a substitute serve records the substitute's tag. Migration 028 re-keys without facts.
+*Mutation probes:* skip retiring the old key on a re-cut; let retire delete the asset row; drop
+the one-candidate-per-tarball rule; record the first candidate's tag instead of the served one;
+carry facts in 028. Each must turn a named test red.
