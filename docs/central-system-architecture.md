@@ -99,8 +99,8 @@ the worker calls it for jobs.
 
 | Domain | Owns | HTTP actions (Central) | Job handlers (worker) | Must NEVER |
 | --- | --- | --- | --- | --- |
-| **Catalog & release policy** | Releases, media sources and recipes, devices, pins, promotion | Resolve a request to **candidate asset keys** (pinned: exactly one; unpinned: newest first, may substitute; otherwise *Unknown* → 404). Per-device `.deb` manifest. Operator: pin/unpin, promote, refresh, media source settings. | `SyncReleases`, `SyncMediaSources`, `SyncMediaSource` | Look at the disk or download bytes. |
-| **Assets & cache** | Asset records, disk layout, the read path, production, the byte budget | Serve bytes for a key through the **read-through** path: open, else publish the asset's fetch job and await its handle ≤30s, serve or 503. Record `last_served_at` (throttled). | `FetchOsImage`, `FetchPackage`, `PrepareMedia`, `Prefetch`, `MaintainCache` | Decide which version a device gets. Keep any "is cached" state. |
+| **Catalog & release policy** | Releases, media sources and recipes, devices, pins, promotion | Resolve a request to **candidate asset keys** (pinned: exactly one; unpinned: newest first, may substitute; an unseen serial is registered and an invalid one is still served; *Unknown* → 404 only when nothing matches: an empty catalog, or a `.deb` neither desired nor on disk). Per-device `.deb` manifest. Operator: pin/unpin, promote, refresh, media source settings. A promotion records who set it (`auto` or `operator`); `SyncReleases` never moves an `operator` one. | `SyncReleases`, `SyncMediaSources`, `SyncMediaSource` | Look at the disk or download bytes. |
+| **Assets & cache** | Asset records, disk layout, the read path, production, the byte budget | Serve bytes for a key through the **read-through** path: open (serving a substitute also publishes the wanted asset's fetch job, in the open's transaction), else publish the asset's fetch job and await its handle ≤30s, serve or 503. Record `last_served_at` (throttled). | `FetchOsImage`, `FetchPackage`, `PrepareMedia`, `Prefetch`, `MaintainCache` | Decide which version a device gets. Keep any "is cached" state. |
 | **Health & signals** | Probes, fleet health, metrics | `/livez`; `/readyz` = the process is up and can reach the DB. Fleet health view for the console. | none: fleet health is **computed when read** from job outcomes and worker heartbeats | Put cache contents, origins or convergence into a probe. |
 | **Queue operations** (infrastructure in `central.infra`, not a domain) | Queue hygiene | none | `RescueStalledJobs`, `PurgeFinishedJobs` | Touch domain records. |
 
@@ -122,8 +122,8 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 
 | Job type | Published by | Subject (lock) | Handler (domain) | Writes | Periodic |
 | --- | --- | --- | --- | --- | --- |
-| `FetchOsImage(tag)` | HTTP miss; `Prefetch` | `tag` | Assets & cache | Downloads the release's base image, extracts it off the event loop, verifies it, renames it into place. Result `AssetReady`. | no |
-| `FetchPackage(sha256)` | HTTP miss; `Prefetch` | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
+| `FetchOsImage(tag)` | HTTP miss; HTTP substitute serve; `Prefetch` | `tag` | Assets & cache | Downloads the release's base image, extracts it off the event loop, verifies it, renames it into place. Result `AssetReady`. | no |
+| `FetchPackage(sha256)` | HTTP miss; HTTP substitute serve; `Prefetch` | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
 | `PrepareMedia(original, recipe)` | HTTP miss; `Prefetch` | `original`, `recipe` (the recipe id includes the renderer build) | Assets & cache | Fetches the original from Immich, renders it to the recipe, renames it into place. Result `MediaReady` (digest, size, type, dimensions, duration), kept on the Asset record. | no |
 | `SyncReleases` | Tick; operator refresh (HTTP) | (none) | Catalog | Release + Asset rows (add, withdraw), then publishes `Prefetch` | yes |
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
@@ -139,11 +139,11 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 
 | Record | Key | Holds | Written by |
 | --- | --- | --- | --- |
-| **Catalog entries** (per domain) | Release `tag`; media original (`asset_id`); device `device_id` | What exists upstream and who should get what (pin, promote, last served tag) | `Sync*` handlers; HTTP operator actions; HTTP netboot (device row) |
+| **Catalog entries** (per domain) | Release `tag`; media original (`asset_id`); device `device_id` | What exists upstream and who should get what (pin, promote and who promoted it, last served tag) | `Sync*` handlers; HTTP operator actions; HTTP netboot (device row) |
 | **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tag)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once; `last_served_at`. The row goes when its last reference is retired. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
 | **Job outcome** (one table, every job type) | `(job type, subject)` | The latest attempt's *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
-| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices; media that active plans reference | nobody (computed) |
+| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); media that active plans reference | nobody (computed) |
 
 ---
 
@@ -159,7 +159,10 @@ new version on their next boot.
 
 **(b) A Pi boots and the file is present.** Central resolves the serial to candidate keys,
 opens the first one present, checks its size against the Asset record, and streams it.
-Central then records the served tag and a throttled `last_served_at`. No job is published.
+Central then records the served tag and a throttled `last_served_at`. No job is published when
+the first candidate is the one opened. When a substitute is opened, Central publishes the first
+candidate's fetch job (`retry_terminal`) in the same transaction as the open. A failed publish is
+logged and never fails the serve.
 
 **(c) A Pi boots and the file is missing: produce and wait**
 
@@ -174,7 +177,7 @@ sequenceDiagram
   C->>C: resolve → key (Unknown → 404, stop)
   C->>D: open(key) → missing
   C->>C: take a waiter slot (full → 503 Retry-After)
-  C->>Q: publish FetchOsImage(tag) → handle (merges into a pending or running copy)
+  C->>Q: publish FetchOsImage(tag) → handle (merges into a pending copy; with one running, a new pending row runs after it)
   C->>C: handle.wait(30s): this pod's one LISTEN, plus a 1s re-check
   Q->>W: deliver FetchOsImage(tag) (lock = tag, so it is the only one running)
   W->>D: temp file → verify → rename
@@ -398,10 +401,11 @@ class Publisher(Protocol):
   `publish_now` and `OutcomeFeed` use a small **async** psycopg pool beside the 10-connection
   sync pool (`central/db.py:15`), because `SyncPsycopgConnector` refuses async calls. A timeout
   returns `Pending`, and a cancelled waiter only unregisters. **Neither cancels the job.**
-- **Transactions.** `publish(within=tx)` runs in a SAVEPOINT (`media_queue.py:51`), so a merge
-  never aborts the caller's write. A `Transaction` is a sync block on a worker thread and `wait`
-  is async, so a handle is awaited only after the block has committed or rolled back. After a
-  rollback, `wait` returns `Failed(terminal, "not_published")`.
+- **Transactions.** `publish(within=tx)` runs in a SAVEPOINT, outcome read included
+  (`media_queue.py:51`), so neither a merge nor a failed statement aborts the caller's write. A
+  `Transaction` is a sync block on a worker thread and `wait` is async, so a handle is awaited
+  only after the block has committed or rolled back. After a rollback, `wait` returns
+  `Failed(terminal, "not_published")`.
 
 **"A player asks for photo X".** Only `AssetReader.read` decides whether to publish. Starlette 0.46.2
 never cancels an endpoint on disconnect, so `until_disconnect` watches `http.disconnect`
@@ -416,7 +420,7 @@ async def media(request: Request, original: MediaOriginalId, recipe: RecipeId) -
     return stream(served) if isinstance(served, Opened) else unavailable(served)  # 503 + Retry-After
 
 async def read(self, c: Candidates) -> Opened | Unavailable:   # AssetReader
-    if opened := self.store.open_first(c.jobs): return opened  # on disk: publish nothing
+    if opened := self.store.open_first(c.jobs): return opened  # substitute: publish c.jobs[0] in its tx
     async with self.slots.claim():                             # bulkhead: full → Unavailable("busy")
         handle = await self.publisher.publish_now(c.jobs[0], retry_terminal=True)  # decision 3
         match await handle.wait(timeout=timedelta(seconds=30)):

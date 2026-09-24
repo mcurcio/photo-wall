@@ -83,7 +83,7 @@ Acceptance still requires the exact built image to boot a candidate, fail health
 
 | Route | Auth | What it does |
 |---|---|---|
-| `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; 503 `app_unconfigured` if nothing is promoted yet. |
+| `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; while the promoted `.deb` is not on disk, the last-good one if it is (with neither on disk, the promoted one). 503 `app_unconfigured` if nothing is promoted yet. A promotion records who set it: `auto` (the release sync) or `operator`; the sync never moves an `operator` promotion. |
 | `GET /v1/app/package/{sha256}.deb` | none | Streams the `.deb` bytes (same `O_NOFOLLOW`/`fstat`/size-match/streaming discipline as the rootfs route above); 404 unknown sha256, 503 if the bytes are missing or the wrong size. |
 | `POST /v1/operator/app` | admin token | Registers `{version, sha256, size}` for a `.deb` already staged by the operator under `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` — **stage-by-reference, like the rootfs route above, not a file upload**; central never accepts `.deb` bytes over this request body. 422 on malformed input; immutable once registered (re-registering the same sha256 with different metadata fails). |
 | `PUT /v1/operator/app/current` | admin token | Promotes a previously registered sha256 as the current app. 404 if that sha256 was never registered. |
