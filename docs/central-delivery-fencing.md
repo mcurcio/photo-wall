@@ -1,94 +1,109 @@
 # Central: a late worker must not overwrite a rescued job's result
 
-**Date:** 2026-09-24 · **Status:** decided by the owner (gate 2026-09-24). It amends the approved
-[Central system architecture](central-system-architecture.md) and replaces every working note on
-issue #26. **Asked of the reader:** nothing; the rulings are in [§9](#9-decisions-owner-gate-2026-09-24).
+**Date:** 2026-09-24 · **Status:** owner rulings of 2026-09-24 applied, including amended
+decision 3. It amends the approved [Central system architecture](central-system-architecture.md) and
+replaces every working note on issue #26. **Asked of the reader:** confirm one mechanism change
+to ruling 2 ([§9](#9-decisions)).
 
 ## 1. The problem in plain words
 
-A worker silent for 30s is treated as dead, and its job is handed to another worker. It can be
-silent and still alive: garbage collection, a stalled host, or a graceful shutdown (procrastinate
-stops the heartbeat *before* it waits for running jobs, upstream #1585). When it wakes, today it
-can still write. What must be true:
+A worker silent for 30s is treated as dead, and its job is handed to another worker. A worker can
+be silent and still alive: garbage collection, a stalled host, or a graceful shutdown
+(procrastinate stops the heartbeat *before* it waits for running jobs, upstream #1585). When it
+wakes up, today it can still write. What must be true:
 
 - A job that was taken over keeps the takeover's result. The late worker writes nothing.
 - The same holds after an operator retries the job by hand.
-- A slow but alive worker keeps running.
+- A slow but alive worker keeps running, and a database blip does not make good work terminal.
 - No worker, paused or killed, can stop the fleet from rescuing stalled jobs.
 
-**Builds on** architecture §7, §10.1–§10.3: one worker kind, retry by re-publishing, no leases.
-
-| Fact (procrastinate 3.9.0; proven on real PostgreSQL, errata 2026-09-23) | Where | Consequence |
+| Fact (procrastinate 3.9.0; PostgreSQL 16 probes) | Where | Consequence |
 | --- | --- | --- |
 | Every worker, at start, deletes worker records silent for 30s; the media loop uses the same default | procrastinate `worker.py:447-452`; `runtime.py:53`; `media/worker.py:348-353` | A paused worker loses its record |
 | A deleted record sets its jobs' `worker_id` to NULL; rescue treats NULL as stalled | `schema.sql:77`; `queries.sql:53` | A pruned worker's live jobs are rescued |
 | Outcome and facts commit with no ownership check | `execution.py:131-177` | A late `terminal` overwrites the copy's `ok` |
-| procrastinate closes a row by id only, and always calls that close when a task ends | `schema.sql:264-292`; `worker.py:352-380`; `runtime.py:87-104` | A superseded worker's close can shut another delivery of the same row |
-| Closing adds 1 to `attempts`; a manual retry adds 1 and reopens the same row (refused while a copy is pending); fetching changes nothing | `schema.sql:210-292`, `:364-400`, `:100` | `(row id, attempts at fetch)` names one delivery |
-| Rescue re-publishes at the same `_attempt`; it holds a fleet-wide running lock; its close has no time limit | `queue_ops.py:88-95`; `job_queue.py:97-98`, `:118` | Our attempt counter cannot fence; one killed rescue can stop all rescue |
-| Publishing on a caller's connection needs a sync-connector app | procrastinate `manager.py:114-116`, `connector.py:120-128`; `publisher.py:54` | The runtime's async app (`runtime.py:137`) cannot |
+| procrastinate closes by id only, and always calls that close when a task ends | `schema.sql:264-292`; `worker.py:352-386`; `runtime.py:87-104` | A superseded worker can shut another delivery of the same row |
+| Close and manual retry each add 1 to `attempts`; fetching changes nothing; at most one `doing` row per running lock | `schema.sql:210-292`, `:364-400`, `:102` | `(row id, attempts at fetch)` names one delivery, and it is the only owner of its lock key |
+| Rescue re-publishes before it closes, at the same `_attempt`, under a fleet-wide running lock | `queue_ops.py:88-95`, `:115-132`; `job_queue.py:97-98`, `:118` | Extra copies; one killed rescue stops all rescue |
+| An idle-session kill raises 25P03, which is **not** an `OperationalError`, and leaves the connection broken; a pool timeout **is** an `OperationalError` | probe below; psycopg 3.2.9 | "Unsure" must be classified by exception type and by broken connection, not by SQLSTATE class |
+| procrastinate's async connector takes one connection per statement | `psycopg_connector.py:221-224` | A claim check and its close cannot share a transaction through it |
 
 ## 2. The answer in one picture
 
 ```mermaid
 graph LR
   subgraph W["Worker process"]
-    fetch["Fetch row<br/>claim = (id, attempts)"] --> handler["Handler"]
-    handler --> s1["Step 1: result transaction<br/>check claim, then outcome,<br/>facts, NOTIFY, retry copy"]
-    s1 --> s2["Step 2: fenced close<br/>(the completion guard)"]
+    fetch["Fetch row<br/>claim = (id, attempts)"] --> handler["Handler<br/>(claimed transactions)"]
+    handler --> s1["Step 1: hold claim, write<br/>outcome, facts, retry copy"]
+    s1 --> s2["Step 2: guard<br/>fenced close"]
   end
   subgraph PG["Postgres"]
     row[("Job row")]
-    rec[("Outcomes, facts")]
+    rec[("Outcomes, facts, catalog")]
   end
-  rescue["Rescue job<br/>no running lock"]
-  s1 -- "claim matches: write" --> rec
+  rescue["Rescue, per row, one transaction:<br/>fenced close, then copy if closed"]
+  handler -- "claim held: write" --> rec
+  s1 -- "claim held: write" --> rec
   s2 -- "fenced close" --> row
-  rescue -- "re-publish, fenced close" --> row
+  rescue -- "fenced close + copy" --> row
 ```
 
 **The three rules**
 
-1. **Only the current claim writes a result, and only the current claim closes the row.** Step 1
-   checks the claim while it writes. Step 2 and rescue close with the same check. procrastinate's
-   close by id never runs.
-2. **Silent for 30 seconds: take its jobs. Silent for an hour: forget the worker.** A slow worker's
-   jobs re-run elsewhere, and rule 1 makes that safe.
-3. **Only "cannot tell" stops a worker.** An unsure error re-runs the step. If it stays unsure, the
-   row stays open, the worker stops, and rescue takes over.
+1. **Nothing is written and no row is closed without holding the current claim.** Step 1,
+   claimed handler transactions, step 2 and rescue all lock the job row on its claim first.
+   procrastinate's close by id never runs.
+2. **Silent for 30 seconds: take its jobs. Silent for an hour: forget the worker.** Rescue closes
+   a row and publishes its copy in one transaction, and it never holds a running lock.
+3. **Only "cannot tell" stops a worker, and only after retrying.** A lost connection or timeout
+   re-runs the step for up to 30s. A definite error records the job `terminal`.
 
 ## 3. Glossary
 
-- **Delivery**: one run of one job row by one worker.
-- **Claim**: (job row id, `attempts` when fetched). Any close or manual retry changes it. A fencing token.
-- **Fenced close**: closes the row only if its claim still matches `doing`. Closes 0 or 1 rows.
-- **Zombie**: a worker declared dead that wakes up and tries to finish.
-- **Superseded**: a delivery whose claim no longer matches. It writes and closes nothing.
-- **Rescue**: the upkeep job that re-publishes a silent worker's jobs, then fence-closes their rows.
+- **Delivery**: one run of a job row by a worker. **Zombie**: a worker declared dead that wakes.
+- **Claim**: (job row id, `attempts` at fetch). Any close or manual retry changes it (a fencing token).
+- **Hold the claim**: lock the job row where id, attempts and `doing` match; no row = superseded.
+- **Fenced close**: hold the claim, then call procrastinate's own close in the same transaction.
+- **Superseded**: a delivery whose claim no longer holds; it writes and closes nothing. **Unsure**: §4.
 
 ## 4. How ownership works
 
-**Step 1** is one transaction. It locks the row `FOR NO KEY UPDATE` on id, `attempts` and `doing`,
-then writes every result path: `ok` with its facts, the facts-conflict terminal, `terminal`,
-`transient` with its retry copy and attempt carry, and the early-copy re-publish. If nothing
-matches, it writes nothing. **Step 2** is the completion guard (`runtime.py`), which replaces
-procrastinate's close with one fenced close in its own transaction (SQL in `job_queue.py`).
+**Holding the claim** is `SELECT … FOR NO KEY UPDATE` on id, `attempts` and `doing`; claimed
+handler transactions use `FOR SHARE`. Only claim-holding transactions add `SET LOCAL
+idle_in_transaction_session_timeout` 10s; `lock_timeout` 5s and `statement_timeout` 10s already
+come from `db.py:50-51`. All of it runs on our own sync connection from `Database`, in
+`central/infra/job_queue.py`, reached by the executor through a port (`DeliveryFence`), so
+`execution.py` stays free of procrastinate.
 
-| The delivery | Step 2 (guard) does |
+**The fenced close** holds the claim, then calls `procrastinate_finish_job_v1` in the same
+transaction, keeping procrastinate's status check, `attempts`+1, abort-flag reset and delete
+branch. Its two users are step 2 and rescue.
+
+| Delivery result | Step 2 closes with |
 | --- | --- |
-| step 1 committed | fenced close with the status its result implies |
-| superseded in step 1 | nothing |
-| never reached step 1 (undecodable row, missing handler, error reading the retry window, abort or cancel) | fenced close with procrastinate's status |
-| still unsure in step 1 after retries | nothing: the row stays open and the runtime stops |
+| `ok`, or an early copy re-published | `succeeded` |
+| `terminal` (including `outcome_write_failed`) or `transient` | `failed` |
+| never reached step 1 (undecodable row, missing handler, error reading the retry window, abort) | procrastinate's status (`failed` or `aborted`) |
+| superseded | nothing |
+| still unsure after retrying | nothing; the row stays open and the runtime stops `completion_not_recorded` (already in `_RUNTIME_EXITS`, `media/worker.py:56`) |
 
-**Unsure** means a lost connection (class 08, which includes a session killed for idling),
-`lock_timeout` (55P03), serialization (40001) or deadlock (40P01). The whole step re-runs after
-0.5, 1 and 2s. Any other error in step 1 writes `terminal outcome_write_failed` in a fresh checked
-transaction. *Cost:* a bug turns jobs terminal instead of restarting the fleet on one poison job.
-**Every step 2 error counts as unsure:** the result is already safe, and a row left open under a
-live worker would block its key for ever.
+**The guard** (`runtime.py`) replaces procrastinate's `finish_job` with step 2, keyed by claim,
+and makes `retry_job` (a reopen by id we never use) raise. Step 1 is shielded from cancellation
+and awaited before re-raising, as procrastinate does at `worker.py:382-386`.
 
-**The invariant:** no outcome or fact is written, and no row closed, without a matching claim.
+**Unsure**, classified by exception type: any `psycopg.OperationalError` (class 08, 57P01, 55P03,
+40001, 40P01, no SQLSTATE, `PoolTimeout`) except 57014; 25P03 and 25P04; any error that leaves the
+connection broken. Unsure re-runs the **whole** step with backoff for up to 30s; step 1 is
+replay-safe (`now` and `retry_not_before` computed once, the claim re-checked each run). Any other
+step-1 error (integrity, data, programming) writes `terminal outcome_write_failed` in a fresh
+claim-held transaction; if that write is unsure, it is unsure. **57014 (statement timeout) is
+definite**, or one deterministically slow write would stop every worker that takes the job.
+*Cost:* a once-slow write turns its job terminal until the next request. Step 2 treats every
+error as unsure: the result is already safe.
+
+**The invariant:** a result, a claimed handler write or a close happens only in a transaction
+holding the delivery's claim. *Strength:* decision (the executor calls the fence). The
+alternative is making `JobOutcomes.record` and `record_produced` take the claim.
 
 ## 5. Walkthroughs
 
@@ -99,39 +114,41 @@ sequenceDiagram
   participant R as Rescue
   participant B as Worker B
   A->>DB: fetch row 7, claim (7,0)
-  Note over A: paused 45s
-  R->>DB: publish copy row 8, fenced close (7,0)
-  B->>DB: fetch row 8, step 1 claim (8,0) matches, write ok, commit
+  Note over A: paused 45s, heartbeat stale
+  R->>DB: one tx: fenced close (7,0) closes 1, publish copy row 8
+  B->>DB: fetch row 8, step 1 holds (8,0), write ok, commit
   B->>DB: step 2: fenced close (8,0)
   DB-->>B: NOTIFY: waiters see ok
-  A->>DB: step 1 claim (7,0) matches nothing
+  A->>DB: step 1: hold (7,0) finds nothing
   Note over A: superseded, step 2 does nothing
 ```
 
-A keeps its worker record, because nobody prunes for an hour. If an operator had retried row 7 and B
-picked it up, A's step 2 would still close nothing, where a close by id would shut B's delivery.
+A keeps its worker record, because nobody prunes for an hour. Had an operator retried row 7 for
+B, A's step 2 would still close nothing, where a close by id would shut B's delivery.
 
 | Situation | What a user sees |
 | --- | --- |
-| A worker pauses 45s mid-download | The request may 503 at 30s; the copy fills the cache |
-| The database goes down | Idle loops stop as `worker_exited`; running handlers are waited on, then their step retries and stops |
+| A worker pauses 45s mid-download | The request may get a 503 at 30s; the copy fills the cache |
+| The database is down for more than 30s | Idle loops stop as `worker_exited`; running deliveries stop with `completion_not_recorded` |
 
-## 6. The hard part: the gap between the steps, and blocking rescue
+## 6. The hard part: the gap, and never blocking rescue
 
-**The gap.** After step 1 commits, the row stays `doing` and keeps the job's running lock until
-step 2. If the worker pauses or dies here:
+**The gap.** After step 1 commits, the row stays `doing`, holding its running lock, until step 2.
+If the worker pauses or dies there:
 
-1. The result is final. A copy cannot run until the row closes, so step 1 can never overwrite a
-   copy's result.
-2. After 30s, rescue re-publishes and fence-closes the row. The copy finds its verified file,
-   downloads nothing, and writes a second `ok`. The original's late step 2 closes nothing.
-3. Stated plainly: a recorded `terminal` or spent retry runs once more if it dies in the gap (as today).
+1. The result is final. A copy waits behind the running lock until the row closes, after which
+   step 1 cannot hold the old claim, so a late step 1 never overwrites a copy.
+2. Rescue closes and copies. The copy finds its verified file (`AssetProduction.produce` returns
+   early), downloads nothing, and writes a second `ok`.
+3. By ruling 3a, a job whose recorded result was `terminal` may run once more this way.
 
-**Nobody blocks rescue.** Rescue takes a queueing lock only, with no running lock. That is
-procrastinate's documented stalled-jobs pattern, and it is a named exception in §10.1. Step 1 and
-every fenced close use `SET LOCAL` to cap `idle_in_transaction_session_timeout` at 10s and
-`lock_timeout` at 5s. Residual, stated plainly: a row whose zombie holds its lock is rescued up to
-one tick (~1 minute) plus 10s late.
+**Rescue**, per stalled row, in one transaction: a fenced close on the claim from
+`get_stalled_jobs`, then the copy on the same connection only if one row closed. There is never
+a moment with no copy, and never a copy without a close. Rescue takes a queueing lock only
+(procrastinate's documented stalled-jobs pattern). That needs a `Delivery` declaration, while
+`job_keys` stays the key source (`kernel/jobs.py:196-221`); §10.1 forbids it today and is amended.
+A paused holder is killed by the idle limit, and rescue skips its row after the 5s lock limit.
+Residual, stated plainly: that row is rescued up to one tick (~1 minute) plus 10s late.
 
 ```mermaid
 stateDiagram-v2
@@ -139,6 +156,8 @@ stateDiagram-v2
   Doing --> Doing: step 1 commits, result final
   Doing --> Closed: step 2, N+1
   Doing --> Failed: rescue fenced close, N+1
+  Doing --> Failed: retry of an abort-requested row, N unchanged
+  Doing --> Todo: manual retry of a running row, N+1
   Failed --> Todo: manual retry once no copy pending, N+2
   Todo --> Doing: fetch, new claim
   Closed --> [*]
@@ -146,105 +165,136 @@ stateDiagram-v2
 
 ## 7. The next consumer, and the shape not chosen
 
-Next consumer: media jobs, where long drains are normal. Step 1 carries `MediaReady` facts, and
-renders are byte-deterministic per recipe id, so a copy in the gap returns early.
+**Claimed transactions, the shared primitive for handler writes.** `ClaimedTransactions`
+implements `Transactions`: `begin()` holds the running delivery's claim `FOR SHARE`, read from a
+context variable the runtime sets around `handle()` (`asyncio.to_thread` copies it,
+`content_catalog/catalog.py:96-102`), and raises `Superseded` (kernel) if it does not hold. It
+yields a `PgTransaction`, so `pg_connection` still works (`central/infra/transactions.py:60-64`).
+`SyncReleases` is the first consumer. `SyncMediaSource` and `PrepareMedia` must adopt it when media
+lands, because they replace two paths fenced today: the refresh generation
+(`media_repository.py:157-161`, `:178-181`) and the publish lease (`media_store.py:365-369`,
+`:398-405`).
 
-- **Rejected, B: close inside the result transaction.** This is pg-boss `complete(name, id, data,
-  { db })` or River `JobCompleteTx`, and it has no gap. The owner chose to keep procrastinate's row
-  writes out of our result transaction. Fences by `worker_id`, status or `_attempt` fail (§12).
+- **Rejected, B: close inside the result transaction** (pg-boss `complete(…, { db })`, River
+  `JobCompleteTx`; no gap). The owner kept procrastinate's row writes out of our result transaction.
+- **Rejected, a stamp row per lock key:** at most one row per lock is `doing` (`schema.sql:102`), so
+  the claim already names the only owner.
 
 ## 8. Storage, lifecycle, migration
 
-- **No procrastinate schema change.** The claim comes from the fetched row. It is carried into
-  `JobExecutor.execute` and keyed in the guard by claim, never by row id.
-- **Step 1** puts every write path on one connection. The retry copy goes through a publish-only
-  sync app, and the attempt carry gets a sync form. **Step 2** is the one fenced-close statement,
-  shared with rescue. `RecordedFailure` (`runtime.py:60-65`) goes.
-- **`app_release_poll`** gains a run-stamp column (one migration), seeded if absent.
-- **Liveness, one module** imported by `runtime.py`, `queue_ops.py` and `media/worker.py`: 10s
-  heartbeat, `RESCUE_AFTER` 30s, `PRUNE_AFTER` 1h (placeholder; import fails unless it is larger).
+- **No schema change, no migration; rollback is a code revert.** The claim comes from
+  `context.job.attempts` (procrastinate `jobs.py:97`). `RecordedFailure` goes.
+- **Step 1 carries every result path:** `ok` with facts, the facts-conflict terminal, `terminal`,
+  `transient` with retry copy and attempt carry, and the early-copy re-publish. Copies go through
+  the one publish-only sync app in `job_queue.py`, which `publisher.py:54` also uses.
+- **Liveness numbers stay in `runtime.py`:** `RESCUE_AFTER` 30s, `PRUNE_AFTER` 1h (placeholder);
+  `JobRuntime` refuses prune ≤ rescue. The media loop passes `PRUNE_AFTER`; rescue's 30s comes in
+  from `content_wiring.py:113`.
 
-## 9. Decisions (owner gate 2026-09-24)
+## 9. Decisions
 
-| # | Ruling | Cost |
+| # | Ruling (owner, 2026-09-24) | Cost |
 | --- | --- | --- |
-| 1 | **Two steps:** a claim-checked result transaction, then a separate fenced close | A gap where the result is final and the row is open; a death there re-runs the job once (§6) |
-| 2 | **`SyncReleases` stamp:** its first transaction stamps `app_release_poll`; each later one `SELECT … FOR UPDATE`s it; a different stamp means superseded | One migration; other handlers stay last-writer-wins (none proven harmful) |
-| 3 | **No heartbeat override:** the fetch foreign-key error maps to `worker_pruned` via `_RUNTIME_EXITS` | A worker pruned after an hour's pause runs blind until its next fetch |
+| 1 | **Two steps:** a claim-held result transaction, then a separate fenced close | A gap where the result is final and the row is open (§6) |
+| 2 | **Fence `SyncReleases` writes only.** The mechanism is now claimed transactions, not an `app_release_poll` stamp: **please confirm** | No migration; other handlers stay last-writer-wins until media adopts the primitive |
+| 3 | **No heartbeat override.** The foreign-key error on fetch maps to `worker_pruned` | A worker pruned after an hour-long pause runs blind until its next fetch |
+| 3a | **Amended:** a death in the gap may re-run a job whose result was `terminal`, once | One extra origin attempt; architecture §7 and §9 decision 3 get the exception |
 | 4 | **Accept** re-runs when a graceful shutdown exceeds 30s | Duplicate CPU and origin traffic per long drain |
 
-**Assumptions:** only rescue and a manual retry move a running row; procrastinate stays at 3.9.0;
-no fenced transaction idles for 10s; both asset kinds are byte-deterministic per key.
+**Assumptions:** only rescue and a manual retry move a running row; procrastinate stays at 3.9.0,
+with a schema-pinned test; no claim-holding transaction idles for 10s between statements.
 
 ## 10. Deliberately out of scope
 
-**Deferred:** fencing the disk rename, legacy media writes, handlers other than `SyncReleases`.
-**Non-goals:** a recovery-time promise; leases; stopping duplicate *work*.
-
-**Separate one-bead fix (defect 3):** an outage takes ~279s to stop a worker (`runtime.py:137`,
-`:87-115`), and the reason is lost when any loop raised (`:157-177`). It bounds that pool at 5s,
-skips the re-read after a connection error, and raises the first stop reason on every exit.
+**Deferred:** fencing the disk rename; handlers other than `SyncReleases`. **Non-goals:** a
+recovery-time promise; leases; stopping duplicate *work*. Outage stop time and reasons: bead 0.
 
 ## 11. What can go wrong
 
 Strength: **construction** > **transaction** (Postgres enforces it) > **decision** (one code
-path) > **test** > **convention** > **documented**.
+path) > **test** (§13) > **convention** > **documented**.
 
 | Failure | Behaviour | Strength |
 | --- | --- | --- |
-| Zombie finishes after rescue or after a manual retry | superseded; the current delivery untouched (T1, T2, T2b) | transaction |
-| Live delivery whose record was pruned | commits (T1b) | transaction |
-| Worker pauses or dies between step 1 and step 2 | rescue re-publishes and closes; the copy finds its file and writes a second `ok`; a late step 2 closes nothing (T5) | transaction |
-| Dies in the gap after recording `terminal` or a spent retry | the job runs once more | documented |
-| Late step 1 after a copy's result | impossible: a copy runs only after the row closes, and step 1 then matches nothing | transaction |
-| Step 2 fails | unsure: retried, then the runtime stops; rescue re-publishes as above | decision |
-| Paused inside step 1 | session killed at 10s; step 1 re-runs; rescue ≤1 tick late (T3) | transaction |
-| Rescue killed mid-run | the next tick still rescues (T4) | decision |
-| Zombie `SyncReleases` | superseded by the stamp (T6) | transaction |
-| Media loop's pruner; zombie rename | safe while it imports `PRUNE_AFTER`; renamed bytes verified against facts re-read just before | convention; documented |
+| Zombie finishes after rescue or a manual retry; a late step 1 after a copy's result | superseded: it cannot hold the old claim; the current delivery is untouched (T1, T1t, T2) | decision |
+| Live delivery whose record was pruned | commits (T1b) | decision |
+| Pause or death in the gap | rescue closes and copies; the copy writes a second `ok` with no download; a late step 2 closes nothing (T5) | decision |
+| Death in the gap after `terminal` | runs once more (ruling 3a) | documented |
+| Database restart or blip in step 1 or step 2 | unsure: the step re-runs for up to 30s, then the runtime stops (T7, T9) | decision |
+| Poison write error (integrity, data) | `terminal outcome_write_failed`; the runtime keeps running (T8) | decision |
+| Paused inside a claim-holding transaction | killed at 10s; rescue skips its row after 5s and gets it next tick (T3) | transaction |
+| Rescue killed mid-run, or working from a stale snapshot | the next tick rescues; a stale rescue closes and copies nothing (T4, T4b) | decision |
+| Zombie `SyncReleases` | `Superseded` on its next transaction (T6, T6b) | decision |
+| Prune too early | refused at build; the media loop is tested at 1h (T11) | construction; test |
+| Outage, or a worker pruned while alive | stops with its first named reason (T10) | test |
+| Zombie renames a file | allowed; its bytes are verified against the recorded facts first | documented |
 
 ## 12. How the design got here
 
 ```mermaid
 graph LR
-  P["Issue 26 probe"] -- "fix by worker_id" --> R1["Review 1"]
-  R1 -- "FAIL: prune loses a live job" --> R2["Review 2"]
-  R2 -- "FAIL: status alone, split writes" --> D1["Draft 1"]
-  D1 -- "FAIL: close by id, rescue lock" --> D2["Draft 2"]
-  D2 -- "owner: two steps" --> D3["This document"]
+  P["Issue 26 probe"] -- "Reviews 1-2 FAIL" --> D1["Draft 1"]
+  D1 -- "FAIL: close by id" --> D2["Draft 2, owner gate"]
+  D2 -- "FAIL: unsure, rescue, stamp" --> D3["This document"]
 ```
 
-- **Reviews:** fences by `worker_id` (loses a pruned live delivery), status (admits a retried row)
-  and `_attempt` (rescue reuses it) fail; close by id; rescue's running lock.
-- **Owner gate 2026-09-24:** 1 two-step, 2 SyncReleases stamp, 3 drop, 4 accept.
-- **Survived:** the claim `(id, attempts)`; prune after rescue. **Specs found wrong:**
-  `defer(connection=)` needs a sync-connector app; an etag alone cannot fence.
+- **Owner gate 2026-09-24:** 1 two-step, 2 SyncReleases stamp, 3 drop, 4 accept; later, 3 amended.
+- **Round 3:** unsure by exception type; one-transaction rescue; procrastinate's own close; the
+  stamp becomes the claim. **Survived every attack:** the claim `(id, attempts)`; prune after rescue.
 
 ## 13. What happens after the gate
 
-1. **`fence-result` (tracer):** the claim, step 1 and the sync publish app. Tests T1, T1b, T2.
-   R1: 19 tests in `tests/test_infra_execution.py` need real procrastinate rows.
-2. **`fence-close`:** the fenced close and the guard as step 2, and `RecordedFailure` goes. Tests
-   T2b, T5. R2: `tests/test_infra_runtime_boot.py:442-460`, `:466-509`, `:21`/`:320`.
-3. **`rescue-liveness`:** liveness numbers, media pruner, lock-free fenced rescue, `SET LOCAL`
-   limits. T3, T4. R3 `test_infra_runtime_boot.py:111`; R4/R5 count fresh heartbeats only:
-   `scripts/two_pod_run.py:269`, `:326-330`, `:556`; `tests/test_worker_processes.py:41-43`.
-4. **`sync-releases-stamp`:** the migration and the stamp. Test T6.
-5. **`fence-docs`:** the architecture doc's header, §0, §5, §6(d), §10.1, §10.2 and §10.3.
-6. **Separate, `runtime-stop-reasons`:** defect 3 (§10) plus the `worker_pruned` mapping.
+Each bead is green alone and carries every test it breaks.
 
-**Tracer bullet** (PostgreSQL tests on the real 3.9.0 schema; CI is the database gate)
+0. **`runtime-stop-reasons`:** procrastinate's pool bounded at 5s; no status re-read after a
+   connection error; first stop reason on every exit; fetch foreign-key error → `worker_pruned`.
+   T10. Updates `test_infra_runtime_boot.py:140-156`, `test_media_worker.py:600`, `media/worker.py:447-450`.
+1. **`fence-tracer`:** claim from `context.job.attempts`; `DeliveryFence`; step 1 for `ok` only;
+   step 2 and its status table; `retry_job` refused; cancel shield; unsure classes; the idle
+   limit and a 5s lock limit on `QueueAdmin` (libpq `options`), shipping with the lock;
+   `RecordedFailure` removed. T1, T1b, T2, T3, T7, T9. Updates
+   `test_netboot_fresh_install_e2e.py:162-172`; `test_infra_runtime_boot.py:235-302`,
+   `:307-356`, `:466-534`; `test_infra_job_queue.py:172-189`; `test_infra_queue_ops.py:100`;
+   the 6 boot tests `test_infra_execution.py:251-290` (constructor only).
+2. **`fence-all-results`:** every other result path in step 1; the one sync publish app;
+   `outcome_write_failed`. T1t, T5, T8. Updates the 13 PostgreSQL executor tests
+   `test_infra_execution.py:108-226` (a `DeliveryFence` fake under the fence's conformance suite).
+3. **`liveness-pruners`:** `RESCUE_AFTER`, `PRUNE_AFTER`, the build check, the media loop,
+   fresh-heartbeat counts. T11. Updates `test_infra_runtime_boot.py:111`,
+   `scripts/two_pod_run.py:269`, `:326-330`, `:556`, `test_worker_processes.py:41-43`.
+4. **`rescue-lock-free`:** the `Delivery` declaration; rescue per row in one transaction. T4, T4b.
+   Updates `test_infra_queue_ops.py:47-89`, `:115-118`, `:136-151`, `:224-259`,
+   `test_infra_job_queue.py:155-166`.
+5. **`sync-releases-claimed`:** `ClaimedTransactions`, `Superseded`, wired to `SyncReleases`. T6, T6b.
+6. **`fence-docs`:** architecture header, §0, §3:104 and §10.4 `WorkerBeat` (records linger an
+   hour; readers filter by freshness), §4:116-117 (rescue has no running lock), §5, §6(d), §7 and
+   §9 decision 3 (ruling 3a), §10.1–§10.3.
 
-- **T1:** row 7 rescued; copy row 8 commits `ok`; A returns `TerminalFailure`; outcome stays `ok`.
-  *Probe:* drop step 1's claim check → red.
-- **T1b:** A's record deleted, row not rescued; both steps commit. *Probe:* check `worker_id` → red.
-- **T2:** rescue row 7; finish row 8; `retry_job_v2(7)`; B fetches it (attempts 2); A superseded.
-  Attempts alone decide here. *Probe:* status-only check → red.
-- **T2b:** T2 through the real `Worker` and guard; B's row stays `doing`. *Probe:* close by id → red.
-- **T3:** A pauses 15s in step 1; rescue's first run returns in ≤6s; the row ends closed and `ok`;
-  A keeps running. *Probes:* remove the idle limit, or the lock limit → red.
-- **T4:** kill the worker running `RescueStalledJobs`; the next tick rescues. *Probe:* running lock → red.
-- **T5:** A commits step 1, then pauses. (a) Rescue closes; the copy writes a second `ok`, no
-  download. (b) Operator retries row 7 in place, B fetches it; A's step 2 closes nothing.
-  *Probe:* step 2 by id → red.
-- **T6:** two `SyncReleases` runs overlap; the older is superseded. *Probe:* skip the compare → red.
+**Tracer bullet and probes** (PostgreSQL, real 3.9.0 schema; each probe must turn its test red)
+
+- **T1 / T1t:** row 7 rescued; copy row 8 commits `ok`; A's late `ok` (T1) or `terminal` (T1t) is
+  superseded, with no new outcome and no NOTIFY. *Probes:* no claim in step 1; terminal path unfenced.
+- **T1b:** A's record deleted, row not rescued; both steps commit. *Probe:* check `worker_id`.
+- **T2:** real `Worker`: rescue row 7, finish row 8, `retry_job_v2(7)`, B fetches it (attempts 2);
+  A is superseded and B's row stays `doing`. *Probes:* status-only claim; guard closes by id.
+- **T3:** A's heartbeat backdated; A pauses 15s holding step 1. Rescue's first run returns ≤6s; a
+  close at t=11s succeeds; A's re-run is superseded; A keeps running. *Probes:* no idle limit
+  (the t=11s close fails); no lock limit (the first run exceeds 6s).
+- **T4 / T4b:** a killed rescue's next tick still rescues; a stale snapshot (7,0) while B holds
+  (7,2) closes and copies nothing. *Probes:* running lock restored; close by id; copy before close.
+- **T5:** A commits step 1 and pauses. (a) Rescue closes; the copy writes a second `ok`, no
+  download. (b) Operator retry in place, B fetches; A's step 2 closes nothing. *Probe:* step 2 by id.
+- **T6 / T6b:** a zombie `SyncReleases` is superseded mid-run, and when it first writes after the
+  copy finished. *Probe:* plain `Transactions`.
+- **T7:** `pg_terminate_backend` during step 1; it re-runs and ends `ok`. *Probe:* class-08-only.
+- **T8:** an integrity failure → `outcome_write_failed`; runtime runs. *Probe:* integrity as unsure.
+- **T9:** step 2 fails for 5s, then closes; fails for 35s, and the runtime stops with the row open.
+  *Probe:* stop on the first failure.
+- **T10:** a failing loop plus a lost completion raises the first reason; the fetch foreign-key
+  error gives `worker_pruned`. *Probe:* raise the task-group error.
+- **T11:** prune ≤ rescue is refused at build; a record silent 31s survives another worker's
+  start, the media loop's included. *Probe:* media loop on its default.
+
+**Probe (PG16, psycopg 3.2.9):** a claim holder with a 2s idle limit made a fenced close fail 55P03
+at 1s; after the kill the close took 1 row; the holder then got 25P03 (not an `OperationalError`,
+connection broken). A plain transaction idle 2.5s beside it survived.
