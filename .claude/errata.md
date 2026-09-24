@@ -907,3 +907,31 @@ doc softenings.
   call site. A background publish still in flight at process shutdown is dropped; the next
   `Prefetch` or request re-publishes it. Only `FetchOsImage` substitutes today (a package
   request resolves to one sha256), but the rule is kind-agnostic.
+
+## 2026-09-23 — follow-ups: two-pod run (item 6) and #26 probe
+
+- **Two-pod run PASSED** (`scripts/two_pod_run.py`, 2 Central + 2 workers, one shared cache, fake
+  GitHub origin): flow (c) single download for 8 concurrent misses across both pods; flow (d)
+  kill -9 mid-download rescued by the other worker; flow (e) cache wipe refilled with one download
+  per asset while `/readyz` stayed green; empty catalog 404; a pinned device never substituted.
+- **Proven defect (legacy media, fold into the media retirement, do not patch):** a cache wipe
+  unlinks the held `media/.worker.lock` (`central/media_store.py:182-186`); the standby loop
+  (`media/worker.py:356-372`) then locks a NEW file, so two media writers run at once. Violates
+  "cache purgeable anytime". Retiring the flock (item 1) removes the class.
+- **Harness shim:** `GitHubReleaseOrigin.from_env` has no API base URL setting; the harness
+  monkeypatches it. A CI two-pod run needs a real setting.
+- **Doc corrections for the docs bead:** §6(c) says publish "merges into a pending or running
+  copy" — with a copy running, a new `todo` row is inserted (it runs afterwards as a no-op; §10.3
+  is right). §3 "otherwise Unknown → 404" holds only while the catalog is empty: with a release
+  present an unseen, missing or invalid serial is auto-registered and served.
+- **CI gap:** `netboot-e2e.yml` `tracer` runs one Central, no worker, no origin and a pre-staged
+  `.deb`; nothing in CI covers the OS image, flows (c)-(e), two pods, or kill-and-rescue.
+- **#26 probe (real PostgreSQL):** the guard part is FIXED by dd144f7 (a rescued row's completion
+  is dropped; an open row still stops the runtime). STILL REAL: (1) a worker started while another
+  is paused prunes the paused worker's `procrastinate_workers` row; its heartbeat then silently
+  updates nothing and its next fetch dies on `procrastinate_jobs_worker_id_fkey`; (1b, derived)
+  `select_stalled_jobs_by_heartbeat` treats `worker_id IS NULL` as stalled, so a pruned worker's
+  live job is rescued; (2) the paused worker's late outcome overwrites the copy's (`ok` → `terminal`)
+  because `JobExecutor` commits outcomes without checking the delivery still owns its row
+  (`central/infra/execution.py:131-177`); (3) a true outage takes ~279 s to stop (30 s pool timeout
+  per attempt) and the named `completion_not_recorded` reason is lost to the task-group error.
