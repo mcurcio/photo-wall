@@ -30,6 +30,7 @@ from central.assets.layout import CacheLayout
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
 from central.content_catalog.catalog import ReleaseCatalog
+from central.content_catalog.ports import Promotion
 from central.content_catalog.sync import SyncReleasesHandler
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
@@ -93,11 +94,12 @@ class World:
 
 @pytest.fixture
 def world(registry, tmp_path):
-    def build(origin_listing, *, releases=(), devices=(), promoted=None, etag=None, bound=False,
+    def build(origin_listing, *, releases=(), devices=(), promoted=None, promoted_by="operator",
+              etag=None, bound=False,
               assets: PgAssetRecords | None = None, on_disk=(), **handler_options) -> World:
         clock = ManualClock(NOW)
         seeding = RecordingTransactions(registry.db)
-        seed_releases(seeding, releases, promoted=promoted, etag=etag)
+        seed_releases(seeding, releases, promoted=promoted, promoted_by=promoted_by, etag=etag)
         for fields in devices:
             insert_device(registry.db, **fields)
         if bound:
@@ -357,25 +359,31 @@ def test_pending_health_timeout_is_configurable(world):
 # -- tail: auto-promote -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("promoted,bound,cached,expected", [
+@pytest.mark.parametrize("promoted,by,bound,cached,expected", [
     # Main's `_autopull_deb` (central/app_release_boot.py): suppress iff cached > 0 AND bound > 0.
-    (None, True, False, T),   # nothing cached: pull, even with bound players
-    (T1, True, False, T),
-    (T1, False, True, T),     # no bound player: follow the newest
-    (None, False, True, T),
-    (T1, True, True, T1),     # a configured fleet keeps the operator's choice
-    (None, True, True, None),  # ... and is never promoted behind the operator's back (P1)
+    (None, None, True, False, Promotion(T, "auto")),  # nothing cached: pull, even when bound
+    (None, None, False, True, Promotion(T, "auto")),  # no bound player: pull
+    (None, None, True, True, None),  # a configured fleet is never promoted behind its back (P1)
+    # The sync's own promotion follows the newest under the same rule.
+    (T1, "auto", True, False, Promotion(T, "auto")),
+    (T1, "auto", False, True, Promotion(T, "auto")),
+    (T1, "auto", True, True, Promotion(T1, "auto")),
+    # An operator's promotion is never moved, whatever the fleet (issue #23).
+    (T1, "operator", True, False, Promotion(T1, "operator")),
+    (T1, "operator", False, True, Promotion(T1, "operator")),
+    (T1, "operator", False, False, Promotion(T1, "operator")),
+    (T1, "operator", True, True, Promotion(T1, "operator")),
 ])
-def test_auto_promote(promoted, bound, cached, expected, world):
+def test_auto_promote(promoted, by, bound, cached, expected, world):
     rows = [published(t) for t in (T, T1)]
     rows.append(published(T2, pre=True))  # a newer rc is never auto-promoted
     rows.append(published("v0.1.0", package=None))  # nor a release without a .deb
     w = world(ReleaseListing((), None, unchanged=True), releases=rows, promoted=promoted,
-              bound=bound)
+              promoted_by=by or "operator", bound=bound)
     if cached:
         produced(w, deb(T1))
     sync(w)
-    assert w.reads.promoted() == expected
+    assert w.reads.promotion() == expected
 
 
 def test_suppressed_auto_promote_with_nothing_promoted_says_why(caplog, world):
@@ -398,9 +406,32 @@ def test_auto_promote_honours_release_prereleases(include, expected, world):
     assert w.reads.promoted() == expected
 
 
+def test_an_operator_promotion_of_an_older_release_survives_syncs_that_bring_newer_ones(world):
+    # Issue #23: with no player bound, the periodic sync used to replace an operator's
+    # promotion of an older release with the newest within one tick.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="operator",
+              on_disk=[deb(T1)])
+    sync(w)
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    sync(w)
+    assert (w.reads.promotion(), w.reads.last_good()) == (Promotion(T1, "operator"), None)
+
+
+def test_an_auto_promotion_follows_a_newer_release_on_the_next_sync(world):
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)])
+    sync(w)
+    assert w.reads.promotion() == Promotion(T, "auto")  # an empty promotion is auto-filled
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    assert w.reads.promotion() == Promotion(T2, "auto")
+
+
 def test_auto_promote_keeps_the_outgoing_tag_as_last_good_when_its_deb_is_on_disk(world):
     w = world(ReleaseListing((), None, unchanged=True),
-              releases=[published(t) for t in (T1, T)], promoted=T1,
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="auto",
               on_disk=[deb(T1)])
     sync(w)
     assert (w.reads.promoted(), w.reads.last_good()) == (T, T1)
@@ -413,10 +444,10 @@ def test_auto_promote_with_no_deployable_release_leaves_nothing_promoted(world):
 
 
 def test_auto_promoted_deb_is_fetched_when_it_changed(world):
-    # A new release lands on a fleet with no bound players: it is promoted in the tail, and its
-    # changed .deb is therefore desired in the same transaction and fetched.
+    # A new release lands on an auto promotion with no bound players: it is promoted in the
+    # tail, and its changed .deb is therefore desired in the same transaction and fetched.
     w = world(listing(published(T1), published(T2, os_image=None)),
-              releases=[published(T1)], promoted=T1,
+              releases=[published(T1)], promoted=T1, promoted_by="auto",
               devices=[dev("frontier", known_good_tag=T1)])
     sync(w)
     assert w.reads.promoted() == T2

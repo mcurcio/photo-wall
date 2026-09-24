@@ -1,4 +1,5 @@
-"""Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across.
+"""Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across, and
+027 records every carried promotion as the operator's.
 
 Each test builds a schema at main's last migration (019), seeds main's state, then runs
 `Database.migrate()`, which applies the MVP's 020 onward as an upgrade does: 021 seeds the Asset
@@ -17,18 +18,23 @@ from pathlib import Path
 import psycopg
 import pytest
 from content_db import put_file
+from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
 from psycopg.conninfo import make_conninfo
 
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
 from central.content_catalog.catalog import DevicePackage, ReleaseCatalog
+from central.content_catalog.ports import Promotion
+from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.job_types import SyncReleases
+from central.kernel.ports import ReleaseListing
 from contracts.time import ManualClock
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
@@ -147,3 +153,37 @@ def test_a_fresh_install_writes_nothing(legacy):
     _main_state(legacy, current=None, promoted=None, releases=())
     legacy.migrate()
     assert _pointers(legacy) == (None, None)
+
+
+def _promotion(db: Database) -> Promotion | None:
+    with PgTransactions(db).begin() as tx:
+        return PgReleaseRecords().promotion(tx)
+
+
+def _sync(db: Database, cache: Path) -> None:
+    """One periodic release sync over the upgraded schema: no bound players, nothing new."""
+    clock = ManualClock(1000.0)
+    assets = PgAssetRecords(clock)
+    transactions = PgTransactions(db)
+    publisher = RecordingPublisher(clock)
+    catalog = ReleaseCatalog(
+        releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+        stored=DiskStoredAssets(records=assets, store=CacheStore(CacheLayout(cache))),
+        transactions=transactions, publisher=publisher, clock=clock)
+    handler = SyncReleasesHandler(
+        origin=FakeReleaseOrigin(ReleaseListing((), None, unchanged=True), {}),
+        releases=PgReleaseRecords(), devices=PgDeviceRecords(), assets=assets,
+        transactions=transactions, publisher=publisher, catalog=catalog, clock=clock)
+    asyncio.run(handler.handle(SyncReleases()))
+
+
+@pytest.mark.parametrize("promoted", [V1, None])  # main's promotion, or 023's carry
+def test_an_upgraded_promotion_is_the_operators_and_the_sync_never_moves_it(
+        legacy, tmp_path, promoted):
+    # 027: nothing before it recorded who promoted, so every existing promotion is 'operator'.
+    # With no bound player an 'auto' promotion would follow the newest (V3) on this sync.
+    _main_state(legacy, current=sha(V1), promoted=promoted)
+    legacy.migrate()
+    assert _promotion(legacy) == Promotion(V1, "operator")
+    _sync(legacy, tmp_path)
+    assert _promotion(legacy) == Promotion(V1, "operator")

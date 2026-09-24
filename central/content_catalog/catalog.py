@@ -12,6 +12,7 @@ import asyncio
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Literal, TypeVar
 
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from central.content_catalog.boot_policy import choose_base, newest
 from central.content_catalog.ports import (
     DeviceRecords,
     DeviceRow,
+    Promoter,
     ReleaseRecords,
     ReleaseRow,
     StoredAssets,
@@ -46,6 +48,10 @@ DEVICE_KIND = "pi"
 # is 16 hex digits; a small safe superset leaves room for another scheme. The serial is
 # unauthenticated, so control characters, separators and whitespace are refused here.
 _SAFE_SERIAL = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+# How long a device's last served tag stays desired (owner ruling, issue #25). The netboot route
+# is unauthenticated, so any serial mints a device row that names what it was served; without a
+# window those tags stayed desired forever. Pins and known-goods are not aged.
+SERVED_TAG_WINDOW = timedelta(days=30)
 
 T = TypeVar("T")
 
@@ -168,11 +174,11 @@ class ReleaseCatalog:
         """The desired set, read inside the caller's transaction (the sync tail uses it).
 
         OS images and `.deb`s for active devices' pins, known-goods and last-served tags (what
-        they run now) and `frontier or bootstrap`; the `.deb` of the promoted and the last-good
-        tag. Tags without the locator are skipped, and so is a frozen (divergent) tag's `.deb`
+        they run now; only those served within `SERVED_TAG_WINDOW`) and `frontier or bootstrap`;
+        the `.deb` of the promoted and the last-good tag. Tags without the locator are skipped, and so is a frozen (divergent) tag's `.deb`
         once its file is gone: upstream serves other bytes for it, so fetching it can only fail.
         """
-        named = self._devices.named_tags(tx)
+        named = self._devices.named_tags(tx, served_since=self._served_since())
         by_tag = {row.tag: row for row in self._releases.all(tx)}
         tags = set(named.pinned | named.known_good | named.served)
         target = newest(named.known_good) or _bootstrap(by_tag.values())
@@ -200,6 +206,10 @@ class ReleaseCatalog:
             return None
         return package
 
+    def _served_since(self) -> float:
+        """The oldest serve that still makes a device's last served tag desired."""
+        return self._clock.utc() - SERVED_TAG_WINDOW.total_seconds()
+
     def _policy_tags(self, tx: Transaction) -> set[str]:
         """The promoted and the last-good tag: the `.deb`s `/v1/app/manifest` may name."""
         tags = {self._releases.promoted_tag(tx), self._releases.last_good_tag(tx)}
@@ -211,7 +221,8 @@ class ReleaseCatalog:
         The same three sources as `desired_in`: a device-named tag, a policy tag, or
         `frontier or bootstrap`.
         """
-        if self._devices.names_any(tx, tags) or tags & self._policy_tags(tx):
+        if (self._devices.names_any(tx, tags, served_since=self._served_since())
+                or tags & self._policy_tags(tx)):
             return True
         frontier = newest(self._devices.known_good_tags(tx))
         return (frontier or _bootstrap(self._releases.all(tx))) in tags
@@ -304,25 +315,27 @@ class ReleaseCatalog:
             package = _package(release)
             if package is None:
                 raise CatalogError("release_undeployable", "conflict")
-            self.promote_in(tx, tag)
+            self.promote_in(tx, tag, by="operator")
             self._publisher.publish(FetchPackage(sha256=package.sha256), within=tx,
                                     retry_terminal=True)
             self._publisher.publish(Prefetch(), within=tx)
 
         await self._in_tx(write)
 
-    def promote_in(self, tx: Transaction, tag: str) -> None:
-        """Move the promoted pointer to a known tag with a `.deb` (the caller checked that).
+    def promote_in(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
+        """Move the promoted pointer to a known tag with a `.deb` (the caller checked that), and
+        record who moved it: the operator route passes "operator", auto-promote "auto". The sync
+        never moves an "operator" promotion.
 
         The outgoing promoted tag becomes the last-good fallback when its `.deb` is on disk
-        (otherwise the older last-good stays). The operator route and auto-promote both use it.
+        (otherwise the older last-good stays).
         """
         outgoing = self._releases.promoted_tag(tx)
         if outgoing is not None and outgoing != tag:
             package = _package(self._releases.get(tx, outgoing))
             if package is not None and self._on_disk(tx, package):
                 self._releases.set_last_good(tx, outgoing)
-        self._releases.set_promoted(tx, tag)
+        self._releases.set_promoted(tx, tag, by=by)
 
     async def refresh(self) -> None:
         await self._publisher.publish_now(SyncReleases(), retry_terminal=True)

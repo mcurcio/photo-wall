@@ -15,7 +15,7 @@ from pathlib import Path
 from test_registry import enroll, frame
 
 from central.assets.store import CacheStore
-from central.content_catalog.ports import DeviceRow, ReleaseRow
+from central.content_catalog.ports import DeviceRow, Promoter, Promotion, ReleaseRow
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransaction, PgTransactions
@@ -49,8 +49,8 @@ def published(row: ReleaseRow) -> PublishedRelease:
 
 
 def seed_releases(transactions: PgTransactions, rows, *, promoted: str | None = None,
-                  last_good: str | None = None, etag: str | None = None,
-                  now: float = 1000.0) -> None:
+                  promoted_by: Promoter = "operator", last_good: str | None = None,
+                  etag: str | None = None, now: float = 1000.0) -> None:
     """Upsert every release (a `ReleaseRow` or `PublishedRelease`), then the policy and ETag."""
     releases = PgReleaseRecords()
     with transactions.begin() as tx:
@@ -60,7 +60,7 @@ def seed_releases(transactions: PgTransactions, rows, *, promoted: str | None = 
             if isinstance(row, ReleaseRow) and row.divergent:
                 releases.mark_divergent(tx, row.tag)
         if promoted is not None:
-            releases.set_promoted(tx, promoted)
+            releases.set_promoted(tx, promoted, by=promoted_by)
         if last_good is not None:
             releases.set_last_good(tx, last_good)
         if etag is not None:
@@ -110,6 +110,10 @@ class Reads:
     def promoted(self) -> str | None:
         with self.transactions.begin() as tx:
             return PgReleaseRecords().promoted_tag(tx)
+
+    def promotion(self) -> Promotion | None:
+        with self.transactions.begin() as tx:
+            return PgReleaseRecords().promotion(tx)
 
     def last_good(self) -> str | None:
         with self.transactions.begin() as tx:

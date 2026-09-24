@@ -1,8 +1,8 @@
 """Postgres `ReleaseRecords` / `DeviceRecords` over the existing tables, unchanged.
 
-`app_releases` (016 + 018's base_* columns), `app_release_policy` (+ 023's last_good_tag),
-`app_release_poll`, `devices` (018; 024's partial indexes serve the DISTINCT tag reads) and
-`bindings` (001). The SQL is ported from `central/app_releases.py`,
+`app_releases` (016 + 018's base_* columns), `app_release_policy` (+ 023's last_good_tag and
+027's promoted_by), `app_release_poll`, `devices` (018; 024's and 026's partial indexes serve the
+tag reads) and `bindings` (001). The SQL is ported from `central/app_releases.py`,
 `central/app_release_service.py`, `central/installation_repository.py` and
 `central/netboot_base.py`. Each method runs in the caller's transaction; a fake transaction is a
 `TypeError` (`pg_connection`).
@@ -13,7 +13,14 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any
 
-from central.content_catalog.ports import DeviceRow, DeviceUpdate, NamedTags, ReleaseRow
+from central.content_catalog.ports import (
+    DeviceRow,
+    DeviceUpdate,
+    NamedTags,
+    Promoter,
+    Promotion,
+    ReleaseRow,
+)
 from central.infra.transactions import pg_connection
 from central.kernel.assets import OriginLocator
 from central.kernel.ports import PublishedRelease
@@ -27,6 +34,15 @@ _RELEASE_COLUMNS = (
 _DEVICE_COLUMNS = (
     "device_id, serial, attached_tag, known_good_tag, last_served_tag, boot_outcome, "
     "failed_tag, last_served_at, retired_at"
+)
+# The roles through which an active device names a tag: (role, tag column, extra WHERE).
+# `named_tags` and `names_any` are both generated from this one table, so they cannot disagree.
+# The served role counts only a serve at or after `%(served_since)s` (issue #25: fake-serial
+# rows and long-gone devices must not keep a tag desired forever); 026's index covers it.
+_NAMING_ROLES = (
+    ("pinned", "attached_tag", ""),
+    ("known_good", "known_good_tag", ""),
+    ("served", "last_served_tag", " AND last_served_at >= %(served_since)s"),
 )
 
 
@@ -126,18 +142,23 @@ class PgReleaseRecords:
         )
 
     def promoted_tag(self, tx: Transaction) -> str | None:
-        row = pg_connection(tx).execute(
-            "SELECT promoted_tag FROM app_release_policy WHERE singleton"
-        ).fetchone()
-        return None if row is None else row["promoted_tag"]
+        promotion = self.promotion(tx)
+        return None if promotion is None else promotion.tag
 
-    def set_promoted(self, tx: Transaction, tag: str) -> None:
+    def promotion(self, tx: Transaction) -> Promotion | None:
+        row = pg_connection(tx).execute(
+            "SELECT promoted_tag, promoted_by FROM app_release_policy WHERE singleton"
+        ).fetchone()
+        return None if row is None else Promotion(row["promoted_tag"], row["promoted_by"])
+
+    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
         conn = pg_connection(tx)
         conn.execute("SELECT promoted_tag FROM app_release_policy WHERE singleton FOR UPDATE")
         conn.execute(
-            "INSERT INTO app_release_policy VALUES(TRUE,%s) ON CONFLICT(singleton) "
-            "DO UPDATE SET promoted_tag=EXCLUDED.promoted_tag",
-            (tag,),
+            "INSERT INTO app_release_policy(singleton, promoted_tag, promoted_by) "
+            "VALUES(TRUE,%s,%s) ON CONFLICT(singleton) "
+            "DO UPDATE SET promoted_tag=EXCLUDED.promoted_tag, promoted_by=EXCLUDED.promoted_by",
+            (tag, by),
         )
 
     def last_good_tag(self, tx: Transaction) -> str | None:
@@ -200,32 +221,30 @@ class PgDeviceRecords:
         ).fetchall()
         return frozenset(row["tag"] for row in rows)
 
-    def named_tags(self, tx: Transaction) -> NamedTags:
+    def named_tags(self, tx: Transaction, *, served_since: float) -> NamedTags:
         rows = pg_connection(tx).execute(
-            "SELECT DISTINCT 'pinned' AS role, attached_tag AS tag FROM devices "
-            "WHERE retired_at IS NULL AND attached_tag IS NOT NULL "
-            "UNION SELECT DISTINCT 'known_good', known_good_tag FROM devices "
-            "WHERE retired_at IS NULL AND known_good_tag IS NOT NULL "
-            "UNION SELECT DISTINCT 'served', last_served_tag FROM devices "
-            "WHERE retired_at IS NULL AND last_served_tag IS NOT NULL"
+            " UNION ".join(
+                f"SELECT DISTINCT '{role}' AS role, {column} AS tag FROM devices "
+                f"WHERE retired_at IS NULL{extra} AND {column} IS NOT NULL"
+                for role, column, extra in _NAMING_ROLES),
+            {"served_since": served_since},
         ).fetchall()
-        by_role: dict[str, set[str]] = {"pinned": set(), "known_good": set(), "served": set()}
+        by_role: dict[str, set[str]] = {role: set() for role, _, _ in _NAMING_ROLES}
         for row in rows:
             by_role[row["role"]].add(row["tag"])
         return NamedTags(frozenset(by_role["pinned"]), frozenset(by_role["known_good"]),
                          frozenset(by_role["served"]))
 
-    def names_any(self, tx: Transaction, tags: Collection[str]) -> bool:
+    def names_any(self, tx: Transaction, tags: Collection[str], *, served_since: float) -> bool:
         tags = sorted(tags)
         if not tags:
             return False
         row = pg_connection(tx).execute(
-            "SELECT EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL AND attached_tag = ANY(%s)) "
-            "OR EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL "
-            "AND known_good_tag = ANY(%s)) "
-            "OR EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL "
-            "AND last_served_tag = ANY(%s)) AS named",
-            (tags, tags, tags),
+            "SELECT " + " OR ".join(
+                f"EXISTS(SELECT 1 FROM devices WHERE retired_at IS NULL{extra} "
+                f"AND {column} = ANY(%(tags)s))"
+                for _, column, extra in _NAMING_ROLES) + " AS named",
+            {"tags": tags, "served_since": served_since},
         ).fetchone()
         return bool(row["named"])
 

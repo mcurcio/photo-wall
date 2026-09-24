@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import hashlib
 
+import psycopg
 import pytest
 from fakes.transactions import FakeTransaction
 from test_registry import enroll, frame
 
-from central.content_catalog.ports import DeviceRow, DeviceUpdate, NamedTags, ReleaseRow
+from central.content_catalog.ports import (
+    DeviceRow,
+    DeviceUpdate,
+    NamedTags,
+    Promotion,
+    ReleaseRow,
+)
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import OriginLocator
@@ -83,7 +90,8 @@ def _raw(registry, sql, params=()):
     lambda tx: PgReleaseRecords().all(tx),
     lambda tx: PgReleaseRecords().upsert(tx, published(T1), now=1.0),
     lambda tx: PgReleaseRecords().promoted_tag(tx),
-    lambda tx: PgReleaseRecords().set_promoted(tx, T1),
+    lambda tx: PgReleaseRecords().set_promoted(tx, T1, by="operator"),
+    lambda tx: PgReleaseRecords().promotion(tx),
     lambda tx: PgReleaseRecords().load_etag(tx),
     lambda tx: PgReleaseRecords().store_etag(tx, "e"),
     lambda tx: PgReleaseRecords().bound_player_count(tx),
@@ -92,8 +100,8 @@ def _raw(registry, sql, params=()):
     lambda tx: PgReleaseRecords().last_good_tag(tx),
     lambda tx: PgReleaseRecords().set_last_good(tx, T1),
     lambda tx: PgDeviceRecords().known_good_tags(tx),
-    lambda tx: PgDeviceRecords().named_tags(tx),
-    lambda tx: PgDeviceRecords().names_any(tx, {T1}),
+    lambda tx: PgDeviceRecords().named_tags(tx, served_since=1.0),
+    lambda tx: PgDeviceRecords().names_any(tx, {T1}, served_since=1.0),
     lambda tx: PgDeviceRecords().lock(tx, "d", "s", now=1.0),
     lambda tx: PgDeviceRecords().active(tx),
     lambda tx: PgDeviceRecords().get(tx, "d"),
@@ -148,16 +156,29 @@ def test_all_and_get_of_unknown(pg):
         assert PgReleaseRecords().get(tx, "v9.9.9") is None
 
 
-def test_promoted_tag_round_trip(pg):
+def test_promoted_tag_round_trip_records_who_promoted(pg):
     _seed(pg, published(T1), published(T2))
     releases = PgReleaseRecords()
     with pg.begin() as tx:
-        assert releases.promoted_tag(tx) is None
-        releases.set_promoted(tx, T1)
-        assert releases.promoted_tag(tx) == T1
-        releases.set_promoted(tx, T2)
+        assert releases.promoted_tag(tx) is None and releases.promotion(tx) is None
+        releases.set_promoted(tx, T1, by="auto")
+        assert releases.promotion(tx) == Promotion(T1, "auto")
+        releases.set_promoted(tx, T2, by="operator")
     with pg.begin() as tx:
         assert releases.promoted_tag(tx) == T2
+        assert releases.promotion(tx) == Promotion(T2, "operator")
+
+
+@pytest.mark.parametrize("columns,values", [
+    ("singleton, promoted_tag", "TRUE, 'v0.0.1'"),  # a writer that does not say who it is
+    ("singleton, promoted_tag, promoted_by", "TRUE, 'v0.0.1', 'sync'"),
+])
+def test_the_policy_row_refuses_a_promotion_without_a_known_promoter(registry, pg, columns,
+                                                                    values):
+    _seed(pg, published(T1))
+    with pytest.raises(psycopg.errors.IntegrityError), registry.db.transaction() as conn:
+        # Test-controlled literals only.
+        conn.execute(f"INSERT INTO app_release_policy({columns}) VALUES({values})")
 
 
 def test_last_good_round_trip_rides_the_policy_row(pg):
@@ -165,11 +186,11 @@ def test_last_good_round_trip_rides_the_policy_row(pg):
     releases = PgReleaseRecords()
     with pg.begin() as tx:
         assert releases.last_good_tag(tx) is None
-        releases.set_promoted(tx, T2)
+        releases.set_promoted(tx, T2, by="operator")
         releases.set_last_good(tx, T1)
     with pg.begin() as tx:
         assert (releases.promoted_tag(tx), releases.last_good_tag(tx)) == (T2, T1)
-        releases.set_promoted(tx, T1)  # moving the promoted pointer leaves last-good alone
+        releases.set_promoted(tx, T1, by="auto")  # moving the promoted pointer leaves last-good alone
         assert releases.last_good_tag(tx) == T1
 
 
@@ -243,20 +264,41 @@ def test_active_get_and_retired(registry, pg):
 
 def test_distinct_tag_reads_cover_active_devices_only(registry, pg):
     _seed(pg, published(T1), published(T), published(T2))
-    _insert_device(registry, "device-a", attached_tag=T1, known_good_tag=T, last_served_tag=T)
-    _insert_device(registry, "device-b", known_good_tag=T, last_served_tag=T1)
+    _insert_device(registry, "device-a", attached_tag=T1, known_good_tag=T, last_served_tag=T,
+                   last_served_at=1000.0)
+    _insert_device(registry, "device-b", known_good_tag=T, last_served_tag=T1,
+                   last_served_at=1000.0)
     _insert_device(registry, "device-r", attached_tag=T2, known_good_tag=T2,
-                   last_served_tag=T2, retired_at=1500.0)
+                   last_served_tag=T2, last_served_at=1000.0, retired_at=1500.0)
     for n in range(3):
         _insert_device(registry, f"device-fake-{n}")  # a fake serial names nothing
     devices = PgDeviceRecords()
     with pg.begin() as tx:
         assert devices.known_good_tags(tx) == frozenset({T})
-        assert devices.named_tags(tx) == NamedTags(frozenset({T1}), frozenset({T}),
-                                                   frozenset({T, T1}))
-        assert devices.names_any(tx, {T1, "v9.9.9"}) is True
-        assert devices.names_any(tx, {T2}) is False  # only the retired device names it
-        assert devices.names_any(tx, set()) is False
+        assert devices.named_tags(tx, served_since=1000.0) == NamedTags(
+            frozenset({T1}), frozenset({T}), frozenset({T, T1}))
+        assert devices.names_any(tx, {T1, "v9.9.9"}, served_since=1000.0) is True
+        # only the retired device names it
+        assert devices.names_any(tx, {T2}, served_since=1000.0) is False
+        assert devices.names_any(tx, set(), served_since=1000.0) is False
+
+
+@pytest.mark.parametrize("served_at,named", [(1000.0, True), (999.0, False), (None, False)])
+def test_the_served_role_counts_a_serve_at_or_after_served_since_only(registry, pg, served_at,
+                                                                     named):
+    # Issue #25: both reads take the one cutoff; a row with no serve time names nothing.
+    _seed(pg, published(T1), published(T), published(T2))
+    _insert_device(registry, "device-s", last_served_tag=T1, last_served_at=served_at)
+    _insert_device(registry, "device-p", attached_tag=T, last_served_tag=T, last_served_at=1.0)
+    _insert_device(registry, "device-k", known_good_tag=T2, last_served_tag=T2,
+                   last_served_at=1.0)
+    devices = PgDeviceRecords()
+    with pg.begin() as tx:
+        assert devices.named_tags(tx, served_since=1000.0) == NamedTags(
+            frozenset({T}), frozenset({T2}), frozenset({T1}) if named else frozenset())
+        assert devices.names_any(tx, {T1}, served_since=1000.0) is named
+        assert devices.names_any(tx, {T}, served_since=1000.0) is True  # a pin is not aged
+        assert devices.names_any(tx, {T2}, served_since=1000.0) is True  # nor a known-good
 
 
 def test_apply_record_served_and_pin(registry, pg):

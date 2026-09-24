@@ -152,8 +152,10 @@ def release_seed_sql(tag: str, sha256: str, size: int, url: str = TRACER_DEB_URL
         "locator_size, expected_size, expected_sha256, added_at) "
         f"VALUES ('player-deb', '{sha256}', '{tag}', '{url}', '{sha256}', {size}, {size}, "
         f"'{sha256}', {now});\n"
-        f"INSERT INTO app_release_policy VALUES (TRUE, '{tag}') ON CONFLICT (singleton) "
-        "DO UPDATE SET promoted_tag = EXCLUDED.promoted_tag;\n"
+        "INSERT INTO app_release_policy(singleton, promoted_tag, promoted_by) "
+        f"VALUES (TRUE, '{tag}', 'operator') ON CONFLICT (singleton) "
+        "DO UPDATE SET promoted_tag = EXCLUDED.promoted_tag, "
+        "promoted_by = EXCLUDED.promoted_by;\n"
         "COMMIT;\n"
     )
 

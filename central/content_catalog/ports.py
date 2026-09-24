@@ -18,6 +18,9 @@ from central.kernel.ports import PublishedRelease
 from central.kernel.transactions import Transaction
 
 BootOutcome: TypeAlias = Literal["pending", "healthy", "failed"]
+# Who set the current promotion (027's `promoted_by`). The periodic sync moves only an "auto"
+# promotion; an "operator" one is never overridden (issue #23, owner ruling).
+Promoter: TypeAlias = Literal["auto", "operator"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,12 @@ class ReleaseRow:
     package: OriginLocator | None  # the .deb (asset_url/asset_sha256/asset_size)
     os_image: OriginLocator | None  # the base tarball (base_tarball_url/_sha256/_size)
     divergent: bool = False  # the .deb was re-cut upstream after it was produced: frozen
+
+
+@dataclass(frozen=True, slots=True)
+class Promotion:
+    tag: str
+    by: Promoter
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +57,7 @@ class NamedTags:
 
     pinned: frozenset[str]
     known_good: frozenset[str]
-    served: frozenset[str]  # last_served_tag: the OS (and so the `.deb`) a device runs now
+    served: frozenset[str]  # last_served_tag, served within the window: what a device runs now
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +90,13 @@ class ReleaseRecords(Protocol):
 
     def promoted_tag(self, tx: Transaction) -> str | None: ...
 
-    def set_promoted(self, tx: Transaction, tag: str) -> None: ...
+    def promotion(self, tx: Transaction) -> Promotion | None:
+        """The promoted tag and who set it; None when nothing is promoted."""
+        ...
+
+    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
+        """Move the promoted pointer and record who moved it (`by` has no default)."""
+        ...
 
     def last_good_tag(self, tx: Transaction) -> str | None:
         """The last promoted tag whose `.deb` was on disk (main's `current_sha256` pointer)."""
@@ -113,10 +128,13 @@ class DeviceRecords(Protocol):
         """DISTINCT known_good_tag of active devices: the frontier's input, per netboot."""
         ...
 
-    def named_tags(self, tx: Transaction) -> NamedTags: ...
+    def named_tags(self, tx: Transaction, *, served_since: float) -> NamedTags:
+        """The served role counts a device only when `last_served_at >= served_since`."""
+        ...
 
-    def names_any(self, tx: Transaction, tags: Collection[str]) -> bool:
-        """Whether an active device pins, ran healthy on, or was last served one of `tags`."""
+    def names_any(self, tx: Transaction, tags: Collection[str], *, served_since: float) -> bool:
+        """Whether an active device pins, ran healthy on, or was last served (at or after
+        `served_since`) one of `tags`: the same predicate per role as `named_tags`."""
         ...
 
     def get(self, tx: Transaction, device_id: str) -> DeviceRow | None: ...

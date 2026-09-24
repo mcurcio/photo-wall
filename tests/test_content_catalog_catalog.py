@@ -33,7 +33,7 @@ from central.content_catalog.catalog import (
     device_id_for_serial,
     sanitize_serial,
 )
-from central.content_catalog.ports import DeviceRow, ReleaseRow
+from central.content_catalog.ports import DeviceRow, Promotion, ReleaseRow
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
@@ -102,10 +102,12 @@ class World:
 
 @pytest.fixture
 def world(registry, tmp_path):
-    def build(releases=(), devices=(), *, promoted=None, last_good=None, on_disk=()) -> World:
+    def build(releases=(), devices=(), *, promoted=None, promoted_by="operator", last_good=None,
+              on_disk=()) -> World:
         clock = ManualClock(1000.0)
         seeding = RecordingTransactions(registry.db)
-        seed_releases(seeding, releases, promoted=promoted, last_good=last_good)
+        seed_releases(seeding, releases, promoted=promoted, promoted_by=promoted_by,
+                      last_good=last_good)
         for fields in devices:
             insert_device(registry.db, **fields)
         assets = PgAssetRecords(clock)
@@ -308,7 +310,7 @@ def test_package_request_for_a_desired_sha_is_a_pinned_single_candidate(world):
 @pytest.mark.parametrize("devices,policy", [
     ([dev("d", attached_tag=T1)], {}),
     ([dev("d", known_good_tag=T1)], {}),
-    ([dev("d", last_served_tag=T1)], {}),
+    ([dev("d", last_served_tag=T1, last_served_at=1000.0)], {}),
     ([], {"promoted": T1}),
     ([], {"promoted": T2, "last_good": T1}),
 ])
@@ -362,13 +364,41 @@ def test_a_frozen_deb_that_a_live_tag_also_ships_stays_desired(world):
 # -- B3 desired_assets --------------------------------------------------------------------------
 
 
+DAY = 24 * 60 * 60.0
+
+
+@pytest.mark.parametrize("age_days,desired", [(29, True), (31, False)])
+def test_a_served_tag_is_desired_only_within_thirty_days_of_its_serve(age_days, desired, world):
+    # Issue #25 (owner ruling): any serial on the unauthenticated netboot route mints a device
+    # row; its last served tag must not stay desired for ever. T2 (the bootstrap) is the only
+    # other source, so T1 is desired through the served role or not at all.
+    w = world([release(T1), release(T2)], [dev("d", last_served_tag=T1, last_served_at=1000.0)])
+    w.clock.advance(age_days * DAY)
+    job = FetchPackage(sha256=deb_sha(T1))
+    assert (job in run(w.catalog.desired_assets())) is desired  # named_tags
+    assert (FetchOsImage(tag=T1) in run(w.catalog.desired_assets())) is desired
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == (  # names_any: same rule
+        Candidates((job,), pinned=True) if desired else Unknown("unknown_package"))
+
+
+@pytest.mark.parametrize("role", ["attached_tag", "known_good_tag"])
+def test_pins_and_known_goods_are_desired_whatever_the_age_of_the_serve(role, world):
+    w = world([release(T1), release(T2)],
+              [dev("d", last_served_tag=T1, last_served_at=1000.0, **{role: T1})])
+    w.clock.advance(365 * DAY)
+    job = FetchPackage(sha256=deb_sha(T1))
+    assert job in run(w.catalog.desired_assets())
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == Candidates(
+        (job,), pinned=True)
+
+
 def test_desired_assets_is_pins_known_goods_target_and_promoted_deb(world):
     tags = ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0", "v0.6.0"]
     pin, kg, frontier, promoted, retired_pin, unrelated = tags
     served, last_good = "v0.0.8", "v0.0.9"
     w = world([*(release(t) for t in tags), release(served), release(last_good)],
               [dev("a", attached_tag=pin, known_good_tag=kg),
-               dev("b", known_good_tag=frontier, last_served_tag=served),
+               dev("b", known_good_tag=frontier, last_served_tag=served, last_served_at=1000.0),
                dev("r", attached_tag=retired_pin, retired=True)],
               promoted=promoted, last_good=last_good)
     desired = run(w.catalog.desired_assets())
@@ -520,9 +550,11 @@ def test_promote_refusals_write_nothing(world):
 
 
 def test_promote_sets_the_pointer_and_fetches_its_deb(world):
-    w = world([release(T1), release(T2)], promoted=T2)
+    # The operator route takes the promotion over from auto-promote (issue #23): the sync never
+    # moves it again.
+    w = world([release(T1), release(T2)], promoted=T2, promoted_by="auto")
     run(w.catalog.promote(T1))
-    assert w.reads.promoted() == T1
+    assert w.reads.promotion() == Promotion(T1, "operator")
     (tx,) = w.transactions.begun
     assert w.publisher.calls == [
         PublishedCall(FetchPackage(sha256=deb_sha(T1)), True, tx),

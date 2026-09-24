@@ -935,3 +935,57 @@ doc softenings.
   because `JobExecutor` commits outcomes without checking the delivery still owns its row
   (`central/infra/execution.py:131-177`); (3) a true outage takes ~279 s to stop (30 s pool timeout
   per attempt) and the named `completion_not_recorded` reason is lost to the task-group error.
+
+## 2026-09-23 — follow-ups: issues #23 and #25
+
+- **#23 (owner ruling "remember who promoted"): the policy row records who promoted.**
+  Migration `027_promoted_by.sql` adds `app_release_policy.promoted_by` as NOT NULL with a CHECK
+  for `('auto','operator')` and no default. The periodic sync auto-promotes only when nothing is
+  promoted or the promotion is `'auto'`. It keeps the suppress rule, the WARNING (only when
+  nothing is promoted) and the lane-X last-good carry through `promote_in`. It never moves an
+  `'operator'` promotion.
+- **Every writer states who it is. Nothing has a default.** The new signatures are
+  `ReleaseRecords.set_promoted(tx, tag, *, by: Promoter)` and
+  `ReleaseCatalog.promote_in(tx, tag, *, by: Promoter)`, with
+  `Promoter = Literal["auto", "operator"]` in `ports.py`. There is a new reader,
+  `ReleaseRecords.promotion(tx) -> Promotion | None`, where `Promotion(tag, by)`. The operator
+  route writes `"operator"` and the sync writes `"auto"`. A raw SQL writer that omits the column
+  fails on NOT NULL. `scripts/test_netboot_e2e.py`'s seed now names `'operator'`
+  (`test_netboot_e2e_wire.py` runs it against the real schema).
+- **Backfill: every existing row is `'operator'`.** No row can be proven automatic. Main's
+  `_autopull_deb` and the operator route both called the same `set_promoted`
+  (`git show ca75879^:central/app_release_boot.py`, around line 141). 023's carry promotes only
+  when nothing was promoted, from `current_sha256`, which with no promoted tag only an operator
+  set (0009 `/v1/operator/app/current`).
+- **Costs:**
+  1. An upgraded install whose promotion main set automatically now stays on that tag until an
+     operator promotes once. Before the MVP, main re-pulled the newest at every boot.
+  2. **Gap: no operator action hands control back to auto.** There is no unpromote or "follow
+     newest" route (`central/app.py:533` is promote only). Once an operator promotes, the sync
+     never moves the pointer again. Adding such an action needs a design choice: deleting the
+     policy row also drops `last_good_tag`, so either `promoted_by='auto'` in place, or
+     `promoted_tag` must become nullable. No route was added.
+  3. The operator views (`ReleaseView`, the console) do not show who promoted.
+- **#25: only the served role ages. The pinned and known-good roles do not.** Signature change:
+  `DeviceRecords.named_tags(tx, *, served_since: float)` and
+  `names_any(tx, tags, *, served_since: float)`. The window is defined once:
+  `SERVED_TAG_WINDOW = timedelta(days=30)` in `central/content_catalog/catalog.py`.
+  `ReleaseCatalog._served_since()` (the clock minus the window) feeds both reads. The adapter
+  builds both SQL statements from one role table (`_NAMING_ROLES`), so the two cannot disagree.
+  Migration 026 replaces 024's `devices_active_served` with `(last_served_tag, last_served_at)`
+  and keeps the same partial predicate. EXPLAIN (enable_seqscan off, 20k rows) shows an
+  index-only scan for the EXISTS and a bitmap index scan for the DISTINCT.
+- **Consequences of the ruling (not bugs in this bead):**
+  1. A row with `last_served_tag` set and `last_served_at` NULL names nothing in the served
+     role. Every writer sets both columns together.
+  2. The window re-opens lane X's gap for devices with long uptimes. Take a device that has not
+     netbooted for more than 30 days, whose tag is not pinned, known-good, promoted, last-good or
+     the frontier. Its per-device manifest (`device_package`) still names that tag's `.deb`, but
+     once the file is gone from disk the package route answers 404 for it. Nothing removes files
+     in the MVP, but a cache wipe does.
+  3. A tag served to a fake serial stays desired for 30 days after the serve. The number of such
+     tags is bounded by the release count, not the device count.
+- **Doc text for the docs bead:** in `docs/central-system-architecture.md`, the §5 "Desired set"
+  row ("current OS and `.deb` for unpinned devices") needs "served within the last 30 days". §3's
+  Catalog row and §5's Catalog entries row ("pin, promote") do not say that a promotion records
+  who set it, or that the sync moves only its own.

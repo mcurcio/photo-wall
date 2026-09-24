@@ -148,26 +148,30 @@ class SyncReleasesHandler:
         self._publisher.publish(Prefetch(), within=tx)
 
     def _auto_promote(self, tx: Transaction) -> None:
-        """Main's boot-time `_autopull_deb` rule (`central/app_release_boot.py`, removed by the
+        """Auto-promote the newest release while nothing is promoted or the promotion is the
+        sync's own ("auto"); an operator promotion is never moved (issue #23, owner ruling).
+
+        Main's boot-time `_autopull_deb` rule (`central/app_release_boot.py`, removed by the
         MVP), now on every sync: suppress iff `cached > 0 AND bound > 0`, else promote the
         newest deployable release (prereleases only with PHOTO_WALL_RELEASE_PRERELEASES).
-
         `cached` was `count(*) FROM app_packages`; it is now "some release's `.deb` was
         produced". A configured fleet is never upgraded behind the operator's back.
         """
-        promoted = self._releases.promoted_tag(tx)
+        promotion = self._releases.promotion(tx)
+        if promotion is not None and promotion.by == "operator":
+            return
         releases = self._releases.all(tx)
         bound = self._releases.bound_player_count(tx)
         if bound > 0 and self._any_package_produced(tx, releases):
-            if promoted is None:
+            if promotion is None:
                 LOG.warning("no release is promoted and auto-promote is suppressed (%d bound "
                             "players, .debs cached): GET /v1/app/manifest answers 503 "
                             "app_unconfigured until an operator promotes a release", bound)
             return
         candidate = newest(row.tag for row in releases if row.package is not None
                            and (self._include_prereleases or not row.is_prerelease))
-        if candidate is not None and candidate != promoted:
-            self._catalog.promote_in(tx, candidate)
+        if candidate is not None and (promotion is None or candidate != promotion.tag):
+            self._catalog.promote_in(tx, candidate, by="auto")
 
     def _any_package_produced(self, tx: Transaction, releases: tuple[ReleaseRow, ...]) -> bool:
         shas = {row.package.sha256 for row in releases
