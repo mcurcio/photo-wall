@@ -1096,3 +1096,27 @@ doc softenings.
   sync's two `reference` calls (each keyed by its locator's sha) and
   `scripts/test_netboot_e2e.py:159-162`. The CHECK is replaced (`DROP ... IF EXISTS`, then `ADD`),
   so 028 is safe to run twice. Test fixtures with NULL or mismatched locator shas were fixed.
+
+## 2026-09-24 — bead 4 rescue-lock-free
+
+- **The page's signature is wrong.** `_lock(job_type) -> str | None` cannot return
+  `job_keys(job).lock`: it has no job to key. The code has `_lock(job: Job[Any]) -> str | None`,
+  which returns the key when `type(job).asset_kind is not None`, else None. `_register` passes it
+  the field-less tick `job_type()`, and `_deferrer` passes the published job. The behaviour is
+  what the page freezes.
+- **Stale text outside this bead's file set (for bead 5, docs; not edited here):**
+  - `central/infra/queue_ops.py:7-10` says the re-published copy "runs only after the close
+    frees the lock". That is now true only for asset fetches. A non-asset copy is fetchable at
+    once. The ordering of re-publish then close still holds.
+  - `central/infra/queue_ops.py:93` (`close`): the words "which frees its lock for the new copy"
+    are now true only for asset fetches.
+  - `central/kernel/jobs.py:199`: the `JobKeys.lock` comment "one RUNNING copy fleet-wide" now
+    holds only for asset jobs. The page forbids a kernel change.
+  - `central/kernel/publishing.py:11-12`, PB4: "a running copy is joined, not duplicated" now
+    holds only for asset jobs. A non-asset publish while a copy runs inserts a pending copy that
+    may run alongside it. Waiters are unaffected, because they resolve on the first outcome newer
+    than `since`.
+  - `docs/central-system-architecture.md:28`, `:79` and `:116-117` still say every job's `lock`
+    is one running copy.
+- No file outside the set turned red. The full suite, ruff, lint-imports and check_docs pass;
+  `test_registry` is the known local failure.
