@@ -219,7 +219,7 @@ def publish_committed(h, job, **kwargs):
 def reference(h, job) -> None:
     with h.transactions.begin() as tx:
         h.assets.reference(tx, asset_key(job), AssetReference(
-            owner="v1.0.0", locator=OriginLocator("https://x.test/t", None, None),
+            owner="v1.0.0", locator=OriginLocator("https://x.test/t", asset_key(job).identity, None),
             expected_size=None, expected_sha256=None))
 
 

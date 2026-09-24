@@ -1080,3 +1080,19 @@ doc softenings.
   `NetbootBaseRequest` statically yields `NetbootCandidates | Unknown`, which is what
   `record_served(request, resolution, job)` takes from the route. `central/kernel/types.py`
   `ReleaseTag` now has no user; it is kept.
+- **Fix cycle 1 (high-risk review of 028): the page's rollback was wrong.** It said "revert the
+  code, then `UPDATE app_release_poll SET etag = NULL`". That strands new-shape
+  `{"tarball_sha256": ...}` deliveries, which the reverted code cannot decode (the mirror image of
+  028 step 4). 028's header now gives: (a) cancel `todo` and fail `doing`
+  `photo_wall.os_image.fetch` rows; (b) drop the new CHECK; (c) revert the code; (d) clear the
+  ETag. Roll forward: repeat (a), then `DELETE FROM schema_migrations WHERE name =
+  '028_os_image_content_key.sql'`. Step (b) goes beyond the coordinator's text: the reverted code
+  writes tag-keyed references whose locator sha is the tarball's, which the CHECK refuses, so its
+  sync would fail. The header's "the runbook deletes them at upgrade" was premature; it now says
+  that bead 5 adds that step to the runbook.
+- **Fix cycle 1: the page left fall-through unguarded in the schema.** 028 now adds
+  `asset_references_locator_names_the_key CHECK (locator_sha256 IS NOT NULL AND locator_sha256 =
+  identity)` for both kinds. Every production writer already satisfies it: 021's seeds, the
+  sync's two `reference` calls (each keyed by its locator's sha) and
+  `scripts/test_netboot_e2e.py:159-162`. The CHECK is replaced (`DROP ... IF EXISTS`, then `ADD`),
+  so 028 is safe to run twice. Test fixtures with NULL or mismatched locator shas were fixed.

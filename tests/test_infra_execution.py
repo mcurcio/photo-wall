@@ -72,7 +72,7 @@ class Harness:
         if reference:
             with self.reads.begin() as tx:
                 self.assets.reference(tx, KEY, AssetReference(
-                    owner=TAG, locator=OriginLocator("https://x.test/t", None, None),
+                    owner=TAG, locator=OriginLocator("https://x.test/t", TARBALL, None),
                     expected_size=None, expected_sha256=None))
 
         async def redeliver(redelivery):

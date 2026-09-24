@@ -117,6 +117,22 @@ def test_record_produced_is_write_once(repo):
     assert repo.get(KEY).produced == facts
 
 
+@pytest.mark.parametrize("kind", list(AssetKind))
+@pytest.mark.parametrize("locator_sha", [None, SHA_B])
+def test_a_reference_whose_locator_does_not_name_its_key_is_refused(repo, kind, locator_sha):
+    # 028's CHECK: production may fetch from ANY reference of a key, and `download` checks the
+    # bytes only against a set locator sha, so a reference to other (or unchecked) bytes would
+    # install them under the key. The schema refuses it, for both kinds.
+    key = AssetKey(kind, SHA_A)
+    stray = AssetReference("v1.0.0", OriginLocator("https://example.test/a", sha256=locator_sha,
+                                                   size=10), None, None)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        repo.reference(key, stray)
+    assert repo.count("assets") == 0 and repo.count("asset_references") == 0  # rolled back
+    good = AssetReference("v1.0.0", OriginLocator("https://example.test/a", SHA_A, 10), None, None)
+    assert repo.reference(key, good) is True
+
+
 def test_touch_served_sets_last_served_at(repo):
     repo.touch_served(KEY, 5.0)  # absent -> no-op
     repo.reference(KEY, ref("v1.0.0"))

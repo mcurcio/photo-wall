@@ -340,6 +340,11 @@ def _seed_027(db: Database) -> None:
                          (tag, tag, url(tag), build.sha, len(build.tarball)))
         conn.execute("INSERT INTO assets(kind,identity,produced_size,produced_sha256,created_at) "
                      "VALUES('player-deb',%s,10,%s,1.0)", (deb_sha, deb_sha))
+        # As 021 seeds a `.deb` reference: its locator names its key, so 028's CHECK holds.
+        conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,locator_sha256,"
+                     "locator_size,expected_size,expected_sha256,added_at) "
+                     "VALUES('player-deb',%s,'v1.0.0','https://example.test/a.deb',%s,10,10,%s,1.0)",
+                     (deb_sha, deb_sha, deb_sha))
         for lock, name in (('os_image.fetch["v1.0.0"]', "os_image.fetch"),
                            (f'player_deb.fetch["{deb_sha}"]', "player_deb.fetch")):
             conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,seq,updated_at) "
@@ -353,10 +358,9 @@ def _seed_027(db: Database) -> None:
                          "VALUES('photo-wall-fetch',%s,%s,%s)", (task, json.dumps(args), status))
 
 
-def test_t7_028_rekeys_os_images_by_tarball_with_no_facts_and_ends_old_shape_rows(at_027):
-    _seed_027(at_027)
-    at_027.migrate()
-    with at_027.transaction() as conn:
+def _state(db: Database) -> dict:
+    """What 028 decides: the os-image rows and references, the notes, the queue, the CHECK."""
+    with db.transaction() as conn:
         assets = conn.execute("SELECT kind, identity, produced_sha256 FROM assets "
                               "ORDER BY kind, identity").fetchall()
         references = conn.execute("SELECT identity, owner, locator_sha256, expected_sha256 "
@@ -366,22 +370,86 @@ def test_t7_028_rekeys_os_images_by_tarball_with_no_facts_and_ends_old_shape_row
             "SELECT job_name FROM job_outcomes ORDER BY job_name").fetchall()]
         queue = [(row["task_name"], row["status"]) for row in conn.execute(
             "SELECT task_name, status::text AS status FROM procrastinate_jobs ORDER BY id")]
-    os_rows = sorted((row["identity"], row["produced_sha256"]) for row in assets
-                     if row["kind"] == "os-image")
-    assert os_rows == sorted([(S1.sha, None), (S2.sha, None)])  # keyed by sha, no facts
-    assert [(row["identity"], row["owner"]) for row in references] == [
-        (S1.sha, "v1.0.0"), (S1.sha, "v2.0.0"), (S2.sha, "v3.0.0")]
-    assert all(row["locator_sha256"] == row["identity"] and row["expected_sha256"] is None
-               for row in references)
-    assert [row["produced_sha256"] for row in assets if row["kind"] == "player-deb"] == [
-        "d" * 64]  # untouched
-    assert notes == ["player_deb.fetch"]  # the os_image.fetch note is gone
-    assert queue == [("photo_wall.os_image.fetch", "cancelled"),
-                     ("photo_wall.os_image.fetch", "failed"),
-                     ("photo_wall.player_deb.fetch", "todo"),
-                     ("photo_wall.player_deb.fetch", "doing")]
+        check = conn.execute(
+            "SELECT count(*) AS n FROM pg_constraint "
+            "WHERE conname = 'asset_references_locator_names_the_key'").fetchone()["n"]
+    return {
+        "os_rows": sorted((row["identity"], row["produced_sha256"]) for row in assets
+                          if row["kind"] == "os-image"),
+        "deb_facts": [row["produced_sha256"] for row in assets if row["kind"] == "player-deb"],
+        "references": [(row["identity"], row["owner"], row["locator_sha256"],
+                        row["expected_sha256"]) for row in references],
+        "notes": notes, "queue": queue, "check": check,
+    }
+
+
+def test_t7_028_rekeys_os_images_by_tarball_with_no_facts_and_ends_old_shape_rows(at_027):
+    _seed_027(at_027)
+    at_027.migrate()
+    state = _state(at_027)
+    assert state["os_rows"] == sorted([(S1.sha, None), (S2.sha, None)])  # keyed by sha, no facts
+    assert state["references"] == [  # the locator names the key; no expected facts
+        (S1.sha, "v1.0.0", S1.sha, None), (S1.sha, "v2.0.0", S1.sha, None),
+        (S2.sha, "v3.0.0", S2.sha, None)]
+    assert state["deb_facts"] == ["d" * 64]  # untouched
+    assert state["notes"] == ["player_deb.fetch"]  # the os_image.fetch note is gone
+    assert state["queue"] == [("photo_wall.os_image.fetch", "cancelled"),
+                              ("photo_wall.os_image.fetch", "failed"),
+                              ("photo_wall.player_deb.fetch", "todo"),
+                              ("photo_wall.player_deb.fetch", "doing")]
+    assert state["check"] == 1
     # The re-keyed rows are what the code reads.
     with RecordingTransactions(at_027).begin() as tx:
         asset = PgAssetRecords(ManualClock(0.0)).get(tx, asset_key(S1.job))
     assert asset is not None and asset.produced is None
     assert [ref.owner for ref in asset.references] == ["v2.0.0", "v1.0.0"]
+
+
+# 028's header, verbatim: rollback steps (a) and (b), and the roll forward. Step (c) is the code
+# revert and (d) the ETag reset; the old code's writes meanwhile are simulated below.
+END_OS_IMAGE_DELIVERIES = (
+    "UPDATE procrastinate_jobs SET status = 'cancelled' "
+    "WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'todo'; "
+    "UPDATE procrastinate_jobs SET status = 'failed' "
+    "WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'doing';")
+ROLLBACK = (END_OS_IMAGE_DELIVERIES + " ALTER TABLE asset_references DROP CONSTRAINT "
+            "asset_references_locator_names_the_key; UPDATE app_release_poll SET etag = NULL;")
+ROLL_FORWARD = (END_OS_IMAGE_DELIVERIES + " DELETE FROM schema_migrations "
+                "WHERE name = '028_os_image_content_key.sql';")
+
+
+@pytest.mark.parametrize("rolled_back", [False, True])
+def test_t7b_028_runs_again_to_the_same_state(at_027, rolled_back):
+    # A second run of 028 (roll forward after a rollback, or twice in a row) converges: it
+    # deletes every os-image row first and replaces its CHECK.
+    _seed_027(at_027)
+    at_027.migrate()
+    first = _state(at_027)
+    if rolled_back:
+        with at_027.transaction() as conn:
+            conn.execute(ROLLBACK)
+            # The reverted code runs: a tag-keyed OS image with facts (the CHECK is gone, or
+            # this insert would be refused), its note and an old-shape delivery.
+            conn.execute("INSERT INTO assets(kind,identity,produced_size,produced_sha256,"
+                         "created_at) VALUES('os-image','v1.0.0',%s,%s,1.0)",
+                         (S1.facts.size, S1.facts.sha256))
+            conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,"
+                         "locator_sha256,locator_size,added_at) "
+                         "VALUES('os-image','v1.0.0','v1.0.0',%s,%s,%s,1.0)",
+                         (url("v1.0.0"), S1.sha, len(S1.tarball)))
+            conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,seq,updated_at) "
+                         "VALUES('os_image.fetch[\"v1.0.0\"]','os_image.fetch','ok',"
+                         "nextval('job_outcome_seq'),1.0)")
+            conn.execute("INSERT INTO procrastinate_jobs(queue_name,task_name,args,status) "
+                         "VALUES('photo-wall-fetch','photo_wall.os_image.fetch',%s,'doing')",
+                         (json.dumps({"tag": "v1.0.0", "_attempt": 0}),))
+    with at_027.transaction() as conn:
+        conn.execute(ROLL_FORWARD)
+    at_027.migrate()
+    again = _state(at_027)
+    queue = again.pop("queue")
+    assert queue[:len(first["queue"])] == first["queue"]
+    assert queue[len(first["queue"]):] == (
+        [("photo_wall.os_image.fetch", "failed")] if rolled_back else [])
+    first.pop("queue")
+    assert again == first  # re-keyed, no facts, no note, one CHECK

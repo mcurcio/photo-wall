@@ -34,7 +34,7 @@ OS_JOB = FetchOsImage(tarball_sha256=TARBALL)
 DEB_JOB = FetchPackage(sha256=DEB_SHA)
 OS_KEY = AssetKey(AssetKind.OS_IMAGE, TARBALL)
 DEB_KEY = AssetKey(AssetKind.PLAYER_DEB, DEB_SHA)
-LOCATOR = OriginLocator("https://example.test/a", sha256=None, size=None)
+URL = "https://example.test/a"
 
 
 class Writer:
@@ -62,9 +62,9 @@ class World:
         self.production = AssetProduction(store=self.store, records=self.records,
                                            transactions=self.transactions)
 
-    def reference(self, key, owner=TAG, expected: AssetReady | None = None,
-                  locator: OriginLocator = LOCATOR) -> None:
-        ref = AssetReference(owner, locator,
+    def reference(self, key, owner=TAG, expected: AssetReady | None = None) -> None:
+        """A reference whose locator names the key, as the schema requires."""
+        ref = AssetReference(owner, OriginLocator(URL, sha256=key.identity, size=None),
                              expected_size=expected.size if expected else None,
                              expected_sha256=expected.sha256 if expected else None)
         with self.reads.transactions.begin() as tx:

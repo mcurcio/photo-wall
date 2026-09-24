@@ -156,15 +156,16 @@ def test_os_image_handler_uses_the_newest_reference_and_caps_unsized_downloads(w
 
 def test_os_image_handler_hostile_archive_is_terminal_and_leaves_no_temp(world_at):
     blob = tarball(listed=b"not the squashfs")
+    key = AssetKey(AssetKind.OS_IMAGE, sha(blob))  # the hostile tarball is its own key
     world = world_at({"https://example.test/base.tar.gz": blob})
-    world.reference(OS_KEY, TAG, os_locator(blob))
+    world.reference(key, TAG, os_locator(blob))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
     with pytest.raises(TerminalFailure) as raised:
-        asyncio.run(handler.handle(OS_JOB))
+        asyncio.run(handler.handle(FetchOsImage(tarball_sha256=sha(blob))))
     assert raised.value.reason == "base_digest_mismatch"
     assert world.temps() == []
-    assert not world.store.layout.path(OS_KEY).exists()
+    assert not world.store.layout.path(key).exists()
 
 
 def test_os_image_handler_download_failure_leaves_no_temp(world_at):
@@ -299,10 +300,10 @@ def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
     absent_file = FetchOsImage(tarball_sha256=sha(b"tarball v1.1.0"))
     never_produced = FetchPackage(sha256=sha(DEB))
     unrecorded = FetchOsImage(tarball_sha256=sha(b"tarball v9.9.9"))
-    loc = os_locator(b"x")
     for job, owner in ((present, "v1.0.0"), (absent_file, "v1.1.0")):
         key = AssetKey(AssetKind.OS_IMAGE, job.tarball_sha256)
-        world.reference(key, owner, loc)
+        world.reference(key, owner, OriginLocator("https://example.test/b.tgz",
+                                                  sha256=job.tarball_sha256, size=None))
         world.record_produced(key, facts(SQUASHFS))
     world.reference(DEB_KEY, "v1.0.0", deb_locator("https://example.test/a.deb"), facts(DEB))
     path = world.store.layout.path(AssetKey(AssetKind.OS_IMAGE, present.tarball_sha256))

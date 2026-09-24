@@ -131,7 +131,8 @@ class World:
     def reference(self, job, *, owner: str) -> None:
         with self.transactions.begin() as tx:
             self.records.reference(tx, asset_key(job), AssetReference(
-                owner, OriginLocator("https://example.test/x", None, None), None, None))
+                owner, OriginLocator("https://example.test/x", asset_key(job).identity, None), None,
+                None))
 
     def produce(self, job, data: bytes) -> AssetReady:
         """The worker's effect: the verified file on disk plus its produced facts."""

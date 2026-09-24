@@ -38,7 +38,7 @@ FACTS = AssetReady(size=len(DATA), sha256=hashlib.sha256(DATA).hexdigest())
 NEW = FetchOsImage(tarball_sha256=hashlib.sha256(b"tarball v2.0.0").hexdigest())
 OLD = FetchOsImage(tarball_sha256=hashlib.sha256(b"tarball v1.0.0").hexdigest())
 OWNERS = {NEW: "v2.0.0", OLD: "v1.0.0"}  # the tag that references each
-LOCATOR = OriginLocator("https://example.test/base.tar.gz", sha256=None, size=None)
+URL = "https://example.test/base.tar.gz"
 
 
 def fd_closed(fd: int) -> bool:
@@ -77,7 +77,7 @@ class World:
     def record(self, job, produced: AssetReady | None = None) -> None:
         key = asset_key(job)
         with self.reads.transactions.begin() as tx:
-            self.records.reference(tx, key, AssetReference(OWNERS[job], LOCATOR, None, None))
+            self.records.reference(tx, key, AssetReference(OWNERS[job], OriginLocator(URL, key.identity, None), None, None))
             if produced is not None:
                 self.records.record_produced(tx, key, produced)
 
