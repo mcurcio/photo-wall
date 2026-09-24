@@ -1120,3 +1120,22 @@ doc softenings.
     is one running copy.
 - No file outside the set turned red. The full suite, ruff, lint-imports and check_docs pass;
   `test_registry` is the known local failure.
+
+## 2026-09-24 — bead 2 reader-data-first
+
+- **M1's predicted output is wrong for this bead's own code.** The page says that with M1 (the
+  reader consults the outcome before `_open_first` in `read`), D1 shows "a publish happens, and
+  the result is a 503". Probed: D1 turns red on the publish (`Call(FetchPackage, retry_terminal=True)`
+  where `[]` was expected). The result is not a 503: the frozen step 1 (open the data again after
+  any wait) serves the file once the wait times out. A 503 appears only if M2 is applied too. The
+  probe still guards the right thing; only its expected symptom is wrong.
+- **D2 as worded can race.** "Facts and file appear while the waiter waits, and the outcome it
+  gets is `terminal`". If the facts come with their own `ok` (rule 3: `ok` arrives with its data),
+  the waiter can wake on that `ok` before the late `terminal` commits. That tests the `Ready` path
+  instead, and under M2 it fails as `absent_after_ready`, not a 503 `terminal`. D2 therefore
+  records facts and the file with no `ok` (a lost result write, N3), then the `terminal`, so the
+  outcome the waiter gets is `terminal` deterministically.
+- **"Existing tests it carries" matched nothing.** No test in `tests/test_assets_reader.py`
+  asserts a `Failed` or `Pending` result while the asset's facts and file are present, so that
+  file is unchanged. Its `RecordingPublisher` `Ready` tests still pass: `record_outcome` writes
+  the facts to `AssetRecords`, so the post-wait `_open_first` finds them.
