@@ -121,26 +121,32 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 
 1. **Stage the base image in your TFTP tree.** Unpack the published base OS bundle (kernel, DTBs, initramfs, `base-<revision>.squashfs`) beneath the boot-server root exactly as any other boot tree — see [PXE service setup](module-pxe-service.md). The base carries no Player code and no deployment config; it exists to run the bootstrapper (`appliance/provision.py`) that fetches everything else.
 2. **Boot the Pi and watch the pending queue.** The bootstrapper discovers central by mDNS, downloads the app manifest and the `.deb`, installs it, and starts the Player, which enrolls by serial — it appears **unbound** in the same operator inventory (`/v1/operator/inventory`) as the flash path.
-3. **Register and promote the app in central.** Copy the `.deb` bytes to central's `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` out of band (central never accepts the bytes over the request body — this mirrors how a signed release artifact is staged today), then:
+3. **Check which app is promoted.** Central serves the `.deb` of the one promoted release, taken
+   from the GitHub release list ([below](#player-provisioning-promote-a-release-from-github-0010)).
+   The release sync promotes the newest deployable release by itself (`promoted_by: "auto"`)
+   until a Player is bound and a `.deb` has been downloaded; after that it holds the promotion.
+   To choose a release, promote it yourself:
 
    ```sh
-   curl -X POST http://<central>/v1/operator/app \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"version": "<version>", "sha256": "<sha256>", "size": <size>}'
-   curl -X PUT http://<central>/v1/operator/app/current \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"sha256": "<sha256>"}'
+   curl -X POST -H 'Authorization: Bearer <admin-token>' \
+     http://<central>/v1/operator/app/releases/<tag>/promote
    ```
 
-   `POST /v1/operator/app` records the `{version, sha256, size}` pointer (422 on malformed input); `PUT /v1/operator/app/current` promotes it as the one global "current app" (404 if that sha256 was never registered). Every Player fetches the newly promoted `.deb` on its next reboot; already-running Players are unaffected until then.
+   The release sync never moves an operator promotion. Every Player fetches the newly promoted
+   `.deb` on its next reboot; already-running Players are unaffected until then.
 4. **Bind** the pending Player to a Frame and calibrate, exactly as in the flash-and-go flow above.
-5. **Update the app later** by repeating step 3 with a new `.deb` — no re-imaging, no re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot, the dark screen is the signal, and recovery is re-promoting the previous sha256.
+5. **Update the app later** by promoting a newer release tag, as in step 3 — no re-imaging, no
+   re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot,
+   the dark screen is the signal, and recovery is re-promoting the previous tag.
 
-**Where this actually stands.** Central's app-package endpoints (`central/app_packages.py`, `central/app.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
+**Where this actually stands.** Central's app manifest and package routes (`central/content_routes.py`, over the release
+catalog in `central/content_catalog/catalog.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
 
 ## Player provisioning: promote a release from GitHub (0010)
 
-[Decision 0010](decisions/0010-github-release-sourcing.md) removes the manual sha256 dance above for the common case: central **watches the project's GitHub Releases**, records every semver release as a candidate, and lazily mirrors the `.deb` into the shared `.deb` store Players already fetch from — but only when *you* promote a version. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic; promotion is a deliberate operator action. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
+[Decision 0010](decisions/0010-github-release-sourcing.md) removed 0009's manual sha256 dance: central **watches the project's GitHub Releases**, records every semver release as a candidate, and downloads the `.deb`s the fleet needs (the promoted release's among them) into the shared `.deb` store Players fetch from. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic. So is promotion on a fresh install: the release sync promotes the newest
+deployable release until a Player is bound and a `.deb` has been downloaded, then holds it; an
+operator promotion overrides it and is never moved by the sync. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
 
 **Configuration.** Release sourcing is **always-on** (0013 retired the opt-in gate): the worker polls GitHub and mirrors bytes into `<cache-root>/apps/` unconditionally; central serves them RO. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)); there is no separate `.deb`-store env to wire.
 
@@ -156,25 +162,36 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 **List, promote, refresh (all admin-authenticated).** These reach central's operator API; substitute your central origin and admin token:
 
 ```sh
-# List tracked releases: tag / version / mirror_state / deployable / promoted / current.
+# List tracked releases, newest first: tag / is_prerelease / deployable / promoted /
+# promoted_by ("auto" | "operator", null unless promoted) / has_os_image.
 curl --fail -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases
 
-# Promote a version. 200 if its bytes are already mirrored (current advances now);
-# 202 pending if central must mirror the .deb first; 404 unknown tag; 409 undeployable.
+# Promote a version: 200 {"status": "promoted"}, and central starts downloading its .deb;
+# 404 unknown tag; 409 no .deb (undeployable); 422 not a version tag.
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/<tag>/promote
 
-# Poll GitHub now instead of waiting for the next cadence (coalesced; 202).
+# Poll GitHub now instead of waiting for the next cadence (coalesced; 202 {"status": "polling"}).
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/refresh
 ```
 
 All three routes are always available: release sourcing is unconditional as of [decision 0013](decisions/0013-unified-cache-root.md), so the former **503 `release_sourcing_unconfigured`** branch (gated on the old `PHOTO_WALL_APP_ROOT`) has been removed.
 
-**Promoted vs. current (pending).** A promote records your **chosen tag** immediately. If that release is already mirrored, the served **current** pointer advances in the same request (`200 promoted`). If it is not yet mirrored, the request returns `202 pending`: the worker downloads and verifies the `.deb`, and `current` advances only once those bytes are on disk — the previously current version keeps serving until then, so Players are never broken. A pending promote whose uplink is down stays pending; it completes automatically when connectivity returns (no re-promote needed). Watch `mirror_state` in the list to see it move `discovered → mirroring → mirrored`, and `current` flip to the new tag.
+**Promoted vs. served.** A promote records your tag at once (`promoted_by: "operator"`) and, in
+the same transaction, queues the download of its `.deb`. `GET /v1/app/manifest` names the promoted
+`.deb` once its bytes are on disk; until then it names the last-good one (the latest earlier
+promotion whose `.deb` was on disk when it was replaced) if that is on disk, so Players are never
+broken. With neither on disk it names the promoted one, and the package route downloads it on
+request. A failed download is retried: a Player's next request asks again, and the five-minute
+`Prefetch` tick re-queues it after a transient failure; no re-promote is needed. Watch `promoted`
+and `promoted_by` in the list.
 
-**Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
+**Offline / air-gapped.** There is no manual stage path: the hand-staging routes
+(`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no longer exist, and central downloads
+every `.deb` from the download link of the GitHub release that lists it. A `.deb` already on disk
+keeps serving while the uplink is down.
 
 ## Base-image auto-mirror (0012)
 

@@ -122,8 +122,8 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 
 | Job type | Published by | Subject (lock) | Handler (domain) | Writes | Periodic |
 | --- | --- | --- | --- | --- | --- |
-| `FetchOsImage(tag)` | HTTP miss; HTTP substitute serve; `Prefetch` | `tag` | Assets & cache | Downloads the release's base image, extracts it off the event loop, verifies it, renames it into place. Result `AssetReady`. | no |
-| `FetchPackage(sha256)` | HTTP miss; HTTP substitute serve; `Prefetch` | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
+| `FetchOsImage(tag)` | HTTP miss; HTTP substitute serve; `Prefetch`; `SyncReleases` (changed facts); operator pin | `tag` | Assets & cache | Downloads the release's base image, extracts it off the event loop, verifies it, renames it into place. Result `AssetReady`. | no |
+| `FetchPackage(sha256)` | HTTP miss; HTTP substitute serve; `Prefetch`; `SyncReleases` (changed facts); operator pin and promote | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
 | `PrepareMedia(original, recipe)` | HTTP miss; `Prefetch` | `original`, `recipe` (the recipe id includes the renderer build) | Assets & cache | Fetches the original from Immich, renders it to the recipe, renames it into place. Result `MediaReady` (digest, size, type, dimensions, duration), kept on the Asset record. | no |
 | `SyncReleases` | Tick; operator refresh (HTTP) | (none) | Catalog | Release + Asset rows (add, withdraw), then publishes `Prefetch` | yes |
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
@@ -398,9 +398,10 @@ class Publisher(Protocol):
   that changed facts and an operator (decision 3). `Prefetch` and ticks never set it.
 - **Signal.** Each process has one `OutcomeFeed` (infra) with one LISTEN connection. Waiters
   for the same key share one entry, and a 1s re-check reads the rows for keys that have waiters.
-  `publish_now` and `OutcomeFeed` use a small **async** psycopg pool beside the 10-connection
-  sync pool (`central/db.py:15`), because `SyncPsycopgConnector` refuses async calls. A timeout
-  returns `Pending`, and a cancelled waiter only unregisters. **Neither cancels the job.**
+  `publish_now` runs `publish` in its own transaction on a worker thread, through the
+  10-connection sync pool (`central/db.py:19`); there is no async pool. `OutcomeFeed` holds its
+  one LISTEN connection as a psycopg `AsyncConnection` and reads rows through the sync pool. A
+  timeout returns `Pending`, and a cancelled waiter only unregisters. **Neither cancels the job.**
 - **Transactions.** `publish(within=tx)` runs in a SAVEPOINT, outcome read included
   (`media_queue.py:51`), so neither a merge nor a failed statement aborts the caller's write. A
   `Transaction` is a sync block on a worker thread and `wait` is async, so a handle is awaited
