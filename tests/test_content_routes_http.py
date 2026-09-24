@@ -362,7 +362,7 @@ def test_a_missing_package_is_503_with_retry_after(world):
 
 def test_the_netboot_manifest_is_the_served_tags_package(world):
     w = world(releases=[release(T1), release(T2)], devices=[
-        dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1)])
+        dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1, last_served_at=1000.0)])
     with TestClient(w.app) as client:
         response = client.get("/v1/netboot/manifest", headers={SERIAL_HEADER: SERIAL})
     assert response.status_code == 200
@@ -372,7 +372,8 @@ def test_the_netboot_manifest_is_the_served_tags_package(world):
 
 @pytest.mark.parametrize(("devices", "releases", "code"), [
     ([], [release(T1)], "app_manifest_unresolved"),
-    ([dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1)], [release(T1, package=False)],
+    ([dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1, last_served_at=1000.0)],
+     [release(T1, package=False)],
      "app_manifest_undeployable"),
 ])
 def test_an_unresolvable_netboot_manifest_is_503(world, devices, releases, code):
@@ -505,16 +506,16 @@ def test_the_hand_upload_routes_are_gone(world):
                           json={"sha256": sha(b"x")}).status_code == 404
 
 
-def test_releases_view_lists_semver_descending(world):
+def test_releases_view_lists_semver_descending_with_who_promoted(world):
     w = world(releases=[release(T1), release(T2, os_image=False)], promoted=T1)
     with TestClient(w.app) as client:
         response = client.get("/v1/operator/app/releases", headers=AUTH)
     assert response.status_code == 200
     assert response.json() == [
         {"tag": T2, "is_prerelease": False, "deployable": True, "promoted": False,
-         "has_os_image": False},
+         "promoted_by": None, "has_os_image": False},
         {"tag": T1, "is_prerelease": False, "deployable": True, "promoted": True,
-         "has_os_image": True},
+         "promoted_by": "operator", "has_os_image": True},
     ]
 
 

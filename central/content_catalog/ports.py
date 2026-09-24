@@ -39,6 +39,16 @@ class Promotion:
 
 
 @dataclass(frozen=True, slots=True)
+class PromotionWrite:
+    """What `set_promoted` did. `outgoing` is the promotion it found, read under the policy row's
+    lock (None when nothing was promoted); `moved` is False only when an "auto" write met an
+    "operator" promotion, which the write itself refuses."""
+
+    moved: bool
+    outgoing: Promotion | None
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceRow:
     device_id: str
     serial: str | None
@@ -94,8 +104,11 @@ class ReleaseRecords(Protocol):
         """The promoted tag and who set it; None when nothing is promoted."""
         ...
 
-    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
-        """Move the promoted pointer and record who moved it (`by` has no default)."""
+    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> PromotionWrite:
+        """Move the promoted pointer and record who moved it (`by` has no default), unless `by`
+        is "auto" and the promotion is the operator's: the write enforces that rule under the
+        row lock, so a promotion committed after any earlier read still wins. An "operator"
+        write always moves it."""
         ...
 
     def last_good_tag(self, tx: Transaction) -> str | None:

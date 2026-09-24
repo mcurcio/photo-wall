@@ -343,7 +343,8 @@ def test_package_request_for_an_unknown_sha_is_unknown_package(world):
 def test_a_frozen_tags_deb_is_desired_and_resolved_only_while_on_disk(world, on_disk):
     # A divergent tag's .deb was re-cut upstream, so its URL serves other bytes. Once the file
     # is gone, a fetch can only fail download_corrupt, and Prefetch used to retry it for ever.
-    w = world([release(T1, divergent=True)], [dev("d", last_served_tag=T1)], promoted=T1,
+    w = world([release(T1, divergent=True)],
+              [dev("d", last_served_tag=T1, last_served_at=1000.0)], promoted=T1,
               on_disk=[T1] if on_disk else [])
     job = FetchPackage(sha256=deb_sha(T1))
     desired = run(w.catalog.desired_assets())
@@ -432,7 +433,8 @@ def test_desired_assets_of_an_empty_catalog_is_empty(world):
 
 
 def test_device_package_rides_the_served_tag(world):
-    w = world([release(T1), release(T2)], [dev(DEVICE_ID, last_served_tag=T1)], promoted=T2)
+    w = world([release(T1), release(T2)],
+              [dev(DEVICE_ID, last_served_tag=T1, last_served_at=1000.0)], promoted=T2)
     assert run(w.catalog.device_package(SERIAL)) == DevicePackage(T1, T1, deb_sha(T1), 10)
 
 
@@ -448,7 +450,8 @@ def test_device_package_without_a_carried_tag_is_unresolved(serial, devices, wor
 
 
 def test_device_package_for_a_release_without_a_deb_is_undeployable(world):
-    w = world([release(T1, deb=False)], [dev(DEVICE_ID, last_served_tag=T1)])
+    w = world([release(T1, deb=False)],
+              [dev(DEVICE_ID, last_served_tag=T1, last_served_at=1000.0)])
     assert run(w.catalog.device_package(SERIAL)) == ManifestRefusal("app_manifest_undeployable")
 
 
@@ -575,14 +578,18 @@ def test_refresh_publishes_a_sync_now_retrying_a_terminal_outcome(world):
 # -- views --------------------------------------------------------------------------------------
 
 
-def test_releases_view_is_semver_desc_with_flags(world):
+@pytest.mark.parametrize("by", ["operator", "auto"])
+def test_releases_view_is_semver_desc_with_flags_and_who_promoted(world, by):
     w = world([release("v0.9.0"), release("v0.10.0", deb=False),
-               release("v0.10.0-rc.1", pre=True, image=False)], promoted="v0.9.0")
-    assert run(w.catalog.releases_view()) == (
-        ReleaseView("v0.10.0", False, False, False, True),
-        ReleaseView("v0.10.0-rc.1", True, True, False, False),
-        ReleaseView("v0.9.0", False, True, True, True),
+               release("v0.10.0-rc.1", pre=True, image=False)], promoted="v0.9.0",
+              promoted_by=by)
+    views = run(w.catalog.releases_view())
+    assert views == (
+        ReleaseView("v0.10.0", False, False, None, True),
+        ReleaseView("v0.10.0-rc.1", True, True, None, False),
+        ReleaseView("v0.9.0", False, True, by, True),
     )
+    assert [view.promoted for view in views] == [False, False, True]
 
 
 def test_netboot_view_is_the_frontier_and_active_devices(world):

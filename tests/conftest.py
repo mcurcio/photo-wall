@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from contextlib import contextmanager
 
 import psycopg
 import pytest
@@ -26,8 +27,9 @@ def _mdns_advertise_disabled_by_default(monkeypatch):
     monkeypatch.setenv("PHOTO_WALL_MDNS_ADVERTISE", "false")
 
 
-@pytest.fixture
-def registry():
+@contextmanager
+def _private_schema_registry():
+    """A `Registry` over a fresh random schema of PHOTO_WALL_TEST_DATABASE_URL, dropped after."""
     dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
@@ -44,3 +46,17 @@ def registry():
             db.close()
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
+
+
+@pytest.fixture
+def registry():
+    with _private_schema_registry() as registry:
+        yield registry
+
+
+@pytest.fixture(scope="module")
+def module_registry():
+    """`registry` shared by one module's tests: for a module whose tests run in order against one
+    long-lived system (real processes on one schema) that is too slow to boot per test."""
+    with _private_schema_registry() as registry:
+        yield registry

@@ -69,6 +69,7 @@ from central.kernel.ports import PublishedRelease
 from scripts.test_netboot_e2e import (  # reuse tracer helpers
     _FixedDiscovery,
     _NoSleep,
+    promote_path,
     release_seed_sql,
 )
 
@@ -249,12 +250,18 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
 
         # --- Phase 2: chain the app .deb fetch via the Bootstrapper path ---
         # A promoted release whose `.deb` is produced and on disk: the compose
-        # tracer's seed (scripts/test_netboot_e2e.py), proven here against a real schema.
+        # tracer's seed (scripts/test_netboot_e2e.py) and its promotion through the
+        # operator route, proven here against a real schema.
         payload = b"synthetic photo-wall-player package bytes" * 32
         sha = hashlib.sha256(payload).hexdigest()
         with psycopg.connect(registry.db.dsn, autocommit=True) as conn:
             conn.execute(release_seed_sql("v9.9.8", sha, len(payload)))
         _write(cache_root, asset_key(FetchPackage(sha256=sha)), payload)
+        promote = urllib.request.Request(origin + promote_path("v9.9.8"), method="POST",
+                                         headers={"Authorization": "Bearer " + ADMIN})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(promote, timeout=15) as response:
+            assert json.loads(response.read()) == {"status": "promoted"}
 
         capture = _InstallCapture()
         bootstrapper = Bootstrapper(

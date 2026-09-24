@@ -11,6 +11,7 @@ tag reads) and `bindings` (001). The SQL is ported from `central/app_releases.py
 from __future__ import annotations
 
 from collections.abc import Collection
+from dataclasses import fields
 from typing import Any
 
 from central.content_catalog.ports import (
@@ -19,6 +20,7 @@ from central.content_catalog.ports import (
     NamedTags,
     Promoter,
     Promotion,
+    PromotionWrite,
     ReleaseRow,
 )
 from central.infra.transactions import pg_connection
@@ -37,13 +39,17 @@ _DEVICE_COLUMNS = (
 )
 # The roles through which an active device names a tag: (role, tag column, extra WHERE).
 # `named_tags` and `names_any` are both generated from this one table, so they cannot disagree.
-# The served role counts only a serve at or after `%(served_since)s` (issue #25: fake-serial
-# rows and long-gone devices must not keep a tag desired forever); 026's index covers it.
+# Each role is a `NamedTags` field name; `named_tags` builds the result by name, and the import
+# fails if the table and the fields differ. The served role counts only a serve at or after
+# `%(served_since)s` (issue #25: fake-serial rows and long-gone devices must not keep a tag
+# desired forever).
 _NAMING_ROLES = (
     ("pinned", "attached_tag", ""),
     ("known_good", "known_good_tag", ""),
     ("served", "last_served_tag", " AND last_served_at >= %(served_since)s"),
 )
+if {role for role, _, _ in _NAMING_ROLES} != {field.name for field in fields(NamedTags)}:
+    raise ImportError("_NAMING_ROLES must name exactly the NamedTags fields")
 
 
 def _locator(url: str | None, sha256: str | None, size: int | None) -> OriginLocator | None:
@@ -151,15 +157,29 @@ class PgReleaseRecords:
         ).fetchone()
         return None if row is None else Promotion(row["promoted_tag"], row["promoted_by"])
 
-    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
+    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> PromotionWrite:
+        # Issue #23: "auto never moves an operator promotion" is enforced by the write, not by a
+        # caller's earlier read (READ COMMITTED: an operator promote may commit in between).
+        # 1. The first promotion inserts; ON CONFLICT is the guard (a concurrent first insert
+        #    commits before this statement returns, and this one then does nothing).
+        # 2. Otherwise lock the row, read what it holds now (the exact outgoing promotion), and
+        #    UPDATE it only for an operator, or over the sync's own promotion.
         conn = pg_connection(tx)
-        conn.execute("SELECT promoted_tag FROM app_release_policy WHERE singleton FOR UPDATE")
-        conn.execute(
+        if conn.execute(
             "INSERT INTO app_release_policy(singleton, promoted_tag, promoted_by) "
-            "VALUES(TRUE,%s,%s) ON CONFLICT(singleton) "
-            "DO UPDATE SET promoted_tag=EXCLUDED.promoted_tag, promoted_by=EXCLUDED.promoted_by",
+            "VALUES(TRUE,%s,%s) ON CONFLICT(singleton) DO NOTHING",
             (tag, by),
-        )
+        ).rowcount == 1:
+            return PromotionWrite(moved=True, outgoing=None)
+        row = conn.execute(
+            "SELECT promoted_tag, promoted_by FROM app_release_policy WHERE singleton FOR UPDATE"
+        ).fetchone()
+        moved = conn.execute(
+            "UPDATE app_release_policy SET promoted_tag=%(tag)s, promoted_by=%(by)s "
+            "WHERE singleton AND (%(by)s = 'operator' OR promoted_by = 'auto')",
+            {"tag": tag, "by": by},
+        ).rowcount == 1
+        return PromotionWrite(moved, Promotion(row["promoted_tag"], row["promoted_by"]))
 
     def last_good_tag(self, tx: Transaction) -> str | None:
         row = pg_connection(tx).execute(
@@ -232,8 +252,7 @@ class PgDeviceRecords:
         by_role: dict[str, set[str]] = {role: set() for role, _, _ in _NAMING_ROLES}
         for row in rows:
             by_role[row["role"]].add(row["tag"])
-        return NamedTags(frozenset(by_role["pinned"]), frozenset(by_role["known_good"]),
-                         frozenset(by_role["served"]))
+        return NamedTags(**{role: frozenset(tags) for role, tags in by_role.items()})
 
     def names_any(self, tx: Transaction, tags: Collection[str], *, served_since: float) -> bool:
         tags = sorted(tags)

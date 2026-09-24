@@ -38,16 +38,15 @@ Two gates, per the 0012 bead-8 page:
 import asyncio
 import base64
 import hashlib
-import io
 import json
 import os
-import tarfile
 import threading
-import time
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from support.github_release import deb_name, manifest_bytes, real_tarball, release_entry
+from support.workers import wait_for
 
 from central import content_wiring
 from central.app import create_app
@@ -73,52 +72,17 @@ REPO = "owner/repo"
 MANIFEST_URL = "https://example.test/dl/manifest.json"
 TARBALL_URL = "https://example.test/dl/photo-wall-base.tar.gz"
 DEB_URL = "https://example.test/dl/photo-wall-player_1.2.3_all.deb"
-TARBALL_NAME = "photo-wall-base.tar.gz"
-DEB_NAME = "photo-wall-player_1.2.3_all.deb"
-
-
-def _add(tar, name, data):
-    info = tarfile.TarInfo(name)
-    info.size = len(data)
-    tar.addfile(info, io.BytesIO(data))
-
-
-def _real_tarball(squashfs=SQUASHFS):
-    """A REAL base tarball: photo-wall-base/{squashfs, SHA256SUMS}. Returns
-    (bytes, tarball_sha256, squashfs_sha256) -- the exact shape
-    scripts/package_release_artifacts.py produces (arcname prefix + inner
-    SHA256SUMS)."""
-    sq_sha = hashlib.sha256(squashfs).hexdigest()
-    sums = f"{sq_sha}  ./photo-wall-base.squashfs\n".encode()
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        _add(tar, "photo-wall-base/photo-wall-base.squashfs", squashfs)
-        _add(tar, "photo-wall-base/SHA256SUMS", sums)
-    data = buffer.getvalue()
-    return data, hashlib.sha256(data).hexdigest(), sq_sha
+DEB_NAME = deb_name(TAG)
 
 
 def _github_mock(tarball, tarball_sha, *, deb=DEB_BYTES):
     """The single mock boundary: an ``httpx.MockTransport`` that answers ONLY the
     GitHub surfaces (the releases list, the manifest asset, the base tarball, the
     .deb). Any other path raises, so the test proves nothing else is mocked."""
-    deb_sha = hashlib.sha256(deb).hexdigest()
-    manifest = json.dumps({
-        "schema": 1,
-        "revision": "0" * 40,
-        "base_image": {"filename": TARBALL_NAME, "sha256": tarball_sha, "size": len(tarball)},
-        "player_deb": {"filename": DEB_NAME, "sha256": deb_sha, "size": len(deb)},
-    }).encode()
-    releases = json.dumps([{
-        "tag_name": TAG,
-        "draft": False,
-        "prerelease": False,
-        "assets": [
-            {"name": "manifest.json", "browser_download_url": MANIFEST_URL},
-            {"name": TARBALL_NAME, "browser_download_url": TARBALL_URL},
-            {"name": DEB_NAME, "browser_download_url": DEB_URL},
-        ],
-    }]).encode()
+    manifest = manifest_bytes(tarball=tarball, tarball_sha=tarball_sha, deb=deb,
+                              deb_filename=DEB_NAME)
+    releases = json.dumps([release_entry(TAG, manifest_url=MANIFEST_URL, tarball_url=TARBALL_URL,
+                                         deb_filename=DEB_NAME, deb_url=DEB_URL)]).encode()
 
     def handle(request):
         url = str(request.url)
@@ -171,13 +135,6 @@ def _executor(db, clock, cache_root, monkeypatch, *, transport=None, env=None):
     return execute
 
 
-def _until(predicate, seconds=10.0):
-    deadline = time.monotonic() + seconds
-    while not predicate():
-        assert time.monotonic() < deadline, "condition not reached"
-        time.sleep(0.01)
-
-
 def _digest(data):
     return "sha-256=" + base64.b64encode(hashlib.sha256(data).digest()).decode()
 
@@ -188,7 +145,7 @@ def _digest(data):
 def test_fresh_install_arc_deterministic(registry, tmp_path, monkeypatch):
     db, clock = registry.db, registry.clock
     cache_root = tmp_path / "cache"
-    tarball, tarball_sha, squashfs_sha = _real_tarball()
+    tarball, tarball_sha, squashfs_sha = real_tarball(SQUASHFS)
     execute = _executor(db, clock, cache_root, monkeypatch,
                         transport=_github_mock(tarball, tarball_sha))
     content = build_content_services(db, clock, cache_root=cache_root)
@@ -222,7 +179,8 @@ def test_fresh_install_arc_deterministic(registry, tmp_path, monkeypatch):
         request = threading.Thread(target=lambda: result.update(
             response=client.get("/v1/netboot/base", headers={SERIAL_HEADER: SERIAL_CY})))
         request.start()
-        _until(lambda: content.feed._entries)  # the request is waiting on the outcome
+        wait_for(lambda: content.feed._entries, seconds=10,  # the request is waiting
+                 what="the request to wait on its fetch's outcome")
         # ... a worker runs it (download + verify + allowlist-extract + rename into
         # place; produced facts + ok outcome + NOTIFY) ...
         assert execute(FetchOsImage(tag=TAG)) == "ok"

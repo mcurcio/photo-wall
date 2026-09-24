@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Literal, TypeVar
 
@@ -83,8 +83,12 @@ class ReleaseView:
     tag: str
     is_prerelease: bool
     deployable: bool
-    promoted: bool
+    promoted_by: Promoter | None  # who promoted this release; None when it is not promoted
     has_os_image: bool
+    promoted: bool = field(init=False)  # derived from promoted_by, so the two cannot disagree
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "promoted", self.promoted_by is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,20 +326,24 @@ class ReleaseCatalog:
 
         await self._in_tx(write)
 
-    def promote_in(self, tx: Transaction, tag: str, *, by: Promoter) -> None:
+    def promote_in(self, tx: Transaction, tag: str, *, by: Promoter) -> bool:
         """Move the promoted pointer to a known tag with a `.deb` (the caller checked that), and
-        record who moved it: the operator route passes "operator", auto-promote "auto". The sync
-        never moves an "operator" promotion.
+        record who moved it: the operator route passes "operator", auto-promote "auto". Returns
+        whether it moved: `set_promoted` refuses an "auto" move of an "operator" promotion,
+        including one committed after the caller's own read.
 
-        The outgoing promoted tag becomes the last-good fallback when its `.deb` is on disk
-        (otherwise the older last-good stays).
+        When it moved, the outgoing promoted tag (read under the policy row's lock by the same
+        write) becomes the last-good fallback if its `.deb` is on disk (otherwise the older
+        last-good stays). An operator re-promoting the sync's current tag still writes: the
+        promotion becomes the operator's.
         """
-        outgoing = self._releases.promoted_tag(tx)
-        if outgoing is not None and outgoing != tag:
-            package = _package(self._releases.get(tx, outgoing))
+        write = self._releases.set_promoted(tx, tag, by=by)
+        outgoing = write.outgoing
+        if write.moved and outgoing is not None and outgoing.tag != tag:
+            package = _package(self._releases.get(tx, outgoing.tag))
             if package is not None and self._on_disk(tx, package):
-                self._releases.set_last_good(tx, outgoing)
-        self._releases.set_promoted(tx, tag, by=by)
+                self._releases.set_last_good(tx, outgoing.tag)
+        return write.moved
 
     async def refresh(self) -> None:
         await self._publisher.publish_now(SyncReleases(), retry_terminal=True)
@@ -346,10 +354,11 @@ class ReleaseCatalog:
     async def releases_view(self) -> tuple[ReleaseView, ...]:
         """Every release, semver DESC (non-semver legacy tags last)."""
         def read(tx: Transaction) -> tuple[ReleaseView, ...]:
-            promoted = self._releases.promoted_tag(tx)
+            promotion = self._releases.promotion(tx)
             return tuple(
                 ReleaseView(row.tag, row.is_prerelease, _package(row) is not None,
-                            row.tag == promoted, row.os_image is not None)
+                            promotion.by if promotion and row.tag == promotion.tag else None,
+                            row.os_image is not None)
                 for row in _semver_desc(self._releases.all(tx))
             )
 

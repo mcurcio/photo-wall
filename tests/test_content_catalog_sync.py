@@ -7,6 +7,7 @@ PostgreSQL (the `registry` fixture; CI runs it). The origin is the only fake bes
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -85,6 +86,7 @@ class World:
     store: CacheStore
     reads: Reads
     db: object
+    catalog: ReleaseCatalog  # the handler's: the operator route runs through the same one
 
     def updated_at(self) -> dict[str, float]:
         with self.db.transaction() as conn:
@@ -119,7 +121,7 @@ def world(registry, tmp_path):
                                       transactions=transactions, publisher=publisher,
                                       catalog=catalog, clock=clock, **handler_options)
         return World(handler, origin, assets, transactions, publisher, store,
-                     Reads(RecordingTransactions(registry.db)), registry.db)
+                     Reads(RecordingTransactions(registry.db)), registry.db, catalog)
 
     return build
 
@@ -427,6 +429,49 @@ def test_an_auto_promotion_follows_a_newer_release_on_the_next_sync(world):
     w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
     sync(w)
     assert w.reads.promotion() == Promotion(T2, "auto")
+
+
+def test_an_operator_re_promoting_the_auto_tag_takes_it_over(world):
+    # The operator promotes the very tag the sync chose: the promotion is now the operator's,
+    # so a newer release no longer moves it.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T, promoted_by="auto")
+    asyncio.run(w.catalog.promote(T))
+    assert w.reads.promotion() == Promotion(T, "operator")
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    assert w.reads.promotion() == Promotion(T, "operator")
+
+
+@pytest.mark.parametrize("operator_tag,last_good", [
+    (T1, None),  # the operator keeps the sync's tag: nothing outgoing to carry
+    (T, T1),  # the operator moves it: the outgoing auto tag (on disk) is last-good
+])
+def test_an_operator_promotion_committed_during_the_sync_tail_is_never_overwritten(
+        world, monkeypatch, operator_tag, last_good):
+    # Issue #23 race: the tail reads promotion (T1, auto) unlocked, an operator promotion commits,
+    # then the tail's auto write lands. The write must re-check under the row lock. The operator
+    # promotes from another thread in its own transaction while the tail is paused inside
+    # `bound_player_count`, between its read and its write.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="auto",
+              on_disk=[deb(T1)])
+    records = w.handler._releases
+    count = records.bound_player_count
+    seen = []
+
+    def operator_promotes_meanwhile(tx):
+        thread = threading.Thread(target=lambda: asyncio.run(w.catalog.promote(operator_tag)))
+        thread.start()
+        thread.join(timeout=10)
+        seen.append((thread.is_alive(), w.reads.promotion()))
+        return count(tx)
+
+    monkeypatch.setattr(records, "bound_player_count", operator_promotes_meanwhile)
+    sync(w)
+    assert seen == [(False, Promotion(operator_tag, "operator"))]  # it committed mid-tail
+    assert (w.reads.promotion(), w.reads.last_good()) == (
+        Promotion(operator_tag, "operator"), last_good)
 
 
 def test_auto_promote_keeps_the_outgoing_tag_as_last_good_when_its_deb_is_on_disk(world):

@@ -19,6 +19,7 @@ from central.content_catalog.ports import (
     DeviceUpdate,
     NamedTags,
     Promotion,
+    PromotionWrite,
     ReleaseRow,
 )
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
@@ -157,15 +158,38 @@ def test_all_and_get_of_unknown(pg):
 
 
 def test_promoted_tag_round_trip_records_who_promoted(pg):
-    _seed(pg, published(T1), published(T2))
+    _seed(pg, published(T1), published(T), published(T2))
     releases = PgReleaseRecords()
     with pg.begin() as tx:
         assert releases.promoted_tag(tx) is None and releases.promotion(tx) is None
-        releases.set_promoted(tx, T1, by="auto")
+        assert releases.set_promoted(tx, T1, by="auto") == PromotionWrite(True, None)
         assert releases.promotion(tx) == Promotion(T1, "auto")
-        releases.set_promoted(tx, T2, by="operator")
+        assert releases.set_promoted(tx, T, by="auto") == PromotionWrite(
+            True, Promotion(T1, "auto"))
+        assert releases.set_promoted(tx, T2, by="operator") == PromotionWrite(
+            True, Promotion(T, "auto"))
     with pg.begin() as tx:
         assert releases.promoted_tag(tx) == T2
+        assert releases.promotion(tx) == Promotion(T2, "operator")
+
+
+@pytest.mark.parametrize("first", ["seeded", "same_transaction"])
+def test_an_auto_write_never_moves_an_operator_promotion_and_an_operator_write_always_does(
+        pg, first):
+    # Issue #23: the write itself refuses, whatever the caller read before it.
+    _seed(pg, published(T1), published(T), published(T2))
+    releases = PgReleaseRecords()
+    if first == "seeded":
+        with pg.begin() as tx:
+            releases.set_promoted(tx, T1, by="operator")
+    with pg.begin() as tx:
+        if first == "same_transaction":
+            releases.set_promoted(tx, T1, by="operator")
+        assert releases.set_promoted(tx, T, by="auto") == PromotionWrite(
+            False, Promotion(T1, "operator"))
+        assert releases.promotion(tx) == Promotion(T1, "operator")
+        assert releases.set_promoted(tx, T2, by="operator") == PromotionWrite(
+            True, Promotion(T1, "operator"))
         assert releases.promotion(tx) == Promotion(T2, "operator")
 
 
@@ -190,7 +214,8 @@ def test_last_good_round_trip_rides_the_policy_row(pg):
         releases.set_last_good(tx, T1)
     with pg.begin() as tx:
         assert (releases.promoted_tag(tx), releases.last_good_tag(tx)) == (T2, T1)
-        releases.set_promoted(tx, T1, by="auto")  # moving the promoted pointer leaves last-good alone
+        # moving the promoted pointer leaves last-good alone
+        releases.set_promoted(tx, T1, by="operator")
         assert releases.last_good_tag(tx) == T1
 
 
@@ -283,10 +308,10 @@ def test_distinct_tag_reads_cover_active_devices_only(registry, pg):
         assert devices.names_any(tx, set(), served_since=1000.0) is False
 
 
-@pytest.mark.parametrize("served_at,named", [(1000.0, True), (999.0, False), (None, False)])
+@pytest.mark.parametrize("served_at,named", [(1000.0, True), (999.0, False)])
 def test_the_served_role_counts_a_serve_at_or_after_served_since_only(registry, pg, served_at,
                                                                      named):
-    # Issue #25: both reads take the one cutoff; a row with no serve time names nothing.
+    # Issue #25: both reads take the one cutoff.
     _seed(pg, published(T1), published(T), published(T2))
     _insert_device(registry, "device-s", last_served_tag=T1, last_served_at=served_at)
     _insert_device(registry, "device-p", attached_tag=T, last_served_tag=T, last_served_at=1.0)
@@ -301,9 +326,23 @@ def test_the_served_role_counts_a_serve_at_or_after_served_since_only(registry, 
         assert devices.names_any(tx, {T2}, served_since=1000.0) is True  # nor a known-good
 
 
+@pytest.mark.parametrize("write", ["insert", "update"])
+def test_the_database_refuses_a_served_tag_without_a_serve_time(registry, pg, write):
+    # 026: the served window reads last_served_at, so a served tag with no serve time would
+    # silently name nothing; the schema refuses the pair instead.
+    _seed(pg, published(T1))
+    _insert_device(registry, "device-a", last_served_tag=T1, last_served_at=1000.0)
+    sql = {"insert": "INSERT INTO devices(device_id, last_served_tag, first_seen, last_seen) "
+                     "VALUES('device-b', 'v0.0.1', 1.0, 1.0)",
+           "update": "UPDATE devices SET last_served_at = NULL WHERE device_id = 'device-a'"}
+    with pytest.raises(psycopg.errors.CheckViolation), registry.db.transaction() as conn:
+        conn.execute(sql[write])
+
+
 def test_apply_record_served_and_pin(registry, pg):
     _seed(pg, published(T1), published(T))
-    _insert_device(registry, "device-a", last_served_tag=T, boot_outcome="pending")
+    _insert_device(registry, "device-a", last_served_tag=T, boot_outcome="pending",
+                   last_served_at=1000.0)
     devices = PgDeviceRecords()
     with pg.begin() as tx:
         devices.apply(tx, "device-a", DeviceUpdate(T, mark_boot_failed=True))
@@ -371,7 +410,8 @@ def test_base_health_for_a_tag_no_longer_last_served_never_advances_known_good(r
     # last_served_tag to T1 while a stale report still claims T2. Drop the conditional
     # `WHERE last_served_tag = running_tag` guard and the stale report wins.
     _seed(pg, published(T1), published(T2))
-    _insert_device(registry, "device-a", last_served_tag=T1, boot_outcome="pending")
+    _insert_device(registry, "device-a", last_served_tag=T1, boot_outcome="pending",
+                   last_served_at=1000.0)
     stale = BaseHealth(authority_epoch=1, sequence=1, running_tag=T2, healthy=True)
     with registry.db.transaction() as conn:
         assert record_base_health(conn, "device-a", stale, clock=registry.clock) is False

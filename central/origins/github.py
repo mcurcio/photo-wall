@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import BinaryIO, Final
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -86,7 +87,7 @@ class GitHubReleaseOrigin:
             raise ValueError("invalid_timeout")
         self.repo = repo
         self.include_prereleases = bool(include_prereleases)
-        self._api_base = api_base.rstrip("/")
+        self._api_base = _require_api_base(api_base)
         self._transport = transport
         self._timeout = timeout.total_seconds()
         self._headers = {
@@ -101,12 +102,15 @@ class GitHubReleaseOrigin:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GitHubReleaseOrigin:
-        """The rules of `AppReleaseService.from_env`: repo, optional token, prerelease opt-in."""
+        """The rules of `AppReleaseService.from_env`: repo, optional token, prerelease opt-in,
+        and the API base (`PHOTO_WALL_RELEASE_API_BASE`, default GitHub's; an unset or empty
+        value is the default, an invalid one is `ValueError("invalid_api_base")` at boot)."""
         env = os.environ if env is None else env
         return cls(
             env.get("PHOTO_WALL_RELEASE_REPO", DEFAULT_REPO),
             token=env.get("PHOTO_WALL_RELEASE_TOKEN") or None,
             include_prereleases=env.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in _TRUTHY,
+            api_base=env.get("PHOTO_WALL_RELEASE_API_BASE") or GITHUB_API_BASE,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -294,6 +298,23 @@ async def _off_loop(function: Callable[..., object], *args: object) -> None:
                 await asyncio.wait({task})
         task.exception()  # retrieved: the cancellation is what propagates
         raise
+
+
+def _require_api_base(api_base: object) -> str:
+    """An absolute http(s) URL with a host and no query or fragment; returned without a trailing
+    slash (the listing appends `/repos/...`)."""
+    if not isinstance(api_base, str):
+        raise ValueError("invalid_api_base")
+    try:
+        parts = urlsplit(api_base)
+        host = parts.hostname
+        parts.port  # noqa: B018 -- raises ValueError for a malformed port
+    except ValueError:
+        raise ValueError("invalid_api_base") from None
+    if (parts.scheme not in ("http", "https") or not host or parts.query or parts.fragment
+            or api_base != api_base.strip()):
+        raise ValueError("invalid_api_base")
+    return api_base.rstrip("/")
 
 
 def _asset_urls(raw_assets: object) -> dict[str, str]:

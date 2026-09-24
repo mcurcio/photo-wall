@@ -170,8 +170,12 @@ class SyncReleasesHandler:
             return
         candidate = newest(row.tag for row in releases if row.package is not None
                            and (self._include_prereleases or not row.is_prerelease))
-        if candidate is not None and (promotion is None or candidate != promotion.tag):
-            self._catalog.promote_in(tx, candidate, by="auto")
+        # `promotion` was read without a lock: the write re-checks under the row lock and refuses
+        # to move an operator promotion committed since.
+        if (candidate is not None and (promotion is None or candidate != promotion.tag)
+                and not self._catalog.promote_in(tx, candidate, by="auto")):
+            LOG.info("auto-promote of %s yielded to an operator promotion made meanwhile",
+                     candidate)
 
     def _any_package_produced(self, tx: Transaction, releases: tuple[ReleaseRow, ...]) -> bool:
         shas = {row.package.sha256 for row in releases

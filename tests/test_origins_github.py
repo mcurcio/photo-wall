@@ -635,3 +635,36 @@ def test_from_env_repo_and_token_reach_the_wire():
     request = server.requests[0]
     assert request.url.path == "/repos/acme/wall/releases"
     assert request.headers.get("Authorization") == "Bearer tok"
+
+
+def _listed_urls(env):
+    """The listing URLs (no query) a `from_env` origin requests; every page answers `[]`."""
+    urls = []
+
+    def handle(request):
+        urls.append(str(request.url.copy_with(query=None)))
+        return httpx.Response(200, json=[])
+
+    built = GitHubReleaseOrigin.from_env(env)
+    built._transport = httpx.MockTransport(handle)
+    asyncio.run(built.list_releases(etag=None))
+    return urls
+
+
+@pytest.mark.parametrize("env", [{}, {"PHOTO_WALL_RELEASE_API_BASE": ""}])
+def test_from_env_api_base_defaults_to_github(env):
+    assert _listed_urls(env) == ["https://api.github.com/repos/mcurcio/photo-wall/releases"]
+
+
+@pytest.mark.parametrize("base", ["http://127.0.0.1:8123", "https://ghe.example.test/api/v3/"])
+def test_from_env_api_base_reaches_the_wire(base):
+    assert _listed_urls({"PHOTO_WALL_RELEASE_API_BASE": base}) == [
+        base.rstrip("/") + "/repos/mcurcio/photo-wall/releases"]
+
+
+@pytest.mark.parametrize("base", ["api.github.com", "ftp://api.github.com", "file:///etc/passwd",
+                                  "http://", "https://h.test/api?x=1", "https://h.test/#frag",
+                                  "https://h.test:notaport", " https://h.test"])
+def test_from_env_invalid_api_base_is_refused_at_construction(base):
+    with pytest.raises(ValueError, match="invalid_api_base"):
+        GitHubReleaseOrigin.from_env({"PHOTO_WALL_RELEASE_API_BASE": base})

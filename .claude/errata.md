@@ -1020,3 +1020,27 @@ doc softenings.
      connection already held, so there is no extra pool pressure.
 - **Docs bead:** any doc text saying the substitute publish is "in the background" or "not
   awaited" is now wrong. It is synchronous, inside the open's transaction.
+
+## 2026-09-24 — PR #27 review: catalog race, backfill, harness moved into CI
+
+- **#23 race fix:** `ReleaseRecords.set_promoted(tx, tag, *, by)` now returns
+  `PromotionWrite(moved, outgoing)` and enforces "auto never moves operator" inside the write
+  itself. The write is:
+  1. on a first promotion, `INSERT ... ON CONFLICT DO NOTHING`;
+  2. otherwise, `SELECT ... FOR UPDATE`;
+  3. then a guarded `UPDATE`.
+
+  `promote_in` returns a bool and carries last-good only when the write moved.
+- **027 backfill follows main's rule:** 'operator' only if a binding exists AND a release's `.deb`
+  has produced facts; otherwise 'auto'. This supersedes "every existing row is operator".
+  - Main's code fails on the 027 schema (NotNullViolation on `promoted_by`), so a rollback must
+    drop the column first.
+  - `GET /v1/operator/app/releases` returns `promoted_by`. The console does not show it yet.
+- **026:** `DROP INDEX IF EXISTS`, plus `CHECK (last_served_tag IS NULL OR last_served_at IS NOT NULL)`.
+  Only `names_any` uses the index, and only when few rows match; `named_tags`' served branch
+  does a sequential scan.
+- **The two-pod harness is a CI test:** `tests/test_two_pods.py` (module-scoped schema, 65–95 s).
+  `scripts/two_pod_run.py` is deleted. The shared support lives in `tests/support/`.
+  - The new setting `PHOTO_WALL_RELEASE_API_BASE` needs a row in the runbook (docs bead).
+  - The media flock defect is pinned by a strict xfail.
+  - Coalescing means "one pending copy at a time and one origin GET", not "one fetch row".

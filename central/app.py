@@ -527,7 +527,8 @@ def create_app(
 
     @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
     async def list_releases():
-        # Discovered releases, semver DESC, each flagged deployable/promoted/has_os_image.
+        # Discovered releases, semver DESC, each flagged deployable/promoted/has_os_image, and
+        # promoted_by ("auto" | "operator", null unless promoted).
         return [asdict(view) for view in await _content().catalog.releases_view()]
 
     @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
