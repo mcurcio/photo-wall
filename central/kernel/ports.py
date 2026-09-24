@@ -78,19 +78,11 @@ class AssetRecords(Protocol):
         ...
 
     def retire(self, tx: Transaction, key: AssetKey, owner: str) -> None:
-        """Delete that reference, and the asset row with its last reference; absent -> no-op."""
+        """Delete that reference; the asset row and its facts stay; absent -> no-op."""
         ...
 
     def record_produced(self, tx: Transaction, key: AssetKey, facts: AssetReady) -> None:
         """Write-once: equal facts -> no-op; different -> ProducedFactsConflict; absent -> no-op."""
-        ...
-
-    def forget_produced(self, tx: Transaction, key: AssetKey) -> None:
-        """Clear the produced facts: the origin rebuilt the asset under the same identity (a
-        release re-cut), so the next production records the new build; absent -> no-op.
-
-        The only way produced facts change. The release sync calls it; nothing else does.
-        """
         ...
 
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:

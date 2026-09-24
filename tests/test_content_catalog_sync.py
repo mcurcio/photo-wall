@@ -134,8 +134,13 @@ def sync(w: World) -> None:
     asyncio.run(w.handler.handle(SyncReleases()))
 
 
-def image_key(tag: str) -> AssetKey:
-    return AssetKey(AssetKind.OS_IMAGE, tag)
+def image_key(tag: str, cut: str = "") -> AssetKey:
+    """The OS image's key: the sha256 of `image(tag, cut)`'s tarball."""
+    return AssetKey(AssetKind.OS_IMAGE, image(tag, cut).sha256)
+
+
+def os_job(tag: str, cut: str = "") -> FetchOsImage:
+    return FetchOsImage(tarball_sha256=image(tag, cut).sha256)
 
 
 def deb_key(locator: OriginLocator) -> AssetKey:
@@ -173,7 +178,7 @@ def test_first_sync_records_releases_references_promotes_and_fetches_desired_cha
     tail = w.transactions.begun[-1]
     # Changed AND desired (bootstrap T1 + its .deb); the rc's .deb changed but is not desired.
     assert w.publisher.calls == [
-        PublishedCall(FetchOsImage(tag=T1), True, tail),
+        PublishedCall(os_job(T1), True, tail),
         PublishedCall(FetchPackage(sha256=deb(T1).sha256), True, tail),
         PublishedCall(Prefetch(), False, tail),
     ]
@@ -244,34 +249,37 @@ def test_recut_keeps_a_deb_another_tag_still_ships(world):
 
 
 def writing(data: bytes):
-    async def write(temp, asset) -> None:
+    async def write(temp, locator) -> None:
         temp.write_bytes(data)
     return write
 
 
-def test_a_recut_os_image_is_produced_again_after_a_cache_wipe(world):
-    # PR #22 review P1: release.yml re-uploads a rebuilt image under its tag (--clobber). The
-    # write-once produced facts then failed every later production `not_reproducible` once the
-    # cache was wiped, so the tag was unservable for good (and each Pi boot re-fetched ~1 GB).
+def test_a_recut_os_image_is_a_new_key_and_the_old_keeps_its_facts(world):
+    # release.yml re-uploads a rebuilt image under its tag (--clobber): another tarball, so
+    # another key. The tag moves its reference; the old key's facts are never cleared, and the
+    # new build is produced and recorded under its own key (PR #22 review P1: no
+    # `not_reproducible` for good).
     w = world(listing(published(T1)))
     sync(w)
-    key, job = image_key(T1), FetchOsImage(tag=T1)
+    old, new = image_key(T1), image_key(T1, cut="-rebuilt")
     production = AssetProduction(store=w.store, records=w.assets, transactions=w.transactions)
-    built = asyncio.run(production.produce(job, writing(b"build-1")))
-    record_produced(w.transactions, w.assets, key, built)  # what the runtime records
+    built = asyncio.run(production.produce(os_job(T1), writing(b"build-1")))
+    record_produced(w.transactions, w.assets, old, built)  # what the runtime records
     first = len(w.publisher.calls)
     w.origin.listing = listing(published(T1, os_image=image(T1, cut="-rebuilt")), etag="e2")
     sync(w)
-    asset = w.reads.asset(key)
+    assert w.reads.asset(old) is None  # no reference left: not an asset
+    assert w.reads.facts(old) == built  # but its row and facts stay
+    asset = w.reads.asset(new)
     assert asset.produced is None
     assert asset.references == (AssetReference(T1, image(T1, cut="-rebuilt"), None, None),)
-    assert PublishedCall(FetchOsImage(tag=T1), True, w.transactions.begun[-1]) in (
+    assert PublishedCall(os_job(T1, cut="-rebuilt"), True, w.transactions.begun[-1]) in (
         w.publisher.calls[first:])
-    w.store.discard(w.store.layout.path(key))  # the cache is wiped
-    rebuilt = asyncio.run(production.produce(job, writing(b"build-2")))
+    rebuilt = asyncio.run(production.produce(os_job(T1, cut="-rebuilt"), writing(b"build-2")))
     assert rebuilt == facts_of(b"build-2")
-    record_produced(w.transactions, w.assets, key, rebuilt)  # no ProducedFactsConflict
-    assert w.reads.asset(key).produced == rebuilt
+    record_produced(w.transactions, w.assets, new, rebuilt)  # no ProducedFactsConflict
+    assert w.reads.asset(new).produced == rebuilt
+    assert w.reads.facts(old) == built
 
 
 @pytest.mark.parametrize("changed", [
@@ -291,10 +299,12 @@ def test_an_os_image_whose_bytes_did_not_change_keeps_its_produced_facts(world, 
 def test_dropped_image_and_dropped_deb_retire_their_references(world):
     w = world(listing(published(T1)))
     sync(w)
+    record_produced(w.reads.transactions, w.assets, image_key(T1), facts_of(b"build-1"))
     w.origin.listing = listing(published(T1, package=None, os_image=None), etag="e2")
     sync(w)
     assert w.reads.owners(image_key(T1)) is None
     assert w.reads.owners(deb_key(deb(T1))) is None
+    assert w.reads.facts(image_key(T1)) == facts_of(b"build-1")  # retiring never clears facts
 
 
 def test_origin_failure_propagates_and_writes_nothing(world):

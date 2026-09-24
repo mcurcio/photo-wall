@@ -1056,3 +1056,27 @@ doc softenings.
   is set if unset, or moved only when its file is gone (compare-and-set): an OCI tag pointing at a
   digest. The digest stays write-once per FILE, not per variant. Whether a Pi can see a variant's
   digest change after a wipe is a Pi-visible question for the media gate.
+
+## 2026-09-24 — bead 1 os-image-content-key
+
+- **The page is silent on legacy tags that fail `release_version`.** The old
+  `_os_image_job(tag)` skipped them because `FetchOsImage(tag=...)` refused a non-semver tag
+  (`central/content_catalog/catalog.py`, pre-bead `:122-126`). A sha-keyed job no longer can, so
+  a row whose tag passes the DB check (`tag ~ '^v[0-9]+\.[0-9]+\.[0-9]+'`, prefix only,
+  `central/migrations/016_release_tracking.sql:20`) but not `release_version` (e.g. `v1.2.3foo`)
+  would have become a netboot substitute and desired through a device's roles.
+  **Resolved (coordinator, regression-preservation):** today's behaviour is kept. The rule lives
+  in ONE place, `_os_image_job(row)`, which returns None for a tag `release_version` refuses;
+  `_resolve_base`, `desired_in` and `pin` all build the OS-image job through it, and `pin` still
+  refuses the tag up front (`invalid_tag`). Test:
+  `tests/test_content_catalog_catalog.py::test_a_legacy_tag_is_never_a_netboot_candidate_nor_desired`
+  (PostgreSQL). Probe M7 (drop the filter) turns it red: the legacy tag is offered as a
+  substitute and its image becomes desired.
+- **`FetchOsImageHandler._write(temp, locator)` has no key to ask `CacheStore.temp_path` for the
+  tarball temp.** It now downloads to `<temp>.tar.gz` beside the unique temp (same directory, same
+  `TEMP_PREFIX`, created `O_EXCL` by the download, removed in `finally`). The constructor keeps
+  `store` (for `discard`), so `central/content_wiring.py` is unchanged.
+- **Additive, not on the page:** `ReleaseCatalog.resolve` gained a `typing.overload` so a
+  `NetbootBaseRequest` statically yields `NetbootCandidates | Unknown`, which is what
+  `record_served(request, resolution, job)` takes from the route. `central/kernel/types.py`
+  `ReleaseTag` now has no user; it is kept.

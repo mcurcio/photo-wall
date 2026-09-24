@@ -79,6 +79,7 @@ SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
 SERIAL = "10000000cafef00d"
 TAG = "v9.9.9"
 DEB_SHA = hashlib.sha256(("deb-" + TAG).encode()).hexdigest()  # TAG's `.deb` (manifest only)
+TARBALL_SHA = "b" * 64  # TAG's base tarball: the OS image's key
 
 
 class _Log:
@@ -148,9 +149,9 @@ def _seed_base(registry, cache_root, *, tag=TAG, squashfs=SQUASHFS, cached=True,
     with its reference and -- when `cached` -- its produced facts and the file at its
     cache path, and a device pinned to `tag` so the serial resolves deterministically."""
     db, clock = registry.db, registry.clock
-    tarball = OriginLocator("https://example.test/base.tgz", "b" * 64, len(squashfs))
+    tarball = OriginLocator("https://example.test/base.tgz", TARBALL_SHA, len(squashfs))
     package = OriginLocator("https://example.test/app.deb", DEB_SHA, 4096)
-    key = asset_key(FetchOsImage(tag=tag))
+    key = asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA))
     assets = PgAssetRecords(clock)
     with PgTransactions(db).begin() as tx:
         PgReleaseRecords().upsert(tx, PublishedRelease(tag, False, package, None, tarball),
@@ -375,7 +376,7 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
         # serves the tampered bytes with the recorded (now-mismatching) Digest header,
         # and the client's streamed sha256 must refuse.
         tampered = SQUASHFS[:-1] + bytes([SQUASHFS[-1] ^ 0x01])
-        _write(cache_root, asset_key(FetchOsImage(tag=TAG)), tampered)
+        _write(cache_root, asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA)), tampered)
         with pytest.raises(NetbootError, match="netboot_integrity"):
             netboot(
                 {"photowall.central": origin + "/"},
@@ -408,8 +409,8 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
     with registry.db.transaction() as conn:
         queued = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
                               "WHERE status = 'todo'").fetchall()
-    assert [(q["task_name"], q["args"]["tag"]) for q in queued] == [
-        ("photo_wall.os_image.fetch", TAG)]
+    assert [(q["task_name"], q["args"]["tarball_sha256"]) for q in queued] == [
+        ("photo_wall.os_image.fetch", TARBALL_SHA)]
     assert _served_row(registry)["last_served_tag"] is None  # a miss records nothing
 
 

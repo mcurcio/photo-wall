@@ -11,6 +11,7 @@ import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 from test_registry import enroll, frame
 
@@ -18,7 +19,7 @@ from central.assets.store import CacheStore
 from central.content_catalog.ports import DeviceRow, Promoter, Promotion, ReleaseRow
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
-from central.infra.transactions import PgTransaction, PgTransactions
+from central.infra.transactions import PgTransaction, PgTransactions, pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.ports import PublishedRelease
 from contracts.time import ManualClock
@@ -130,6 +131,19 @@ class Reads:
     def owners(self, key: AssetKey) -> list[str] | None:
         asset = self.asset(key)
         return None if asset is None else [ref.owner for ref in asset.references]
+
+    def facts(self, key: AssetKey) -> AssetReady | None | Literal["no_row"]:
+        """The asset row's produced facts, even with no reference left (`get` then answers
+        None); "no_row" when the row itself is gone."""
+        with self.transactions.begin() as tx:
+            row = pg_connection(tx).execute(
+                "SELECT produced_size, produced_sha256 FROM assets WHERE kind=%s AND identity=%s",
+                (key.kind.value, key.identity)).fetchone()
+        if row is None:
+            return "no_row"
+        if row["produced_sha256"] is None:
+            return None
+        return AssetReady(size=row["produced_size"], sha256=row["produced_sha256"])
 
 
 def reference(transactions: PgTransactions, assets: PgAssetRecords, key: AssetKey,

@@ -174,8 +174,9 @@ class TwoPods:
         with self.db.transaction() as conn:
             return conn.execute(query, args).fetchall()
 
-    def fetch_rows(self, tag: str, *, after: int = 0) -> list[dict]:
-        """The OS-image fetch rows of `tag` with id > `after`, oldest first, with the ids of
+    def fetch_rows(self, tarball_sha: str, *, after: int = 0) -> list[dict]:
+        """The OS-image fetch rows of the image keyed `tarball_sha` (a release's base tarball)
+        with id > `after`, oldest first, with the ids of
         their `deferred` and `started` events (a sequence, so ordered by execution)."""
         return self.sql(
             "SELECT j.id, j.status::text AS status, "
@@ -183,14 +184,15 @@ class TwoPods:
             " WHERE e.job_id = j.id AND e.type = 'deferred') AS deferred_event, "
             "(SELECT min(e.id) FROM procrastinate_events e "
             " WHERE e.job_id = j.id AND e.type = 'started') AS started_event "
-            "FROM procrastinate_jobs j WHERE j.task_name = %s AND j.args->>'tag' = %s "
-            "AND j.id > %s ORDER BY j.id", OS_IMAGE_FETCH, tag, after)
+            "FROM procrastinate_jobs j WHERE j.task_name = %s AND j.args->>'tarball_sha256' = %s "
+            "AND j.id > %s ORDER BY j.id", OS_IMAGE_FETCH, tarball_sha, after)
 
-    def last_fetch_id(self, tag: str) -> int:
-        return max((row["id"] for row in self.fetch_rows(tag)), default=0)
+    def last_fetch_id(self, tarball_sha: str) -> int:
+        return max((row["id"] for row in self.fetch_rows(tarball_sha)), default=0)
 
-    def fetches_settled(self, tag: str) -> bool:
-        return all(row["status"] not in ("todo", "doing") for row in self.fetch_rows(tag))
+    def fetches_settled(self, tarball_sha: str) -> bool:
+        return all(row["status"] not in ("todo", "doing")
+                   for row in self.fetch_rows(tarball_sha))
 
     def os_files(self) -> list[str]:
         directory = self.cache / "os-images"
@@ -212,7 +214,7 @@ class TwoPods:
         response = self.admin("POST", "central-a", "/v1/operator/app/releases/refresh")
         assert response.status_code == 202, response.text
         wait_for(lambda: self.sql("SELECT 1 FROM assets WHERE kind='os-image' AND identity=%s",
-                                  release.tag), seconds=60, what=f"SyncReleases to record "
+                                  release.tarball_sha), seconds=60, what=f"SyncReleases to record "
                  f"{release.tag}")
 
 
@@ -310,7 +312,7 @@ def test_a1a_misses_on_both_pods_merge_into_the_running_fetch(pods, v1):
         with ThreadPoolExecutor(1) as pool:
             future = pool.submit(concurrent_boots, pods, serials, retry_for=60)
             time.sleep(3)  # every request has published and is parked on its handle
-            waiting = pods.fetch_rows(v1.tag)
+            waiting = pods.fetch_rows(v1.tarball_sha)
             pods.origin.hold.set()
             boots = future.result()
     finally:
@@ -320,9 +322,9 @@ def test_a1a_misses_on_both_pods_merge_into_the_running_fetch(pods, v1):
     assert all(boot.statuses[-1] == 200 for boot in boots), boots
     assert {boot.sha256 for boot in boots} == {v1.squashfs_sha}  # = SHA256SUMS in the tarball
     assert {boot.pod for boot in boots} == set(PODS)
-    wait_for(lambda: pods.fetches_settled(v1.tag), seconds=30, what="the pending copy")
+    wait_for(lambda: pods.fetches_settled(v1.tarball_sha), seconds=30, what="the pending copy")
     assert pods.origin.count(v1.tag, "tarball") == 1  # the pending copy found it on disk
-    assert pods.os_files() == [f"base-{v1.tag}.squashfs"]
+    assert pods.os_files() == [f"base-{v1.tarball_sha}.squashfs"]
 
 
 def test_a3_cache_wipe_keeps_readyz_green_and_prefetch_refills_once(pods, v1):
@@ -339,9 +341,9 @@ def test_a3_cache_wipe_keeps_readyz_green_and_prefetch_refills_once(pods, v1):
             PODS))
     assert codes == [202, 202]
     deb = f"app-{hashlib.sha256(v1.deb).hexdigest()}.deb"
-    wait_for(lambda: (pods.cache / "os-images" / f"base-{v1.tag}.squashfs").exists()
+    wait_for(lambda: (pods.cache / "os-images" / f"base-{v1.tarball_sha}.squashfs").exists()
              and (pods.cache / "apps" / deb).exists(), seconds=90, what="the prefetch refill")
-    wait_for(lambda: pods.fetches_settled(v1.tag), seconds=30, what="any duplicate fetch")
+    wait_for(lambda: pods.fetches_settled(v1.tarball_sha), seconds=30, what="any duplicate fetch")
     after = (pods.origin.count(v1.tag, "tarball"), pods.origin.count(v1.tag, "deb"))
     assert after == (before[0] + 1, before[1] + 1)
     for pod in PODS:
@@ -367,23 +369,23 @@ def test_a1b_request_driven_miss_on_both_pods_downloads_once(pods, v1):
     """Flow (c) proper: nothing running; 8 Pis on both pods miss at once. One download, and
     the queue never held two pending copies of the fetch."""
     shutil.rmtree(pods.cache / "os-images")
-    before, after_id = pods.origin.count(v1.tag, "tarball"), pods.last_fetch_id(v1.tag)
+    before, after_id = pods.origin.count(v1.tag, "tarball"), pods.last_fetch_id(v1.tarball_sha)
     pods.origin.chunk_delay = 0.05  # ~3 s for the 4 MiB tarball, so every request overlaps it
     try:
         boots = concurrent_boots(pods, [f"10000000c2c2{i:04x}" for i in range(8)], retry_for=60)
     finally:
         pods.origin.chunk_delay = 0.0
-    rows = pods.fetch_rows(v1.tag, after=after_id)  # every publish precedes its response
+    rows = pods.fetch_rows(v1.tarball_sha, after=after_id)  # every publish precedes its response
     assert all(boot.statuses[-1] == 200 for boot in boots), boots
     assert {boot.sha256 for boot in boots} == {v1.squashfs_sha}
     # Coalescing on rows: the 8 publishes merged into the pending copy. A publish after the
     # copy started inserts the next pending copy (it runs afterwards as a no-op), so 1-2 rows.
     assert 1 <= len(rows) <= 2 and one_pending_copy_at_a_time(rows), rows
-    wait_for(lambda: pods.fetches_settled(v1.tag), seconds=30, what="the fetch copies")
-    rows = pods.fetch_rows(v1.tag, after=after_id)
+    wait_for(lambda: pods.fetches_settled(v1.tarball_sha), seconds=30, what="the fetch copies")
+    rows = pods.fetch_rows(v1.tarball_sha, after=after_id)
     assert all(row["status"] == "succeeded" for row in rows), rows
     assert pods.origin.count(v1.tag, "tarball") - before == 1
-    assert pods.os_files() == [f"base-{v1.tag}.squashfs"]
+    assert pods.os_files() == [f"base-{v1.tarball_sha}.squashfs"]
 
 
 def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
@@ -391,7 +393,7 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
     and the waiting Pi is served. The victim is known by construction: it is the only job
     runtime when the download starts; the survivor starts while the download is held."""
     shutil.rmtree(pods.cache / "os-images")
-    before, after_id = pods.origin.count(v1.tag, "tarball"), pods.last_fetch_id(v1.tag)
+    before, after_id = pods.origin.count(v1.tag, "tarball"), pods.last_fetch_id(v1.tarball_sha)
     pods.stop_worker("worker-2")
     pods.origin.hold = threading.Event()
     try:
@@ -407,14 +409,14 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
             victim.wait()
             pods.origin.hold.set()
             # RescueStalledJobs: the heartbeat lapses (30 s), then its 1-minute tick.
-            wait_for(lambda: f"base-{v1.tag}.squashfs" in pods.os_files(), seconds=300,
+            wait_for(lambda: f"base-{v1.tarball_sha}.squashfs" in pods.os_files(), seconds=300,
                      what="the rescued fetch")
             boot = pi.result()
     finally:
         pods.origin.hold.set()
         pods.origin.hold = None
-    wait_for(lambda: pods.fetches_settled(v1.tag), seconds=30, what="the fetch copies")
-    rows = pods.fetch_rows(v1.tag, after=after_id)
+    wait_for(lambda: pods.fetches_settled(v1.tarball_sha), seconds=30, what="the fetch copies")
+    rows = pods.fetch_rows(v1.tarball_sha, after=after_id)
     assert pods.origin.count(v1.tag, "tarball") == before + 2  # the killed attempt + one retry
     assert "rescuing stalled job" in pods.procs["worker-2"].log.read_text(errors="replace")
     statuses = [row["status"] for row in rows]
@@ -432,15 +434,15 @@ def test_a4b_pinned_never_substitutes_and_a_substitute_serve_queues_the_wanted_f
     v2.tarball_status = 404  # its OS image can never be fetched: a substitute is tempting
     pods.sync_release(v2)
     wait_for(lambda: pods.sql("SELECT 1 FROM job_outcomes WHERE lock_key LIKE %s",
-                              f"%os_image.fetch%{v2.tag}%"), seconds=60,
+                              f"%os_image.fetch%{v2.tarball_sha}%"), seconds=60,
              what="the v1.1.0 fetch outcome")
-    wait_for(lambda: pods.fetches_settled(v2.tag), seconds=30, what="the v1.1.0 fetch copies")
-    before, after_id = pods.origin.count(v2.tag, "tarball"), pods.last_fetch_id(v2.tag)
+    wait_for(lambda: pods.fetches_settled(v2.tarball_sha), seconds=30, what="the v1.1.0 fetch copies")
+    before, after_id = pods.origin.count(v2.tag, "tarball"), pods.last_fetch_id(v2.tarball_sha)
 
     unpinned = netboot(pods, "central-b", other_serial)
     assert unpinned.statuses == [200] and unpinned.sha256 == v1.squashfs_sha  # the substitute
     # #24: the substitute serve published the WANTED version's fetch (retry_terminal).
-    wait_for(lambda: pods.fetch_rows(v2.tag, after=after_id), seconds=30,
+    wait_for(lambda: pods.fetch_rows(v2.tarball_sha, after=after_id), seconds=30,
              what="the v1.1.0 fetch a substitute serve publishes")
     wait_for(lambda: pods.origin.count(v2.tag, "tarball") > before, seconds=30,
              what="the origin to see the republished v1.1.0 fetch")

@@ -183,7 +183,7 @@ def test_fresh_install_arc_deterministic(registry, tmp_path, monkeypatch):
                  what="the request to wait on its fetch's outcome")
         # ... a worker runs it (download + verify + allowlist-extract + rename into
         # place; produced facts + ok outcome + NOTIFY) ...
-        assert execute(FetchOsImage(tag=TAG)) == "ok"
+        assert execute(FetchOsImage(tarball_sha256=tarball_sha)) == "ok"
         request.join(30)
         ok = result["response"]
         # ... and the SAME request answers with the extracted bytes and a Digest equal
@@ -192,7 +192,8 @@ def test_fresh_install_arc_deterministic(registry, tmp_path, monkeypatch):
         assert ok.headers["digest"] == _digest(ok.content)
         assert ok.headers["digest"] == "sha-256=" + base64.b64encode(
             bytes.fromhex(squashfs_sha)).decode()
-        assert (cache_root / "os-images" / f"base-{TAG}.squashfs").read_bytes() == SQUASHFS
+        assert (cache_root / "os-images" / f"base-{tarball_sha}.squashfs").read_bytes() == (
+            SQUASHFS)
 
         # The 200 recorded the served tag (pending), the precondition for a
         # validated base-health check-in.
@@ -269,13 +270,14 @@ def test_fresh_install_arc_against_real_github(registry, tmp_path, monkeypatch):
         # legitimate skip, not a failure.
         with db.transaction() as conn:
             tag = conn.execute(
-                "SELECT tag FROM app_releases WHERE base_tarball_sha256 IS NOT NULL "
+                "SELECT tag, base_tarball_sha256 FROM app_releases "
+                "WHERE base_tarball_sha256 IS NOT NULL "
                 "AND base_tarball_url IS NOT NULL AND is_prerelease = FALSE "
                 "ORDER BY major DESC, minor DESC, patch DESC LIMIT 1"
             ).fetchone()
         if tag is None:
             pytest.skip("no released base_image asset on the real repo yet (nothing to fetch)")
-        assert execute(FetchOsImage(tag=tag["tag"])) == "ok"
+        assert execute(FetchOsImage(tarball_sha256=tag["base_tarball_sha256"])) == "ok"
         response = client.get("/v1/netboot/base", headers={SERIAL_HEADER: SERIAL_CY})
     assert response.status_code == 200
     assert response.headers["digest"] == _digest(response.content)

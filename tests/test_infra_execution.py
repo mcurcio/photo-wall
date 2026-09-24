@@ -39,7 +39,8 @@ from central.kernel.jobs import Delivery, Job, QueueName, job_keys
 from contracts.time import ManualClock
 
 TAG = "v1.0.0"
-KEY = AssetKey(AssetKind.OS_IMAGE, TAG)
+TARBALL = "1" * 64
+KEY = AssetKey(AssetKind.OS_IMAGE, TARBALL)
 RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5))  # FetchOsImage's
 
 
@@ -86,11 +87,11 @@ class Harness:
             assets=self.assets, clock=self.clock, redeliver=redeliver)
 
     def run(self, job=None, attempt=0):
-        return asyncio.run(self.executor.execute(job or FetchOsImage(tag=TAG), attempt))
+        return asyncio.run(self.executor.execute(job or FetchOsImage(tarball_sha256=TARBALL), attempt))
 
     def row(self, job=None):
         with self.reads.begin() as tx:
-            return self.outcomes.get(tx, job_keys(job or FetchOsImage(tag=TAG)).lock)
+            return self.outcomes.get(tx, job_keys(job or FetchOsImage(tarball_sha256=TARBALL)).lock)
 
     def produced(self):
         with self.reads.begin() as tx:
@@ -152,7 +153,7 @@ def test_transient_failure_follows_the_backoff(attempt, harness):
     not_before = 1000.0 + RETRY[attempt].total_seconds()
     assert (h.row().status, h.row().reason, h.row().retry_not_before) == (
         "transient", "origin_down", not_before)
-    assert h.redeliveries == [Redelivery(FetchOsImage(tag=TAG), attempt + 1, not_before)]
+    assert h.redeliveries == [Redelivery(FetchOsImage(tarball_sha256=TARBALL), attempt + 1, not_before)]
 
 
 def test_retry_after_raises_the_delay_and_is_capped(harness):
@@ -231,7 +232,7 @@ def test_an_early_copy_is_redelivered_for_the_window_end_without_running(harness
     h.clock.advance(2)
     assert h.run(attempt=0) is None
     assert handler.calls == 1
-    assert h.redeliveries[-1] == Redelivery(FetchOsImage(tag=TAG), 0, 1005.0)
+    assert h.redeliveries[-1] == Redelivery(FetchOsImage(tarball_sha256=TARBALL), 0, 1005.0)
     assert h.row() == written  # no outcome written
     h.clock.advance(2.5)  # within the 1s tolerance of the window's end: it runs
     assert h.run(attempt=1) == "ok"

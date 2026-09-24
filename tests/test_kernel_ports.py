@@ -26,8 +26,8 @@ KEY = AssetKey(AssetKind.PLAYER_DEB, SHA)
 
 
 def test_candidates_invariants():
-    one = FetchOsImage(tag="v1.0.0")
-    two = FetchOsImage(tag="v1.1.0")
+    one = FetchOsImage(tarball_sha256="1" * 64)
+    two = FetchOsImage(tarball_sha256="2" * 64)
     assert Candidates((one, two), pinned=False).jobs == (one, two)
     assert Candidates((one,), pinned=True).pinned
     with pytest.raises(ValueError):
@@ -37,7 +37,7 @@ def test_candidates_invariants():
     with pytest.raises(ValueError):
         Candidates((one, FetchPackage(sha256=SHA)), pinned=False)
     with pytest.raises(ValueError):
-        Candidates((one, FetchOsImage(tag="v1.0.0")), pinned=False)
+        Candidates((one, FetchOsImage(tarball_sha256="1" * 64)), pinned=False)
 
 
 def test_asset_requires_references_with_unique_owners():

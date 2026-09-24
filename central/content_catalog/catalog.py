@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, overload
 
 from pydantic import ValidationError
 
@@ -92,6 +92,24 @@ class ReleaseView:
 
 
 @dataclass(frozen=True, slots=True)
+class NetbootCandidates(Candidates):
+    """The OS images a netboot request may be served, with the tag each one is served as.
+
+    One candidate per distinct base tarball (its content key), tagged with the first tag in
+    preference order that ships it: two tags sharing a tarball are one asset.
+    """
+
+    tags: tuple[str, ...]  # same length and order as `jobs`
+
+    def __post_init__(self) -> None:
+        Candidates.__post_init__(self)  # slots=True: a zero-argument super() cannot bind here
+        if (not isinstance(self.tags, tuple) or len(self.tags) != len(self.jobs)
+                or not all(isinstance(tag, str) for tag in self.tags)
+                or not all(isinstance(job, FetchOsImage) for job in self.jobs)):
+            raise ValueError("invalid_netboot_candidates")
+
+
+@dataclass(frozen=True, slots=True)
 class NetbootView:
     frontier: str | None
     devices: tuple[DeviceRow, ...]
@@ -119,10 +137,23 @@ def device_id_for_serial(serial: str | None) -> str | None:
     return None if serial is None else equipment_device_id(DEVICE_KIND, serial.encode())
 
 
-def _os_image_job(tag: str) -> FetchOsImage | None:
+def _os_image_job(row: ReleaseRow) -> FetchOsImage | None:
+    """The fetch of the row's OS image, keyed by its base tarball's sha256; None without one.
+
+    The one rule for which OS images the catalog offers (`_resolve_base`) and wants
+    (`desired_in`, `pin`): a legacy tag that `release_version` refuses is never a netboot
+    candidate or substitute and never desired, as before the image was keyed by its tarball
+    (the tag-keyed job refused such a tag). The key no longer checks the tag, so this does.
+    """
+    if row.os_image is None or row.os_image.sha256 is None:
+        return None
     try:
-        return FetchOsImage(tag=tag)
-    except ValidationError:  # a legacy non-semver tag cannot name an asset job
+        release_version(row.tag)
+    except ValueError:
+        return None
+    try:
+        return FetchOsImage(tarball_sha256=row.os_image.sha256)
+    except ValidationError:  # a legacy row whose stored sha cannot name an asset job
         return None
 
 
@@ -164,6 +195,12 @@ class ReleaseCatalog:
 
     # -- ContentCatalog ---------------------------------------------------------------------------
 
+    @overload
+    async def resolve(self, request: NetbootBaseRequest) -> NetbootCandidates | Unknown: ...
+
+    @overload
+    async def resolve(self, request: ContentRequest) -> Resolution: ...
+
     async def resolve(self, request: ContentRequest) -> Resolution:
         if isinstance(request, NetbootBaseRequest):
             return await self._in_tx(lambda tx: self._resolve_base(tx, request))
@@ -193,7 +230,7 @@ class ReleaseCatalog:
             row = by_tag.get(tag)
             if row is None:
                 continue
-            if row.os_image is not None and (job := _os_image_job(tag)) is not None:
+            if (job := _os_image_job(row)) is not None:
                 jobs.add(job)
             if (package := self._obtainable(tx, row)) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
@@ -233,14 +270,19 @@ class ReleaseCatalog:
 
     # -- serving ----------------------------------------------------------------------------------
 
-    async def record_served(self, request: NetbootBaseRequest, job: FetchOsImage) -> None:
-        """After a 200 only: record the tag whose bytes were served (never on a 503 miss)."""
+    async def record_served(self, request: NetbootBaseRequest, resolution: NetbootCandidates,
+                            job: FetchOsImage) -> None:
+        """After a 200 only: record the tag whose bytes were served (never on a 503 miss).
+
+        `job` is the candidate the reader served; the tag is the one `resolution` served it as.
+        """
         device_id = device_id_for_serial(request.serial)
         if device_id is None:
             return
+        tag = resolution.tags[resolution.jobs.index(job)]
 
         def write(tx: Transaction) -> None:
-            self._devices.record_served(tx, device_id, job.tag, now=self._clock.utc())
+            self._devices.record_served(tx, device_id, tag, now=self._clock.utc())
 
         await self._in_tx(write)
 
@@ -293,7 +335,8 @@ class ReleaseCatalog:
                 raise CatalogError("release_not_found", "not_found")
             if not self._devices.set_pin(tx, device_id, tag):
                 raise CatalogError("device_not_found", "not_found")  # rolls back: no write
-            self._publisher.publish(FetchOsImage(tag=tag), within=tx, retry_terminal=True)
+            if (image := _os_image_job(release)) is not None:
+                self._publisher.publish(image, within=tx, retry_terminal=True)
             if (package := _package(release)) is not None:
                 self._publisher.publish(FetchPackage(sha256=package.sha256), within=tx,
                                         retry_terminal=True)
@@ -373,7 +416,8 @@ class ReleaseCatalog:
 
     # -- internals --------------------------------------------------------------------------------
 
-    def _resolve_base(self, tx: Transaction, request: NetbootBaseRequest) -> Resolution:
+    def _resolve_base(self, tx: Transaction,
+                      request: NetbootBaseRequest) -> NetbootCandidates | Unknown:
         serial = sanitize_serial(request.serial)
         device_id = device_id_for_serial(serial)
         device = None
@@ -386,12 +430,18 @@ class ReleaseCatalog:
             return Unknown("no_release")
         if choice.update is not None and device is not None:
             self._devices.apply(tx, device.device_id, choice.update)
-        with_image = {row.tag for row in releases if row.os_image is not None}
-        jobs = tuple(job for tag in choice.tags if tag in with_image
-                     and (job := _os_image_job(tag)) is not None)
+        by_tag = {row.tag: row for row in releases}
+        jobs: list[FetchOsImage] = []
+        tags: list[str] = []
+        for tag in choice.tags:  # preference order: the first tag shipping a tarball names it
+            row = by_tag.get(tag)
+            job = _os_image_job(row) if row is not None else None
+            if job is not None and job not in jobs:
+                jobs.append(job)
+                tags.append(tag)
         if not jobs:
             return Unknown("no_release")
-        return Candidates(jobs, pinned=choice.pinned)
+        return NetbootCandidates(tuple(jobs), pinned=choice.pinned, tags=tuple(tags))
 
     def _resolve_package(self, tx: Transaction, request: PackageRequest) -> Resolution:
         """A desired `.deb` resolves (a miss fetches it); any other known one only while it is

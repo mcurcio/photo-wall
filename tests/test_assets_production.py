@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from content_db import Reads, RecordingTransactions, facts_of, put_file
+from content_db import Reads, RecordingTransactions, facts_of, put_file, sha
 
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.assets.production import AssetProduction
@@ -29,9 +29,10 @@ OTHER = b"some other bytes " * 50
 facts = facts_of
 
 DEB_SHA = facts(GOOD).sha256
-OS_JOB = FetchOsImage(tag=TAG)
+TARBALL = sha("base tarball v1")
+OS_JOB = FetchOsImage(tarball_sha256=TARBALL)
 DEB_JOB = FetchPackage(sha256=DEB_SHA)
-OS_KEY = AssetKey(AssetKind.OS_IMAGE, TAG)
+OS_KEY = AssetKey(AssetKind.OS_IMAGE, TARBALL)
 DEB_KEY = AssetKey(AssetKind.PLAYER_DEB, DEB_SHA)
 LOCATOR = OriginLocator("https://example.test/a", sha256=None, size=None)
 
@@ -43,8 +44,8 @@ class Writer:
         self.data = data
         self.calls: list[tuple[object, object]] = []
 
-    async def __call__(self, temp, asset) -> None:
-        self.calls.append((temp, asset))
+    async def __call__(self, temp, locator) -> None:
+        self.calls.append((temp, locator))
         assert not temp.exists()
         if isinstance(self.data, BaseException):
             temp.write_bytes(b"partial")
@@ -156,7 +157,7 @@ def test_present_deb_differing_from_expectation_is_discarded_before_writing(worl
     world.put(DEB_KEY, OTHER)
     seen: list[bool] = []
 
-    async def write(temp, asset):
+    async def write(temp, locator):
         seen.append(world.store.layout.path(DEB_KEY).exists())
         temp.write_bytes(GOOD)
 
@@ -220,7 +221,7 @@ def test_cancellation_mid_write_discards_the_temp(world):
     world.reference(OS_KEY)
     started = asyncio.Event()
 
-    async def write(temp, asset):
+    async def write(temp, locator):
         temp.write_bytes(b"partial")
         started.set()
         await asyncio.sleep(3600)
@@ -237,28 +238,14 @@ def test_cancellation_mid_write_discards_the_temp(world):
     assert world.final(OS_KEY) is None
 
 
-def test_a_build_from_a_locator_recut_meanwhile_is_discarded_and_retried(world):
-    # The sync replaced the image's locator (and forgot its produced facts) while this
-    # production downloaded the old one: installing it would record the old build's facts.
-    world.reference(OS_KEY)
-    recut = OriginLocator("https://example.test/rebuilt", sha256=None, size=None)
-
-    async def write(temp, asset):
-        world.reference(OS_KEY, locator=recut)  # the sync, mid-production
-        temp.write_bytes(GOOD)
-
-    with pytest.raises(TransientFailure) as raised:
-        asyncio.run(world.production.produce(OS_JOB, write))
-    assert raised.value.reason == "reference_changed"
-    assert world.final(OS_KEY) is None
-    assert world.temps(AssetKind.OS_IMAGE) == []
-
-
-def test_after_a_recut_forgot_the_facts_the_new_build_is_produced(world):
-    # The reviewer's probe (PR #22 P1), at the records seam: without `forget_produced` this is
-    # TerminalFailure("not_reproducible") for good.
+def test_a_recut_is_a_new_key_and_is_produced(world):
+    # A re-cut names another tarball, so it is another asset: the old key's facts are never
+    # cleared, and the new build is recorded under its own key (no `not_reproducible`).
     world.reference(OS_KEY)
     world.produced(OS_KEY, facts(GOOD))
-    with world.reads.transactions.begin() as tx:
-        world.records.forget_produced(tx, OS_KEY)
-    assert world.produce(OS_JOB, Writer(OTHER)) == facts(OTHER)
+    recut = AssetKey(AssetKind.OS_IMAGE, sha("base tarball v1, re-cut"))
+    world.reference(recut)
+    assert world.produce(FetchOsImage(tarball_sha256=recut.identity), Writer(OTHER)) == facts(
+        OTHER)
+    assert world.final(recut) == OTHER
+    assert world.reads.asset(OS_KEY).produced == facts(GOOD)

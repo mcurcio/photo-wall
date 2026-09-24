@@ -65,6 +65,11 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def os_job(tag: str) -> FetchOsImage:
+    """The fetch of `release(tag)`'s OS image: keyed by its tarball sha."""
+    return FetchOsImage(tarball_sha256=sha(image(tag)))
+
+
 def digest(data: bytes) -> str:
     return "sha-256=" + base64.b64encode(hashlib.sha256(data).digest()).decode()
 
@@ -137,7 +142,7 @@ class World:
         return facts
 
     def cached_image(self, tag: str) -> bytes:
-        job = FetchOsImage(tag=tag)
+        job = os_job(tag)
         self.reference(job, owner=tag)
         self.produce(job, image(tag))
         return image(tag)
@@ -193,7 +198,7 @@ def test_nothing_to_boot_is_404_base_unknown(world, releases):
 
 def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(world):
     w = world(releases=[release(T1)], wait=0.2)
-    w.reference(FetchOsImage(tag=T1), owner=T1)
+    w.reference(os_job(T1), owner=T1)
     with TestClient(w.app) as client:
         response = base(client)
     assert response.status_code == 503
@@ -201,13 +206,13 @@ def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(world):
     assert response.headers["retry-after"] == "5"
     assert w.row().last_served_tag is None  # record_served only on a 200
     assert [(c.job, c.retry_terminal) for c in w.publisher.calls] == [
-        (FetchOsImage(tag=T1), True)]  # the request path may retry a terminal failure
+        (os_job(T1), True)]  # the request path may retry a terminal failure
     assert w.slots.in_use == 0
 
 
 def test_a_miss_is_served_once_the_fetch_lands(world):
     w = world(releases=[release(T1)])
-    job = FetchOsImage(tag=T1)
+    job = os_job(T1)
     w.reference(job, owner=T1)
     with TestClient(w.app) as client:
         result = {}
@@ -229,7 +234,7 @@ def test_a_miss_is_served_once_the_fetch_lands(world):
 ])
 def test_a_failed_fetch_is_503_with_its_reason(world, outcome, code, retry_after):
     w = world(releases=[release(T1)])
-    job = FetchOsImage(tag=T1)
+    job = os_job(T1)
     w.reference(job, owner=T1)
     with TestClient(w.app) as client:
         result = {}
@@ -249,15 +254,15 @@ def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(wor
     w = world(releases=[release(T1), release(T2)], devices=[
         dev(DEVICE_ID, serial=SERIAL, known_good_tag=T1),
         dev("device-other", known_good_tag=T2)])
-    w.reference(FetchOsImage(tag=T2), owner=T2)
+    w.reference(os_job(T2), owner=T2)
     data = w.cached_image(T1)
     with TestClient(w.app) as client:
         response = base(client)
     assert response.status_code == 200 and response.content == data
     # serving the substitute published the wanted tag's fetch (issue #24) in its read transaction
     assert [(c.job, c.retry_terminal, c.within is not None) for c in w.publisher.calls] == [
-        (FetchOsImage(tag=T2), True, True)]
-    assert w.publisher.inserted == [FetchOsImage(tag=T2)]
+        (os_job(T2), True, True)]
+    assert w.publisher.inserted == [os_job(T2)]
     assert w.row().last_served_tag == T1  # the substitute is what was served
 
 
@@ -274,7 +279,7 @@ def _asgi_get(path: str, headers: dict[str, str]):
 
 def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(world):
     w = world(releases=[release(T1)], wait=30)
-    w.reference(FetchOsImage(tag=T1), owner=T1)
+    w.reference(os_job(T1), owner=T1)
     sent: list[dict] = []
 
     async def main() -> None:
@@ -305,7 +310,7 @@ def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(world):
     asyncio.run(main())
     assert w.slots.in_use == 0  # freed at once, not after 30s
     assert sent[0]["status"] == 499
-    assert w.publisher.inserted == [FetchOsImage(tag=T1)]  # the fetch is never cancelled
+    assert w.publisher.inserted == [os_job(T1)]  # the fetch is never cancelled
     assert w.row().last_served_tag is None
 
 
@@ -557,7 +562,7 @@ def test_pin_and_unpin(world):
                             json={"tag": T1})
         assert pinned.status_code == 200 and pinned.json() == {"status": "pinned"}
         assert w.row().attached_tag == T1
-        assert FetchOsImage(tag=T1) in w.publisher.inserted
+        assert os_job(T1) in w.publisher.inserted
         cleared = client.delete(f"/v1/operator/devices/{DEVICE_ID}/pin", headers=AUTH)
         assert cleared.status_code == 200 and cleared.json() == {"status": "cleared"}
         assert w.row().attached_tag is None

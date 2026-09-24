@@ -13,8 +13,7 @@ from typing import Final
 from central.assets.os_image import extract_squashfs
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
-from central.kernel.assets import Asset, AssetReady
-from central.kernel.handling import OriginRejected, OriginUnavailable, TerminalFailure
+from central.kernel.assets import AssetReady, OriginLocator
 from central.kernel.job_types import AssetJob, FetchOsImage, FetchPackage, Prefetch
 from central.kernel.jobs import asset_key, job_keys
 from central.kernel.ports import AssetRecords, ContentCatalog, ReleaseOrigin
@@ -27,7 +26,10 @@ MAX_PACKAGE_BYTES: Final = 1024**3
 
 
 class FetchOsImageHandler:
-    """Download the newest reference's base tarball, then extract the squashfs off the loop."""
+    """Download one reference's base tarball, then extract the squashfs off the loop.
+
+    `AssetProduction` tries every reference, newest first; each names the same tarball (the key).
+    """
 
     def __init__(self, *, production: AssetProduction, origin: ReleaseOrigin,
                  store: CacheStore) -> None:
@@ -38,9 +40,10 @@ class FetchOsImageHandler:
     async def handle(self, job: FetchOsImage) -> AssetReady:
         return await self._production.produce(job, self._write)
 
-    async def _write(self, temp: Path, asset: Asset) -> None:
-        locator = asset.references[0].locator
-        tarball = await asyncio.to_thread(self._store.temp_path, asset.key)
+    async def _write(self, temp: Path, locator: OriginLocator) -> None:
+        # Beside `temp`, so it carries the temp prefix and is never mistaken for an asset; the
+        # download creates it `O_EXCL` and removes it on any failure.
+        tarball = temp.with_name(f"{temp.name}.tar.gz")
         try:
             await self._origin.download(locator, tarball,
                                         max_bytes=locator.size or MAX_TARBALL_BYTES)
@@ -52,7 +55,10 @@ class FetchOsImageHandler:
 
 
 class FetchPackageHandler:
-    """Download the `.deb` from its references, newest first; one file for every tag that ships it."""
+    """Download the `.deb` from one reference; one file for every tag that ships it.
+
+    `AssetProduction` tries every reference, newest first.
+    """
 
     def __init__(self, *, production: AssetProduction, origin: ReleaseOrigin) -> None:
         self._production = production
@@ -61,22 +67,8 @@ class FetchPackageHandler:
     async def handle(self, job: FetchPackage) -> AssetReady:
         return await self._production.produce(job, self._write)
 
-    async def _write(self, temp: Path, asset: Asset) -> None:
-        unavailable: OriginUnavailable | None = None
-        for ref in asset.references:
-            locator = ref.locator
-            try:
-                # `download` removes `temp` on any failure, so the next reference can reuse it.
-                await self._origin.download(locator, temp,
-                                            max_bytes=locator.size or MAX_PACKAGE_BYTES)
-                return
-            except OriginRejected:
-                continue
-            except OriginUnavailable as error:
-                unavailable = error
-        if unavailable is not None:
-            raise unavailable
-        raise TerminalFailure("all_references_rejected")
+    async def _write(self, temp: Path, locator: OriginLocator) -> None:
+        await self._origin.download(locator, temp, max_bytes=locator.size or MAX_PACKAGE_BYTES)
 
 
 class PrefetchHandler:

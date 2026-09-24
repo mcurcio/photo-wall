@@ -132,7 +132,7 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         if isinstance(served, Unavailable):
             return _unavailable("base", served)  # a miss records nothing about the device
         try:
-            await catalog.record_served(base, served.job)  # only after a 200
+            await catalog.record_served(base, resolution, served.job)  # only after a 200
         except BaseException:
             os.close(served.fd)
             raise

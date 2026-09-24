@@ -5,14 +5,17 @@ Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_typ
 
 One sync is: read the ETag and list releases (an origin failure propagates; the runtime records
 it); unless unchanged, one transaction per release (upsert, reference its `os-image` and
-`player-deb` keys, retire a re-cut `.deb` or a dropped image), then store the ETag; then a tail
+`player-deb` keys, retire the tag's reference to a re-cut or dropped `.deb` or OS image), then
+store the ETag; then a tail
 transaction (the stale-`pending` boot sweep, auto-promote, a fetch for every changed desired key,
 and `Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
 
 A `.deb` re-cut upstream after its bytes were produced is FROZEN, as main froze a `mirrored`
 tag as `divergent` (`central/app_releases.py` `upsert_discovered`, removed by the MVP): the
 tag keeps the sha it was produced with, and the new sha is neither referenced nor fetched. An OS
-image re-cut is taken instead (its old bytes are gone upstream): its produced facts are forgotten.
+image re-cut is taken instead (its old bytes are gone upstream). It is keyed by its base
+tarball's sha256, so a re-cut is a new key: the tag references the new key and retires its
+reference to the old one, whose row and produced facts stay (facts are never cleared).
 """
 
 from __future__ import annotations
@@ -77,15 +80,23 @@ class SyncReleasesHandler:
         if frozen is not None and not (previous is not None and previous.divergent):
             self._releases.mark_divergent(tx, tag)
         changed: set[AssetKey] = set()
-        image_key = asset_key(FetchOsImage(tag=tag))
-        if release.os_image is not None:
-            image = AssetReference(owner=tag, locator=release.os_image,
-                                   expected_size=None, expected_sha256=None)
-            if self._assets.reference(tx, image_key, image):
+        image = release.os_image
+        if image is not None:
+            assert image.sha256 is not None  # PublishedRelease guarantees a complete locator
+            image_key = asset_key(FetchOsImage(tarball_sha256=image.sha256))
+            reference = AssetReference(owner=tag, locator=image,
+                                       expected_size=None, expected_sha256=None)
+            if self._assets.reference(tx, image_key, reference):
                 changed.add(image_key)
-                self._forget_recut_image(tx, previous, release)
-        elif previous is not None and previous.os_image is not None:
-            self._assets.retire(tx, image_key, tag)  # the release dropped its image
+        old_image = previous.os_image if previous is not None else None
+        if old_image is not None and old_image.sha256 is not None and (
+                image is None or image.sha256 != old_image.sha256):
+            if image is not None:
+                LOG.warning("release %s: OS image re-cut upstream (%s -> %s); the new build is "
+                            "referenced under its own key", tag, old_image.sha256, image.sha256)
+            # re-cut or dropped: the old key keeps its row and facts
+            self._assets.retire(
+                tx, asset_key(FetchOsImage(tarball_sha256=old_image.sha256)), tag)
         package = release.package
         if package is not None:
             assert package.sha256 is not None  # PublishedRelease guarantees a complete locator
@@ -99,20 +110,6 @@ class SyncReleasesHandler:
                 package is None or package.sha256 != old.sha256):
             self._assets.retire(tx, asset_key(FetchPackage(sha256=old.sha256)), tag)  # re-cut
         return changed
-
-    def _forget_recut_image(self, tx: Transaction, previous: ReleaseRow | None,
-                            release: PublishedRelease) -> None:
-        """An OS image rebuilt under its tag (release.yml re-uploads with `--clobber`) replaces
-        the old build, whose bytes are gone upstream: clear the produced facts so the next fetch
-        records the new build instead of failing `not_reproducible` for good. Main overwrote the
-        stored hash on every fetch. A `.deb` never needs this: its key is its sha."""
-        old = previous.os_image if previous is not None else None
-        new = release.os_image
-        if old is None or new is None or (old.sha256, old.size) == (new.sha256, new.size):
-            return
-        LOG.warning("release %s: OS image re-cut upstream (%s -> %s); its produced facts are "
-                    "cleared so the new build is fetched", release.tag, old.sha256, new.sha256)
-        self._assets.forget_produced(tx, asset_key(FetchOsImage(tag=release.tag)))
 
     def _frozen_package(self, tx: Transaction, release: PublishedRelease) -> OriginLocator | None:
         """The `.deb` the tag must keep, or None when the upstream facts may be taken.

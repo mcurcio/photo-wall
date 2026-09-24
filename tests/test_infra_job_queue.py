@@ -56,7 +56,7 @@ class Mixed(Job[None], name="test.job_queue_mixed",
 
 
 def catalog_instances() -> list[Job]:
-    samples = {FetchOsImage: FetchOsImage(tag="v1.2.3-rc.1"), FetchPackage: FetchPackage(sha256=SHA)}
+    samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32), FetchPackage: FetchPackage(sha256=SHA)}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 
@@ -178,7 +178,7 @@ def test_task_decodes_and_runs_the_body():
         seen.append((job, attempt))
 
     app = build_app(connector(), (FetchOsImage, SyncReleases), body)
-    job = FetchOsImage(tag="v2.0.0")
+    job = FetchOsImage(tarball_sha256="2" * 64)
 
     async def run():
         for name, kwargs in ((task_name(FetchOsImage), job_kwargs(job, attempt=2)),
@@ -306,7 +306,7 @@ def test_repository_refuses_a_fake_transaction():
 
 def test_outcomes_upsert_sequence_and_purge(registry):
     transactions, outcomes = PgTransactions(registry.db), JobOutcomes()
-    job, other = FetchOsImage(tag="v1.0.0"), SyncReleases()
+    job, other = FetchOsImage(tarball_sha256="1" * 64), SyncReleases()
     lock = job_keys(job).lock
     with transactions.begin() as tx:
         assert outcomes.get(tx, lock) is None
