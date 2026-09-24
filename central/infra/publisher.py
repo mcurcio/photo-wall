@@ -1,7 +1,9 @@
 """The procrastinate `Publisher` (kernel contract PB1-PB9, `central/kernel/publishing.py`).
 
-`publish` runs in the caller's transaction: it reads the key's latest outcome (`since`), then
-defers through `job_queue.defer`, whose SAVEPOINT keeps a merge from aborting the caller's work.
+`publish` runs in a SAVEPOINT of the caller's transaction (PB5): it reads the key's latest
+outcome (`since`), then defers through `job_queue.defer`, whose own savepoint turns a merge into
+success. A failed statement in either rolls back only the savepoint, so a caller that catches a
+publish failure keeps a working transaction.
 Inside a retry window, or after a terminal outcome without `retry_terminal`, it inserts nothing
 and returns a `SettledHandle`.
 
@@ -66,16 +68,18 @@ class ProcrastinatePublisher:
             raise TypeError(f"{type(job).__name__} is not published by this publisher")
         if within.state != "open":
             raise RuntimeError("transaction_not_open")
-        latest = self._outcomes.get(within, keys.lock)
-        now = self._clock.utc()
-        if (latest is not None and latest.status == "transient"
-                and latest.retry_not_before is not None and latest.retry_not_before > now):
-            return SettledHandle(Failed(  # PB2
-                False, latest.reason or "", timedelta(seconds=latest.retry_not_before - now)))
-        if latest is not None and latest.status == "terminal" and not retry_terminal:
-            return SettledHandle(Failed(True, latest.reason or "", None))  # PB3
-        since = latest.seq if latest is not None else 0  # PB4: since first, then defer
-        defer(self._app, job, attempt=0, connection=pg_connection(within))  # PB5: a savepoint
+        connection = pg_connection(within)
+        with connection.transaction():  # PB5: the whole publish, outcome read included
+            latest = self._outcomes.get(within, keys.lock)
+            now = self._clock.utc()
+            if (latest is not None and latest.status == "transient"
+                    and latest.retry_not_before is not None and latest.retry_not_before > now):
+                return SettledHandle(Failed(  # PB2
+                    False, latest.reason or "", timedelta(seconds=latest.retry_not_before - now)))
+            if latest is not None and latest.status == "terminal" and not retry_terminal:
+                return SettledHandle(Failed(True, latest.reason or "", None))  # PB3
+            since = latest.seq if latest is not None else 0  # PB4: since first, then defer
+            defer(self._app, job, attempt=0, connection=connection)
         return _OutcomeHandle(self, job, keys.lock, since, within)
 
     async def publish_now(self, job: Job[R], *, retry_terminal: bool = False) -> JobHandle[R]:

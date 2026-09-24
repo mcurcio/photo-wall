@@ -25,6 +25,7 @@ from central.infra.asset_records import PgAssetRecords
 from central.infra.job_queue import decode
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
+from central.infra.transactions import pg_connection
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage
 from central.kernel.jobs import asset_key
@@ -120,19 +121,14 @@ def test_first_present_candidate_is_opened_in_one_read(world_at):
     world.record(NEW)  # recorded but never produced
     world.record(OLD, FACTS)
     world.put(OLD)
-
-    async def run():
-        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
-        await until(lambda: world.publisher.calls)  # the substitute's background publish
-        return result
-
-    result = asyncio.run(run())
+    result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
     assert isinstance(result, Opened)
     assert (result.job, result.size, result.sha256) == (OLD, FACTS.size, FACTS.sha256)
     assert served(result) == DATA
-    assert world.transactions.begun[0].state == "committed"
-    [call] = world.publisher.calls  # the wanted candidate, as a request (decision 3)
-    assert (call.job, call.retry_terminal, call.within) == (NEW, True, None)
+    read = world.transactions.begun[0]
+    assert read.state == "committed"
+    [call] = world.publisher.calls  # the wanted candidate, as a request (decision 3), in the read
+    assert (call.job, call.retry_terminal, call.within) == (NEW, True, read)
 
 
 def test_the_wanted_candidate_on_disk_publishes_nothing(world_at):
@@ -141,13 +137,7 @@ def test_the_wanted_candidate_on_disk_publishes_nothing(world_at):
     world.put(NEW)
     world.record(OLD, FACTS)
     world.put(OLD)
-
-    async def run():
-        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
-        assert asyncio.all_tasks() == {asyncio.current_task()}  # nothing left running
-        return result
-
-    result = asyncio.run(run())
+    result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
     assert result.job == NEW
     assert served(result) == DATA
     assert world.publisher.calls == []
@@ -350,31 +340,20 @@ def test_a_touch_failure_is_logged_and_never_fails_the_serve(world_at, caplog):
 # -- a substitute serve publishes the wanted fetch (issue #24), on the real queue ----------------
 
 
-async def eventually(predicate, seconds: float = 5.0) -> None:
-    deadline = asyncio.get_running_loop().time() + seconds
-    while not predicate():
-        assert asyncio.get_running_loop().time() < deadline, "condition never held"
-        await asyncio.sleep(0.01)
-
-
-def test_a_substitute_serve_queues_exactly_one_fetch_for_the_wanted_key(world_at):
+def test_a_substitute_serve_queues_exactly_one_fetch_committed_with_the_serve(world_at):
     world = world_at(queue=ProcrastinatePublisher)
     world.record(NEW)  # wanted, never produced
     world.record(OLD, FACTS)
     world.put(OLD)
     candidates = Candidates((NEW, OLD), pinned=False)
-
-    async def run():
-        first = await world.reader.read(candidates)
-        await eventually(lambda: world.pending())
-        second = await world.reader.read(candidates)  # merges into the pending copy
-        await eventually(lambda: not asyncio.all_tasks() - {asyncio.current_task()})
-        return first, second
-
-    first, second = asyncio.run(run())
+    own = len(world.reads.transactions.begun)  # `publish_now`'s transactions, were it used
+    first = asyncio.run(world.reader.read(candidates))
+    assert world.pending() == [NEW]  # committed by the time the serve returns
+    second = asyncio.run(world.reader.read(candidates))  # merges into the pending copy
     assert served(first) == DATA and served(second) == DATA
     assert (first.job, second.job) == (OLD, OLD)
     assert world.pending() == [NEW]
+    assert len(world.reads.transactions.begun) == own  # no transaction of the publisher's own
 
 
 def test_a_wanted_serve_queues_nothing(world_at):
@@ -383,67 +362,54 @@ def test_a_wanted_serve_queues_nothing(world_at):
     world.put(NEW)
     world.record(OLD, FACTS)
     world.put(OLD)
-
-    async def run():
-        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
-        assert asyncio.all_tasks() == {asyncio.current_task()}
-        return result
-
-    assert served(asyncio.run(run())) == DATA
+    assert served(asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))) == DATA
     assert world.pending() == []
 
 
-class HeldPublisher(ProcrastinatePublisher):
-    """`publish_now` waits for `release` first: a serve that awaited it would never return."""
+class FailingOutcomeRead(JobOutcomes):
+    """The publish's outcome read fails as a real statement in the serve's transaction."""
 
-    release: asyncio.Event
-
-    async def publish_now(self, job, *, retry_terminal=False):
-        await self.release.wait()
-        return await super().publish_now(job, retry_terminal=retry_terminal)
+    def get(self, tx, lock_key):
+        return pg_connection(tx).execute("SELECT 1/0").fetchone()
 
 
-def test_a_substitute_serve_never_waits_on_its_publish(world_at):
-    world = world_at(queue=HeldPublisher)
-    world.record(NEW)
-    world.record(OLD, FACTS)
-    world.put(OLD)
-
-    async def run():
-        world.publisher.release = asyncio.Event()
-        result = await asyncio.wait_for(
-            world.reader.read(Candidates((NEW, OLD), pinned=False)), timeout=5)
-        assert world.pending() == []  # served while the publish is still held
-        world.publisher.release.set()
-        await eventually(lambda: world.pending())
-        return result
-
-    result = asyncio.run(run())
-    assert result.job == OLD and served(result) == DATA
-    assert world.pending() == [NEW]
-
-
-class RaisingPublisher(ProcrastinatePublisher):
-    async def publish_now(self, job, *, retry_terminal=False):
-        raise RuntimeError("queue down")
+class FailingPublisher(ProcrastinatePublisher):
+    def __init__(self, dsn, **options) -> None:
+        super().__init__(dsn, **{**options, "outcomes": FailingOutcomeRead()})
 
 
 def test_a_publish_failure_is_logged_and_never_fails_the_substitute_serve(world_at, caplog):
-    world = world_at(queue=RaisingPublisher)
+    world = world_at(queue=FailingPublisher)
+    world.record(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    with caplog.at_level(logging.WARNING, logger="central.assets.reader"):
+        result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+    assert result.job == OLD and served(result) == DATA
+    assert "failed while serving a substitute" in caplog.text
+    assert "division by zero" in caplog.text
+    assert world.transactions.begun[0].state == "committed"
+    assert world.pending() == []
+
+
+def test_a_disconnect_during_a_substitute_open_still_commits_its_publish(world_at, tmp_path):
+    store = BlockingStore(CacheLayout(tmp_path))
+    world = world_at(store=store, queue=ProcrastinatePublisher)
     world.record(NEW)
     world.record(OLD, FACTS)
     world.put(OLD)
 
     async def run():
-        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
-        await eventually(lambda: "failed after serving a substitute" in caplog.text)
-        return result
+        task = asyncio.create_task(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+        await asyncio.to_thread(store.entered.wait, 5)
+        task.cancel()  # the route's disconnect watcher
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        store.release.set()
+        await until(lambda: store.fds and fd_closed(store.fds[0]))
 
-    with caplog.at_level(logging.WARNING, logger="central.assets.reader"):
-        result = asyncio.run(run())
-    assert result.job == OLD and served(result) == DATA
-    assert "queue down" in caplog.text
-    assert world.pending() == []
+    asyncio.run(run())
+    assert world.pending() == [NEW]  # the shielded open's transaction committed the publish
 
 
 # -- WaiterSlots ----------------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import Any
 
 import procrastinate
+import psycopg
 import pytest
 from fakes.publisher import PublishedCall, RecordingPublisher
 from procrastinate.periodic import PeriodicDeferrer
@@ -501,6 +502,20 @@ def test_adapter_refuses_a_registered_type_it_does_not_publish(registry):
     with h.transactions.begin() as tx:
         with pytest.raises(TypeError):
             publisher.publish(Pair(a="x", b="y"), within=tx)
+
+
+def test_adapter_a_failed_statement_inside_publish_leaves_the_caller_transaction_working(registry):
+    """PB5 covers the whole publish: a caller that catches a publish failure keeps its work."""
+    h = ProcrastinateHarness(registry)
+    with h.transactions.begin() as tx:
+        h.outcomes.after_get = lambda: pg_connection(tx).execute("SELECT 1/0")
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            h.publisher.publish(Pair(a="x", b="1"), within=tx)
+        h.outcomes.after_get = None
+        h.caller_write(tx)  # would be InFailedSqlTransaction had the failure aborted `tx`
+        h.publisher.publish(Pair(a="x", b="2"), within=tx)
+    assert h.caller_writes() == 1
+    assert h.inserted() == [Pair(a="x", b="2")]
 
 
 def test_the_worker_publisher_has_no_feed_to_wait_on(registry):

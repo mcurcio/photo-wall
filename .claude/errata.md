@@ -989,3 +989,34 @@ doc softenings.
   row ("current OS and `.deb` for unpinned devices") needs "served within the last 30 days". §3's
   Catalog row and §5's Catalog entries row ("pin, promote") do not say that a promotion records
   who set it, or that the sync moves only its own.
+
+## 2026-09-24 — PR #27 review: substitute-serve publish moves into the open's transaction (#24)
+
+- **The #24 background task is replaced.** `AssetReader._open_first` now publishes the wanted
+  (first) candidate with `Publisher.publish(jobs[0], within=tx, retry_terminal=True)` inside the
+  transaction that opened the substitute, so the fetch commits with the serve. Deleted:
+  `_background`, `_publish_in_background` and `_publish_logged`. Reasons:
+  - nothing drained the task set at shutdown, so the lifespan closed the DB under in-flight
+    publishes;
+  - each substitute serve took an extra pool connection outside the `WaiterSlots` bulkhead;
+  - it contradicted the reader's own no-in-process-coalescing rationale.
+
+  A publish failure is caught and logged, and never fails the serve. A client disconnect does
+  not cancel it: the open runs shielded on a worker thread.
+- **ProcrastinatePublisher violated PB5.** Its outcome read ran on the caller's connection,
+  OUTSIDE the `defer` savepoint, so a failing read aborted the caller's transaction. A caught
+  failure followed by a commit silently became a ROLLBACK: PostgreSQL answers COMMIT on an
+  aborted transaction with the tag ROLLBACK, and psycopg does not raise. Meanwhile
+  `PgTransaction.state` reported "committed".
+  - Fixed: the whole publish (outcome read and defer) now runs in one savepoint of `within`.
+  - Guarded by `test_adapter_a_failed_statement_inside_publish_leaves_the_caller_transaction_working`.
+  - Cost: one extra SAVEPOINT/RELEASE round trip per publish, for every caller.
+- **Costs of the new shape.**
+  1. `retry_terminal=True` on a substitute serve: an unauthenticated LAN client can keep a
+     terminally failed release re-downloading back to back. Accepted by the owner 2026-09-24.
+  2. The substitute check now lives in `_open_first`. A future path that serves a substitute
+     outside `_open_first` must publish there too.
+  3. The publish adds one savepoint round trip to the serve's open transaction. It uses the
+     connection already held, so there is no extra pool pressure.
+- **Docs bead:** any doc text saying the substitute publish is "in the background" or "not
+  awaited" is now wrong. It is synchronous, inside the open's transaction.

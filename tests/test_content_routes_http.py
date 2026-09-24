@@ -253,10 +253,11 @@ def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(wor
     data = w.cached_image(T1)
     with TestClient(w.app) as client:
         response = base(client)
-        # serving the substitute publishes the wanted tag's fetch (issue #24), not awaited
-        until(lambda: [(c.job, c.retry_terminal) for c in w.publisher.calls]
-              == [(FetchOsImage(tag=T2), True)])
     assert response.status_code == 200 and response.content == data
+    # serving the substitute published the wanted tag's fetch (issue #24) in its read transaction
+    assert [(c.job, c.retry_terminal, c.within is not None) for c in w.publisher.calls] == [
+        (FetchOsImage(tag=T2), True, True)]
+    assert w.publisher.inserted == [FetchOsImage(tag=T2)]
     assert w.row().last_served_tag == T1  # the substitute is what was served
 
 

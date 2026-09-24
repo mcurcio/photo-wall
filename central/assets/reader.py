@@ -1,12 +1,13 @@
 """The read-through path every asset request takes (design §1 rule 2, §6(b)-(c), §10.2).
 
 Open the first candidate on disk. When that is the first (wanted) candidate, publish nothing;
-when it is a substitute, publish the wanted candidate's fetch job in the background and serve
-without waiting on it (a publish failure is logged, never served). Otherwise take a waiter slot,
-publish the first candidate's fetch job and await its handle up to `wait_timeout`, then open it
-or report why not. Every request publish sets `retry_terminal` (decision 3). The route cancels
-`read` when the client disconnects; cancellation releases the slot, closes any fd opened but not
-returned, and never cancels a job or a background publish.
+when it is a substitute, publish the wanted candidate's fetch job in the same transaction as the
+open (PB5's savepoint keeps a failed publish from aborting it; the failure is logged, never
+served). Otherwise take a waiter slot, publish the first candidate's fetch job and await its
+handle up to `wait_timeout`, then open it or report why not. Every request publish sets
+`retry_terminal` (decision 3). The route cancels `read` when the client disconnects;
+cancellation releases the slot, closes any fd opened but not returned, and never cancels a job
+or the open's transaction (the open is shielded, so its publish still commits).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords, Candidates
 from central.kernel.publishing import Failed, JobHandle, Pending, Publisher, Ready
-from central.kernel.transactions import Transactions
+from central.kernel.transactions import Transaction, Transactions
 from contracts.time import Clock
 
 LOG = logging.getLogger("central.assets.reader")
@@ -121,7 +122,6 @@ class AssetReader:
         self._wait_timeout = wait_timeout
         self._touch_interval = touch_interval.total_seconds()
         self._touched: dict[AssetKey, float] = {}  # per process: key -> last touch attempt
-        self._background: set[asyncio.Task[None]] = set()  # strong refs until each publish ends
 
     async def read(self, candidates: Candidates) -> Opened | Unavailable:
         wanted = candidates.jobs[0]
@@ -136,8 +136,6 @@ class AssetReader:
                 return result
             opened = result
         try:
-            if opened.job != wanted:  # any substitute, however it was opened
-                self._publish_in_background(wanted)
             await self._touch(opened.job)
         except BaseException:  # cancelled after the open: the caller will never own the fd
             os.close(opened.fd)
@@ -145,21 +143,8 @@ class AssetReader:
         return opened
 
     async def _publish_request(self, job: AssetJob) -> JobHandle[AssetReady]:
-        """The one request-originated publish: a request may retry a terminal (decision 3)."""
+        """A miss's publish: a request may retry a terminal (decision 3)."""
         return await self._publisher.publish_now(job, retry_terminal=True)
-
-    def _publish_in_background(self, job: AssetJob) -> None:
-        """Publish `job` in a task this serve never awaits; the read's cancellation spares it."""
-        task = asyncio.get_running_loop().create_task(self._publish_logged(job))
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
-
-    async def _publish_logged(self, job: AssetJob) -> None:
-        try:
-            await self._publish_request(job)
-        except Exception:
-            LOG.warning("fetch publish for %s failed after serving a substitute", asset_key(job),
-                        exc_info=True)
 
     async def _produce_and_open(self, job: AssetJob) -> Opened | Unavailable:
         handle = await self._publish_request(job)
@@ -179,7 +164,8 @@ class AssetReader:
         return Unavailable("timeout", _TIMEOUT_RETRY_SECONDS)
 
     def _open_first(self, jobs: tuple[AssetJob, ...]) -> Opened | None:
-        """One read transaction: the first candidate with produced facts whose file opens."""
+        """One transaction: the first candidate with produced facts whose file opens; serving a
+        substitute also publishes the wanted (first) candidate's fetch, committed with it."""
         opened: Opened | None = None
         try:
             with self._transactions.begin() as tx:
@@ -190,11 +176,24 @@ class AssetReader:
                     opened = self._open(job, asset.produced)
                     if opened is not None:
                         break
+                if opened is not None and opened.job != jobs[0]:
+                    self._publish_wanted(jobs[0], tx)
         except BaseException:  # e.g. the commit failed after an open: nobody owns the fd
             if opened is not None:
                 os.close(opened.fd)
             raise
         return opened
+
+    def _publish_wanted(self, job: AssetJob, tx: Transaction) -> None:
+        """A substitute serve's request publish (decision 3); a failure is logged, never served.
+
+        PB5 runs the publish in a savepoint of `tx`, so a failed statement leaves `tx` usable.
+        """
+        try:
+            self._publisher.publish(job, within=tx, retry_terminal=True)
+        except Exception:
+            LOG.warning("fetch publish for %s failed while serving a substitute", asset_key(job),
+                        exc_info=True)
 
     def _open(self, job: AssetJob, facts: AssetReady) -> Opened | None:
         file = self._store.open(asset_key(job), facts)
