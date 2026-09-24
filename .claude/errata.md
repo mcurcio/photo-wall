@@ -886,3 +886,24 @@ doc softenings.
   their comments (checksum-pinned, left as is). The reviewer's probe
   (`scratchpad/probe_recut.py`) imports the deleted fake; its scenario is now
   `test_a_recut_os_image_is_produced_again_after_a_cache_wipe`.
+
+## 2026-09-23 — follow-ups: issue #24
+
+- **The design says a substitute serve publishes nothing. That is the bug.** `AssetReader.read`
+  now publishes the FIRST candidate's fetch job whenever the candidate it serves is any other
+  one. The check is on the served job after either path, so a future path that serves a
+  substitute is covered too. The publish runs in a background task through
+  `Publisher.publish_now(..., retry_terminal=True)`, the same request publish as a miss (the
+  owner ruled a request may retry a terminal). The serve never awaits it, the read's
+  cancellation does not cancel it, and a failure is logged (`"fetch publish for ... failed
+  after serving a substitute"`) and never fails the serve. Doc text that is now wrong, for the
+  docs bead: `docs/central-system-architecture.md` §6(b) ("No job is published" is true only
+  when the first candidate is the one opened), the §10.2 `read` sketch
+  (`# on disk: publish nothing`), §3's Assets row ("open, else publish ...") and §4's
+  Published-by column for `FetchOsImage`/`FetchPackage` ("HTTP miss; Prefetch" needs "HTTP
+  substitute serve").
+- **Costs of the chosen shape.** One short DB write per substitute serve, merged by the job's
+  queueing lock. There is no in-process coalescing, because that would restate dedupe at the
+  call site. A background publish still in flight at process shutdown is dropped; the next
+  `Prefetch` or request re-publishes it. Only `FetchOsImage` substitutes today (a package
+  request resolves to one sha256), but the rule is kind-agnostic.

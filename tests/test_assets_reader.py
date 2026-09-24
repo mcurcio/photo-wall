@@ -1,6 +1,7 @@
 """`AssetReader.read` and `WaiterSlots`, with `RecordingPublisher` settling via `record_outcome`.
 
 The Asset records are the real table (PostgreSQL, the `registry` fixture); `WaiterSlots` needs none.
+The substitute-serve tests (issue #24) publish through `ProcrastinatePublisher` onto the real queue.
 """
 
 from __future__ import annotations
@@ -15,11 +16,15 @@ from datetime import timedelta
 import pytest
 from content_db import Reads, RecordingTransactions, put_file
 from fakes.publisher import RecordingPublisher
+from runtime_fakes import apply_procrastinate_schema
 
 from central.assets.layout import CacheLayout
 from central.assets.reader import AssetReader, Opened, SlotsFull, Unavailable, WaiterSlots
 from central.assets.store import CacheStore
 from central.infra.asset_records import PgAssetRecords
+from central.infra.job_queue import decode
+from central.infra.outcomes import JobOutcomes
+from central.infra.publisher import ProcrastinatePublisher
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage
 from central.kernel.jobs import asset_key
@@ -45,14 +50,22 @@ def fd_closed(fd: int) -> bool:
 class World:
     def __init__(self, registry, tmp_path, *, capacity: int = 4, wait: float = 5.0,
                  records: PgAssetRecords | None = None,
-                 store: CacheStore | None = None) -> None:
+                 store: CacheStore | None = None,
+                 queue: type[ProcrastinatePublisher] | None = None) -> None:
+        self.db = registry.db
         self.clock = ManualClock(1000.0)
         self.store = store or CacheStore(CacheLayout(tmp_path))
         self.records = records or PgAssetRecords(self.clock)
         self.transactions = RecordingTransactions(registry.db)
         self.reads = Reads(RecordingTransactions(registry.db))
-        self.publisher = RecordingPublisher(self.clock, assets=self.records,
-                                            transactions=self.reads.transactions)
+        if queue is None:
+            self.publisher = RecordingPublisher(self.clock, assets=self.records,
+                                                transactions=self.reads.transactions)
+        else:  # the real queue; nothing here waits on a handle, so no OutcomeFeed
+            apply_procrastinate_schema(registry.db.dsn)
+            self.publisher = queue(registry.db.dsn, transactions=self.reads.transactions,
+                                   outcomes=JobOutcomes(), assets=self.records,
+                                   clock=self.clock, feed=None)
         self.slots = WaiterSlots(capacity)
         self.reader = AssetReader(store=self.store, records=self.records,
                                   transactions=self.transactions, publisher=self.publisher,
@@ -68,6 +81,13 @@ class World:
 
     def put(self, job, data: bytes = DATA) -> None:
         put_file(self.store, asset_key(job), data)
+
+    def pending(self) -> list:
+        """The queue's `todo` jobs, decoded (real queue only)."""
+        with self.db.transaction() as conn:
+            rows = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
+                                "WHERE status = 'todo' ORDER BY id").fetchall()
+        return [decode(row["task_name"], row["args"])[0] for row in rows]
 
 
 @pytest.fixture
@@ -95,17 +115,42 @@ async def until(predicate) -> None:
 # -- fast path (flow b) ---------------------------------------------------------------------------
 
 
-def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(world_at):
+def test_first_present_candidate_is_opened_in_one_read(world_at):
     world = world_at()
     world.record(NEW)  # recorded but never produced
     world.record(OLD, FACTS)
     world.put(OLD)
-    result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+
+    async def run():
+        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
+        await until(lambda: world.publisher.calls)  # the substitute's background publish
+        return result
+
+    result = asyncio.run(run())
     assert isinstance(result, Opened)
     assert (result.job, result.size, result.sha256) == (OLD, FACTS.size, FACTS.sha256)
     assert served(result) == DATA
-    assert world.publisher.calls == []
     assert world.transactions.begun[0].state == "committed"
+    [call] = world.publisher.calls  # the wanted candidate, as a request (decision 3)
+    assert (call.job, call.retry_terminal, call.within) == (NEW, True, None)
+
+
+def test_the_wanted_candidate_on_disk_publishes_nothing(world_at):
+    world = world_at()
+    world.record(NEW, FACTS)
+    world.put(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+
+    async def run():
+        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
+        assert asyncio.all_tasks() == {asyncio.current_task()}  # nothing left running
+        return result
+
+    result = asyncio.run(run())
+    assert result.job == NEW
+    assert served(result) == DATA
+    assert world.publisher.calls == []
 
 
 def test_a_candidate_whose_file_is_absent_or_wrong_is_skipped(world_at):
@@ -300,6 +345,105 @@ def test_a_touch_failure_is_logged_and_never_fails_the_serve(world_at, caplog):
         result = asyncio.run(world.reader.read(Candidates((NEW,), pinned=True)))
     assert served(result) == DATA
     assert "touch failed" in caplog.text
+
+
+# -- a substitute serve publishes the wanted fetch (issue #24), on the real queue ----------------
+
+
+async def eventually(predicate, seconds: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + seconds
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition never held"
+        await asyncio.sleep(0.01)
+
+
+def test_a_substitute_serve_queues_exactly_one_fetch_for_the_wanted_key(world_at):
+    world = world_at(queue=ProcrastinatePublisher)
+    world.record(NEW)  # wanted, never produced
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    candidates = Candidates((NEW, OLD), pinned=False)
+
+    async def run():
+        first = await world.reader.read(candidates)
+        await eventually(lambda: world.pending())
+        second = await world.reader.read(candidates)  # merges into the pending copy
+        await eventually(lambda: not asyncio.all_tasks() - {asyncio.current_task()})
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert served(first) == DATA and served(second) == DATA
+    assert (first.job, second.job) == (OLD, OLD)
+    assert world.pending() == [NEW]
+
+
+def test_a_wanted_serve_queues_nothing(world_at):
+    world = world_at(queue=ProcrastinatePublisher)
+    world.record(NEW, FACTS)
+    world.put(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+
+    async def run():
+        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+        return result
+
+    assert served(asyncio.run(run())) == DATA
+    assert world.pending() == []
+
+
+class HeldPublisher(ProcrastinatePublisher):
+    """`publish_now` waits for `release` first: a serve that awaited it would never return."""
+
+    release: asyncio.Event
+
+    async def publish_now(self, job, *, retry_terminal=False):
+        await self.release.wait()
+        return await super().publish_now(job, retry_terminal=retry_terminal)
+
+
+def test_a_substitute_serve_never_waits_on_its_publish(world_at):
+    world = world_at(queue=HeldPublisher)
+    world.record(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+
+    async def run():
+        world.publisher.release = asyncio.Event()
+        result = await asyncio.wait_for(
+            world.reader.read(Candidates((NEW, OLD), pinned=False)), timeout=5)
+        assert world.pending() == []  # served while the publish is still held
+        world.publisher.release.set()
+        await eventually(lambda: world.pending())
+        return result
+
+    result = asyncio.run(run())
+    assert result.job == OLD and served(result) == DATA
+    assert world.pending() == [NEW]
+
+
+class RaisingPublisher(ProcrastinatePublisher):
+    async def publish_now(self, job, *, retry_terminal=False):
+        raise RuntimeError("queue down")
+
+
+def test_a_publish_failure_is_logged_and_never_fails_the_substitute_serve(world_at, caplog):
+    world = world_at(queue=RaisingPublisher)
+    world.record(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+
+    async def run():
+        result = await world.reader.read(Candidates((NEW, OLD), pinned=False))
+        await eventually(lambda: "failed after serving a substitute" in caplog.text)
+        return result
+
+    with caplog.at_level(logging.WARNING, logger="central.assets.reader"):
+        result = asyncio.run(run())
+    assert result.job == OLD and served(result) == DATA
+    assert "queue down" in caplog.text
+    assert world.pending() == []
 
 
 # -- WaiterSlots ----------------------------------------------------------------------------------

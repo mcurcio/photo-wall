@@ -253,9 +253,11 @@ def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(wor
     data = w.cached_image(T1)
     with TestClient(w.app) as client:
         response = base(client)
+        # serving the substitute publishes the wanted tag's fetch (issue #24), not awaited
+        until(lambda: [(c.job, c.retry_terminal) for c in w.publisher.calls]
+              == [(FetchOsImage(tag=T2), True)])
     assert response.status_code == 200 and response.content == data
     assert w.row().last_served_tag == T1  # the substitute is what was served
-    assert w.publisher.calls == []
 
 
 def _asgi_get(path: str, headers: dict[str, str]):
