@@ -8,21 +8,66 @@ it). Rows go in through the repositories, or as SQL for tables no repository wri
 from __future__ import annotations
 
 import hashlib
+import os
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
+import psycopg
+import pytest
+from psycopg.conninfo import make_conninfo
+from runtime_fakes import apply_procrastinate_schema
 from test_registry import enroll, frame
 
 from central.assets.store import CacheStore
-from central.content_catalog.ports import DeviceRow, Promoter, Promotion, ReleaseRow
+from central.content_catalog.ports import DeviceRow, Promoter, Promotion, ReleaseRow, StoredEtag
+from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransaction, PgTransactions, pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.ports import PublishedRelease
 from contracts.time import ManualClock
+
+MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
+
+
+@contextmanager
+def schema_before(first_unapplied: str) -> Iterator[Database]:
+    """A fresh schema migrated through the migration before `first_unapplied` (a file-name
+    prefix, e.g. "028"), with procrastinate installed; `Database.migrate()` then applies the
+    rest. Skips without PHOTO_WALL_TEST_DATABASE_URL."""
+    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
+    schema = "pw_test_" + uuid.uuid4().hex
+    conninfo = make_conninfo(dsn, options=f"-c search_path={schema}")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
+    db = None
+    try:
+        with psycopg.connect(conninfo) as conn:
+            conn.execute("""CREATE TABLE schema_migrations (
+                name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            for path in sorted(MIGRATIONS.glob("*.sql")):
+                if path.name >= first_unapplied:
+                    break
+                sql = path.read_text()
+                conn.execute(sql)
+                conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
+                             (path.name, hashlib.sha256(sql.encode()).hexdigest()))
+        apply_procrastinate_schema(conninfo)
+        db = Database(conninfo)
+        yield db
+    finally:
+        if db is not None:
+            db.close()
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
+                psycopg.sql.Identifier(schema)))
 
 
 class RecordingTransactions(PgTransactions):
@@ -44,28 +89,31 @@ def sha(text: str) -> str:
 
 
 def published(row: ReleaseRow) -> PublishedRelease:
-    """The listing entry that stores `row` (the inverse of `PgReleaseRecords.get`)."""
+    """The listing entry that stores `row` (the inverse of `PgReleaseRecords.get`), with no
+    upstream version: any later observation applies over it."""
     return PublishedRelease(row.tag, row.is_prerelease, row.package,
-                            None if row.package else "no_player_asset", row.os_image)
+                            None if row.package else "no_player_asset", row.os_image, None)
 
 
 def seed_releases(transactions: PgTransactions, rows, *, promoted: str | None = None,
                   promoted_by: Promoter = "operator", last_good: str | None = None,
-                  etag: str | None = None, now: float = 1000.0) -> None:
-    """Upsert every release (a `ReleaseRow` or `PublishedRelease`), then the policy and ETag."""
+                  etag: str | None = None, now: float = 1000.0,
+                  etag_stored_at: float | None = None) -> None:
+    """Claim and apply every release (a `ReleaseRow` or `PublishedRelease`; a divergent row is
+    applied frozen), then the policy and the ETag (stored at `etag_stored_at`, default `now`)."""
     releases = PgReleaseRecords()
     with transactions.begin() as tx:
         for row in rows:
             release = published(row) if isinstance(row, ReleaseRow) else row
-            releases.upsert(tx, release, now=now)
-            if isinstance(row, ReleaseRow) and row.divergent:
-                releases.mark_divergent(tx, row.tag)
+            divergent = isinstance(row, ReleaseRow) and row.divergent
+            if releases.claim(tx, release, now=now) is not None or divergent:
+                releases.apply(tx, release, divergent=divergent, now=now)
         if promoted is not None:
             releases.set_promoted(tx, promoted, by=promoted_by)
         if last_good is not None:
             releases.set_last_good(tx, last_good)
         if etag is not None:
-            releases.store_etag(tx, etag)
+            releases.store_etag(tx, etag, now=now if etag_stored_at is None else etag_stored_at)
 
 
 def insert_device(db, device_id: str, *, serial: str | None = None,
@@ -121,6 +169,10 @@ class Reads:
             return PgReleaseRecords().last_good_tag(tx)
 
     def etag(self) -> str | None:
+        stored = self.stored_etag()
+        return None if stored is None else stored.etag
+
+    def stored_etag(self) -> StoredEtag | None:
         with self.transactions.begin() as tx:
             return PgReleaseRecords().load_etag(tx)
 

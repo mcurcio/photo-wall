@@ -17,6 +17,7 @@ from central.kernel.ports import (
     PublishedRelease,
     ReleaseListing,
     Unknown,
+    UpstreamVersion,
 )
 
 SHA = "ab" * 32
@@ -73,20 +74,42 @@ def test_value_invariants():
 
 def test_published_release_invariants():
     release = PublishedRelease(tag="v1.0.0", is_prerelease=False, package=LOCATOR,
-                               package_problem=None, os_image=LOCATOR)
+                               package_problem=None, os_image=LOCATOR,
+                               upstream_version=UpstreamVersion(1.0, 1))
     assert ReleaseListing((release,), etag='"e"', unchanged=False).releases == (release,)
     with pytest.raises(ValueError):
         PublishedRelease(tag="1.0.0", is_prerelease=False, package=LOCATOR, package_problem=None,
-                         os_image=None)
+                         os_image=None, upstream_version=None)
     with pytest.raises(ValueError):
         PublishedRelease(tag="v1.0.0", is_prerelease=False, package=None, package_problem=None,
-                         os_image=None)
+                         os_image=None, upstream_version=None)
     with pytest.raises(ValueError):
         PublishedRelease(tag="v1.0.0", is_prerelease=False, package=LOCATOR,
-                         package_problem="no_deb", os_image=None)
+                         package_problem="no_deb", os_image=None, upstream_version=None)
     with pytest.raises(ValueError):
         PublishedRelease(tag="v1.0.0", is_prerelease=False,
                          package=OriginLocator(url="https://x.test/a", sha256=None, size=1),
-                         package_problem=None, os_image=None)
+                         package_problem=None, os_image=None, upstream_version=None)
     with pytest.raises(ValueError):
         ReleaseListing((release,), etag=None, unchanged=True)
+
+
+def test_upstream_version_is_ordered_by_time_then_asset_id():
+    assert UpstreamVersion(1.0, 9) < UpstreamVersion(2.0, 1) < UpstreamVersion(2.0, 2)
+    assert UpstreamVersion(2.0, 2) == UpstreamVersion(2.0, 2)
+
+
+@pytest.mark.parametrize("changed_at,asset_id,code", [
+    (float("inf"), 1, "invalid_changed_at"),
+    (float("nan"), 1, "invalid_changed_at"),
+    ("2026-09-01", 1, "invalid_changed_at"),
+    (True, 1, "invalid_changed_at"),
+    (1.0, 0, "invalid_asset_id"),
+    (1.0, -1, "invalid_asset_id"),
+    (1.0, 1.0, "invalid_asset_id"),
+    (1.0, True, "invalid_asset_id"),
+])
+def test_upstream_version_refuses_a_non_finite_time_or_a_non_positive_id(changed_at, asset_id,
+                                                                         code):
+    with pytest.raises(ValueError, match=code):
+        UpstreamVersion(changed_at, asset_id)

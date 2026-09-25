@@ -389,7 +389,13 @@ class ReleaseCatalog:
         return write.moved
 
     async def refresh(self) -> None:
-        await self._publisher.publish_now(SyncReleases(), retry_terminal=True)
+        """Force a full listing: clear the stored ETag and publish the sync in one transaction
+        (the operator's repair of a stale equal-version observation, design §6.4)."""
+        def write(tx: Transaction) -> None:
+            self._releases.store_etag(tx, None, now=self._clock.utc())
+            self._publisher.publish(SyncReleases(), within=tx, retry_terminal=True)
+
+        await self._in_tx(write)
         await self._publisher.publish_now(Prefetch())
 
     # -- operator views ---------------------------------------------------------------------------

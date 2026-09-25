@@ -7,6 +7,7 @@ them). The SQL assertions are ported from `test_netboot_base_pin.py` and the swe
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 
 import psycopg
@@ -21,11 +22,12 @@ from central.content_catalog.ports import (
     Promotion,
     PromotionWrite,
     ReleaseRow,
+    StoredEtag,
 )
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import OriginLocator
-from central.kernel.ports import PublishedRelease
+from central.kernel.ports import PublishedRelease, UpstreamVersion
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -46,10 +48,13 @@ def image(tag: str) -> OriginLocator:
 
 
 def published(tag: str, *, pre: bool = False, package: OriginLocator | None = None,
-              has_deb: bool = True, has_image: bool = True) -> PublishedRelease:
+              has_deb: bool = True, has_image: bool = True,
+              at: float | None = 1) -> PublishedRelease:
+    """`tag` observed at upstream version `at` (None: no manifest body was read)."""
     locator = package or (deb(tag) if has_deb else None)
     return PublishedRelease(tag, pre, locator, None if locator else "no_player_asset",
-                            image(tag) if has_image else None)
+                            image(tag) if has_image else None,
+                            None if at is None else UpstreamVersion(float(at), 1))
 
 
 def row(release: PublishedRelease) -> ReleaseRow:
@@ -64,7 +69,7 @@ def pg(registry):
 def _seed(pg, *releases: PublishedRelease) -> None:
     with pg.begin() as tx:
         for release in releases:
-            PgReleaseRecords().upsert(tx, release, now=1000.0)
+            assert PgReleaseRecords().claim(tx, release, now=1000.0) is None
 
 
 def _insert_device(registry, device_id, **cols):
@@ -89,15 +94,16 @@ def _raw(registry, sql, params=()):
 @pytest.mark.parametrize("call", [
     lambda tx: PgReleaseRecords().get(tx, T1),
     lambda tx: PgReleaseRecords().all(tx),
-    lambda tx: PgReleaseRecords().upsert(tx, published(T1), now=1.0),
+    lambda tx: PgReleaseRecords().claim(tx, published(T1), now=1.0),
+    lambda tx: PgReleaseRecords().apply(tx, published(T1), divergent=False, now=1.0),
     lambda tx: PgReleaseRecords().promoted_tag(tx),
     lambda tx: PgReleaseRecords().set_promoted(tx, T1, by="operator"),
     lambda tx: PgReleaseRecords().promotion(tx),
     lambda tx: PgReleaseRecords().load_etag(tx),
-    lambda tx: PgReleaseRecords().store_etag(tx, "e"),
+    lambda tx: PgReleaseRecords().store_etag(tx, "e", now=1.0),
+    lambda tx: PgReleaseRecords().lock_auto_promotion(tx),
     lambda tx: PgReleaseRecords().bound_player_count(tx),
     lambda tx: PgReleaseRecords().shipping(tx, sha("x")),
-    lambda tx: PgReleaseRecords().mark_divergent(tx, T1),
     lambda tx: PgReleaseRecords().last_good_tag(tx),
     lambda tx: PgReleaseRecords().set_last_good(tx, T1),
     lambda tx: PgDeviceRecords().known_good_tags(tx),
@@ -119,26 +125,30 @@ def test_a_fake_transaction_is_a_type_error(call):
 # -- releases -----------------------------------------------------------------------------------
 
 
-def test_upsert_inserts_then_returns_the_previous_row(registry, pg):
+def test_claim_inserts_then_returns_the_previous_row_and_apply_writes_over_it(registry, pg):
     releases = PgReleaseRecords()
     first = published(T1)
     with pg.begin() as tx:
-        assert releases.upsert(tx, first, now=1000.0) is None
+        assert releases.claim(tx, first, now=1000.0) is None  # inserted: applied
         assert releases.get(tx, T1) == row(first)
-    recut = published(T1, package=deb(T1, "-recut"), has_image=False)
+    recut = published(T1, package=deb(T1, "-recut"), has_image=False, at=2)
     with pg.begin() as tx:
-        assert releases.upsert(tx, recut, now=2000.0) == row(first)
+        assert releases.claim(tx, recut, now=2000.0) == row(first)  # claimed: nothing written
+        assert releases.get(tx, T1) == row(first)
+        assert releases.apply(tx, recut, divergent=False, now=2000.0) is True
         assert releases.get(tx, T1) == row(recut)  # base_* columns cleared with the image
     stored = _raw(registry, "SELECT major, minor, patch, prerelease, mirror_state, discovered_at, "
-                            "updated_at, base_tarball_url FROM app_releases WHERE tag=%s", (T1,))
+                            "updated_at, base_tarball_url, upstream_changed_at, upstream_asset_id "
+                            "FROM app_releases WHERE tag=%s", (T1,))
     assert (stored["major"], stored["minor"], stored["patch"], stored["prerelease"]) == (
         0, 0, 1, "")
     assert stored["mirror_state"] == "discovered"
     assert (stored["discovered_at"], stored["updated_at"]) == (1000.0, 2000.0)
     assert stored["base_tarball_url"] is None
+    assert (stored["upstream_changed_at"], stored["upstream_asset_id"]) == (2.0, 1)
 
 
-def test_upsert_of_a_prerelease_without_a_deb_is_undeployable_legacy_state(registry, pg):
+def test_claim_of_a_prerelease_without_a_deb_is_undeployable_legacy_state(registry, pg):
     rc = published("v1.0.0-rc.1", pre=True, has_deb=False)
     _seed(pg, rc)
     with pg.begin() as tx:
@@ -227,24 +237,75 @@ def test_shipping_finds_every_release_of_a_sha(pg):
         assert PgReleaseRecords().shipping(tx, sha("unknown")) == ()
 
 
-def test_mark_divergent_survives_later_upserts(pg):
+@pytest.mark.parametrize("has_deb,released", [(True, "discovered"), (False, "undeployable")])
+def test_apply_writes_the_frozen_flag_it_is_given_and_never_carries_it(registry, pg, has_deb,
+                                                                      released):
+    # The flag is the caller's, derived from the locked row on every write (design §4).
     _seed(pg, published(T1))
     releases = PgReleaseRecords()
+
+    def state():
+        return tuple(_raw(registry, "SELECT mirror_state, mirror_error FROM app_releases "
+                                    "WHERE tag=%s", (T1,)).values())
+
     with pg.begin() as tx:
         assert releases.get(tx, T1).divergent is False
-        releases.mark_divergent(tx, T1)
-        releases.upsert(tx, published(T1), now=2000.0)
+        assert releases.apply(tx, published(T1), divergent=True, now=2000.0)
         assert releases.get(tx, T1).divergent is True
+    assert state() == ("divergent", "asset_changed")
+    with pg.begin() as tx:
+        assert releases.apply(tx, published(T1, has_deb=has_deb), divergent=False, now=3000.0)
+        assert releases.get(tx, T1).divergent is False
+    assert state() == (released, None)
+    with pg.begin() as tx:  # a row that was not divergent keeps its state
+        assert releases.apply(tx, published(T1), divergent=False, now=4000.0)
+    assert state() == (released, None)
 
 
-def test_etag_round_trip(pg):
+@pytest.mark.parametrize("stored,offered,applied", [
+    (None, None, True),  # a row never stamped takes any observation ...
+    (None, (1.0, 5), True),
+    ((2.0, 5), (2.0, 5), True),  # ... a stamped one an equal version ...
+    ((2.0, 5), (2.0, 6), True),  # ... or a newer one: the id breaks a same-second tie
+    ((2.0, 5), (3.0, 1), True),
+    ((2.0, 5), (2.0, 4), False),  # an older one is refused
+    ((2.0, 5), (1.0, 9), False),
+    ((2.0, 5), None, False),  # and so is one whose manifest body was not read
+])
+def test_apply_refuses_an_older_observation_and_writes_nothing(registry, pg, stored, offered,
+                                                               applied):
+    def version(pair):
+        return None if pair is None else UpstreamVersion(*pair)
+
+    first = dataclasses.replace(published(T1), upstream_version=version(stored))
+    _seed(pg, first)
+    offer = dataclasses.replace(published(T1, package=deb(T1, "-recut"), pre=True),
+                                upstream_version=version(offered))
+    releases = PgReleaseRecords()
+    with pg.begin() as tx:
+        assert releases.claim(tx, offer, now=2000.0) == row(first)
+        assert releases.apply(tx, offer, divergent=False, now=2000.0) is applied
+        assert releases.get(tx, T1) == row(offer if applied else first)
+    got = _raw(registry, "SELECT upstream_changed_at, upstream_asset_id, updated_at "
+                         "FROM app_releases WHERE tag=%s", (T1,))
+    expected = offered if applied else stored
+    assert (got["upstream_changed_at"], got["upstream_asset_id"]) == (
+        (None, None) if expected is None else expected)
+    assert got["updated_at"] == (2000.0 if applied else 1000.0)
+
+
+def test_etag_round_trip_records_when_it_was_stored(registry, pg):
     releases = PgReleaseRecords()
     with pg.begin() as tx:
         assert releases.load_etag(tx) is None
-        releases.store_etag(tx, 'W/"abc"')
+        releases.store_etag(tx, 'W/"abc"', now=1000.0)
     with pg.begin() as tx:
-        assert releases.load_etag(tx) == 'W/"abc"'
-        releases.store_etag(tx, None)
+        assert releases.load_etag(tx) == StoredEtag('W/"abc"', 1000.0)
+        releases.store_etag(tx, None, now=2000.0)
+        assert releases.load_etag(tx) == StoredEtag(None, 2000.0)
+    with registry.db.transaction() as conn:  # an ETag no code of this version stored
+        conn.execute("UPDATE app_release_poll SET etag='W/\"old\"', etag_stored_at=NULL")
+    with pg.begin() as tx:
         assert releases.load_etag(tx) is None
 
 

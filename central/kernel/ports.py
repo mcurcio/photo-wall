@@ -9,6 +9,7 @@ on failure and never returns a partial list.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias
@@ -95,6 +96,23 @@ def _complete_locator(locator: object) -> None:
         raise ValueError("incomplete_locator")
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class UpstreamVersion:
+    """The origin's own version of one release observation: its manifest asset's
+    `(updated_at, id)` (docs/central-idempotent-jobs.md rule 2, §6). Ordered: `updated_at` is
+    GitHub's documented timestamp, and the id only breaks a same-second tie."""
+
+    changed_at: float  # epoch seconds, finite
+    asset_id: int  # > 0
+
+    def __post_init__(self) -> None:
+        if (isinstance(self.changed_at, bool) or not isinstance(self.changed_at, (int, float))
+                or not math.isfinite(self.changed_at)):
+            raise ValueError("invalid_changed_at")
+        if type(self.asset_id) is not int or self.asset_id <= 0:
+            raise ValueError("invalid_asset_id")
+
+
 @dataclass(frozen=True, slots=True)
 class PublishedRelease:
     tag: str  # release_version-valid
@@ -102,6 +120,9 @@ class PublishedRelease:
     package: OriginLocator | None  # the Player .deb; url, sha256 and size all set when present
     package_problem: str | None  # require_reason; set iff package is None
     os_image: OriginLocator | None  # the base tarball; url, sha256 and size set when present
+    # None when the manifest body was not read (absent, or 404/410 upstream): an observation
+    # with no version is refused over a stored one, so it can never wipe the tag.
+    upstream_version: UpstreamVersion | None
 
     def __post_init__(self) -> None:
         release_version(self.tag)

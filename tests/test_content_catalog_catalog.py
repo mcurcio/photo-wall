@@ -34,7 +34,7 @@ from central.content_catalog.catalog import (
     device_id_for_serial,
     sanitize_serial,
 )
-from central.content_catalog.ports import DeviceRow, Promotion, ReleaseRow
+from central.content_catalog.ports import DeviceRow, Promotion, ReleaseRow, StoredEtag
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
@@ -104,11 +104,11 @@ class World:
 @pytest.fixture
 def world(registry, tmp_path):
     def build(releases=(), devices=(), *, promoted=None, promoted_by="operator", last_good=None,
-              on_disk=()) -> World:
+              on_disk=(), etag=None) -> World:
         clock = ManualClock(1000.0)
         seeding = RecordingTransactions(registry.db)
         seed_releases(seeding, releases, promoted=promoted, promoted_by=promoted_by,
-                      last_good=last_good)
+                      last_good=last_good, etag=etag)
         for fields in devices:
             insert_device(registry.db, **fields)
         assets = PgAssetRecords(clock)
@@ -614,14 +614,18 @@ def test_promote_sets_the_pointer_and_fetches_its_deb(world):
     ]
 
 
-def test_refresh_publishes_a_sync_now_retrying_a_terminal_outcome(world):
-    w = world()
+def test_refresh_clears_the_etag_and_publishes_a_sync_retrying_a_terminal_outcome(world):
+    # One transaction clears the ETag and publishes the sync, so the sync lists in full
+    # (design §6.4: the operator's repair of a stale equal-version observation).
+    w = world(etag='W/"e1"')
     run(w.catalog.refresh())
+    (tx,) = w.transactions.begun
+    assert tx.state == "committed"
+    assert w.reads.stored_etag() == StoredEtag(None, w.clock.utc())
     assert w.publisher.calls == [
-        PublishedCall(SyncReleases(), True, None),
-        PublishedCall(Prefetch(), False, None),
+        PublishedCall(SyncReleases(), True, tx),
+        PublishedCall(Prefetch(), False, None),  # publish_now owns its own transaction
     ]
-    assert w.transactions.begun == []  # publish_now owns its own transaction
 
 
 # -- views --------------------------------------------------------------------------------------

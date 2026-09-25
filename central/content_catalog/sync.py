@@ -3,19 +3,32 @@
 Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_type` resolves the
 `handle` hints to find the job type this handler serves.
 
-One sync is: read the ETag and list releases (an origin failure propagates; the runtime records
-it); unless unchanged, one transaction per release (upsert, reference its `os-image` and
-`player-deb` keys, retire the tag's reference to a re-cut or dropped `.deb` or OS image), then
-store the ETag; then a tail
-transaction (the stale-`pending` boot sweep, auto-promote, a fetch for every changed desired key,
-and `Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
+One sync is: read the ETag and list releases, sending the ETag only if it was stored less than
+`ETAG_MAX_AGE` ago (an origin failure propagates; the runtime records it); unless unchanged, one
+transaction per release, then store the ETag; then a tail transaction (the stale-`pending` boot
+sweep, auto-promote, a fetch for every changed desired key, and `Prefetch`). Withdrawal of tags
+gone upstream is not in the MVP.
+
+Jobs may run in any order (docs/central-idempotent-jobs.md rule 2, §6): each release transaction
+applies one observation only if its upstream version (the manifest asset's `(updated_at, id)`)
+is not older than the row's. It claims the tag (insert if absent, else lock the row), derives the
+frozen flag from the locked previous row, and offers the observation to the guarded write. A
+refused, older observation touches nothing: no row, no reference. An applied one references its
+`os-image` and `player-deb` keys and retires the tag's reference to a re-cut or dropped `.deb` or
+OS image. An equal version re-applies (a prerelease flag can change without a new manifest), so a
+stale equal-version observation can land after a fresh one: the hourly full listing repairs it.
 
 A `.deb` re-cut upstream after its bytes were produced is FROZEN, as main froze a `mirrored`
 tag as `divergent` (`central/app_releases.py` `upsert_discovered`, removed by the MVP): the
-tag keeps the sha it was produced with, and the new sha is neither referenced nor fetched. An OS
-image re-cut is taken instead (its old bytes are gone upstream). It is keyed by its base
-tarball's sha256, so a re-cut is a new key: the tag references the new key and retires its
-reference to the old one, whose row and produced facts stay (facts are never cleared).
+tag keeps the sha it was produced with, and the new sha is neither referenced nor fetched. The
+flag is derived on every write, never carried: upstream returning to the produced `.deb`
+unfreezes the tag. An OS image re-cut is taken instead (its old bytes are gone upstream). It is
+keyed by its base tarball's sha256, so a re-cut is a new key: the tag references the new key and
+retires its reference to the old one, whose row and produced facts stay (facts are never
+cleared).
+
+Automatic promotion holds a transaction-scoped advisory lock from its first read to its write, so
+the last writer read every row committed before it.
 """
 
 from __future__ import annotations
@@ -23,6 +36,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import timedelta
+from typing import Final
 
 from central.content_catalog.boot_policy import newest
 from central.content_catalog.catalog import ReleaseCatalog, in_transaction
@@ -36,6 +50,9 @@ from central.kernel.transactions import Transaction, Transactions
 from contracts.time import Clock
 
 LOG = logging.getLogger("central.content_catalog.sync")
+# How long a stored ETag is trusted (a placeholder, design §6.4): past it the sync lists in full,
+# which repairs a stale equal-version observation within ETAG_MAX_AGE plus one sync interval.
+ETAG_MAX_AGE: Final = timedelta(hours=1)
 
 
 class SyncReleasesHandler:
@@ -59,26 +76,33 @@ class SyncReleasesHandler:
 
     async def handle(self, job: SyncReleases) -> None:
         transactions = self._transactions
-        etag = await in_transaction(transactions, self._releases.load_etag)
-        listing = await self._origin.list_releases(etag=etag)
+        stored = await in_transaction(transactions, self._releases.load_etag)
+        fresh = (stored is not None and self._clock.utc() - stored.stored_at
+                 < ETAG_MAX_AGE.total_seconds())
+        listing = await self._origin.list_releases(etag=stored.etag if fresh else None)
         changed: set[AssetKey] = set()
         if not listing.unchanged:
             for release in listing.releases:
                 changed |= await in_transaction(
                     transactions, lambda tx, r=release: self._record(tx, r))
-            await in_transaction(
-                transactions, lambda tx: self._releases.store_etag(tx, listing.etag))
+            await in_transaction(transactions, lambda tx: self._releases.store_etag(
+                tx, listing.etag, now=self._clock.utc()))
         await in_transaction(transactions, lambda tx: self._tail(tx, changed))
 
     def _record(self, tx: Transaction, release: PublishedRelease) -> set[AssetKey]:
-        """Upsert one release and its references; return the keys whose reference changed."""
+        """Apply one observation and its references; return the keys whose reference changed.
+
+        An observation older than the row's is refused whole: nothing changes."""
         tag = release.tag
-        frozen = self._frozen_package(tx, release)
-        if frozen is not None:
-            release = dataclasses.replace(release, package=frozen, package_problem=None)
-        previous = self._releases.upsert(tx, release, now=self._clock.utc())
-        if frozen is not None and not (previous is not None and previous.divergent):
-            self._releases.mark_divergent(tx, tag)
+        now = self._clock.utc()
+        previous = self._releases.claim(tx, release, now=now)
+        if previous is not None:
+            frozen = self._frozen_package(tx, release, previous)
+            if frozen is not None:
+                release = dataclasses.replace(release, package=frozen, package_problem=None)
+            if not self._releases.apply(tx, release, divergent=frozen is not None, now=now):
+                LOG.info("release %s: an older observation was refused", tag)
+                return set()
         changed: set[AssetKey] = set()
         image = release.os_image
         if image is not None:
@@ -111,27 +135,28 @@ class SyncReleasesHandler:
             self._assets.retire(tx, asset_key(FetchPackage(sha256=old.sha256)), tag)  # re-cut
         return changed
 
-    def _frozen_package(self, tx: Transaction, release: PublishedRelease) -> OriginLocator | None:
+    def _frozen_package(self, tx: Transaction, release: PublishedRelease,
+                        previous: ReleaseRow) -> OriginLocator | None:
         """The `.deb` the tag must keep, or None when the upstream facts may be taken.
 
-        A tag already divergent stays frozen. Otherwise a changed or dropped `.deb` whose old
-        bytes were produced (main: `mirror_state='mirrored'`) freezes the tag now.
+        Derived from the locked previous row, never carried: a changed or dropped `.deb` whose
+        old bytes were produced (main: `mirror_state='mirrored'`) freezes the tag, and upstream
+        naming the produced `.deb` again unfreezes it.
         """
-        previous = self._releases.get(tx, release.tag)
-        if previous is None or previous.package is None:
+        if previous.package is None:
             return None
         old = previous.package
-        if previous.divergent:
-            return old
         if release.package is not None and release.package.sha256 == old.sha256:
             return None
         assert old.sha256 is not None  # a stored .deb locator always carries its sha
         asset = self._assets.get(tx, asset_key(FetchPackage(sha256=old.sha256)))
         if asset is None or asset.produced is None:
             return None  # never produced: the re-cut heals, as main refreshed an unmirrored tag
-        LOG.warning("release %s: .deb re-cut upstream after it was produced (%s -> %s); keeping "
-                    "the produced .deb, the tag is frozen as divergent", release.tag, old.sha256,
-                    release.package.sha256 if release.package is not None else None)
+        if not previous.divergent:  # freezing now; while frozen, every sync derives it again
+            LOG.warning(
+                "release %s: .deb re-cut upstream after it was produced (%s -> %s); keeping the "
+                "produced .deb, the tag is frozen as divergent", release.tag, old.sha256,
+                release.package.sha256 if release.package is not None else None)
         return old
 
     def _tail(self, tx: Transaction, changed: set[AssetKey]) -> None:
@@ -153,7 +178,11 @@ class SyncReleasesHandler:
         newest deployable release (prereleases only with PHOTO_WALL_RELEASE_PRERELEASES).
         `cached` was `count(*) FROM app_packages`; it is now "some release's `.deb` was
         produced". A configured fleet is never upgraded behind the operator's back.
+
+        The advisory lock comes FIRST: the rows read below include every release committed
+        before it, and no other sync's promotion can land between this read and this write.
         """
+        self._releases.lock_auto_promotion(tx)
         promotion = self._releases.promotion(tx)
         if promotion is not None and promotion.by == "operator":
             return
@@ -167,8 +196,8 @@ class SyncReleasesHandler:
             return
         candidate = newest(row.tag for row in releases if row.package is not None
                            and (self._include_prereleases or not row.is_prerelease))
-        # `promotion` was read without a lock: the write re-checks under the row lock and refuses
-        # to move an operator promotion committed since.
+        # The advisory lock serializes syncs, not the operator route: the write re-checks under
+        # the row lock and refuses to move an operator promotion committed since.
         if (candidate is not None and (promotion is None or candidate != promotion.tag)
                 and not self._catalog.promote_in(tx, candidate, by="auto")):
             LOG.info("auto-promote of %s yielded to an operator promotion made meanwhile",

@@ -1096,3 +1096,23 @@ doc softenings.
   sync's two `reference` calls (each keyed by its locator's sha) and
   `scripts/test_netboot_e2e.py:159-162`. The CHECK is replaced (`DROP ... IF EXISTS`, then `ADD`),
   so 028 is safe to run twice. Test fixtures with NULL or mismatched locator shas were fixed.
+
+## 2026-09-24 — bead 3 catalog-follows-upstream
+
+- **Owner decision: a manifest read but INVALID is unversioned, exactly as one not read.** The
+  frozen page (§Origin) set `upstream_version` whenever `_fetch_manifest` returned a body, so a
+  NEWER broken upload (bad JSON, a non-object, `schema` other than 1, or a malformed
+  `player_deb`: every `manifest_invalid` / `schema_mismatch` case) was applied and took a
+  working release's `.deb` from the Pis. Now `_parse_manifest` (`central/origins/github.py`) is
+  the one place a version is set, and only on a valid AND complete manifest; any other is
+  refused over a stored observation, so the last good one stays.
+- **Owner decision, same principle: an incomplete upload (`asset_missing`) is unversioned too.**
+  A valid manifest naming a `.deb` the release does not attach (typically a release caught
+  mid-upload) must never remove a working `.deb`. Once the `.deb` is attached, the next sync
+  versions the same manifest asset and applies it normally (it is newer than the stored row).
+  Tests: `test_origins_github.py::test_a_read_but_invalid_or_incomplete_manifest_is_no_version`,
+  `test_release_versions.py::test_v9b_a_newer_invalid_manifest_cannot_wipe_the_tag` (probe M9)
+  and `::test_v9c_an_upload_caught_midway_cannot_wipe_the_tag_and_applies_once_complete`
+  (probe M10). Residual: a FIRST observation of a new tag has no stored row to protect, so it is
+  inserted whatever its manifest says and repaired by the next valid one. Bead 5 (docs) should
+  state this in design §6.3.
