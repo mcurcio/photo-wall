@@ -90,6 +90,13 @@ class AssetRecords(Protocol):
         """Set last_served_at; absent -> no-op."""
         ...
 
+    def lock_produced(self, tx: Transaction, key: AssetKey) -> AssetReady | None:
+        """The key's produced facts (None when absent or not produced), read under a lock held
+        to the end of `tx` that serializes with `record_produced`: a concurrent recording either
+        committed before this read, and is seen, or waits until `tx` ends. References play no
+        part: facts are returned even when every reference was retired."""
+        ...
+
 
 def _complete_locator(locator: object) -> None:
     if not isinstance(locator, OriginLocator) or locator.sha256 is None or locator.size is None:
@@ -120,8 +127,9 @@ class PublishedRelease:
     package: OriginLocator | None  # the Player .deb; url, sha256 and size all set when present
     package_problem: str | None  # require_reason; set iff package is None
     os_image: OriginLocator | None  # the base tarball; url, sha256 and size set when present
-    # None when the manifest body was not read (absent, or 404/410 upstream): an observation
-    # with no version is refused over a stored one, so it can never wipe the tag.
+    # Set only for a manifest that was read, valid and complete (its `.deb` attached); None
+    # otherwise (absent, 404/410, invalid, or `.deb` not attached yet): an observation with no
+    # version is refused over a stored one, so it can never wipe the tag.
     upstream_version: UpstreamVersion | None
 
     def __post_init__(self) -> None:

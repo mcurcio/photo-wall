@@ -47,9 +47,10 @@ from test_content_catalog_sync import (
 
 from central.content_catalog.ports import Promotion, ReleaseRow
 from central.content_catalog.sync import ETAG_MAX_AGE
+from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import AUTO_PROMOTION_LOCK, PgReleaseRecords
 from central.infra.transactions import PgTransactions
-from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.assets import AssetKey, AssetKind, AssetReady
 from central.kernel.job_types import Prefetch, SyncReleases
 from central.kernel.ports import ReleaseListing, UpstreamVersion
 from central.origins.github import GitHubReleaseOrigin
@@ -123,6 +124,34 @@ def in_thread(target) -> tuple[threading.Thread, list]:
     thread = threading.Thread(target=run)
     thread.start()
     return thread, errors
+
+
+def pause_after(monkeypatch, records, name: str) -> tuple[threading.Event, threading.Event]:
+    """Make `records.<name>` run for real, then signal `reached` and wait for `go`: the caller's
+    transaction stays open, holding whatever that call locked."""
+    real = getattr(records, name)
+    reached, go = threading.Event(), threading.Event()
+
+    def then_pause(*args, **kwargs):
+        result = real(*args, **kwargs)
+        reached.set()
+        assert go.wait(10)
+        return result
+
+    monkeypatch.setattr(records, name, then_pause)
+    return reached, go
+
+
+def recording(monkeypatch, records, name: str) -> list:
+    """Every value `records.<name>` returns, in order."""
+    real, returned = getattr(records, name), []
+
+    def record(*args, **kwargs):
+        returned.append(real(*args, **kwargs))
+        return returned[-1]
+
+    monkeypatch.setattr(records, name, record)
+    return returned
 
 
 def join(*threads_and_errors) -> None:
@@ -200,17 +229,7 @@ def test_v5_the_last_automatic_promotion_read_every_row_committed_before_it(worl
     # Y must wait on the lock, so it reads after X wrote: it promotes v2, the newest. Were the
     # rows read before the lock, Y would promote v2 first and X, resuming, would write v1 last.
     w = world(UNCHANGED, releases=[published(T1)])
-    x_records = w.handler._releases
-    read_rows, go = threading.Event(), threading.Event()
-    real_all = x_records.all
-
-    def all_then_pause(tx):
-        rows = real_all(tx)
-        read_rows.set()
-        assert go.wait(10)
-        return rows
-
-    monkeypatch.setattr(x_records, "all", all_then_pause)
+    read_rows, go = pause_after(monkeypatch, w.handler._releases, "all")
     x = in_thread(lambda: sync(w))
     assert read_rows.wait(10)
     with PgTransactions(w.db).begin() as tx:  # a newer release commits elsewhere
@@ -431,29 +450,12 @@ def test_v10_a_concurrent_first_insert_gives_the_second_the_first_row(world, mon
     # waits on the unique index, then locks and returns X's committed row: it retires X's
     # reference to A. No reference is left that the row does not name.
     w = world(listing(published(T1, package=A, os_image=S1, at=10)))
-    x_records = w.handler._releases
-    claimed, go = threading.Event(), threading.Event()
-    real_claim = x_records.claim
-
-    def claim_then_pause(tx, release, *, now):
-        previous = real_claim(tx, release, now=now)
-        claimed.set()
-        assert go.wait(10)
-        return previous
-
-    monkeypatch.setattr(x_records, "claim", claim_then_pause)
+    claimed, go = pause_after(monkeypatch, w.handler._releases, "claim")
     x = in_thread(lambda: sync(w))
     assert claimed.wait(10)
     y_handler = w.another_handler(RecordingOrigin(
         listing(published(T1, package=B, os_image=S2, at=20), etag="e2")))
-    y_previous = []
-    y_claim = y_handler._releases.claim
-
-    def recording_claim(tx, release, *, now):
-        y_previous.append(y_claim(tx, release, now=now))
-        return y_previous[-1]
-
-    monkeypatch.setattr(y_handler._releases, "claim", recording_claim)
+    y_previous = recording(monkeypatch, y_handler._releases, "claim")
     y = in_thread(lambda: asyncio.run(y_handler.handle(SyncReleases())))
     y_waited = wait_until_blocked_or_done(w, y[0])
     go.set()
@@ -463,4 +465,74 @@ def test_v10_a_concurrent_first_insert_gives_the_second_the_first_row(world, mon
     assert w.reads.release(T1) == ReleaseRow(T1, False, B, S2)
     assert owners(w, *keys_of()) == {deb_key(A): None, deb_key(B): [T1],
                                      image_key(T1, "-S1"): None, image_key(T1, "-S2"): [T1]}
+    references_match_the_row(w)
+
+
+# -- V11: the frozen flag serializes with a concurrent FetchPackage (review P1) --------------------
+
+
+@pytest.mark.parametrize("fetch", ["commits_first", "commits_during_the_sync"])
+def test_v11_the_frozen_flag_serializes_with_the_old_debs_fetch(world, monkeypatch, fetch):
+    # v1 ships A, referenced but not produced; upstream re-cuts it to B while FetchPackage(A)
+    # records A's facts. Whatever the timing, the tag is frozen iff A's facts committed before
+    # the sync decided: a recording after the sync's read WAITS for the sync (`lock_produced`),
+    # so it never lands unseen between the read and the commit.
+    w = world(listing(published(T1, package=A, at=10)))
+    sync(w)
+    facts = AssetReady(A.size, A.sha256)
+
+    def fetch_records() -> None:  # the worker's `ok`, in its own transaction
+        with PgTransactions(w.db).begin() as tx:
+            PgAssetRecords(w.clock).record_produced(tx, deb_key(A), facts)
+
+    w.origin.listing = listing(published(T1, package=B, at=20), etag="e2")
+    if fetch == "commits_first":
+        fetch_records()
+        sync(w)
+        assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (A, True)
+        assert w.reads.owners(deb_key(B)) is None
+        return
+    decided, go = pause_after(monkeypatch, w.handler, "_frozen_package")
+    x = in_thread(lambda: sync(w))
+    assert decided.wait(10)  # the sync read "A not produced" and holds its transaction
+    fetcher = in_thread(fetch_records)
+    fetch_waited = wait_until_blocked_or_done(w, fetcher[0])
+    go.set()
+    join(x, fetcher)
+    assert fetch_waited  # the recording waited for the sync's commit
+    assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (B, False)
+    assert w.reads.facts(deb_key(A)) == facts  # A landed after the tag had moved to B
+    references_match_the_row(w)
+
+
+# -- V12: a claim of an existing row waits for its holder (review P2) ------------------------------
+
+
+@pytest.mark.parametrize("held_after", ["claim", "apply"])
+def test_v12_a_claim_of_an_existing_row_waits_and_gets_the_holders_write(world, monkeypatch,
+                                                                         held_after):
+    # X claims v1 and applies B at 20, holding its transaction after `held_after`. Y's claim of
+    # v1 (C at 30) waits, then gets X's B as `previous`, so it retires B: nothing is orphaned.
+    # Held after `claim` (the row locked, not yet written), only `claim`'s FOR UPDATE makes Y
+    # wait: an unlocked read would return A at once. Held after `apply`, Y's insert already
+    # waits on X's row version.
+    c = deb(T1, "-C")
+    w = world(listing(published(T1, package=A, at=10)))
+    sync(w)
+    w.origin.listing = listing(published(T1, package=B, at=20), etag="e2")
+    held, go = pause_after(monkeypatch, w.handler._releases, held_after)
+    x = in_thread(lambda: sync(w))
+    assert held.wait(10)
+    y_handler = w.another_handler(RecordingOrigin(listing(published(T1, package=c, at=30),
+                                                          etag="e3")))
+    y_previous = recording(monkeypatch, y_handler._releases, "claim")
+    y = in_thread(lambda: asyncio.run(y_handler.handle(SyncReleases())))
+    y_waited = wait_until_blocked_or_done(w, y[0])
+    go.set()
+    join(x, y)
+    assert y_waited
+    assert y_previous == [ReleaseRow(T1, False, B, image(T1))]  # X's write, read under the lock
+    assert w.reads.release(T1).package == c
+    assert owners(w, deb_key(A), deb_key(B), deb_key(c)) == {
+        deb_key(A): None, deb_key(B): None, deb_key(c): [T1]}
     references_match_the_row(w)

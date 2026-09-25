@@ -1159,3 +1159,23 @@ doc softenings.
   (probe M10). Residual: a FIRST observation of a new tag has no stored row to protect, so it is
   inserted whatever its manifest says and repaired by the next valid one. Bead 5 (docs) should
   state this in design §6.3.
+- **Review fix cycle 1 (integrated branch, 69f0336). P1: the frozen flag raced a concurrent
+  `FetchPackage`.** `_frozen_package` read the old `.deb`'s produced facts through the unlocked
+  `AssetRecords.get`, so a `record_produced` committing between that read and the sync's commit
+  left the tag unfrozen at the re-cut although the old bytes were servable. The port gains ONE
+  locking read, `AssetRecords.lock_produced(tx, key) -> AssetReady | None` (`FOR SHARE` on the
+  asset row, conflicting with `record_produced`'s UPDATE); the recording either committed before
+  the read and freezes the tag, or waits for the sync and lands after the re-cut was taken.
+  Lock order in a release transaction: release row (`claim`, FOR UPDATE) -> the old `.deb`'s
+  asset row (FOR SHARE) -> `reference` inserts (FOR KEY SHARE via the foreign key). No cycle:
+  `record_produced` locks only its asset row and then `job_outcomes`; `touch_served` runs alone;
+  the tail takes only the advisory lock and the policy row. Test V11 (both orders), probe M11.
+- **P2: nothing tested `claim`'s FOR UPDATE on an existing row.** Test V12, probe M12. **The
+  review's staging was insufficient on its own:** with the holder paused AFTER `apply`, the
+  waiter blocks already in `INSERT ... ON CONFLICT DO NOTHING` (on the holder's uncommitted row
+  version; probed on PostgreSQL 16), so an unlocked SELECT would still read the new row and the
+  test stays green without FOR UPDATE. V12 therefore also pauses the holder right after `claim`
+  (row locked, not yet written): there an unlocked read returns the stale row at once, and M12
+  turns that case red. Both stagings are kept.
+- **P2: comments.** `central/kernel/ports.py` (`PublishedRelease.upstream_version`) and 029's
+  header now say "valid and complete"; design §3 (glossary) and §6.1/§6.3 are listed for bead 5.

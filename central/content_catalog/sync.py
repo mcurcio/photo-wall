@@ -141,7 +141,11 @@ class SyncReleasesHandler:
 
         Derived from the locked previous row, never carried: a changed or dropped `.deb` whose
         old bytes were produced (main: `mirror_state='mirrored'`) freezes the tag, and upstream
-        naming the produced `.deb` again unfreezes it.
+        naming the produced `.deb` again unfreezes it. "Produced" is read under
+        `lock_produced`, so a `FetchPackage` recording its facts either committed first and
+        freezes the tag, or waits for this transaction and lands after the re-cut was taken.
+        Lock order: the release row (`claim`), then the old `.deb`'s asset row, then the rows
+        `reference` inserts.
         """
         if previous.package is None:
             return None
@@ -149,8 +153,7 @@ class SyncReleasesHandler:
         if release.package is not None and release.package.sha256 == old.sha256:
             return None
         assert old.sha256 is not None  # a stored .deb locator always carries its sha
-        asset = self._assets.get(tx, asset_key(FetchPackage(sha256=old.sha256)))
-        if asset is None or asset.produced is None:
+        if self._assets.lock_produced(tx, asset_key(FetchPackage(sha256=old.sha256))) is None:
             return None  # never produced: the re-cut heals, as main refreshed an unmirrored tag
         if not previous.divergent:  # freezing now; while frozen, every sync derives it again
             LOG.warning(

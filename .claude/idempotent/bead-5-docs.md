@@ -43,8 +43,19 @@ errata corrections are applied. The runbook carries the owner's upgrade procedur
 - §10.4:
   - `retire` keeps the row;
   - `ReleaseRecords.claim` and `apply`, `lock_auto_promotion`, `StoredEtag`;
+  - `AssetRecords.lock_produced`;
   - `mark_divergent` and `upsert` are gone;
   - `WriteFn` takes a locator.
+
+**`docs/central-idempotent-jobs.md`** (bead 3's review corrections; the code is the truth)
+- §3 glossary (about :65), "Upstream version": taken only from a manifest that was read, valid
+  (JSON object, schema 1, well-formed `player_deb`) and complete (its `.deb` attached); not
+  "whenever the manifest body was read".
+- §6.3 (about :131): the same rule, and why: a broken or partly uploaded manifest never removes a
+  working `.deb`; a first observation of a new tag is inserted whatever its manifest says.
+- §6.1 (about :126): the frozen flag reads the old `.deb`'s produced facts under
+  `AssetRecords.lock_produced` (`FOR SHARE`), so it serializes with `record_produced`. Lock
+  order: release row -> old `.deb`'s asset row -> `reference` inserts.
 
 **`docs/runbook.md`**
 - The release configuration table (about :152): add the row below.

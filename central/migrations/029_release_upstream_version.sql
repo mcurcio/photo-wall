@@ -2,9 +2,10 @@
 -- written only by an observation whose upstream version is not older than the stored one.
 --
 -- 1. `app_releases.upstream_changed_at` / `upstream_asset_id`: the manifest asset's GitHub
---    `(updated_at, id)` of the observation the row holds, compared as a row value. Both NULL
---    (never observed with a read manifest) or both set; the CHECK refuses a half-set pair. NULL is
---    applied over by any observation, so every row existing today is stamped by the next sync.
+--    `(updated_at, id)` of the observation the row holds, compared as a row value, set only
+--    from a manifest that was read, valid and complete. Both NULL (never so observed) or both
+--    set; the CHECK refuses a half-set pair. NULL is applied over by any observation, so every
+--    row existing today is stamped by the next sync.
 -- 2. `app_release_poll.etag_stored_at`: when the ETag was stored. The sync trusts it for one hour
 --    only, so a stale equal-version observation is repaired by the next full listing.
 -- 3. The ETag is cleared, so the first sync after this migration lists every release in full and
