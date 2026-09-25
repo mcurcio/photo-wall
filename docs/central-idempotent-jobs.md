@@ -1,9 +1,11 @@
 # Central: jobs may run in any order, because every piece of data converges
 
-**Date:** 2026-09-24 · **Status:** proposed amendment to the approved
-[Central system architecture](central-system-architecture.md). It replaces every earlier version of
-this document and every note on issue #26. **Asked of the reader:** approve the three rules. The
-one Pi-visible cost, the upgrade re-download, is already decided ([§9](#9-decisions)).
+**Date:** 2026-09-24 · **Status:** implemented (beads 1 to 5,
+[§13](#13-what-happens-after-the-gate)). An approved amendment to the
+[Central system architecture](central-system-architecture.md). It replaces every earlier version
+of this document and every note on issue #26. The one Pi-visible cost, the upgrade re-download, is
+decided ([§9](#9-decisions)); the runbook carries its
+[procedure](runbook.md#upgrading-to-content-keyed-os-images-migration-028).
 
 ## 1. The problem in plain words
 
@@ -23,7 +25,7 @@ normal. What must be true:
 | The cache may be wiped at any time, and correctness must survive | owner, 2026-09 |
 | Upgrade by re-downloading OS images once, with a runbook preflight | ruling 2026-09-24 (§9) |
 
-| Fact about today's code | Where | Consequence |
+| Fact about the code before this design | Where (pre-#26) | Consequence |
 | --- | --- | --- |
 | A `.deb` is named by its sha256; facts are write-once | `central/assets/layout.py:22-25`; `central/infra/asset_records.py:107-124` | Two runs write the same bytes to the same name |
 | An OS image is named by its **tag**, and a re-cut clears its facts | `central/kernel/job_types.py:19-21`; `central/content_catalog/sync.py:103-115` | A late run can put an old build under new facts (old R2) |
@@ -62,7 +64,9 @@ graph LR
 - **Content key:** an asset's identity, the sha256 of the upstream file it is made from.
 - **Facts:** the produced file's size and sha256, recorded once per content key.
 - **Observation:** what one sync saw for one release. **Upstream version:** its manifest asset's
-  `(updated_at, id)`, taken only when the manifest body was read.
+  `(updated_at, id)`, taken only from a manifest that was read, valid (a JSON object, schema 1, a
+  well-formed `player_deb`) and complete (that `.deb` attached to the release). An unread,
+  invalid or `asset_missing` manifest never has one.
 - **Derived value:** a column computed from other rows on every write, never read back as input.
 
 ## 4. How each data type converges
@@ -85,6 +89,12 @@ request (a miss, a substitute serve, pin, promote, refresh) retries it, or until
 `PurgeFinishedJobs` drops the note after 30 days (`central/infra/queue_ops.py:148-152`). A re-cut
 is a new key with no note. A sync's `retry_terminal` publish fires only when a key gains or
 changes a reference: new input, not a retry.
+
+**Legacy tags.** A tag that `release_version` refuses (e.g. `v1.2.3foo`, which the table's prefix
+CHECK admits) is never a netboot candidate or substitute and never desired. The one rule is
+`_os_image_job(row)`, through which `_resolve_base`, `desired_in` and `pin` build every OS-image
+job; `pin` also refuses such a tag up front (`invalid_tag`). The tag-keyed job used to refuse it;
+the sha-keyed job cannot.
 
 **The invariant:** every stored value is a pure function of its key, the newest upstream
 observation, or recomputed from current rows. It is enforced by construction (content keys) and
@@ -125,20 +135,34 @@ stateDiagram-v2
 
 1. **Lock before reading.** `INSERT ... ON CONFLICT DO NOTHING`, then `SELECT ... FOR UPDATE`; the
    previous row and the frozen flag come from the locked row. A concurrent first insert waits, then
-   sees the winner, so no reference is orphaned (probed on PostgreSQL 16, both orders).
+   sees the winner, so no reference is orphaned (probed on PostgreSQL 16, both orders). The frozen
+   flag asks whether the old `.deb` was produced through `AssetRecords.lock_produced`, a
+   `FOR SHARE` read of its asset row that serializes with `record_produced`: a recording either
+   committed first and freezes the tag, or waits and lands after the re-cut was taken. Lock order
+   in a release transaction: the release row, then the old `.deb`'s asset row, then the rows
+   `reference` inserts.
 2. **The guard:** apply when the stored version is NULL, or the new one is set and not older.
    Equal versions re-apply: a prerelease flag can change without a new manifest asset.
-3. **The version** is set only when the manifest body was read, so a manifest that 404s mid-re-draft
-   cannot wipe a tag. It is `(updated_at, id)`: `updated_at` is a documented timestamp, while
-   growing ids are not documented; the id only breaks a same-second tie.
+3. **The version** is set only for a manifest that was read, valid and complete (glossary). So a
+   manifest that 404s mid-re-draft, a broken upload, or a release caught mid-upload never takes a
+   working `.deb` from the Pis: unversioned, it is refused over a stored version, and the last good
+   observation stays. Once the `.deb` is attached, the next sync versions the same manifest and
+   applies it. *Residual:* a first observation of a new tag has no row to protect, so it is
+   inserted whatever its manifest says, and the next valid observation repairs it. The version is
+   `(updated_at, id)`: `updated_at` is a documented timestamp, while growing ids are not
+   documented; the id only breaks a same-second tie.
 4. **Hourly repair.** A stale equal-version observation can land after a fresh one whose ETag is
-   stored last, and then every sync gets 304. So the ETag is trusted for one hour (placeholder),
-   and an operator refresh clears it.
+   stored last, and then every sync gets 304. So the ETag is stored with its time
+   (`etag_stored_at`) and sent only while younger than `ETAG_MAX_AGE`, one hour (a placeholder);
+   an ETag with no stored time is never sent, and an operator refresh clears it.
 
 **Runtime.** Rescue re-publishing then closing, the completion guard and early-copy deferral all
-stay: none of them orders jobs. **Deleted:** the one-runner lock on every job type that is not an
-asset fetch, so rescue can never block itself; clearing facts on a re-cut; the re-check before
-rename; the sticky freeze; retire deleting the asset row. *Cost:* an operator refresh during a
+stay: none of them orders jobs. The one-runner lock is `_lock(job)` in the queue mapping: the
+job's `lock` key when its type is an asset fetch, else None. A periodic registration passes it
+the field-less tick, and a publish passes the published job (`central/infra/job_queue.py`).
+**Deleted:** the one-runner lock on every job type that is not an asset fetch, so rescue can never
+block itself; clearing facts on a re-cut; the re-check before rename; the sticky freeze; retire
+deleting the asset row. *Cost:* an operator refresh during a
 running sync lists GitHub twice. The two syncs converge by rule 2.
 
 ## 7. The next consumer: media
@@ -150,11 +174,11 @@ catalog guarded by Immich's per-asset `updatedAt` (rule 2), a variant pointing a
 
 | Migration | Shape | Rollback |
 | --- | --- | --- |
-| 028 | Re-key `os-image` assets from tag to `base_tarball_sha256`, one reference per tag, **no facts**. Delete `os_image.fetch` notes. Cancel pending and fail running `photo_wall.os_image.fetch` rows (`to_regclass` guard, as 022) | Revert the code and clear the ETag: one download per desired OS image |
+| 028 | Re-key `os-image` assets from tag to `base_tarball_sha256`, one reference per tag, **no facts**. Delete `os_image.fetch` notes. Cancel pending and fail running `photo_wall.os_image.fetch` rows (`to_regclass` guard, as 022). Add `asset_references_locator_names_the_key`: `locator_sha256 = identity`, never NULL, for both kinds. Safe to run twice | In order: end the `os_image.fetch` deliveries; drop the CHECK; revert the code; clear the ETag (one download per desired OS image). Roll forward: end them again, then delete 028's `schema_migrations` row. The exact SQL is in 028's header and the [runbook](runbook.md#upgrading-to-content-keyed-os-images-migration-028) |
 | 029 | `app_releases.upstream_changed_at`, `upstream_asset_id` (both NULL or both set); `app_release_poll.etag_stored_at`; clear the ETag so the first sync stamps every row | Code revert |
 
-*Costs:* old `base-<tag>.squashfs` files double OS-image disk until deleted (the runbook deletes
-them at upgrade). Each re-cut then leaves about 1 GiB and an unreferenced asset row until
+*Costs:* old `base-<tag>.squashfs` files double OS-image disk until deleted (the runbook's upgrade
+procedure deletes them). Each re-cut then leaves about 1 GiB and an unreferenced asset row until
 `MaintainCache` exists. This reverses the programme plan's "orphan sweep before content keys", and
 no slice removed unreferenced rows: C3 now must.
 
@@ -217,6 +241,10 @@ graph LR
   data-first readers) and "a terminal stands against a transient" (run ordering in disguise).
 - **Round 1 fixes:** lock-then-read for release rows; every reference tried; a version needs a read
   manifest body; hourly repair of equal versions.
+- **Implemented** (beads 1 to 5). Where the code went past the frozen pages: an invalid or
+  `asset_missing` manifest is unversioned (owner); the frozen flag reads under `lock_produced`;
+  `_lock` takes the job, not its type; `_os_image_job` keeps legacy tags out; 028 gained its
+  rollback order and the reference CHECK; the substitute publish runs in the open's transaction.
 - **Survived every attack:** content keys, the version guard, the derived flag, lock-then-read
   promotion, rescue by re-publishing, data-first readers. **Prior art:** git, OCI and Nix content
   addressing; Kubernetes `resourceVersion`; HTTP cache max-age.

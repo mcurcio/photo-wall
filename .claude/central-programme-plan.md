@@ -1,6 +1,6 @@
 # Central content-serving programme — resume document
 
-Branch `claude/central-followups`, PR #27. Updated 2026-09-24 (after #26 review round 1).
+Branch `claude/central-followups`, PR #27. Updated 2026-09-24 (#26 landed, beads 1–5).
 
 ## Done (PR #27)
 
@@ -11,17 +11,17 @@ Branch `claude/central-followups`, PR #27. Updated 2026-09-24 (after #26 review 
 - **#25:** a served tag stays desired for 30 days.
 - **Two-pod run:** passed, and now runs in CI as `tests/test_two_pods.py`.
 - **Netboot Compose tracer:** runs only in CI (`netboot-e2e.yml`). It passes on #27.
+- **#26 (landed, beads 1–5):** jobs may run in any order; each data type converges by its own
+  rule (`docs/central-idempotent-jobs.md`, status implemented). Bead 1 `os-image-content-key`
+  (migration 028), bead 2 `reader-data-first`, bead 3 `catalog-follows-upstream` (migration 029),
+  bead 4 `rescue-lock-free`, bead 5 `idempotent-jobs-docs` (architecture, runbook upgrade
+  preflight and 028 rollback). Divergences from the pages are in `.claude/errata.md`.
 - **Docs:** they match the landed code.
 
-## Waiting on the owner
+## Residuals
 
-- **#26:** the design is `docs/central-idempotent-jobs.md` (per-data rules, revised after review
-  round 1). The frozen bead pages are in `.claude/idempotent/`. No code until the owner approves.
-  - Wave 1: bead 1 `os-image-content-key` (the tracer; migration 028).
-  - Wave 2, three worktrees in parallel, with disjoint files: bead 2 `reader-data-first`, bead 3
-    `catalog-follows-upstream` (migration 029), bead 4 `rescue-lock-free`.
-  - Wave 3: bead 5 `idempotent-jobs-docs`, which includes the runbook upgrade preflight.
-  - The owner decided the upgrade re-downloads OS images once, after that preflight.
+- **Test gap (bead 2's verifier):** no test covers a `Pending` outcome with the data present at
+  the post-wait open (`central/assets/reader.py` `_produce_and_open`). Add one.
 
 ## Remaining, sized (about 31–36 beads)
 
@@ -39,7 +39,7 @@ Constraints:
 
 ## Recommended order
 
-1. #26 beads 1–5.
+1. ~~#26 beads 1–5.~~ Done.
 2. H1, then H2.
 3. C1, then C3. REVERSED by #26: content-keyed OS images land first, so orphaned
    `base-*.squashfs` files and bare asset rows accumulate (~1 GiB per re-cut) until C3.
@@ -51,7 +51,11 @@ Constraints:
 
 ## Still-stale docs (fold into cleanup)
 
-- `docs/module-player-package.md:50,58`
-- `docs/module-central-cache.md:153-154`
 - `docs/module-appliance-release.md`: the 0012 section and the upper half
   (`ReleaseAuthority`, `/v1/player/boot-health`)
+- `docs/module-central-cache.md`: the status line and "os-images miss-tolerance and self-heal"
+  (`base_cache`, `enqueue_base_fetch_in`: both gone)
+- `docs/runbook.md` 0012 section: "latest-verified", `base_cache` rows and eviction reasons in
+  the `/v1/operator/netboot` paragraph
+- `docs/module-player-package.md:56`: "only on an operator promote" (the desired set fetches too)
+- `central/infra/runtime.py:18`: "its lock blocks the key forever" (only an asset fetch has one)

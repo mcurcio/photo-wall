@@ -196,7 +196,7 @@ def _check_asset(
 
 @dataclass(frozen=True, slots=True)
 class JobKeys:
-    lock: str  # one RUNNING copy fleet-wide; also the job_outcomes key + NOTIFY payload
+    lock: str  # job_outcomes key + NOTIFY payload; one RUNNING copy, for asset jobs only
     queueing_lock: str  # one PENDING copy
 
 

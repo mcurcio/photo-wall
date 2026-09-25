@@ -9,7 +9,9 @@ conformance suite):
 - PB3 A latest `terminal` outcome without `retry_terminal`: insert nothing, return
   `SettledHandle(Failed(True, reason, None))`.
 - PB4 Otherwise read `since` (the key's current outcome sequence, 0 if none), then defer. A merge
-  into a pending copy is success; a running copy is joined, not duplicated.
+  into a pending copy is success. With a copy running, a pending copy is inserted: an asset job's
+  waits for the running one's lock; any other may run alongside it. Either way the handle
+  resolves on the first outcome newer than `since` (PB7), the running copy's included.
 - PB5 `publish` runs in a SAVEPOINT of `within`, so a merge never aborts the caller's work.
 - PB6 `wait` while `within` is open raises `RuntimeError("await_after_commit")`; after a rollback
   it returns `NOT_PUBLISHED`.

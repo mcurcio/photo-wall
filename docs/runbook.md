@@ -197,11 +197,11 @@ keeps serving while the uplink is down.
 
 [Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
 
-**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tag>.squashfs`** under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a cached-but-absent file at the serve seam (a dangling `cached` row demotes and re-enqueues) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
+**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tarball sha256>.squashfs`** (named by the sha256 of the release's base tarball, so a re-cut is a new file) under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a missing file at the serve seam (a read that finds no file publishes its fetch) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; per-version `base-<tag>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
+| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; `base-<tarball sha256>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
 | `PHOTO_WALL_PER_DEVICE_DEB` | player | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
 
 **Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.
@@ -225,7 +225,11 @@ curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
 
 **Server-side rollback (the Pi is diskless).** The Pi persists nothing and cannot choose a tag, so rollback lives on central. When a device is served a target (a 200) but never posts it base-healthy and re-netboots, central marks that boot failed, fences the tag, and serves the device its own **known-good** on the next boot — **sticking** there (never re-serving the failing tag) until a newer tag appears or you pin it, so it cannot oscillate. A device with **no** prior known-good that cannot boot its served image boot-loops until you pin it (accepted).
 
-**Garbage collection.** Cache bytes are need-driven: a `base-<tag>.squashfs` is kept while its tag is `latest-verified`, any non-retired device's pin, any non-retired device's known-good, or a fetch is in flight; otherwise GC unlinks the bytes and records an **eviction reason** on the `base_cache` row (the row and its integrity sha survive; a later need re-fetches). GC runs at the poll tail and after a pin change. A **retired** device holds nothing — its versions become evictable and stop holding the frontier.
+**Garbage collection.** None exists yet. Nothing removes an OS image file or an unreferenced
+asset row: a re-cut leaves the old `base-<tarball sha256>.squashfs` (about 1 GiB) and its bare
+asset row on disk until `MaintainCache` is built. A wiped cache refills on demand: a read that
+finds no file publishes its fetch, and the five-minute `Prefetch` publishes the fetch of every
+desired asset missing from disk. A **retired** device names no tag, so it keeps nothing desired.
 
 **Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
 
@@ -234,6 +238,75 @@ curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operato
 ```
 
 **Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+
+## Upgrading to content-keyed OS images (migration 028)
+
+Migration 028 re-keys every OS image from its release tag to the sha256 of its base tarball
+([idempotent jobs](central-idempotent-jobs.md) §8). It carries **no produced facts**: the owner
+decided that each desired OS image downloads once more after the upgrade, rather than trusting a
+file whose tag may have been re-cut since it was fetched. The cost, stated plainly:
+
+- A Pi that reboots before its image lands fails its fetch (`503`) and reboots again.
+- If GitHub is unreachable, or a wanted tarball was deleted upstream, Pis loop on `503` and reboot
+  until a download succeeds.
+- A device pinned to a deleted release stays stuck until you re-pin it.
+
+1. **Preflight, before upgrading.** Confirm the worker reaches the release origin
+   (`PHOTO_WALL_RELEASE_API_BASE`, default `https://api.github.com`). Then, for every desired
+   tag, check that its tarball URL answers. The desired tags are every active device's pin and
+   known-good, every tag served in the last 30 days, and, while no device has a known-good, the
+   newest release with an OS image (`GET /v1/operator/app/releases`, `has_os_image`). This lists
+   the device-named ones with their URLs:
+
+   ```sh
+   docker compose exec -T database psql -U photo_wall photo_wall -At -F ' ' -c "
+     SELECT DISTINCT r.tag, r.base_tarball_url FROM app_releases r JOIN devices d
+       ON d.retired_at IS NULL AND r.tag IN (d.attached_tag, d.known_good_tag,
+          CASE WHEN d.last_served_at >= EXTRACT(EPOCH FROM now()) - 30 * 86400
+               THEN d.last_served_tag END)
+     WHERE r.base_tarball_url IS NOT NULL ORDER BY r.tag"
+   # For each URL, fetch one byte: 206 or 200 means it answers; 404 means deleted upstream.
+   curl -sL -r 0-0 -o /dev/null -w '%{http_code}\n' '<base_tarball_url>'
+   ```
+
+   A tag whose tarball is gone will not boot after the upgrade. Re-pin its devices first.
+2. **Upgrade Central and the workers together** (Compose replaces both). 028 runs at start-up.
+3. **Delete the old `os-images/base-<tag>.squashfs` files.** Nothing reads them any more, and
+   they double the OS-image disk until removed. A new-style name is 64 hex digits; a tag name
+   starts with `v`:
+
+   ```sh
+   docker compose exec -T worker sh -c 'rm -f /var/cache/photo-wall/os-images/base-v*.squashfs'
+   ```
+
+   (Use your `PHOTO_WALL_CACHE_ROOT` if it is not the default.)
+4. **Watch the first downloads.** Each desired OS image downloads once, on the next `Prefetch`
+   (every five minutes) or on the first Pi that asks for it.
+
+**Rollback.** Migrations are forward-only. From 028's header, in this order:
+
+```text
+  a. End the new-shape deliveries, which the old code cannot decode:
+       UPDATE procrastinate_jobs SET status = 'cancelled'
+       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'todo';
+       UPDATE procrastinate_jobs SET status = 'failed'
+       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'doing';
+  b. Drop the CHECK, which the old code's tag-keyed references violate:
+       ALTER TABLE asset_references DROP CONSTRAINT asset_references_locator_names_the_key;
+  c. Revert the code.
+  d. UPDATE app_release_poll SET etag = NULL;
+     so the next sync lists every release again and re-references each OS image under its
+     tag: one download per desired OS image.
+```
+
+**Roll forward after a rollback:** repeat (a) for the old-shape deliveries, then
+
+```sql
+DELETE FROM schema_migrations WHERE name = '028_os_image_content_key.sql';
+```
+
+and deploy the new code: 028 runs again and re-keys every OS image from `app_releases`. It is
+safe to run twice.
 
 ## Operator API: reposition and remove Frames
 

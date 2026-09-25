@@ -97,6 +97,12 @@ the dangling window because `unlink` is non-transactional).
 
 ## os-images orphan sweep, floor, and cap (Slice 1)
 
+**Superseded by the Central MVP.** The sweep, the floor and the cap below went with `base_cache`.
+OS images are now `os-images/base-<tarball sha256>.squashfs`, named by the sha256 of the
+release's base tarball, and nothing removes an orphaned file or an unreferenced asset row until
+`MaintainCache` is built ([runbook](runbook.md#base-image-auto-mirror-0012)). The rest of this
+section records Slice 1 as it landed.
+
 The poll-tail **orphan sweep** (`central/netboot_base.py`, modeled on media
 `store.recover`) enumerates the `os-images/` directory and unlinks any
 `base-<tag>.squashfs` with no owning `base_cache` row. "Owning row" **includes
@@ -149,10 +155,9 @@ so the log fields are the interim observability floor.
   the release-asset split and the withdraw half of the release-list sync.
 - **media (`media/`)** — serve-time regeneration (distinguishing a miss from
   corruption, adding the requeue transition) lands in **Slice 3**.
-- **Hand-staging removal is pending (bead B5)** — GitHub is the intended sole
-  `.deb` source, but the operator hand-staging routes (`POST /v1/operator/app`,
-  `PUT /v1/operator/app/current`) are **still live**; their removal is gated on a
-  live-DB precondition and is not done here. Do not treat hand-staging as gone.
+- **Hand-staging is removed.** GitHub is the sole `.deb` source: the operator
+  hand-staging routes (`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no
+  longer exist ([runbook](runbook.md#player-provisioning-promote-a-release-from-github-0010)).
 
 Between slices, an out-of-band loss in an unlanded domain (`.deb`, media) still
 errors rather than self-healing — the one disclosed interim cost.
