@@ -1,8 +1,9 @@
 """The GitHub Releases wire as tests serve it, and a fake origin HTTP server.
 
 One place states what `GitHubReleaseOrigin` reads: the release-list entry (`tag_name`, `draft`,
-`prerelease`, `assets[].browser_download_url`), the release's `manifest.json` (`base_image`,
-`player_deb`) and the base tarball `scripts/package_release_artifacts.py` builds. The
+`prerelease`, `assets[].browser_download_url`, and the manifest asset's `id` and `updated_at`:
+the release's upstream version), the release's `manifest.json` (`base_image`, `player_deb`) and
+the base tarball `scripts/package_release_artifacts.py` builds. The
 `httpx.MockTransport` e2e and the real-process two-pod test both serve these bytes.
 """
 
@@ -16,12 +17,15 @@ import tarfile
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 TARBALL_NAME = "photo-wall-base.tar.gz"
 MANIFEST_NAME = "manifest.json"
+# The manifest asset's (updated_at, id) of a first upload: GitHub's asset `updated_at` format.
+FIRST_UPLOAD = ("2026-09-01T00:00:00Z", 7)
 
 
 def _add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -60,17 +64,20 @@ def manifest_bytes(*, tarball: bytes, tarball_sha: str, deb: bytes, deb_filename
 
 
 def release_entry(tag: str, *, manifest_url: str, tarball_url: str, deb_filename: str,
-                  deb_url: str) -> dict:
-    """One published (non-draft, non-prerelease) entry of the releases list."""
+                  deb_url: str, uploaded: tuple[str, int] = FIRST_UPLOAD) -> dict:
+    """One published (non-draft, non-prerelease) entry of the releases list. Every asset was
+    uploaded at `uploaded` = (updated_at, the manifest asset's id); the others take the next ids.
+    """
+    updated_at, manifest_id = uploaded
+    names_and_urls = ((MANIFEST_NAME, manifest_url), (TARBALL_NAME, tarball_url),
+                      (deb_filename, deb_url))
     return {
         "tag_name": tag,
         "draft": False,
         "prerelease": False,
-        "assets": [
-            {"name": MANIFEST_NAME, "browser_download_url": manifest_url},
-            {"name": TARBALL_NAME, "browser_download_url": tarball_url},
-            {"name": deb_filename, "browser_download_url": deb_url},
-        ],
+        "assets": [{"id": manifest_id + offset, "name": name, "updated_at": updated_at,
+                    "browser_download_url": url}
+                   for offset, (name, url) in enumerate(names_and_urls)],
     }
 
 
@@ -85,6 +92,7 @@ class FakeRelease:
     squashfs_sha: str
     deb: bytes
     tarball_status: int = 200  # 404 makes the OS image terminally unobtainable
+    uploaded: tuple[str, int] = FIRST_UPLOAD  # the manifest asset's (updated_at, id)
 
     @property
     def deb_filename(self) -> str:
@@ -95,6 +103,16 @@ def make_release(tag: str, *, squashfs_bytes: int = 4 * 1024 * 1024) -> FakeRele
     """Random (incompressible) squashfs bytes, so the tarball is big enough to throttle or hold."""
     tarball, tarball_sha, squashfs_sha = real_tarball(os.urandom(squashfs_bytes))
     return FakeRelease(tag, tarball, tarball_sha, squashfs_sha, os.urandom(64 * 1024))
+
+
+def recut(release: FakeRelease, *, squashfs_bytes: int = 4 * 1024 * 1024) -> FakeRelease:
+    """`release` re-cut upstream (`--clobber`): new tarball bytes under the same tag, uploaded one
+    hour later as new assets (a newer manifest `updated_at` and id), so the sync takes it."""
+    tarball, tarball_sha, squashfs_sha = real_tarball(os.urandom(squashfs_bytes))
+    updated_at, manifest_id = release.uploaded
+    later = datetime.fromisoformat(updated_at) + timedelta(hours=1)
+    return replace(release, tarball=tarball, tarball_sha=tarball_sha, squashfs_sha=squashfs_sha,
+                   uploaded=(later.isoformat().replace("+00:00", "Z"), manifest_id + 3))
 
 
 @dataclass
@@ -127,7 +145,7 @@ class FakeGitHubOrigin:
             entries.append(release_entry(
                 release.tag, manifest_url=f"{url}/{MANIFEST_NAME}",
                 tarball_url=f"{url}/{TARBALL_NAME}", deb_filename=release.deb_filename,
-                deb_url=f"{url}/{release.deb_filename}"))
+                deb_url=f"{url}/{release.deb_filename}", uploaded=release.uploaded))
         return json.dumps(entries).encode()
 
     def __enter__(self) -> FakeGitHubOrigin:

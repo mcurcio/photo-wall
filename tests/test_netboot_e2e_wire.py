@@ -154,8 +154,8 @@ def _seed_base(registry, cache_root, *, tag=TAG, squashfs=SQUASHFS, cached=True,
     key = asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA))
     assets = PgAssetRecords(clock)
     with PgTransactions(db).begin() as tx:
-        PgReleaseRecords().upsert(tx, PublishedRelease(tag, False, package, None, tarball),
-                                  now=clock.utc())
+        PgReleaseRecords().claim(tx, PublishedRelease(tag, False, package, None, tarball, None),
+                                 now=clock.utc())
         assets.reference(tx, key, AssetReference(tag, tarball, None, None))
         if cached:
             assets.record_produced(

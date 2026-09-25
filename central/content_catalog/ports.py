@@ -33,6 +33,14 @@ class ReleaseRow:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredEtag:
+    """The release listing's stored ETag (None: list in full) and when it was stored."""
+
+    etag: str | None
+    stored_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class Promotion:
     tag: str
     by: Promoter
@@ -85,17 +93,27 @@ class ReleaseRecords(Protocol):
         """The releases whose `.deb` sha is `sha256` (an indexed WHERE, never a scan)."""
         ...
 
-    def upsert(self, tx: Transaction, release: PublishedRelease, *,
-               now: float) -> ReleaseRow | None:
-        """Write tag, semver columns, is_prerelease, asset_* and base_*; return the PREVIOUS row.
+    def claim(self, tx: Transaction, release: PublishedRelease, *,
+              now: float) -> ReleaseRow | None:
+        """Insert the release if its tag is absent, and return None: this first observation is
+        applied (the legacy NOT NULL `mirror_state` is 'discovered' with a package, else
+        'undeployable'). Otherwise lock the row (`FOR UPDATE`) and return it: the PREVIOUS row,
+        which the caller derives from and then offers the observation to `apply`.
 
-        None when the tag is new. On insert the legacy NOT NULL `mirror_state` is 'discovered'
-        with a package, else 'undeployable'.
+        A concurrent first insert of the same tag waits for the winner, then returns its row.
         """
         ...
 
-    def mark_divergent(self, tx: Transaction, tag: str) -> None:
-        """Freeze the tag's `.deb` facts (`mirror_state='divergent'`, main's re-cut rule)."""
+    def apply(self, tx: Transaction, release: PublishedRelease, *, divergent: bool,
+              now: float) -> bool:
+        """Write the observation over the claimed row, unless its upstream version is older than
+        the stored one: a stored NULL version takes any observation; a stored version takes only
+        a set, not older one (equal re-applies). True when written; a refusal writes nothing.
+
+        `divergent` is the frozen flag the caller derived from the locked row: the row is
+        'divergent' iff it is set; a row leaving 'divergent' is 'discovered' with a package, else
+        'undeployable'.
+        """
         ...
 
     def promoted_tag(self, tx: Transaction) -> str | None: ...
@@ -119,9 +137,16 @@ class ReleaseRecords(Protocol):
         """Only while a tag is promoted (the policy row exists)."""
         ...
 
-    def load_etag(self, tx: Transaction) -> str | None: ...
+    def load_etag(self, tx: Transaction) -> StoredEtag | None:
+        """None when no listing was ever stored."""
+        ...
 
-    def store_etag(self, tx: Transaction, etag: str | None) -> None: ...
+    def store_etag(self, tx: Transaction, etag: str | None, *, now: float) -> None: ...
+
+    def lock_auto_promotion(self, tx: Transaction) -> None:
+        """Take the transaction-scoped lock that serializes automatic promotions: the holder
+        reads every row committed before it, and writes before the next holder reads."""
+        ...
 
     def bound_player_count(self, tx: Transaction) -> int:
         """count(DISTINCT player_id) FROM bindings."""

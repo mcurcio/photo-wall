@@ -1,8 +1,8 @@
-"""Postgres `ReleaseRecords` / `DeviceRecords` over the existing tables, unchanged.
+"""Postgres `ReleaseRecords` / `DeviceRecords` over the existing tables.
 
-`app_releases` (016 + 018's base_* columns), `app_release_policy` (+ 023's last_good_tag and
-027's promoted_by), `app_release_poll`, `devices` (018; 024's and 026's partial indexes serve the
-tag reads) and `bindings` (001). The SQL is ported from `central/app_releases.py`,
+`app_releases` (016 + 018's base_* columns + 029's upstream version), `app_release_policy` (+
+023's last_good_tag and 027's promoted_by), `app_release_poll` (+ 029's etag_stored_at),
+`devices` (018; 024's and 026's partial indexes serve the tag reads) and `bindings` (001). The SQL is ported from `central/app_releases.py`,
 `central/app_release_service.py`, `central/installation_repository.py` and
 `central/netboot_base.py`. Each method runs in the caller's transaction; a fake transaction is a
 `TypeError` (`pg_connection`).
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import fields
-from typing import Any
+from typing import Any, Final
 
 from central.content_catalog.ports import (
     DeviceRow,
@@ -22,6 +22,7 @@ from central.content_catalog.ports import (
     Promotion,
     PromotionWrite,
     ReleaseRow,
+    StoredEtag,
 )
 from central.infra.transactions import pg_connection
 from central.kernel.assets import OriginLocator
@@ -33,6 +34,11 @@ _RELEASE_COLUMNS = (
     "tag, is_prerelease, asset_url, asset_sha256, asset_size, "
     "base_tarball_url, base_tarball_sha256, base_tarball_size, mirror_state"
 )
+# The transaction-scoped advisory lock one automatic promotion holds from its first read to its
+# write (docs/central-idempotent-jobs.md §4). Distinct from every other lock id in `central`
+# (734118321 migrations in `central/db.py`, 322 registry, 323 runtime, 324 coordination, 325
+# media, 326 media queue schema).
+AUTO_PROMOTION_LOCK: Final = 734118327
 _DEVICE_COLUMNS = (
     "device_id, serial, attached_tag, known_good_tag, last_served_tag, boot_outcome, "
     "failed_tag, last_served_at, retired_at"
@@ -89,6 +95,11 @@ def _facts(locator: OriginLocator | None) -> tuple[str | None, str | None, int |
     return locator.url, locator.sha256, locator.size
 
 
+def _upstream(release: PublishedRelease) -> tuple[float | None, int | None]:
+    version = release.upstream_version
+    return (None, None) if version is None else (version.changed_at, version.asset_id)
+
+
 class PgReleaseRecords:
     """Implements `ReleaseRecords`."""
 
@@ -111,41 +122,68 @@ class PgReleaseRecords:
         ).fetchall()
         return tuple(_release(row) for row in rows)
 
-    def upsert(self, tx: Transaction, release: PublishedRelease, *,
-               now: float) -> ReleaseRow | None:
+    def claim(self, tx: Transaction, release: PublishedRelease, *,
+              now: float) -> ReleaseRow | None:
+        # 1. Insert if absent: a concurrent first insert of the tag waits on the unique index
+        #    for the winner to commit, then inserts nothing.
+        # 2. Otherwise lock the row. Under READ COMMITTED this statement sees the winner's
+        #    committed row, so the previous row is never read before the lock is held.
         conn = pg_connection(tx)
-        previous = conn.execute(
+        version = release_version(release.tag)
+        changed_at, asset_id = _upstream(release)
+        mirror_state = "discovered" if release.package is not None else "undeployable"
+        if conn.execute(
+            "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
+            "asset_url,asset_sha256,asset_size,base_tarball_url,base_tarball_sha256,"
+            "base_tarball_size,mirror_state,upstream_changed_at,upstream_asset_id,"
+            "discovered_at,updated_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(tag) DO NOTHING",
+            (release.tag, version.major, version.minor, version.patch, version.prerelease,
+             release.is_prerelease, *_facts(release.package), *_facts(release.os_image),
+             mirror_state, changed_at, asset_id, now, now),
+        ).rowcount == 1:
+            return None
+        row = conn.execute(
             f"SELECT {_RELEASE_COLUMNS} FROM app_releases WHERE tag=%s FOR UPDATE",
             (release.tag,),
         ).fetchone()
-        version = release_version(release.tag)
-        asset = _facts(release.package)  # url, sha256, size
-        base = _facts(release.os_image)
-        # mirror_state is written on insert only; afterwards only mark_divergent changes it.
-        mirror_state = "discovered" if release.package is not None else "undeployable"
-        conn.execute(
-            "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
-            "asset_url,asset_sha256,asset_size,base_tarball_url,base_tarball_sha256,"
-            "base_tarball_size,mirror_state,discovered_at,updated_at) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-            "ON CONFLICT(tag) DO UPDATE SET major=EXCLUDED.major,minor=EXCLUDED.minor,"
-            "patch=EXCLUDED.patch,prerelease=EXCLUDED.prerelease,"
-            "is_prerelease=EXCLUDED.is_prerelease,asset_url=EXCLUDED.asset_url,"
-            "asset_sha256=EXCLUDED.asset_sha256,asset_size=EXCLUDED.asset_size,"
-            "base_tarball_url=EXCLUDED.base_tarball_url,"
-            "base_tarball_sha256=EXCLUDED.base_tarball_sha256,"
-            "base_tarball_size=EXCLUDED.base_tarball_size,updated_at=EXCLUDED.updated_at",
-            (release.tag, version.major, version.minor, version.patch, version.prerelease,
-             release.is_prerelease, *asset, *base, mirror_state, now, now),
-        )
-        return None if previous is None else _release(previous)
+        return _release(row)
 
-    def mark_divergent(self, tx: Transaction, tag: str) -> None:
-        pg_connection(tx).execute(
-            "UPDATE app_releases SET mirror_state='divergent', mirror_error='asset_changed' "
-            "WHERE tag=%s",
-            (tag,),
-        )
+    def apply(self, tx: Transaction, release: PublishedRelease, *, divergent: bool,
+              now: float) -> bool:
+        # The guard is the WHERE: a stored NULL version takes any observation; a stored version
+        # takes only a set one that is not older, compared as the row value (changed_at, id).
+        # The SET's right-hand `mirror_state` is the row's value before this write.
+        version = release_version(release.tag)
+        changed_at, asset_id = _upstream(release)
+        asset_url, asset_sha256, asset_size = _facts(release.package)
+        base_url, base_sha256, base_size = _facts(release.os_image)
+        return pg_connection(tx).execute(
+            "UPDATE app_releases SET major=%(major)s,minor=%(minor)s,patch=%(patch)s,"
+            "prerelease=%(prerelease)s,is_prerelease=%(is_prerelease)s,"
+            "asset_url=%(asset_url)s,asset_sha256=%(asset_sha256)s,asset_size=%(asset_size)s,"
+            "base_tarball_url=%(base_url)s,base_tarball_sha256=%(base_sha256)s,"
+            "base_tarball_size=%(base_size)s,"
+            "upstream_changed_at=%(changed_at)s,upstream_asset_id=%(asset_id)s,"
+            "mirror_state=CASE WHEN %(divergent)s THEN 'divergent' "
+            "WHEN mirror_state='divergent' THEN %(released_state)s ELSE mirror_state END,"
+            "mirror_error=CASE WHEN %(divergent)s THEN 'asset_changed' "
+            "WHEN mirror_state='divergent' THEN NULL ELSE mirror_error END,"
+            "updated_at=%(now)s "
+            "WHERE tag=%(tag)s AND (upstream_changed_at IS NULL OR "
+            "(%(changed_at)s::double precision IS NOT NULL AND "
+            "(upstream_changed_at, upstream_asset_id) "
+            "<= (%(changed_at)s::double precision, %(asset_id)s::bigint))) "
+            "RETURNING tag",
+            {"tag": release.tag, "major": version.major, "minor": version.minor,
+             "patch": version.patch, "prerelease": version.prerelease,
+             "is_prerelease": release.is_prerelease, "asset_url": asset_url,
+             "asset_sha256": asset_sha256, "asset_size": asset_size, "base_url": base_url,
+             "base_sha256": base_sha256, "base_size": base_size, "changed_at": changed_at,
+             "asset_id": asset_id, "divergent": divergent, "now": now,
+             "released_state": "discovered" if release.package is not None else "undeployable"},
+        ).fetchone() is not None
 
     def promoted_tag(self, tx: Transaction) -> str | None:
         promotion = self.promotion(tx)
@@ -192,18 +230,24 @@ class PgReleaseRecords:
             "UPDATE app_release_policy SET last_good_tag=%s WHERE singleton", (tag,)
         )
 
-    def load_etag(self, tx: Transaction) -> str | None:
+    def load_etag(self, tx: Transaction) -> StoredEtag | None:
         row = pg_connection(tx).execute(
-            "SELECT etag FROM app_release_poll WHERE singleton"
+            "SELECT etag, etag_stored_at FROM app_release_poll WHERE singleton"
         ).fetchone()
-        return None if row is None else row["etag"]
+        if row is None or row["etag_stored_at"] is None:
+            return None  # never stored by this code (029 cleared any older ETag)
+        return StoredEtag(row["etag"], row["etag_stored_at"])
 
-    def store_etag(self, tx: Transaction, etag: str | None) -> None:
+    def store_etag(self, tx: Transaction, etag: str | None, *, now: float) -> None:
         pg_connection(tx).execute(
-            "INSERT INTO app_release_poll(singleton,etag) VALUES(TRUE,%s) "
-            "ON CONFLICT(singleton) DO UPDATE SET etag=EXCLUDED.etag",
-            (etag,),
+            "INSERT INTO app_release_poll(singleton,etag,etag_stored_at) VALUES(TRUE,%s,%s) "
+            "ON CONFLICT(singleton) DO UPDATE SET etag=EXCLUDED.etag,"
+            "etag_stored_at=EXCLUDED.etag_stored_at",
+            (etag, now),
         )
+
+    def lock_auto_promotion(self, tx: Transaction) -> None:
+        pg_connection(tx).execute("SELECT pg_advisory_xact_lock(%s)", (AUTO_PROMOTION_LOCK,))
 
     def bound_player_count(self, tx: Transaction) -> int:
         row = pg_connection(tx).execute(

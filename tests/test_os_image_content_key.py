@@ -13,19 +13,13 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
-import uuid
 from datetime import timedelta
-from pathlib import Path
 
-import psycopg
 import pytest
-from content_db import Reads, RecordingTransactions, insert_device
+from content_db import Reads, RecordingTransactions, insert_device, schema_before
 from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
 from fastapi.testclient import TestClient
-from psycopg.conninfo import make_conninfo
-from runtime_fakes import apply_procrastinate_schema
 from support.github_release import real_tarball
 from test_content_routes_http import ADMIN, StubDatabase
 
@@ -47,7 +41,12 @@ from central.infra.transactions import pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, OriginLocator
 from central.kernel.job_types import FetchOsImage, SyncReleases
 from central.kernel.jobs import asset_key
-from central.kernel.ports import NetbootBaseRequest, PublishedRelease, ReleaseListing
+from central.kernel.ports import (
+    NetbootBaseRequest,
+    PublishedRelease,
+    ReleaseListing,
+    UpstreamVersion,
+)
 from central.netboot_base import SERIAL_HEADER
 from contracts.equipment import equipment_device_id
 from contracts.time import ManualClock
@@ -55,7 +54,6 @@ from contracts.time import ManualClock
 V1, V2 = "v1.0.0", "v1.1.0"
 SERIAL = "10000000c0ffee77"
 DEVICE_ID = equipment_device_id("pi", SERIAL.encode())
-MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
 
 
 class Build:
@@ -81,8 +79,10 @@ def url(tag: str) -> str:
     return f"https://example.test/{tag}/photo-wall-base.tar.gz"
 
 
-def published(tag: str, build: Build) -> PublishedRelease:
-    return PublishedRelease(tag, False, None, "no_player_asset", build.locator(url(tag)))
+def published(tag: str, build: Build, at: int = 1) -> PublishedRelease:
+    """`tag` shipping `build`, observed at upstream version `at`: a re-cut is a newer one."""
+    return PublishedRelease(tag, False, None, "no_player_asset", build.locator(url(tag)),
+                            UpstreamVersion(float(at), 1))
 
 
 class HeldOrigin(FakeReleaseOrigin):
@@ -207,7 +207,7 @@ def world(registry, tmp_path):
 def test_t1_a_recut_moves_the_reference_to_the_new_key_and_boots_it(world):
     world.list(published(V1, S1), serving={url(V1): S1})
     assert world.fetch(S1) == S1.facts
-    world.list(published(V1, S2), serving={url(V1): S2})  # re-cut: the same URL, new bytes
+    world.list(published(V1, S2, at=2), serving={url(V1): S2})  # re-cut: same URL, new bytes
 
     assert world.os_references(V1) == [S2.sha]  # v1 references only (os-image, S2)
     assert world.reads.facts(S1.key) == S1.facts  # the old key keeps its facts
@@ -226,7 +226,7 @@ def test_t2_a_zombie_on_the_old_key_cannot_touch_the_new_one(world):
         world.origin.hold(S1.sha)
         zombie = asyncio.create_task(world.run_fetch(S1))  # worker A: S1's bytes, then paused
         await world.origin.reached[S1.sha].wait()
-        world.upstream(published(V1, S2), serving={url(V1): S2})
+        world.upstream(published(V1, S2, at=2), serving={url(V1): S2})
         await world.sync()  # worker B: v1 is re-cut to S2 ...
         assert await world.run_fetch(S2) == S2.facts  # ... and S2 is produced
         world.origin.held[S1.sha].set()  # A resumes, long after
@@ -244,8 +244,8 @@ def test_t2_a_zombie_on_the_old_key_cannot_touch_the_new_one(world):
 def test_t3_a_flip_flop_keeps_the_facts_and_downloads_once(world):
     world.list(published(V1, S2), serving={url(V1): S2})
     assert world.fetch(S2) == S2.facts
-    world.list(published(V1, S1), serving={url(V1): S1})
-    world.list(published(V1, S2), serving={url(V1): S2})
+    world.list(published(V1, S1, at=2), serving={url(V1): S1})
+    world.list(published(V1, S2, at=3), serving={url(V1): S2})
     assert world.fetch(S2) == S2.facts  # the sync's fetch finds the verified file ...
     assert world.origin.fetched(S2) == 1  # ... and downloads nothing
     assert world.reads.asset(S2.key).produced == S2.facts  # the facts survived the interlude
@@ -288,35 +288,8 @@ def test_t6_a_substitute_serve_records_the_known_good_tag(world):
 @pytest.fixture
 def at_027():
     """A schema migrated through 027 with procrastinate installed, and its `Database`."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    conninfo = make_conninfo(dsn, options=f"-c search_path={schema}")
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    db = None
-    try:
-        with psycopg.connect(conninfo) as conn:
-            conn.execute("""CREATE TABLE schema_migrations (
-                name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
-            for path in sorted(MIGRATIONS.glob("*.sql")):
-                if path.name >= "028":
-                    break
-                sql = path.read_text()
-                conn.execute(sql)
-                conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
-                             (path.name, hashlib.sha256(sql.encode()).hexdigest()))
-        apply_procrastinate_schema(conninfo)
-        db = Database(conninfo)
+    with schema_before("028") as db:
         yield db
-    finally:
-        if db is not None:
-            db.close()
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
-                psycopg.sql.Identifier(schema)))
 
 
 def _seed_027(db: Database) -> None:
