@@ -343,9 +343,13 @@ def _state(db: Database) -> dict:
             "SELECT job_name FROM job_outcomes ORDER BY job_name").fetchall()]
         queue = [(row["task_name"], row["status"]) for row in conn.execute(
             "SELECT task_name, status::text AS status FROM procrastinate_jobs ORDER BY id")]
+        # The catalog is database-wide: another schema (the app's own, in CI) has its copy of
+        # the constraint. `::regclass` resolves through this test's search_path, so only this
+        # schema's table counts.
         check = conn.execute(
             "SELECT count(*) AS n FROM pg_constraint "
-            "WHERE conname = 'asset_references_locator_names_the_key'").fetchone()["n"]
+            "WHERE conname = 'asset_references_locator_names_the_key' "
+            "AND conrelid = 'asset_references'::regclass").fetchone()["n"]
     return {
         "os_rows": sorted((row["identity"], row["produced_sha256"]) for row in assets
                           if row["kind"] == "os-image"),
