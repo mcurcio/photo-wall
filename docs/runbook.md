@@ -121,26 +121,32 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 
 1. **Stage the base image in your TFTP tree.** Unpack the published base OS bundle (kernel, DTBs, initramfs, `base-<revision>.squashfs`) beneath the boot-server root exactly as any other boot tree — see [PXE service setup](module-pxe-service.md). The base carries no Player code and no deployment config; it exists to run the bootstrapper (`appliance/provision.py`) that fetches everything else.
 2. **Boot the Pi and watch the pending queue.** The bootstrapper discovers central by mDNS, downloads the app manifest and the `.deb`, installs it, and starts the Player, which enrolls by serial — it appears **unbound** in the same operator inventory (`/v1/operator/inventory`) as the flash path.
-3. **Register and promote the app in central.** Copy the `.deb` bytes to central's `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` out of band (central never accepts the bytes over the request body — this mirrors how a signed release artifact is staged today), then:
+3. **Check which app is promoted.** Central serves the `.deb` of the one promoted release, taken
+   from the GitHub release list ([below](#player-provisioning-promote-a-release-from-github-0010)).
+   The release sync promotes the newest deployable release by itself (`promoted_by: "auto"`)
+   until a Player is bound and a `.deb` has been downloaded; after that it holds the promotion.
+   To choose a release, promote it yourself:
 
    ```sh
-   curl -X POST http://<central>/v1/operator/app \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"version": "<version>", "sha256": "<sha256>", "size": <size>}'
-   curl -X PUT http://<central>/v1/operator/app/current \
-     -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-     -d '{"sha256": "<sha256>"}'
+   curl -X POST -H 'Authorization: Bearer <admin-token>' \
+     http://<central>/v1/operator/app/releases/<tag>/promote
    ```
 
-   `POST /v1/operator/app` records the `{version, sha256, size}` pointer (422 on malformed input); `PUT /v1/operator/app/current` promotes it as the one global "current app" (404 if that sha256 was never registered). Every Player fetches the newly promoted `.deb` on its next reboot; already-running Players are unaffected until then.
+   The release sync never moves an operator promotion. Every Player fetches the newly promoted
+   `.deb` on its next reboot; already-running Players are unaffected until then.
 4. **Bind** the pending Player to a Frame and calibrate, exactly as in the flash-and-go flow above.
-5. **Update the app later** by repeating step 3 with a new `.deb` — no re-imaging, no re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot, the dark screen is the signal, and recovery is re-promoting the previous sha256.
+5. **Update the app later** by promoting a newer release tag, as in step 3 — no re-imaging, no
+   re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot,
+   the dark screen is the signal, and recovery is re-promoting the previous tag.
 
-**Where this actually stands.** Central's app-package endpoints (`central/app_packages.py`, `central/app.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
+**Where this actually stands.** Central's app manifest and package routes (`central/content_routes.py`, over the release
+catalog in `central/content_catalog/catalog.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
 
 ## Player provisioning: promote a release from GitHub (0010)
 
-[Decision 0010](decisions/0010-github-release-sourcing.md) removes the manual sha256 dance above for the common case: central **watches the project's GitHub Releases**, records every semver release as a candidate, and lazily mirrors the `.deb` into the shared `.deb` store Players already fetch from — but only when *you* promote a version. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic; promotion is a deliberate operator action. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
+[Decision 0010](decisions/0010-github-release-sourcing.md) removed 0009's manual sha256 dance: central **watches the project's GitHub Releases**, records every semver release as a candidate, and downloads the `.deb`s the fleet needs (the promoted release's among them) into the shared `.deb` store Players fetch from. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic. So is promotion on a fresh install: the release sync promotes the newest
+deployable release until a Player is bound and a `.deb` has been downloaded, then holds it; an
+operator promotion overrides it and is never moved by the sync. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
 
 **Configuration.** Release sourcing is **always-on** (0013 retired the opt-in gate): the worker polls GitHub and mirrors bytes into `<cache-root>/apps/` unconditionally; central serves them RO. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)); there is no separate `.deb`-store env to wire.
 
@@ -151,39 +157,51 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 | `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
 | `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Truthy to also track GitHub prereleases (drafts are always skipped) |
 | `PHOTO_WALL_RELEASE_POLL_SECONDS` | worker | `900` | Poll cadence in seconds |
+| `PHOTO_WALL_RELEASE_API_BASE` | worker | `https://api.github.com` | Base URL of the releases API; unset or empty means the default, an invalid URL fails at boot. Tests point it at a fake origin |
 
 **List, promote, refresh (all admin-authenticated).** These reach central's operator API; substitute your central origin and admin token:
 
 ```sh
-# List tracked releases: tag / version / mirror_state / deployable / promoted / current.
+# List tracked releases, newest first: tag / is_prerelease / deployable / promoted /
+# promoted_by ("auto" | "operator", null unless promoted) / has_os_image.
 curl --fail -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases
 
-# Promote a version. 200 if its bytes are already mirrored (current advances now);
-# 202 pending if central must mirror the .deb first; 404 unknown tag; 409 undeployable.
+# Promote a version: 200 {"status": "promoted"}, and central starts downloading its .deb;
+# 404 unknown tag; 409 no .deb (undeployable); 422 not a version tag.
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/<tag>/promote
 
-# Poll GitHub now instead of waiting for the next cadence (coalesced; 202).
+# Poll GitHub now instead of waiting for the next cadence (coalesced; 202 {"status": "polling"}).
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/refresh
 ```
 
 All three routes are always available: release sourcing is unconditional as of [decision 0013](decisions/0013-unified-cache-root.md), so the former **503 `release_sourcing_unconfigured`** branch (gated on the old `PHOTO_WALL_APP_ROOT`) has been removed.
 
-**Promoted vs. current (pending).** A promote records your **chosen tag** immediately. If that release is already mirrored, the served **current** pointer advances in the same request (`200 promoted`). If it is not yet mirrored, the request returns `202 pending`: the worker downloads and verifies the `.deb`, and `current` advances only once those bytes are on disk — the previously current version keeps serving until then, so Players are never broken. A pending promote whose uplink is down stays pending; it completes automatically when connectivity returns (no re-promote needed). Watch `mirror_state` in the list to see it move `discovered → mirroring → mirrored`, and `current` flip to the new tag.
+**Promoted vs. served.** A promote records your tag at once (`promoted_by: "operator"`) and, in
+the same transaction, queues the download of its `.deb`. `GET /v1/app/manifest` names the promoted
+`.deb` once its bytes are on disk; until then it names the last-good one (the latest earlier
+promotion whose `.deb` was on disk when it was replaced) if that is on disk, so Players are never
+broken. With neither on disk it names the promoted one, and the package route downloads it on
+request. A failed download is retried: a Player's next request asks again, and the five-minute
+`Prefetch` tick re-queues it after a transient failure; no re-promote is needed. Watch `promoted`
+and `promoted_by` in the list.
 
-**Offline / air-gapped.** The manual stage-by-reference path (`POST /v1/operator/app` + `PUT /v1/operator/app/current`, [above](#player-provisioning-netboot-and-promote-the-app-0009-in-progress)) still exists as an escape hatch when central cannot reach GitHub but you have the `.deb` on hand. A manually staged package simply won't appear in the release list.
+**Offline / air-gapped.** There is no manual stage path: the hand-staging routes
+(`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no longer exist, and central downloads
+every `.deb` from the download link of the GitHub release that lists it. A `.deb` already on disk
+keeps serving while the uplink is down.
 
 ## Base-image auto-mirror (0012)
 
 [Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
 
-**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tag>.squashfs`** under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a cached-but-absent file at the serve seam (a dangling `cached` row demotes and re-enqueues) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
+**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tarball sha256>.squashfs`** (named by the sha256 of the release's base tarball, so a re-cut is a new file) under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a missing file at the serve seam (a read that finds no file publishes its fetch) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; per-version `base-<tag>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
+| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; `base-<tarball sha256>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
 | `PHOTO_WALL_PER_DEVICE_DEB` | player | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
 
 **Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.
@@ -207,7 +225,11 @@ curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
 
 **Server-side rollback (the Pi is diskless).** The Pi persists nothing and cannot choose a tag, so rollback lives on central. When a device is served a target (a 200) but never posts it base-healthy and re-netboots, central marks that boot failed, fences the tag, and serves the device its own **known-good** on the next boot — **sticking** there (never re-serving the failing tag) until a newer tag appears or you pin it, so it cannot oscillate. A device with **no** prior known-good that cannot boot its served image boot-loops until you pin it (accepted).
 
-**Garbage collection.** Cache bytes are need-driven: a `base-<tag>.squashfs` is kept while its tag is `latest-verified`, any non-retired device's pin, any non-retired device's known-good, or a fetch is in flight; otherwise GC unlinks the bytes and records an **eviction reason** on the `base_cache` row (the row and its integrity sha survive; a later need re-fetches). GC runs at the poll tail and after a pin change. A **retired** device holds nothing — its versions become evictable and stop holding the frontier.
+**Garbage collection.** None exists yet. Nothing removes an OS image file or an unreferenced
+asset row: a re-cut leaves the old `base-<tarball sha256>.squashfs` (about 1 GiB) and its bare
+asset row on disk until `MaintainCache` is built. A wiped cache refills on demand: a read that
+finds no file publishes its fetch, and the five-minute `Prefetch` publishes the fetch of every
+desired asset missing from disk. A **retired** device names no tag, so it keeps nothing desired.
 
 **Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
 
@@ -216,6 +238,75 @@ curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operato
 ```
 
 **Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+
+## Upgrading to content-keyed OS images (migration 028)
+
+Migration 028 re-keys every OS image from its release tag to the sha256 of its base tarball
+([idempotent jobs](central-idempotent-jobs.md) §8). It carries **no produced facts**: the owner
+decided that each desired OS image downloads once more after the upgrade, rather than trusting a
+file whose tag may have been re-cut since it was fetched. The cost, stated plainly:
+
+- A Pi that reboots before its image lands fails its fetch (`503`) and reboots again.
+- If GitHub is unreachable, or a wanted tarball was deleted upstream, Pis loop on `503` and reboot
+  until a download succeeds.
+- A device pinned to a deleted release stays stuck until you re-pin it.
+
+1. **Preflight, before upgrading.** Confirm the worker reaches the release origin
+   (`PHOTO_WALL_RELEASE_API_BASE`, default `https://api.github.com`). Then, for every desired
+   tag, check that its tarball URL answers. The desired tags are every active device's pin and
+   known-good, every tag served in the last 30 days, and, while no device has a known-good, the
+   newest release with an OS image (`GET /v1/operator/app/releases`, `has_os_image`). This lists
+   the device-named ones with their URLs:
+
+   ```sh
+   docker compose exec -T database psql -U photo_wall photo_wall -At -F ' ' -c "
+     SELECT DISTINCT r.tag, r.base_tarball_url FROM app_releases r JOIN devices d
+       ON d.retired_at IS NULL AND r.tag IN (d.attached_tag, d.known_good_tag,
+          CASE WHEN d.last_served_at >= EXTRACT(EPOCH FROM now()) - 30 * 86400
+               THEN d.last_served_tag END)
+     WHERE r.base_tarball_url IS NOT NULL ORDER BY r.tag"
+   # For each URL, fetch one byte: 206 or 200 means it answers; 404 means deleted upstream.
+   curl -sL -r 0-0 -o /dev/null -w '%{http_code}\n' '<base_tarball_url>'
+   ```
+
+   A tag whose tarball is gone will not boot after the upgrade. Re-pin its devices first.
+2. **Upgrade Central and the workers together** (Compose replaces both). 028 runs at start-up.
+3. **Delete the old `os-images/base-<tag>.squashfs` files.** Nothing reads them any more, and
+   they double the OS-image disk until removed. A new-style name is 64 hex digits; a tag name
+   starts with `v`:
+
+   ```sh
+   docker compose exec -T worker sh -c 'rm -f /var/cache/photo-wall/os-images/base-v*.squashfs'
+   ```
+
+   (Use your `PHOTO_WALL_CACHE_ROOT` if it is not the default.)
+4. **Watch the first downloads.** Each desired OS image downloads once, on the next `Prefetch`
+   (every five minutes) or on the first Pi that asks for it.
+
+**Rollback.** Migrations are forward-only. From 028's header, in this order:
+
+```text
+  a. End the new-shape deliveries, which the old code cannot decode:
+       UPDATE procrastinate_jobs SET status = 'cancelled'
+       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'todo';
+       UPDATE procrastinate_jobs SET status = 'failed'
+       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'doing';
+  b. Drop the CHECK, which the old code's tag-keyed references violate:
+       ALTER TABLE asset_references DROP CONSTRAINT asset_references_locator_names_the_key;
+  c. Revert the code.
+  d. UPDATE app_release_poll SET etag = NULL;
+     so the next sync lists every release again and re-references each OS image under its
+     tag: one download per desired OS image.
+```
+
+**Roll forward after a rollback:** repeat (a) for the old-shape deliveries, then
+
+```sql
+DELETE FROM schema_migrations WHERE name = '028_os_image_content_key.sql';
+```
+
+and deploy the new code: 028 runs again and re-keys every OS image from `app_releases`. It is
+safe to run twice.
 
 ## Operator API: reposition and remove Frames
 

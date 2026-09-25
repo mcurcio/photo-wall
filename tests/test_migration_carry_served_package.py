@@ -1,4 +1,5 @@
-"""Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across.
+"""Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across, and
+027 records who promoted by main's rule: 'operator' where main would hold the promotion.
 
 Each test builds a schema at main's last migration (019), seeds main's state, then runs
 `Database.migrate()`, which applies the MVP's 020 onward as an upgrade does: 021 seeds the Asset
@@ -17,18 +18,23 @@ from pathlib import Path
 import psycopg
 import pytest
 from content_db import put_file
+from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
 from psycopg.conninfo import make_conninfo
 
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
 from central.content_catalog.catalog import DevicePackage, ReleaseCatalog
+from central.content_catalog.ports import Promotion
+from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.job_types import SyncReleases
+from central.kernel.ports import ReleaseListing
 from contracts.time import ManualClock
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
@@ -73,18 +79,20 @@ def legacy():
 
 
 def _main_state(db: Database, *, current: str | None, promoted: str | None,
-                releases=(V1, V2, V3)) -> None:
-    """Main's tables: every release mirrored, `current` registered and pointed at."""
+                releases=(V1, V2, V3), cached: bool = True) -> None:
+    """Main's tables: every release (mirrored into `app_packages` when `cached`), `current`
+    registered and pointed at."""
     with db.transaction() as conn:
         for tag in releases:
             major, minor, patch = (int(part) for part in tag[1:].split("."))
-            conn.execute("INSERT INTO app_packages VALUES(%s,%s,10,1.0)", (sha(tag), tag))
+            if cached:
+                conn.execute("INSERT INTO app_packages VALUES(%s,%s,10,1.0)", (sha(tag), tag))
             conn.execute(
                 "INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,asset_sha256,"
                 "asset_size,asset_url,mirror_state,mirrored_sha256,discovered_at,updated_at) "
-                "VALUES(%s,%s,%s,%s,FALSE,%s,10,%s,'mirrored',%s,1.0,1.0)",
+                "VALUES(%s,%s,%s,%s,FALSE,%s,10,%s,%s,%s,1.0,1.0)",
                 (tag, major, minor, patch, sha(tag), f"https://example.test/{tag}.deb",
-                 sha(tag)))
+                 "mirrored" if cached else "discovered", sha(tag) if cached else None))
         if current is not None:
             conn.execute("INSERT INTO app_packages VALUES(%s,'manual',10,1.0) "
                          "ON CONFLICT DO NOTHING", (current,))
@@ -147,3 +155,60 @@ def test_a_fresh_install_writes_nothing(legacy):
     _main_state(legacy, current=None, promoted=None, releases=())
     legacy.migrate()
     assert _pointers(legacy) == (None, None)
+
+
+def _promotion(db: Database) -> Promotion | None:
+    with PgTransactions(db).begin() as tx:
+        return PgReleaseRecords().promotion(tx)
+
+
+def _sync(db: Database, cache: Path) -> None:
+    """One periodic release sync over the upgraded schema: no bound players, nothing new."""
+    clock = ManualClock(1000.0)
+    assets = PgAssetRecords(clock)
+    transactions = PgTransactions(db)
+    publisher = RecordingPublisher(clock)
+    catalog = ReleaseCatalog(
+        releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+        stored=DiskStoredAssets(records=assets, store=CacheStore(CacheLayout(cache))),
+        transactions=transactions, publisher=publisher, clock=clock)
+    handler = SyncReleasesHandler(
+        origin=FakeReleaseOrigin(ReleaseListing((), None, unchanged=True), {}),
+        releases=PgReleaseRecords(), devices=PgDeviceRecords(), assets=assets,
+        transactions=transactions, publisher=publisher, catalog=catalog, clock=clock)
+    asyncio.run(handler.handle(SyncReleases()))
+
+
+def _bind_a_player(db: Database) -> None:
+    """One binding in main's 001 tables: main's `bound_player_count` becomes 1."""
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,"
+                     "device_id) VALUES('p1','pk1','th1',1.0,1.0,'d1')")
+        conn.execute("INSERT INTO outputs VALUES('p1','HDMI-A-1','{}')")
+        conn.execute("INSERT INTO frames(id,surface_id,x_mm,y_mm,width_mm,height_mm,profile,"
+                     "calibration) VALUES('f1','s1',0,0,100,100,'{}','{}')")
+        conn.execute("INSERT INTO bindings VALUES('f1','p1','HDMI-A-1')")
+
+
+# 027 classifies an existing promotion by main's rule (`_autopull_deb`, then the MVP's sync):
+# main held it iff a player is bound AND a `.deb` is cached, and moved it to the newest (V3)
+# otherwise. `current` is main's served `.deb`; each release's `.deb` is in `app_packages`
+# (cached) unless `cached` is False.
+@pytest.mark.parametrize("promoted,current,bound,cached,by,after_sync", [
+    # Not held by main: 'auto', and the sync follows the newest as main would.
+    (V1, sha(V1), False, True, "auto", V3),  # main's promotion, no bound player
+    (None, sha(V1), False, True, "auto", V3),  # 023's carry, no bound player
+    (V1, None, True, False, "auto", V3),  # bound, but no `.deb` cached
+    # Held by main: 'operator', and the sync never moves it.
+    (V1, sha(V1), True, True, "operator", V1),
+    (None, sha(V1), True, True, "operator", V1),  # 023's carry
+])
+def test_an_upgraded_promotion_is_classified_by_mains_rule(
+        legacy, tmp_path, promoted, current, bound, cached, by, after_sync):
+    _main_state(legacy, current=current, promoted=promoted, cached=cached)
+    if bound:
+        _bind_a_player(legacy)
+    legacy.migrate()
+    assert _promotion(legacy) == Promotion(V1, by)
+    _sync(legacy, tmp_path)
+    assert _promotion(legacy) == Promotion(after_sync, by)

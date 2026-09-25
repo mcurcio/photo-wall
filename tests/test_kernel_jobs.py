@@ -194,7 +194,7 @@ def test_registered_job_type_unknown_raises_key_error():
 
 def test_catalog_types_are_registered_with_their_declarations():
     assert [registered_job_type(t.job_name) for t in CATALOG] == list(CATALOG)
-    assert FetchOsImage.subject == ("tag",)
+    assert FetchOsImage.subject == ("tarball_sha256",)
     assert FetchOsImage.result_type is AssetReady
     assert SyncReleases.result_type is None and SyncReleases.subject == ()
     assert Keyable.subject == ("s", "i", "flag", "colour")
@@ -236,11 +236,10 @@ def test_field_less_keys_are_constant():
 
 
 def test_asset_key_matches_the_lock():
-    tag = "v1.2.3-rc.1"
-    job = FetchOsImage(tag=tag)
-    assert asset_key(job) == AssetKey(AssetKind.OS_IMAGE, tag)
-    assert job_keys(job).lock == f'os_image.fetch["{tag}"]'
     sha = "ab" * 32
+    job = FetchOsImage(tarball_sha256=sha)
+    assert asset_key(job) == AssetKey(AssetKind.OS_IMAGE, sha)
+    assert job_keys(job).lock == f'os_image.fetch["{sha}"]'
     assert asset_key(FetchPackage(sha256=sha)) == AssetKey(AssetKind.PLAYER_DEB, sha)
 
 
@@ -261,18 +260,20 @@ def test_keyable_enum_and_scalars_encode_as_json():
 
 def test_catalog_jobs_validate_their_fields():
     with pytest.raises(ValidationError):
-        FetchOsImage(tag="1.0")
+        FetchOsImage(tarball_sha256="v1.0.0")  # a tag no longer names an OS image
     with pytest.raises(ValidationError):
         FetchPackage(sha256="XYZ")
 
 
 def test_jobs_are_frozen_and_reject_extra_fields():
-    job = FetchOsImage(tag="v1.0.0")
+    job = FetchOsImage(tarball_sha256="1" * 64)
     with pytest.raises(ValidationError):
-        job.tag = "v2.0.0"  # type: ignore[misc]
+        job.tarball_sha256 = "2" * 64  # type: ignore[misc]
     with pytest.raises(ValidationError):
-        FetchOsImage(tag="v1.0.0", extra="x")  # type: ignore[call-arg]
-    assert hash(job) == hash(FetchOsImage(tag="v1.0.0"))
+        FetchOsImage(tarball_sha256="1" * 64, extra="x")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        FetchOsImage(tag="v1.0.0")  # type: ignore[call-arg]  # the old shape
+    assert hash(job) == hash(FetchOsImage(tarball_sha256="1" * 64))
 
 
 @pytest.mark.parametrize("kwargs", [

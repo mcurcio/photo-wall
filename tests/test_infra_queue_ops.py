@@ -67,7 +67,7 @@ class RecordingAdmin:
 
 
 def test_rescue_republishes_each_stalled_job_then_closes_it():
-    stalled = [StalledJob(7, FetchOsImage(tag="v1.0.0"), 1), StalledJob(9, SyncReleases(), 0)]
+    stalled = [StalledJob(7, FetchOsImage(tarball_sha256="1" * 64), 1), StalledJob(9, SyncReleases(), 0)]
     admin = RecordingAdmin(stalled)
     asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
     assert admin.calls == [("stalled", timedelta(seconds=30)), ("republish", 7), ("close", 7),
@@ -82,7 +82,7 @@ def test_one_row_failing_to_close_does_not_abort_the_rescue_of_the_others():
             if stalled.id == 7:
                 raise procrastinate.exceptions.ConnectorException("not in doing")
 
-    stalled = [StalledJob(7, FetchOsImage(tag="v1.0.0"), 1), StalledJob(9, SyncReleases(), 0)]
+    stalled = [StalledJob(7, FetchOsImage(tarball_sha256="1" * 64), 1), StalledJob(9, SyncReleases(), 0)]
     admin = Refusing(stalled)
     with pytest.raises(TransientFailure) as raised:
         asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
@@ -137,7 +137,7 @@ def row(id_, name, kwargs, queue="photo-wall-fetch"):
 
 
 def test_stalled_returns_only_our_jobs_with_their_attempt(monkeypatch):
-    ours = FetchOsImage(tag="v3.0.0")
+    ours = FetchOsImage(tarball_sha256="3" * 64)
     manager = FakeJobManager([
         row(1, "photo_wall.media.prepare", {"job_id": "x"}, queue="photo-wall-media"),
         row(2, task_name(FetchOsImage), job_kwargs(ours, attempt=2)),
@@ -161,7 +161,7 @@ def test_close_finishes_the_row_failed_and_republish_keeps_the_attempt(monkeypat
         return True
 
     monkeypatch.setattr(queue_ops, "defer_async", defer_async)
-    stalled = StalledJob(11, FetchOsImage(tag="v1.0.0"), 2)
+    stalled = StalledJob(11, FetchOsImage(tarball_sha256="1" * 64), 2)
     asyncio.run(admin.republish(stalled))
     asyncio.run(admin.close(stalled))
     assert deferred == [(stalled.job, 2, None)]
@@ -213,7 +213,7 @@ class Db:
 
 def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(registry):
     db = Db(registry)
-    job = FetchOsImage(tag="v5.0.0")
+    job = FetchOsImage(tarball_sha256="5" * 64)
     db.publish(job, attempt=1)
     dead = db.sql("INSERT INTO procrastinate_workers (last_heartbeat) "
                   "VALUES (now() - interval '5 minutes') RETURNING id")[0]["id"]
@@ -259,22 +259,23 @@ def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(
 
 def test_purge_deletes_old_finished_rows_and_stale_outcomes_only(registry):
     db = Db(registry)
-    for tag in ("v1.0.0", "v2.0.0", "v3.0.0"):
-        db.publish(FetchOsImage(tag=tag))
+    v1, v2, v3 = "1" * 64, "2" * 64, "3" * 64  # three OS images' tarball shas
+    for tarball in (v1, v2, v3):
+        db.publish(FetchOsImage(tarball_sha256=tarball))
     db.sql("UPDATE procrastinate_jobs SET status = 'doing'")
-    rows = {r["tag"]: r["id"] for r in db.sql(
-        "SELECT id, args->>'tag' AS tag FROM procrastinate_jobs")}
-    for tag, status in (("v1.0.0", "failed"), ("v2.0.0", "succeeded")):
-        db.sql("SELECT procrastinate_finish_job_v1(%s, %s, false)", (rows[tag], status))
+    rows = {r["tarball"]: r["id"] for r in db.sql(
+        "SELECT id, args->>'tarball_sha256' AS tarball FROM procrastinate_jobs")}
+    for tarball, status in ((v1, "failed"), (v2, "succeeded")):
+        db.sql("SELECT procrastinate_finish_job_v1(%s, %s, false)", (rows[tarball], status))
     legacy = db.legacy(status="succeeded", queue="photo-wall-media")
     db.sql("INSERT INTO procrastinate_events (job_id, type) VALUES (%s, 'succeeded')", (legacy,))
     db.sql("UPDATE procrastinate_events SET at = now() - interval '8 days' "
-           "WHERE job_id IN (%s, %s)", (rows["v1.0.0"], legacy))
+           "WHERE job_id IN (%s, %s)", (rows[v1], legacy))
 
     outcomes, clock = JobOutcomes(), ManualClock(100 * DAY)
     with db.transactions.begin() as tx:
-        for tag, now in (("v1.0.0", 60 * DAY), ("v2.0.0", 80 * DAY)):
-            outcomes.record(tx, FetchOsImage(tag=tag), status="ok", reason=None,
+        for tarball, now in ((v1, 60 * DAY), (v2, 80 * DAY)):
+            outcomes.record(tx, FetchOsImage(tarball_sha256=tarball), status="ok", reason=None,
                             retry_not_before=None, now=now)
     admin = QueueAdmin(db.dsn)
 
@@ -288,9 +289,9 @@ def test_purge_deletes_old_finished_rows_and_stale_outcomes_only(registry):
 
     asyncio.run(scenario())
     left = {r["id"] for r in db.sql("SELECT id FROM procrastinate_jobs")}
-    assert left == {rows["v2.0.0"], rows["v3.0.0"], legacy}  # young, still doing, legacy
+    assert left == {rows[v2], rows[v3], legacy}  # young, still doing, legacy
     assert [r["lock_key"] for r in db.sql("SELECT lock_key FROM job_outcomes")] == [
-        'os_image.fetch["v2.0.0"]']
+        f'os_image.fetch["{v2}"]']
 
 
 @pytest.mark.parametrize("older_than,hours", [(timedelta(minutes=5), 1), (timedelta(hours=2), 2)])

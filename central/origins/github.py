@@ -20,15 +20,16 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO, Final
+from urllib.parse import urlsplit
 
 import httpx
 
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
-from central.kernel.ports import PublishedRelease, ReleaseListing
+from central.kernel.ports import PublishedRelease, ReleaseListing, UpstreamVersion
 from central.kernel.types import release_version, require_sha256
 from contracts.release import MAX_ROOTFS_BYTES
 
@@ -66,11 +67,22 @@ class _BodyEncoded(Exception):
 
 @dataclass(frozen=True, slots=True)
 class _Manifest:
-    """What one release's `manifest.json` yields: the `.deb` (or why not) and the OS image."""
+    """What one release's `manifest.json` yields: the `.deb` (or why not), the OS image, and the
+    upstream version: set only by `_parse_manifest`, for a valid manifest."""
 
     package: OriginLocator | None
     package_problem: str | None
     os_image: OriginLocator | None
+    upstream_version: UpstreamVersion | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Asset:
+    """One attached release asset: its download URL, and its GitHub `id` and `updated_at`
+    (None when absent or invalid)."""
+
+    url: str
+    version: UpstreamVersion | None
 
 
 class GitHubReleaseOrigin:
@@ -86,7 +98,7 @@ class GitHubReleaseOrigin:
             raise ValueError("invalid_timeout")
         self.repo = repo
         self.include_prereleases = bool(include_prereleases)
-        self._api_base = api_base.rstrip("/")
+        self._api_base = _require_api_base(api_base)
         self._transport = transport
         self._timeout = timeout.total_seconds()
         self._headers = {
@@ -101,12 +113,15 @@ class GitHubReleaseOrigin:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GitHubReleaseOrigin:
-        """The rules of `AppReleaseService.from_env`: repo, optional token, prerelease opt-in."""
+        """The rules of `AppReleaseService.from_env`: repo, optional token, prerelease opt-in,
+        and the API base (`PHOTO_WALL_RELEASE_API_BASE`, default GitHub's; an unset or empty
+        value is the default, an invalid one is `ValueError("invalid_api_base")` at boot)."""
         env = os.environ if env is None else env
         return cls(
             env.get("PHOTO_WALL_RELEASE_REPO", DEFAULT_REPO),
             token=env.get("PHOTO_WALL_RELEASE_TOKEN") or None,
             include_prereleases=env.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in _TRUTHY,
+            api_base=env.get("PHOTO_WALL_RELEASE_API_BASE") or GITHUB_API_BASE,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -182,35 +197,20 @@ class GitHubReleaseOrigin:
         manifest = await self._manifest(client, assets)
         return PublishedRelease(tag=tag, is_prerelease=is_prerelease, package=manifest.package,
                                 package_problem=manifest.package_problem,
-                                os_image=manifest.os_image)
+                                os_image=manifest.os_image,
+                                upstream_version=manifest.upstream_version)
 
-    async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, str]) -> _Manifest:
-        manifest_url = assets.get(MANIFEST_ASSET_NAME)
-        if manifest_url is None:
+    async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
+        manifest_asset = assets.get(MANIFEST_ASSET_NAME)
+        if manifest_asset is None:
             return _Manifest(None, "no_manifest", None)
         try:
-            body = await self._fetch_manifest(client, manifest_url)
+            body = await self._fetch_manifest(client, manifest_asset.url)
         except (_BodyTooLarge, _BodyEncoded):
             return _Manifest(None, "manifest_invalid", None)  # deterministic: this release only
-        if body is None:  # listed, but gone upstream (404/410)
+        if body is None:  # listed, but gone upstream (404/410): no body, so no version
             return _Manifest(None, "no_manifest", None)
-        try:
-            manifest = json.loads(body)
-        except (ValueError, UnicodeError):
-            return _Manifest(None, "manifest_invalid", None)
-        if not isinstance(manifest, dict):
-            return _Manifest(None, "manifest_invalid", None)
-        if manifest.get("schema") != 1:
-            return _Manifest(None, "schema_mismatch", None)
-        # The OS image is independent of the .deb: parsed whatever the player_deb outcome.
-        os_image = _locator(manifest.get("base_image"), assets, suffix="", max_size=None)
-        player = manifest.get("player_deb")
-        if _declared_file(player, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES) is None:
-            return _Manifest(None, "manifest_invalid", os_image)
-        package = _locator(player, assets, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES)
-        if package is None:  # the manifest names a .deb the release does not attach
-            return _Manifest(None, "asset_missing", os_image)
-        return _Manifest(package, None, os_image)
+        return _parse_manifest(body, assets, manifest_asset.version)
 
     async def _fetch_manifest(self, client: httpx.AsyncClient, url: str) -> bytes | None:
         """The manifest bytes; None when absent (404/410). A transient failure aborts the whole
@@ -296,15 +296,77 @@ async def _off_loop(function: Callable[..., object], *args: object) -> None:
         raise
 
 
-def _asset_urls(raw_assets: object) -> dict[str, str]:
-    assets: dict[str, str] = {}
+def _require_api_base(api_base: object) -> str:
+    """An absolute http(s) URL with a host and no query or fragment; returned without a trailing
+    slash (the listing appends `/repos/...`)."""
+    if not isinstance(api_base, str):
+        raise ValueError("invalid_api_base")
+    try:
+        parts = urlsplit(api_base)
+        host = parts.hostname
+        parts.port  # noqa: B018 -- raises ValueError for a malformed port
+    except ValueError:
+        raise ValueError("invalid_api_base") from None
+    if (parts.scheme not in ("http", "https") or not host or parts.query or parts.fragment
+            or api_base != api_base.strip()):
+        raise ValueError("invalid_api_base")
+    return api_base.rstrip("/")
+
+
+def _parse_manifest(body: bytes, assets: dict[str, _Asset],
+                    version: UpstreamVersion | None) -> _Manifest:
+    """The `.deb` (or why not) and the OS image a read manifest body declares, and `version`
+    only when the manifest is VALID AND COMPLETE: a JSON object of schema 1 whose well-formed
+    `player_deb` is attached to the release.
+
+    This is the one place a version is set. An invalid manifest (`manifest_invalid`,
+    `schema_mismatch`) or an incomplete upload (`asset_missing`: typically a release caught
+    mid-upload) is unversioned like an unread one, so the sync refuses it over any stored
+    observation: a broken or partial upload never takes a working release's `.deb` from the Pis.
+    """
+    try:
+        manifest = json.loads(body)
+    except (ValueError, UnicodeError):
+        return _Manifest(None, "manifest_invalid", None)
+    if not isinstance(manifest, dict):
+        return _Manifest(None, "manifest_invalid", None)
+    if manifest.get("schema") != 1:
+        return _Manifest(None, "schema_mismatch", None)
+    # The OS image is independent of the .deb: parsed whatever the player_deb outcome.
+    os_image = _locator(manifest.get("base_image"), assets, suffix="", max_size=None)
+    player = manifest.get("player_deb")
+    if _declared_file(player, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES) is None:
+        return _Manifest(None, "manifest_invalid", os_image)
+    package = _locator(player, assets, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES)
+    if package is None:  # the manifest names a .deb the release does not attach (yet)
+        return _Manifest(None, "asset_missing", os_image)
+    return _Manifest(package, None, os_image, version)  # valid and complete: versioned
+
+
+def _asset_urls(raw_assets: object) -> dict[str, _Asset]:
+    assets: dict[str, _Asset] = {}
     if isinstance(raw_assets, list):
         for asset in raw_assets:
             if isinstance(asset, dict):
                 name, url = asset.get("name"), asset.get("browser_download_url")
                 if isinstance(name, str) and isinstance(url, str):
-                    assets.setdefault(name, url)
+                    assets.setdefault(name, _Asset(url, _asset_version(asset)))
     return assets
+
+
+def _asset_version(asset: dict) -> UpstreamVersion | None:
+    """An asset's `(updated_at, id)`: `updated_at` an ISO 8601 timestamp with its offset (GitHub
+    writes `Z`), as epoch seconds. None when either is absent or invalid."""
+    asset_id, updated_at = asset.get("id"), asset.get("updated_at")
+    if type(asset_id) is not int or asset_id <= 0 or not isinstance(updated_at, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None  # a naive time would be read in the host's zone
+    return UpstreamVersion(moment.timestamp(), asset_id)
 
 
 def _declared_file(record: object, *, suffix: str,
@@ -324,7 +386,7 @@ def _declared_file(record: object, *, suffix: str,
     return filename, sha256, size
 
 
-def _locator(record: object, assets: dict[str, str], *, suffix: str,
+def _locator(record: object, assets: dict[str, _Asset], *, suffix: str,
              max_size: int | None) -> OriginLocator | None:
     """The download locator for a manifest file record: its filename joined to the release's
     attached assets (the manifest carries no URL). None when malformed or not attached."""
@@ -332,11 +394,11 @@ def _locator(record: object, assets: dict[str, str], *, suffix: str,
     if declared is None:
         return None
     filename, sha256, size = declared
-    url = assets.get(filename)
-    if url is None:
+    asset = assets.get(filename)
+    if asset is None:
         return None
     try:
-        return OriginLocator(url=url, sha256=sha256, size=size)
+        return OriginLocator(url=asset.url, sha256=sha256, size=size)
     except ValueError:
         return None  # an unusable asset URL is the same as no asset
 

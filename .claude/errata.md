@@ -886,3 +886,296 @@ doc softenings.
   their comments (checksum-pinned, left as is). The reviewer's probe
   (`scratchpad/probe_recut.py`) imports the deleted fake; its scenario is now
   `test_a_recut_os_image_is_produced_again_after_a_cache_wipe`.
+
+## 2026-09-23 — follow-ups: issue #24
+
+- **The design says a substitute serve publishes nothing. That is the bug.** `AssetReader.read`
+  now publishes the FIRST candidate's fetch job whenever the candidate it serves is any other
+  one. The check is on the served job after either path, so a future path that serves a
+  substitute is covered too. The publish runs in a background task through
+  `Publisher.publish_now(..., retry_terminal=True)`, the same request publish as a miss (the
+  owner ruled a request may retry a terminal). The serve never awaits it, the read's
+  cancellation does not cancel it, and a failure is logged (`"fetch publish for ... failed
+  after serving a substitute"`) and never fails the serve. Doc text that is now wrong, for the
+  docs bead: `docs/central-system-architecture.md` §6(b) ("No job is published" is true only
+  when the first candidate is the one opened), the §10.2 `read` sketch
+  (`# on disk: publish nothing`), §3's Assets row ("open, else publish ...") and §4's
+  Published-by column for `FetchOsImage`/`FetchPackage` ("HTTP miss; Prefetch" needs "HTTP
+  substitute serve").
+- **Costs of the chosen shape.** One short DB write per substitute serve, merged by the job's
+  queueing lock. There is no in-process coalescing, because that would restate dedupe at the
+  call site. A background publish still in flight at process shutdown is dropped; the next
+  `Prefetch` or request re-publishes it. Only `FetchOsImage` substitutes today (a package
+  request resolves to one sha256), but the rule is kind-agnostic.
+
+## 2026-09-23 — follow-ups: two-pod run (item 6) and #26 probe
+
+- **Two-pod run PASSED** (`scripts/two_pod_run.py`, 2 Central + 2 workers, one shared cache, fake
+  GitHub origin): flow (c) single download for 8 concurrent misses across both pods; flow (d)
+  kill -9 mid-download rescued by the other worker; flow (e) cache wipe refilled with one download
+  per asset while `/readyz` stayed green; empty catalog 404; a pinned device never substituted.
+- **Proven defect (legacy media, fold into the media retirement, do not patch):** a cache wipe
+  unlinks the held `media/.worker.lock` (`central/media_store.py:182-186`); the standby loop
+  (`media/worker.py:356-372`) then locks a NEW file, so two media writers run at once. Violates
+  "cache purgeable anytime". Retiring the flock (item 1) removes the class.
+- **Harness shim:** `GitHubReleaseOrigin.from_env` has no API base URL setting; the harness
+  monkeypatches it. A CI two-pod run needs a real setting.
+- **Doc corrections for the docs bead:** §6(c) says publish "merges into a pending or running
+  copy" — with a copy running, a new `todo` row is inserted (it runs afterwards as a no-op; §10.3
+  is right). §3 "otherwise Unknown → 404" holds only while the catalog is empty: with a release
+  present an unseen, missing or invalid serial is auto-registered and served.
+- **CI gap:** `netboot-e2e.yml` `tracer` runs one Central, no worker, no origin and a pre-staged
+  `.deb`; nothing in CI covers the OS image, flows (c)-(e), two pods, or kill-and-rescue.
+- **#26 probe (real PostgreSQL):** the guard part is FIXED by dd144f7 (a rescued row's completion
+  is dropped; an open row still stops the runtime). STILL REAL: (1) a worker started while another
+  is paused prunes the paused worker's `procrastinate_workers` row; its heartbeat then silently
+  updates nothing and its next fetch dies on `procrastinate_jobs_worker_id_fkey`; (1b, derived)
+  `select_stalled_jobs_by_heartbeat` treats `worker_id IS NULL` as stalled, so a pruned worker's
+  live job is rescued; (2) the paused worker's late outcome overwrites the copy's (`ok` → `terminal`)
+  because `JobExecutor` commits outcomes without checking the delivery still owns its row
+  (`central/infra/execution.py:131-177`); (3) a true outage takes ~279 s to stop (30 s pool timeout
+  per attempt) and the named `completion_not_recorded` reason is lost to the task-group error.
+
+## 2026-09-23 — follow-ups: issues #23 and #25
+
+- **#23 (owner ruling "remember who promoted"): the policy row records who promoted.**
+  Migration `027_promoted_by.sql` adds `app_release_policy.promoted_by` as NOT NULL with a CHECK
+  for `('auto','operator')` and no default. The periodic sync auto-promotes only when nothing is
+  promoted or the promotion is `'auto'`. It keeps the suppress rule, the WARNING (only when
+  nothing is promoted) and the lane-X last-good carry through `promote_in`. It never moves an
+  `'operator'` promotion.
+- **Every writer states who it is. Nothing has a default.** The new signatures are
+  `ReleaseRecords.set_promoted(tx, tag, *, by: Promoter)` and
+  `ReleaseCatalog.promote_in(tx, tag, *, by: Promoter)`, with
+  `Promoter = Literal["auto", "operator"]` in `ports.py`. There is a new reader,
+  `ReleaseRecords.promotion(tx) -> Promotion | None`, where `Promotion(tag, by)`. The operator
+  route writes `"operator"` and the sync writes `"auto"`. A raw SQL writer that omits the column
+  fails on NOT NULL. `scripts/test_netboot_e2e.py`'s seed now names `'operator'`
+  (`test_netboot_e2e_wire.py` runs it against the real schema).
+- **Backfill: every existing row is `'operator'`.** No row can be proven automatic. Main's
+  `_autopull_deb` and the operator route both called the same `set_promoted`
+  (`git show ca75879^:central/app_release_boot.py`, around line 141). 023's carry promotes only
+  when nothing was promoted, from `current_sha256`, which with no promoted tag only an operator
+  set (0009 `/v1/operator/app/current`).
+- **Costs:**
+  1. An upgraded install whose promotion main set automatically now stays on that tag until an
+     operator promotes once. Before the MVP, main re-pulled the newest at every boot.
+  2. **Gap: no operator action hands control back to auto.** There is no unpromote or "follow
+     newest" route (`central/app.py:533` is promote only). Once an operator promotes, the sync
+     never moves the pointer again. Adding such an action needs a design choice: deleting the
+     policy row also drops `last_good_tag`, so either `promoted_by='auto'` in place, or
+     `promoted_tag` must become nullable. No route was added.
+  3. The operator views (`ReleaseView`, the console) do not show who promoted.
+- **#25: only the served role ages. The pinned and known-good roles do not.** Signature change:
+  `DeviceRecords.named_tags(tx, *, served_since: float)` and
+  `names_any(tx, tags, *, served_since: float)`. The window is defined once:
+  `SERVED_TAG_WINDOW = timedelta(days=30)` in `central/content_catalog/catalog.py`.
+  `ReleaseCatalog._served_since()` (the clock minus the window) feeds both reads. The adapter
+  builds both SQL statements from one role table (`_NAMING_ROLES`), so the two cannot disagree.
+  Migration 026 replaces 024's `devices_active_served` with `(last_served_tag, last_served_at)`
+  and keeps the same partial predicate. EXPLAIN (enable_seqscan off, 20k rows) shows an
+  index-only scan for the EXISTS and a bitmap index scan for the DISTINCT.
+- **Consequences of the ruling (not bugs in this bead):**
+  1. A row with `last_served_tag` set and `last_served_at` NULL names nothing in the served
+     role. Every writer sets both columns together.
+  2. The window re-opens lane X's gap for devices with long uptimes. Take a device that has not
+     netbooted for more than 30 days, whose tag is not pinned, known-good, promoted, last-good or
+     the frontier. Its per-device manifest (`device_package`) still names that tag's `.deb`, but
+     once the file is gone from disk the package route answers 404 for it. Nothing removes files
+     in the MVP, but a cache wipe does.
+  3. A tag served to a fake serial stays desired for 30 days after the serve. The number of such
+     tags is bounded by the release count, not the device count.
+- **Doc text for the docs bead:** in `docs/central-system-architecture.md`, the §5 "Desired set"
+  row ("current OS and `.deb` for unpinned devices") needs "served within the last 30 days". §3's
+  Catalog row and §5's Catalog entries row ("pin, promote") do not say that a promotion records
+  who set it, or that the sync moves only its own.
+
+## 2026-09-24 — PR #27 review: substitute-serve publish moves into the open's transaction (#24)
+
+- **The #24 background task is replaced.** `AssetReader._open_first` now publishes the wanted
+  (first) candidate with `Publisher.publish(jobs[0], within=tx, retry_terminal=True)` inside the
+  transaction that opened the substitute, so the fetch commits with the serve. Deleted:
+  `_background`, `_publish_in_background` and `_publish_logged`. Reasons:
+  - nothing drained the task set at shutdown, so the lifespan closed the DB under in-flight
+    publishes;
+  - each substitute serve took an extra pool connection outside the `WaiterSlots` bulkhead;
+  - it contradicted the reader's own no-in-process-coalescing rationale.
+
+  A publish failure is caught and logged, and never fails the serve. A client disconnect does
+  not cancel it: the open runs shielded on a worker thread.
+- **ProcrastinatePublisher violated PB5.** Its outcome read ran on the caller's connection,
+  OUTSIDE the `defer` savepoint, so a failing read aborted the caller's transaction. A caught
+  failure followed by a commit silently became a ROLLBACK: PostgreSQL answers COMMIT on an
+  aborted transaction with the tag ROLLBACK, and psycopg does not raise. Meanwhile
+  `PgTransaction.state` reported "committed".
+  - Fixed: the whole publish (outcome read and defer) now runs in one savepoint of `within`.
+  - Guarded by `test_adapter_a_failed_statement_inside_publish_leaves_the_caller_transaction_working`.
+  - Cost: one extra SAVEPOINT/RELEASE round trip per publish, for every caller.
+- **Costs of the new shape.**
+  1. `retry_terminal=True` on a substitute serve: an unauthenticated LAN client can keep a
+     terminally failed release re-downloading back to back. Accepted by the owner 2026-09-24.
+  2. The substitute check now lives in `_open_first`. A future path that serves a substitute
+     outside `_open_first` must publish there too.
+  3. The publish adds one savepoint round trip to the serve's open transaction. It uses the
+     connection already held, so there is no extra pool pressure.
+- **Docs bead:** any doc text saying the substitute publish is "in the background" or "not
+  awaited" is now wrong. It is synchronous, inside the open's transaction.
+
+## 2026-09-24 — PR #27 review: catalog race, backfill, harness moved into CI
+
+- **#23 race fix:** `ReleaseRecords.set_promoted(tx, tag, *, by)` now returns
+  `PromotionWrite(moved, outgoing)` and enforces "auto never moves operator" inside the write
+  itself. The write is:
+  1. on a first promotion, `INSERT ... ON CONFLICT DO NOTHING`;
+  2. otherwise, `SELECT ... FOR UPDATE`;
+  3. then a guarded `UPDATE`.
+
+  `promote_in` returns a bool and carries last-good only when the write moved.
+- **027 backfill follows main's rule:** 'operator' only if a binding exists AND a release's `.deb`
+  has produced facts; otherwise 'auto'. This supersedes "every existing row is operator".
+  - Main's code fails on the 027 schema (NotNullViolation on `promoted_by`), so a rollback must
+    drop the column first.
+  - `GET /v1/operator/app/releases` returns `promoted_by`. The console does not show it yet.
+- **026:** `DROP INDEX IF EXISTS`, plus `CHECK (last_served_tag IS NULL OR last_served_at IS NOT NULL)`.
+  Only `names_any` uses the index, and only when few rows match; `named_tags`' served branch
+  does a sequential scan.
+- **The two-pod harness is a CI test:** `tests/test_two_pods.py` (module-scoped schema, 65–95 s).
+  `scripts/two_pod_run.py` is deleted. The shared support lives in `tests/support/`.
+  - The new setting `PHOTO_WALL_RELEASE_API_BASE` needs a row in the runbook (docs bead).
+  - The media flock defect is pinned by a strict xfail.
+  - Coalescing means "one pending copy at a time and one origin GET", not "one fetch row".
+
+## 2026-09-24 — #26 per-data design, review round 1: media variant identity (for the media design)
+
+- **Architecture §9 decision 1 says a media variant's digest is a write-once integrity check.**
+  That cannot survive a cache wipe while rendering is not reproducible
+  (`docs/module-media-preparation.md:33` disclaims a reproducible build): a re-render after a wipe
+  yields different bytes, and write-once facts would refuse them (`not_reproducible`) for good.
+- **Proposed for the media design (not built by #26):** keep the variant key `original + recipe`,
+  store its bytes under their own sha256, and let the variant row point at that digest. The pointer
+  is set if unset, or moved only when its file is gone (compare-and-set): an OCI tag pointing at a
+  digest. The digest stays write-once per FILE, not per variant. Whether a Pi can see a variant's
+  digest change after a wipe is a Pi-visible question for the media gate.
+
+## 2026-09-24 — bead 1 os-image-content-key
+
+- **The page is silent on legacy tags that fail `release_version`.** The old
+  `_os_image_job(tag)` skipped them because `FetchOsImage(tag=...)` refused a non-semver tag
+  (`central/content_catalog/catalog.py`, pre-bead `:122-126`). A sha-keyed job no longer can, so
+  a row whose tag passes the DB check (`tag ~ '^v[0-9]+\.[0-9]+\.[0-9]+'`, prefix only,
+  `central/migrations/016_release_tracking.sql:20`) but not `release_version` (e.g. `v1.2.3foo`)
+  would have become a netboot substitute and desired through a device's roles.
+  **Resolved (coordinator, regression-preservation):** today's behaviour is kept. The rule lives
+  in ONE place, `_os_image_job(row)`, which returns None for a tag `release_version` refuses;
+  `_resolve_base`, `desired_in` and `pin` all build the OS-image job through it, and `pin` still
+  refuses the tag up front (`invalid_tag`). Test:
+  `tests/test_content_catalog_catalog.py::test_a_legacy_tag_is_never_a_netboot_candidate_nor_desired`
+  (PostgreSQL). Probe M7 (drop the filter) turns it red: the legacy tag is offered as a
+  substitute and its image becomes desired.
+- **`FetchOsImageHandler._write(temp, locator)` has no key to ask `CacheStore.temp_path` for the
+  tarball temp.** It now downloads to `<temp>.tar.gz` beside the unique temp (same directory, same
+  `TEMP_PREFIX`, created `O_EXCL` by the download, removed in `finally`). The constructor keeps
+  `store` (for `discard`), so `central/content_wiring.py` is unchanged.
+- **Additive, not on the page:** `ReleaseCatalog.resolve` gained a `typing.overload` so a
+  `NetbootBaseRequest` statically yields `NetbootCandidates | Unknown`, which is what
+  `record_served(request, resolution, job)` takes from the route. `central/kernel/types.py`
+  `ReleaseTag` now has no user; it is kept.
+- **Fix cycle 1 (high-risk review of 028): the page's rollback was wrong.** It said "revert the
+  code, then `UPDATE app_release_poll SET etag = NULL`". That strands new-shape
+  `{"tarball_sha256": ...}` deliveries, which the reverted code cannot decode (the mirror image of
+  028 step 4). 028's header now gives: (a) cancel `todo` and fail `doing`
+  `photo_wall.os_image.fetch` rows; (b) drop the new CHECK; (c) revert the code; (d) clear the
+  ETag. Roll forward: repeat (a), then `DELETE FROM schema_migrations WHERE name =
+  '028_os_image_content_key.sql'`. Step (b) goes beyond the coordinator's text: the reverted code
+  writes tag-keyed references whose locator sha is the tarball's, which the CHECK refuses, so its
+  sync would fail. The header's "the runbook deletes them at upgrade" was premature; it now says
+  that bead 5 adds that step to the runbook.
+- **Fix cycle 1: the page left fall-through unguarded in the schema.** 028 now adds
+  `asset_references_locator_names_the_key CHECK (locator_sha256 IS NOT NULL AND locator_sha256 =
+  identity)` for both kinds. Every production writer already satisfies it: 021's seeds, the
+  sync's two `reference` calls (each keyed by its locator's sha) and
+  `scripts/test_netboot_e2e.py:159-162`. The CHECK is replaced (`DROP ... IF EXISTS`, then `ADD`),
+  so 028 is safe to run twice. Test fixtures with NULL or mismatched locator shas were fixed.
+
+## 2026-09-24 — bead 4 rescue-lock-free
+
+- **The page's signature is wrong.** `_lock(job_type) -> str | None` cannot return
+  `job_keys(job).lock`: it has no job to key. The code has `_lock(job: Job[Any]) -> str | None`,
+  which returns the key when `type(job).asset_kind is not None`, else None. `_register` passes it
+  the field-less tick `job_type()`, and `_deferrer` passes the published job. The behaviour is
+  what the page freezes.
+- **Stale text outside this bead's file set (for bead 5, docs; not edited here):**
+  - `central/infra/queue_ops.py:7-10` says the re-published copy "runs only after the close
+    frees the lock". That is now true only for asset fetches. A non-asset copy is fetchable at
+    once. The ordering of re-publish then close still holds.
+  - `central/infra/queue_ops.py:93` (`close`): the words "which frees its lock for the new copy"
+    are now true only for asset fetches.
+  - `central/kernel/jobs.py:199`: the `JobKeys.lock` comment "one RUNNING copy fleet-wide" now
+    holds only for asset jobs. The page forbids a kernel change.
+  - `central/kernel/publishing.py:11-12`, PB4: "a running copy is joined, not duplicated" now
+    holds only for asset jobs. A non-asset publish while a copy runs inserts a pending copy that
+    may run alongside it. Waiters are unaffected, because they resolve on the first outcome newer
+    than `since`.
+  - `docs/central-system-architecture.md:28`, `:79` and `:116-117` still say every job's `lock`
+    is one running copy.
+- No file outside the set turned red. The full suite, ruff, lint-imports and check_docs pass;
+  `test_registry` is the known local failure.
+
+## 2026-09-24 — bead 2 reader-data-first
+
+- **M1's predicted output is wrong for this bead's own code.** The page says that with M1 (the
+  reader consults the outcome before `_open_first` in `read`), D1 shows "a publish happens, and
+  the result is a 503". Probed: D1 turns red on the publish (`Call(FetchPackage, retry_terminal=True)`
+  where `[]` was expected). The result is not a 503: the frozen step 1 (open the data again after
+  any wait) serves the file once the wait times out. A 503 appears only if M2 is applied too. The
+  probe still guards the right thing; only its expected symptom is wrong.
+- **D2 as worded can race.** "Facts and file appear while the waiter waits, and the outcome it
+  gets is `terminal`". If the facts come with their own `ok` (rule 3: `ok` arrives with its data),
+  the waiter can wake on that `ok` before the late `terminal` commits. That tests the `Ready` path
+  instead, and under M2 it fails as `absent_after_ready`, not a 503 `terminal`. D2 therefore
+  records facts and the file with no `ok` (a lost result write, N3), then the `terminal`, so the
+  outcome the waiter gets is `terminal` deterministically.
+- **"Existing tests it carries" matched nothing.** No test in `tests/test_assets_reader.py`
+  asserts a `Failed` or `Pending` result while the asset's facts and file are present, so that
+  file is unchanged. Its `RecordingPublisher` `Ready` tests still pass: `record_outcome` writes
+  the facts to `AssetRecords`, so the post-wait `_open_first` finds them.
+
+## 2026-09-24 — bead 3 catalog-follows-upstream
+
+- **Owner decision: a manifest read but INVALID is unversioned, exactly as one not read.** The
+  frozen page (§Origin) set `upstream_version` whenever `_fetch_manifest` returned a body, so a
+  NEWER broken upload (bad JSON, a non-object, `schema` other than 1, or a malformed
+  `player_deb`: every `manifest_invalid` / `schema_mismatch` case) was applied and took a
+  working release's `.deb` from the Pis. Now `_parse_manifest` (`central/origins/github.py`) is
+  the one place a version is set, and only on a valid AND complete manifest; any other is
+  refused over a stored observation, so the last good one stays.
+- **Owner decision, same principle: an incomplete upload (`asset_missing`) is unversioned too.**
+  A valid manifest naming a `.deb` the release does not attach (typically a release caught
+  mid-upload) must never remove a working `.deb`. Once the `.deb` is attached, the next sync
+  versions the same manifest asset and applies it normally (it is newer than the stored row).
+  Tests: `test_origins_github.py::test_a_read_but_invalid_or_incomplete_manifest_is_no_version`,
+  `test_release_versions.py::test_v9b_a_newer_invalid_manifest_cannot_wipe_the_tag` (probe M9)
+  and `::test_v9c_an_upload_caught_midway_cannot_wipe_the_tag_and_applies_once_complete`
+  (probe M10). Residual: a FIRST observation of a new tag has no stored row to protect, so it is
+  inserted whatever its manifest says and repaired by the next valid one. Bead 5 (docs) should
+  state this in design §6.3.
+- **Review fix cycle 1 (integrated branch, 69f0336). P1: the frozen flag raced a concurrent
+  `FetchPackage`.** `_frozen_package` read the old `.deb`'s produced facts through the unlocked
+  `AssetRecords.get`, so a `record_produced` committing between that read and the sync's commit
+  left the tag unfrozen at the re-cut although the old bytes were servable. The port gains ONE
+  locking read, `AssetRecords.lock_produced(tx, key) -> AssetReady | None` (`FOR SHARE` on the
+  asset row, conflicting with `record_produced`'s UPDATE); the recording either committed before
+  the read and freezes the tag, or waits for the sync and lands after the re-cut was taken.
+  Lock order in a release transaction: release row (`claim`, FOR UPDATE) -> the old `.deb`'s
+  asset row (FOR SHARE) -> `reference` inserts (FOR KEY SHARE via the foreign key). No cycle:
+  `record_produced` locks only its asset row and then `job_outcomes`; `touch_served` runs alone;
+  the tail takes only the advisory lock and the policy row. Test V11 (both orders), probe M11.
+- **P2: nothing tested `claim`'s FOR UPDATE on an existing row.** Test V12, probe M12. **The
+  review's staging was insufficient on its own:** with the holder paused AFTER `apply`, the
+  waiter blocks already in `INSERT ... ON CONFLICT DO NOTHING` (on the holder's uncommitted row
+  version; probed on PostgreSQL 16), so an unlocked SELECT would still read the new row and the
+  test stays green without FOR UPDATE. V12 therefore also pauses the holder right after `claim`
+  (row locked, not yet written): there an unlocked read returns the stale row at once, and M12
+  turns that case red. Both stagings are kept.
+- **P2: comments.** `central/kernel/ports.py` (`PublishedRelease.upstream_version`) and 029's
+  header now say "valid and complete"; design §3 (glossary) and §6.1/§6.3 are listed for bead 5.

@@ -112,7 +112,9 @@ def world_at(registry, tmp_path):
 # -- FetchOsImageHandler --------------------------------------------------------------------------
 
 TAG = "v2.0.0"
-OS_KEY = AssetKey(AssetKind.OS_IMAGE, TAG)
+BLOB = tarball()  # built once: its sha256 is the OS image's key
+OS_JOB = FetchOsImage(tarball_sha256=sha(BLOB))
+OS_KEY = AssetKey(AssetKind.OS_IMAGE, sha(BLOB))
 
 
 def os_locator(data: bytes, url: str = "https://example.test/base.tar.gz", sized=True):
@@ -120,7 +122,7 @@ def os_locator(data: bytes, url: str = "https://example.test/base.tar.gz", sized
 
 
 def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(world_at, monkeypatch):
-    blob = tarball()
+    blob = BLOB
     world = world_at({"https://example.test/base.tar.gz": blob})
     world.reference(OS_KEY, TAG, os_locator(blob))
     threads: list[bool] = []
@@ -133,7 +135,7 @@ def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(world_at,
     monkeypatch.setattr(handlers, "extract_squashfs", spy)
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
-    assert asyncio.run(handler.handle(FetchOsImage(tag=TAG))) == facts(SQUASHFS)
+    assert asyncio.run(handler.handle(OS_JOB)) == facts(SQUASHFS)
     assert threads == [False]  # extraction ran in a worker thread, not on the event loop
     assert world.store.layout.path(OS_KEY).read_bytes() == SQUASHFS
     assert world.origin.max_bytes == [len(blob)]
@@ -141,38 +143,39 @@ def test_os_image_handler_downloads_extracts_off_the_loop_and_installs(world_at,
 
 
 def test_os_image_handler_uses_the_newest_reference_and_caps_unsized_downloads(world_at):
-    blob = tarball()
+    blob = BLOB
     world = world_at({"https://example.test/new.tar.gz": blob})
     world.reference(OS_KEY, "old", os_locator(blob, "https://example.test/old.tar.gz"))
     world.reference(OS_KEY, "new", os_locator(blob, "https://example.test/new.tar.gz", sized=False))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
-    asyncio.run(handler.handle(FetchOsImage(tag=TAG)))
+    asyncio.run(handler.handle(OS_JOB))
     assert [loc.url for loc in world.origin.downloads] == ["https://example.test/new.tar.gz"]
     assert world.origin.max_bytes == [MAX_TARBALL_BYTES]
 
 
 def test_os_image_handler_hostile_archive_is_terminal_and_leaves_no_temp(world_at):
     blob = tarball(listed=b"not the squashfs")
+    key = AssetKey(AssetKind.OS_IMAGE, sha(blob))  # the hostile tarball is its own key
     world = world_at({"https://example.test/base.tar.gz": blob})
-    world.reference(OS_KEY, TAG, os_locator(blob))
+    world.reference(key, TAG, os_locator(blob))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
     with pytest.raises(TerminalFailure) as raised:
-        asyncio.run(handler.handle(FetchOsImage(tag=TAG)))
+        asyncio.run(handler.handle(FetchOsImage(tarball_sha256=sha(blob))))
     assert raised.value.reason == "base_digest_mismatch"
     assert world.temps() == []
-    assert not world.store.layout.path(OS_KEY).exists()
+    assert not world.store.layout.path(key).exists()
 
 
 def test_os_image_handler_download_failure_leaves_no_temp(world_at):
-    blob = tarball()
+    blob = BLOB
     world = world_at({"https://example.test/base.tar.gz": OriginUnavailable("http_503")})
     world.reference(OS_KEY, TAG, os_locator(blob))
     handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                   store=world.store)
     with pytest.raises(OriginUnavailable):
-        asyncio.run(handler.handle(FetchOsImage(tag=TAG)))
+        asyncio.run(handler.handle(OS_JOB))
     assert world.temps() == []
 
 
@@ -209,29 +212,56 @@ def test_package_handler_two_tags_share_one_file_and_one_producer(world_at):
     assert len(world.origin.downloads) == 1
 
 
-def test_package_handler_skips_a_rejected_reference(world_at):
-    world = package_world(world_at, {"https://example.test/v1.0.0.deb": DEB})  # newest -> 404
-    assert run_package(world) == facts(DEB)
+# -- every reference is tried, newest first (AssetProduction), for both kinds ---------------------
+
+OK = object()  # the kind's good bytes at that owner's URL
+
+
+def fallthrough(world_at, kind: str, blobs: dict[str, object]):
+    """Two references (v1.0.0, then the newest v1.1.0) to one asset of `kind`, each at its own URL;
+    `blobs` maps an owner to OK or the exception its URL raises (unmapped: 404)."""
+    data, key = (DEB, DEB_KEY) if kind == "deb" else (BLOB, OS_KEY)
+    world = world_at({f"https://example.test/{owner}.{kind}": data if blob is OK else blob
+                      for owner, blob in blobs.items()})
+    for owner in ("v1.0.0", "v1.1.0"):
+        locator = OriginLocator(f"https://example.test/{owner}.{kind}", sha256=sha(data),
+                                size=len(data))
+        world.reference(key, owner, locator, expected=facts(DEB) if kind == "deb" else None)
+    if kind == "deb":
+        handler = FetchPackageHandler(production=world.production, origin=world.origin)
+        return world, lambda: asyncio.run(handler.handle(FetchPackage(sha256=sha(DEB)))), DEB
+    os_handler = FetchOsImageHandler(production=world.production, origin=world.origin,
+                                     store=world.store)
+    return world, lambda: asyncio.run(os_handler.handle(OS_JOB)), SQUASHFS
+
+
+@pytest.mark.parametrize("kind", ["deb", "os"])
+def test_a_rejected_reference_falls_through_to_the_next(world_at, kind):
+    world, run, produced = fallthrough(world_at, kind, {"v1.0.0": OK})  # newest -> 404
+    assert run() == facts(produced)
     assert [loc.url for loc in world.origin.downloads] == [
-        "https://example.test/v1.1.0.deb", "https://example.test/v1.0.0.deb"]
+        f"https://example.test/v1.1.0.{kind}", f"https://example.test/v1.0.0.{kind}"]
+    assert world.temps() == []
 
 
-def test_package_handler_raises_the_last_unavailable_after_trying_all(world_at):
-    world = package_world(world_at, {
-        "https://example.test/v1.1.0.deb": OriginUnavailable("http_503"),
-        "https://example.test/v1.0.0.deb": OriginRejected("not_found"),
+@pytest.mark.parametrize("kind", ["deb", "os"])
+def test_the_last_unavailable_is_raised_after_trying_all(world_at, kind):
+    world, run, _ = fallthrough(world_at, kind, {
+        "v1.1.0": OriginUnavailable("http_503"),
+        "v1.0.0": OriginRejected("not_found"),
     })
     with pytest.raises(OriginUnavailable) as raised:
-        run_package(world)
+        run()
     assert raised.value.reason == "http_503"
     assert len(world.origin.downloads) == 2
     assert world.temps() == []
 
 
-def test_package_handler_all_rejected_is_terminal(world_at):
-    world = package_world(world_at, {})
+@pytest.mark.parametrize("kind", ["deb", "os"])
+def test_all_references_rejected_is_terminal(world_at, kind):
+    world, run, _ = fallthrough(world_at, kind, {})
     with pytest.raises(TerminalFailure) as raised:
-        run_package(world)
+        run()
     assert raised.value.reason == "all_references_rejected"
     assert type(raised.value) is TerminalFailure
     assert world.temps() == []
@@ -266,20 +296,21 @@ def test_handlers_declare_their_job_types():
 
 def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
     world = world_at()
-    present = FetchOsImage(tag="v1.0.0")
-    absent_file = FetchOsImage(tag="v1.1.0")
+    present = FetchOsImage(tarball_sha256=sha(b"tarball v1.0.0"))
+    absent_file = FetchOsImage(tarball_sha256=sha(b"tarball v1.1.0"))
     never_produced = FetchPackage(sha256=sha(DEB))
-    unrecorded = FetchOsImage(tag="v9.9.9")
-    loc = os_locator(b"x")
-    for job in (present, absent_file):
-        key = AssetKey(AssetKind.OS_IMAGE, job.tag)
-        world.reference(key, job.tag, loc)
+    unrecorded = FetchOsImage(tarball_sha256=sha(b"tarball v9.9.9"))
+    for job, owner in ((present, "v1.0.0"), (absent_file, "v1.1.0")):
+        key = AssetKey(AssetKind.OS_IMAGE, job.tarball_sha256)
+        world.reference(key, owner, OriginLocator("https://example.test/b.tgz",
+                                                  sha256=job.tarball_sha256, size=None))
         world.record_produced(key, facts(SQUASHFS))
     world.reference(DEB_KEY, "v1.0.0", deb_locator("https://example.test/a.deb"), facts(DEB))
-    path = world.store.layout.path(AssetKey(AssetKind.OS_IMAGE, "v1.0.0"))
+    path = world.store.layout.path(AssetKey(AssetKind.OS_IMAGE, present.tarball_sha256))
     path.parent.mkdir(parents=True)
     path.write_bytes(SQUASHFS)
-    wrong_size = world.store.layout.path(AssetKey(AssetKind.OS_IMAGE, "v1.1.0"))
+    wrong_size = world.store.layout.path(
+        AssetKey(AssetKind.OS_IMAGE, absent_file.tarball_sha256))
     wrong_size.write_bytes(SQUASHFS[:-1])  # present on disk but not the produced file
 
     publisher = RecordingPublisher(ManualClock(1000.0))

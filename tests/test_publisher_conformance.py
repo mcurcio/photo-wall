@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import Any
 
 import procrastinate
+import psycopg
 import pytest
 from fakes.publisher import PublishedCall, RecordingPublisher
 from procrastinate.periodic import PeriodicDeferrer
@@ -218,7 +219,7 @@ def publish_committed(h, job, **kwargs):
 def reference(h, job) -> None:
     with h.transactions.begin() as tx:
         h.assets.reference(tx, asset_key(job), AssetReference(
-            owner=job.tag, locator=OriginLocator("https://x.test/t", None, None),
+            owner="v1.0.0", locator=OriginLocator("https://x.test/t", asset_key(job).identity, None),
             expected_size=None, expected_sha256=None))
 
 
@@ -246,7 +247,7 @@ def test_pb1_unregistered_job_type_and_closed_transaction(h):
 
 
 def test_enqueued_merged_and_joined_handles_are_equivalent(h):
-    job = FetchOsImage(tag="v1.0.0")
+    job = FetchOsImage(tarball_sha256="1" * 64)
     reference(h, job)
     enqueued = publish_committed(h, job)
     merged = publish_committed(h, job)
@@ -335,7 +336,7 @@ def test_timeout_returns_pending_and_does_not_cancel(h):
 
 
 def test_cancel_unregisters_and_the_job_still_completes(h):
-    job = FetchOsImage(tag="v2.0.0")
+    job = FetchOsImage(tarball_sha256="2" * 64)
     reference(h, job)
     handle = publish_committed(h, job)
 
@@ -357,7 +358,7 @@ def test_cancel_unregisters_and_the_job_still_completes(h):
 
 
 def test_a_retry_window_suppresses_publishing(h):
-    job = FetchOsImage(tag="v3.0.0")
+    job = FetchOsImage(tarball_sha256="3" * 64)
     reference(h, job)
     handle = publish_committed(h, job)
     h.record_outcome(job, Failed(False, "origin_down", timedelta(seconds=30)))
@@ -386,7 +387,7 @@ def test_an_explicit_retry_not_before_sets_the_window(h):
 
 
 def test_a_terminal_outcome_suppresses_unless_retry_terminal(h):
-    job = FetchOsImage(tag="v4.0.0")
+    job = FetchOsImage(tarball_sha256="4" * 64)
     reference(h, job)
     h.record_outcome(job, Failed(True, "not_found", None))
     suppressed = publish_committed(h, job)
@@ -406,7 +407,7 @@ def test_a_terminal_outcome_suppresses_unless_retry_terminal(h):
 def test_an_ok_asset_outcome_without_an_asset_record_is_not_ready(h):
     # PB7: nothing to serve. The same reason and class as `AssetProduction` raises for a
     # missing record, so a waiter sees one condition however it arose.
-    job = FetchOsImage(tag="v9.0.0")  # never referenced: record_produced is a no-op
+    job = FetchOsImage(tarball_sha256="9" * 64)  # never referenced: record_produced is a no-op
     handle = publish_committed(h, job)
     h.record_outcome(job, Ready(FACTS))
     assert run(h, lambda: handle.wait(timeout=NOW)) == Failed(False, ASSET_NOT_RECORDED, NOW)
@@ -462,7 +463,7 @@ def recording(registry):
 
 
 def test_the_fake_records_every_call_with_its_transaction(recording):
-    h, job = recording, FetchOsImage(tag="v1.0.0")
+    h, job = recording, FetchOsImage(tarball_sha256="1" * 64)
     with h.transactions.begin() as tx:
         h.publisher.publish(job, within=tx)
         h.publisher.publish(job, within=tx, retry_terminal=True)  # merged, still recorded
@@ -472,7 +473,7 @@ def test_the_fake_records_every_call_with_its_transaction(recording):
 
 
 def test_the_fake_records_suppressed_calls_but_not_refused_ones(recording):
-    h, job = recording, FetchOsImage(tag="v4.0.0")
+    h, job = recording, FetchOsImage(tarball_sha256="4" * 64)
     h.record_outcome(job, Failed(True, "not_found", None))
     publish_committed(h, job)  # PB3: suppressed, still recorded
     with h.transactions.begin() as tx:
@@ -483,7 +484,7 @@ def test_the_fake_records_suppressed_calls_but_not_refused_ones(recording):
 
 
 def test_the_fake_writes_an_asset_jobs_facts_onto_its_record(recording):
-    h, job = recording, FetchOsImage(tag="v5.0.0")
+    h, job = recording, FetchOsImage(tarball_sha256="5" * 64)
     reference(h, job)
     h.record_outcome(job, Ready(FACTS))
     with h.transactions.begin() as tx:
@@ -501,6 +502,20 @@ def test_adapter_refuses_a_registered_type_it_does_not_publish(registry):
     with h.transactions.begin() as tx:
         with pytest.raises(TypeError):
             publisher.publish(Pair(a="x", b="y"), within=tx)
+
+
+def test_adapter_a_failed_statement_inside_publish_leaves_the_caller_transaction_working(registry):
+    """PB5 covers the whole publish: a caller that catches a publish failure keeps its work."""
+    h = ProcrastinateHarness(registry)
+    with h.transactions.begin() as tx:
+        h.outcomes.after_get = lambda: pg_connection(tx).execute("SELECT 1/0")
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            h.publisher.publish(Pair(a="x", b="1"), within=tx)
+        h.outcomes.after_get = None
+        h.caller_write(tx)  # would be InFailedSqlTransaction had the failure aborted `tx`
+        h.publisher.publish(Pair(a="x", b="2"), within=tx)
+    assert h.caller_writes() == 1
+    assert h.inserted() == [Pair(a="x", b="2")]
 
 
 def test_the_worker_publisher_has_no_feed_to_wait_on(registry):

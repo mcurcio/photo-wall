@@ -1,6 +1,7 @@
 """`AssetReader.read` and `WaiterSlots`, with `RecordingPublisher` settling via `record_outcome`.
 
 The Asset records are the real table (PostgreSQL, the `registry` fixture); `WaiterSlots` needs none.
+The substitute-serve tests (issue #24) publish through `ProcrastinatePublisher` onto the real queue.
 """
 
 from __future__ import annotations
@@ -15,11 +16,16 @@ from datetime import timedelta
 import pytest
 from content_db import Reads, RecordingTransactions, put_file
 from fakes.publisher import RecordingPublisher
+from runtime_fakes import apply_procrastinate_schema
 
 from central.assets.layout import CacheLayout
 from central.assets.reader import AssetReader, Opened, SlotsFull, Unavailable, WaiterSlots
 from central.assets.store import CacheStore
 from central.infra.asset_records import PgAssetRecords
+from central.infra.job_queue import decode
+from central.infra.outcomes import JobOutcomes
+from central.infra.publisher import ProcrastinatePublisher
+from central.infra.transactions import pg_connection
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage
 from central.kernel.jobs import asset_key
@@ -29,9 +35,10 @@ from contracts.time import ManualClock
 
 DATA = b"a squashfs " * 100
 FACTS = AssetReady(size=len(DATA), sha256=hashlib.sha256(DATA).hexdigest())
-NEW = FetchOsImage(tag="v2.0.0")
-OLD = FetchOsImage(tag="v1.0.0")
-LOCATOR = OriginLocator("https://example.test/base.tar.gz", sha256=None, size=None)
+NEW = FetchOsImage(tarball_sha256=hashlib.sha256(b"tarball v2.0.0").hexdigest())
+OLD = FetchOsImage(tarball_sha256=hashlib.sha256(b"tarball v1.0.0").hexdigest())
+OWNERS = {NEW: "v2.0.0", OLD: "v1.0.0"}  # the tag that references each
+URL = "https://example.test/base.tar.gz"
 
 
 def fd_closed(fd: int) -> bool:
@@ -45,14 +52,22 @@ def fd_closed(fd: int) -> bool:
 class World:
     def __init__(self, registry, tmp_path, *, capacity: int = 4, wait: float = 5.0,
                  records: PgAssetRecords | None = None,
-                 store: CacheStore | None = None) -> None:
+                 store: CacheStore | None = None,
+                 queue: type[ProcrastinatePublisher] | None = None) -> None:
+        self.db = registry.db
         self.clock = ManualClock(1000.0)
         self.store = store or CacheStore(CacheLayout(tmp_path))
         self.records = records or PgAssetRecords(self.clock)
         self.transactions = RecordingTransactions(registry.db)
         self.reads = Reads(RecordingTransactions(registry.db))
-        self.publisher = RecordingPublisher(self.clock, assets=self.records,
-                                            transactions=self.reads.transactions)
+        if queue is None:
+            self.publisher = RecordingPublisher(self.clock, assets=self.records,
+                                                transactions=self.reads.transactions)
+        else:  # the real queue; nothing here waits on a handle, so no OutcomeFeed
+            apply_procrastinate_schema(registry.db.dsn)
+            self.publisher = queue(registry.db.dsn, transactions=self.reads.transactions,
+                                   outcomes=JobOutcomes(), assets=self.records,
+                                   clock=self.clock, feed=None)
         self.slots = WaiterSlots(capacity)
         self.reader = AssetReader(store=self.store, records=self.records,
                                   transactions=self.transactions, publisher=self.publisher,
@@ -62,12 +77,19 @@ class World:
     def record(self, job, produced: AssetReady | None = None) -> None:
         key = asset_key(job)
         with self.reads.transactions.begin() as tx:
-            self.records.reference(tx, key, AssetReference(job.tag, LOCATOR, None, None))
+            self.records.reference(tx, key, AssetReference(OWNERS[job], OriginLocator(URL, key.identity, None), None, None))
             if produced is not None:
                 self.records.record_produced(tx, key, produced)
 
     def put(self, job, data: bytes = DATA) -> None:
         put_file(self.store, asset_key(job), data)
+
+    def pending(self) -> list:
+        """The queue's `todo` jobs, decoded (real queue only)."""
+        with self.db.transaction() as conn:
+            rows = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
+                                "WHERE status = 'todo' ORDER BY id").fetchall()
+        return [decode(row["task_name"], row["args"])[0] for row in rows]
 
 
 @pytest.fixture
@@ -95,7 +117,7 @@ async def until(predicate) -> None:
 # -- fast path (flow b) ---------------------------------------------------------------------------
 
 
-def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(world_at):
+def test_first_present_candidate_is_opened_in_one_read(world_at):
     world = world_at()
     world.record(NEW)  # recorded but never produced
     world.record(OLD, FACTS)
@@ -104,8 +126,22 @@ def test_first_present_candidate_is_opened_in_one_read_and_nothing_is_published(
     assert isinstance(result, Opened)
     assert (result.job, result.size, result.sha256) == (OLD, FACTS.size, FACTS.sha256)
     assert served(result) == DATA
+    read = world.transactions.begun[0]
+    assert read.state == "committed"
+    [call] = world.publisher.calls  # the wanted candidate, as a request (decision 3), in the read
+    assert (call.job, call.retry_terminal, call.within) == (NEW, True, read)
+
+
+def test_the_wanted_candidate_on_disk_publishes_nothing(world_at):
+    world = world_at()
+    world.record(NEW, FACTS)
+    world.put(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+    assert result.job == NEW
+    assert served(result) == DATA
     assert world.publisher.calls == []
-    assert world.transactions.begun[0].state == "committed"
 
 
 def test_a_candidate_whose_file_is_absent_or_wrong_is_skipped(world_at):
@@ -300,6 +336,81 @@ def test_a_touch_failure_is_logged_and_never_fails_the_serve(world_at, caplog):
         result = asyncio.run(world.reader.read(Candidates((NEW,), pinned=True)))
     assert served(result) == DATA
     assert "touch failed" in caplog.text
+
+
+# -- a substitute serve publishes the wanted fetch (issue #24), on the real queue ----------------
+
+
+def test_a_substitute_serve_queues_exactly_one_fetch_committed_with_the_serve(world_at):
+    world = world_at(queue=ProcrastinatePublisher)
+    world.record(NEW)  # wanted, never produced
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    candidates = Candidates((NEW, OLD), pinned=False)
+    own = len(world.reads.transactions.begun)  # `publish_now`'s transactions, were it used
+    first = asyncio.run(world.reader.read(candidates))
+    assert world.pending() == [NEW]  # committed by the time the serve returns
+    second = asyncio.run(world.reader.read(candidates))  # merges into the pending copy
+    assert served(first) == DATA and served(second) == DATA
+    assert (first.job, second.job) == (OLD, OLD)
+    assert world.pending() == [NEW]
+    assert len(world.reads.transactions.begun) == own  # no transaction of the publisher's own
+
+
+def test_a_wanted_serve_queues_nothing(world_at):
+    world = world_at(queue=ProcrastinatePublisher)
+    world.record(NEW, FACTS)
+    world.put(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    assert served(asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))) == DATA
+    assert world.pending() == []
+
+
+class FailingOutcomeRead(JobOutcomes):
+    """The publish's outcome read fails as a real statement in the serve's transaction."""
+
+    def get(self, tx, lock_key):
+        return pg_connection(tx).execute("SELECT 1/0").fetchone()
+
+
+class FailingPublisher(ProcrastinatePublisher):
+    def __init__(self, dsn, **options) -> None:
+        super().__init__(dsn, **{**options, "outcomes": FailingOutcomeRead()})
+
+
+def test_a_publish_failure_is_logged_and_never_fails_the_substitute_serve(world_at, caplog):
+    world = world_at(queue=FailingPublisher)
+    world.record(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+    with caplog.at_level(logging.WARNING, logger="central.assets.reader"):
+        result = asyncio.run(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+    assert result.job == OLD and served(result) == DATA
+    assert "failed while serving a substitute" in caplog.text
+    assert "division by zero" in caplog.text
+    assert world.transactions.begun[0].state == "committed"
+    assert world.pending() == []
+
+
+def test_a_disconnect_during_a_substitute_open_still_commits_its_publish(world_at, tmp_path):
+    store = BlockingStore(CacheLayout(tmp_path))
+    world = world_at(store=store, queue=ProcrastinatePublisher)
+    world.record(NEW)
+    world.record(OLD, FACTS)
+    world.put(OLD)
+
+    async def run():
+        task = asyncio.create_task(world.reader.read(Candidates((NEW, OLD), pinned=False)))
+        await asyncio.to_thread(store.entered.wait, 5)
+        task.cancel()  # the route's disconnect watcher
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        store.release.set()
+        await until(lambda: store.fds and fd_closed(store.fds[0]))
+
+    asyncio.run(run())
+    assert world.pending() == [NEW]  # the shielded open's transaction committed the publish
 
 
 # -- WaiterSlots ----------------------------------------------------------------------------------

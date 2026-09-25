@@ -1,8 +1,10 @@
 """Where each asset lives on the cache disk: one subdirectory per kind, a file named by the key.
 
-The names are today's (`os-images/base-<tag>.squashfs`, `apps/app-<sha256>.deb`), so files already
-on disk keep serving across the rollout. Temp files start with `TEMP_PREFIX`, which no final name
-can, so a temp is never mistaken for an asset.
+Every name is content-keyed: an OS image by the sha256 of its base tarball
+(`os-images/base-<tarball sha256>.squashfs`), a Player `.deb` by its own sha256
+(`apps/app-<sha256>.deb`). A re-cut is a new name, so a late run can only write the same bytes to
+the same file. Temp files start with `TEMP_PREFIX`, which no final name can, so a temp is never
+mistaken for an asset.
 """
 
 from __future__ import annotations

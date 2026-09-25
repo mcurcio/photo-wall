@@ -2,9 +2,13 @@
 
 A job type becomes one procrastinate task named `TASK_PREFIX + job_name`, on its delivery's queue
 and priority, with `retry=None`: procrastinate never retries in place, because the runtime
-retries by re-publishing (design §10.1). Both locks always come from `job_keys`; callers never
-write them. A periodic job type is additionally registered with `app.periodic`, carrying the
-constant locks of its field-less job, so a tick and an on-demand publish merge (PB9).
+retries by re-publishing (design §10.1). The locks come from `job_keys` and the job's type;
+callers never write them. `queueing_lock` (one pending copy) is taken by every job.
+`lock` (one running copy) is taken only by asset fetches, where it saves a second download.
+Every other job may overlap itself, so a stalled rescue never blocks the next tick (idempotent
+jobs §6). The key itself is still the `job_outcomes` key and the NOTIFY payload. A periodic job
+type is additionally registered with `app.periodic`, carrying the constant locks of its
+field-less job, so a tick and an on-demand publish merge (PB9).
 
 Task kwargs are the job's `model_dump(mode="json")` plus the attempt under `ATTEMPT_KWARG`.
 procrastinate passes kwargs through verbatim (worker.py:301), and pydantic forbids fields that
@@ -81,6 +85,11 @@ def _publish_only(job_type: type[Job[Any]]) -> TaskBody:
     return refuse
 
 
+def _lock(job: Job[Any]) -> str | None:
+    """The one-running-copy lock: an asset fetch's key, None for every other job type."""
+    return job_keys(job).lock if type(job).asset_kind is not None else None
+
+
 def _register(app: procrastinate.App, job_type: type[Job[Any]], body: TaskBody) -> None:
     name = task_name(job_type)
     delivery = job_type.delivery
@@ -93,9 +102,9 @@ def _register(app: procrastinate.App, job_type: type[Job[Any]], body: TaskBody) 
     task = app.task(name=name, queue=delivery.queue.value, priority=delivery.priority,
                     retry=None, pass_context=True)(run)
     if delivery.every is not None:
-        keys = job_keys(job_type())
+        tick = job_type()
         app.periodic(cron=periodic_cron(delivery.every), periodic_id=job_type.job_name,
-                     lock=keys.lock, queueing_lock=keys.queueing_lock)(task)
+                     lock=_lock(tick), queueing_lock=job_keys(tick).queueing_lock)(task)
 
 
 def build_app(connector: procrastinate.BaseConnector, job_types: Sequence[type[Job[Any]]],
@@ -112,11 +121,10 @@ def build_app(connector: procrastinate.BaseConnector, job_types: Sequence[type[J
 
 def _deferrer(app: procrastinate.App, job: Job[Any], *, connection: Any,
               schedule_at: datetime | None) -> Any:
-    keys = job_keys(job)
     # allow_unknown=False: a type this app was not built with must never land on the
     # procrastinate "default" queue.
-    return app.configure_task(task_name(type(job)), allow_unknown=False, lock=keys.lock,
-                              queueing_lock=keys.queueing_lock, connection=connection,
+    return app.configure_task(task_name(type(job)), allow_unknown=False, lock=_lock(job),
+                              queueing_lock=job_keys(job).queueing_lock, connection=connection,
                               schedule_at=schedule_at)
 
 
@@ -161,8 +169,9 @@ async def carry_attempt_async(app: procrastinate.App, job: Job[Any], *, attempt:
     """Raise the key's pending (`todo`) copy to at least `attempt`, through the app's pool.
 
     A redelivery that merged into a pending copy must not reset the backoff: that copy may carry
-    a lower attempt (a request's attempt 0). Called while the redelivering copy is still `doing`
-    and holds the key's lock, so the pending copy cannot be fetched in between.
+    a lower attempt (a request's attempt 0). Called while the redelivering copy is still `doing`;
+    an asset job's lock keeps the pending copy from being fetched in between. A non-asset pending
+    copy fetched first is no longer `todo`, so it is left as it is.
     """
     await app.connector.execute_query_async(
         _CARRY_ATTEMPT, attempt=_require_attempt(attempt),

@@ -7,6 +7,7 @@ PostgreSQL (the `registry` fixture; CI runs it). The origin is the only fake bes
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -30,6 +31,7 @@ from central.assets.layout import CacheLayout
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
 from central.content_catalog.catalog import ReleaseCatalog
+from central.content_catalog.ports import Promotion
 from central.content_catalog.sync import SyncReleasesHandler
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
@@ -37,7 +39,12 @@ from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.handling import OriginUnavailable, handler_job_type
 from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
-from central.kernel.ports import PublishedRelease, ReleaseListing
+from central.kernel.ports import (
+    PublishedRelease,
+    ReleaseListing,
+    ReleaseOrigin,
+    UpstreamVersion,
+)
 from contracts.time import ManualClock
 
 T1, T, T2 = "v0.0.1", "v0.0.2", "v0.0.3"
@@ -53,11 +60,20 @@ def image(tag: str, cut: str = "") -> OriginLocator:
     return OriginLocator(f"https://example.test/{tag}.tgz", sha("img" + tag + cut), 64)
 
 
+def version(at: float) -> UpstreamVersion:
+    """An upstream version: the manifest asset's `updated_at` (`at`), with one asset id."""
+    return UpstreamVersion(float(at), 1)
+
+
 def published(tag: str, *, pre: bool = False, package: OriginLocator | None | str = "default",
-              os_image: OriginLocator | None | str = "default") -> PublishedRelease:
+              os_image: OriginLocator | None | str = "default",
+              at: float | None = 1) -> PublishedRelease:
+    """`tag` observed at upstream version `at` (None: the manifest body was not read). A re-cut
+    upstream is a newer version."""
     locator = deb(tag) if package == "default" else package
     base = image(tag) if os_image == "default" else os_image
-    return PublishedRelease(tag, pre, locator, None if locator else "no_player_asset", base)
+    return PublishedRelease(tag, pre, locator, None if locator else "no_player_asset", base,
+                            None if at is None else version(at))
 
 
 def listing(*releases: PublishedRelease, etag: str | None = "e1") -> ReleaseListing:
@@ -65,25 +81,44 @@ def listing(*releases: PublishedRelease, etag: str | None = "e1") -> ReleaseList
 
 
 class RecordingOrigin(FakeReleaseOrigin):
-    def __init__(self, listing_or_error) -> None:
+    """Records every ETag it is sent. With `honour_etag`, it answers as GitHub does: unchanged
+    (304) when sent the ETag of the listing it holds."""
+
+    def __init__(self, listing_or_error, *, honour_etag: bool = False) -> None:
         super().__init__(listing_or_error, {})
         self.etags: list[str | None] = []
+        self.honour_etag = honour_etag
 
     async def list_releases(self, *, etag: str | None) -> ReleaseListing:
         self.etags.append(etag)
+        held = self.listing
+        if (self.honour_etag and etag is not None and isinstance(held, ReleaseListing)
+                and held.etag == etag):
+            return ReleaseListing((), etag, unchanged=True)
         return await super().list_releases(etag=etag)
 
 
 @dataclass
 class World:
     handler: SyncReleasesHandler
-    origin: RecordingOrigin
+    origin: ReleaseOrigin  # a `RecordingOrigin` unless the test passed its own
     assets: PgAssetRecords
     transactions: RecordingTransactions
     publisher: RecordingPublisher
     store: CacheStore
     reads: Reads
     db: object
+    catalog: ReleaseCatalog  # the handler's: the operator route runs through the same one
+    clock: ManualClock
+
+    def another_handler(self, origin: ReleaseOrigin) -> SyncReleasesHandler:
+        """A second sync (another worker) over the same database, publisher and clock, with its
+        own records and transactions."""
+        return SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
+                                   devices=PgDeviceRecords(), assets=self.assets,
+                                   transactions=RecordingTransactions(self.db),
+                                   publisher=self.publisher, catalog=self.catalog,
+                                   clock=self.clock)
 
     def updated_at(self) -> dict[str, float]:
         with self.db.transaction() as conn:
@@ -91,13 +126,16 @@ class World:
         return {row["tag"]: row["updated_at"] for row in rows}
 
 
-@pytest.fixture
-def world(registry, tmp_path):
-    def build(origin_listing, *, releases=(), devices=(), promoted=None, etag=None, bound=False,
-              assets: PgAssetRecords | None = None, on_disk=(), **handler_options) -> World:
+def make_world(registry, tmp_path):
+    """The `world` fixture's builder, for another test module's own fixture."""
+    def build(origin_listing, *, releases=(), devices=(), promoted=None, promoted_by="operator",
+              etag=None, bound=False, assets: PgAssetRecords | None = None, on_disk=(),
+              origin: ReleaseOrigin | None = None, honour_etag: bool = False,
+              **handler_options) -> World:
         clock = ManualClock(NOW)
         seeding = RecordingTransactions(registry.db)
-        seed_releases(seeding, releases, promoted=promoted, etag=etag)
+        seed_releases(seeding, releases, promoted=promoted, promoted_by=promoted_by, etag=etag,
+                      etag_stored_at=NOW)  # fresh: the sync sends it
         for fields in devices:
             insert_device(registry.db, **fields)
         if bound:
@@ -111,15 +149,20 @@ def world(registry, tmp_path):
         catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
                                  stored=DiskStoredAssets(records=assets, store=store),
                                  transactions=transactions, publisher=publisher, clock=clock)
-        origin = RecordingOrigin(origin_listing)
+        origin = origin or RecordingOrigin(origin_listing, honour_etag=honour_etag)
         handler = SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                                       devices=PgDeviceRecords(), assets=assets,
                                       transactions=transactions, publisher=publisher,
                                       catalog=catalog, clock=clock, **handler_options)
         return World(handler, origin, assets, transactions, publisher, store,
-                     Reads(RecordingTransactions(registry.db)), registry.db)
+                     Reads(RecordingTransactions(registry.db)), registry.db, catalog, clock)
 
     return build
+
+
+@pytest.fixture
+def world(registry, tmp_path):
+    return make_world(registry, tmp_path)
 
 
 def dev(device_id: str, **fields) -> dict:
@@ -130,8 +173,13 @@ def sync(w: World) -> None:
     asyncio.run(w.handler.handle(SyncReleases()))
 
 
-def image_key(tag: str) -> AssetKey:
-    return AssetKey(AssetKind.OS_IMAGE, tag)
+def image_key(tag: str, cut: str = "") -> AssetKey:
+    """The OS image's key: the sha256 of `image(tag, cut)`'s tarball."""
+    return AssetKey(AssetKind.OS_IMAGE, image(tag, cut).sha256)
+
+
+def os_job(tag: str, cut: str = "") -> FetchOsImage:
+    return FetchOsImage(tarball_sha256=image(tag, cut).sha256)
 
 
 def deb_key(locator: OriginLocator) -> AssetKey:
@@ -169,7 +217,7 @@ def test_first_sync_records_releases_references_promotes_and_fetches_desired_cha
     tail = w.transactions.begun[-1]
     # Changed AND desired (bootstrap T1 + its .deb); the rc's .deb changed but is not desired.
     assert w.publisher.calls == [
-        PublishedCall(FetchOsImage(tag=T1), True, tail),
+        PublishedCall(os_job(T1), True, tail),
         PublishedCall(FetchPackage(sha256=deb(T1).sha256), True, tail),
         PublishedCall(Prefetch(), False, tail),
     ]
@@ -199,7 +247,7 @@ def test_recut_deb_retires_the_old_sha_and_fetches_the_new_one(world):
     sync(w)
     first = len(w.publisher.calls)
     recut = deb(T1, cut="-recut")
-    w.origin.listing = listing(published(T1, package=recut), etag="e2")
+    w.origin.listing = listing(published(T1, package=recut, at=2), etag="e2")
     sync(w)
     assert w.reads.owners(deb_key(deb(T1))) is None  # its last reference retired -> row gone
     assert w.reads.owners(deb_key(recut)) == [T1]
@@ -215,14 +263,15 @@ def test_recut_of_a_produced_deb_freezes_the_tag_as_divergent(world):
     produced(w, deb(T1))
     first = len(w.publisher.calls)
     recut = deb(T1, cut="-recut")
-    w.origin.listing = listing(published(T1, package=recut), etag="e2")
+    w.origin.listing = listing(published(T1, package=recut, at=2), etag="e2")
     sync(w)
     row = w.reads.release(T1)
     assert row.package == deb(T1) and row.divergent
     assert T1 in w.reads.owners(deb_key(deb(T1))) and w.reads.owners(deb_key(recut)) is None
     assert [call.job for call in w.publisher.calls[first:]] == [Prefetch()]
-    # Frozen for good: a later sync, even one dropping the .deb, keeps the produced facts.
-    w.origin.listing = listing(published(T1, package=None), etag="e3")
+    # Derived on every write: a later sync, even one dropping the .deb, freezes it again, so
+    # the produced facts stay.
+    w.origin.listing = listing(published(T1, package=None, at=3), etag="e3")
     sync(w)
     assert w.reads.release(T1).package == deb(T1)
     assert T1 in w.reads.owners(deb_key(deb(T1)))
@@ -233,41 +282,45 @@ def test_recut_keeps_a_deb_another_tag_still_ships(world):
     w = world(listing(published(T1), published(T2, package=shared)))
     sync(w)
     assert sorted(w.reads.owners(deb_key(shared))) == [T1, T2]
-    w.origin.listing = listing(published(T1, package=deb(T1, cut="-recut")),
+    w.origin.listing = listing(published(T1, package=deb(T1, cut="-recut"), at=2),
                                published(T2, package=shared), etag="e2")
     sync(w)
     assert w.reads.owners(deb_key(shared)) == [T2]
 
 
 def writing(data: bytes):
-    async def write(temp, asset) -> None:
+    async def write(temp, locator) -> None:
         temp.write_bytes(data)
     return write
 
 
-def test_a_recut_os_image_is_produced_again_after_a_cache_wipe(world):
-    # PR #22 review P1: release.yml re-uploads a rebuilt image under its tag (--clobber). The
-    # write-once produced facts then failed every later production `not_reproducible` once the
-    # cache was wiped, so the tag was unservable for good (and each Pi boot re-fetched ~1 GB).
+def test_a_recut_os_image_is_a_new_key_and_the_old_keeps_its_facts(world):
+    # release.yml re-uploads a rebuilt image under its tag (--clobber): another tarball, so
+    # another key. The tag moves its reference; the old key's facts are never cleared, and the
+    # new build is produced and recorded under its own key (PR #22 review P1: no
+    # `not_reproducible` for good).
     w = world(listing(published(T1)))
     sync(w)
-    key, job = image_key(T1), FetchOsImage(tag=T1)
+    old, new = image_key(T1), image_key(T1, cut="-rebuilt")
     production = AssetProduction(store=w.store, records=w.assets, transactions=w.transactions)
-    built = asyncio.run(production.produce(job, writing(b"build-1")))
-    record_produced(w.transactions, w.assets, key, built)  # what the runtime records
+    built = asyncio.run(production.produce(os_job(T1), writing(b"build-1")))
+    record_produced(w.transactions, w.assets, old, built)  # what the runtime records
     first = len(w.publisher.calls)
-    w.origin.listing = listing(published(T1, os_image=image(T1, cut="-rebuilt")), etag="e2")
+    w.origin.listing = listing(published(T1, os_image=image(T1, cut="-rebuilt"), at=2),
+                               etag="e2")
     sync(w)
-    asset = w.reads.asset(key)
+    assert w.reads.asset(old) is None  # no reference left: not an asset
+    assert w.reads.facts(old) == built  # but its row and facts stay
+    asset = w.reads.asset(new)
     assert asset.produced is None
     assert asset.references == (AssetReference(T1, image(T1, cut="-rebuilt"), None, None),)
-    assert PublishedCall(FetchOsImage(tag=T1), True, w.transactions.begun[-1]) in (
+    assert PublishedCall(os_job(T1, cut="-rebuilt"), True, w.transactions.begun[-1]) in (
         w.publisher.calls[first:])
-    w.store.discard(w.store.layout.path(key))  # the cache is wiped
-    rebuilt = asyncio.run(production.produce(job, writing(b"build-2")))
+    rebuilt = asyncio.run(production.produce(os_job(T1, cut="-rebuilt"), writing(b"build-2")))
     assert rebuilt == facts_of(b"build-2")
-    record_produced(w.transactions, w.assets, key, rebuilt)  # no ProducedFactsConflict
-    assert w.reads.asset(key).produced == rebuilt
+    record_produced(w.transactions, w.assets, new, rebuilt)  # no ProducedFactsConflict
+    assert w.reads.asset(new).produced == rebuilt
+    assert w.reads.facts(old) == built
 
 
 @pytest.mark.parametrize("changed", [
@@ -279,7 +332,7 @@ def test_an_os_image_whose_bytes_did_not_change_keeps_its_produced_facts(world, 
     sync(w)
     facts = facts_of(b"build-1")
     record_produced(w.reads.transactions, w.assets, image_key(T1), facts)
-    w.origin.listing = listing(published(T1, os_image=changed), etag="e2")
+    w.origin.listing = listing(published(T1, os_image=changed, at=2), etag="e2")
     sync(w)
     assert w.reads.asset(image_key(T1)).produced == facts
 
@@ -287,10 +340,12 @@ def test_an_os_image_whose_bytes_did_not_change_keeps_its_produced_facts(world, 
 def test_dropped_image_and_dropped_deb_retire_their_references(world):
     w = world(listing(published(T1)))
     sync(w)
-    w.origin.listing = listing(published(T1, package=None, os_image=None), etag="e2")
+    record_produced(w.reads.transactions, w.assets, image_key(T1), facts_of(b"build-1"))
+    w.origin.listing = listing(published(T1, package=None, os_image=None, at=2), etag="e2")
     sync(w)
     assert w.reads.owners(image_key(T1)) is None
     assert w.reads.owners(deb_key(deb(T1))) is None
+    assert w.reads.facts(image_key(T1)) == facts_of(b"build-1")  # retiring never clears facts
 
 
 def test_origin_failure_propagates_and_writes_nothing(world):
@@ -357,25 +412,31 @@ def test_pending_health_timeout_is_configurable(world):
 # -- tail: auto-promote -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("promoted,bound,cached,expected", [
+@pytest.mark.parametrize("promoted,by,bound,cached,expected", [
     # Main's `_autopull_deb` (central/app_release_boot.py): suppress iff cached > 0 AND bound > 0.
-    (None, True, False, T),   # nothing cached: pull, even with bound players
-    (T1, True, False, T),
-    (T1, False, True, T),     # no bound player: follow the newest
-    (None, False, True, T),
-    (T1, True, True, T1),     # a configured fleet keeps the operator's choice
-    (None, True, True, None),  # ... and is never promoted behind the operator's back (P1)
+    (None, None, True, False, Promotion(T, "auto")),  # nothing cached: pull, even when bound
+    (None, None, False, True, Promotion(T, "auto")),  # no bound player: pull
+    (None, None, True, True, None),  # a configured fleet is never promoted behind its back (P1)
+    # The sync's own promotion follows the newest under the same rule.
+    (T1, "auto", True, False, Promotion(T, "auto")),
+    (T1, "auto", False, True, Promotion(T, "auto")),
+    (T1, "auto", True, True, Promotion(T1, "auto")),
+    # An operator's promotion is never moved, whatever the fleet (issue #23).
+    (T1, "operator", True, False, Promotion(T1, "operator")),
+    (T1, "operator", False, True, Promotion(T1, "operator")),
+    (T1, "operator", False, False, Promotion(T1, "operator")),
+    (T1, "operator", True, True, Promotion(T1, "operator")),
 ])
-def test_auto_promote(promoted, bound, cached, expected, world):
+def test_auto_promote(promoted, by, bound, cached, expected, world):
     rows = [published(t) for t in (T, T1)]
     rows.append(published(T2, pre=True))  # a newer rc is never auto-promoted
     rows.append(published("v0.1.0", package=None))  # nor a release without a .deb
     w = world(ReleaseListing((), None, unchanged=True), releases=rows, promoted=promoted,
-              bound=bound)
+              promoted_by=by or "operator", bound=bound)
     if cached:
         produced(w, deb(T1))
     sync(w)
-    assert w.reads.promoted() == expected
+    assert w.reads.promotion() == expected
 
 
 def test_suppressed_auto_promote_with_nothing_promoted_says_why(caplog, world):
@@ -398,9 +459,75 @@ def test_auto_promote_honours_release_prereleases(include, expected, world):
     assert w.reads.promoted() == expected
 
 
+def test_an_operator_promotion_of_an_older_release_survives_syncs_that_bring_newer_ones(world):
+    # Issue #23: with no player bound, the periodic sync used to replace an operator's
+    # promotion of an older release with the newest within one tick.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="operator",
+              on_disk=[deb(T1)])
+    sync(w)
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    sync(w)
+    assert (w.reads.promotion(), w.reads.last_good()) == (Promotion(T1, "operator"), None)
+
+
+def test_an_auto_promotion_follows_a_newer_release_on_the_next_sync(world):
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)])
+    sync(w)
+    assert w.reads.promotion() == Promotion(T, "auto")  # an empty promotion is auto-filled
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    assert w.reads.promotion() == Promotion(T2, "auto")
+
+
+def test_an_operator_re_promoting_the_auto_tag_takes_it_over(world):
+    # The operator promotes the very tag the sync chose: the promotion is now the operator's,
+    # so a newer release no longer moves it.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T, promoted_by="auto")
+    asyncio.run(w.catalog.promote(T))
+    assert w.reads.promotion() == Promotion(T, "operator")
+    w.origin.listing = listing(published(T1), published(T), published(T2))  # a newer release
+    sync(w)
+    assert w.reads.promotion() == Promotion(T, "operator")
+
+
+@pytest.mark.parametrize("operator_tag,last_good", [
+    (T1, None),  # the operator keeps the sync's tag: nothing outgoing to carry
+    (T, T1),  # the operator moves it: the outgoing auto tag (on disk) is last-good
+])
+def test_an_operator_promotion_committed_during_the_sync_tail_is_never_overwritten(
+        world, monkeypatch, operator_tag, last_good):
+    # Issue #23 race: the tail reads promotion (T1, auto) unlocked, an operator promotion commits,
+    # then the tail's auto write lands. The write must re-check under the row lock. The operator
+    # promotes from another thread in its own transaction while the tail is paused inside
+    # `bound_player_count`, between its read and its write.
+    w = world(ReleaseListing((), None, unchanged=True),
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="auto",
+              on_disk=[deb(T1)])
+    records = w.handler._releases
+    count = records.bound_player_count
+    seen = []
+
+    def operator_promotes_meanwhile(tx):
+        thread = threading.Thread(target=lambda: asyncio.run(w.catalog.promote(operator_tag)))
+        thread.start()
+        thread.join(timeout=10)
+        seen.append((thread.is_alive(), w.reads.promotion()))
+        return count(tx)
+
+    monkeypatch.setattr(records, "bound_player_count", operator_promotes_meanwhile)
+    sync(w)
+    assert seen == [(False, Promotion(operator_tag, "operator"))]  # it committed mid-tail
+    assert (w.reads.promotion(), w.reads.last_good()) == (
+        Promotion(operator_tag, "operator"), last_good)
+
+
 def test_auto_promote_keeps_the_outgoing_tag_as_last_good_when_its_deb_is_on_disk(world):
     w = world(ReleaseListing((), None, unchanged=True),
-              releases=[published(t) for t in (T1, T)], promoted=T1,
+              releases=[published(t) for t in (T1, T)], promoted=T1, promoted_by="auto",
               on_disk=[deb(T1)])
     sync(w)
     assert (w.reads.promoted(), w.reads.last_good()) == (T, T1)
@@ -413,10 +540,10 @@ def test_auto_promote_with_no_deployable_release_leaves_nothing_promoted(world):
 
 
 def test_auto_promoted_deb_is_fetched_when_it_changed(world):
-    # A new release lands on a fleet with no bound players: it is promoted in the tail, and its
-    # changed .deb is therefore desired in the same transaction and fetched.
+    # A new release lands on an auto promotion with no bound players: it is promoted in the
+    # tail, and its changed .deb is therefore desired in the same transaction and fetched.
     w = world(listing(published(T1), published(T2, os_image=None)),
-              releases=[published(T1)], promoted=T1,
+              releases=[published(T1)], promoted=T1, promoted_by="auto",
               devices=[dev("frontier", known_good_tag=T1)])
     sync(w)
     assert w.reads.promoted() == T2

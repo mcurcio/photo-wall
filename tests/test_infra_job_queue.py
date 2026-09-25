@@ -56,7 +56,7 @@ class Mixed(Job[None], name="test.job_queue_mixed",
 
 
 def catalog_instances() -> list[Job]:
-    samples = {FetchOsImage: FetchOsImage(tag="v1.2.3-rc.1"), FetchPackage: FetchPackage(sha256=SHA)}
+    samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32), FetchPackage: FetchPackage(sha256=SHA)}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 
@@ -152,7 +152,7 @@ def test_build_app_registers_one_task_per_type_with_its_delivery():
         assert task.lock is None and task.queueing_lock is None  # always per job, from job_keys
 
 
-def test_build_app_registers_periodic_types_with_their_constant_locks():
+def test_build_app_registers_periodic_types_with_their_constant_queueing_lock_only():
     app = build_app(connector(), CATALOG, None)
     periodic = {pt.task.name: pt for pt in app.periodic_registry.periodic_tasks.values()}
     expected = [t for t in CATALOG if t.delivery.every is not None]
@@ -162,7 +162,7 @@ def test_build_app_registers_periodic_types_with_their_constant_locks():
         keys = job_keys(job_type())
         assert entry.cron == periodic_cron(job_type.delivery.every)
         assert entry.periodic_id == job_type.job_name
-        assert entry.configure_kwargs["lock"] == keys.lock
+        assert entry.configure_kwargs["lock"] is None  # no asset job is periodic: ticks overlap
         assert entry.configure_kwargs["queueing_lock"] == keys.queueing_lock
 
 
@@ -178,7 +178,7 @@ def test_task_decodes_and_runs_the_body():
         seen.append((job, attempt))
 
     app = build_app(connector(), (FetchOsImage, SyncReleases), body)
-    job = FetchOsImage(tag="v2.0.0")
+    job = FetchOsImage(tarball_sha256="2" * 64)
 
     async def run():
         for name, kwargs in ((task_name(FetchOsImage), job_kwargs(job, attempt=2)),
@@ -241,14 +241,21 @@ class SavepointConnection:
         self.savepoints.append("released")
 
 
-def test_defer_passes_both_locks_inside_a_savepoint():
+@pytest.mark.parametrize("job,holds_lock", [
+    (FetchPackage(sha256=SHA), True),  # an asset fetch keeps its one-runner lock
+    (FetchOsImage(tarball_sha256="cd" * 32), True),
+    (Mixed(s="x", i=1, b=True, c=Colour.RED), False),  # every other job may overlap itself
+    (SyncReleases(), False),
+])
+def test_defer_passes_the_queueing_lock_and_an_asset_jobs_lock_inside_a_savepoint(job,
+                                                                                  holds_lock):
     app, conn = RecordingApp(), SavepointConnection()
-    job = Mixed(s="x", i=1, b=True, c=Colour.RED)
     at = datetime(2026, 1, 1, tzinfo=UTC)
     assert defer(app, job, attempt=1, connection=conn, schedule_at=at) is True
     keys = job_keys(job)
     assert app.configured == [{
-        "name": task_name(Mixed), "allow_unknown": False, "lock": keys.lock,
+        "name": task_name(type(job)), "allow_unknown": False,
+        "lock": keys.lock if holds_lock else None,
         "queueing_lock": keys.queueing_lock, "connection": conn, "schedule_at": at,
     }]
     assert app.deferred == [job_kwargs(job, attempt=1)]
@@ -265,7 +272,11 @@ def test_defer_async_uses_the_app_pool_and_reports_merges():
     app = RecordingApp()
     assert asyncio.run(defer_async(app, SyncReleases(), attempt=2)) is True
     assert app.configured[0]["connection"] is None
+    assert app.configured[0]["lock"] is None
     assert app.deferred == [job_kwargs(SyncReleases(), attempt=2)]
+    asset = FetchPackage(sha256=SHA)
+    assert asyncio.run(defer_async(app, asset, attempt=0)) is True
+    assert app.configured[1]["lock"] == job_keys(asset).lock  # an asset fetch keeps its lock
     assert asyncio.run(defer_async(RecordingApp(raises=True), SyncReleases(), attempt=0)) is False
 
 
@@ -306,7 +317,7 @@ def test_repository_refuses_a_fake_transaction():
 
 def test_outcomes_upsert_sequence_and_purge(registry):
     transactions, outcomes = PgTransactions(registry.db), JobOutcomes()
-    job, other = FetchOsImage(tag="v1.0.0"), SyncReleases()
+    job, other = FetchOsImage(tarball_sha256="1" * 64), SyncReleases()
     lock = job_keys(job).lock
     with transactions.begin() as tx:
         assert outcomes.get(tx, lock) is None

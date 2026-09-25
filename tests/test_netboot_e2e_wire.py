@@ -69,6 +69,7 @@ from central.kernel.ports import PublishedRelease
 from scripts.test_netboot_e2e import (  # reuse tracer helpers
     _FixedDiscovery,
     _NoSleep,
+    promote_path,
     release_seed_sql,
 )
 
@@ -78,6 +79,7 @@ SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
 SERIAL = "10000000cafef00d"
 TAG = "v9.9.9"
 DEB_SHA = hashlib.sha256(("deb-" + TAG).encode()).hexdigest()  # TAG's `.deb` (manifest only)
+TARBALL_SHA = "b" * 64  # TAG's base tarball: the OS image's key
 
 
 class _Log:
@@ -147,13 +149,13 @@ def _seed_base(registry, cache_root, *, tag=TAG, squashfs=SQUASHFS, cached=True,
     with its reference and -- when `cached` -- its produced facts and the file at its
     cache path, and a device pinned to `tag` so the serial resolves deterministically."""
     db, clock = registry.db, registry.clock
-    tarball = OriginLocator("https://example.test/base.tgz", "b" * 64, len(squashfs))
+    tarball = OriginLocator("https://example.test/base.tgz", TARBALL_SHA, len(squashfs))
     package = OriginLocator("https://example.test/app.deb", DEB_SHA, 4096)
-    key = asset_key(FetchOsImage(tag=tag))
+    key = asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA))
     assets = PgAssetRecords(clock)
     with PgTransactions(db).begin() as tx:
-        PgReleaseRecords().upsert(tx, PublishedRelease(tag, False, package, None, tarball),
-                                  now=clock.utc())
+        PgReleaseRecords().claim(tx, PublishedRelease(tag, False, package, None, tarball, None),
+                                 now=clock.utc())
         assets.reference(tx, key, AssetReference(tag, tarball, None, None))
         if cached:
             assets.record_produced(
@@ -249,12 +251,18 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
 
         # --- Phase 2: chain the app .deb fetch via the Bootstrapper path ---
         # A promoted release whose `.deb` is produced and on disk: the compose
-        # tracer's seed (scripts/test_netboot_e2e.py), proven here against a real schema.
+        # tracer's seed (scripts/test_netboot_e2e.py) and its promotion through the
+        # operator route, proven here against a real schema.
         payload = b"synthetic photo-wall-player package bytes" * 32
         sha = hashlib.sha256(payload).hexdigest()
         with psycopg.connect(registry.db.dsn, autocommit=True) as conn:
             conn.execute(release_seed_sql("v9.9.8", sha, len(payload)))
         _write(cache_root, asset_key(FetchPackage(sha256=sha)), payload)
+        promote = urllib.request.Request(origin + promote_path("v9.9.8"), method="POST",
+                                         headers={"Authorization": "Bearer " + ADMIN})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(promote, timeout=15) as response:
+            assert json.loads(response.read()) == {"status": "promoted"}
 
         capture = _InstallCapture()
         bootstrapper = Bootstrapper(
@@ -368,7 +376,7 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
         # serves the tampered bytes with the recorded (now-mismatching) Digest header,
         # and the client's streamed sha256 must refuse.
         tampered = SQUASHFS[:-1] + bytes([SQUASHFS[-1] ^ 0x01])
-        _write(cache_root, asset_key(FetchOsImage(tag=TAG)), tampered)
+        _write(cache_root, asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA)), tampered)
         with pytest.raises(NetbootError, match="netboot_integrity"):
             netboot(
                 {"photowall.central": origin + "/"},
@@ -401,8 +409,8 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
     with registry.db.transaction() as conn:
         queued = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
                               "WHERE status = 'todo'").fetchall()
-    assert [(q["task_name"], q["args"]["tag"]) for q in queued] == [
-        ("photo_wall.os_image.fetch", TAG)]
+    assert [(q["task_name"], q["args"]["tarball_sha256"]) for q in queued] == [
+        ("photo_wall.os_image.fetch", TARBALL_SHA)]
     assert _served_row(registry)["last_served_tag"] is None  # a miss records nothing
 
 

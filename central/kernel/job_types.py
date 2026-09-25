@@ -11,14 +11,14 @@ from typing import Any, Final, TypeAlias
 
 from central.kernel.assets import AssetKind, AssetReady
 from central.kernel.jobs import Delivery, Job, QueueName
-from central.kernel.types import ReleaseTag, Sha256
+from central.kernel.types import Sha256
 
 _FETCH_RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5))
 
 
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
                    delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
-    tag: ReleaseTag
+    tarball_sha256: Sha256  # the base tarball's sha256: the image is a pure function of it
 
 
 class FetchPackage(Job[AssetReady], name="player_deb.fetch", asset=AssetKind.PLAYER_DEB,

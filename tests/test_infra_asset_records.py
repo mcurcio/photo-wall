@@ -87,16 +87,22 @@ def test_get_orders_references_newest_first_then_owner_desc(repo):
     assert [r.owner for r in repo.get(KEY).references] == ["v0.9.1", "v0.9.0", "v1.0.0"]
 
 
-def test_retire_of_the_last_reference_deletes_the_asset(repo):
+def test_retire_of_the_last_reference_keeps_the_row_and_its_facts(repo):
+    facts = AssetReady(size=10, sha256=SHA_A)
     repo.reference(KEY, ref("v1.0.0"))
     repo.reference(KEY, ref("v1.1.0"))
+    repo.record_produced(KEY, facts)
     repo.retire(KEY, "v1.0.0")
     assert [r.owner for r in repo.get(KEY).references] == ["v1.1.0"]
     repo.retire(KEY, "nobody")  # absent owner -> no-op
     repo.retire(KEY, "v1.1.0")
-    assert repo.get(KEY) is None
-    assert repo.count("assets") == 0 and repo.count("asset_references") == 0
-    repo.retire(KEY, "v1.1.0")  # absent asset -> no-op
+    assert repo.get(KEY) is None  # no reference: not an asset
+    assert repo.count("assets") == 1 and repo.count("asset_references") == 0
+    repo.retire(KEY, "v1.1.0")  # absent reference -> no-op
+    repo.retire(AssetKey(AssetKind.PLAYER_DEB, SHA_B), "v1.1.0")  # absent asset -> no-op
+    # A new reference revives the key with the facts it always had (never cleared).
+    assert repo.reference(KEY, ref("v1.2.0")) is True
+    assert repo.get(KEY).produced == facts
 
 
 def test_record_produced_is_write_once(repo):
@@ -111,15 +117,20 @@ def test_record_produced_is_write_once(repo):
     assert repo.get(KEY).produced == facts
 
 
-def test_forget_produced_clears_the_facts_so_a_new_build_can_be_recorded(repo):
-    repo.forget_produced(KEY)  # absent -> no-op
-    repo.reference(KEY, ref("v1.0.0"))
-    repo.record_produced(KEY, AssetReady(size=10, sha256=SHA_A))
-    repo.forget_produced(KEY)
-    assert repo.get(KEY).produced is None
-    assert [r.owner for r in repo.get(KEY).references] == ["v1.0.0"]  # references untouched
-    repo.record_produced(KEY, AssetReady(size=11, sha256=SHA_B))  # no ProducedFactsConflict
-    assert repo.get(KEY).produced == AssetReady(size=11, sha256=SHA_B)
+@pytest.mark.parametrize("kind", list(AssetKind))
+@pytest.mark.parametrize("locator_sha", [None, SHA_B])
+def test_a_reference_whose_locator_does_not_name_its_key_is_refused(repo, kind, locator_sha):
+    # 028's CHECK: production may fetch from ANY reference of a key, and `download` checks the
+    # bytes only against a set locator sha, so a reference to other (or unchecked) bytes would
+    # install them under the key. The schema refuses it, for both kinds.
+    key = AssetKey(kind, SHA_A)
+    stray = AssetReference("v1.0.0", OriginLocator("https://example.test/a", sha256=locator_sha,
+                                                   size=10), None, None)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        repo.reference(key, stray)
+    assert repo.count("assets") == 0 and repo.count("asset_references") == 0  # rolled back
+    good = AssetReference("v1.0.0", OriginLocator("https://example.test/a", SHA_A, 10), None, None)
+    assert repo.reference(key, good) is True
 
 
 def test_touch_served_sets_last_served_at(repo):

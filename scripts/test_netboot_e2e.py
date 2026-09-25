@@ -34,8 +34,9 @@ What is REAL here vs captured
 - SEEDED: the release catalog. There is no hand-uploaded `.deb` any more (the
   design's catalog learns packages from releases), and this tracer runs no
   worker and reaches no GitHub, so `release_seed_sql` writes what a release sync
-  plus a finished `FetchPackage` would have: one promoted release referencing
-  the staged `.deb`, and its Asset record with the produced facts.
+  plus a finished `FetchPackage` would have: one release referencing the staged
+  `.deb`, and its Asset record with the produced facts. The tracer then promotes
+  it through the REAL operator route (`promote_path`).
 - CAPTURED: the systemd `start` step -- there is no systemd PID1 in the CI
   container, so `start_unit` is a recording stub; the tracer asserts the
   Bootstrapper *invoked* it exactly once, after a landed install. Real GTK/HDMI
@@ -125,13 +126,20 @@ def require(condition: object, code: str) -> None:
         raise TracerError(code)
 
 
+def promote_path(tag: str) -> str:
+    """The operator promote route: the seed's promotion goes through it, so the policy row is
+    written by the catalog's own writer (`PgReleaseRecords.set_promoted`), never by SQL here."""
+    return f"/v1/operator/app/releases/{tag}/promote"
+
+
 def release_seed_sql(tag: str, sha256: str, size: int, url: str = TRACER_DEB_URL) -> str:
-    """One promoted release whose `.deb` is already produced (flow (b): served from disk).
+    """One release whose `.deb` is already produced (flow (b): served from disk).
 
     It is the state a release sync plus a finished `FetchPackage` leave behind: the
-    `app_releases` row with the package locator, the `player-deb` Asset with its produced
-    facts and its reference, and the promoted tag. The values are validated here, so the
-    SQL text carries no untrusted input.
+    `app_releases` row with the package locator, and the `player-deb` Asset with its
+    produced facts and its reference. The caller then promotes the tag through
+    `promote_path`. The values are validated here, so the SQL text carries no untrusted
+    input.
     """
     match = _TAG_SHAPE.fullmatch(tag)
     require(match is not None, "seed_tag_invalid")
@@ -152,8 +160,6 @@ def release_seed_sql(tag: str, sha256: str, size: int, url: str = TRACER_DEB_URL
         "locator_size, expected_size, expected_sha256, added_at) "
         f"VALUES ('player-deb', '{sha256}', '{tag}', '{url}', '{sha256}', {size}, {size}, "
         f"'{sha256}', {now});\n"
-        f"INSERT INTO app_release_policy VALUES (TRUE, '{tag}') ON CONFLICT (singleton) "
-        "DO UPDATE SET promoted_tag = EXCLUDED.promoted_tag;\n"
         "COMMIT;\n"
     )
 
@@ -262,6 +268,7 @@ class Central:
         # After central is healthy, so its migrations (the assets tables) have run.
         self.compose("exec", "-T", "database", "psql", "-v", "ON_ERROR_STOP=1",
                      "-U", "wall", "-d", "wall", "-c", release_seed_sql(tag, sha256, size))
+        self._request("POST", promote_path(tag), authenticated=True)
 
     def manifest(self) -> dict:
         return self._request("GET", "/v1/app/manifest")

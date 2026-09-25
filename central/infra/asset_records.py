@@ -3,9 +3,8 @@
 Every method runs inside the caller's transaction (`pg_connection(tx)`), so it blocks: call it
 from a worker thread.
 
-Concurrency: `retire` locks the asset row `FOR UPDATE` before deleting, and `reference` takes a
-row lock through its upsert, so a reference added concurrently with the retirement of the last
-one either sees the row deleted and re-creates it, or keeps it alive; never an orphan reference.
+An asset row, once created, is never deleted here, and its produced facts are never cleared:
+`retire` deletes only the reference.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ class PgAssetRecords:
             "ORDER BY added_at DESC, owner DESC",
             (key.kind.value, key.identity),
         ).fetchall()
-        if not refs:  # the row goes with its last reference; a bare row is not an asset
+        if not refs:  # a row whose references were all retired is not an asset
             return None
         return Asset(key=key, references=tuple(_reference(ref) for ref in refs),
                      produced=_produced(row), last_served_at=row["last_served_at"])
@@ -67,10 +66,9 @@ class PgAssetRecords:
     def reference(self, tx: Transaction, key: AssetKey, ref: AssetReference) -> bool:
         conn = pg_connection(tx)
         now = self._clock.utc()
-        # A no-op upsert rather than DO NOTHING: it row-locks the asset against a concurrent retire.
         conn.execute(
             "INSERT INTO assets (kind, identity, created_at) VALUES (%s, %s, %s) "
-            "ON CONFLICT (kind, identity) DO UPDATE SET created_at = assets.created_at",
+            "ON CONFLICT (kind, identity) DO NOTHING",
             (key.kind.value, key.identity, now),
         )
         changed = ", ".join(f"{column} = EXCLUDED.{column}" for column in _REFERENCE_COLUMNS)
@@ -87,21 +85,9 @@ class PgAssetRecords:
         return cursor.rowcount == 1
 
     def retire(self, tx: Transaction, key: AssetKey, owner: str) -> None:
-        conn = pg_connection(tx)
-        locked = conn.execute(
-            "SELECT 1 FROM assets WHERE kind=%s AND identity=%s FOR UPDATE",
-            (key.kind.value, key.identity),
-        ).fetchone()
-        if locked is None:
-            return
-        conn.execute(
+        pg_connection(tx).execute(
             "DELETE FROM asset_references WHERE kind=%s AND identity=%s AND owner=%s",
             (key.kind.value, key.identity, owner),
-        )
-        conn.execute(
-            "DELETE FROM assets a WHERE a.kind=%s AND a.identity=%s AND NOT EXISTS ("
-            "SELECT 1 FROM asset_references r WHERE r.kind=a.kind AND r.identity=a.identity)",
-            (key.kind.value, key.identity),
         )
 
     def record_produced(self, tx: Transaction, key: AssetKey, facts: AssetReady) -> None:
@@ -123,12 +109,16 @@ class PgAssetRecords:
         if recorded != facts:
             raise ProducedFactsConflict(f"{key}: recorded {recorded}, given {facts}")
 
-    def forget_produced(self, tx: Transaction, key: AssetKey) -> None:
-        pg_connection(tx).execute(
-            "UPDATE assets SET produced_size=NULL, produced_sha256=NULL "
-            "WHERE kind=%s AND identity=%s",
+    def lock_produced(self, tx: Transaction, key: AssetKey) -> AssetReady | None:
+        # FOR SHARE conflicts with record_produced's UPDATE (FOR NO KEY UPDATE), and with nothing
+        # else the catalog takes on an asset row: reference()'s foreign-key checks take FOR KEY
+        # SHARE, and another reader's FOR SHARE is compatible.
+        row = pg_connection(tx).execute(
+            "SELECT produced_size, produced_sha256 FROM assets "
+            "WHERE kind=%s AND identity=%s FOR SHARE",
             (key.kind.value, key.identity),
-        )
+        ).fetchone()
+        return None if row is None else _produced(row)
 
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
         pg_connection(tx).execute(

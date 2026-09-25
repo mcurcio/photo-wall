@@ -79,18 +79,26 @@ Acceptance still requires the exact built image to boot a candidate, fail health
 
 ## The app-package contract (0009, unsigned, in parallel)
 
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) adds a second, much smaller central contract for shipping the Player, independent of everything above: no shared tables, no `ReleaseAuthority` dependency, no signature anywhere. `central/app_packages.py`'s `AppPackages` owns two tables — `app_packages` (immutable metadata: sha256, version, size, registered_at) and the singleton `app_package_policy` (the one "current app" pointer) — mirroring the shape of `appliance_releases`/the default-release policy above, but with no manifest signature, no per-device candidate/trial, and no health-based promotion.
+[Decision 0009](decisions/0009-minimal-base-and-app-package.md) adds a second, much smaller
+central contract for shipping the Player, independent of everything above: no shared tables, no
+`ReleaseAuthority` dependency, no signature anywhere. The release catalog
+(`central/content_catalog/catalog.py`, `ReleaseCatalog`) owns it over two tables: `app_releases`
+(one row per GitHub release tag, with its `.deb`'s sha256 and size) and the singleton
+`app_release_policy` (the promoted tag, who promoted it, and the last-good tag). There is no
+manifest signature, no per-device candidate/trial, and no health-based promotion.
 
 | Route | Auth | What it does |
 |---|---|---|
-| `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; 503 `app_unconfigured` if nothing is promoted yet. |
-| `GET /v1/app/package/{sha256}.deb` | none | Streams the `.deb` bytes (same `O_NOFOLLOW`/`fstat`/size-match/streaming discipline as the rootfs route above); 404 unknown sha256, 503 if the bytes are missing or the wrong size. |
-| `POST /v1/operator/app` | admin token | Registers `{version, sha256, size}` for a `.deb` already staged by the operator under `PHOTO_WALL_APP_ROOT` as `app-<sha256>.deb` — **stage-by-reference, like the rootfs route above, not a file upload**; central never accepts `.deb` bytes over this request body. 422 on malformed input; immutable once registered (re-registering the same sha256 with different metadata fails). |
-| `PUT /v1/operator/app/current` | admin token | Promotes a previously registered sha256 as the current app. 404 if that sha256 was never registered. |
+| `GET /v1/app/manifest` | none (trusted LAN) | Returns the promoted `{version, sha256, size}`; while the promoted `.deb` is not on disk, the last-good one if it is (with neither on disk, the promoted one). 503 `app_unconfigured` if nothing is promoted yet. A promotion records who set it: `auto` (the release sync) or `operator`; the sync never moves an `operator` promotion. |
+| `GET /v1/app/package/{sha256}.deb` | none | Streams the `.deb` bytes from the cache (`O_NOFOLLOW`/`fstat`/regular-file/size-match). 404 `app_package_not_found` unless a release ships that sha256 and its `.deb` is either wanted by the fleet or already on disk. A miss waits up to 30s for the download, then serves or answers 503 `app_<reason>` with `Retry-After`. |
+| `GET /v1/operator/app/releases` | admin token | Lists every release, newest first: `tag`, `is_prerelease`, `deployable` (has a `.deb`), `promoted`, `promoted_by` (`auto`, `operator`, or null) and `has_os_image`. |
+| `POST /v1/operator/app/releases/{tag}/promote` | admin token | Promotes the tag (`promoted_by: operator`) and queues its `.deb` download in the same transaction; 200 `{"status": "promoted"}`. 404 unknown tag, 409 no `.deb`, 422 not a version tag. |
+| `POST /v1/operator/app/releases/refresh` | admin token | Queues a release sync now; 202 `{"status": "polling"}`. |
 
-The sha256 this contract carries is, by the owner's explicit home-LAN ruling, **a corruption check only** — it lets a downloader detect a truncated or garbled `.deb`, never an authorship or authenticity proof; there is no boot-tree hash and no signing key backing it. There is also no auto-rollback: a promoted `.deb` that crashes on boot has no health signal analogous to `/v1/player/boot-health` above, so recovery from a bad promote is manual (re-promote a prior sha256). See 0009's ["What can go wrong"](decisions/0009-minimal-base-and-app-package.md#what-can-go-wrong) table for the full list of accepted risks this design trades for simplicity.
+The sha256 this contract carries is, by the owner's explicit home-LAN ruling, **a corruption check only** — it lets a downloader detect a truncated or garbled `.deb`, never an authorship or authenticity proof; there is no boot-tree hash and no signing key backing it. There is also no auto-rollback: a promoted `.deb` that crashes on boot has no health signal analogous to `/v1/player/boot-health` above, so recovery from a bad promote is manual (re-promote a prior tag). See 0009's ["What can go wrong"](decisions/0009-minimal-base-and-app-package.md#what-can-go-wrong) table for the full list of accepted risks this design trades for simplicity.
 
-This contract is implemented and unit-tested (`central/app_packages.py`, its routes in `central/app.py`) and is exercised by the bootstrapper (`appliance/provision.py`) in isolation, but nothing above wires it into a real boot yet — see [the appliance builder module](module-appliance-builder.md#the-0009-minimal-base-and-bootstrapper-in-progress) for the current gap.
+This contract is implemented and unit-tested (the catalog above, the Player routes in
+`central/content_routes.py`, the operator routes in `central/app.py`) and is exercised by the bootstrapper (`appliance/provision.py`) in isolation, but nothing above wires it into a real boot yet — see [the appliance builder module](module-appliance-builder.md#the-0009-minimal-base-and-bootstrapper-in-progress) for the current gap.
 
 ## The auto-mirror and per-device release path (0012)
 

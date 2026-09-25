@@ -27,13 +27,14 @@ from central.content_catalog.catalog import (
     CatalogError,
     DevicePackage,
     ManifestRefusal,
+    NetbootCandidates,
     NetbootView,
     ReleaseCatalog,
     ReleaseView,
     device_id_for_serial,
     sanitize_serial,
 )
-from central.content_catalog.ports import DeviceRow, ReleaseRow
+from central.content_catalog.ports import DeviceRow, Promotion, ReleaseRow, StoredEtag
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
@@ -102,10 +103,12 @@ class World:
 
 @pytest.fixture
 def world(registry, tmp_path):
-    def build(releases=(), devices=(), *, promoted=None, last_good=None, on_disk=()) -> World:
+    def build(releases=(), devices=(), *, promoted=None, promoted_by="operator", last_good=None,
+              on_disk=(), etag=None) -> World:
         clock = ManualClock(1000.0)
         seeding = RecordingTransactions(registry.db)
-        seed_releases(seeding, releases, promoted=promoted, last_good=last_good)
+        seed_releases(seeding, releases, promoted=promoted, promoted_by=promoted_by,
+                      last_good=last_good, etag=etag)
         for fields in devices:
             insert_device(registry.db, **fields)
         assets = PgAssetRecords(clock)
@@ -138,8 +141,18 @@ def netboot(w: World, serial: str | None = SERIAL):
     return run(w.catalog.resolve(NetbootBaseRequest(serial)))
 
 
+def os_image(tag: str) -> FetchOsImage:
+    """The fetch of `release(tag)`'s OS image: keyed by its tarball sha."""
+    return FetchOsImage(tarball_sha256=sha("img" + tag))
+
+
 def os_images(*tags: str) -> tuple[FetchOsImage, ...]:
-    return tuple(FetchOsImage(tag=tag) for tag in tags)
+    return tuple(os_image(tag) for tag in tags)
+
+
+def bases(*tags: str, pinned: bool) -> NetbootCandidates:
+    """The netboot resolution serving these tags' OS images, in this order."""
+    return NetbootCandidates(os_images(*tags), pinned=pinned, tags=tags)
 
 
 def test_release_catalog_is_a_content_catalog(world):
@@ -163,7 +176,7 @@ def test_empty_catalog_is_unknown_no_release_but_the_device_row_is_upserted(worl
 
 def test_fresh_device_bootstraps_newest_full_release_with_an_image_in_one_transaction(world):
     w = world([release(T1), release(T), release(T2, pre=True), release("v0.0.4", image=False)])
-    assert netboot(w) == Candidates(os_images(T, T1), pinned=False)  # T1: an older substitute
+    assert netboot(w) == bases(T, T1, pinned=False)  # T1: an older substitute
     assert [tx.state for tx in w.transactions.begun] == ["committed"]
     assert w.devices.locked == [DEVICE_ID]
 
@@ -180,7 +193,7 @@ def test_frontier_of_active_known_goods_beats_bootstrap_and_ignores_retired(worl
     w = world([release(T1), release(T), release(T2)],
               [dev("device-a", known_good_tag=T),
                dev("device-retired", known_good_tag=T2, retired=True)])
-    assert netboot(w) == Candidates(os_images(T, T1), pinned=False)
+    assert netboot(w) == bases(T, T1, pinned=False)
 
 
 def test_unpinned_device_may_get_the_newest_ready_eligible_version_not_only_its_known_good(world):
@@ -190,25 +203,25 @@ def test_unpinned_device_may_get_the_newest_ready_eligible_version_not_only_its_
     w = world([*(release(t) for t in tags), release("v0.3.5-rc.1", pre=True)],
               [dev("frontier", known_good_tag="v0.3.0"),
                dev(DEVICE_ID, known_good_tag="v0.1.0")])
-    assert netboot(w) == Candidates(os_images("v0.3.0", "v0.2.0", "v0.1.0"), pinned=False)
+    assert netboot(w) == bases("v0.3.0", "v0.2.0", "v0.1.0", pinned=False)
 
 
 def test_pinned_device_never_gets_a_substitute(world):
     w = world([release(T1), release(T), release(T2)],
               [dev("frontier", known_good_tag=T2), dev(DEVICE_ID, attached_tag=T)])
-    assert netboot(w) == Candidates(os_images(T), pinned=True)
+    assert netboot(w) == bases(T, pinned=True)
 
 
 def test_unpinned_device_gets_its_known_good_as_a_substitute(world):
     w = world([release(T1), release(T2)],
               [dev("frontier", known_good_tag=T2), dev(DEVICE_ID, known_good_tag=T1)])
-    assert netboot(w) == Candidates(os_images(T2, T1), pinned=False)
+    assert netboot(w) == bases(T2, T1, pinned=False)
 
 
 def test_candidates_without_an_os_image_are_dropped(world):
     w = world([release(T1, image=False), release(T2)],
               [dev("frontier", known_good_tag=T2), dev(DEVICE_ID, known_good_tag=T1)])
-    assert netboot(w) == Candidates(os_images(T2), pinned=False)
+    assert netboot(w) == bases(T2, pinned=False)
 
 
 def test_nothing_left_after_filtering_is_unknown_no_release(world):
@@ -219,7 +232,7 @@ def test_nothing_left_after_filtering_is_unknown_no_release(world):
 def test_pin_resolves_pinned_to_the_pin(world):
     w = world([release(T1), release(T2)],
               [dev("frontier", known_good_tag=T2), dev(DEVICE_ID, attached_tag=T1)])
-    assert netboot(w) == Candidates(os_images(T1), pinned=True)
+    assert netboot(w) == bases(T1, pinned=True)
 
 
 def test_pin_without_an_os_image_is_unknown_no_release(world):
@@ -232,7 +245,7 @@ def test_detect_writes_the_fence_and_recovers_to_known_good(world):
               [dev("frontier", known_good_tag=T),
                dev(DEVICE_ID, known_good_tag=T1, last_served_tag=T, boot_outcome="pending",
                       last_served_at=900.0)])
-    assert netboot(w) == Candidates(os_images(T1), pinned=False)
+    assert netboot(w) == bases(T1, pinned=False)
     row = w.reads.device(DEVICE_ID)
     assert row.failed_tag == T and row.boot_outcome == "failed"
 
@@ -240,7 +253,7 @@ def test_detect_writes_the_fence_and_recovers_to_known_good(world):
 def test_pin_clears_the_fence(world):
     w = world([release(T1), release(T)],
               [dev(DEVICE_ID, attached_tag=T1, failed_tag=T, known_good_tag=T1)])
-    assert netboot(w) == Candidates(os_images(T1), pinned=True)
+    assert netboot(w) == bases(T1, pinned=True)
     assert w.reads.device(DEVICE_ID).failed_tag is None
 
 
@@ -248,7 +261,7 @@ def test_pin_clears_the_fence(world):
 def test_absent_or_unsafe_serial_serves_desired_and_creates_no_row(serial, world):
     # "ABC:DEF" passes _SAFE_SERIAL but equipment_device_id refuses it: still no row.
     w = world([release(T)])
-    assert netboot(w, serial) == Candidates(os_images(T), pinned=False)
+    assert netboot(w, serial) == bases(T, pinned=False)
     assert w.device_count() == 0
 
 
@@ -282,17 +295,47 @@ def test_the_serial_rule_and_device_id_have_one_home():
     assert not hasattr(netboot_base, "device_id_for_serial")
 
 
+LEGACY = "v0.0.9foo"  # passes app_releases' prefix CHECK, refused by `release_version`
+
+
+def _legacy_release_with_image(w: World) -> None:
+    """A legacy row (as main or 021 left it): the repository cannot write this tag."""
+    with w.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,base_tarball_sha256,"
+            "base_tarball_size,base_tarball_url,discovered_at,updated_at) "
+            "VALUES(%s,0,0,9,FALSE,%s,64,%s,1.0,1.0)",
+            (LEGACY, sha("img" + LEGACY), f"https://example.test/{LEGACY}.tgz"))
+
+
+def test_a_legacy_tag_is_never_a_netboot_candidate_nor_desired(world):
+    # Regression-preservation: the tag-keyed FetchOsImage refused such a tag, so its image was
+    # never offered or wanted. A sha-keyed job would accept it; the catalog still refuses it.
+    w = world([release(T2)], [dev("device-frontier", known_good_tag=T2)])
+    _legacy_release_with_image(w)
+    insert_device(w.db, DEVICE_ID, serial=SERIAL, known_good_tag=LEGACY,
+                  last_served_tag=LEGACY, last_served_at=w.clock.utc(), boot_outcome="healthy")
+    legacy_image = FetchOsImage(tarball_sha256=sha("img" + LEGACY))
+    # Unpinned, with the legacy tag as its known-good and among the substitute pool: only T2;
+    # and neither its known-good nor its served role makes the legacy image desired.
+    offered, desired = netboot(w), run(w.catalog.desired_assets())
+    assert (offered, legacy_image in desired) == (bases(T2, pinned=False), False)
+    _refused(w, w.catalog.pin(DEVICE_ID, LEGACY), "invalid_tag", "invalid")
+
+
 def test_record_served_records_the_served_tag_pending_at_now(world):
     w = world([release(T1)], [dev(DEVICE_ID)])
     w.clock.advance(5)
-    run(w.catalog.record_served(NetbootBaseRequest(SERIAL), FetchOsImage(tag=T1)))
+    run(w.catalog.record_served(NetbootBaseRequest(SERIAL), bases(T1, pinned=False),
+                                os_image(T1)))
     row = w.reads.device(DEVICE_ID)
     assert (row.last_served_tag, row.boot_outcome, row.last_served_at) == (T1, "pending", 1005.0)
 
 
 def test_record_served_for_an_unsafe_serial_writes_nothing(world):
     w = world([release(T1)])
-    run(w.catalog.record_served(NetbootBaseRequest("bad serial"), FetchOsImage(tag=T1)))
+    run(w.catalog.record_served(NetbootBaseRequest("bad serial"), bases(T1, pinned=False),
+                                os_image(T1)))
     assert w.device_count() == 0 and w.transactions.begun == []
 
 
@@ -308,7 +351,7 @@ def test_package_request_for_a_desired_sha_is_a_pinned_single_candidate(world):
 @pytest.mark.parametrize("devices,policy", [
     ([dev("d", attached_tag=T1)], {}),
     ([dev("d", known_good_tag=T1)], {}),
-    ([dev("d", last_served_tag=T1)], {}),
+    ([dev("d", last_served_tag=T1, last_served_at=1000.0)], {}),
     ([], {"promoted": T1}),
     ([], {"promoted": T2, "last_good": T1}),
 ])
@@ -341,12 +384,13 @@ def test_package_request_for_an_unknown_sha_is_unknown_package(world):
 def test_a_frozen_tags_deb_is_desired_and_resolved_only_while_on_disk(world, on_disk):
     # A divergent tag's .deb was re-cut upstream, so its URL serves other bytes. Once the file
     # is gone, a fetch can only fail download_corrupt, and Prefetch used to retry it for ever.
-    w = world([release(T1, divergent=True)], [dev("d", last_served_tag=T1)], promoted=T1,
+    w = world([release(T1, divergent=True)],
+              [dev("d", last_served_tag=T1, last_served_at=1000.0)], promoted=T1,
               on_disk=[T1] if on_disk else [])
     job = FetchPackage(sha256=deb_sha(T1))
     desired = run(w.catalog.desired_assets())
     assert (job in desired) is on_disk
-    assert FetchOsImage(tag=T1) in desired  # the tag's OS image is unaffected
+    assert os_image(T1) in desired  # the tag's OS image is unaffected
     assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == (
         Candidates((job,), pinned=True) if on_disk else Unknown("unknown_package"))
 
@@ -362,13 +406,41 @@ def test_a_frozen_deb_that_a_live_tag_also_ships_stays_desired(world):
 # -- B3 desired_assets --------------------------------------------------------------------------
 
 
+DAY = 24 * 60 * 60.0
+
+
+@pytest.mark.parametrize("age_days,desired", [(29, True), (31, False)])
+def test_a_served_tag_is_desired_only_within_thirty_days_of_its_serve(age_days, desired, world):
+    # Issue #25 (owner ruling): any serial on the unauthenticated netboot route mints a device
+    # row; its last served tag must not stay desired for ever. T2 (the bootstrap) is the only
+    # other source, so T1 is desired through the served role or not at all.
+    w = world([release(T1), release(T2)], [dev("d", last_served_tag=T1, last_served_at=1000.0)])
+    w.clock.advance(age_days * DAY)
+    job = FetchPackage(sha256=deb_sha(T1))
+    assert (job in run(w.catalog.desired_assets())) is desired  # named_tags
+    assert (os_image(T1) in run(w.catalog.desired_assets())) is desired
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == (  # names_any: same rule
+        Candidates((job,), pinned=True) if desired else Unknown("unknown_package"))
+
+
+@pytest.mark.parametrize("role", ["attached_tag", "known_good_tag"])
+def test_pins_and_known_goods_are_desired_whatever_the_age_of_the_serve(role, world):
+    w = world([release(T1), release(T2)],
+              [dev("d", last_served_tag=T1, last_served_at=1000.0, **{role: T1})])
+    w.clock.advance(365 * DAY)
+    job = FetchPackage(sha256=deb_sha(T1))
+    assert job in run(w.catalog.desired_assets())
+    assert run(w.catalog.resolve(PackageRequest(deb_sha(T1)))) == Candidates(
+        (job,), pinned=True)
+
+
 def test_desired_assets_is_pins_known_goods_target_and_promoted_deb(world):
     tags = ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0", "v0.6.0"]
     pin, kg, frontier, promoted, retired_pin, unrelated = tags
     served, last_good = "v0.0.8", "v0.0.9"
     w = world([*(release(t) for t in tags), release(served), release(last_good)],
               [dev("a", attached_tag=pin, known_good_tag=kg),
-               dev("b", known_good_tag=frontier, last_served_tag=served),
+               dev("b", known_good_tag=frontier, last_served_tag=served, last_served_at=1000.0),
                dev("r", attached_tag=retired_pin, retired=True)],
               promoted=promoted, last_good=last_good)
     desired = run(w.catalog.desired_assets())
@@ -382,7 +454,7 @@ def test_desired_assets_is_pins_known_goods_target_and_promoted_deb(world):
 def test_desired_assets_bootstraps_when_the_frontier_is_empty(world):
     w = world([release(T1), release(T2, pre=True)])
     assert run(w.catalog.desired_assets()) == frozenset(
-        [FetchOsImage(tag=T1), FetchPackage(sha256=deb_sha(T1))])
+        [os_image(T1), FetchPackage(sha256=deb_sha(T1))])
 
 
 def test_desired_assets_skips_missing_locators(world):
@@ -391,7 +463,7 @@ def test_desired_assets_skips_missing_locators(world):
               [dev("a", attached_tag=T1, known_good_tag=T2)],
               promoted=T1)
     assert run(w.catalog.desired_assets()) == frozenset(
-        [FetchOsImage(tag=T1), FetchPackage(sha256=deb_sha(T2))])
+        [os_image(T1), FetchPackage(sha256=deb_sha(T2))])
 
 
 def test_desired_assets_of_an_empty_catalog_is_empty(world):
@@ -402,7 +474,8 @@ def test_desired_assets_of_an_empty_catalog_is_empty(world):
 
 
 def test_device_package_rides_the_served_tag(world):
-    w = world([release(T1), release(T2)], [dev(DEVICE_ID, last_served_tag=T1)], promoted=T2)
+    w = world([release(T1), release(T2)],
+              [dev(DEVICE_ID, last_served_tag=T1, last_served_at=1000.0)], promoted=T2)
     assert run(w.catalog.device_package(SERIAL)) == DevicePackage(T1, T1, deb_sha(T1), 10)
 
 
@@ -418,7 +491,8 @@ def test_device_package_without_a_carried_tag_is_unresolved(serial, devices, wor
 
 
 def test_device_package_for_a_release_without_a_deb_is_undeployable(world):
-    w = world([release(T1, deb=False)], [dev(DEVICE_ID, last_served_tag=T1)])
+    w = world([release(T1, deb=False)],
+              [dev(DEVICE_ID, last_served_tag=T1, last_served_at=1000.0)])
     assert run(w.catalog.device_package(SERIAL)) == ManifestRefusal("app_manifest_undeployable")
 
 
@@ -487,7 +561,7 @@ def test_pin_sets_the_pin_and_publishes_both_fetches_and_prefetch_in_its_transac
     (tx,) = w.transactions.begun
     assert tx.state == "committed"
     assert w.publisher.calls == [
-        PublishedCall(FetchOsImage(tag=T1), True, tx),
+        PublishedCall(os_image(T1), True, tx),
         PublishedCall(FetchPackage(sha256=deb_sha(T1)), True, tx),
         PublishedCall(Prefetch(), False, tx),
     ]
@@ -496,7 +570,15 @@ def test_pin_sets_the_pin_and_publishes_both_fetches_and_prefetch_in_its_transac
 def test_pin_to_a_release_without_a_deb_fetches_only_the_os_image(world):
     w = world([release(T1, deb=False)], [dev(DEVICE_ID)])
     run(w.catalog.pin(DEVICE_ID, T1))
-    assert [call.job for call in w.publisher.calls] == [FetchOsImage(tag=T1), Prefetch()]
+    assert [call.job for call in w.publisher.calls] == [os_image(T1), Prefetch()]
+
+
+def test_pin_to_a_release_without_an_os_image_skips_the_os_image_fetch(world):
+    w = world([release(T1, image=False)], [dev(DEVICE_ID)])
+    run(w.catalog.pin(DEVICE_ID, T1))
+    assert w.reads.device(DEVICE_ID).attached_tag == T1
+    assert [call.job for call in w.publisher.calls] == [
+        FetchPackage(sha256=deb_sha(T1)), Prefetch()]
 
 
 def test_unpin(world):
@@ -520,9 +602,11 @@ def test_promote_refusals_write_nothing(world):
 
 
 def test_promote_sets_the_pointer_and_fetches_its_deb(world):
-    w = world([release(T1), release(T2)], promoted=T2)
+    # The operator route takes the promotion over from auto-promote (issue #23): the sync never
+    # moves it again.
+    w = world([release(T1), release(T2)], promoted=T2, promoted_by="auto")
     run(w.catalog.promote(T1))
-    assert w.reads.promoted() == T1
+    assert w.reads.promotion() == Promotion(T1, "operator")
     (tx,) = w.transactions.begun
     assert w.publisher.calls == [
         PublishedCall(FetchPackage(sha256=deb_sha(T1)), True, tx),
@@ -530,27 +614,35 @@ def test_promote_sets_the_pointer_and_fetches_its_deb(world):
     ]
 
 
-def test_refresh_publishes_a_sync_now_retrying_a_terminal_outcome(world):
-    w = world()
+def test_refresh_clears_the_etag_and_publishes_a_sync_retrying_a_terminal_outcome(world):
+    # One transaction clears the ETag and publishes the sync, so the sync lists in full
+    # (design §6.4: the operator's repair of a stale equal-version observation).
+    w = world(etag='W/"e1"')
     run(w.catalog.refresh())
+    (tx,) = w.transactions.begun
+    assert tx.state == "committed"
+    assert w.reads.stored_etag() == StoredEtag(None, w.clock.utc())
     assert w.publisher.calls == [
-        PublishedCall(SyncReleases(), True, None),
-        PublishedCall(Prefetch(), False, None),
+        PublishedCall(SyncReleases(), True, tx),
+        PublishedCall(Prefetch(), False, None),  # publish_now owns its own transaction
     ]
-    assert w.transactions.begun == []  # publish_now owns its own transaction
 
 
 # -- views --------------------------------------------------------------------------------------
 
 
-def test_releases_view_is_semver_desc_with_flags(world):
+@pytest.mark.parametrize("by", ["operator", "auto"])
+def test_releases_view_is_semver_desc_with_flags_and_who_promoted(world, by):
     w = world([release("v0.9.0"), release("v0.10.0", deb=False),
-               release("v0.10.0-rc.1", pre=True, image=False)], promoted="v0.9.0")
-    assert run(w.catalog.releases_view()) == (
-        ReleaseView("v0.10.0", False, False, False, True),
-        ReleaseView("v0.10.0-rc.1", True, True, False, False),
-        ReleaseView("v0.9.0", False, True, True, True),
+               release("v0.10.0-rc.1", pre=True, image=False)], promoted="v0.9.0",
+              promoted_by=by)
+    views = run(w.catalog.releases_view())
+    assert views == (
+        ReleaseView("v0.10.0", False, False, None, True),
+        ReleaseView("v0.10.0-rc.1", True, True, None, False),
+        ReleaseView("v0.9.0", False, True, by, True),
     )
+    assert [view.promoted for view in views] == [False, False, True]
 
 
 def test_netboot_view_is_the_frontier_and_active_devices(world):

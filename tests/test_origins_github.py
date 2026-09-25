@@ -18,7 +18,7 @@ import pytest
 
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
-from central.kernel.ports import ReleaseOrigin
+from central.kernel.ports import ReleaseOrigin, UpstreamVersion
 from central.origins.github import MAX_DOWNLOAD_BYTES, GitHubReleaseOrigin
 
 REPO = "mcurcio/photo-wall"
@@ -47,8 +47,9 @@ def release(tag, *, prerelease=False, draft=False, assets=None):
     return {"tag_name": tag, "prerelease": prerelease, "draft": draft, "assets": assets or []}
 
 
-def asset(name, url):
-    return {"name": name, "browser_download_url": url}
+def asset(name, url, **version):
+    """A release asset; `version` may add GitHub's `id` and `updated_at`."""
+    return {"name": name, "browser_download_url": url, **version}
 
 
 def _stream(chunks):
@@ -279,6 +280,79 @@ def test_manifest_asset_listed_but_absent_upstream_has_no_package():
     server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
     record = only(discover(server).releases)
     assert record.package is None and record.package_problem == "no_manifest"
+
+
+# -- the upstream version: the manifest asset's (updated_at, id), only when its body was read --
+
+
+MANIFEST_URL = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
+UPLOADED = {"id": 7, "updated_at": "2026-09-01T00:00:00Z"}
+
+
+def _versioned(server, *, manifest=None, attach_deb=False, **version):
+    """v1.2.3 whose manifest asset carries `version`; `manifest` is its body (None: 404), and
+    `attach_deb` attaches the `.deb` a valid manifest names."""
+    if manifest is not None:
+        server.blob(MANIFEST_URL, chunks=[manifest])
+    assets = [asset("manifest.json", MANIFEST_URL, **version)]
+    if attach_deb:
+        assets.append(asset(DEB_NAME, DOWNLOAD))
+    server.releases.append(release("v1.2.3", assets=assets))
+    return only(discover(server).releases)
+
+
+VALID = manifest_bytes(DEB_NAME, SHA, len(BODY))
+
+
+def test_a_valid_complete_manifest_carries_its_assets_updated_at_and_id():
+    record = _versioned(Server(), manifest=VALID, attach_deb=True, **UPLOADED)
+    assert record.package_problem is None
+    assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
+
+
+def test_an_offset_updated_at_is_read_as_the_same_instant():
+    record = _versioned(Server(), manifest=VALID, attach_deb=True, id=7,
+                        updated_at="2026-09-01T02:00:00+02:00")
+    assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
+
+
+@pytest.mark.parametrize("manifest,problem", [
+    (b"{not json", "manifest_invalid"),
+    (b"[1]", "manifest_invalid"),  # not an object
+    (manifest_bytes(DEB_NAME, SHA, len(BODY), schema=2), "schema_mismatch"),
+    (manifest_bytes("not-a-deb.txt", SHA, 1), "manifest_invalid"),  # a malformed player_deb
+    (VALID, "asset_missing"),  # valid, but its .deb is not attached: an incomplete upload
+])
+def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest, problem):
+    # Owner decisions (errata 2026-09-24, bead 3): invalid or incomplete is treated as unread.
+    record = _versioned(Server(), manifest=manifest, **UPLOADED)
+    assert record.package_problem == problem and record.upstream_version is None
+
+
+@pytest.mark.parametrize("version", [
+    {},  # neither
+    {"updated_at": "2026-09-01T00:00:00Z"},  # no id
+    {"id": 7},  # no updated_at
+    {"id": 0, "updated_at": "2026-09-01T00:00:00Z"},
+    {"id": "7", "updated_at": "2026-09-01T00:00:00Z"},
+    {"id": True, "updated_at": "2026-09-01T00:00:00Z"},
+    {"id": 7, "updated_at": "yesterday"},
+    {"id": 7, "updated_at": "2026-09-01T00:00:00"},  # naive: no offset
+    {"id": 7, "updated_at": 1788220800},
+])
+def test_an_invalid_id_or_updated_at_is_no_version(version):
+    record = _versioned(Server(), manifest=VALID, attach_deb=True, **version)
+    assert record.package_problem is None and record.upstream_version is None
+
+
+def test_a_manifest_not_read_is_no_version():
+    # Listed, but 404 upstream (mid re-draft): no body, so no version, whatever the asset says.
+    assert _versioned(Server(), **UPLOADED).upstream_version is None
+    # Not attached at all.
+    server = Server()
+    server.blob(DOWNLOAD, chunks=[BODY])
+    server.releases.append(release("v1.2.3", assets=[asset(DEB_NAME, DOWNLOAD, **UPLOADED)]))
+    assert only(discover(server).releases).upstream_version is None
 
 
 def test_etag_304_short_circuits_the_whole_listing():
@@ -635,3 +709,36 @@ def test_from_env_repo_and_token_reach_the_wire():
     request = server.requests[0]
     assert request.url.path == "/repos/acme/wall/releases"
     assert request.headers.get("Authorization") == "Bearer tok"
+
+
+def _listed_urls(env):
+    """The listing URLs (no query) a `from_env` origin requests; every page answers `[]`."""
+    urls = []
+
+    def handle(request):
+        urls.append(str(request.url.copy_with(query=None)))
+        return httpx.Response(200, json=[])
+
+    built = GitHubReleaseOrigin.from_env(env)
+    built._transport = httpx.MockTransport(handle)
+    asyncio.run(built.list_releases(etag=None))
+    return urls
+
+
+@pytest.mark.parametrize("env", [{}, {"PHOTO_WALL_RELEASE_API_BASE": ""}])
+def test_from_env_api_base_defaults_to_github(env):
+    assert _listed_urls(env) == ["https://api.github.com/repos/mcurcio/photo-wall/releases"]
+
+
+@pytest.mark.parametrize("base", ["http://127.0.0.1:8123", "https://ghe.example.test/api/v3/"])
+def test_from_env_api_base_reaches_the_wire(base):
+    assert _listed_urls({"PHOTO_WALL_RELEASE_API_BASE": base}) == [
+        base.rstrip("/") + "/repos/mcurcio/photo-wall/releases"]
+
+
+@pytest.mark.parametrize("base", ["api.github.com", "ftp://api.github.com", "file:///etc/passwd",
+                                  "http://", "https://h.test/api?x=1", "https://h.test/#frag",
+                                  "https://h.test:notaport", " https://h.test"])
+def test_from_env_invalid_api_base_is_refused_at_construction(base):
+    with pytest.raises(ValueError, match="invalid_api_base"):
+        GitHubReleaseOrigin.from_env({"PHOTO_WALL_RELEASE_API_BASE": base})

@@ -1,6 +1,7 @@
 # Photo Wall Central: how content is served (system architecture)
 
 **Status:** Approved by the owner: the shape, the module contracts (§10) and the five decisions (§9).
+Amended by [idempotent jobs](central-idempotent-jobs.md) (#26, implemented).
 **Scope:** how Central serves photos, videos, the OS image and the Player `.deb`. Playback
 coordination, enrollment and the console UI are out of scope; they are neighbours only.
 **What it gives up:** a waiting request keeps a connection open for up to 30s. Two or more
@@ -25,8 +26,8 @@ This document uses two separate axes and never mixes them:
 | Many clients ask for the same missing item at once | **Request coalescing / single-flight** with a wait timeout | nginx `proxy_cache_lock` + `_timeout`, Varnish waiting list, Go `singleflight` | anyio events and timeouts |
 | Limit how many waiters one pod holds | **Bulkhead + load shedding** | resilience4j bulkheads, HTTP 503 + `Retry-After` | anyio `CapacityLimiter` |
 | Background work across a fleet | **Competing consumers + messages dispatched by type** (command messages to command handlers) | *Enterprise Integration Patterns* (Competing Consumers, Command Message, Message Dispatcher); Celery, Sidekiq, Oban: one worker binary with a registry of job types | **procrastinate 3.9.0**: a job row carries `task_name`, and the worker looks that name up in its task registry and calls the handler |
-| One producer per item; no duplicate pending work | **Unique jobs + transactional enqueue** | Oban unique jobs, Sidekiq-unique | `queueing_lock` (one pending), `lock` (one running), `defer(connection=…)` (enqueue in the caller's transaction) |
-| A worker dies holding a job | **Heartbeat + re-delivery** | SQS visibility timeout, Oban Lifeline | worker heartbeats, `get_stalled_jobs()`; the job is re-published, then the stalled row is closed as failed (not `retry_job()`, see §10.3) |
+| One producer per item; no duplicate pending work | **Unique jobs + transactional enqueue** | Oban unique jobs, Sidekiq-unique | `queueing_lock` (one pending), `lock` (one running, asset fetches only), `defer(connection=…)` (enqueue in the caller's transaction) |
+| A worker dies holding a job | **Heartbeat + re-delivery** | SQS visibility timeout, Oban Lifeline | worker heartbeats, `get_stalled_jobs()`; the job is re-published, then the stalled row is closed as failed. Rescue never retries in place (not `retry_job()`, see §10.3), and only asset fetches take the one-runner lock, so a stalled rescue never blocks the next |
 | Scheduled work must run once for the fleet | **Deduplicated periodic scheduling** (no leader) | Oban cron | `@periodic` (unique key in `procrastinate_periodic_defers`) |
 | A crash must not leave a half-written file visible | **Temp file + atomic rename** | Maildir | `mkstemp` + `os.replace` |
 | A waiter needs to hear "it's ready" | **Notify with a polling fallback** | procrastinate's own `listen_notify` | Postgres `LISTEN/NOTIFY` |
@@ -76,8 +77,9 @@ flowchart LR
    return 503. Unknown content returns 404 at once.
 3. **All background work is a job on one queue, handled by one kind of worker.** The
    lock and dedupe keys are derived from the job's fields (its subject, such as the asset key). That gives at most
-   one pending and one running copy of any piece of work across the fleet, without a
-   leader or a lease table.
+   one pending copy of any piece of work, and one running copy of any asset fetch, across the
+   fleet, without a leader or a lease table. A job may still run twice, late or out of order;
+   each data type converges by its own rule ([idempotent jobs](central-idempotent-jobs.md)).
 
 ---
 
@@ -99,8 +101,8 @@ the worker calls it for jobs.
 
 | Domain | Owns | HTTP actions (Central) | Job handlers (worker) | Must NEVER |
 | --- | --- | --- | --- | --- |
-| **Catalog & release policy** | Releases, media sources and recipes, devices, pins, promotion | Resolve a request to **candidate asset keys** (pinned: exactly one; unpinned: newest first, may substitute; otherwise *Unknown* → 404). Per-device `.deb` manifest. Operator: pin/unpin, promote, refresh, media source settings. | `SyncReleases`, `SyncMediaSources`, `SyncMediaSource` | Look at the disk or download bytes. |
-| **Assets & cache** | Asset records, disk layout, the read path, production, the byte budget | Serve bytes for a key through the **read-through** path: open, else publish the asset's fetch job and await its handle ≤30s, serve or 503. Record `last_served_at` (throttled). | `FetchOsImage`, `FetchPackage`, `PrepareMedia`, `Prefetch`, `MaintainCache` | Decide which version a device gets. Keep any "is cached" state. |
+| **Catalog & release policy** | Releases, media sources and recipes, devices, pins, promotion | Resolve a request to **candidate asset keys** (pinned: exactly one; unpinned: newest first, may substitute; an unseen serial is registered and an invalid one is still served; *Unknown* → 404 only when nothing matches: an empty catalog, or a `.deb` neither desired nor on disk). Per-device `.deb` manifest. Operator: pin/unpin, promote, refresh, media source settings. A promotion records who set it (`auto` or `operator`); `SyncReleases` never moves an `operator` one. `SyncReleases` applies a release observation only if its upstream version is not older. | `SyncReleases`, `SyncMediaSources`, `SyncMediaSource` | Look at the disk or download bytes. |
+| **Assets & cache** | Asset records, disk layout, the read path, production, the byte budget | Serve bytes for a key through the **read-through** path: open (serving a substitute also publishes the wanted asset's fetch job, in the open's transaction), else publish the asset's fetch job and await its handle ≤30s, then open it whatever the outcome says: serve, or 503. Record `last_served_at` (throttled). | `FetchOsImage`, `FetchPackage`, `PrepareMedia`, `Prefetch`, `MaintainCache` | Decide which version a device gets. Keep any "is cached" state. |
 | **Health & signals** | Probes, fleet health, metrics | `/livez`; `/readyz` = the process is up and can reach the DB. Fleet health view for the console. | none: fleet health is **computed when read** from job outcomes and worker heartbeats | Put cache contents, origins or convergence into a probe. |
 | **Queue operations** (infrastructure in `central.infra`, not a domain) | Queue hygiene | none | `RescueStalledJobs`, `PurgeFinishedJobs` | Touch domain records. |
 
@@ -113,19 +115,21 @@ or *terminal*. Playback coordination is a neighbour: when a plan changes, it pub
 
 ## 4. Job catalog
 
-Every job is a procrastinate job of a declared job type (§10.1). Its `lock` (one running copy,
-fleet-wide) is derived from the type's *subject* fields. Its `queueing_lock` (one pending copy)
-is derived from all its fields. Periodic jobs carry no fields, are deferred by the workers'
-built-in scheduler, and are deduplicated per tick. A retry or a rescue re-publishes the job
+Every job is a procrastinate job of a declared job type (§10.1). Its `queueing_lock` (one pending
+copy) is derived from all its fields. Only an asset fetch also takes a `lock` (one running copy,
+fleet-wide), derived from its *subject*; that saves a second download. Any job may still run twice,
+late or out of order, and each data type converges by its own write rule
+([idempotent jobs](central-idempotent-jobs.md) §4). Periodic jobs carry no fields, are deferred
+by the workers' built-in scheduler, and are deduplicated per tick. A retry or a rescue re-publishes the job
 instead of retrying the row in place (§10.1). Each job type declares its result type, and every
 finished run leaves a **job outcome** that waiters read (§10.2).
 
-| Job type | Published by | Subject (lock) | Handler (domain) | Writes | Periodic |
+| Job type | Published by | Subject | Handler (domain) | Writes | Periodic |
 | --- | --- | --- | --- | --- | --- |
-| `FetchOsImage(tag)` | HTTP miss; `Prefetch` | `tag` | Assets & cache | Downloads the release's base image, extracts it off the event loop, verifies it, renames it into place. Result `AssetReady`. | no |
-| `FetchPackage(sha256)` | HTTP miss; `Prefetch` | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
+| `FetchOsImage(tarball_sha256)` | HTTP miss; HTTP substitute serve; `Prefetch`; `SyncReleases` (changed reference); operator pin | `tarball_sha256` | Assets & cache | Downloads the base tarball from any tag that references it (newest first), extracts the squashfs off the event loop, verifies it, renames it into place. Tags that share a tarball share one file. Result `AssetReady`. | no |
+| `FetchPackage(sha256)` | HTTP miss; HTTP substitute serve; `Prefetch`; `SyncReleases` (changed reference); operator pin and promote | `sha256` | Assets & cache | Downloads the Player `.deb` from any tag that references it (newest first), verifies it, renames it into place. Tags that share a build share one file. Result `AssetReady`. | no |
 | `PrepareMedia(original, recipe)` | HTTP miss; `Prefetch` | `original`, `recipe` (the recipe id includes the renderer build) | Assets & cache | Fetches the original from Immich, renders it to the recipe, renames it into place. Result `MediaReady` (digest, size, type, dimensions, duration), kept on the Asset record. | no |
-| `SyncReleases` | Tick; operator refresh (HTTP) | (none) | Catalog | Release + Asset rows (add, withdraw), then publishes `Prefetch` | yes |
+| `SyncReleases` | Tick; operator refresh (HTTP) | (none) | Catalog | Release rows, each applied only if its upstream version is not older, and their Asset references (add; retire on a re-cut). Withdrawal of tags gone upstream is not in the MVP. Then publishes `Prefetch` | yes |
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
 | `SyncMediaSource(source)` | `SyncMediaSources`; operator source change | `source` | Catalog | Media catalog + `media-variant` Asset rows, then publishes `Prefetch` | no |
 | `Prefetch` | Tick; after sync, pin, promote, plan change | (none) | Assets & cache | Nothing except the fetch job of each desired asset missing from disk | yes + on change |
@@ -139,11 +143,14 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 
 | Record | Key | Holds | Written by |
 | --- | --- | --- | --- |
-| **Catalog entries** (per domain) | Release `tag`; media original (`asset_id`); device `device_id` | What exists upstream and who should get what (pin, promote, last served tag) | `Sync*` handlers; HTTP operator actions; HTTP netboot (device row) |
-| **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tag)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once; `last_served_at`. The row goes when its last reference is retired. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
-| **Job outcome** (one table, every job type) | `(job type, subject)` | The latest attempt's *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". | The job runtime only, with NOTIFY in the same transaction |
+| **Catalog entries** (per domain) | Release `tag`; media original (`asset_id`); device `device_id` | What exists upstream, with the upstream version it was observed at, and who should get what (pin; promote and who promoted it, where the sync moves only its own; last served tag) | `Sync*` handlers; HTTP operator actions; HTTP netboot (device row) |
+| **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tarball sha256)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once and never cleared; `last_served_at`. A row and its facts outlive their last reference (nothing removes them before `MaintainCache`), but a key with no reference is not an asset: nothing serves or fetches it. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
+| **Job outcome** (one table, every job type) | `(job type, subject)` | The latest written *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". Last write wins, so a late run's note may replace a newer one: readers decide from the data (facts plus file) first. | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
-| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices; media that active plans reference | nobody (computed) |
+| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); media that active plans reference | nobody (computed) |
+
+Each record's identity and write rule, and why any order of job runs converges on it, are in
+[idempotent jobs](central-idempotent-jobs.md) §4.
 
 ---
 
@@ -159,7 +166,10 @@ new version on their next boot.
 
 **(b) A Pi boots and the file is present.** Central resolves the serial to candidate keys,
 opens the first one present, checks its size against the Asset record, and streams it.
-Central then records the served tag and a throttled `last_served_at`. No job is published.
+Central then records the served tag and a throttled `last_served_at`. No job is published when
+the first candidate is the one opened. When a substitute is opened, Central publishes the first
+candidate's fetch job (`retry_terminal`) in the same transaction as the open. A failed publish is
+logged and never fails the serve.
 
 **(c) A Pi boots and the file is missing: produce and wait**
 
@@ -174,24 +184,26 @@ sequenceDiagram
   C->>C: resolve → key (Unknown → 404, stop)
   C->>D: open(key) → missing
   C->>C: take a waiter slot (full → 503 Retry-After)
-  C->>Q: publish FetchOsImage(tag) → handle (merges into a pending or running copy)
+  C->>Q: publish FetchOsImage(tarball_sha256) → handle (merges into a pending copy; with one running, a new pending row runs after it)
   C->>C: handle.wait(30s): this pod's one LISTEN, plus a 1s re-check
-  Q->>W: deliver FetchOsImage(tag) (lock = tag, so it is the only one running)
+  Q->>W: deliver FetchOsImage(tarball_sha256) (lock = its key, so it is the only one running)
   W->>D: temp file → verify → rename
   W->>C: runtime records outcome ok(AssetReady) + NOTIFY
-  C->>D: open(key) → present
+  C->>D: open(key), whatever the outcome → present
   C-->>Pi: 200 stream (or 503 after 30s)
 ```
 If the Pi gives up after about 10s, the job still finishes and fills the cache. A pinned
 Pi never gets a different version. An unpinned Pi waits only if *no* candidate is present.
 
-**(d) A worker dies mid-download.** Its heartbeat stops, and its `FetchOsImage(tag)` stays
-"doing", holding the key's lock. A worker later receives the periodic `RescueStalledJobs`,
-re-publishes `FetchOsImage(tag)` (merging into any pending copy, which cannot start while the
-stalled row holds the lock), then closes that row as failed, which releases the lock. Another worker receives `FetchOsImage(tag)` and starts again with a new temp
-file. The abandoned temp file is removed by a later `MaintainCache` once the grace period
-has passed. Waiters return 503 after 30s, and clients retry. We make no promise about
-recovery time.
+**(d) A worker dies mid-download.** Its heartbeat stops, and its `FetchOsImage(tarball_sha256)`
+stays "doing", holding the key's lock. A worker later receives the periodic `RescueStalledJobs`,
+re-publishes the job (merging into any pending copy, which cannot start while the stalled row
+holds the lock), then closes that row as failed, which releases the lock. Another worker receives
+the job and starts again with a new temp file. A worker that was only paused may resume and finish
+late: it writes the same bytes under the same name, and its outcome may replace the copy's.
+Readers still serve the data that is present ([idempotent jobs](central-idempotent-jobs.md) §5).
+The abandoned temp file is removed by a later `MaintainCache` once the grace period has passed.
+Waiters return 503 after 30s, and clients retry. We make no promise about recovery time.
 
 **(e) The cache is wiped.** Every read follows flow (c). `/readyz` stays green (it checks only
 the process and the DB), because being healthy is not the same as having things cached. The next `Prefetch` publishes fetch jobs
@@ -274,7 +286,9 @@ the bullet:** `.deb`, media, `MaintainCache`, the fleet signal.
    fleet-health warning instead of fighting `Prefetch`.
 3. **Terminal fetch failure: decided.** The job is not retried. The *next request* for the asset
    starts a new attempt, with no rate limit. `Prefetch` and ticks do not retry it (§10.2, cost
-   in §7).
+   in §7). `PurgeFinishedJobs` drops an outcome not written for 30 days, and ticks then retry it.
+   **3a (amendment, #26):** a terminal run may run once more if its worker dies after recording
+   the outcome but before its row closes: rescue re-publishes every stalled row.
 4. **Empty catalog at netboot: decided.** 404.
 5. **`/readyz`: decided.** It includes the DB and still never checks cache contents, origins or
    convergence (cost in §7).
@@ -295,7 +309,7 @@ procrastinate `app.py:209`), three enqueues lack a savepoint, and a partial lock
 
 | Job type | Result | Subject | Queue |
 | --- | --- | --- | --- |
-| `FetchOsImage(tag: ReleaseTag)` | `AssetReady` | `tag` | FETCH |
+| `FetchOsImage(tarball_sha256: Sha256)` | `AssetReady` | `tarball_sha256` | FETCH |
 | `FetchPackage(sha256: Sha256)` | `AssetReady` | `sha256` | FETCH |
 | `PrepareMedia(original: MediaOriginalId, recipe: RecipeId)` | `MediaReady` | both | TRANSCODE |
 | `SyncReleases`, `SyncMediaSources` / `SyncMediaSource(source)` | `None` | none / `source` | FETCH |
@@ -304,8 +318,9 @@ procrastinate `app.py:209`), three enqueues lack a savepoint, and a partial lock
 **Identity rules.** A `.deb` is keyed by content hash. Each tag that ships it adds a
 *reference* with its own locator, because GitHub URLs are per tag
 (`central/github_releases.py:254-292`). One file has one producer, and withdrawing a tag drops
-only its reference; keying by tag would let two tags race for one file. Media is keyed by original
-(`asset_id`, `media/models.py:147`) + `RecipeId`, which is today's `recipe_id`. That hashes the
+only its reference; keying by tag would let two tags race for one file. An OS image is keyed by
+its base tarball's sha256, of which the squashfs is a pure function, so a re-cut is a new key.
+Media is keyed by original (`asset_id`, `media/models.py:147`) + `RecipeId`, which is today's `recipe_id`. That hashes the
 renderer `BuildIdentity` (`media/prepare.py:387-391`), so a worker upgrade makes *new* assets
 rather than re-rendering old ones differently. Fetch + render is one job (*cost:* per-recipe
 re-fetch).
@@ -324,14 +339,16 @@ class Job(BaseModel, Generic[R]):            # frozen, extra="forbid"; R = the h
     def __pydantic_init_subclass__(cls, *, name: str | None = None, delivery: Delivery | None = None,
                                    asset: AssetKind | None = None, **kw: Any) -> None: ...
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
-                   delivery=Delivery(queue=QueueName.FETCH, retry=(timedelta(seconds=5), timedelta(minutes=1)))):
-    tag: ReleaseTag
+                   delivery=Delivery(queue=QueueName.FETCH, retry=(timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5)))):
+    tarball_sha256: Sha256
 AssetJob = FetchOsImage | FetchPackage | PrepareMedia   # also the typed reference to an asset
 ```
 
 **Keys are derived by kernel functions, never written or overridden.** The *subject* is every
 field, in declaration order; no declaration can narrow it. `job_keys(job)` gives `lock` and
-`queueing_lock` = task name + those values, escaped so each key maps back to one job.
+`queueing_lock` = task name + those values, escaped so each key maps back to one job. `lock` is
+also the `job_outcomes` key and the NOTIFY payload for every job, but only an asset fetch runs
+under it.
 `asset_key(job)` is `(asset, the job's one field)`, so an asset's lock and its disk key name the
 same thing.
 
@@ -344,7 +361,9 @@ checker in CI, this is the strongest check available.
 
 **Mapping** (`central/infra/job_queue.py`, the only importer of procrastinate): task
 `"photo_wall." + name`; kwargs `model_dump(mode="json")` plus the reserved `timestamp`/`_attempt`;
-both locks from `job_keys`; `app.periodic(cron=<every, seconds-last>)`; `retry=None`. A new
+`queueing_lock` from `job_keys` for every job; the running `lock` from `_lock(job)`, which is
+`job_keys(job).lock` for an asset fetch and None otherwise; `app.periodic(cron=<every,
+seconds-last>)`; `retry=None`. A new
 field needs a default or a new task name.
 
 **Retry by re-publishing.** procrastinate keeps only one `todo` row per `queueing_lock`
@@ -376,13 +395,11 @@ class Publisher(Protocol):
 - **Three facts, three owners.** The **disk** says whether a file is present. The **Asset
   record** says what it is: the runtime writes the handler's `R` there (`record_produced`,
   write-once). A re-production must match that digest before the rename, else
-  `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and no
-  later failure erases facts. The one exception is an OS image rebuilt under its tag (a release
-  re-cut; its old bytes are gone upstream): `SyncReleases` forgets its facts (`forget_produced`),
-  and a production built from the replaced locator is discarded as `reference_changed`.
-  **`job_outcomes`** holds only the latest attempt's *status* per
-  `(job type, subject)`. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock
-  key>` in one transaction, and `Ready.result` is read from the Asset record. Status is stored
+  `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and nothing
+  erases facts: an OS image is keyed by its tarball's sha256, so a release re-cut is a new key.
+  **`job_outcomes`** holds only the latest written *status* per `(job type, subject)`, last write
+  wins. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock key>` in one
+  transaction, and `Ready.result` is read from the Asset record. Status is stored
   because a late waiter misses a NOTIFY. `PurgeFinishedJobs` drops rows unwritten for 30 days
   (*cost:* an old terminal outcome then retries).
 - **`since`.** `publish` reads the global sequence number, *then* defers: two statements,
@@ -392,16 +409,19 @@ class Publisher(Protocol):
 - **`publish` inserts nothing** inside a retry window (its handle is already
   `Failed(transient, retry_after)`) or after a terminal outcome (already `Failed(terminal)`),
   unless `retry_terminal` is set. The request path (`AssetReader`) always sets it, as do a sync
-  that changed facts and an operator (decision 3). `Prefetch` and ticks never set it.
+  whose key gained or changed a reference and an operator (decision 3). `Prefetch` and ticks
+  never set it.
 - **Signal.** Each process has one `OutcomeFeed` (infra) with one LISTEN connection. Waiters
   for the same key share one entry, and a 1s re-check reads the rows for keys that have waiters.
-  `publish_now` and `OutcomeFeed` use a small **async** psycopg pool beside the 10-connection
-  sync pool (`central/db.py:15`), because `SyncPsycopgConnector` refuses async calls. A timeout
-  returns `Pending`, and a cancelled waiter only unregisters. **Neither cancels the job.**
-- **Transactions.** `publish(within=tx)` runs in a SAVEPOINT (`media_queue.py:51`), so a merge
-  never aborts the caller's write. A `Transaction` is a sync block on a worker thread and `wait`
-  is async, so a handle is awaited only after the block has committed or rolled back. After a
-  rollback, `wait` returns `Failed(terminal, "not_published")`.
+  `publish_now` runs `publish` in its own transaction on a worker thread, through the
+  10-connection sync pool (`central/db.py:19`); there is no async pool. `OutcomeFeed` holds its
+  one LISTEN connection as a psycopg `AsyncConnection` and reads rows through the sync pool. A
+  timeout returns `Pending`, and a cancelled waiter only unregisters. **Neither cancels the job.**
+- **Transactions.** `publish(within=tx)` runs in a SAVEPOINT, outcome read included
+  (`media_queue.py:51`), so neither a merge nor a failed statement aborts the caller's write. A
+  `Transaction` is a sync block on a worker thread and `wait` is async, so a handle is awaited
+  only after the block has committed or rolled back. After a rollback, `wait` returns
+  `Failed(terminal, "not_published")`.
 
 **"A player asks for photo X".** Only `AssetReader.read` decides whether to publish. Starlette 0.46.2
 never cancels an endpoint on disconnect, so `until_disconnect` watches `http.disconnect`
@@ -416,11 +436,13 @@ async def media(request: Request, original: MediaOriginalId, recipe: RecipeId) -
     return stream(served) if isinstance(served, Opened) else unavailable(served)  # 503 + Retry-After
 
 async def read(self, c: Candidates) -> Opened | Unavailable:   # AssetReader
-    if opened := self.store.open_first(c.jobs): return opened  # on disk: publish nothing
+    if opened := self.open_first(c.jobs): return opened        # substitute: publish c.jobs[0] in its tx
     async with self.slots.claim():                             # bulkhead: full → Unavailable("busy")
         handle = await self.publisher.publish_now(c.jobs[0], retry_terminal=True)  # decision 3
-        match await handle.wait(timeout=timedelta(seconds=30)):
-            case Ready(): return self.store.open(c.jobs[0]) or Unavailable("absent_after_ready", 1)
+        outcome = await handle.wait(timeout=timedelta(seconds=30))
+        if opened := self.open_first((c.jobs[0],)): return opened  # the data decides, any outcome
+        match outcome:
+            case Ready(): return Unavailable("absent_after_ready", 1)
             case Failed(reason=r, retry_after=s): return Unavailable(r, s)
             case Pending(): return Unavailable("timeout", 5)
 ```
@@ -450,6 +472,8 @@ class JobRuntime:  # central.infra, concrete
   (`worker.py:611`) insert each tick once (`schema.sql:87`).
 - **Rescue re-publishes first, then closes** the stalled row. The pending index covers only `todo`,
   and the fetch skips a `todo` row whose lock a `doing` row holds (`procrastinate_fetch_job_v2`).
+  Only an asset fetch has that lock; any other copy may start at once, and the rules make both
+  runs converge.
 
 ### 10.4 Domain seams
 
@@ -460,7 +484,10 @@ Kernel types (`central/kernel/assets.py`): `AssetKind`, `AssetKey`, `AssetReady(
 for an OS image the origin digest is the tarball's, not the squashfs's, so `expected_digest` is `None`),
 `Asset(key, references, produced: AssetReady | None, last_served_at)`,
 `Resolution = Candidates(jobs: non-empty tuple[AssetJob, ...], pinned) | Unknown(reason)`,
-`WorkerBeat`, `FailingOutcome`.
+`WorkerBeat`, `FailingOutcome` (fleet health; not built yet). A beat counts only while fresh
+(within the 30s stalled-worker timeout, `central/infra/runtime.py:53`): a dead worker's row
+lingers until a starting worker prunes it, and a paused worker whose row was pruned beats into
+nothing.
 
 **Protocols**, only where the implementers differ or tests need a fake:
 
@@ -469,21 +496,23 @@ for an OS image the origin digest is the tarball's, not the squashfs's, so `expe
 | `Publisher`, `JobHandle`, `Transactions` (opaque `Transaction`), `Handler` | §10.2, §10.3 |
 | `ContentCatalog` | `async resolve(request) -> Resolution`; `desired_assets() -> frozenset[AssetJob]` |
 | `PlanMediaReferences` (playback implements it) | `referenced() -> frozenset[PrepareMedia]` |
-| `AssetRecords` (Catalog declares through it) | `get(tx, key)`; `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row goes with its last reference); `record_produced(tx, key, facts)` (write-once); `forget_produced(tx, key)` (a release re-cut only); `touch_served(tx, key, at)` |
+| `AssetRecords` (Catalog declares through it) | `get(tx, key)` (None when no reference is left); `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row and its facts stay); `record_produced(tx, key, facts)` (write-once); `lock_produced(tx, key) -> AssetReady \| None` (`FOR SHARE`, serializes with `record_produced`); `touch_served(tx, key, at)` |
+| `ReleaseRecords` (Catalog) | `claim(tx, release, *, now) -> ReleaseRow \| None` (insert if absent, else lock and return the previous row); `apply(tx, release, *, divergent, now) -> bool` (refuses an older upstream version); `lock_auto_promotion(tx)`; `promotion`, `set_promoted(tx, tag, *, by)`; `load_etag(tx) -> StoredEtag \| None`, `store_etag(tx, etag, *, now)`. No `upsert` or `mark_divergent`: a release is written only through `claim` and `apply` |
 | `ReleaseOrigin` / `MediaOrigin` | `async list_releases(etag)` / `async list_source(spec)`; `async download(loc, into, *, max_bytes)` |
 
 **Concrete classes:**
 - `AssetReader` (above), and `CacheStore` (tests run it on `tmp_path`).
-- **`AssetProduction.produce(job, write: Callable[[Path], Awaitable[None]]) -> AssetReady`**,
-  shared by the three fetch handlers (each *is* its kind's producer). A verified file present
-  returns early; otherwise temp → `write` → verify against the reference or produced digest →
-  `os.replace`.
+- **`AssetProduction.produce(job, write: WriteFn) -> AssetReady`**, with
+  `WriteFn = Callable[[Path, OriginLocator], Awaitable[None]]`, shared by the fetch handlers
+  (each *is* its kind's producer). A verified file present returns early; otherwise temp →
+  `write` from each reference's locator, newest first → verify against the reference or produced
+  digest → `os.replace`.
 - `ReleaseOperations`, `PodProbe` (process + DB), `FleetHealth.snapshot(beats, failing)` (inputs from infra).
 - In infra: `OutcomeFeed`, `QueueAdmin`, `JobRuntime`, and the queue-ops handlers.
 
 `OriginUnavailable(TransientFailure)` covers network errors, 5xx and 429 + `retry_after`.
-`OriginRejected(TerminalFailure)` covers 404, oversize and schema errors. A `.deb` handler tries
-each reference's locator, newest first, and is terminal only when every one rejects.
+`OriginRejected(TerminalFailure)` covers 404, oversize and schema errors. Every fetch handler
+tries each reference's locator, newest first, and is terminal only when every one rejects.
 
 ### 10.5 Dependency rules, wiring, tests, and what stays out
 

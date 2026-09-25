@@ -5,9 +5,10 @@ Only OUR tasks are touched (`TASK_PREFIX` + a type this admin was built with): l
 by our queues.
 
 **Rescue re-publishes first, then closes** the stalled row. The pending (queueing-lock) index
-covers only `todo`, so the new copy inserts while the stalled row is still `doing`; and
-`procrastinate_fetch_job_v2` skips a `todo` whose lock a `doing` row holds, so the new copy runs
-only after the close frees the lock. Closing first would open a window with no copy at all.
+covers only `todo`, so the new copy inserts while the stalled row is still `doing`. An asset
+fetch's copy runs only after the close frees the lock (`procrastinate_fetch_job_v2` skips a
+`todo` whose lock a `doing` row holds); any other job takes no running lock, so its copy may run
+at once. Closing first would open a window with no copy at all.
 
 Handler modules import their job types at runtime (never under TYPE_CHECKING): the runtime reads
 `handle`'s annotations to dispatch.
@@ -90,7 +91,7 @@ class QueueAdmin:
         await defer_async(await self._opened(), stalled.job, attempt=stalled.attempt)
 
     async def close(self, stalled: StalledJob) -> None:
-        """End the stalled row `failed`, which frees its lock for the new copy."""
+        """End the stalled row `failed`; an asset fetch's row frees its lock for the new copy."""
         app = await self._opened()
         await app.job_manager.finish_job_by_id_async(job_id=stalled.id, status=Status.FAILED,
                                                      delete_job=False)

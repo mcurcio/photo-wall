@@ -2,9 +2,13 @@
 
 A verified file already on disk returns its facts without writing, which is what makes a crash
 between the rename and the runtime's outcome write harmless. Otherwise the handler's `write` fills
-a unique temp file, the result is checked against the recorded produced facts and the references'
-expected facts, and only then renamed into place. `produce` writes no record: the runtime writes
-`produced` and the outcome.
+a unique temp file from one reference's locator, trying every reference newest first; the result
+is checked against the recorded produced facts and the references' expected facts, and only then
+renamed into place. `produce` writes no record: the runtime writes `produced` and the outcome.
+
+Any reference may supply the bytes: an asset's key is the sha256 of its upstream file, and every
+download is checked against its locator's sha (`ReleaseOrigin.download`), so each reference names
+the same bytes. A late run can only write the same bytes under the same name.
 """
 
 from __future__ import annotations
@@ -16,15 +20,22 @@ from typing import TypeAlias
 
 from central.artifact_io import HardenedOpenError
 from central.assets.store import CacheStore
-from central.kernel.assets import Asset, AssetKey, AssetReady
-from central.kernel.handling import TerminalFailure, TransientFailure
+from central.kernel.assets import Asset, AssetKey, AssetReady, OriginLocator
+from central.kernel.handling import (
+    OriginRejected,
+    OriginUnavailable,
+    TerminalFailure,
+    TransientFailure,
+)
 from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords
 from central.kernel.publishing import ASSET_NOT_RECORDED
 from central.kernel.transactions import Transactions
 
-WriteFn: TypeAlias = Callable[[Path, Asset], Awaitable[None]]
+# Fill the temp path from one locator. On any failure it leaves nothing at the temp path (as
+# `ReleaseOrigin.download` does), so the next reference can reuse it.
+WriteFn: TypeAlias = Callable[[Path, OriginLocator], Awaitable[None]]
 
 
 def _meets_references(asset: Asset, facts: AssetReady) -> bool:
@@ -36,8 +47,29 @@ def _meets_references(asset: Asset, facts: AssetReady) -> bool:
     )
 
 
+async def _write_from_any(temp: Path, asset: Asset, write: WriteFn) -> None:
+    """`write` from each reference, newest first, until one succeeds.
+
+    A rejection tries the next reference. An `OriginUnavailable` is remembered and raised when no
+    reference succeeds; when every reference is rejected, `all_references_rejected`.
+    """
+    unavailable: OriginUnavailable | None = None
+    for ref in asset.references:
+        try:
+            await write(temp, ref.locator)
+            return
+        except OriginRejected:
+            continue
+        except OriginUnavailable as error:
+            unavailable = error
+    if unavailable is not None:
+        raise unavailable
+    raise TerminalFailure("all_references_rejected")
+
+
 class AssetProduction:
-    """Shared by every fetch handler; each handler supplies only how to `write` its kind's file."""
+    """Shared by every fetch handler; each handler supplies only how to `write` its kind's file
+    from one locator. The reference loop is here, so every kind falls through the same way."""
 
     def __init__(self, *, store: CacheStore, records: AssetRecords,
                  transactions: Transactions) -> None:
@@ -69,16 +101,13 @@ class AssetProduction:
         temp = await asyncio.to_thread(self._store.temp_path, key)
         installed = False
         try:
-            await write(temp, asset)
+            await _write_from_any(temp, asset, write)
             facts = await asyncio.to_thread(self._store.measure, temp)
             if asset.produced is not None and facts != asset.produced:
+                # The key fixes the bytes, so this is a bug, never a re-cut (a re-cut is a new key).
                 raise TerminalFailure("not_reproducible")
             if not _meets_references(asset, facts):
                 raise TerminalFailure("digest_mismatch")
-            if await asyncio.to_thread(self._recut_since, asset):
-                # Built from a locator the sync has since replaced (a re-cut): stale bytes whose
-                # facts would be recorded over the forgotten ones. Retry with the new locator.
-                raise TransientFailure("reference_changed")
             await asyncio.to_thread(self._store.install, temp, key)
             installed = True
             return facts
@@ -89,15 +118,6 @@ class AssetProduction:
     def _get(self, key: AssetKey) -> Asset | None:
         with self._transactions.begin() as tx:
             return self._records.get(tx, key)
-
-    def _recut_since(self, before: Asset) -> bool:
-        """Whether an owner's locator changed since `before` was read."""
-        now = self._get(before.key)
-        if now is None:
-            return False
-        locators = {ref.owner: ref.locator for ref in now.references}
-        return any(locators.get(ref.owner, ref.locator) != ref.locator
-                   for ref in before.references)
 
     def _measure_present(self, final: Path) -> AssetReady | None:
         """The facts of the file at `final`, or None when there is no valid regular file.
