@@ -1,6 +1,8 @@
-"""Process-level end-to-end for the netboot base/squashfs path: the REAL client
-(`appliance.netboot_init` + the REAL `appliance.provision.AppFetcher`) against a
-REAL Central (uvicorn) + REAL Postgres, over a real socket.
+"""Process-level end-to-end for the netboot base/squashfs path: the REAL stage 1
+(`appliance.netboot_init` over the REAL `uplink` transport, locate and direct fetch)
+against a REAL Central (uvicorn) + REAL Postgres, over a real socket -- once through a
+gateway's 301 to Central over verified TLS (decision 0014), and plain http for the
+chained app `.deb` flow (`appliance.provision.AppFetcher`, Project 2's to migrate).
 
 This closes the gap the unit + TestClient tests leave: there, the client used a
 mocked fetcher and the server used an in-memory TestClient, so the two halves
@@ -38,6 +40,7 @@ import threading
 import time
 import urllib.request
 from datetime import timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -47,7 +50,6 @@ from appliance.bootstrap import read_pi_serial
 from appliance.netboot_init import NetbootError, netboot
 from appliance.provision import (
     Bootstrapper,
-    ProvisionError,
     fetch_manifest,
     fetch_package,
 )
@@ -66,12 +68,17 @@ from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchOsImage, FetchPackage
 from central.kernel.jobs import asset_key
 from central.kernel.ports import PublishedRelease
+from contracts.clock_record import ClockRecord, ClockState
 from scripts.test_netboot_e2e import (  # reuse tracer helpers
     _FixedDiscovery,
     _NoSleep,
     promote_path,
     release_seed_sql,
 )
+from tests import tls_fixture as tls
+from uplink.causes import Cause, UplinkError
+from uplink.transport import HttpTransport
+from uplink.trust import Trust
 
 ADMIN = "e2e-netboot-admin-" + "x" * 32
 SQUASHFS = b"rpi-image-gen base squashfs payload, streamed over a real socket" * 64
@@ -98,9 +105,9 @@ class _Log:
 
 
 class _Keeper:
-    """A `Keeper` double (S0-AC6b): every one of this file's six `netboot(`
-    call sites passes one, and one test asserts `hand_over` runs only after
-    the real download and mount."""
+    """A `Keeper` double (S0-AC6b): every netboot run here passes one (through
+    `_netboot`), and one test asserts `hand_over` runs only after the real
+    download and mount."""
 
     def __init__(self):
         self.pets = 0
@@ -136,10 +143,6 @@ class _Ops:
 
     def network_info(self):
         return {"ip": "127.0.0.1"}
-
-    def resolve(self, host):
-        self.calls.append(("resolve", host))
-        return ["127.0.0.1"]
 
     def ram(self):
         path = self.run_root / "ram"
@@ -243,6 +246,24 @@ def _serial_reader(tmp_path):
     return lambda: read_pi_serial(str(path))
 
 
+class _ClockGate:
+    """A settled clock: the SNTP gate is proven in tests/test_uplink_clock.py, not here."""
+
+    def settle(self):
+        return ClockRecord(state=ClockState.SYNCED, floor=1, raised_to_floor=False, tier=None,
+                           source=None, offset=None, stepped=False, tried=(), writer="netboot",
+                           written_at=time.time())
+
+
+def _netboot(root: str, tmp_path: Path, ops: _Ops, *, keeper: _Keeper | None = None) -> None:
+    """The real stage 1 from `root`: the real transport, trusting only the test CA."""
+    transport = HttpTransport(trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)))
+    netboot({"photowall.central": root}, tmp_path / "root", ops=ops, transport=transport,
+            clock_gate=_ClockGate(), keeper=keeper or _Keeper(),
+            trust_provenance="bundle=sha256:test anchors=1 floor=1970-01-01",
+            serial_reader=_serial_reader(tmp_path), log=_Log())
+
+
 def _served_row(registry, serial=SERIAL):
     with registry.db.transaction() as conn:
         return conn.execute(
@@ -258,22 +279,8 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         # --- Phase 1: REAL netboot base fetch over the wire ---
-        keeper = _Keeper()
-        netboot(
-            {"photowall.central": origin + "/"},
-            tmp_path / "root",
-            keeper=keeper,
-            ops=ops,
-            serial_reader=_serial_reader(tmp_path),
-            log=_Log(),
-        )
-        # URL composition resolved to the live route (the request produced the
-        # bytes AND ran the server-side route), not a string-equality assert.
-        assert ("resolve", "127.0.0.1") in ops.calls
+        _netboot(origin + "/", tmp_path, ops)
         assert ops.mounted and ops.mounted[0][0] == SQUASHFS      # runtime downloaded
-        # S0-AC6b: hand_over runs once, after the real download and mount.
-        assert keeper.handed_over is True
-        assert keeper.pets > 0
         # The serial reached the SERVER, not just the client's header: the 200
         # recorded the served tag on the device row that serial derives.
         row = _served_row(registry)
@@ -351,8 +358,7 @@ def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registr
     app = _app(registry, cache_root)
     with _serve(app) as origin:
         # (1) real base serve over the wire -> records last_served_tag = TAG.
-        netboot({"photowall.central": origin + "/"}, tmp_path / "root", keeper=_Keeper(), ops=ops,
-                serial_reader=_serial_reader(tmp_path), log=_Log())
+        _netboot(origin + "/", tmp_path, ops)
         assert ops.mounted and ops.mounted[0][0] == SQUASHFS
 
         # (2) REAL appliance manifest client learns the served tag over the wire.
@@ -384,8 +390,7 @@ def test_base_health_with_a_guessed_tag_is_rejected_over_the_wire(registry, tmp_
     ops = _Ops(tmp_path / "run")
     app = _app(registry, cache_root)
     with _serve(app) as origin:
-        netboot({"photowall.central": origin + "/"}, tmp_path / "root", keeper=_Keeper(), ops=ops,
-                serial_reader=_serial_reader(tmp_path), log=_Log())
+        _netboot(origin + "/", tmp_path, ops)
         status, accepted = _post_base_health(
             origin,
             {"authority_epoch": 1, "sequence": 1, "running_tag": "v0.0.1", "healthy": True},
@@ -408,36 +413,24 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
         tampered = SQUASHFS[:-1] + bytes([SQUASHFS[-1] ^ 0x01])
         _write(cache_root, asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA)), tampered)
         with pytest.raises(NetbootError, match="netboot_integrity"):
-            netboot(
-                {"photowall.central": origin + "/"},
-                tmp_path / "root",
-                keeper=_Keeper(),
-                ops=ops,
-                serial_reader=_serial_reader(tmp_path),
-                log=_Log(),
-            )
+            _netboot(origin + "/", tmp_path, ops)
         assert ops.mounted == []
 
 
 def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
     # Real Central fails closed (503 after the read-through wait) for a known but
-    # uncached tag, so the client sees a transport-level ProvisionError rather than a
+    # uncached tag, so the client names Central's own error rather than accepting a
     # Digest-less 200 -- and the miss published the tag's fetch for a worker to run.
     cache_root = tmp_path / "cache"
     _seed_base(registry, cache_root, cached=False)  # release + reference + pin, no bytes
     app = _app(registry, cache_root, wait=timedelta(seconds=1))
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
-        with pytest.raises(ProvisionError):
-            netboot(
-                {"photowall.central": origin + "/"},
-                tmp_path / "root",
-                keeper=_Keeper(),
-                ops=ops,
-                serial_reader=_serial_reader(tmp_path),
-                log=_Log(),
-            )
+        with pytest.raises(UplinkError) as caught:
+            _netboot(origin + "/", tmp_path, ops)
         assert ops.mounted == []
+    assert (caught.value.cause, caught.value.reason) == (Cause.CENTRAL, "error")
+    assert caught.value.central_error.startswith("base_")
     with registry.db.transaction() as conn:
         queued = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
                               "WHERE status = 'todo'").fetchall()
@@ -447,7 +440,9 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
 
 
 class _NoDigestHandler(http.server.BaseHTTPRequestHandler):
-    """A minimal stand-in that returns a 200 body with NO Digest header.
+    """A minimal stand-in whose base is a 200 body with NO Digest header; built
+    on `tls_fixture.central_stub`, so it answers `/v1/locate` as Central does
+    and the run reaches the base (S4b-AC3b).
 
     The REAL Central structurally cannot emit this -- it 503s when it has no
     stored digest -- so the missing-Digest fail-closed branch is exercised
@@ -465,22 +460,26 @@ class _NoDigestHandler(http.server.BaseHTTPRequestHandler):
 
 
 def test_missing_digest_header_fails_closed_over_the_wire(tmp_path):
-    server = http.server.HTTPServer(("127.0.0.1", 0), _NoDigestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        origin = f"http://127.0.0.1:{server.server_address[1]}"
-        ops = _Ops(tmp_path / "run")
+    ops = _Ops(tmp_path / "run")
+    with tls.serve_stub(tls.central_stub(_NoDigestHandler)) as stub:
         with pytest.raises(NetbootError, match="netboot_no_digest"):
-            netboot(
-                {"photowall.central": origin + "/"},
-                tmp_path / "root",
-                keeper=_Keeper(),
-                ops=ops,
-                serial_reader=_serial_reader(tmp_path),
-                log=_Log(),
-            )
-        assert ops.mounted == []
-    finally:
-        server.shutdown()
-        thread.join(timeout=10)
+            _netboot(f"http://127.0.0.1:{stub.port}/", tmp_path, ops)
+    assert ops.mounted == []
+    assert stub.requests == ["/v1/locate", "/v1/netboot/base"]
+
+
+def test_real_netboot_locates_through_a_301_to_central_over_verified_tls(registry, tmp_path):
+    # S4b-AC3: the Pi's real case -- an http root whose gateway 301s to Central's
+    # https origin -- end to end: locate verifies the TLS certificate against the test
+    # CA only, then the base is one direct request, digest-verified and "mounted".
+    cache_root = tmp_path / "cache"
+    _seed_base(registry, cache_root)
+    ops, keeper = _Ops(tmp_path / "run"), _Keeper()
+    with tls.serve_tls(_app(registry, cache_root), tls.CENTRAL) as port:
+        with tls.redirect_stub(f"https://127.0.0.1:{port}/v1/locate") as gateway:
+            _netboot(f"http://localhost:{gateway.port}/", tmp_path, ops, keeper=keeper)
+    assert ops.mounted and ops.mounted[0][0] == SQUASHFS
+    assert gateway.requests == ["/v1/locate"]          # the base never went through it
+    # S0-AC6b: hand_over runs once, after the real download and mount.
+    assert keeper.handed_over is True and keeper.pets > 0
+    assert _served_row(registry)["last_served_tag"] == TAG

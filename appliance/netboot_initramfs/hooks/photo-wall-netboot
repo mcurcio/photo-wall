@@ -1,13 +1,18 @@
 #!/bin/sh
 # Installed as /etc/initramfs-tools/hooks/photo-wall-netboot in the scratch
-# builder root. Stages the slim, UNSIGNED netboot init (appliance.netboot_init)
-# and its exact 7-file Python closure into the initrd.
+# builder root. Stages the interpreter, its stdlib and the userland the slim,
+# UNSIGNED netboot init (appliance.netboot_init) needs into the initrd.
 #
-# Self-contained on purpose (0008 p4-boot-chain s2a): it copies NO signed or
-# time-path material (no ca.pem/bootstrap.json/boot-policy.json/release.pub.pem,
-# no openssl/chronyd/blkid) and NO appliance.updates / player / central, so the
-# old signed initramfs dir (appliance/initramfs/) can be deleted whole at
-# p4-retire without touching this one.
+# It copies NO first-party code and NO CA bundle or clock floor: those are the
+# boot data (scripts/build_boot_data.py; decision 0014 §5), an uncompressed
+# archive rebuilt on every build and placed in front of this cached initrd, so
+# no cache key has to cover them and they never go stale in the cache. The
+# boot data puts stage 1's computed closure in this interpreter's stdlib dir.
+#
+# Self-contained on purpose (0008 p4-boot-chain s2a): no signed material (no
+# ca.pem/bootstrap.json/boot-policy.json/release.pub.pem), no openssl/chronyd/
+# blkid, so the old signed initramfs dir (appliance/initramfs/) can be deleted
+# whole at p4-retire without touching this one.
 set -eu
 case "${1:-}" in prereqs) exit 0 ;; esac
 . /usr/share/initramfs-tools/hook-functions
@@ -25,9 +30,9 @@ ln -sf "$(basename "$real_python")" "${DESTDIR}/usr/bin/python3"
 mkdir -p "${DESTDIR}${libdir}"
 # Extension modules need their dynamic dependencies as well as the .so itself.
 # copy_exec stops on an already-copied executable, so resolve dependencies
-# first, then copy the stdlib tree over the top. The closure imports ssl,
-# hashlib, urllib.request, asyncio, fcntl, array, secrets, socket -- all served
-# by the stdlib tree plus these lib-dynload .so's (_ssl, _hashlib, _socket, ...).
+# first, then copy the stdlib tree over the top. Stage 1 imports ssl, hashlib,
+# http.client, selectors, fcntl, array, secrets, socket, ... -- all served by
+# the stdlib tree plus these lib-dynload .so's (_ssl, _hashlib, ...).
 for extension in "${libdir}"/lib-dynload/*.so; do
     copy_exec "$extension" "$extension"
 done
@@ -38,23 +43,12 @@ cp -a "${libdir}/." "${DESTDIR}${libdir}/"
 #   modprobe      -- on-demand module load behind those mounts
 # configure_networking comes from initramfs-tools' own /scripts/functions
 # (staged by initramfs-tools), so ip/ipconfig are not staged here. openssl/
-# chronyd/blkid are deliberately absent: no signature check, no time sync, no
-# block-device probe on this RAM-overlay path.
+# chronyd/blkid are deliberately absent: no signature check, no time daemon
+# (stage 1's one SNTP step is uplink.clock), no block-device probe on this
+# RAM-overlay path.
 for program in mount umount modprobe; do
     executable=$(command -v "$program")
     copy_exec "$executable" "$executable"
-done
-
-# The exact 7-file init closure (empirically verified: importing
-# appliance.netboot_init pulls in only these first-party modules). Placed under
-# the stdlib dir so `python3 -I -m appliance.netboot_init` finds them without
-# PYTHONPATH. NOTE: appliance/updates.py is intentionally NOT among them.
-mkdir -p "${DESTDIR}${libdir}/appliance" "${DESTDIR}${libdir}/contracts"
-for module in __init__ bootstrap provision netboot_init; do
-    copy_file config "/usr/lib/python3/dist-packages/appliance/$module.py" "${libdir}/appliance/$module.py"
-done
-for module in __init__ release equipment; do
-    copy_file config "/usr/lib/python3/dist-packages/contracts/$module.py" "${libdir}/contracts/$module.py"
 done
 
 # Minimal userland the HTTP-by-hostname fetch needs: name resolution + a root

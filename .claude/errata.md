@@ -1188,3 +1188,114 @@ doc softenings.
   root finds none, before this bead's changes). Evidence: `git grep -n reboot_path_watched`
   (pre-change tree) returns nothing. Proposed correction: drop that clause from the "Removed"
   line; nothing needed removing beyond `LinuxOps._watchdog_fd`, which was removed as specified.
+
+## netboot-reach-central p1 S1 (tracer: locate over verified TLS)
+
+- 2026-09-26, bead S1: design §2.4 lists `Trust`'s verify flags as `VERIFY_X509_STRICT |
+  VERIFY_X509_PARTIAL_CHAIN` under "every setting explicit". Reality: Python's
+  `SSLContext(PROTOCOL_TLS_CLIENT)` starts with `VERIFY_X509_TRUSTED_FIRST` (OpenSSL's own
+  default since 1.1.0), and assigning `verify_flags` replaces the set, so the literal list would
+  CLEAR trusted-first, which lets a local anchor end a chain the gateway cross-signed (the Root
+  YR / ISRG X1 case). Likewise `hostname_checks_common_name` defaults to True on the CI's
+  Python 3.12.11 + OpenSSL 3.0.16 (probe: `SSLContext(PROTOCOL_TLS_CLIENT)
+  .hostname_checks_common_name` is True). Implemented: flags `TRUSTED_FIRST | STRICT |
+  PARTIAL_CHAIN`, `hostname_checks_common_name = False`, `maximum_version =
+  MAXIMUM_SUPPORTED`, each asserted by `tests/test_uplink_tls.py`. Proposed correction: design
+  §2.4's docstring lists all three flags and the SAN-only name check.
+- 2026-09-26, bead S1: the glossary's Central root says both "no ... whitespace or control
+  characters" and "this is today's validator, unchanged". They disagree: today's stage-1 check
+  (`appliance/netboot_init.py` `_validate_central_root`, `ord(character) <= 32`) admits DEL
+  (0x7f) and non-ASCII whitespace such as U+00A0. `uplink.origin` follows the glossary's words:
+  every character must be printable and not whitespace (`str.isprintable`, `str.isspace`), in
+  the root and in a redirect's Location alike. Everything else (userinfo, empty-port, empty
+  query or fragment handling) matches today's check exactly. Proposed correction: the glossary
+  drops "unchanged" or names the tightening; S4b's stage-1 adoption inherits it.
+- 2026-09-26, bead S1: the frozen page gives `uplink/origin.py` only `Origin` and `Url`, but
+  check 3 of `next_hop` must apply the same URL grammar as `Origin.parse_root` to a resolved
+  Location, and step 2 must see the raw Location before `urlsplit` strips leading space and
+  drops tabs. Implemented one public `parse_url(text, *, base=None) -> Url | None` in
+  `uplink/origin.py` that both use, rather than a second grammar in `redirects.py`. Proposed
+  correction: add `parse_url` to S1's frozen page.
+
+## netboot-reach-central p1, fix cycle 1 (S2-S6 implemented)
+
+- 2026-09-26, bead S3: the frozen page's S3-AC3 row "offset -3600 -> not stepped, AHEAD" and
+  probe "allow a negative step -> the AHEAD row fails" predate the owner's Q5 = A. Reality:
+  Q5 = A amends R6 to "one SNTP step, never below the floor". Implemented in
+  `uplink/clock.py` `ClockGate._apply`: offset < -0.5 steps back (SYNCED, stepped, negative
+  offset); AHEAD only when clock + offset < floor. Evidence:
+  `tests/test_uplink_clock.py::test_the_one_step_follows_the_offset_but_never_goes_below_the_floor`
+  (rows -3600 -> SYNCED stepped, -2 days from floor+1 day -> AHEAD). Proposed correction:
+  S3-AC3 and its probe read "step below the floor -> the AHEAD row fails". Likewise
+  `POOL_HOST` is `debian.pool.ntp.org` (Q2 = A), not the page's `pool.ntp.org`.
+- 2026-09-26, bead S3: parked §B says "the era is chosen as the one >= floor". With that rule
+  `below_floor` can never fire (a time just under the floor decodes 136 years later, as
+  `above_ceiling`). Implemented: the era nearest the floor (`uplink/sntp.py` `_unix`), so both
+  reasons are reachable and every time within 68 years of the floor decodes right. Evidence:
+  `tests/test_uplink_sntp.py` rows below-floor, above-ceiling, and the 2036-wrap row.
+  Proposed correction: parked §B "the era nearest the floor".
+- 2026-09-26, bead S3: the clock record's `tried` entries land on the console FAILED line, so
+  they are single tokens: `timeout`, not design §7's `no answer`; a failed pool lookup is
+  `pool:lookup:<errno or cause_reason>`, a refused step `floor:EPERM` / `step:EPERM`. The gate
+  records (never raises) a step the kernel refuses. `ClockRecord` validates every field at
+  construction (ValueError) and gained `summary()`. Proposed correction: design §7 example 7's
+  text uses `pool:timeout`.
+- 2026-09-26, bead S2: `DirectFetch` maps a declared `Content-Length: 0` to `transfer`/`short`
+  (AppFetcher raised its limit code). A malformed or over-bound length stays `limit`. It never
+  reads past a declared length. A 3xx detail is `status=<n>;location=<host>` (one console
+  token). A Central error body's code is also the detail (design §7 example 15). Evidence:
+  `tests/test_uplink_fetch.py::test_transfer_failures_are_named`.
+- 2026-09-26, beads S3/S0: `RunClockRecord` and the S0 keeper's hand-over need the same atomic
+  0644 write. One `uplink/files.py` `write_atomically` now serves both
+  (`appliance/bootstrap.py` imports it; appliance -> uplink is allowed). Not on either frozen
+  page. Proposed correction: add it to S3's page.
+- 2026-09-26, bead S4a: the frozen page names `compute_closure`, `stage`, `main`,
+  `INITRD_FORBIDDEN`. Needed in addition: `INITRD_ROOTS` (the one root list, beside the one
+  forbidden list), `first_party_packages(repo)` (top-level dirs with `__init__.py`, so no hand
+  list of first-party names), `search_path()`, `Manifest`/`write_manifest`/`read_manifest`
+  (the verifier reads what the build wrote), and `initrd_closure()`. Two rules the page did
+  not state: (1) a MISSING name is judged only when first-party code imports it -- the stdlib's
+  own optional imports (`pdb`/`bdb` import `__main__`) are not ours; (2) a FOUND module that is
+  neither first-party nor stdlib is refused too, so the guarantee does not rest on the search
+  path alone. Evidence: `tests/test_module_closure.py`. `build_boot_data.main` also takes an
+  optional `--snapshot-epoch` for Q3 = A's 90-day warning.
+- 2026-09-26, bead S4b: design §5 "the verifier finds the boot-data files in the early archive
+  and none of them in the cached archive". `lsinitramfs` does not say which archive a path came
+  from, so the verifier parses the leading newc archive itself (`build_boot_data.read_archive`,
+  next to the writer) and runs `lsinitramfs` on the remainder only. The early archive is
+  zero-padded to a 512-byte block, as cpio writes Debian's microcode archives.
+- 2026-09-26, bead S4b: `INITRD_FORBIDDEN` includes `media`, and a cached initrd can hold
+  kernel modules under `.../drivers/media/`. The verifier therefore applies the forbidden set
+  to the package a path installs (the component after its innermost `python3*`,
+  `dist-packages` or `site-packages` directory), not to every path component as the old
+  `FORBIDDEN_COMPONENTS` did. Evidence: `tests/test_verify_netboot_initrd.py` (the golden
+  listing holds `drivers/media/rc/rc-core.ko`; `usr/lib/python3.13/media/__init__.py` fails).
+- 2026-09-26, bead S4b: design §2.7 "stage 1's own content codes print in the same format".
+  Implemented: `FAILED phase=<n> code=<netboot_code>` (and the mount's `boot_*` codes); a
+  non-network error prints only `error=<Type>`. A setup failure is `phase=setup`, and the
+  phase-0 line is printed by `netboot()` from the provenance `main()` built. Phases are
+  numbered 0-7 (`phase N/7`); a failure names the phase in progress, not the last line
+  printed. `Unconfigured("no_cmdline")` fails as `configuration`/`absent detail=no_cmdline`.
+- 2026-09-26, bead S4b: the kernel-config symbol list (S0's four plus S4b's five) is one
+  tested constant, `scripts/kernel_config_check.py` `STAGE1_BUILTINS`, which `--symbol`
+  defaults to, instead of the same nine `--symbol` flags written twice in `base-image.yml`.
+  The job's `DEBIAN_SNAPSHOT_EPOCH` env replaces the two literal `SOURCE_DATE_EPOCH` values.
+- 2026-09-26, bead S5: `scripts/uplink_device_harness.py` must run under `python3 -I -S` with
+  only the closure, so its stand-in servers are stdlib. To keep ONE implementation,
+  `tests/tls_fixture.py`'s `serve_stub`/`redirect_stub`/`central_stub` now delegate to the
+  harness's (the fixture adds the minted leaves). The netboot-e2e path filter also lists
+  `appliance/__init__.py`, `appliance/bootstrap.py` (closure members) and `tests/tls_fixture.py`
+  (the mint source), beyond the page's list. `compare_trust_bundles` compares against
+  `INITRD_CA_BUNDLE` (a module constant equal to `DEBIAN_CA_BUNDLE`, so tests do not read the
+  host's bundle).
+- 2026-09-26, beads S1/S2 (open, frame-level; not changed here): a direct request's wait for
+  the status line is the transport's `HOP_TIMEOUT` (5 s; S1 page, `uplink/transport.py`),
+  because `Transport.send(url, *, headers, deadline)` takes no per-call bound. Central holds a
+  base miss up to its read-through `wait_timeout` (30 s, `central/assets/reader.py:116`) before
+  answering 503, and AppFetcher waited `min(10, remaining)`. So on a real miss the Pi prints
+  `cause=connect reason=timeout`, not `cause=central reason=error`, and a base that becomes
+  ready 5-10 s into the wait is no longer received (the next boot retries). The wire test
+  passes only because it shortens Central's wait to 1 s. Proposed correction: `Transport.send`
+  takes the hop bound (locate keeps 5 s; `DirectFetch` passes one covering Central's
+  read-through wait), or Central's base route answers a miss at once. Needs an owner ruling on
+  the S1 frame before a re-cut.

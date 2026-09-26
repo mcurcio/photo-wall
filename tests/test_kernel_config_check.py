@@ -2,9 +2,8 @@
 against a fixed symbol list (0014 rev 5, design §2.8 and §5). No kernel
 build, no root."""
 
-import pytest
 
-from scripts.kernel_config_check import main, require_builtin
+from scripts.kernel_config_check import STAGE1_BUILTINS, main, require_builtin
 
 CONFIG_ALL_BUILTIN = """\
 CONFIG_WATCHDOG_CORE=y
@@ -54,6 +53,16 @@ def test_main_exits_0_when_every_symbol_is_builtin(tmp_path):
     assert main(["--config", str(config), "--symbol", "WATCHDOG_CORE"]) == 0
 
 
-def test_main_requires_at_least_one_symbol():
-    with pytest.raises(SystemExit):
-        main(["--config", "/dev/null"])
+def test_main_checks_every_stage1_builtin_by_default(tmp_path, capsys):
+    config = tmp_path / "config"
+    config.write_text(CONFIG_ALL_BUILTIN)
+    assert main(["--config", str(config)]) == 1
+    assert "IP_PNP, IP_PNP_DHCP, PCIE_BRCMSTB, MFD_RP1, MACB" in capsys.readouterr().err
+    config.write_text("".join(f"CONFIG_{symbol}=y\n" for symbol in STAGE1_BUILTINS))
+    assert main(["--config", str(config)]) == 0
+
+
+def test_stage1_builtins_cover_liveness_and_the_kernel_dhcp():
+    assert set(STAGE1_BUILTINS) == {"WATCHDOG_CORE", "BCM2835_WDT", "MAGIC_SYSRQ",
+                                    "DETECT_HUNG_TASK", "IP_PNP", "IP_PNP_DHCP", "PCIE_BRCMSTB",
+                                    "MFD_RP1", "MACB"}

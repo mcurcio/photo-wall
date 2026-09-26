@@ -65,7 +65,7 @@ line-length = 100
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.importlinter]
-root_packages = ["central", "contracts", "media", "player", "appliance"]
+root_packages = ["central", "contracts", "media", "player", "appliance", "uplink"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -73,6 +73,14 @@ name = "Transport contracts remain domain neutral"
 type = "forbidden"
 source_modules = ["contracts"]
 forbidden_modules = ["central", "media", "player", "appliance", "psycopg", "procrastinate"]
+
+[[tool.importlinter.contracts]]
+# An early warning only: a denylist cannot catch an unlisted package. The guarantee that uplink
+# runs on the stdlib alone (it ships in the initramfs) is the computed-closure test.
+name = "Uplink reaches Central with the stdlib and stdlib-only contracts"
+type = "forbidden"
+source_modules = ["uplink"]
+forbidden_modules = ["pydantic", "httpx", "central", "media", "player", "appliance"]
 
 [[tool.importlinter.contracts]]
 name = "Players have no central or persistence dependency"

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.equipment import READ_CAP, equipment_device_id
+from uplink.files import write_atomically
 
 CHUNK = 64 * 1024
 ROOT_UID = 0
@@ -315,24 +316,6 @@ def handover_dropin() -> bytes:
             f"RebootWatchdogSec={REBOOT_WATCHDOG_SECONDS}s\n").encode("ascii")
 
 
-def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
-    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
 class _Keeper:
     """The real Keeper: arm_watchdog's return value."""
 
@@ -358,7 +341,7 @@ class _Keeper:
             self.pet()
 
     def hand_over(self) -> None:
-        _atomic_write(self._dropin, handover_dropin(), mode=0o644)
+        write_atomically(self._dropin, handover_dropin(), mode=0o644)
         if self._device is not None:
             self._device.keepalive()
             self._device.release()

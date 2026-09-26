@@ -32,6 +32,9 @@ from appliance.netboot_init import (
     DEBUG_PAUSE_SECONDS,
     NETWORKING_TIMEOUT_SECONDS,
 )
+from uplink.clock import GATE_BUDGET
+from uplink.fetch import READ_TIMEOUT
+from uplink.locate import LOCATE_DEADLINE
 
 
 class ManualMonotonic:
@@ -236,12 +239,16 @@ def test_cmdline_template_carries_every_kernel_liveness_parameter():
 # --- S0-AC7: the timeout/budget rule ---------------------------------------
 
 def test_stage1_budget_covers_the_sum_of_stage1_bounds():
-    assert STAGE1_BUDGET >= (NETWORKING_TIMEOUT_SECONDS + BASE_FETCH_SECONDS + DEBUG_PAUSE_SECONDS)
+    assert STAGE1_BUDGET >= (NETWORKING_TIMEOUT_SECONDS + GATE_BUDGET + LOCATE_DEADLINE
+                             + BASE_FETCH_SECONDS + DEBUG_PAUSE_SECONDS)
 
 
 def test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait():
-    per_block_read_timeout = 10  # appliance/provision.py AppFetcher: min(10, remaining)
-    largest_wait = max(NETWORKING_TIMEOUT_SECONDS, DEBUG_PAUSE_SECONDS, per_block_read_timeout)
+    # Between two pets: networking; the clock gate (phase 3 -> 4 lines); a whole locate, taken
+    # as if no hop line came; one base-block read (DirectFetch: min(READ_TIMEOUT, remaining));
+    # the debug pause after the FAILED line.
+    largest_wait = max(NETWORKING_TIMEOUT_SECONDS, GATE_BUDGET, LOCATE_DEADLINE, READ_TIMEOUT,
+                       DEBUG_PAUSE_SECONDS)
     assert STAGE1_WATCHDOG_TIMEOUT >= largest_wait + 16
 
 
