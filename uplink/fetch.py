@@ -7,15 +7,19 @@ from collections.abc import Callable, Iterator, Mapping
 from types import MappingProxyType
 from typing import Final
 
+from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from contracts.strict_json import loads_object
 from uplink.causes import Cause, UplinkError
 from uplink.locate import LocatedCentral
 from uplink.origin import Url, parse_url
-from uplink.transport import Reply, Transport
+from uplink.transport import HOP_TIMEOUT, Reply, Transport
 
 MAX_ERROR_BODY: Final = 1024
 MAX_FETCH_SECONDS: Final = 300.0    # the acquisition deadline's ceiling (AppFetcher's bound)
 READ_TIMEOUT: Final = 10.0          # per read: min(this, what is left of the deadline)
+# Up to the status line: Central may hold a miss for its read-through wait, plus one hop's bound
+# for everything else. Still capped by the deadline.
+STATUS_TIMEOUT: Final = READ_THROUGH_WAIT_SECONDS + HOP_TIMEOUT
 FETCH_HEADERS: Mapping[str, str] = MappingProxyType({"Accept-Encoding": "identity"})
 
 _LENGTH = re.compile(r"[0-9]{1,12}")
@@ -32,7 +36,8 @@ class DirectFetch:
     """Requests to a located origin only (the constructor takes a LocatedCentral, never a
     string). It keeps AppFetcher's bounds: one deadline for the whole acquisition, set at
     construction (0 < seconds <= 300); a per-read timeout of min(10, remaining); an exact
-    Content-Length bound; identity encoding; a truncation check."""
+    Content-Length bound; identity encoding; a truncation check. The status line may take
+    min(STATUS_TIMEOUT, remaining): Central answers a miss only after its read-through wait."""
 
     __slots__ = ("_central", "_transport", "_deadline", "_monotonic")
 
@@ -65,7 +70,7 @@ class DirectFetch:
         if self._monotonic() >= self._deadline:
             raise UplinkError(Cause.TRANSFER, "deadline", host=host)
         reply = self._transport.send(url, headers={**FETCH_HEADERS, **(headers or {})},
-                                     deadline=self._deadline)
+                                     deadline=self._deadline, status_timeout=STATUS_TIMEOUT)
         try:
             status = reply.status
             if status != 200:

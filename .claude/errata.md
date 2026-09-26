@@ -1299,3 +1299,17 @@ doc softenings.
   takes the hop bound (locate keeps 5 s; `DirectFetch` passes one covering Central's
   read-through wait), or Central's base route answers a miss at once. Needs an owner ruling on
   the S1 frame before a re-cut.
+- 2026-09-26, beads S1/S2 (resolves the open S1/S2 entry above; architect's choice, no owner
+  question): `Transport.send(url, *, headers, deadline, status_timeout=HOP_TIMEOUT)`.
+  `status_timeout` bounds each address's exchange up to and including the status line; the TCP
+  connect and the TLS handshake still get at most `HOP_TIMEOUT` of it, so a dead address falls
+  through to the next as fast whatever the caller's bound. `locate` keeps the default (5 s).
+  `DirectFetch` passes `STATUS_TIMEOUT = READ_THROUGH_WAIT_SECONDS + HOP_TIMEOUT` (35 s), still
+  capped by its deadline. `READ_THROUGH_WAIT_SECONDS` (30) is one stdlib-only constant in the new
+  `contracts/read_through.py`; `AssetReader`'s default `wait_timeout` is derived from it, so
+  Central's wait and the device's bound cannot drift apart. The S1 page's `Transport`/
+  `HttpTransport.send` signatures and the HOP_TIMEOUT comment ("connect, TLS, request write,
+  status line") read with this change. The netboot wire miss test now holds Central's answer
+  `HOP_TIMEOUT + 1` s instead of 1 s. Review fix in the same change: `_Connection.connect`
+  re-applies what is left of the hop before the TLS handshake and before the request write
+  (the handshake and an http request write ran under the pre-connect timeout).

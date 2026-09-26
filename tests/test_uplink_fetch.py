@@ -4,19 +4,29 @@ Content-Length bound, identity encoding, truncation), plus the TLS record row ov
 socket."""
 
 import contextlib
+import http.server
+import json
 import os
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
 
+from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from tests import tls_fixture as tls
 from tests.uplink_fakes import FakeReply, FakeTransport, located
 from uplink.causes import Cause, UplinkError
-from uplink.fetch import MAX_ERROR_BODY, MAX_FETCH_SECONDS, READ_TIMEOUT, DirectFetch
-from uplink.transport import HttpTransport
+from uplink.fetch import (
+    MAX_ERROR_BODY,
+    MAX_FETCH_SECONDS,
+    READ_TIMEOUT,
+    STATUS_TIMEOUT,
+    DirectFetch,
+)
+from uplink.transport import HOP_TIMEOUT, HttpTransport
 from uplink.trust import Trust
 
 ORIGIN = "https://photo-wall.example/"
@@ -179,6 +189,9 @@ def test_one_deadline_bounds_the_whole_acquisition():
     blocks = fetcher.chunks("/v1/netboot/base", 10_000, block=10)
     next(blocks)
     assert transport.sent[0][2] == 130.0            # the send shares the deadline
+    # ...and may wait for Central's read-through wait before the status line (the transport
+    # still caps it by the deadline)
+    assert transport.sent[0][3] == STATUS_TIMEOUT > READ_THROUGH_WAIT_SECONDS
     clock.now = 130.0
     with pytest.raises(UplinkError) as caught:
         list(blocks)
@@ -243,3 +256,30 @@ def test_a_tls_record_error_mid_body_is_a_transfer_tls_failure(tmp_path):
                 blocks.append(block)
     assert (caught.value.cause, caught.value.reason) == (Cause.TRANSFER, "tls")
     assert b"".join(blocks) == b"x" * 10
+
+
+# --- Central holds a miss before its status line, over a real socket --------------------------
+
+def test_central_answering_a_miss_after_more_than_a_hop_is_named_as_central(tmp_path):
+    """Central answers a cache miss only after its read-through wait: the direct request waits
+    for that answer instead of timing the status line out at one hop's bound."""
+    body = json.dumps({"error": "base_timeout"}).encode()
+
+    class SlowMiss(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            time.sleep(HOP_TIMEOUT + 0.5)
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    transport = HttpTransport(trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)))
+    with tls.serve_stub(tls.central_stub(SlowMiss)) as stub:
+        fetcher = DirectFetch(located(f"http://127.0.0.1:{stub.port}/"), transport=transport,
+                              seconds=60)
+        with pytest.raises(UplinkError) as caught:
+            fetcher.get("/v1/netboot/base", 10_000)
+    error = caught.value
+    assert (error.cause, error.reason, error.central_error) == (
+        Cause.CENTRAL, "error", "base_timeout")

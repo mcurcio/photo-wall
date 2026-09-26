@@ -11,6 +11,7 @@ from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink.causes import Cause, UplinkError
 from uplink.locate import LOCATE_DEADLINE, LOCATE_HEADERS, LocatedCentral, locate
 from uplink.origin import Origin
+from uplink.transport import HOP_TIMEOUT
 
 
 class Clock:
@@ -92,7 +93,8 @@ def test_one_deadline_bounds_the_whole_chain_and_every_body_read():
 
     transport.send = send
     locate(ROOT, transport=transport, monotonic=clock)
-    assert [deadline for _, _, deadline in transport.sent] == [100.0 + LOCATE_DEADLINE] * 2
+    assert [deadline for _, _, deadline, _ in transport.sent] == [100.0 + LOCATE_DEADLINE] * 2
+    assert [bound for *_, bound in transport.sent] == [HOP_TIMEOUT] * 2   # locate keeps the hop
     assert answer.reads[0][1] == pytest.approx(100.0 + LOCATE_DEADLINE - 124.0)
 
 

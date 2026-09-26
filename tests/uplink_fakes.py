@@ -8,6 +8,7 @@ from contracts.central_identity import LOCATE_PATH, identity_body
 from uplink.causes import UplinkError
 from uplink.locate import LocatedCentral, locate
 from uplink.origin import Origin, Url
+from uplink.transport import HOP_TIMEOUT
 
 
 class FakeReply:
@@ -42,10 +43,11 @@ class FakeTransport:
 
     def __init__(self, script: dict[str, FakeReply | UplinkError]) -> None:
         self.script = script
-        self.sent: list[tuple[str, dict[str, str], float]] = []
+        self.sent: list[tuple[str, dict[str, str], float, float]] = []
 
-    def send(self, url: Url, *, headers, deadline: float) -> FakeReply:
-        self.sent.append((str(url), dict(headers), deadline))
+    def send(self, url: Url, *, headers, deadline: float,
+             status_timeout: float = HOP_TIMEOUT) -> FakeReply:
+        self.sent.append((str(url), dict(headers), deadline, status_timeout))
         answer = self.script[str(url)]
         if isinstance(answer, UplinkError):
             raise answer

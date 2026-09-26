@@ -20,10 +20,10 @@ from uplink.trust import Trust
 
 
 @contextlib.contextmanager
-def raw_peer(answer: bytes = b"", *, hold: bool = False) -> Iterator[int]:
-    """A TCP peer on 127.0.0.1 that reads one request head, sends `answer`, then either holds
-    the connection open until the test ends (`hold`) or closes its side cleanly. Yields its
-    port."""
+def raw_peer(answer: bytes = b"", *, hold: bool = False, delay: float = 0) -> Iterator[int]:
+    """A TCP peer on 127.0.0.1 that reads one request head, sends `answer` after `delay`
+    seconds, then either holds the connection open until the test ends (`hold`) or closes its
+    side cleanly. Yields its port."""
     listener = socket.create_server(("127.0.0.1", 0))
     listener.settimeout(0.05)
     stop = threading.Event()
@@ -37,6 +37,7 @@ def raw_peer(answer: bytes = b"", *, hold: bool = False) -> Iterator[int]:
                 if not data:
                     return
                 head += data
+            stop.wait(delay)
             connection.sendall(answer)
             if hold:
                 stop.wait(10)
@@ -73,13 +74,14 @@ def trust(tmp_path) -> Trust:
     return Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
 
 
-def at(port: int, host: str = "127.0.0.1") -> Url:
-    return Url(Origin("http", host, port), "/v1/locate")
+def at(port: int, host: str = "127.0.0.1", scheme: str = "http") -> Url:
+    return Url(Origin(scheme, host, port), "/v1/locate")
 
 
-def failure(transport: HttpTransport, url: Url, *, seconds: float = 5.0) -> UplinkError:
+def failure(transport: HttpTransport, url: Url, *, seconds: float = 5.0,
+            **bounds: float) -> UplinkError:
     with pytest.raises(UplinkError) as caught:
-        transport.send(url, headers={}, deadline=time.monotonic() + seconds)
+        transport.send(url, headers={}, deadline=time.monotonic() + seconds, **bounds)
     return caught.value
 
 
@@ -104,13 +106,50 @@ def test_a_peer_that_stalls_before_the_status_line_is_a_connect_timeout(trust):
     assert time.monotonic() - started < 3
 
 
-def test_each_hop_is_bounded_even_when_the_deadline_is_far(trust, monkeypatch):
-    monkeypatch.setattr(transport_module, "HOP_TIMEOUT", 0.3)
+def test_each_hop_is_bounded_even_when_the_deadline_is_far(trust):
     with raw_peer(hold=True) as port:
         started = time.monotonic()
-        error = failure(HttpTransport(trust=trust), at(port), seconds=30)
+        error = failure(HttpTransport(trust=trust), at(port), seconds=30, status_timeout=0.3)
     assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
     assert time.monotonic() - started < 3
+
+
+def test_a_status_line_later_than_the_hop_is_received_within_a_longer_bound(trust):
+    answer = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    with raw_peer(answer, delay=0.6) as port:
+        error = failure(HttpTransport(trust=trust), at(port), status_timeout=0.3)
+        reply = HttpTransport(trust=trust).send(at(port), headers={},
+                                                deadline=time.monotonic() + 5, status_timeout=2)
+        reply.close()
+    assert (error.cause, error.reason, reply.status) == (Cause.CONNECT, "timeout", 200)
+
+
+def test_a_longer_status_bound_leaves_the_tls_handshake_within_the_hop(trust, monkeypatch):
+    # A dead address still falls through to the next one as fast, whatever the caller's bound.
+    monkeypatch.setattr(transport_module, "HOP_TIMEOUT", 0.3)
+    with raw_peer(hold=True) as port:        # accepts TCP, never answers the ClientHello
+        started = time.monotonic()
+        error = failure(HttpTransport(trust=trust), at(port, scheme="https"), seconds=30,
+                        status_timeout=30)
+    assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
+    assert time.monotonic() - started < 3
+
+
+def test_the_tls_handshake_gets_only_what_the_tcp_connect_left(trust, monkeypatch):
+    skew = [0.0]
+    real_connect = socket.socket.connect
+
+    def slow_connect(sock: socket.socket, address) -> None:
+        real_connect(sock, address)
+        skew[0] += transport_module.HOP_TIMEOUT - 0.2    # the connect used all but 0.2 s
+
+    monkeypatch.setattr(socket.socket, "connect", slow_connect)
+    transport = HttpTransport(trust=trust, monotonic=lambda: time.monotonic() + skew[0])
+    with raw_peer(hold=True) as port:        # accepts TCP, never answers the ClientHello
+        started = time.monotonic()
+        error = failure(transport, at(port, scheme="https"), seconds=30)
+    assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
+    assert time.monotonic() - started < 2    # 0.2 s, not a fresh HOP_TIMEOUT
 
 
 class Addresses(list):

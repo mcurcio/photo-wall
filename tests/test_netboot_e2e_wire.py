@@ -77,7 +77,7 @@ from scripts.test_netboot_e2e import (  # reuse tracer helpers
 )
 from tests import tls_fixture as tls
 from uplink.causes import Cause, UplinkError
-from uplink.transport import HttpTransport
+from uplink.transport import HOP_TIMEOUT, HttpTransport
 from uplink.trust import Trust
 
 ADMIN = "e2e-netboot-admin-" + "x" * 32
@@ -421,9 +421,10 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
     # Real Central fails closed (503 after the read-through wait) for a known but
     # uncached tag, so the client names Central's own error rather than accepting a
     # Digest-less 200 -- and the miss published the tag's fetch for a worker to run.
+    # The wait outlasts one hop: the client must wait for Central's answer, not time out.
     cache_root = tmp_path / "cache"
     _seed_base(registry, cache_root, cached=False)  # release + reference + pin, no bytes
-    app = _app(registry, cache_root, wait=timedelta(seconds=1))
+    app = _app(registry, cache_root, wait=timedelta(seconds=HOP_TIMEOUT + 1))
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         with pytest.raises(UplinkError) as caught:

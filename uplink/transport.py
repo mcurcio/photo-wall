@@ -14,7 +14,7 @@ from uplink.origin import DEFAULT_PORTS, Url
 from uplink.trust import Trust
 
 LOOKUP_TIMEOUT = 7.0            # per lookup: lets a second nameserver answer after glibc's 5 s
-HOP_TIMEOUT = 5.0               # per request: connect, TLS, request write, status line
+HOP_TIMEOUT = 5.0               # per address: connect and TLS; by default also the status line
 
 # (host, port, timeout) -> [(family, address), ...] in the order to try them
 Lookup = Callable[[str, int, float], list[tuple[int, str]]]
@@ -34,10 +34,13 @@ class Reply(Protocol):
 
 
 class Transport(Protocol):
-    def send(self, url: Url, *, headers: Mapping[str, str], deadline: float) -> Reply:
+    def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
+             status_timeout: float = HOP_TIMEOUT) -> Reply:
         """Exactly one GET. Never follows a redirect; never uses a proxy. `deadline` is absolute
-        monotonic time. Raises only UplinkError (DNS, CONNECT, TLS or TIME), classified at the
-        source (classify rules 1-13)."""
+        monotonic time. `status_timeout` bounds each address's exchange up to and including the
+        status line; a caller whose server may hold the answer longer passes a longer one.
+        Raises only UplinkError (DNS, CONNECT, TLS or TIME), classified at the source (classify
+        rules 1-13)."""
 
 
 def _raise_classified(error: BaseException, phase: Phase, host: str) -> NoReturn:
@@ -50,19 +53,22 @@ def _raise_classified(error: BaseException, phase: Phase, host: str) -> NoReturn
 class _Connection(http.client.HTTPConnection):
     """One connection to one looked-up address, TLS-wrapped when `context` is given. SNI, the
     certificate name check and the Host header use the URL's host, never the address. Every
-    wait up to the status line is bounded by what is left of the attempt's `deadline`."""
+    wait is bounded by what is left when it starts: the TCP connect and the TLS handshake of
+    `connect_deadline`, the request write and the status line of `deadline`."""
 
     def __init__(self, url: Url, *, family: int, address: str,
-                 context: ssl.SSLContext | None, deadline: float,
+                 context: ssl.SSLContext | None, connect_deadline: float, deadline: float,
                  monotonic: Callable[[], float]) -> None:
         super().__init__(url.origin.host, url.origin.port)
         self.default_port = DEFAULT_PORTS[url.origin.scheme]  # Host omits the default port
         self._family, self._address, self._context = family, address, context
-        self._deadline, self._monotonic = deadline, monotonic
+        self._connect_deadline, self._deadline = connect_deadline, deadline
+        self._monotonic = monotonic
         self.raw: socket.socket | None = None
 
-    def left(self) -> float:
-        left = self._deadline - self._monotonic()
+    def left(self, deadline: float | None = None) -> float:
+        """Seconds left before `deadline` (by default the exchange's); TimeoutError at none."""
+        left = (self._deadline if deadline is None else deadline) - self._monotonic()
         if left <= 0:
             raise TimeoutError("hop deadline passed")
         return left
@@ -70,12 +76,13 @@ class _Connection(http.client.HTTPConnection):
     def connect(self) -> None:
         sock = socket.socket(self._family, socket.SOCK_STREAM)
         try:
-            sock.settimeout(self.left())
+            sock.settimeout(self.left(self._connect_deadline))
             sock.connect((self._address, self.port))
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if self._context is not None:
+                sock.settimeout(self.left(self._connect_deadline))  # what the connect left
                 sock = self._context.wrap_socket(sock, server_hostname=self.host)
-                sock.settimeout(self.left())
+            sock.settimeout(self.left())
         except BaseException:
             sock.close()
             raise
@@ -128,16 +135,19 @@ class _HttpReply:
 class HttpTransport:
     """The real Transport, over http.client. https uses trust.context only. The host is looked
     up with `lookup`, bounded by min(LOOKUP_TIMEOUT, time left). Every returned address is tried
-    in order, as socket.create_connection does, each within min(HOP_TIMEOUT, time left); the
-    first that completes the exchange up to the status line wins and becomes Reply.peer; when
-    all fail, the LAST address's error is classified. SNI and the hostname check always use
-    the URL's host, never the address."""
+    in order, as socket.create_connection does, each within min(status_timeout, time left),
+    of which the TCP connect and the TLS handshake get at most HOP_TIMEOUT, so a dead address
+    falls through to the next as fast whatever the caller's bound; the first that completes
+    the exchange up to the status line wins and becomes Reply.peer; when all fail, the LAST
+    address's error is classified. SNI and the hostname check always use the URL's host, never
+    the address."""
 
     def __init__(self, *, trust: Trust, lookup: Lookup = default_lookup,
                  monotonic: Callable[[], float] = time.monotonic) -> None:
         self._trust, self._lookup, self._monotonic = trust, lookup, monotonic
 
-    def send(self, url: Url, *, headers: Mapping[str, str], deadline: float) -> Reply:
+    def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
+             status_timeout: float = HOP_TIMEOUT) -> Reply:
         host = url.origin.host
         try:
             addresses = self._lookup(host, url.origin.port,
@@ -149,11 +159,13 @@ class HttpTransport:
         context = self._trust.context if url.origin.scheme == "https" else None
         last: BaseException | None = None
         for family, address in addresses:
-            if deadline - self._monotonic() <= 0:
+            start = self._monotonic()
+            if deadline - start <= 0:
                 break
+            answer_by = min(start + status_timeout, deadline)
             connection = _Connection(
                 url, family=family, address=address, context=context, monotonic=self._monotonic,
-                deadline=min(self._monotonic() + HOP_TIMEOUT, deadline))
+                connect_deadline=min(start + HOP_TIMEOUT, answer_by), deadline=answer_by)
             try:
                 connection.request("GET", url.target, headers=dict(headers))
                 connection.raw.settimeout(connection.left())
