@@ -39,9 +39,22 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# The boot script staged verbatim into the initrd (0014 rev 5, design §2.8):
+# checked by SOURCE TEXT, not by extracting it back out of a built initrd --
+# the build copies it byte-for-byte (appliance/netboot_initramfs/hooks), so
+# the repo file IS the shipped content.
+DEFAULT_BOOT_SCRIPT = (
+    Path(__file__).resolve().parent.parent
+    / "appliance" / "netboot_initramfs" / "scripts" / "photowall-netboot"
+)
+
+_PANIC_DEFINITION = re.compile(r"(?m)^\s*panic\s*\(\s*\)\s*\{")
+_REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
 
 # Present-or-fail globs, matched against normalised member paths.
 REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
@@ -142,6 +155,28 @@ def check_listing(members) -> list[str]:
     return violations
 
 
+def check_boot_script(text: str) -> list[str]:
+    """Return the s2a liveness contract violations for the boot script's
+    SOURCE TEXT (0014 rev 5, design §2.8; empty = pass).
+
+    A `reboot` command runs the kernel's reboot notifier, which stops the
+    Pi's watchdog and shuts devices down BEFORE resetting -- the very hang
+    this script exists to recover from, with nothing left watching. The
+    script must instead (re)define `panic()`, so every later `panic()` call
+    -- including one initramfs-tools itself makes after mountroot returns --
+    leaves through `photowall_restart`. Full-line `#` comments (this
+    function's own explanation of what the script no longer does) are
+    stripped first, so documenting the retired behaviour is not itself a
+    violation."""
+    code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+    violations: list[str] = []
+    if _REBOOT_TOKEN.search(code):
+        violations.append("boot script contains a 'reboot' command")
+    if not _PANIC_DEFINITION.search(code):
+        violations.append("boot script does not define panic()")
+    return violations
+
+
 def _lsinitramfs(initrd: Path) -> list[str]:
     result = subprocess.run(
         ["lsinitramfs", str(initrd)],
@@ -158,6 +193,9 @@ def main(argv=None) -> int:
                         help="initrd image to inspect via lsinitramfs")
     parser.add_argument("--listing", type=Path,
                         help="a file holding a pre-captured lsinitramfs listing")
+    parser.add_argument("--boot-script", type=Path, default=DEFAULT_BOOT_SCRIPT,
+                        help="the photowall-netboot source to content-check "
+                             "(default: the repo's own copy)")
     args = parser.parse_args(argv)
 
     if args.initrd and args.listing:
@@ -171,6 +209,7 @@ def main(argv=None) -> int:
         members = _lsinitramfs(args.initrd)
 
     violations = check_listing(members)
+    violations += check_boot_script(args.boot_script.read_text())
     for violation in violations:
         print(violation)
     if violations:

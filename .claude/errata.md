@@ -1179,3 +1179,12 @@ doc softenings.
   turns that case red. Both stagings are kept.
 - **P2: comments.** `central/kernel/ports.py` (`PublishedRelease.upstream_version`) and 029's
   header now say "valid and complete"; design §3 (glossary) and §6.1/§6.3 are listed for bead 5.
+
+## netboot-reach-central p1 S0 (liveness)
+
+- 2026-09-26, bead S0: the frozen page (slices.md §S0 "Removed") says `reboot_path_watched`
+  in `appliance/bootstrap.py` is replaced by `missing_kernel_liveness`. Reality: no
+  `reboot_path_watched` symbol exists anywhere in the tree (`grep -rn` over `*.py` from repo
+  root finds none, before this bead's changes). Evidence: `git grep -n reboot_path_watched`
+  (pre-change tree) returns nothing. Proposed correction: drop that clause from the "Removed"
+  line; nothing needed removing beyond `LinuxOps._watchdog_fd`, which was removed as specified.

@@ -5,15 +5,26 @@ copy_verified, boot(), the trial watchdog) has been retired. What remains is
 the equipment-identity and mount plumbing that appliance/netboot_init.py
 subclasses (see NetbootOps) and that player/service.py mirrors for the flashed
 device_id derivation.
+
+This module also owns stage 1's LIVENESS keeper (0014 rev 5, design §2.8): a
+failed or hung boot must always come back. `arm_watchdog` is called first in
+`netboot_init.main()`, before any of that -- not a trial watchdog kept for one
+verification, but the one hardware watchdog stage 1 arms and hands over to
+systemd at the end of a successful mount (`Keeper.hand_over`).
 """
 
 from __future__ import annotations
 
+import array
+import fcntl
 import os
 import stat
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import Final, Protocol
 
 from contracts.equipment import READ_CAP, equipment_device_id
 
@@ -88,7 +99,6 @@ class LinuxOps:
     def __init__(self, run_root: Path = Path("/run/photo-wall")):
         self.run_root = run_root
         self.run_root.mkdir(mode=0o755, parents=True, exist_ok=True)
-        self._watchdog_fd: int | None = None
 
     def command(self, *argv: str, timeout: int = 30) -> bytes:
         with tempfile.TemporaryFile() as output:
@@ -169,3 +179,215 @@ class LinuxOps:
             if not clean:
                 raise BootstrapFatal("boot_cleanup") from None
             raise
+
+
+# --- Stage-1 liveness (0014 rev 5, design §2.8) -----------------------------
+#
+# One rule: every segment of the boot cycle has one owner that resets the Pi
+# if it stops, and every failure exit keeps that owner armed. Stage 1's owner
+# is the hardware watchdog, armed first in `netboot_init.main()` (124s),
+# petted by every phase line, every base block (`Keeper.paced`) and the FAILED
+# line, and handed to systemd (`Keeper.hand_over`) once, as stage 1's last act
+# after a successful mount. Neither `WatchdogDevice` nor `Keeper` exposes a way
+# to disarm the hardware: a close without the magic 'V' write leaves it
+# running, which is the point (an unhandled crash must still reset the Pi).
+
+WATCHDOG_DEVICES: Final = (Path("/dev/watchdog0"), Path("/dev/watchdog"))
+STAGE1_WATCHDOG_TIMEOUT: Final = 124  # s: about twice the longest inter-pet wait (60s), masking-safe
+STAGE1_BUDGET: Final = 600            # s from arming; pets after this are refused
+HANDOVER_DROPIN: Final = Path("/run/systemd/system.conf.d/90-photo-wall-watchdog.conf")
+RUNTIME_WATCHDOG_SECONDS: Final = 30  # systemd pets every 15s
+REBOOT_WATCHDOG_SECONDS: Final = 300  # systemd-shutdown and the kernel's reboot path
+DRIVER_DEFAULT_TIMEOUT: Final = 15    # what an open with no WDIOC_SETTIMEOUT arms (photowall_restart)
+WATCHDOG_TIMEOUTS: Final = (STAGE1_WATCHDOG_TIMEOUT, RUNTIME_WATCHDOG_SECONDS,
+                            REBOOT_WATCHDOG_SECONDS, DRIVER_DEFAULT_TIMEOUT)
+MIN_MASKED_SECONDS: Final = 12
+
+WDIOC_SETTIMEOUT: Final = 0xC0045706
+WDIOC_KEEPALIVE: Final = 0x80045705
+
+
+def masked_hardware_seconds(timeout: int) -> int:
+    """PURE. What a Pi watchdog driver that MASKS instead of clamping programs
+    into the hardware for `timeout`: some older Raspberry Pi kernel branches
+    take only the low 4 bits of the requested seconds instead of clamping a
+    long timeout to the hardware's 16s ceiling, so (for example) 120s becomes
+    an 8s hardware timeout. Every value in WATCHDOG_TIMEOUTS must clear
+    MIN_MASKED_SECONDS on either driver variant, so the kernel's ~8s hardware
+    pings keep a margin whatever kernel is staged."""
+    return ((timeout << 16) & 0xFFFFF) >> 16
+
+
+# (what the running kernel exposes, the value that means "on", the cmdline parameter)
+KERNEL_LIVENESS: Final[tuple[tuple[Path, str, str], ...]] = (
+    (Path("/sys/module/watchdog/parameters/stop_on_reboot"), "0", "watchdog.stop_on_reboot=0"),
+    (Path("/proc/sys/kernel/hung_task_panic"), "1", "hung_task_panic=1"),
+)
+
+
+def read_text(path: Path) -> str | None:
+    """The stripped text of `path`, or None if it does not exist or cannot be
+    read. Shared default reader for `missing_kernel_liveness`."""
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def missing_kernel_liveness(checks: Sequence[tuple[Path, str, str]] = KERNEL_LIVENESS,
+                            read: Callable[[Path], str | None] = read_text) -> list[str]:
+    """The cmdline parameters (the third element of each `checks` row) whose
+    effect the running kernel does not show -- an unreadable path counts as
+    missing. Stage 1 logs one note naming them and boots on regardless."""
+    return [parameter for path, expected, parameter in checks if read(path) != expected]
+
+
+class WatchdogDevice(Protocol):
+    """The kernel watchdog API, deliberately with no way to stop it."""
+
+    def set_timeout(self, seconds: int) -> int: ...  # WDIOC_SETTIMEOUT; returns what the driver accepted
+
+    def keepalive(self) -> None: ...                 # WDIOC_KEEPALIVE
+
+    def release(self) -> None: ...                   # close WITHOUT the magic 'V': the hardware keeps counting
+
+
+class _RealWatchdogDevice:
+    """The real `WatchdogDevice`: a character-device fd. `release` only closes
+    the fd -- it never writes 'V' and never issues WDIOS_DISABLECARD, so the
+    hardware keeps counting after we let go of it."""
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path = str(path)
+        self._fd = fd
+
+    def set_timeout(self, seconds: int) -> int:
+        accepted = array.array("i", [seconds])
+        fcntl.ioctl(self._fd, WDIOC_SETTIMEOUT, accepted, True)
+        return accepted[0]
+
+    def keepalive(self) -> None:
+        fcntl.ioctl(self._fd, WDIOC_KEEPALIVE, array.array("i", [0]), True)
+
+    def release(self) -> None:
+        os.close(self._fd)
+
+
+def open_watchdog(paths: Sequence[Path] = WATCHDOG_DEVICES) -> WatchdogDevice | None:
+    """The first path in `paths` that opens as a character device (write-only,
+    close-on-exec), else None."""
+    for path in paths:
+        try:
+            fd = os.open(str(path), os.O_WRONLY | os.O_CLOEXEC)
+        except OSError:
+            continue
+        try:
+            if not stat.S_ISCHR(os.fstat(fd).st_mode):
+                os.close(fd)
+                continue
+        except OSError:
+            os.close(fd)
+            continue
+        return _RealWatchdogDevice(path, fd)
+    return None
+
+
+class Keeper(Protocol):
+    """What stage 1 pets. Returned only by `arm_watchdog`."""
+
+    def pet(self) -> None: ...
+
+    def paced(self, blocks: Iterable[bytes]) -> Iterator[bytes]:
+        """Yield each block unchanged and pet after each one."""
+
+    def hand_over(self) -> None:
+        """Write HANDOVER_DROPIN (atomic, mode 0644), pet once, release the
+        device. Called once, after the base is mounted, as stage 1's last
+        act."""
+
+    @property
+    def summary(self) -> str: ...  # "armed device=/dev/watchdog0 timeout=124s" | "unarmed reason=no_device"
+
+
+def handover_dropin() -> bytes:
+    """PURE. Rendered from RUNTIME_WATCHDOG_SECONDS and REBOOT_WATCHDOG_SECONDS."""
+    return (f"[Manager]\nRuntimeWatchdogSec={RUNTIME_WATCHDOG_SECONDS}s\n"
+            f"RebootWatchdogSec={REBOOT_WATCHDOG_SECONDS}s\n").encode("ascii")
+
+
+def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+class _Keeper:
+    """The real Keeper: arm_watchdog's return value."""
+
+    def __init__(self, *, device: WatchdogDevice | None, accepted: int | None, reason: str | None,
+                 dropin: Path, deadline: float, monotonic: Callable[[], float]) -> None:
+        self._device = device
+        self._accepted = accepted
+        self._reason = reason
+        self._dropin = dropin
+        self._deadline = deadline
+        self._monotonic = monotonic
+
+    def pet(self) -> None:
+        if self._device is None:
+            return
+        if self._monotonic() >= self._deadline:
+            return
+        self._device.keepalive()
+
+    def paced(self, blocks: Iterable[bytes]) -> Iterator[bytes]:
+        for block in blocks:
+            yield block
+            self.pet()
+
+    def hand_over(self) -> None:
+        _atomic_write(self._dropin, handover_dropin(), mode=0o644)
+        if self._device is not None:
+            self._device.keepalive()
+            self._device.release()
+
+    @property
+    def summary(self) -> str:
+        if self._device is None:
+            return f"unarmed reason={self._reason}"
+        path = getattr(self._device, "path", "device")
+        return f"armed device={path} timeout={self._accepted}s"
+
+
+def arm_watchdog(*, device: WatchdogDevice | None, timeout: int = STAGE1_WATCHDOG_TIMEOUT,
+                 budget: float = STAGE1_BUDGET, dropin: Path = HANDOVER_DROPIN,
+                 monotonic: Callable[[], float] = time.monotonic) -> Keeper:
+    """Set the timeout and pet once. No device, or a timeout the driver
+    refuses to set (OSError), gives an unarmed Keeper: `pet` does nothing, and
+    `hand_over` still writes the drop-in, so systemd arms the watchdog in
+    stage 2. After `budget` seconds `pet` does nothing, so stage 1 cannot
+    outlive it."""
+    deadline = monotonic() + budget
+    if device is None:
+        return _Keeper(device=None, accepted=None, reason="no_device", dropin=dropin,
+                       deadline=deadline, monotonic=monotonic)
+    try:
+        accepted = device.set_timeout(timeout)
+    except OSError:
+        return _Keeper(device=None, accepted=None, reason="set_timeout", dropin=dropin,
+                       deadline=deadline, monotonic=monotonic)
+    device.keepalive()
+    return _Keeper(device=device, accepted=accepted, reason=None, dropin=dropin,
+                   deadline=deadline, monotonic=monotonic)

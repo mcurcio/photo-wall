@@ -6,14 +6,48 @@ PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
 
+# --- Stage-1 liveness (0014 rev 5, design §2.8) -----------------------------
+# Redefines initramfs-tools' own panic() the moment THIS script is sourced, so
+# every later panic() call -- ours below, and any init makes on its own after
+# mountroot returns (for example "No init found" once the base is mounted) --
+# leaves through photowall_restart rather than opening an interactive shell.
+# Defined at the TOP LEVEL (not inside mountroot), so it is already in scope
+# for every one of those later calls.
+panic()
+{
+    echo "$@"
+    photowall_restart
+}
+
+# Never returns. Replaces the old `sleep 5; reboot -f; while :; do sleep 60;
+# done`: `reboot -f` runs the kernel's reboot notifier, which stops the Pi's
+# watchdog (bcm2835_wdt) and shuts devices down BEFORE resetting -- the
+# suspected hang, with nothing watching it. sysrq `b` (emergency restart)
+# skips both; the hardware watchdog is the backstop if sysrq itself hangs.
+# The watchdog paths and the sysrq trigger are overridable (default: the real
+# device/procfs paths) so a test shim can redirect them to temp files; the
+# sleep is overridable so a test does not have to wait out the real pause.
+photowall_restart()
+{
+    sleep "${PHOTOWALL_RESTART_SLEEP:-5}"
+    # Open then close the first watchdog device that accepts it: arms it (at
+    # the driver's default timeout) if stage 1 never got the chance to, and a
+    # bare close with no magic 'V' write pings once and leaves it running.
+    # shellcheck disable=SC2086
+    for device in ${PHOTOWALL_WATCHDOG_PATHS:-/dev/watchdog0 /dev/watchdog}; do
+        if : >"$device" 2>/dev/null; then
+            break
+        fi
+    done
+    echo b >"${PHOTOWALL_SYSRQ_TRIGGER:-/proc/sysrq-trigger}" 2>/dev/null
+    while :; do sleep 60; done
+}
+
 mount_top() { :; }
 mount_premount() { :; }
 mount_bottom() { :; }
 mountroot()
 {
-    # Noble panic() honors this value and reboots without opening a shell.
-    # Keep it explicit here as well as in the common kernel command line.
-    panic=10
     # No configure_networking here: appliance.netboot_init brings up networking
     # itself (NetbootOps.configure_networking sources /scripts/functions and
     # runs configure_networking) before it fetches the base squashfs. Calling it
@@ -29,15 +63,12 @@ mountroot()
     # handles it) and only exec the redirect when we know the open succeeds. If
     # it does not, we run unredirected and ConsoleLog owns console I/O, falling
     # back to stderr itself. photowall.debug=1 makes the init pause ~60s before
-    # returning so the console is readable before the reboot below.
+    # returning so the console is readable before the restart below.
     if : >/dev/console 2>/dev/null; then
         exec >/dev/console 2>&1
     fi
     if ! /usr/bin/python3 -I -m appliance.netboot_init --rootmnt "$rootmnt"; then
         echo "photo-wall: netboot_failed" >&2
-        sleep 5
-        reboot -f
-        # Fail closed if reboot is unavailable; never enter an interactive shell.
-        while :; do sleep 60; done
+        photowall_restart
     fi
 }

@@ -57,8 +57,8 @@ class RecordingLog:
 
 
 class Ops:
-    """Records every call; any ticket/watchdog/identity call fails the test
-    outright, proving the ticketless path never reaches for them."""
+    """Records every call; any ticket/identity call fails the test outright,
+    proving the ticketless path never reaches for them."""
 
     def __init__(self, path):
         self.run_root = path / "run"
@@ -96,8 +96,30 @@ class Ops:
     def time_ready(self, server):
         pytest.fail("ticketless netboot must never contact a time server")
 
-    def arm_trial_watchdog(self):
-        pytest.fail("ticketless netboot must never arm the trial watchdog")
+
+class FakeKeeper:
+    """A `Keeper` double (S0-AC6): records a pet count, how many pets happened
+    strictly before `hand_over`, and whether `hand_over` ran at all -- the
+    positive check that replaces the old "never arms the trial watchdog"
+    sentinel now that stage 1 legitimately arms a (real, non-trial) watchdog."""
+
+    def __init__(self):
+        self.pets = 0
+        self.pets_before_hand_over = None
+        self.handed_over = False
+        self.summary = "armed device=/dev/watchdog0 timeout=124s"
+
+    def pet(self):
+        self.pets += 1
+
+    def paced(self, blocks):
+        for block in blocks:
+            yield block
+            self.pet()
+
+    def hand_over(self):
+        self.pets_before_hand_over = self.pets
+        self.handed_over = True
 
 
 class Fetcher:
@@ -142,9 +164,11 @@ def capturing_factory(fetcher_cls=Fetcher):
     return factory
 
 
-def run(cmd, rootmnt, *, ops, fetcher_factory=Fetcher, serial_reader=lambda: SERIAL, log=None):
-    return netboot(cmd, rootmnt, ops=ops, fetcher_factory=fetcher_factory,
-                   serial_reader=serial_reader, log=log or RecordingLog())
+def run(cmd, rootmnt, *, ops, fetcher_factory=Fetcher, serial_reader=lambda: SERIAL, log=None,
+        keeper=None):
+    return netboot(cmd, rootmnt, keeper=keeper or FakeKeeper(), ops=ops,
+                   fetcher_factory=fetcher_factory, serial_reader=serial_reader,
+                   log=log or RecordingLog())
 
 
 def test_happy_path_fetches_verifies_mounts_writes_no_ticketed_context(tmp_path):
@@ -155,6 +179,39 @@ def test_happy_path_fetches_verifies_mounts_writes_no_ticketed_context(tmp_path)
     assert ops.calls == ["configure_networking", "network_info", "resolve", "ram", "mount_root"]
     assert ops.mounted == [(BODY, rootmnt)]
     assert not (ops.run_root / "boot.json").exists()
+
+
+def test_netboot_without_keeper_raises_typeerror(tmp_path):
+    # S0-AC6: keeper has no default, so an omitted keeper fails at the call
+    # site (TypeError) instead of reaching the real network or clock unwatched.
+    with pytest.raises(TypeError):
+        netboot(cmdline(), tmp_path / "root", ops=Ops(tmp_path))
+
+
+def test_keeper_pets_before_every_phase_line_pets_every_block_and_hands_over_last(tmp_path):
+    ops = Ops(tmp_path)
+    keeper = FakeKeeper()
+    run(cmdline(), tmp_path / "root", ops=ops, keeper=keeper)
+
+    # One base block (BODY is yielded as a single chunk by Fetcher) plus one
+    # pet per phase line (1-6, then 9 twice: "mounting" and "success").
+    assert keeper.pets >= 1 + 6 + 2   # at least: 1 per numbered phase line, 1 per block
+    assert keeper.handed_over is True
+    # hand_over is the LAST call: every recorded pet happened before it.
+    assert keeper.pets_before_hand_over == keeper.pets
+
+
+def test_keeper_hand_over_never_runs_on_a_failed_boot(tmp_path):
+    ops = Ops(tmp_path)
+    keeper = FakeKeeper()
+
+    class WrongDigest(Fetcher):
+        digest_header = "sha-256=" + base64.b64encode(bytes(32)).decode()
+
+    with pytest.raises(NetbootError, match="netboot_integrity"):
+        run(cmdline(), tmp_path / "root", ops=ops, fetcher_factory=WrongDigest, keeper=keeper)
+    assert keeper.handed_over is False
+    assert keeper.pets > 0  # the FAILED line still pets
 
 
 def test_serial_is_sent_as_request_header(tmp_path):

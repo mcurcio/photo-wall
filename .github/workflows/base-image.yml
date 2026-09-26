@@ -17,8 +17,12 @@ on:
       - appliance/rpi_image_gen/**
       - appliance/netboot_initramfs/**
       - appliance/netboot_init.py
+      - appliance/bootstrap.py
+      - appliance/systemd/photo-wall-provision.service
       - scripts/build_netboot_bundle.sh
       - scripts/verify_netboot_initrd.py
+      - scripts/kernel_config_check.py
+      - scripts/eeprom_update.py
       - scripts/build_player_deb.py
       - .github/workflows/base-image.yml
   # Reused by release.yml to build the release assets (the netboot base bundle
@@ -425,7 +429,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/netboot-kernel-out
-          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'appliance/netboot_init.py', 'appliance/bootstrap.py', 'appliance/provision.py', 'appliance/__init__.py', 'contracts/__init__.py', 'contracts/release.py', 'contracts/equipment.py', 'scripts/build_netboot_bundle.sh', 'scripts/verify_netboot_initrd.py', '.github/workflows/base-image.yml') }}
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'appliance/netboot_init.py', 'appliance/bootstrap.py', 'appliance/provision.py', 'appliance/__init__.py', 'contracts/__init__.py', 'contracts/release.py', 'contracts/equipment.py', 'scripts/build_netboot_bundle.sh', 'scripts/verify_netboot_initrd.py', 'scripts/kernel_config_check.py', 'scripts/eeprom_update.py', '.github/workflows/base-image.yml') }}
 
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
@@ -484,11 +488,14 @@ jobs:
             tail -n 60 "$DIAG/apt-update.log" >&2
             exit 1
           fi
+          # rpi-eeprom (alongside the kernel + firmware) packages the bootloader
+          # images build_eeprom_update.py rebuilds into the TFTP self-update
+          # pair (0014 rev 5, design §2.8) -- pieeprom.upd/.sig, staged below.
           if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
               apt-get install -y --no-install-recommends \
-              linux-image-rpi-2712 raspi-firmware \
+              linux-image-rpi-2712 raspi-firmware rpi-eeprom \
               > "$DIAG/apt-install-kernel.log" 2>&1; then
-            echo "kernel/raspi-firmware install failed; tail:" >&2
+            echo "kernel/raspi-firmware/rpi-eeprom install failed; tail:" >&2
             tail -n 80 "$DIAG/apt-install-kernel.log" >&2
             exit 1
           fi
@@ -523,6 +530,30 @@ jobs:
             exit 1
           fi
           echo "kernel version: $kver" | tee "$DIAG/kernelver.txt"
+
+          # Stage-1 liveness (0014 rev 5, design §2.8 and §5) needs the
+          # watchdog device and the emergency-restart sysrq built INTO this
+          # kernel, not loadable -- nothing in the initramfs can `modprobe`
+          # them. Checked against the packaged config, not the running
+          # kernel's /proc, because this runner never boots it. A failure
+          # here is a STOP: the packaged kernel no longer matches what S0
+          # assumed (parked §B), never a silent skip.
+          kernel_config="$SCRATCH/boot/config-$kver"
+          if [ ! -f "$kernel_config" ]; then
+            echo "no $kernel_config (packaged kernel ships no config-<version>)" >&2
+            exit 1
+          fi
+          # sudo: $SCRATCH/boot is still root-owned/non-world-readable here
+          # (the `chmod -R a+rX` below runs later, once the chroot's mounts
+          # are torn down).
+          sudo .venv/bin/python "$GITHUB_WORKSPACE/scripts/kernel_config_check.py" \
+            --config "$kernel_config" \
+            --symbol WATCHDOG_CORE --symbol BCM2835_WDT \
+            --symbol MAGIC_SYSRQ --symbol DETECT_HUNG_TASK
+          # $kernel_config itself is copied into $KOUT below (once $KOUT
+          # exists), so the cache-hit leg can re-assert the SAME check
+          # against a config Cache B restored, without re-installing the
+          # kernel package.
 
           if ! sudo chroot "$SCRATCH" mkinitramfs -o /boot/initrd.img "$kver" \
               > "$DIAG/mkinitramfs.log" 2>&1; then
@@ -565,6 +596,17 @@ jobs:
           if [ -n "$any_dtbo" ]; then
             overlays_dir=$(dirname "$any_dtbo")
           fi
+          # The packaged rpi-eeprom bootloader image build_eeprom_update.py
+          # rebuilds into pieeprom.upd/.sig (0014 rev 5, design §2.8). "default"
+          # is the release rpi-eeprom recommends for boards already in the
+          # field; sorted so the newest dated image wins if more than one ships.
+          eeprom_image=$(sudo find "$SCRATCH/usr/lib/firmware/raspberrypi/bootloader-2712/default" \
+            -maxdepth 1 -name 'pieeprom-*.bin' 2>/dev/null | sort | tail -n1)
+          if [ -z "$eeprom_image" ]; then
+            echo "no pieeprom-*.bin under bootloader-2712/default" >&2
+            sudo find "$SCRATCH/usr/lib/firmware/raspberrypi" -maxdepth 3 >&2 || true
+            exit 1
+          fi
           echo "kernel_img=$kernel_img"       >> "$GITHUB_OUTPUT"
           echo "initrd=$SCRATCH/boot/initrd.img" >> "$GITHUB_OUTPUT"
           echo "dtb=$dtb"                       >> "$GITHUB_OUTPUT"
@@ -585,12 +627,30 @@ jobs:
           sudo cp "$kernel_img" "$KOUT/kernel"
           sudo cp "$SCRATCH/boot/initrd.img" "$KOUT/initrd.img"
           sudo cp "$dtb" "$KOUT/dtb"
+          sudo cp "$eeprom_image" "$KOUT/pieeprom.bin"
+          sudo cp "$kernel_config" "$KOUT/kernel-config"
           if [ -n "$overlays_dir" ]; then
             sudo cp "$overlays_dir"/*.dtbo "$KOUT/overlays/" 2>/dev/null || true
           fi
           # World-readable (and dirs traversable) so the unprivileged cache-save
           # and assembly steps can read the root-owned copies.
           sudo chmod -R a+rX "$KOUT"
+
+      # The cache-miss leg above already ran this check against the config it
+      # just installed; on a cache HIT that step (and its apt-get install) is
+      # skipped entirely, so re-assert the SAME check against the config copy
+      # Cache B restored -- a stale hit must not silently carry a kernel whose
+      # watchdog/sysrq support regressed (0014 rev 5, design §5).
+      - name: Verify the cached kernel config still builds in watchdog + sysrq support
+        if: steps.cache-kernel.outputs.cache-hit == 'true'
+        env:
+          KOUT: ${{ runner.temp }}/netboot-kernel-out
+        run: |
+          set -eu
+          .venv/bin/python scripts/kernel_config_check.py \
+            --config "$KOUT/kernel-config" \
+            --symbol WATCHDOG_CORE --symbol BCM2835_WDT \
+            --symbol MAGIC_SYSRQ --symbol DETECT_HUNG_TASK
 
       # Consumes the FIXED-LAYOUT $KOUT (freshly built OR Cache B-restored) and
       # the squashfs (freshly built OR Cache A-restored), so it is NOT gated by
@@ -618,6 +678,7 @@ jobs:
             --kernel "$KOUT/kernel" \
             --initrd "$KOUT/initrd.img" \
             --dtb "$KOUT/dtb" \
+            --eeprom-image "$KOUT/pieeprom.bin" \
             $overlay_arg \
             --squashfs "$squashfs" \
             --output "$BUNDLE" \
@@ -636,6 +697,7 @@ jobs:
           # Required artifacts present.
           for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
                    boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
+                   boot/pieeprom.upd boot/pieeprom.sig \
                    photo-wall-base.squashfs SHA256SUMS; do
             [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
           done
@@ -659,13 +721,25 @@ jobs:
             || violation "SHA256SUMS re-verification failed"
 
           # No signed / trust material anywhere in the bundle (this path is
-          # unsigned by construction -- 0008 boot-chain).
+          # unsigned by construction -- 0008 boot-chain). pieeprom.sig is the
+          # bootloader's own rpi-eeprom-digest over pieeprom.upd (0014 rev 5,
+          # design §2.8), not app/release trust material, so it is exempt.
           signed=$(find "$BUNDLE" \( -name '*.sig' -o -name 'release.pub.pem' \
             -o -name 'ca.pem' -o -name 'bootstrap.json' \
-            -o -name 'boot-policy.json' \) 2>/dev/null || true)
+            -o -name 'boot-policy.json' \) ! -name 'pieeprom.sig' 2>/dev/null || true)
           if [ -n "$signed" ]; then
             violation "signed material present in bundle: $signed"
           fi
+
+          # eeprom_update.py already refused (nonzero exit) to build an update
+          # missing either setting; re-read the built pieeprom.upd's embedded
+          # config partition (plain text) back here as a belt-and-braces check
+          # -- the host runner has no rpi-eeprom-config, so this greps the raw
+          # bytes rather than parsing the image.
+          for setting in 'BOOT_ORDER=0xf21' 'BOOT_WATCHDOG_TIMEOUT=120'; do
+            grep -aq -- "$setting" "$BUNDLE/boot/pieeprom.upd" \
+              || violation "pieeprom.upd missing required setting $setting"
+          done
 
           # cmdline.txt template contract (central-discovery model,
           # build_netboot_bundle.sh): exactly ONE non-comment kernel command
@@ -679,7 +753,8 @@ jobs:
             || violation "cmdline.txt has $cmd_lines command lines, expected exactly 1"
           printf '%s' "$cmd" | grep -q 'photowall.central=@@PHOTOWALL_CENTRAL@@' \
             || violation "cmdline.txt missing photowall.central=@@PHOTOWALL_CENTRAL@@"
-          for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10'; do
+          for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' \
+                     'watchdog.stop_on_reboot=0' 'hung_task_panic=1'; do
             printf '%s' "$cmd" | grep -q -- "$tok" \
               || violation "cmdline.txt missing static token $tok"
           done

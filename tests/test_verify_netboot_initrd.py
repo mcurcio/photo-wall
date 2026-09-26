@@ -10,6 +10,8 @@ import pytest
 
 from scripts.verify_netboot_initrd import (
     CLOSURE_MODULES,
+    DEFAULT_BOOT_SCRIPT,
+    check_boot_script,
     check_listing,
     main,
 )
@@ -110,3 +112,44 @@ def test_main_listing_fail(tmp_path, capsys):
     listing.write_text("\n".join(GOLDEN + [f"{_PREFIX}/appliance/updates.py"]) + "\n")
     assert main(["--listing", str(listing)]) == 1
     assert "FAIL" in capsys.readouterr().out
+
+
+# --- S0-AC8: the boot script's SOURCE TEXT (0014 rev 5, design §2.8) ------
+
+def test_check_boot_script_passes_the_repo_script():
+    assert check_boot_script(DEFAULT_BOOT_SCRIPT.read_text()) == []
+
+
+def test_check_boot_script_fails_a_reboot_command():
+    text = "panic() { :; }\nphotowall_restart() { reboot -f; }\n"
+    violations = check_boot_script(text)
+    assert any("reboot" in v for v in violations)
+
+
+def test_check_boot_script_ignores_reboot_mentioned_only_in_a_comment():
+    text = "# once called reboot -f here\npanic() { :; }\n"
+    assert check_boot_script(text) == []
+
+
+def test_check_boot_script_fails_when_panic_is_not_defined():
+    text = "photowall_restart() { echo b > /proc/sysrq-trigger; }\n"
+    violations = check_boot_script(text)
+    assert any("panic" in v for v in violations)
+
+
+def test_main_content_checks_the_boot_script_by_default(tmp_path, capsys):
+    # main()'s --boot-script defaults to the repo's own copy, so a listing-only
+    # invocation still content-checks it (no --boot-script argument given).
+    listing = tmp_path / "listing.txt"
+    listing.write_text("\n".join(GOLDEN) + "\n")
+    assert main(["--listing", str(listing)]) == 0
+
+
+def test_main_fails_on_an_explicit_bad_boot_script(tmp_path, capsys):
+    listing = tmp_path / "listing.txt"
+    listing.write_text("\n".join(GOLDEN) + "\n")
+    bad_script = tmp_path / "photowall-netboot"
+    bad_script.write_text("reboot -f\n")
+    assert main(["--listing", str(listing), "--boot-script", str(bad_script)]) == 1
+    out = capsys.readouterr().out
+    assert "reboot" in out and "panic" in out

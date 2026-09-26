@@ -97,6 +97,31 @@ class _Log:
         pass
 
 
+class _Keeper:
+    """A `Keeper` double (S0-AC6b): every one of this file's six `netboot(`
+    call sites passes one, and one test asserts `hand_over` runs only after
+    the real download and mount."""
+
+    def __init__(self):
+        self.pets = 0
+        self.handed_over = False
+
+    def pet(self):
+        self.pets += 1
+
+    def paced(self, blocks):
+        for block in blocks:
+            yield block
+            self.pet()
+
+    def hand_over(self):
+        self.handed_over = True
+
+    @property
+    def summary(self):
+        return "armed device=/dev/watchdog0 timeout=124s"
+
+
 class _Ops:
     """Injected ram/mount ops (as the unit test does) -- no real root pivot; the
     HTTP fetch that feeds `mount_root` is real."""
@@ -233,9 +258,11 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
     ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
         # --- Phase 1: REAL netboot base fetch over the wire ---
+        keeper = _Keeper()
         netboot(
             {"photowall.central": origin + "/"},
             tmp_path / "root",
+            keeper=keeper,
             ops=ops,
             serial_reader=_serial_reader(tmp_path),
             log=_Log(),
@@ -244,6 +271,9 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
         # bytes AND ran the server-side route), not a string-equality assert.
         assert ("resolve", "127.0.0.1") in ops.calls
         assert ops.mounted and ops.mounted[0][0] == SQUASHFS      # runtime downloaded
+        # S0-AC6b: hand_over runs once, after the real download and mount.
+        assert keeper.handed_over is True
+        assert keeper.pets > 0
         # The serial reached the SERVER, not just the client's header: the 200
         # recorded the served tag on the device row that serial derives.
         row = _served_row(registry)
@@ -321,7 +351,7 @@ def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registr
     app = _app(registry, cache_root)
     with _serve(app) as origin:
         # (1) real base serve over the wire -> records last_served_tag = TAG.
-        netboot({"photowall.central": origin + "/"}, tmp_path / "root", ops=ops,
+        netboot({"photowall.central": origin + "/"}, tmp_path / "root", keeper=_Keeper(), ops=ops,
                 serial_reader=_serial_reader(tmp_path), log=_Log())
         assert ops.mounted and ops.mounted[0][0] == SQUASHFS
 
@@ -354,7 +384,7 @@ def test_base_health_with_a_guessed_tag_is_rejected_over_the_wire(registry, tmp_
     ops = _Ops(tmp_path / "run")
     app = _app(registry, cache_root)
     with _serve(app) as origin:
-        netboot({"photowall.central": origin + "/"}, tmp_path / "root", ops=ops,
+        netboot({"photowall.central": origin + "/"}, tmp_path / "root", keeper=_Keeper(), ops=ops,
                 serial_reader=_serial_reader(tmp_path), log=_Log())
         status, accepted = _post_base_health(
             origin,
@@ -381,6 +411,7 @@ def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
             netboot(
                 {"photowall.central": origin + "/"},
                 tmp_path / "root",
+                keeper=_Keeper(),
                 ops=ops,
                 serial_reader=_serial_reader(tmp_path),
                 log=_Log(),
@@ -401,6 +432,7 @@ def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
             netboot(
                 {"photowall.central": origin + "/"},
                 tmp_path / "root",
+                keeper=_Keeper(),
                 ops=ops,
                 serial_reader=_serial_reader(tmp_path),
                 log=_Log(),
@@ -443,6 +475,7 @@ def test_missing_digest_header_fails_closed_over_the_wire(tmp_path):
             netboot(
                 {"photowall.central": origin + "/"},
                 tmp_path / "root",
+                keeper=_Keeper(),
                 ops=ops,
                 serial_reader=_serial_reader(tmp_path),
                 log=_Log(),

@@ -6,7 +6,10 @@ This is a NEW, additive boot path. It does not touch, replace, or retire
 `appliance/bootstrap.py`'s `boot()` (the ticket/signed-rootfs flow) -- that
 stays live for the existing netboot tier and its e2e coverage. This module
 boots the *unsigned* rpi-image-gen base squashfs instead: no boot ticket, no
-signature verification, and no trial watchdog.
+signature verification. It does arm the stage-1 LIVENESS watchdog (0014 rev 5,
+design §2.8) -- not a trial watchdog kept for one verification, but the one
+hardware watchdog `main()` arms first and hands to systemd once the base is
+mounted (see `keeper` below and `appliance.bootstrap.arm_watchdog`).
 
 Central-discovery boot model
 ----------------------------
@@ -68,7 +71,16 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
-from appliance.bootstrap import CHUNK, BootstrapFatal, LinuxOps, read_pi_serial
+from appliance.bootstrap import (
+    CHUNK,
+    BootstrapFatal,
+    Keeper,
+    LinuxOps,
+    arm_watchdog,
+    missing_kernel_liveness,
+    open_watchdog,
+    read_pi_serial,
+)
 from appliance.provision import MAX_APP_PACKAGE_BYTES, AppFetcher, ProvisionError
 from contracts.release import MAX_ROOTFS_BYTES
 
@@ -90,6 +102,10 @@ CONSOLE_PATH = "/dev/console"
 KMSG_PATH = "/dev/kmsg"
 LOG_PREFIX = "photo-wall[netboot]"
 PROGRESS_INTERVAL = 50 * 1024 * 1024
+# The initramfs-tools `configure_networking` shell helper's own bound (0014
+# rev 5, design §2.8: named so S0-AC7's budget/timeout assertions import it
+# rather than a magic 60 duplicated in a test).
+NETWORKING_TIMEOUT_SECONDS = 60
 DEBUG_PAUSE_SECONDS = 60
 # Whole-acquisition deadline for the base fetch. AppFetcher's default is 60s and
 # its hard ceiling is 300s; a <=1 GiB base needs more than 60s on a slow LAN, and
@@ -154,11 +170,13 @@ class ConsoleLog:
 class NetbootOps(LinuxOps):
     """`LinuxOps` plus network bring-up and console-diagnostic reads.
 
-    Deliberately does NOT add or override `time_ready`, `device_id`,
-    `boot_id`, or `arm_trial_watchdog` -- this path never enrolls, never
-    verifies a signature, and never arms the trial watchdog, so those steps
-    are simply absent rather than stubbed. `mount_root`, `_prepare_root`,
-    `ram`, and `command` are inherited from `LinuxOps` unchanged.
+    Deliberately does NOT add or override `time_ready`, `device_id`, or
+    `boot_id` -- this path never enrolls and never verifies a signature, so
+    those steps are simply absent rather than stubbed. The stage-1 hardware
+    watchdog is a `Keeper` (`appliance.bootstrap.arm_watchdog`), armed once in
+    `main()` and passed into `netboot()`; it is not equipment state `NetbootOps`
+    owns. `mount_root`, `_prepare_root`, `ram`, and `command` are inherited from
+    `LinuxOps` unchanged.
     """
 
     def configure_networking(self) -> None:
@@ -168,7 +186,7 @@ class NetbootOps(LinuxOps):
         # out to the same helper, rather than reimplementing DHCP/`ip=`
         # parsing here.
         self.command("sh", "-c", ". /scripts/functions 2>/dev/null; configure_networking",
-                     timeout=60)
+                     timeout=NETWORKING_TIMEOUT_SECONDS)
 
     def network_info(self) -> dict[str, str]:
         """Best-effort acquired-IP / gateway / DNS-server / search-domain
@@ -368,30 +386,48 @@ def _pre_reboot_pause(debug: bool, log) -> None:
         pass
 
 
-def netboot(cmdline: Mapping[str, str], rootmnt: Path, *, ops=None,
+def _phase(log, keeper: Keeper, message: str) -> None:
+    """Log one phase line and pet the watchdog -- every phase line pets, so a
+    phase cannot be added without a pet (0014 rev 5, design §2.8)."""
+    log.info(message)
+    keeper.pet()
+
+
+def netboot(cmdline: Mapping[str, str], rootmnt: Path, *, keeper: Keeper, ops=None,
             fetcher_factory=AppFetcher, serial_reader=read_pi_serial, log=None) -> None:
     """Fetch + RAM-overlay-mount the unsigned rpi-image-gen base from Central,
     self-identifying by serial. Writes no boot-context file (module docstring,
-    step 7). On any failure, logs the phase + exception to the console and (if
+    step 7). On any failure, logs the phase + exception to the console (petting
+    `keeper` so the FAILED line itself keeps the watchdog fed) and (if
     `photowall.debug`) pauses before re-raising -- never a shell, always the
-    fail-closed reboot the shell wrapper enforces."""
+    fail-closed reboot the shell wrapper enforces. `keeper` has no default: a
+    test (or a caller) that forgets one fails with TypeError instead of running
+    unwatched."""
     debug = _is_truthy(cmdline.get("photowall.debug"))
     if log is None:
         log = ConsoleLog(debug=debug)
     try:
-        _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log)
+        _run_netboot(cmdline, rootmnt, keeper, ops, fetcher_factory, serial_reader, log)
     except BaseException as error:
         log.info(f"FAILED: {error.__class__.__name__}: {error}")
+        keeper.pet()
         _pre_reboot_pause(debug, log)
         raise
 
 
-def _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log) -> None:
-    # Phase 1: cmdline parsed -- show central + all photowall.* params.
+def _run_netboot(cmdline, rootmnt, keeper: Keeper, ops, fetcher_factory, serial_reader, log) -> None:
+    # Phase 1: cmdline parsed -- show central + all photowall.* params, this
+    # keeper's arming summary, and any kernel liveness parameter the running
+    # kernel does not show (0014 rev 5, design §2.8).
     central = cmdline.get("photowall.central")
     photowall_params = {key: value for key, value in cmdline.items()
                         if key.startswith("photowall.")}
-    log.info(f"phase 1/9 cmdline parsed: photowall.central={central!r} params={photowall_params}")
+    note = ""
+    missing = missing_kernel_liveness()
+    if missing:
+        note = f" note: kernel liveness missing: {', '.join(missing)}"
+    _phase(log, keeper, f"phase 1/9 cmdline parsed: photowall.central={central!r} "
+                        f"params={photowall_params} keeper={keeper.summary}{note}")
     if not isinstance(central, str) or not central:
         raise NetbootError("netboot_configuration")
     origin = _validate_central_root(central)
@@ -400,27 +436,27 @@ def _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log) -> 
     # Phase 2: serial read (self-supplied identity; nothing baked).
     serial = serial_reader()
     if serial is None:
-        log.info("phase 2/9 serial: UNAVAILABLE (no firmware serial-number; "
-                 "Central serves the default base)")
+        _phase(log, keeper, "phase 2/9 serial: UNAVAILABLE (no firmware serial-number; "
+                            "Central serves the default base)")
     else:
-        log.info(f"phase 2/9 serial: {serial}")
+        _phase(log, keeper, f"phase 2/9 serial: {serial}")
 
     # Phase 3: networking up -- acquired IP, gateway, DNS server(s), search.
     ops.configure_networking()
     info = ops.network_info()
-    log.info(f"phase 3/9 networking up: ip={info.get('ip', '?')} "
-             f"gateway={info.get('gateway', '?')} interface={info.get('interface', '?')} "
-             f"dns={info.get('dns', '?')} search={info.get('search', '?')}")
+    _phase(log, keeper, f"phase 3/9 networking up: ip={info.get('ip', '?')} "
+                        f"gateway={info.get('gateway', '?')} interface={info.get('interface', '?')} "
+                        f"dns={info.get('dns', '?')} search={info.get('search', '?')}")
 
     # Phase 4: DNS resolution of Central's host (the #1 field failure -- loud).
     host = urlsplit(origin).hostname
     addresses = ops.resolve(host)
-    log.info(f"phase 4/9 DNS: {host} -> {','.join(addresses)}")
+    _phase(log, keeper, f"phase 4/9 DNS: {host} -> {','.join(addresses)}")
 
     # Phase 5: HTTP request -- method, full URL, headers sent.
     url = origin + NETBOOT_BASE_PATH
     headers = {SERIAL_HEADER: serial} if serial else {}
-    log.info(f"phase 5/9 GET {url} headers={headers}")
+    _phase(log, keeper, f"phase 5/9 GET {url} headers={headers}")
 
     fetcher = fetcher_factory(origin, seconds=BASE_FETCH_SECONDS)
     ram = ops.ram()
@@ -435,7 +471,8 @@ def _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log) -> 
         raw_digest = response_headers.get("Digest")
         length = response_headers.get("Content-Length")
         captured["digest"] = parse_digest_header(raw_digest)
-        log.info(f"phase 6/9 response: 200 Digest={raw_digest!r} Content-Length={length!r}")
+        _phase(log, keeper, f"phase 6/9 response: 200 Digest={raw_digest!r} "
+                            f"Content-Length={length!r}")
         if captured["digest"] is None:
             log.info("phase 6/9 response: NO usable sha-256 Digest header -- "
                      "fetch will fail closed")
@@ -443,22 +480,28 @@ def _run_netboot(cmdline, rootmnt, ops, fetcher_factory, serial_reader, log) -> 
     try:
         chunks = fetcher.chunks(NETBOOT_BASE_PATH, MAX_ROOTFS_BYTES,
                                 headers=headers, on_response=on_response)
-        fetch_verified(chunks, image, lambda: captured.get("digest"), log=log)
-        log.info("phase 9/9 mount + handoff: mounting squashfs")
+        # keeper.paced pets once per streamed block (S0-AC4), independent of
+        # fetch_verified's own (unpetted) progress/hash-compare log lines.
+        fetch_verified(keeper.paced(chunks), image, lambda: captured.get("digest"), log=log)
+        _phase(log, keeper, "phase 9/9 mount + handoff: mounting squashfs")
         ops.mount_root(image, rootmnt)
-        log.info("phase 9/9 mount + handoff: success")
+        _phase(log, keeper, "phase 9/9 mount + handoff: success")
+        keeper.hand_over()
     except BaseException:
         image.unlink(missing_ok=True)
         raise
 
 
 def main() -> None:
+    # First, before anything else: arm the hardware watchdog (0014 rev 5,
+    # design §2.8). A failed or hung boot must always come back.
+    keeper = arm_watchdog(device=open_watchdog())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rootmnt", type=Path, default=Path("/root"))
     parser.add_argument("--cmdline", type=Path, default=Path("/proc/cmdline"))
     args = parser.parse_args()
     try:
-        netboot(parse_cmdline(read_cmdline(args.cmdline)), args.rootmnt)
+        netboot(parse_cmdline(read_cmdline(args.cmdline)), args.rootmnt, keeper=keeper)
     except (NetbootError, ProvisionError, OSError, BootstrapFatal):
         raise SystemExit("photo-wall: netboot_failed") from None
 
