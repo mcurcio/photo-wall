@@ -21,13 +21,25 @@ name: Netboot boot-chain e2e tracer (p4 s3)
 # Part B (ticketless enroll -> pending -> operator bind -> render smoke) is
 # proven by the re-keyed scripts/demo_wall.py runner under the existing
 # "Controller and Player software e2e" job; both green together gate s4.
+#
+# It also runs stage 1's uplink on the DEVICE's runtime (decision 0014 §11):
+# CI is Python 3.12 with a venv, the Pi is Debian trixie's python3 (3.13) and
+# OpenSSL (3.5) with the stdlib and the computed closure only.
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - scripts/test_netboot_e2e.py
+      - appliance/__init__.py
+      - appliance/bootstrap.py
+      - appliance/netboot_init.py
       - appliance/provision.py
+      - contracts/**
+      - uplink/**
+      - scripts/module_closure.py
+      - scripts/uplink_device_harness.py
+      - tests/tls_fixture.py
       - scripts/build_player_deb.py
       - central/content_routes.py
       - central/content_catalog/**
@@ -62,6 +74,26 @@ jobs:
         run: |
           python -m pip install uv==0.7.8
           uv sync --frozen
+
+      # Stage 1's computed closure, imported and exercised under `python3 -I -S`
+      # in debian:trixie-slim with only the closure on sys.path: the 301 chain,
+      # a TLS-to-TLS hop, the downgrade refusal and the 62/64 name mismatches,
+      # against stdlib servers inside the container. Certificates are minted
+      # here on the runner (tests/tls_fixture.py); none is kept in the tree.
+      - name: uplink on the device runtime (Python 3.13, OpenSSL 3.5)
+        run: |
+          set -eu
+          work="$RUNNER_TEMP/uplink-device"
+          .venv/bin/python scripts/module_closure.py --stage "$work/closure"
+          .venv/bin/python -m scripts.uplink_device_harness mint "$work/certs"
+          docker run --rm --platform linux/arm64 \
+            -v "$work:/work:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/uplink_device_harness.py:/harness.py:ro" \
+            debian:trixie-slim sh -ec '
+              apt-get update >/dev/null
+              apt-get install -y --no-install-recommends python3 >/dev/null
+              python3 --version
+              python3 -I -S /harness.py run --closure /work/closure --certs /work/certs'
 
       - name: Authenticate to the durable image registry
         env:

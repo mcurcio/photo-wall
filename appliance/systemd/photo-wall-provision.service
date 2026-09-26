@@ -5,8 +5,16 @@ Wants=network-online.target
 After=network-online.target
 # A base with no central on the LAN, or a central with no app promoted yet,
 # must keep retrying (appliance.provision.Bootstrapper.run loops forever by
-# default) rather than be restarted into a fresh attempt counter.
-StartLimitIntervalSec=0
+# default), so a single crash must not park the unit. But a unit that cannot
+# make ANY progress -- a crash, or an exception the provisioner does not
+# catch -- must not retry forever either (0014 rev 5, design §2.8): after 10
+# exits in 10 minutes (about a minute of crash-restarts) the Pi reboots into
+# PXE, which keeps retrying until the network answers and fetches the newest
+# base. A provisioner that is merely WAITING on a failed fetch loops
+# in-process (Restart is never triggered) and keeps waiting, uncounted.
+StartLimitIntervalSec=10min
+StartLimitBurst=10
+StartLimitAction=reboot-force
 
 [Service]
 Type=oneshot

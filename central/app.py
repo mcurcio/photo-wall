@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
@@ -36,6 +36,7 @@ from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, Scene
+from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     BaseHealth,
     Calibration,
@@ -340,6 +341,14 @@ def create_app(
             },
             status_code=200 if healthy else 503,
         )
+
+    @app.get(LOCATE_PATH)
+    def central_identity():
+        # Where a device's locate chain ends (decision 0014): no database, catalog or clock,
+        # so it answers even when /healthz says unavailable; never a redirect; `no-store` so
+        # no proxy can pin an identity.
+        return Response(identity_body(), media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
 
     # The redesigned React console (delivery plan Bead 17 cutover) is now the
     # operator surface at `/`. The bundle is BUILT (Vite) into

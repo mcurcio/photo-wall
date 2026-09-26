@@ -101,6 +101,34 @@ Define transaction boundaries and crash recovery around admission, preparation, 
 
 The Player row is intentionally absent from the durable-owner table. Player keys, tokens, epochs, plans, commitments, pins, and cache metadata are process-local. A surviving file is only a candidate until rehashed against the current central manifest. On every process start or reconnect, central issues/reconciles fresh session authority and sends the current configuration, plan, revocations, and commitments needed to converge. A log of missed commands or local journal is neither required nor trusted.
 
+## Netboot stage 1: boot data, the clock record and liveness
+
+These are the contracts stage 1 of the netboot keeps, from [decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md). They are proven by tests and CI only. The hardware milestones that would qualify them on a Pi (M0: the loop stays alive for 24 hours; M1: a real boot through the gateway's 301) have not run yet.
+
+**Boot data.** The shipped `initrd.img` is two archives. First comes a small uncompressed `newc` archive, rebuilt on every build and never cached. It is followed by the cached compressed initrd, byte for byte ([`scripts/build_boot_data.py`](../scripts/build_boot_data.py); [`tests/test_build_boot_data.py`](../tests/test_build_boot_data.py), [`tests/test_build_netboot_bundle.py`](../tests/test_build_netboot_bundle.py)). The first archive holds three things:
+
+- stage 1's first-party import closure, placed in the initrd interpreter's stdlib directory. It is computed from `appliance.netboot_init`, never listed by hand, and must stay stdlib-only ([`scripts/module_closure.py`](../scripts/module_closure.py); [`tests/test_module_closure.py`](../tests/test_module_closure.py), [`tests/test_netboot_closure.py`](../tests/test_netboot_closure.py));
+- `etc/ssl/certs/ca-certificates.crt`, copied byte for byte from the built base squashfs (R5);
+- `usr/lib/photo-wall/clock-floor`, the built revision's commit time.
+
+The build refuses a floor later than its own clock plus five minutes, and a bundle without a certificate. It warns, but does not fail, when the Debian snapshot pin is more than 90 days old. The verifier reads the closure manifest the same build wrote. It fails an initrd whose boot data lacks the bundle, the floor or a closure module, or whose cached archive holds any boot-data file, which would win ([`tests/test_verify_netboot_initrd.py`](../tests/test_verify_netboot_initrd.py)). Because none of this passes through the initrd cache, no cache key has to list it. It is still only as fresh as the snapshot pin and the TFTP staging.
+
+**Clock record.** Before the first request, stage 1 raises the clock to the floor. It then takes at most one SNTP step, from the first valid answer: first the DHCP option-42 servers the kernel's own `ip=dhcp` publishes, then `debian.pool.ntp.org`, all within one 10 s budget. The step may move the clock back, but never below the floor. A failure to get time never blocks TLS; a certificate date failure is named `time` ([`uplink/clock.py`](../uplink/clock.py), [`uplink/sntp.py`](../uplink/sntp.py); [`tests/test_uplink_clock.py`](../tests/test_uplink_clock.py), [`tests/test_uplink_sntp.py`](../tests/test_uplink_sntp.py)). What happened is written to `/run/photo-wall-clock.json` (schema 1), which switch_root carries into the base for later stages. The state is `synced` (stepped or already right), `ahead` (the answer would take the clock below the floor), or `unsynced` (no valid answer). The file is replaced atomically with mode 0644, and a reader treats anything unparsable as "not known to be synced" ([`contracts/clock_record.py`](../contracts/clock_record.py); [`tests/test_contracts_clock_record.py`](../tests/test_contracts_clock_record.py)).
+
+**One failure line.** Every stage-1 failure prints one `photo-wall[netboot] FAILED phase=<n> cause=<cause> reason=<reason> host=<host> detail=<detail>` line. Stage 1's own content checks print `code=<code>` instead. A `time` or `tls`/`untrusted` failure also shows the clock state, the sources tried and which CA list the initrd carries ([`tests/test_netboot_init.py`](../tests/test_netboot_init.py)).
+
+**Liveness.** A failed or hung boot must always come back. Each segment of the boot cycle has one owner that resets the Pi if it stops ([`tests/test_netboot_liveness.py`](../tests/test_netboot_liveness.py), [`tests/test_boot_script.py`](../tests/test_boot_script.py)):
+
+| Segment | Who resets the Pi | Its failure exit |
+|---|---|---|
+| Bootloader (DHCP, TFTP) | EEPROM `BOOT_WATCHDOG_TIMEOUT=120` | `BOOT_ORDER=0xf21`: a failed network boot starts again |
+| Kernel start until built-in drivers are probed | nobody (a stated residual) | `panic=10`, for panics only |
+| initramfs `/init` until stage 1 starts | the hung-task detector (`hung_task_panic=1`), for tasks stuck 120 s | the boot script's own `panic()` |
+| Stage 1 | the hardware watchdog, armed first at 124 s and petted by every phase line, every base block and the FAILED line | `photowall_restart`: a sysrq emergency restart, with the watchdog as backstop; the script holds no `reboot` |
+| Stage 2 | systemd, from the `/run/systemd/system.conf.d/90-photo-wall-watchdog.conf` drop-in stage 1 writes last (`RuntimeWatchdogSec=30s`, `RebootWatchdogSec=300s`); the watchdog stays armed through reboots (`watchdog.stop_on_reboot=0`) | a systemd reboot; the provisioning unit reboots after 10 exits in 10 minutes |
+
+The EEPROM settings are a provisioning requirement, not a per-Pi step. The build puts them in `pieeprom.upd` and `pieeprom.sig` in the TFTP bundle, and the bootloader updates itself from there ([`tests/test_eeprom_update.py`](../tests/test_eeprom_update.py)). The kernel must build in the watchdog, sysrq, the hung-task detector and its own DHCP; the build checks this on every run ([`tests/test_kernel_config_check.py`](../tests/test_kernel_config_check.py)).
+
 ## Failure behavior
 
 During a running-process outage, preserve already authorized visible output while its bounded lease permits it. Losing the server alone need not immediately blank a valid composition. New work, lease extension, and recovery after process restart or cold boot require central connectivity. Do not promise playback across cold reboot from cached files or old instructions.
