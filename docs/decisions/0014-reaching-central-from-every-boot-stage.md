@@ -1,10 +1,13 @@
 # 0014 — Every boot stage reaches the configured Central the same way
 
 **Date:** 2026-09-25 · **Layer:** module contracts and data flow · **Status:** Owner-reviewed
-at this layer. Feature-layer design (function names, algorithms) follows per project. Nothing
-is implemented yet.
+at this layer. Feature-layer design (function names, algorithms) follows per project. Project 1's
+feature layer was reviewed on 2026-09-26; Projects 2 and 3 have not been designed at that layer.
 
-Briefing reviewed by the owner: <https://claude.ai/artifact/WJggU5Wp2FwPNxHXFA9ivN>
+Briefings reviewed by the owner:
+
+- Module layer: <https://claude.ai/artifact/WJggU5Wp2FwPNxHXFA9ivN>
+- Project 1, feature layer: <https://claude.ai/artifact/C4wrY7wfDDybcYWTxwhwp3>
 
 ## Problem
 
@@ -23,13 +26,19 @@ error.
 | R1 | When `photowall.central` is on the cmdline, every stage uses it. Other discovery applies only when it is absent. | Owner |
 | R2 | http and https are both legal; https is better. LAN trust is not a main concern, so no host allowlist. | Owner |
 | R3 | Redirects are followed across hosts, with a hop limit above 3. One redirect policy covers every Central fetch. | Owner |
-| R5 | The initramfs trusts the Debian CA bundle, the same list the booted base uses. | Owner |
-| R6 | Clock: a build-time floor, then one forward-only SNTP step (DHCP option 42, then `pool.ntp.org`). No new cmdline parameter. A failed step does not block TLS; a certificate date failure is reported as `time`. | Owner (amended at this gate) |
+| R5 | The initramfs trusts the Debian CA bundle, the same list the booted base of the same release uses. | Owner (amended 2026-09-26) |
+| R6 | Clock: a build-time floor, then one SNTP step that never sets the clock below the floor (DHCP option 42, then a public pool zone the product may use). No new `photowall.*` cmdline parameter. A failed step does not block TLS; a certificate date failure is reported as `time`. | Owner (amended at this gate and on 2026-09-26) |
 | R7 | No plain-HTTP workaround, and no sidestepping the ingress. | Owner |
 | R8 | Never downgrade https to http while following redirects. | Owner (confirmed 2026-09-25) |
 | R9 | Every failure names its real cause (TLS, time, redirect, DNS/connect). | Owner (confirmed 2026-09-25) |
 
 R4 ("persist the final address") became a design choice, because the owner called it optional.
+
+The 2026-09-26 amendments came from Project 1's feature layer. R5 is read per release, because
+the initrd is staged by hand and can run with a newer base. R6 may step the clock back, because
+the Pi 5 kernel loads its RTC at boot and an RTC set in the future would otherwise fail every
+https boot. The NTP Pool's terms forbid shipping the default `pool.ntp.org` names in a product.
+Liveness needs two kernel parameters that are not `photowall.*` parameters.
 
 ## Current design choices (revisable)
 
@@ -50,13 +59,22 @@ R4 ("persist the final address") became a design choice, because the owner calle
 - **Nothing persisted from locate.** Each stage locates again from the cmdline.
 - **Computed module lists.** The build computes each artefact's import set, which replaces the
   hand-kept lists that caused the crash.
+- **Time source.** The kernel's own `ip=dhcp` supplies option 42, because klibc `ipconfig`
+  never requests it. The pool zone is `debian.pool.ntp.org` until a photo-wall vendor zone
+  exists.
+- **A failed or hung boot always comes back.** P1 requires it. Stage 1 arms the hardware
+  watchdog first and hands it to systemd, and it leaves through one emergency restart rather
+  than `reboot -f`. The bootloader settings ship in the TFTP bundle as a self-update. Hangs
+  before stage 1 starts are only partly covered; an external power cycle covers the rest.
+- **Hardware proof before merge.** A pre-release tag of the verified branch provides the
+  Central image, because Central images come only from the release workflow.
 
 ## Delivery
 
 | Project | Scope | Proven when |
 |---|---|---|
-| 1. Initramfs reaches Central | Shared package core, the 10 s clock step, the CA bundle in the boot data, `/v1/locate` on Central | The Pi fetches the base through the gateway's 301 and switch_roots |
-| 2. Provisioning and Player adopt it | Resolver-first provisioning and Player, computed module lists | The Pi appears unbound in the console |
+| 1. Initramfs reaches Central | Liveness first, then the shared package core, the 10 s clock step, the CA bundle and clock floor in the boot data, the initramfs's computed module list, `/v1/locate` on Central | The loop stays alive for 24 hours, and the Pi fetches the base through the gateway's 301 and switch_roots |
+| 2. Provisioning and Player adopt it | Resolver-first provisioning and Player, computed module lists for the packages | The Pi appears unbound in the console |
 | 3. Docs | Reword [0008](0008-generic-image-and-serial-identity.md), [0009](0009-minimal-base-and-app-package.md), the README and the runbook to R1–R9 | Docs check passes |
 
 ## Deferred
@@ -67,4 +85,6 @@ RTC; a private CA in the initramfs.
 ## History
 
 Rev 1 went through two review rounds. Rev 3 was compressed to this layer. Rev 4 separated
-requirements from choices and recorded the owner's answers (2026-09-25).
+requirements from choices and recorded the owner's answers (2026-09-25). Rev 5 recorded the
+owner's answers to Project 1's feature-layer briefing: R5 and R6 amended, liveness and the
+initramfs's computed module list added to Project 1 (2026-09-26).
