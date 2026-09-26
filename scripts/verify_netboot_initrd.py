@@ -194,7 +194,9 @@ def check_boot_script(text: str) -> list[str]:
 
 def split_initrd(initrd: Path) -> tuple[list[str], list[str]]:
     """(the boot data's file paths, the cached archive's lsinitramfs listing). ValueError when
-    the initrd does not start with the boot data."""
+    the initrd does not start with the boot data; CalledProcessError when lsinitramfs cannot
+    list what follows it (mkinitramfs compresses the cached archive; an uncompressed or
+    truncated remainder is refused)."""
     data = initrd.read_bytes()
     members, end = read_archive(data)
     with tempfile.NamedTemporaryFile(prefix="cached-initrd-") as cached:
@@ -230,15 +232,23 @@ def main(argv=None) -> int:
         try:
             early, cached = split_initrd(args.initrd)
         except ValueError as error:
-            print(f"initrd does not start with the boot-data archive: {error}")
-            print("FAIL: 1 netboot initrd contract violation(s)")
-            return 1
+            return _report([f"initrd does not start with the boot-data archive: {error}"])
+        except subprocess.CalledProcessError as error:
+            detail = "; ".join(line.strip() for line in (error.stderr or "").splitlines()
+                               if line.strip())
+            return _report([f"the cached archive could not be listed: "
+                            f"{detail or f'exit status {error.returncode}'}"])
     else:
         early = args.early_listing.read_text().splitlines()
         cached = args.cached_listing.read_text().splitlines()
 
     violations = check_listing(early, cached, manifest=read_manifest(args.manifest))
     violations += check_boot_script(args.boot_script.read_text())
+    return _report(violations)
+
+
+def _report(violations: list[str]) -> int:
+    """Print each violation and the verdict; the exit code."""
     for violation in violations:
         print(violation)
     if violations:

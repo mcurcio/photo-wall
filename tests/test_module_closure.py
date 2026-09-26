@@ -1,13 +1,14 @@
 """The computed first-party closure on synthetic package trees: imports at module level and
 inside functions are both followed; a third-party import, a missing first-party module or a
-forbidden package is refused with the importer named; the search path never includes
-site-packages."""
+forbidden package is refused with the importer named; the stdlib's own imports are not judged;
+the search path never includes site-packages."""
 
 import sys
 from pathlib import Path
 
 import pytest
 
+from scripts import module_closure
 from scripts.module_closure import (
     INITRD_FORBIDDEN,
     ClosureError,
@@ -86,6 +87,35 @@ def test_a_forbidden_first_party_package_is_refused(tmp_path):
 
 def test_a_forbidden_package_not_reached_is_fine(tmp_path):
     assert closure_of(tmp_path, forbidden=("pkg_d",)).modules[0] == "pkg_a"
+
+
+def fake_stdlib(tmp_path: Path, monkeypatch) -> None:
+    """A directory searched before the real stdlib: `colorsys` (a real stdlib name) whose own
+    code imports `_pw_not_stdlib`, a module that is neither first-party nor stdlib -- the shape
+    of CPython's `multiprocessing.util` importing `test.support` -> `_testcapi` on an
+    interpreter that ships its test suite."""
+    stdlib = tree(tmp_path / "fake-stdlib", {
+        "colorsys.py": "def f():\n    import _pw_not_stdlib\n",
+        "_pw_not_stdlib.py": "",
+    })
+    real = module_closure.search_path()
+    monkeypatch.setattr(module_closure, "search_path", lambda: [str(stdlib), *real])
+
+
+def test_the_stdlibs_own_imports_are_not_judged(tmp_path, monkeypatch):
+    fake_stdlib(tmp_path, monkeypatch)
+    repo = tree(tmp_path / "repo", {"pkg_a/__init__.py": "import colorsys\n"})
+    closure = compute_closure(["pkg_a"], repo=repo, first_party=FIRST_PARTY)
+    assert closure.modules == ("pkg_a",)
+
+
+def test_a_found_non_stdlib_module_imported_by_first_party_code_is_refused(tmp_path,
+                                                                          monkeypatch):
+    fake_stdlib(tmp_path, monkeypatch)
+    repo = tree(tmp_path / "repo", {"pkg_a/__init__.py": "def f():\n    import _pw_not_stdlib\n"})
+    with pytest.raises(ClosureError,
+                       match="pkg_a imports _pw_not_stdlib, which is neither first-party"):
+        compute_closure(["pkg_a"], repo=repo, first_party=FIRST_PARTY)
 
 
 def test_the_search_path_is_the_stdlib_only(tmp_path):

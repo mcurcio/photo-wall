@@ -1313,3 +1313,34 @@ doc softenings.
   `HOP_TIMEOUT + 1` s instead of 1 s. Review fix in the same change: `_Connection.connect`
   re-applies what is left of the hop before the TLS handshake and before the request write
   (the handshake and an http request write ran under the pre-connect timeout).
+- 2026-09-26, bead S4a (CI fix; narrows rule 2 of the S4a entry above): rule 2 now matches
+  rule 1 -- a FOUND module that is neither first-party nor stdlib is refused only when
+  first-party code imports it. `modulefinder` followed imports into the stdlib itself, and
+  `multiprocessing.util` imports `test.support` -> `_testcapi`; an interpreter that ships its
+  test suite (the runners' hosted-toolcache CPython, Homebrew's) failed the closure, one
+  without it (python-build-standalone) passed. `_Finder` now scans first-party code only: a
+  stdlib module first-party code imports is still found and judged, its own imports are not
+  (the initramfs hook copies the whole stdlib tree anyway). The closure is identical on both
+  kinds of interpreter. Evidence: `tests/test_module_closure.py`
+  (`test_the_stdlibs_own_imports_are_not_judged`,
+  `test_a_found_non_stdlib_module_imported_by_first_party_code_is_refused`). Not covered: the
+  judgement uses the build host's `sys.stdlib_module_names` (3.12 in CI), not the device's
+  3.13, so a first-party import of a module 3.13 removed passes here; only the tracer's
+  device-runtime leg catches it.
+- 2026-09-26, bead S0 (CI fix; the page is wrong): the S0 page's `photowall_restart` probes
+  the watchdog with a guarded `: >/dev/watchdog0`, and `mountroot` probed `/dev/console` the
+  same way. `:` is a POSIX special built-in (XCU 2.8.1): a redirection error on it exits a
+  non-interactive dash, klibc sh or busybox ash even inside an `if`, so an unopenable first
+  watchdog path ended /init (PID 1) before the fallback path and the sysrq write. bash (macOS
+  `sh`) tolerates it, which is why the tests passed locally. Both probes now go through one
+  helper, `photowall_can_open() { ( : >"$1" ) 2>/dev/null; }`; the child still opens and
+  closes the device. `tests/test_boot_script.py` runs under `dash` (required on Linux) and
+  `busybox sh` (where installed), never the host `sh`. Proposed correction: the S0 page's
+  probe reads `photowall_can_open`. Not covered: nothing tests that `mountroot`'s console
+  probe calls the helper rather than a bare `: >`; the helper's own test covers the mechanism.
+- 2026-09-26, bead S4b (CI fix): `test_main_splits_a_real_initrd` built an UNCOMPRESSED
+  cached archive; mkinitramfs compresses it (trixie: zstd), and `unmkinitramfs --list` takes an
+  uncompressed archive for an early one and then fails on the empty remainder (exit 2). The
+  fixture is now `gzip`-compressed (same decompress-then-list path). `verify_netboot_initrd`
+  now reports a cached archive `lsinitramfs` cannot list as a contract FAIL ("the cached
+  archive could not be listed: <stderr>") instead of a CalledProcessError traceback.

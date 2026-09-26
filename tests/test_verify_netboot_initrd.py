@@ -8,7 +8,9 @@ the build's closure manifest, never from the verifier's own source.
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -185,15 +187,49 @@ def test_main_fails_an_initrd_without_the_boot_data_in_front(tmp_path, capsys):
     assert "does not start with the boot-data archive" in capsys.readouterr().out
 
 
-@pytest.mark.skipif(shutil.which("lsinitramfs") is None or shutil.which("cpio") is None,
-                    reason="lsinitramfs/cpio are initramfs-tools hosts only (the CI builder)")
-def test_main_splits_a_real_initrd(tmp_path, capsys):
+needs_lsinitramfs = pytest.mark.skipif(
+    shutil.which("lsinitramfs") is None or shutil.which("cpio") is None,
+    reason="lsinitramfs/cpio are initramfs-tools hosts only (the CI builder)")
+
+
+def real_initrd(tmp_path: Path, *, compress) -> Path:
+    """The boot data, uncompressed, in front of the cached archive passed through `compress`."""
     cached = newc_archive({path: b"x" for path in CACHED
                            if path not in (".", "etc", _PREFIX)})
-    early = newc_archive({path: b"x" for path in EARLY})
     initrd = tmp_path / "initrd.img"
-    initrd.write_bytes(early + cached)
+    initrd.write_bytes(newc_archive({path: b"x" for path in EARLY}) + compress(cached))
+    return initrd
+
+
+@needs_lsinitramfs
+def test_main_splits_a_real_initrd(tmp_path, capsys):
+    # mkinitramfs compresses the cached archive (trixie: zstd); gzip takes the same
+    # decompress-then-list path through unmkinitramfs, and is in the stdlib.
+    initrd = real_initrd(tmp_path, compress=gzip.compress)
     assert main([str(initrd), *write_listings(tmp_path)[-2:]]) == 0, capsys.readouterr().out
+
+
+@needs_lsinitramfs
+def test_main_fails_an_initrd_whose_cached_archive_is_not_compressed(tmp_path, capsys):
+    # unmkinitramfs takes an uncompressed archive for another early one and finds nothing to
+    # decompress after it: a named contract FAIL, not a crash.
+    initrd = real_initrd(tmp_path, compress=lambda archive: archive)
+    assert main([str(initrd), *write_listings(tmp_path)[-2:]]) == 1
+    assert "the cached archive could not be listed" in capsys.readouterr().out
+
+
+def test_main_fails_a_cached_archive_lsinitramfs_cannot_list(tmp_path, monkeypatch, capsys):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    lsinitramfs = bin_dir / "lsinitramfs"
+    lsinitramfs.write_text("#!/bin/sh\necho 'cpio: premature end of archive' >&2\nexit 2\n")
+    lsinitramfs.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    initrd = real_initrd(tmp_path, compress=gzip.compress)
+    assert main([str(initrd), *write_listings(tmp_path)[-2:]]) == 1
+    out = capsys.readouterr().out
+    assert "the cached archive could not be listed: cpio: premature end of archive" in out
+    assert "FAIL: 1 netboot initrd contract violation(s)" in out
 
 
 # --- S0-AC8: the boot script's SOURCE TEXT (0014 rev 5, design §2.8) ------

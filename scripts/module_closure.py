@@ -3,10 +3,13 @@
 
 `compute_closure` runs the stdlib `modulefinder` (which also scans function bodies) over the
 repository and the interpreter's own standard library only -- never site-packages -- and
-refuses a closure that reaches a top-level name that is neither first-party nor in
-`sys.stdlib_module_names`, or a package the caller forbids. The initramfs policy is the two
-constants below: stage 1's root module and INITRD_FORBIDDEN, which the manifest carries to the
-initrd verifier, so the policy is written once.
+refuses a closure in which first-party code imports a top-level name that is neither
+first-party nor in `sys.stdlib_module_names`, or a package the caller forbids. The scan stops
+at the first-party boundary: a stdlib module first-party code imports is found, but its own
+imports are the interpreter's business (the initrd ships the whole stdlib tree), so the result
+does not depend on whether the build interpreter ships `test`/`_testcapi`. The initramfs
+policy is the two constants below: stage 1's root module and INITRD_FORBIDDEN, which the
+manifest carries to the initrd verifier, so the policy is written once.
 
 Build tooling: stdlib only, runs on the builder's own python3.
 """
@@ -64,11 +67,14 @@ def first_party_packages(repo: Path) -> tuple[str, ...]:
 
 
 class _Finder(modulefinder.ModuleFinder):
-    """modulefinder that also remembers which module's code first reached each module, so an
-    error names the importer and not just the import."""
+    """modulefinder that scans first-party code only and remembers which module's code first
+    reached each module, so an error names the importer and not just the import. A module
+    outside `first_party` is still found and loaded (so it is judged as an import of the
+    first-party code that reached it), but its own imports are not followed."""
 
-    def __init__(self, path: list[str]) -> None:
+    def __init__(self, path: list[str], first_party: frozenset[str]) -> None:
         super().__init__(path=path)
+        self.first_party = first_party
         self.importer: dict[str, str] = {}
         self._scanning: list[str] = []
 
@@ -77,6 +83,8 @@ class _Finder(modulefinder.ModuleFinder):
         return super().load_module(fqname, fp, pathname, file_info)
 
     def scan_code(self, co, m):
+        if m.__name__.partition(".")[0] not in self.first_party:
+            return
         self._scanning.append(m.__name__)
         try:
             super().scan_code(co, m)
@@ -95,13 +103,13 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
     function. Raises ClosureError naming the importer and the import when the closure reaches
     a top-level name that is neither in `first_party` nor stdlib, a first-party module that
     does not exist, or any name under `forbidden`."""
-    finder = _Finder([str(repo), *search_path()])
+    first_party, forbidden = frozenset(first_party), frozenset(forbidden)
+    finder = _Finder([str(repo), *search_path()], first_party)
     for root in roots:
         try:
             finder.import_hook(root)
         except ImportError as error:
             raise ClosureError(f"root {root} not found under {repo}: {error}") from None
-    first_party, forbidden = frozenset(first_party), frozenset(forbidden)
     reached = sorted(set(finder.modules) | set(finder.badmodules))
     crossings = [name for name in reached if name.partition(".")[0] in forbidden]
     if crossings:
