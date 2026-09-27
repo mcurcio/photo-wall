@@ -36,7 +36,15 @@ from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
-WHEEL_PACKAGES: Final = ("player", "contracts", "uplink")
+MANDATORY_PACKAGES: Final = ("player", "contracts")
+# `uplink` reaches Central from a booted appliance (0014); revisions before it existed have no
+# `uplink` directory. Its presence is computed per revision -- from Git, never hand-kept -- so a
+# revision predating it still builds; `revision_packages` does that computation for `build`.
+OPTIONAL_PACKAGES: Final = ("uplink",)
+# The full known package set: the default for callers with no revision tree of their own, i.e.
+# direct unit tests of archive_sources/make_player_wheel/validate_player_wheel below. `build`
+# instead computes the per-revision set with `revision_packages`.
+WHEEL_PACKAGES: Final = MANDATORY_PACKAGES + OPTIONAL_PACKAGES
 ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 FORBIDDEN = frozenset({
     "central", "media", "fastapi", "psycopg", "psycopg-binary", "psycopg-pool",
@@ -161,7 +169,20 @@ def locked_runtime(project: dict, lock: dict) -> tuple[LockedWheel, ...]:
     return tuple(selected[name] for name in sorted(selected))
 
 
-def archive_sources(archive: bytes) -> dict[str, bytes]:
+def revision_packages(entries: Iterable[str], mandatory: tuple[str, ...],
+                      optional: tuple[str, ...]) -> tuple[str, ...]:
+    """The Player wheel packages one revision ships: `mandatory`, plus whichever of `optional`
+    actually exist among `entries` (a revision's top-level tree). Computed from the revision
+    itself rather than assumed present, so an older revision that predates an optional package
+    still builds instead of failing a `git archive` for a pathspec that does not exist yet."""
+    names = frozenset(entries)
+    missing = sorted(name for name in mandatory if name not in names)
+    if missing:
+        raise BuildError(f"revision is missing mandatory package: {missing[0]}")
+    return tuple(sorted({*mandatory, *(name for name in optional if name in names)}))
+
+
+def archive_sources(archive: bytes, packages: tuple[str, ...] = WHEEL_PACKAGES) -> dict[str, bytes]:
     if len(archive) > MAX_SOURCE:
         raise BuildError("source archive too large")
     result = {}
@@ -170,10 +191,10 @@ def archive_sources(archive: bytes) -> dict[str, bytes]:
             path = PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts or str(path) != member.name.rstrip("/"):
                 raise BuildError("unsafe archive path")
-            if member.isdir() and path.parts[0] in WHEEL_PACKAGES:
+            if member.isdir() and path.parts[0] in packages:
                 continue
             allowed = (member.name in ("pyproject.toml", "uv.lock")
-                       or (len(path.parts) >= 2 and path.parts[0] in WHEEL_PACKAGES
+                       or (len(path.parts) >= 2 and path.parts[0] in packages
                            and all(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", p)
                                    for p in path.parts[:-1])
                            and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\.py", path.name)))
@@ -191,14 +212,15 @@ def archive_sources(archive: bytes) -> dict[str, bytes]:
                     if any(canonicalize_name(name.split(".")[0]) in FORBIDDEN for name in imports):
                         raise BuildError("Player source imports a forbidden runtime package")
             result[member.name] = data
-    required = {f"{package}/__init__.py" for package in WHEEL_PACKAGES} | {"pyproject.toml", "uv.lock"}
+    required = {f"{package}/__init__.py" for package in packages} | {"pyproject.toml", "uv.lock"}
     if not required <= result.keys():
         raise BuildError("incomplete Player archive")
     return result
 
 
 def make_player_wheel(sources: dict[str, bytes], version: str,
-                      runtime: tuple[LockedWheel, ...]) -> tuple[str, bytes]:
+                      runtime: tuple[LockedWheel, ...],
+                      packages: tuple[str, ...] = WHEEL_PACKAGES) -> tuple[str, bytes]:
     if str(Version(version)) != version:
         raise BuildError("noncanonical Player version")
     name = f"photo_wall_player-{version}"
@@ -208,7 +230,7 @@ def make_player_wheel(sources: dict[str, bytes], version: str,
     metadata += "".join(f"Requires-Dist: {wheel.name}=={wheel.version}\n"
                         for wheel in runtime if wheel.name in ROOTS)
     files = {path: value for path, value in sources.items()
-             if path.startswith(tuple(f"{package}/" for package in WHEEL_PACKAGES))}
+             if path.startswith(tuple(f"{package}/" for package in packages))}
     files[f"{name}.dist-info/METADATA"] = (metadata + "\n").encode()
     files[f"{name}.dist-info/WHEEL"] = (
         b"Wheel-Version: 1.0\nGenerator: photo-wall-stdlib\n"
@@ -230,19 +252,20 @@ def make_player_wheel(sources: dict[str, bytes], version: str,
             info.external_attr = 0o100644 << 16
             wheel.writestr(info, content)
     data = output.getvalue()
-    validate_player_wheel(data, files, version, runtime)
+    validate_player_wheel(data, files, version, runtime, packages)
     return f"{name}-py3-none-any.whl", data
 
 
 def validate_player_wheel(data: bytes, expected: dict[str, bytes], version: str,
-                          runtime: tuple[LockedWheel, ...]) -> None:
+                          runtime: tuple[LockedWheel, ...],
+                          packages: tuple[str, ...] = WHEEL_PACKAGES) -> None:
     prefix = f"photo_wall_player-{version}.dist-info/"
     with zipfile.ZipFile(io.BytesIO(data)) as wheel:
         names = wheel.namelist()
         allowed_metadata = {prefix + name for name in ("METADATA", "WHEEL", "RECORD")}
         if len(names) != len(set(names)) or set(names) != expected.keys():
             raise BuildError("unexpected Player wheel members")
-        package_alternation = "|".join(re.escape(package) for package in WHEEL_PACKAGES)
+        package_alternation = "|".join(re.escape(package) for package in packages)
         if any(not (re.fullmatch(rf"(?:{package_alternation})/(?:[A-Za-z_]\w*/)*[A-Za-z_]\w*\.py",
                                 name, re.ASCII))
                and name not in allowed_metadata for name in names):
@@ -371,9 +394,11 @@ def build(repository: Path, revision: str, output: Path,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     if inside_git.returncode == 0:
         raise BuildError("output must be outside every Git tree")
+    packages = revision_packages(git("ls-tree", "--name-only", revision + "^{tree}").decode().splitlines(),
+                                 MANDATORY_PACKAGES, OPTIONAL_PACKAGES)
     archive = git("archive", "--format=tar", revision,
-                  *WHEEL_PACKAGES, "pyproject.toml", "uv.lock", limit=MAX_SOURCE)
-    sources = archive_sources(archive)
+                  *packages, "pyproject.toml", "uv.lock", limit=MAX_SOURCE)
+    sources = archive_sources(archive, packages)
     project = tomllib.loads(sources["pyproject.toml"].decode())
     lock = tomllib.loads(sources["uv.lock"].decode())
     runtime = locked_runtime(project, lock)
@@ -386,7 +411,7 @@ def build(repository: Path, revision: str, output: Path,
             .contains(TARGET["python_full_version"])):
         raise BuildError("unsupported project version or Python target")
     version = f"{base_version}+g{revision}"
-    filename, wheel_data = make_player_wheel(sources, version, runtime)
+    filename, wheel_data = make_player_wheel(sources, version, runtime, packages)
     lock_path = parent / ("." + output.name + ".build-lock")
     try:
         lock_path.mkdir(mode=0o700)

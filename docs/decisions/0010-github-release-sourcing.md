@@ -67,7 +67,7 @@ unchanged):
 | Home LAN, no threat model; sha256 is corruption-only, no signing anywhere | `docs/decisions/0009-*`, `central/app_packages.py:1-12` | We never verify authorship of a release asset; sha256 only guards transit corruption |
 | Central serves the Player `.deb` **by reference**: bytes are staged under `PHOTO_WALL_APP_ROOT`, a pointer is registered, one pointer is promoted "current" | `central/app_packages.py:31-101` | GitHub sourcing reuses this registry unchanged; it only automates the staging |
 | One global "current app" pointer the operator promotes | `central/app_packages.py:74-82`, migration `014_app_package.sql` | Promotion semantics already exist; we add release tracking around them |
-| Players fetch `current` at boot, verify sha256 against the manifest, then `apt-get install` | `appliance/provision.py:187-215,341-365` | The Player path is untouched; central just becomes the thing that holds the bytes |
+| Players fetch `current` at boot, verify sha256 against the manifest, then install with `dpkg --install` | `appliance/provision.py:148-167` (see [0014](0014-reaching-central-from-every-boot-stage.md)) | The Player path is untouched; central just becomes the thing that holds the bytes |
 
 ### Verified facts about today's code
 
@@ -352,7 +352,7 @@ sequenceDiagram
   C-->>P: {version, sha256, size} (from app_packages current)
   P->>C: GET /v1/app/package/<sha256>.deb
   C-->>P: streamed bytes (fstat size-checked)
-  P->>P: verify sha256 vs manifest, apt-get install
+  P->>P: verify sha256 vs manifest, dpkg --install
 ```
 
 | Situation | What the Player sees |
