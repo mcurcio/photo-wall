@@ -9,7 +9,7 @@ from typing import Final
 
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from contracts.strict_json import loads_object
-from uplink.causes import Cause, UplinkError
+from uplink.causes import CENTRAL_ERROR_CODE, Cause, UplinkError
 from uplink.locate import LocatedCentral
 from uplink.origin import Url, parse_url
 from uplink.transport import HOP_TIMEOUT, Reply, Transport
@@ -23,7 +23,6 @@ STATUS_TIMEOUT: Final = READ_THROUGH_WAIT_SECONDS + HOP_TIMEOUT
 FETCH_HEADERS: Mapping[str, str] = MappingProxyType({"Accept-Encoding": "identity"})
 
 _LENGTH = re.compile(r"[0-9]{1,12}")
-_CENTRAL_ERROR = re.compile(r"[a-z0-9_]{1,64}")
 
 
 def central_error_code(body: bytes) -> str | None:
@@ -31,7 +30,7 @@ def central_error_code(body: bytes) -> str | None:
     (a longer body, one that is not a strict JSON object, or a code of another shape)."""
     document = loads_object(body, max_bytes=MAX_ERROR_BODY)
     code = None if document is None else document.get("error")
-    return code if isinstance(code, str) and _CENTRAL_ERROR.fullmatch(code) else None
+    return code if isinstance(code, str) and CENTRAL_ERROR_CODE.fullmatch(code) else None
 
 
 def refusal(url: Url, status: int, *, location: str | None, body: bytes) -> UplinkError:

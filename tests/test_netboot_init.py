@@ -10,6 +10,7 @@ import base64
 import functools
 import hashlib
 import os
+import socket
 import stat
 import sys
 from pathlib import Path
@@ -39,6 +40,8 @@ from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink.causes import Cause, UplinkError
 from uplink.clock import DHCP_NTP_SERVERS
 from uplink.fetch import MAX_FETCH_SECONDS
+from uplink.lookup import LookupTimeout
+from uplink.transport import LOOKUP_TIMEOUT
 
 BODY = b"generated base squashfs bytes"
 SHA256 = hashlib.sha256(BODY).hexdigest()
@@ -228,8 +231,10 @@ def test_the_pi_real_case_locates_through_the_301_and_mounts_the_verified_base(t
     assert keeper.handed_over
     # Example 1: the located origin drops :443, and the note keys on the configured http root.
     assert "phase 5/7 located https://photo-wall.example (Central api 1)" in log.lines
-    assert ("note: configured root is http: the first hop is unauthenticated; "
-            "set photowall.central=https://photo-wall.example/") in log.lines
+    # U7: the note never suggests a value to pin -- the located origin can come from an
+    # unauthenticated first hop.
+    assert "note: configured root is http: the first hop is unauthenticated" in log.lines
+    assert not any("set photowall.central" in line for line in log.lines)
     assert f"phase 5/7 locate: GET {FIRST} -> 301 peer=192.0.2.1" in log.lines
 
 
@@ -250,11 +255,11 @@ def test_an_https_root_gets_no_http_note(tmp_path):
     assert not any(line.startswith("note: configured root") for line in log.lines)
 
 
-def test_example_8_an_http_root_that_never_redirects_prefers_https(tmp_path):
+def test_example_8_an_http_root_that_never_redirects_still_gets_the_no_pin_note(tmp_path):
     answers = {FIRST: central(), "http://photo-wall.localdomain/v1/netboot/base": base_reply()}
     log = run(cmdline(), tmp_path, answers=answers)
-    assert ("note: configured root is http: the first hop is unauthenticated; https preferred"
-            in log.lines)
+    assert "note: configured root is http: the first hop is unauthenticated" in log.lines
+    assert not any("set photowall.central" in line for line in log.lines)
 
 
 def test_the_clock_is_settled_before_locate_and_logged(tmp_path):
@@ -681,6 +686,34 @@ def test_netboot_ops_mount_root_runs_the_same_mount_sequence_as_bootstrap(tmp_pa
     ops.mount_root(tmp_path / "rootfs", rootmnt)
     assert stat.S_IMODE(rootmnt.stat().st_mode) == 0o755
     assert [call[2] for call in calls if call[0] == "mount"] == ["squashfs", "tmpfs", "overlay"]
+
+
+def test_network_info_ip_lookup_is_bounded_not_plain_gethostbyname(tmp_path, monkeypatch):
+    """M5: a plain socket.gethostbyname has no timeout of its own; network_info must route
+    through the bounded uplink.lookup instead."""
+    calls = []
+
+    def fake_lookup(host, port, timeout):
+        calls.append((host, port, timeout))
+        return [(socket.AF_INET, "192.0.2.9")]
+
+    monkeypatch.setattr(netboot_module, "lookup", fake_lookup)
+    monkeypatch.setattr(socket, "gethostbyname", lambda host: (_ for _ in ()).throw(
+        AssertionError("must not call the unbounded gethostbyname")))
+    ops = NetbootOps(tmp_path / "run")
+    info = ops.network_info()
+    assert calls == [(socket.gethostname(), 0, LOOKUP_TIMEOUT)]
+    assert info["ip"] == "192.0.2.9"
+
+
+def test_network_info_survives_a_lookup_timeout(tmp_path, monkeypatch):
+    def timing_out(host, port, timeout):
+        raise LookupTimeout(f"lookup of {host} took over {timeout:.1f}s")
+
+    monkeypatch.setattr(netboot_module, "lookup", timing_out)
+    ops = NetbootOps(tmp_path / "run")
+    info = ops.network_info()
+    assert "ip" not in info
 
 
 @pytest.mark.parametrize("header,expected", [

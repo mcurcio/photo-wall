@@ -132,6 +132,22 @@ class Sleeps:
         self.calls.append(seconds)
 
 
+class Watchdog:
+    """Records `uplink.watchdog.extend_start`/`ready` calls in order, so tests can pin M5's
+    per-attempt renewal and the single READY=1 on success."""
+
+    def __init__(self):
+        self.calls = []
+
+    def extend(self, seconds):
+        self.calls.append(("extend", seconds))
+        return True
+
+    def ready(self):
+        self.calls.append(("ready",))
+        return True
+
+
 class FixedDiscovery:
     def __init__(self, root):
         self.root, self.proofs = root, []
@@ -301,6 +317,36 @@ def test_no_central_found_is_retried_without_a_crash():
     assert run(subject, 3) is False
     assert len(discovery.proofs) == 3 and len(sleeps.calls) == 3
     assert transport.sent == []
+
+
+def test_watchdog_extend_renews_before_every_attempt_ready_once_after_start_unit():
+    """M5: extend_start(PROVISION_ATTEMPT_TIMEOUT_SECONDS) renews the deadline at the start of
+    every attempt (a retried failure, then the successful one); ready() (READY=1) fires exactly
+    once, after start_unit -- Type=notify's starting phase does not end without it."""
+    manifests = iter([FakeReply(503, body=b'{"error":"app_unconfigured"}'), reply(manifest_json())])
+    transport = gateway(manifest=lambda: next(manifests))
+    watchdog, recorder, sleeps = Watchdog(), Recorder(), Sleeps()
+    subject = bootstrapper(transport, recorder=recorder, sleep=sleeps,
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready)
+    assert run(subject, 2) is True
+    assert watchdog.calls == [
+        ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS),
+        ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS),
+        ("ready",)]
+    assert recorder.order[-1] == ("start_unit",)
+
+
+def test_watchdog_ready_is_never_sent_on_a_failed_or_incomplete_run():
+    watchdog, sleeps = Watchdog(), Sleeps()
+    subject = bootstrapper(FakeTransport({}), install=never_called, sleep=sleeps,
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready,
+                           find=functools.partial(find_central, Unconfigured("absent"),
+                                                  transport=FakeTransport({}),
+                                                  discovery=FixedDiscovery(None)))
+    assert run(subject, 3) is False
+    assert ("ready",) not in watchdog.calls
+    assert [call for call in watchdog.calls if call[0] == "extend"] == [
+        ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS)] * 3
 
 
 def test_eventually_succeeds_once_central_has_an_app():

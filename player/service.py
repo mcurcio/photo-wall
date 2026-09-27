@@ -26,7 +26,6 @@ from typing import Callable, Literal
 
 import httpx
 from pydantic import ConfigDict, Field, model_validator
-from websockets.exceptions import InvalidStatus
 
 from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
@@ -44,26 +43,20 @@ from contracts.models import (
 )
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
-from player.central_link import (
-    REQUEST_TIMEOUT,
-    DirectWebsocket,
-    Exchange,
-    central_http_client,
-    central_url,
-    read_refusal,
-    websocket_url,
-)
+from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.output_discovery import discover_outputs, output_app_id
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
-from uplink.causes import UplinkError, classify
+from uplink import watchdog
+from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
 from uplink.finder import CentralDiscovery, Found, find_central
 from uplink.locate import LocatedCentral
 from uplink.origin import Origin
 from uplink.resolver import (
+    KERNEL_COMMAND_LINE,
     Configured,
     Unconfigured,
     read_kernel_command_line,
@@ -95,7 +88,9 @@ class PlayerConfig(Model):
     schema_version: Literal[1] = Field(default=1, alias="schema")
     # The saved root (R1): written by provisioning only when its root came from mDNS, and
     # used only when the kernel command line names no Central. Validated by the one
-    # Central-root validator, uplink.origin.Origin.parse_root.
+    # Central-root validator, uplink.origin.Origin.parse_root, only then (saved_root()): when
+    # the cmdline names Central it is never parsed, so a bad saved value cannot stop the
+    # Player (U3).
     central_origin: str | None = Field(default=None, max_length=2048)
     # The base tag this boot's diskless base was served, handed forward by the
     # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
@@ -119,11 +114,6 @@ class PlayerConfig(Model):
 
     @model_validator(mode="after")
     def trusted_origin(self):
-        if self.central_origin is not None:
-            try:
-                Origin.parse_root(self.central_origin)
-            except UplinkError as error:
-                raise ValueError("central_origin is not a Central root") from error
         if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
             raise ValueError("absolute cache directory required")
         if not Path(self.boot_context_file).is_absolute():
@@ -133,7 +123,8 @@ class PlayerConfig(Model):
         return self
 
     def saved_root(self) -> Origin | None:
-        """The saved root, or None when no central_origin is configured."""
+        """The saved root, or None when no central_origin is configured. Raises
+        UplinkError(CONFIGURATION, "invalid") when it is not a Central root."""
         return None if self.central_origin is None else Origin.parse_root(self.central_origin)
 
 
@@ -364,11 +355,9 @@ class PlayerService:
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
-        self.client = client
-        self.time_client = time_client
-        self.trust = trust
+        self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
+                                time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
-        self.websocket_connect = websocket_connect
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
         self.health_path = health_path
         try:
@@ -379,10 +368,12 @@ class PlayerService:
             self.boot_id = None
         self.boot_context = boot_context
         self._find_central = find_central
-        self._central: LocatedCentral | None = None
+        # The located Central and the registration it issued (U8): the only source of the
+        # bearer. Kept across a failed cycle; `_located` says whether it is this cycle's.
+        self._session: Session | None = None
+        self._located = False
         self.cache = None
         self.executor = None
-        self.registration: Registration | None = None
         self._owner = threading.get_ident()
         self._lock = threading.RLock()
         self._plan: Plan | None = None
@@ -411,19 +402,21 @@ class PlayerService:
             LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
         self.last_fault, self.last_fault_detail = code, detail
 
-    def _fault_for(self, error: Exception, host: str | None) -> None:
+    def _uplink_fault(self, code: str, error: UplinkError) -> None:
+        """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
+        self.fault(code, detail=failure_text(error, clock=self.clock_record()))
+
+    def _fault_for(self, error: Exception) -> None:
         """Names one session-ending failure of run()'s cycle (R9): a ServiceError is its own
-        code; an UplinkError, or an error classify(phase="connect") recognizes, is named
-        "<cause>_<reason>" with the console line (plus the clock summary for TIME/TLS) as its
-        detail; anything else is the bounded "player_error"."""
+        code; an UplinkError is "<cause>_<reason>" with its console detail; anything else is
+        the bounded "player_error". Only the transport (CentralLink, locate) names network
+        errors, so a local failure (ENOSPC, a bug) is never reported as a network cause."""
         if isinstance(error, ServiceError):
             self.fault(str(error))
-            return
-        named = error if isinstance(error, UplinkError) else classify(error, phase="connect", host=host)
-        if named is not None:
-            self.fault(f"{named.cause}_{named.reason}", detail=failure_text(named, clock=self.clock_record()))
-            return
-        self.fault("player_error", detail=type(error).__name__)
+        elif isinstance(error, UplinkError):
+            self._uplink_fault(f"{error.cause}_{error.reason}", error)
+        else:
+            self.fault("player_error", detail=type(error).__name__)
 
     def _main(self):
         if threading.get_ident() != self._owner:
@@ -433,76 +426,68 @@ class PlayerService:
         return await asyncio.wrap_future(self.dispatcher(callback))
 
     @property
-    def central(self) -> LocatedCentral:
-        """The located Central of this session; ServiceError("central_origin_unavailable")
-        before the first locate. Every Central URL is built from its origin."""
-        if self._central is None:
+    def session(self) -> Session:
+        """This cycle's Session; ServiceError("central_origin_unavailable") until this cycle
+        has located Central. Every Central URL and every bearer comes from it."""
+        if self._session is None or not self._located:
             raise ServiceError("central_origin_unavailable")
-        return self._central
+        return self._session
+
+    @property
+    def central(self) -> LocatedCentral:
+        """The located Central of this cycle (see `session`)."""
+        return self.session.central
+
+    @property
+    def registration(self) -> Registration | None:
+        """The registration the Session's origin issued, if any. Read-only: it changes only
+        through Session.enrolled / unregistered / relocated."""
+        return None if self._session is None else self._session.registration
 
     async def locate_central(self) -> LocatedCentral:
         """await find_central() (R1: cmdline root, else the saved root, else mDNS); keeps the
-        result for the session. Raises UplinkError."""
+        result for the session. A located origin other than the one that issued the
+        registration drops it (Session.relocated), so the next step re-enrolls there.
+        Raises UplinkError."""
         found = await self._find_central()
-        self._central = found.central
+        self._session = (Session(found.central) if self._session is None
+                         else self._session.relocated(found.central))
+        self._located = True
         LOG.info("player: central %s (%s root %s)", found.central.origin, found.source,
                  found.root)
         return found.central
-
-    def _url(self, target: str) -> str:
-        return central_url(self.central, target)
-
-    def _headers(self, authenticated=True):
-        headers = {"Accept-Encoding": "identity"}
-        if authenticated:
-            if self.registration is None:
-                raise Unauthorized("not_registered")
-            headers["Authorization"] = "Bearer " + self.registration.token
-        return headers
 
     async def request(self, method: str, path: str, *, body=None, authenticated=True) -> dict:
         value, _ = await self._request_with_receipt(method, path, body=body, authenticated=authenticated)
         return value
 
     async def _request_with_receipt(self, method: str, path: str, *, body=None,
-                                    authenticated=True, client=None) -> tuple[dict, tuple[float, float]]:
-        selected_client = client or self.client
-        if selected_client is None:
-            raise ServiceError("client_unavailable")
-        exchange = Exchange(self.central, path)
-        try:
-            async with asyncio.timeout(REQUEST_TIMEOUT):
-                async with selected_client.stream(method, str(exchange.url), json=body,
-                        headers=self._headers(authenticated), follow_redirects=False) as response:
-                    exchange.answered()
-                    await self._check_status(response, exchange)
-                    if response.headers.get("content-encoding", "identity") != "identity":
-                        raise ServiceError("encoded_response")
-                    if response.headers.get("content-type", "").split(";")[0] != "application/json":
-                        raise ServiceError("response_type")
-                    self._length(response, MAX_JSON)
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                        if len(data) + len(chunk) > MAX_JSON:
-                            raise ServiceError("body_limit")
-                        data.extend(chunk)
-                    # Local JSON/schema work is not transport latency. Keep its delay
-                    # visible to the later sample-age gate instead of inflating RTT.
-                    received = self.clock.utc(), self.clock.monotonic()
-                    return _json(bytes(data)), received
-        except Exception as error:
-            named = exchange.name(error)
-            if named is None or named is error:
-                raise
-            raise named from error
+                                    authenticated=True, time=False) -> tuple[dict, tuple[float, float]]:
+        async with self.link.stream(self.session, method, path, body=body,
+                                    authenticated=authenticated, time=time) as response:
+            await self._check_status(response, path)
+            if response.headers.get("content-encoding", "identity") != "identity":
+                raise ServiceError("encoded_response")
+            if response.headers.get("content-type", "").split(";")[0] != "application/json":
+                raise ServiceError("response_type")
+            self._length(response, MAX_JSON)
+            data = bytearray()
+            async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                if len(data) + len(chunk) > MAX_JSON:
+                    raise ServiceError("body_limit")
+                data.extend(chunk)
+            # Local JSON/schema work is not transport latency. Keep its delay
+            # visible to the later sample-age gate instead of inflating RTT.
+            received = self.clock.utc(), self.clock.monotonic()
+            return _json(bytes(data)), received
 
-    async def _check_status(self, response, exchange):
-        if response.status_code == 401:
-            raise Unauthorized("unauthorized")
+    async def _check_status(self, response, target: str):
+        """409 is StaleFeedback; any other non-200 is refusal(...) (401 and 3xx never get
+        here: CentralLink refuses them)."""
         if response.status_code == 409:
             raise StaleFeedback("state_changed")
         if response.status_code != 200:
-            raise await read_refusal(response, exchange.url)
+            raise await read_refusal(response, self.central.origin.url(target))
 
     @staticmethod
     def _length(response, maximum):
@@ -519,6 +504,7 @@ class PlayerService:
     async def enroll(self):
         if self.boot_context is None:
             raise ServiceError("boot_context")
+        session = self.session
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
         # A boot context with no ticket (D0/flashed, and 0009's diskless
@@ -535,7 +521,8 @@ class PlayerService:
         )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
-        self.registration = registered
+        # Issued by session's origin, so it joins that Session and no other (U8).
+        self._session = session.enrolled(registered)
         with self._lock:
             self._offered = False
             self._jobs = ()
@@ -558,7 +545,7 @@ class PlayerService:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
                 self.cache = self.executor = None
-                self.registration = None
+                self._session = session.unregistered()
                 raise ServiceError("player_initialization") from error
 
     async def _report_base_health(self):
@@ -591,8 +578,10 @@ class PlayerService:
             })
             self._base_health_epoch = self.registration.authority_epoch
         except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
-                UplinkError, asyncio.TimeoutError):
-            LOG.info("player base-health check-in deferred")
+                UplinkError, asyncio.TimeoutError) as error:
+            LOG.info("player base-health check-in deferred: %s",
+                     error if isinstance(error, (ServiceError, UplinkError))
+                     else type(error).__name__)
 
     def _apply_state(self, state: State):
         self._main()
@@ -751,38 +740,29 @@ class PlayerService:
         worker = asyncio.get_running_loop().run_in_executor(self._worker,
             self.executor.acquire, job.layer.assignment_id, bridge.chunks())
         variant = job.layer.variant
-        exchange = Exchange(self.central, "/v1/media/" + variant.sha256)
+        target = "/v1/media/" + variant.sha256
         try:
-            try:
-                async with asyncio.timeout(120):
-                    async with self.client.stream("GET", str(exchange.url),
-                            headers=self._headers(), follow_redirects=False) as response:
-                        exchange.answered()
-                        await self._check_status(response, exchange)
-                        if (response.headers.get("content-type", "").split(";")[0] != variant.media_type
-                                or response.headers.get("content-encoding", "identity") != "identity"):
-                            raise ServiceError("media_type")
-                        if self._length(response, variant.size) != variant.size:
-                            raise ServiceError("media_length")
-                        size = 0
-                        async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                            size += len(chunk)
-                            if worker.done():
-                                # Cache may have verified an existing exact blob without
-                                # consuming bytes; it owns this independent success gate.
-                                return worker.result()
-                            if size > variant.size:
-                                raise ServiceError("media_length")
-                            await bridge.put(chunk)
-                        if size != variant.size:
-                            raise ServiceError("media_length")
-                        await bridge.put(None)
-                        return await asyncio.shield(worker)
-            except Exception as error:
-                named = exchange.name(error)
-                if named is None or named is error:
-                    raise
-                raise named from error
+            async with self.link.stream(self.session, "GET", target, timeout=120) as response:
+                await self._check_status(response, target)
+                if (response.headers.get("content-type", "").split(";")[0] != variant.media_type
+                        or response.headers.get("content-encoding", "identity") != "identity"):
+                    raise ServiceError("media_type")
+                if self._length(response, variant.size) != variant.size:
+                    raise ServiceError("media_length")
+                size = 0
+                async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                    size += len(chunk)
+                    if worker.done():
+                        # Cache may have verified an existing exact blob without
+                        # consuming bytes; it owns this independent success gate.
+                        return worker.result()
+                    if size > variant.size:
+                        raise ServiceError("media_length")
+                    await bridge.put(chunk)
+                if size != variant.size:
+                    raise ServiceError("media_length")
+                await bridge.put(None)
+                return await asyncio.shield(worker)
         finally:
             # No HTTP failure/cancellation leaves the worker blocked on queue.get.
             bridge.stopped.set()
@@ -803,8 +783,12 @@ class PlayerService:
                     success = await self.download(job)
                 except Unauthorized:
                     raise
-                except (httpx.HTTPError, ServiceError, UplinkError, TimeoutError, OSError,
-                        AuthorityError):
+                except UplinkError as error:
+                    if error.cause is Cause.REDIRECT:
+                        raise           # ends the cycle: run() locates again (0014)
+                    success = False
+                    self._uplink_fault("media_download", error)
+                except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
                     success = False
                     self.fault("media_download")
                 attempts[job] = (min(count + 1, 3), self.clock.monotonic()
@@ -831,7 +815,7 @@ class PlayerService:
             raise Unauthorized("not_registered")
         sent_utc, sent_monotonic = self.clock.utc(), self.clock.monotonic()
         body, (received_utc, received_monotonic) = await self._request_with_receipt(
-            "GET", "/v1/player/time", client=self.time_client or self.client
+            "GET", "/v1/player/time", time=True
         )
         sample = PlayerTime.model_validate(body)
 
@@ -862,7 +846,11 @@ class PlayerService:
                 await self.probe_time()
             except Unauthorized:
                 raise
-            except (httpx.HTTPError, ServiceError, UplinkError, TimeoutError, ValueError):
+            except UplinkError as error:
+                if error.cause is Cause.REDIRECT:
+                    raise               # ends the cycle: run() locates again (0014)
+                self._uplink_fault("clock_probe", error)
+            except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
@@ -885,6 +873,9 @@ class PlayerService:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
                 self._outgoing.append(observation)
+            # A completed state/readiness exchange with the GLib thread answering: the
+            # session is live (M5; the unit's WatchdogSec is the deadline owner).
+            watchdog.pet()
             await asyncio.sleep(max(0, .5 - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
@@ -902,48 +893,27 @@ class PlayerService:
                     await self.poll_state()
 
     async def _websocket_loop(self):
-        exchange = Exchange(self.central, "/v1/player/session")
-        connector = self.websocket_connect or DirectWebsocket
-        options = dict(additional_headers=self._headers(), max_size=MAX_JSON, max_queue=4,
-                       compression=None, proxy=None, open_timeout=15, close_timeout=3,
-                       ping_interval=10, ping_timeout=10)
-        if self.central.origin.scheme == "https":
-            options["ssl"] = self.trust.context
-        uri = websocket_url(self.central, "/v1/player/session")
-        try:
-            async with connector(uri, **options) as socket:
-                exchange.answered()
-                async for message in socket:
-                    body = _json(message)
-                    if body.pop("type", None) != "state":
-                        raise ServiceError("message_type")
-                    state = State.model_validate(body)
-                    await self.dispatch(lambda: self._apply_state(state))
-                raise ServiceError("session_closed")
-        except Exception as error:
-            if isinstance(error, InvalidStatus) and error.response.status_code == 401:
-                raise Unauthorized("unauthorized") from error
-            named = exchange.name(error)
-            if named is None or named is error:
-                raise
-            raise named from error
+        async with self.link.websocket(self.session, "/v1/player/session",
+                                       max_size=MAX_JSON) as socket:
+            async for message in socket:
+                body = _json(message)
+                if body.pop("type", None) != "state":
+                    raise ServiceError("message_type")
+                state = State.model_validate(body)
+                await self.dispatch(lambda: self._apply_state(state))
+            raise ServiceError("session_closed")
 
     async def run(self):
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
-        owns_client = self.client is None
-        owns_time_client = self.time_client is None
-        if owns_client:
-            self.client = central_http_client(self.trust, connections=4, keepalive=2)
-        if owns_time_client:
-            self.time_client = central_http_client(self.trust, connections=1, keepalive=1)
+        self.link.open()
         attempt = 0
         try:
             while not self._stop.is_set():
                 tasks = []
                 session_started = None
                 try:
-                    if self._central is None:
+                    if not self._located:
                         await self.locate_central()
                     if self.registration is None:
                         await self.enroll()
@@ -956,22 +926,23 @@ class PlayerService:
                              asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
                              asyncio.create_task(self._observation_loop())]
-                    if self.websocket_connect is not False:
+                    if self.link.websocket_connect is not False:
                         tasks.append(asyncio.create_task(self._websocket_loop()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()
                     attempt = 0
                 except Unauthorized:
-                    # Every failed cycle locates again; the registration is kept (no
-                    # credential binding) unless Central refused it.
-                    self._central = None
-                    self.registration = None
+                    # Every failed cycle locates again. Central refused the registration, so
+                    # it is dropped here; otherwise Session.relocated keeps it only if the
+                    # new locate lands on the origin that issued it (U8).
+                    self._located = False
+                    if self._session is not None:
+                        self._session = self._session.unregistered()
                     self.fault("registration_required")
                 except Exception as error:
-                    host = self._central.origin.host if self._central is not None else None
-                    self._central = None
-                    self._fault_for(error, host)
+                    self._located = False
+                    self._fault_for(error)
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
@@ -983,20 +954,18 @@ class PlayerService:
                         self._offered = False
                         self._jobs = ()
                     self._write_health(False)
+                    watchdog.pet()      # one completed cycle, whatever its outcome (M5)
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)
         except asyncio.CancelledError:
             pass
         finally:
-            if owns_client:
-                await self.client.aclose()
-            if owns_time_client:
-                await self.time_client.aclose()
+            await self.link.aclose()
             if self.cache is not None:
                 await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
             self._worker.shutdown(wait=True, cancel_futures=True)
-            self.registration = None
+            self._session, self._located = None, False
 
     def start(self):
         self._main()
@@ -1034,23 +1003,37 @@ class UnavailableRenderer:
 
 def central_finder(config: PlayerConfig, resolution: Configured | Unconfigured, *,
                    transport: Transport) -> Callable[[], Awaitable[Found]]:
-    """R1's wiring for the Player (design §2.3): the cmdline root wins; the saved root
-    (config.central_origin) is used only when the cmdline names no Central, and a note is
-    logged when it is ignored; mDNS is built only when resolution is Unconfigured and nothing
-    is saved. The zeroconf import is deferred to that branch, so `import player.service` never
+    """R1/U3's wiring for the Player (design §2.3): the cmdline root wins outright, and then
+    the saved root (config.central_origin) is never parsed or validated, only noted as
+    ignored; without a cmdline root the saved root is validated (UplinkError when it is not a
+    Central root) and used; mDNS is built only when resolution is Unconfigured and nothing is
+    saved. The zeroconf import is deferred to that branch, so `import player.service` never
     pulls it in."""
-    saved = config.saved_root()
+    saved: Origin | None = None
     discovery: CentralDiscovery | None = None
     if isinstance(resolution, Configured):
-        if saved is not None:
-            LOG.info("player: central_origin %s ignored: the kernel command line names %s",
-                     saved, resolution.root)
-    elif saved is None:
-        from player.mdns_discovery import MdnsCentralDiscovery
+        if config.central_origin is not None:
+            LOG.info("player: the saved central_origin is ignored: the kernel command line "
+                     "names %s", resolution.root)
+    else:
+        saved = config.saved_root()
+        if saved is None:
+            from player.mdns_discovery import MdnsCentralDiscovery
 
-        discovery = MdnsCentralDiscovery()
+            discovery = MdnsCentralDiscovery()
     return functools.partial(find_central, resolution, transport=transport, saved=saved,
                              discovery=discovery)
+
+
+def build_finder(config: PlayerConfig, *, transport: Transport,
+                 cmdline_path: Path | None = None) -> Callable[[], Awaitable[Found]]:
+    """main()'s pre-GTK construction step: read the kernel command line at `cmdline_path`
+    (default KERNEL_COMMAND_LINE; a missing file is "no cmdline"), resolve it (R1) and wire
+    central_finder. Raises UplinkError for an unreadable or invalid cmdline, or an invalid
+    saved root when the cmdline names no Central."""
+    path = KERNEL_COMMAND_LINE if cmdline_path is None else cmdline_path
+    resolution = resolve_central(read_kernel_command_line(path))
+    return central_finder(config, resolution, transport=transport)
 
 
 def main():
@@ -1062,10 +1045,9 @@ def main():
     config = load_config(args.config)
     try:
         trust = Trust.public(Path(config.ca_file)) if config.ca_file else Trust.public()
-        resolution = resolve_central(read_kernel_command_line())
-        find = central_finder(config, resolution, transport=HttpTransport(trust=trust))
+        find = build_finder(config, transport=HttpTransport(trust=trust))
     except UplinkError as error:
-        # A bad cmdline or trust store: exit 1, and the unit restarts.
+        # A bad cmdline, saved root or trust store: exit 1, and the unit restarts.
         LOG.error("player: %s", failure_text(error, clock=None))
         raise SystemExit(1) from None
     identity = load_identity()
@@ -1127,6 +1109,7 @@ def main():
     signal.signal(signal.SIGINT, finish)
     GLib.timeout_add(33, tick)
     service.start()
+    watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):
         loop.run()
 

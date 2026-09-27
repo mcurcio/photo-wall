@@ -49,7 +49,7 @@ REASONS: Mapping[Cause, frozenset[str]] = MappingProxyType({
 })
 
 CONSOLE_LIMIT = 512
-_CENTRAL_ERROR = re.compile(r"[a-z0-9_]{1,64}")
+CENTRAL_ERROR_CODE = re.compile(r"[a-z0-9_]{1,64}")
 _OPENSSL_REASON = re.compile(r"[A-Z0-9_]{1,64}")
 # host and detail are single console tokens: printable ASCII, no space.
 _TOKEN = re.compile(r"[\x21-\x7e]*")
@@ -76,7 +76,7 @@ class UplinkError(Exception):
             raise TypeError("host and detail must be single printable ASCII tokens")
         self.cause, self.reason, self.host, self.detail = cause, reason, host, detail
         self.central_error = (central_error if isinstance(central_error, str)
-                              and _CENTRAL_ERROR.fullmatch(central_error) else None)
+                              and CENTRAL_ERROR_CODE.fullmatch(central_error) else None)
         super().__init__(self.console())
 
     def console(self) -> str:

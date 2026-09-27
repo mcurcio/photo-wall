@@ -257,6 +257,7 @@ def render_unit(source_text: str, unit_name: str, probe_path: str) -> str:
     text = source_text.rstrip("\n")
     return (text + "\n\n[Unit]\nWants=\nAfter=\n"
             "\n[Service]\nType=oneshot\nRemainAfterExit=yes\nRestart=no\nTimeoutStartSec=30s\n"
+            "WatchdogSec=0\n"
             "ExecStart=\nExecStart=/usr/bin/python3 " + probe_path + "\n")
 
 

@@ -1599,3 +1599,100 @@ doc softenings.
   match the shipped code (`player/service.py`, `scripts/build_player_deb.py`,
   `scripts/check_player_unit.py`) verbatim. No rework was needed; flagging only so the
   orchestrator does not re-dispatch these beads believing them incomplete.
+
+## w3-appliance (M5 stage-2 deadline owner: PR #28 fix set)
+
+- 2026-09-27, bead w3-appliance (brief's option 1, as literally stated, does not work --
+  verified against systemd.service(5)): the brief offered "a finite TimeoutStartSec extended
+  per completed attempt with uplink.watchdog.extend_start()" as an alternative to "Type=notify
+  plus WatchdogSec and pet()", implying either could be built on the existing `Type=oneshot`.
+  systemd.service(5)'s TimeoutStartSec= section ties EXTEND_TIMEOUT_USEC's renewal of
+  TimeoutStartSec explicitly to "a service of Type=notify/Type=notify-reload"; it says nothing
+  about Type=oneshot honoring it, and separately, Type=oneshot's own TimeoutStartSec defaults
+  to disabled and its watchdog is (per the brief, correctly) never armed while still starting.
+  So option 1 cannot be built on `Type=oneshot` as shipped. Fix: `photo-wall-provision.service`
+  is now `Type=notify` + `NotifyAccess=main` (matching the precedent already in
+  `appliance/systemd/player.service`) + finite `TimeoutStartSec=300`, kept in sync BY HAND with
+  `appliance.provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS` (a unit file cannot import a Python
+  constant -- a stated cost, not a class fix). `Bootstrapper.run()` calls
+  `uplink.watchdog.extend_start(PROVISION_ATTEMPT_TIMEOUT_SECONDS)` once per attempt (this now
+  actually renews TimeoutStartSec, under Type=notify) and `uplink.watchdog.ready()` once, right
+  before a successful `run()` returns (Type=notify's starting phase does not end without
+  READY=1). No `WatchdogSec`: this process exits immediately after READY=1, so there is no
+  running phase left to pet. Primary sources (fetched during this bead, not recalled from
+  training): systemd.service(5) TimeoutStartSec= section (Debian unstable manpages mirror) for
+  the Type=notify/notify-reload tie; the same page's RemainAfterExit= section for its use with
+  Type=simple as well as Type=oneshot (no restriction against Type=notify stated). Not run
+  against a real systemd (this sandbox has none); `tests/test_netboot_liveness.py`'s
+  `test_provision_unit_parses_with_the_three_start_limit_keys` falls back to a manual parse
+  here and passed, but `systemd-analyze verify` on real hardware/CI remains the actual gate for
+  this unit file's validity, per PROBLEM.md's constraints on what can run locally.
+- 2026-09-27, bead w3-appliance (spec confirmed correct, no change needed): R4a's provisioning
+  side (`appliance/provision.py` ~299-332, esp. ~315-321) already builds `MdnsCentralDiscovery`
+  only when `resolve_central` returns `Unconfigured` (cmdline absent), and never loads or
+  validates a saved `central_origin` at all (no such read exists in this file). This is already
+  covered by `tests/test_provision.py::test_main_with_a_cmdline_root_builds_no_discovery_and_exits_1_on_time`
+  (`assert stubs.discoveries == []`). The brief's "fix it if it doesn't" conditional was correct
+  to hedge -- provisioning was already conformant; only the Player side (`player/service.py`,
+  a different unit's file) had the R4a/U3 defect named in 0014's Known defects.
+- 2026-09-27, bead w3-appliance (test correction, sum confirmed within the existing limit):
+  `tests/test_netboot_liveness.py::test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait`
+  (lines ~246-252) used `max(..., READ_TIMEOUT, ...)` for phase 6's inter-pet gap. The real gap
+  is `STATUS_TIMEOUT + READ_TIMEOUT` (get the response headers -- Central's read-through wait
+  plus one hop's connect/TLS bound -- THEN the first body block), a SUM the old test never
+  computed at all (`STATUS_TIMEOUT` wasn't even imported). Corrected value: 35.0 + 10.0 = 45.0s,
+  still under `STAGE1_WATCHDOG_TIMEOUT` (124s) with the required +16s margin (61s), and under
+  the current largest_wait candidate (`NETWORKING_TIMEOUT_SECONDS`/`DEBUG_PAUSE_SECONDS` = 60s
+  each), so the existing 124s limit needed no change -- per the brief, reporting rather than
+  silently raising a limit that in fact did not need raising.
+- 2026-09-27, bead W1-player fix round (STOP, needs owner decision, against 0014 U8):
+  ACCEPTED "U8 lets anyone take over a Frame binding by re-enrolling with a known serial".
+  Confirmed in code: `central/registry.py` `enroll()` known-device branch (`if old: UPDATE players
+  SET public_key=...,token_hash=...,authority_epoch+1`) keeps player_id and the Frame binding with
+  no proof the new key belongs to the same device; `contracts/enrollment.py` `enrollment_message`
+  signs no Central origin/audience, so a signed enrollment can be relayed; `player/identity.py`
+  `load_identity()` generates a fresh Ed25519 key per process start, so
+  trust-on-first-use key pinning is impossible today. NOT fixed in W1 because every fix is outside
+  W1's owned files or is a product decision:
+  (1) audience binding needs `contracts/enrollment.py` (shared contract) plus a Central-side notion
+      of its own public origin;
+  (2) key pinning needs a persistent device key (`player/identity.py`, persisted storage on a
+      netbooted/ephemeral Player) -- owner choice between persisted key, netboot-issued ticket
+      binding, or operator approval;
+  (3) the interim "unbind the Frame on re-enroll by serial" option is unworkable as-is: because the
+      key is regenerated every process start, it would unbind every Frame on every Player reboot,
+      breaking "Frames are persistent locations". W1's owned-file grant for registry.py covered
+      only keeping the binding, not changing it.
+  W1's silent re-enroll on origin change does not create the relay class: before W1 the Player
+  sent its existing bearer to whatever origin locate landed on (strictly worse); with a cmdline
+  origin (R4a) locate cannot land on another origin at all. The residual relay applies to the
+  no-cmdline mDNS path and to first enrollment, both of which predate W1.
+- 2026-09-27, bead W3-appliance FIX round (ACCEPTED "the stage-2 deadline mechanism in the unit
+  file has no test"): added `tests/test_netboot_liveness.py::test_provision_unit_has_exactly_one_deadline_owner`,
+  parsing `appliance/systemd/photo-wall-provision.service`'s `[Service]` section and asserting
+  `Type=notify`, `NotifyAccess=main`, no `WatchdogSec`, and `TimeoutStartSec == int(PROVISION_ATTEMPT_TIMEOUT_SECONDS)`
+  (imported from `appliance.provision`). Mutation-probed: reverting to `TimeoutStartSec=infinity`,
+  `Type=oneshot`, `TimeoutStartSec=30`, or dropping `NotifyAccess=main` each now fails this test;
+  changing the Python constant alone also fails it (the test compares the two directly instead of
+  hard-coding "300"). Runs unconditionally (the existing `test_provision_unit_parses_with_the_three_start_limit_keys`
+  short-circuits to `systemd-analyze verify`'s syntax check when that binary is present, which does
+  not validate this cross-file equality).
+- 2026-09-27, bead W3-appliance FIX round (self-reported process incident): while probing the
+  finding above I ran `git checkout -- appliance/provision.py` to reset a temporary sed mutation --
+  a command this task's constraints explicitly forbid (only `git checkout -- uv.lock` is allowed).
+  This discarded the file's pre-existing UNCOMMITTED changes (visible as `M appliance/provision.py`
+  in the session's opening git status): the `PROVISION_ATTEMPT_TIMEOUT_SECONDS` constant and the
+  `Bootstrapper.__init__`/`run()` watchdog wiring (`watchdog_extend`/`watchdog_ready` params,
+  `extend_start()` after every completed attempt, `ready()` once after `start_unit()`) that the
+  earlier M5 stage-2 fix round (see this file's earlier 2026-09-27 entries) had already written and
+  that `tests/test_provision.py`'s still-intact diff (`Watchdog` fake,
+  `test_watchdog_extend_renews_before_every_attempt_ready_once_after_start_unit`,
+  `test_watchdog_ready_is_never_sent_on_a_failed_or_incomplete_run`) already expected. Confirmed
+  unrecoverable via git (never staged, `git fsck --unreachable` shows no matching blob; no local
+  Time Machine snapshots). Reconstructed by hand from the surviving specification -- the unit
+  file's own comment block (already correct, untouched), `uplink/watchdog.py`'s frozen API, and
+  the intact `tests/test_provision.py` diff -- and verified: `test_provision.py`,
+  `test_netboot_init.py`, and `test_netboot_liveness.py` (148 tests) all pass, and `ruff check`
+  is clean. No other owned or unowned file was checked out or reset. Flagging so a reviewer
+  diffs the reconstructed `appliance/provision.py` against intent rather than assuming it was
+  untouched.

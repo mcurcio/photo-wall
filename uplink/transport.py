@@ -2,6 +2,7 @@
 every wait, and raises only UplinkError, classified where the error happens."""
 
 import http.client
+import io
 import socket
 import ssl
 import time
@@ -50,11 +51,68 @@ def _raise_classified(error: BaseException, phase: Phase, host: str) -> NoReturn
     raise classified from error
 
 
+class _DeadlineSocket:
+    """The only socket http.client sees. Every send and receive waits at most what is left
+    before `deadline` (absolute monotonic time) and raises TimeoutError once none is left, so
+    no http.client path (status line, each header line, chunked body, trailers) can outlive
+    it, however many reads it makes. It wraps the socket AFTER TLS, so the deadline bounds
+    records, not raw bytes under them. Cost: one settimeout per call. Closing follows
+    socket.socket: the wrapped socket closes when this is closed and no file made by
+    makefile() is still open (http.client closes the connection before its response)."""
+
+    def __init__(self, sock: socket.socket, *, deadline: float,
+                 monotonic: Callable[[], float]) -> None:
+        self._sock, self.deadline, self._monotonic = sock, deadline, monotonic
+        self._io_refs, self._closed = 0, False
+
+    def _bound(self) -> None:
+        left = self.deadline - self._monotonic()
+        if left <= 0:
+            raise TimeoutError("exchange deadline passed")
+        self._sock.settimeout(left)
+
+    def recv_into(self, buffer, nbytes: int = 0, flags: int = 0) -> int:
+        self._bound()
+        return self._sock.recv_into(buffer, nbytes, flags)
+
+    def recv(self, bufsize: int, flags: int = 0) -> bytes:
+        self._bound()
+        return self._sock.recv(bufsize, flags)
+
+    def sendall(self, data) -> None:
+        with memoryview(data) as view, view.cast("B") as octets:
+            sent = 0
+            while sent < len(octets):
+                self._bound()
+                sent += self._sock.send(octets[sent:])
+
+    def makefile(self, mode: str = "rb", buffering: int = -1, **_: object) -> io.BufferedReader:
+        if mode != "rb":
+            raise ValueError("only a binary read file is supported")
+        self._io_refs += 1
+        return io.BufferedReader(socket.SocketIO(self, "rb"),  # type: ignore[arg-type]
+                                 buffering if buffering > 0 else io.DEFAULT_BUFFER_SIZE)
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def _decref_socketios(self) -> None:      # called by SocketIO.close
+        self._io_refs -= 1
+        if self._closed and self._io_refs <= 0:
+            self._sock.close()
+
+    def close(self) -> None:
+        self._closed = True
+        if self._io_refs <= 0:
+            self._sock.close()
+
+
 class _Connection(http.client.HTTPConnection):
     """One connection to one looked-up address, TLS-wrapped when `context` is given. SNI, the
-    certificate name check and the Host header use the URL's host, never the address. Every
-    wait is bounded by what is left when it starts: the TCP connect and the TLS handshake of
-    `connect_deadline`, the request write and the status line of `deadline`."""
+    certificate name check and the Host header use the URL's host, never the address. The TCP
+    connect and the TLS handshake are bounded by what is left of `connect_deadline`; after
+    that every send and receive is bounded by `deadline` through a _DeadlineSocket, whose
+    deadline the reply moves for each body read."""
 
     def __init__(self, url: Url, *, family: int, address: str,
                  context: ssl.SSLContext | None, connect_deadline: float, deadline: float,
@@ -64,11 +122,10 @@ class _Connection(http.client.HTTPConnection):
         self._family, self._address, self._context = family, address, context
         self._connect_deadline, self._deadline = connect_deadline, deadline
         self._monotonic = monotonic
-        self.raw: socket.socket | None = None
+        self.bounded: _DeadlineSocket | None = None
 
-    def left(self, deadline: float | None = None) -> float:
-        """Seconds left before `deadline` (by default the exchange's); TimeoutError at none."""
-        left = (self._deadline if deadline is None else deadline) - self._monotonic()
+    def _left(self, deadline: float) -> float:
+        left = deadline - self._monotonic()
         if left <= 0:
             raise TimeoutError("hop deadline passed")
         return left
@@ -76,26 +133,26 @@ class _Connection(http.client.HTTPConnection):
     def connect(self) -> None:
         sock = socket.socket(self._family, socket.SOCK_STREAM)
         try:
-            sock.settimeout(self.left(self._connect_deadline))
+            sock.settimeout(self._left(self._connect_deadline))
             sock.connect((self._address, self.port))
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if self._context is not None:
-                sock.settimeout(self.left(self._connect_deadline))  # what the connect left
+                sock.settimeout(self._left(self._connect_deadline))  # what the connect left
                 sock = self._context.wrap_socket(sock, server_hostname=self.host)
-            sock.settimeout(self.left())
         except BaseException:
             sock.close()
             raise
-        self.sock = self.raw = sock
+        self.sock = self.bounded = _DeadlineSocket(sock, deadline=self._deadline,
+                                                   monotonic=self._monotonic)
 
 
 class _HttpReply:
-    __slots__ = ("_connection", "_response", "_peer", "_host")
+    __slots__ = ("_connection", "_response", "_peer", "_host", "_monotonic")
 
     def __init__(self, connection: _Connection, response: http.client.HTTPResponse, *,
-                 peer: str, host: str) -> None:
-        self._connection, self._response, self._peer, self._host = (
-            connection, response, peer, host)
+                 peer: str, host: str, monotonic: Callable[[], float]) -> None:
+        self._connection, self._response, self._peer, self._host, self._monotonic = (
+            connection, response, peer, host, monotonic)
 
     @property
     def status(self) -> int:
@@ -115,9 +172,10 @@ class _HttpReply:
         if timeout <= 0:
             raise UplinkError(Cause.TRANSFER, "deadline", host=self._host)
         try:
-            # The connection may already have handed its socket to the response; the raw
-            # socket stays open under the response's file until close().
-            self._connection.raw.settimeout(timeout)
+            # The connection may already have handed its socket to the response; the bounded
+            # socket stays open under the response's file until close(). The whole read (a
+            # chunk-size line, the chunk, the trailers) ends by now + timeout.
+            self._connection.bounded.deadline = self._monotonic() + timeout
             remaining = self._response.length       # None unless Content-Length was sent
             chunk = self._response.read1(amount)    # one read from the socket at most
             if not chunk and amount and remaining:
@@ -168,7 +226,6 @@ class HttpTransport:
                 connect_deadline=min(start + HOP_TIMEOUT, answer_by), deadline=answer_by)
             try:
                 connection.request("GET", url.target, headers=dict(headers))
-                connection.raw.settimeout(connection.left())
                 response = connection.getresponse()
                 if response.status < 200:
                     # A 1xx that is not 100 Continue (a 101 upgrade): no request/response HTTP.
@@ -180,7 +237,8 @@ class HttpTransport:
             except BaseException:
                 connection.close()
                 raise
-            return _HttpReply(connection, response, peer=address, host=host)
+            return _HttpReply(connection, response, peer=address, host=host,
+                              monotonic=self._monotonic)
         if last is None:
             raise UplinkError(Cause.CONNECT, "timeout", host=host, detail="deadline")
         _raise_classified(last, "connect", host)

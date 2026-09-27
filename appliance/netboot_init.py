@@ -88,6 +88,7 @@ from uplink.diagnosis import failure_text, trust_provenance
 from uplink.fetch import DirectFetch
 from uplink.files import write_atomically
 from uplink.locate import locate
+from uplink.lookup import lookup
 from uplink.origin import Url
 from uplink.resolver import (
     CENTRAL_KEY,
@@ -96,7 +97,7 @@ from uplink.resolver import (
     read_kernel_command_line,
     resolve_central,
 )
-from uplink.transport import HttpTransport, Transport
+from uplink.transport import LOOKUP_TIMEOUT, HttpTransport, Transport
 from uplink.trust import DEBIAN_CA_BUNDLE, Trust
 
 RAM_IMAGE_NAME = "photo-wall-base.squashfs"
@@ -237,7 +238,11 @@ class NetbootOps(LinuxOps):
         except (OSError, ValueError):
             pass
         try:
-            info["ip"] = socket.gethostbyname(socket.gethostname())
+            # Diagnostic only, but bounded like every other lookup here (M5): plain
+            # gethostbyname has no timeout of its own and can hang the boot.
+            addresses = lookup(socket.gethostname(), 0, LOOKUP_TIMEOUT)
+            if addresses:
+                info["ip"] = addresses[0][1]
         except OSError:
             pass
         try:
@@ -499,10 +504,9 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
     console.line(5, f"located {located.origin} (Central api {located.identity.api})")
     if root.scheme == "http":
         # Keyed on the CONFIGURED root: it decides how far the first answer can be trusted.
-        advice = (f"set {CENTRAL_KEY}={located.origin}/" if located.origin.scheme == "https"
-                  else "https preferred")
-        console.log.info(f"note: configured root is http: the first hop is unauthenticated; "
-                         f"{advice}")
+        # U7: never suggest a value to pin here -- the located origin can come from an
+        # unauthenticated first hop, so this note names the risk only.
+        console.log.info("note: configured root is http: the first hop is unauthenticated")
 
     # Phase 6: the base, one direct request to the located origin.
     headers = {SERIAL_HEADER: serial} if serial else {}

@@ -17,7 +17,19 @@ StartLimitBurst=10
 StartLimitAction=reboot-force
 
 [Service]
-Type=oneshot
+# M5: the one deadline owner after switch_root. A plain Type=oneshot cannot use
+# EXTEND_TIMEOUT_USEC to renew TimeoutStartSec -- systemd.service(5) ties that renewal to
+# "a service of Type=notify/Type=notify-reload" only, and Type=oneshot's own WatchdogSec is
+# never armed while the unit is still starting either way. So this unit is Type=notify:
+# appliance.provision.Bootstrapper.run() calls uplink.watchdog.extend_start() with
+# PROVISION_ATTEMPT_TIMEOUT_SECONDS after every completed attempt (success, a retried failure,
+# or a discarded corrupt package) -- renewing TimeoutStartSec so a healthy run that keeps making
+# attempts is never killed for running long overall, while one attempt that truly hangs is
+# killed within that many seconds -- then calls uplink.watchdog.ready() right before the process
+# exits 0 (READY=1 is required to end Type=notify's starting phase at all). No WatchdogSec: once
+# READY=1 lands this process exits immediately, so there is no running phase to pet.
+Type=notify
+NotifyAccess=main
 RemainAfterExit=yes
 User=root
 Group=root
@@ -33,7 +45,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=infinity
+# Keep equal to appliance.provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS by hand: a systemd unit
+# file cannot import a Python constant.
+TimeoutStartSec=300
 UMask=0077
 
 [Install]

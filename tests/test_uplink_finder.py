@@ -107,3 +107,28 @@ def test_find_central_reports_a_discovered_root_and_raises_locate_failures_uncha
         asyncio.run(find_central(Unconfigured("absent"), transport=FakeTransport(
             {str(SAVED.url(LOCATE_PATH)): refused}), saved=SAVED))
     assert raised.value is refused
+
+
+class BrokenDiscovery:
+    def __init__(self, error):
+        self.error = error
+
+    async def discover(self, unconfigured):
+        raise self.error
+
+
+def test_a_discovery_that_raises_is_named_so_find_central_raises_only_uplink_errors():
+    transport = FakeTransport({})
+    with pytest.raises(UplinkError) as excinfo:
+        asyncio.run(find_central(Unconfigured("absent"), transport=transport,
+                                 discovery=BrokenDiscovery(OSError(19, "no multicast"))))
+    assert (excinfo.value.cause, excinfo.value.reason, excinfo.value.detail) == (
+        Cause.CONFIGURATION, "absent", "discovery_OSError")
+
+
+def test_a_discovery_uplink_error_passes_unchanged():
+    error = UplinkError(Cause.DNS, "failed")
+    with pytest.raises(UplinkError) as excinfo:
+        asyncio.run(find_central(Unconfigured("absent"), transport=FakeTransport({}),
+                                 discovery=BrokenDiscovery(error)))
+    assert excinfo.value is error

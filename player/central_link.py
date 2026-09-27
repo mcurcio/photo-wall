@@ -1,11 +1,18 @@
-"""The Player's link to Central (decision 0014, R3/R7/R8/R9): its httpx and websockets clients
-are built from the process's one Trust, every URL comes from the LocatedCentral, no request
-follows a redirect (locate is the only redirect follower), and every network failure of a direct
-request is named as an UplinkError."""
+"""The Player's link to Central (decision 0014, R3/R7/R8/R9, U8): its httpx and websockets
+clients are built from the process's one Trust, every URL comes from the LocatedCentral, no
+request follows a redirect (locate is the only redirect follower), and every network failure of
+a direct request is named as an UplinkError.
+
+CentralLink is the only thing in the Player that opens a request to Central, and a Session is
+the only source of its bearer: the bearer goes to the origin that issued it or nowhere."""
 
 from __future__ import annotations
 
-from typing import Final
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
+from typing import Any, Final, Protocol
 
 import httpx
 from websockets.asyncio.client import connect
@@ -14,20 +21,41 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Inval
 from uplink.causes import Cause, Phase, UplinkError, classify
 from uplink.fetch import MAX_ERROR_BODY, refusal
 from uplink.locate import LocatedCentral
-from uplink.origin import Url
+from uplink.origin import Url, parse_url
 from uplink.trust import Trust
 
 REQUEST_TIMEOUT: Final = 15.0
 
 
+async def refuse_redirect(response: httpx.Response) -> None:
+    """The response hook on every client CentralLink uses: any 3xx is refused as
+    refusal(...) (REDIRECT/unexpected) before httpx could follow it, whatever the client's or
+    the request's follow_redirects says. Only locate follows redirects (R3)."""
+    if 300 <= response.status_code < 400:
+        url = parse_url(str(response.request.url))
+        if url is None:
+            raise UplinkError(Cause.REDIRECT, "unexpected",
+                              detail=f"status={response.status_code}")
+        raise await read_refusal(response, url)
+
+
+def guarded(client: httpx.AsyncClient) -> httpx.AsyncClient:
+    """`client` with refuse_redirect installed as a response hook (once)."""
+    hooks = client.event_hooks
+    if refuse_redirect not in hooks["response"]:
+        client.event_hooks = {**hooks, "response": [*hooks["response"], refuse_redirect]}
+    return client
+
+
 def central_http_client(trust: Trust, *, connections: int, keepalive: int) -> httpx.AsyncClient:
     """verify=trust.context, follow_redirects=False, trust_env=False (no proxy, netrc or
     SSL_CERT_FILE from the environment), timeout=REQUEST_TIMEOUT,
-    limits=httpx.Limits(max_connections=connections, max_keepalive_connections=keepalive).
-    It has no base URL: every request names a URL built by central_url."""
-    return httpx.AsyncClient(
+    limits=httpx.Limits(max_connections=connections, max_keepalive_connections=keepalive),
+    and the refuse_redirect response hook. It has no base URL: every request names a URL built
+    by central_url."""
+    return guarded(httpx.AsyncClient(
         verify=trust.context, follow_redirects=False, trust_env=False, timeout=REQUEST_TIMEOUT,
-        limits=httpx.Limits(max_connections=connections, max_keepalive_connections=keepalive))
+        limits=httpx.Limits(max_connections=connections, max_keepalive_connections=keepalive)))
 
 
 def central_url(central: LocatedCentral, target: str) -> str:
@@ -120,3 +148,168 @@ async def read_refusal(response: httpx.Response, url: Url) -> UplinkError:
         body = bytearray()
     return refusal(url, response.status_code, location=response.headers.get("location"),
                     body=bytes(body[:MAX_ERROR_BODY + 1]))
+
+
+class Credential(Protocol):
+    """What a Session needs of a registration: its bearer token."""
+
+    @property
+    def token(self) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Session:
+    """A located Central and at most the registration that origin issued (U8, R8).
+
+    The constructor takes no registration: one joins a Session only through `enrolled`, after
+    enrolling at `central.origin`, and survives a new locate only through `relocated`, which
+    keeps it when the origin is unchanged and drops it otherwise (so the Player re-enrolls,
+    silently, at the new origin). Scheme is part of the origin, so https -> http drops it too.
+    CentralLink reads the bearer from here and nowhere else, so it is only ever sent to the
+    origin that issued it.
+
+    Cost: an origin change (a moved Central, a changed port or scheme) always costs one
+    re-enrollment and an authority-epoch bump, even when it is the same Central."""
+
+    central: LocatedCentral
+    registration: Credential | None = field(default=None, init=False)
+
+    def enrolled(self, registration: Credential) -> Session:
+        """This Session with `registration`, which this Session's origin issued."""
+        session = Session(self.central)
+        object.__setattr__(session, "registration", registration)
+        return session
+
+    def unregistered(self) -> Session:
+        """This Session with no registration (Central refused it, or enrollment failed)."""
+        return Session(self.central)
+
+    def relocated(self, central: LocatedCentral) -> Session:
+        """A Session for a new locate: the registration is kept only if `central` has the same
+        origin (scheme, host, port) as this one."""
+        if self.registration is None or central.origin != self.central.origin:
+            return Session(central)
+        return Session(central).enrolled(self.registration)
+
+
+class CentralLink:
+    """The Player's one link to Central: it owns the httpx clients (each guarded by
+    refuse_redirect), the websocket factory (ssl from the one Trust for wss, proxy=None,
+    DirectWebsocket refusing redirects), the bearer (from the Session only), and failure naming
+    (Exchange). Callers name a Session and a target; they cannot pass a URL, follow_redirects,
+    ssl or an Authorization header.
+
+    `unauthorized(code)` builds the caller's exception for a 401 answer or an authenticated
+    request on a Session with no registration. `client`/`time_client`/`websocket_connect` may
+    be injected (tests, fixtures); any client given is guarded too. `websocket_connect=False`
+    is the caller's own "no websocket" switch and is kept as given."""
+
+    WEBSOCKET_OPTIONS: Final = dict(max_queue=4, compression=None, proxy=None, open_timeout=15,
+                                    close_timeout=3, ping_interval=10, ping_timeout=10)
+
+    def __init__(self, trust: Trust, *, unauthorized: Callable[[str], Exception],
+                 client: httpx.AsyncClient | None = None,
+                 time_client: httpx.AsyncClient | None = None,
+                 websocket_connect: Any = None) -> None:
+        self.trust = trust
+        self._unauthorized = unauthorized
+        self._client = self._time_client = None
+        self._owned: list[httpx.AsyncClient] = []
+        self.client, self.time_client = client, time_client
+        self.websocket_connect = websocket_connect
+
+    @property
+    def client(self) -> httpx.AsyncClient | None:
+        return self._client
+
+    @client.setter
+    def client(self, client: httpx.AsyncClient | None) -> None:
+        self._client = None if client is None else guarded(client)
+
+    @property
+    def time_client(self) -> httpx.AsyncClient | None:
+        return self._time_client
+
+    @time_client.setter
+    def time_client(self, client: httpx.AsyncClient | None) -> None:
+        self._time_client = None if client is None else guarded(client)
+
+    def open(self) -> None:
+        """Builds, from the one Trust, each client that was not injected: the request client
+        (4 connections, 2 keep-alive) and the clock-probe client (1, 1)."""
+        if self._client is None:
+            self._client = central_http_client(self.trust, connections=4, keepalive=2)
+            self._owned.append(self._client)
+        if self._time_client is None:
+            self._time_client = central_http_client(self.trust, connections=1, keepalive=1)
+            self._owned.append(self._time_client)
+
+    async def aclose(self) -> None:
+        """Closes the clients open() built; injected ones belong to their owner."""
+        owned, self._owned = self._owned, []
+        for client in owned:
+            await client.aclose()
+
+    def _headers(self, session: Session, authenticated: bool) -> dict[str, str]:
+        headers = {"Accept-Encoding": "identity"}
+        if authenticated:
+            if session.registration is None:
+                raise self._unauthorized("not_registered")
+            headers["Authorization"] = "Bearer " + session.registration.token
+        return headers
+
+    def _named(self, exchange: Exchange, error: Exception) -> Exception:
+        named = exchange.name(error)
+        return error if named is None else named
+
+    @contextlib.asynccontextmanager
+    async def stream(self, session: Session, method: str, target: str, *, body: Any = None,
+                     authenticated: bool = True, timeout: float = REQUEST_TIMEOUT,
+                     time: bool = False) -> AsyncIterator[httpx.Response]:
+        """One streamed request to session.central.origin.url(target), bounded by `timeout`
+        for the whole exchange including the caller's body reads. Yields the answered response
+        (a 3xx never gets here; a 401 is `unauthorized("unauthorized")`). `time` selects the
+        clock-probe client. Every failure inside, the caller's included, is named by Exchange;
+        what it does not name is re-raised unchanged."""
+        client = (self._time_client if time else None) or self._client
+        if client is None:
+            raise RuntimeError("CentralLink is not open")
+        exchange = Exchange(session.central, target)
+        try:
+            headers = self._headers(session, authenticated)
+            async with asyncio.timeout(timeout):
+                async with client.stream(method, str(exchange.url), json=body,
+                                         headers=headers) as response:
+                    exchange.answered()
+                    if response.status_code == 401:
+                        raise self._unauthorized("unauthorized")
+                    yield response
+        except Exception as error:
+            named = self._named(exchange, error)
+            if named is error:
+                raise
+            raise named from error
+
+    @contextlib.asynccontextmanager
+    async def websocket(self, session: Session, target: str, *,
+                        max_size: int) -> AsyncIterator[Any]:
+        """The authenticated session websocket at session.central's origin (ws/wss by scheme),
+        with ssl=trust.context for wss and WEBSOCKET_OPTIONS. A 401 handshake is
+        `unauthorized("unauthorized")`; every other failure is named by Exchange."""
+        exchange = Exchange(session.central, target)
+        try:
+            options = dict(self.WEBSOCKET_OPTIONS, max_size=max_size,
+                           additional_headers=self._headers(session, True))
+            if session.central.origin.scheme == "https":
+                options["ssl"] = self.trust.context
+            connector = self.websocket_connect or DirectWebsocket
+            async with connector(websocket_url(session.central, target), **options) as socket:
+                exchange.answered()
+                yield socket
+        except Exception as error:
+            if isinstance(error, InvalidStatus) and error.response.status_code == 401:
+                raise self._unauthorized("unauthorized") from error
+            named = self._named(exchange, error)
+            if named is error:
+                raise
+            raise named from error

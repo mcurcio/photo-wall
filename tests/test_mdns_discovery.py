@@ -164,3 +164,21 @@ def test_an_advertisement_becomes_a_validated_root(info, root):
 ])
 def test_an_advertisement_that_is_no_central_root_is_none(info):
     assert origin_from_info(info) is None
+
+
+def test_a_failing_browse_reaches_find_central_as_an_uplink_error(monkeypatch):
+    """find_central's contract ("raises only UplinkError") holds for the real mDNS provider:
+    a browse that cannot open its socket is named, not leaked as OSError."""
+    from tests.uplink_fakes import FakeTransport
+    from uplink.causes import Cause, UplinkError
+    from uplink.finder import find_central
+
+    async def broken(self):
+        raise OSError(19, "No such device")
+
+    monkeypatch.setattr(MdnsCentralDiscovery, "_browse", broken)
+    with pytest.raises(UplinkError) as excinfo:
+        asyncio.run(find_central(PROOF, transport=FakeTransport({}),
+                                 discovery=MdnsCentralDiscovery(timeout=.5)))
+    assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "absent")
+    assert excinfo.value.detail == "discovery_OSError"

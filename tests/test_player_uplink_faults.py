@@ -177,7 +177,7 @@ def test_the_run_loop_builds_both_clients_from_the_one_trust(monkeypatch, trust,
         return real_central_http_client(passed_trust, connections=connections,
                                         keepalive=keepalive)
 
-    monkeypatch.setattr("player.service.central_http_client", recorder)
+    monkeypatch.setattr("player.central_link.central_http_client", recorder)
     service = _service(find_central=finding(f"http://127.0.0.1:{closed_port()}"), trust=trust,
                        cache_dir=cache_dir)
 

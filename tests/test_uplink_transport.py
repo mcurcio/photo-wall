@@ -4,6 +4,7 @@ and every wait bounded and named by what it was waiting for."""
 import contextlib
 import errno
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Iterator
@@ -45,6 +46,63 @@ def raw_peer(answer: bytes = b"", *, hold: bool = False, delay: float = 0) -> It
             connection.shutdown(socket.SHUT_WR)
             while connection.recv(4096):      # until the client closes: a FIN, never an RST
                 pass
+
+    def accept() -> None:
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            threading.Thread(target=serve, args=(connection,), daemon=True).start()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        stop.set()
+        thread.join(5)
+        listener.close()
+
+
+# The absolute deadline of these tests, and how late past it a failure may come.
+TRICKLE_DEADLINE = 1.0
+TRICKLE_SLACK = 0.5
+TRICKLE_LIMIT = 4.0
+
+
+@contextlib.contextmanager
+def trickle_peer(prefix: bytes, byte: bytes, *, every: float = 0.2,
+                 tls_server: bool = False) -> Iterator[int]:
+    """A TCP peer on 127.0.0.1 (TLS as tls.CENTRAL when `tls_server`) that reads one request
+    head, sends `prefix`, then one `byte` every `every` seconds for TRICKLE_LIMIT seconds
+    (then closes, so a regression fails its timing assertion instead of hanging): each recv()
+    succeeds, so only an absolute deadline can end the exchange sooner. Yields its port."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.05)
+    stop = threading.Event()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    if tls_server:
+        with tls.CENTRAL.files() as files:
+            context.load_cert_chain(*files)
+
+    def serve(connection: socket.socket) -> None:
+        with contextlib.suppress(OSError):
+            connection.settimeout(10)
+            if tls_server:
+                connection = context.wrap_socket(connection, server_side=True)
+        with connection, contextlib.suppress(OSError):
+            connection.settimeout(10)
+            head = b""
+            while b"\r\n\r\n" not in head:
+                data = connection.recv(4096)
+                if not data:
+                    return
+                head += data
+            connection.sendall(prefix)
+            until = time.monotonic() + TRICKLE_LIMIT
+            while time.monotonic() < until and not stop.wait(every):
+                connection.sendall(byte)
 
     def accept() -> None:
         while not stop.is_set():
@@ -288,3 +346,41 @@ def test_a_lookup_os_error_is_classified_too(trust):
 
     error = failure(HttpTransport(trust=trust, lookup=unreachable), at(80, "c.example"))
     assert (error.cause, error.reason) == (Cause.CONNECT, "unreachable")
+
+
+def test_a_trickled_header_fails_at_the_exchange_deadline_not_per_read(trust):
+    # Every recv() gets a byte within 0.2 s; a per-read timeout would wait forever.
+    with trickle_peer(b"HTTP/1.1 200 OK\r\nX-Slow: ", b"a") as port:
+        started = time.monotonic()
+        error = failure(HttpTransport(trust=trust), at(port), seconds=TRICKLE_DEADLINE)
+        elapsed = time.monotonic() - started
+    assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
+    assert TRICKLE_DEADLINE - 0.05 <= elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK
+
+
+def test_a_trickled_chunked_body_read_fails_at_its_timeout(trust):
+    # A chunk-size line that never ends: read1 -> readline makes one recv() per byte.
+    head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    with trickle_peer(head, b"0") as port:
+        reply = HttpTransport(trust=trust).send(at(port), headers={},
+                                                deadline=time.monotonic() + 5)
+        try:
+            started = time.monotonic()
+            with pytest.raises(UplinkError) as caught:
+                reply.read(10, timeout=TRICKLE_DEADLINE)
+            elapsed = time.monotonic() - started
+        finally:
+            reply.close()
+    assert (caught.value.cause, caught.value.reason) == (Cause.TRANSFER, "deadline")
+    assert TRICKLE_DEADLINE - 0.05 <= elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK
+
+
+def test_the_exchange_deadline_holds_over_tls(trust):
+    # The bound wraps the TLS socket, so it counts records, and TLS still verifies.
+    with trickle_peer(b"HTTP/1.1 200 OK\r\nX-Slow: ", b"a", tls_server=True) as port:
+        started = time.monotonic()
+        error = failure(HttpTransport(trust=trust), at(port, scheme="https"),
+                        seconds=TRICKLE_DEADLINE)
+        elapsed = time.monotonic() - started
+    assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
+    assert TRICKLE_DEADLINE - 0.05 <= elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK

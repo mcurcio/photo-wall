@@ -3,15 +3,20 @@ on_hop, and LocatedCentral's construction guarantee."""
 
 import copy
 import dataclasses
+import time
 
 import pytest
 
 from contracts.central_identity import MAX_IDENTITY_BYTES, CentralIdentity, identity_body
+from tests import tls_fixture as tls
+from tests.test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
 from tests.uplink_fakes import FakeReply, FakeTransport, central
+from uplink import locate as locate_module
 from uplink.causes import Cause, UplinkError
 from uplink.locate import LOCATE_DEADLINE, LOCATE_HEADERS, LocatedCentral, locate
 from uplink.origin import Origin
-from uplink.transport import HOP_TIMEOUT
+from uplink.transport import HOP_TIMEOUT, HttpTransport
+from uplink.trust import Trust
 
 
 class Clock:
@@ -159,3 +164,17 @@ def test_a_located_central_cannot_be_replaced_or_changed(located):
     with pytest.raises(AttributeError):
         del located._origin
     assert located.origin == ROOT
+
+
+def test_locate_fails_at_its_deadline_against_a_trickling_server(tmp_path, monkeypatch):
+    # Over a real socket: one header byte per 0.2 s keeps every read alive; only the chain's
+    # one deadline ends it (HOP_TIMEOUT is longer than the deadline here).
+    monkeypatch.setattr(locate_module, "LOCATE_DEADLINE", TRICKLE_DEADLINE)
+    transport = HttpTransport(trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)))
+    with trickle_peer(b"HTTP/1.1 200 OK\r\nX-Slow: ", b"a") as port:
+        started = time.monotonic()
+        with pytest.raises(UplinkError) as caught:
+            locate(Origin.parse_root(f"http://127.0.0.1:{port}/"), transport=transport)
+        elapsed = time.monotonic() - started
+    assert (caught.value.cause, caught.value.reason) == (Cause.CONNECT, "timeout")
+    assert TRICKLE_DEADLINE - 0.05 <= elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK

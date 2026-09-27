@@ -63,6 +63,8 @@ from uplink.resolver import (
 )
 from uplink.transport import HttpTransport, Transport
 from uplink.trust import Trust
+from uplink.watchdog import extend_start
+from uplink.watchdog import ready as watchdog_ready
 
 LOG = logging.getLogger("photo_wall.appliance.provision")
 
@@ -94,6 +96,13 @@ DEFAULT_UNIT = "photo-wall-player.service"
 DEFAULT_PUBLIC_CONFIG: Final = Path("/etc/photo-wall/public.json")
 MANIFEST_SECONDS: Final = 30.0
 PACKAGE_SECONDS: Final = 120.0
+# M5: the one deadline owner after switch_root. Kept equal to TimeoutStartSec in
+# appliance/systemd/photo-wall-provision.service by hand -- a unit file cannot import a Python
+# constant (see test_provision_unit_has_exactly_one_deadline_owner). Renewed by
+# Bootstrapper.run() via uplink.watchdog.extend_start() after every completed attempt, so a
+# healthy run that keeps making attempts is never killed for running long overall, while one
+# attempt that truly hangs is killed within this many seconds.
+PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = 300.0
 
 
 class ProvisionError(ValueError):
@@ -225,7 +234,9 @@ class Bootstrapper:
                  start_unit: Callable[[], None] = start_player_unit,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  backoff: Callable[[int], float] = _default_backoff,
-                 serial_reader: Callable[[], str | None] | None = None) -> None:
+                 serial_reader: Callable[[], str | None] | None = None,
+                 watchdog_extend: Callable[[float], bool] = extend_start,
+                 watchdog_ready: Callable[[], bool] = watchdog_ready) -> None:
         self._find, self._transport, self._clock = find, transport, clock
         self._fetch_manifest, self._fetch_package = fetch_manifest, fetch_package
         self._install, self._write_handoff, self._start_unit = install, write_handoff, start_unit
@@ -234,6 +245,9 @@ class Bootstrapper:
         # manifest fetch carries the serial and Central returns the served tag, handed
         # forward for base-health. Unset (default) keeps 0010's global `.deb`.
         self._serial_reader = serial_reader
+        # M5: default to the real systemd-notify calls (no-ops, returning False, when not run
+        # under systemd's Type=notify -- see uplink.watchdog). Tests inject fakes.
+        self._watchdog_extend, self._watchdog_ready = watchdog_extend, watchdog_ready
 
     def _serial(self) -> str | None:
         if self._serial_reader is None:
@@ -259,7 +273,11 @@ class Bootstrapper:
         backoff, EXCEPT cause TIME, which is re-raised: nothing in stage 2 can fix the clock, so
         the process exits into the unit's start limit and the reboot path (rule 3).
         ProvisionError is retried. Install, handoff and start failures escape. With
-        max_attempts=None (production) it retries forever; False after max_attempts."""
+        max_attempts=None (production) it retries forever; False after max_attempts.
+        M5: watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS) fires once per completed attempt
+        (a retried failure, a discarded corrupt package, or the successful one), renewing
+        TimeoutStartSec; watchdog_ready() fires exactly once, right after start_unit(), on the
+        successful return (Type=notify's starting phase does not end without READY=1)."""
         attempt = 0
         while max_attempts is None or attempt < max_attempts:
             attempt += 1
@@ -275,22 +293,27 @@ class Bootstrapper:
                     raise
                 LOG.warning("provision: %s (attempt %d)",
                             failure_text(error, clock=self._clock), attempt)
+                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             except ProvisionError as error:
                 LOG.warning("provision: %s (attempt %d)", error, attempt)
+                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             if hashlib.sha256(package).hexdigest() != manifest.sha256:
                 # Corruption guard (0009 owner ruling: integrity, not authenticity). Never
                 # install or start on a mismatch.
                 LOG.warning("provision: app_integrity mismatch, discarding (attempt %d)", attempt)
+                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             self._install(package, manifest)
             self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
                                         manifest.tag))
             self._start_unit()
+            self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
+            self._watchdog_ready()
             LOG.info("provision: app_installed %s", manifest.sha256)
             return True
         return False

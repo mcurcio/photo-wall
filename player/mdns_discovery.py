@@ -84,7 +84,9 @@ class MdnsCentralDiscovery:
 
     async def discover(self, unconfigured: Unconfigured) -> Origin | None:
         """A Central root found on the LAN within `timeout`, or None. `unconfigured` is the
-        proof that the kernel command line names no Central (R1)."""
+        proof that the kernel command line names no Central (R1). Any other failure (e.g. no
+        multicast socket) propagates; uplink.finder names it as an UplinkError, so
+        find_central raises only UplinkError."""
         try:
             return await asyncio.wait_for(self._browse(), timeout=self._timeout)
         except asyncio.TimeoutError:

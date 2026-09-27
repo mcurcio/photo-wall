@@ -32,8 +32,9 @@ from appliance.netboot_init import (
     DEBUG_PAUSE_SECONDS,
     NETWORKING_TIMEOUT_SECONDS,
 )
+from appliance.provision import PROVISION_ATTEMPT_TIMEOUT_SECONDS
 from uplink.clock import GATE_BUDGET
-from uplink.fetch import READ_TIMEOUT
+from uplink.fetch import READ_TIMEOUT, STATUS_TIMEOUT
 from uplink.locate import LOCATE_DEADLINE
 
 
@@ -245,10 +246,15 @@ def test_stage1_budget_covers_the_sum_of_stage1_bounds():
 
 def test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait():
     # Between two pets: networking; the clock gate (phase 3 -> 4 lines); a whole locate, taken
-    # as if no hop line came; one base-block read (DirectFetch: min(READ_TIMEOUT, remaining));
-    # the debug pause after the FAILED line.
-    largest_wait = max(NETWORKING_TIMEOUT_SECONDS, GATE_BUDGET, LOCATE_DEADLINE, READ_TIMEOUT,
-                       DEBUG_PAUSE_SECONDS)
+    # as if no hop line came; the debug pause after the FAILED line; and phase 6's first block,
+    # which is a SUM, not a single bound -- the phase-6 "base: GET" line pets once, and no pet
+    # fires again until the first body block is read. Getting there first waits up to
+    # STATUS_TIMEOUT for the response headers (Central's read-through miss, then one hop's
+    # connect/TLS bound), THEN up to READ_TIMEOUT for that first block
+    # (DirectFetch: min(READ_TIMEOUT, remaining)).
+    phase6_first_block_wait = STATUS_TIMEOUT + READ_TIMEOUT
+    largest_wait = max(NETWORKING_TIMEOUT_SECONDS, GATE_BUDGET, LOCATE_DEADLINE,
+                       phase6_first_block_wait, DEBUG_PAUSE_SECONDS)
     assert STAGE1_WATCHDOG_TIMEOUT >= largest_wait + 16
 
 
@@ -288,3 +294,19 @@ def test_provision_unit_parses_with_the_three_start_limit_keys():
     assert unit.get("StartLimitIntervalSec") == ["10min"]
     assert unit.get("StartLimitBurst") == ["10"]
     assert unit.get("StartLimitAction") == ["reboot-force"]
+
+
+def test_provision_unit_has_exactly_one_deadline_owner():
+    """M5: the unit's own deadline mechanism (Type=notify + TimeoutStartSec, extended by
+    appliance.provision.Bootstrapper.run() via uplink.watchdog.extend_start()) must stay
+    wired the way the unit file's own comment describes, or the guarantee it documents --
+    a hung attempt is killed, a healthy long-running provision is not -- silently regresses.
+    Runs independently of systemd-analyze (which validates unit syntax, not this value's
+    link to the Python constant it must equal)."""
+    path = Path("appliance/systemd/photo-wall-provision.service")
+    unit = _parse_unit(path.read_text())
+    service = unit.get("Service", {})
+    assert service.get("Type") == ["notify"]
+    assert service.get("NotifyAccess") == ["main"]
+    assert "WatchdogSec" not in service
+    assert service.get("TimeoutStartSec") == [str(int(PROVISION_ATTEMPT_TIMEOUT_SECONDS))]

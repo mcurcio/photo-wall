@@ -64,9 +64,8 @@ async def main():
         selected.raise_for_status()
         ticket = selected.json()
         config = PlayerConfig(central_origin="https://photo-wall.test", ca_file="/public/ca.pem")
-        # find_central is stored but never invoked below (locate_central()/run() are not
-        # exercised here), so this only needs to be constructible -- but central_finder is the
-        # real production wiring (R1), reused rather than faked.
+        # central_finder is the real production wiring (R1), reused rather than faked; enroll()
+        # needs a located Session, so locate_central() runs first.
         find = central_finder(config, Unconfigured("no_cmdline"), transport=HttpTransport(trust=trust))
         service = PlayerService(config, load_identity(),
             (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),),
@@ -77,6 +76,7 @@ async def main():
                 release_id=ticket["release_id"], trial=ticket["trial"], persistence="volatile")))
         tasks = []
         try:
+            await service.locate_central()
             await service.enroll()
             await service.poll_state()
             original_probe, original_request = service.probe_time, service.request

@@ -138,9 +138,13 @@ def test_identity_is_fresh_signed_and_never_written(tmp_path):
 @pytest.mark.parametrize("origin", ["https://user:secret@central", "https://central/path",
     "https://central?token=x", "https://central#x", "https://central\\evil", "file:///tmp/media",
     "https://central:bad", "https://central:0", "https://central\n"])
-def test_config_rejects_untrusted_or_non_origin_urls(tmp_path, origin):
-    with pytest.raises(ValidationError):
-        PlayerConfig(central_origin=origin)
+def test_the_saved_root_rejects_untrusted_or_non_origin_urls_only_when_read(tmp_path, origin):
+    """U3: loading the config never validates central_origin (a cmdline root must win over a
+    bad saved value); saved_root(), read only without a cmdline root, refuses it."""
+    config = PlayerConfig(central_origin=origin)
+    with pytest.raises(UplinkError) as excinfo:
+        config.saved_root()
+    assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "invalid")
 
 
 @pytest.mark.parametrize("allow_http", [{}, {"allow_http": False}, {"allow_http": True}])
@@ -311,10 +315,10 @@ async def rig(tmp_path, *, server=None):
 
 
 async def close(service):
-    if service.time_client is not None and service.time_client is not service.client:
-        await service.time_client.aclose()
-    if service.client is not None:
-        await service.client.aclose()
+    if service.link.time_client is not None and service.link.time_client is not service.link.client:
+        await service.link.time_client.aclose()
+    if service.link.client is not None:
+        await service.link.client.aclose()
     if service.cache:
         service.cache.close()
     service._worker.shutdown(wait=True, cancel_futures=True)
@@ -357,7 +361,7 @@ def test_a_cmdline_root_wins_over_the_saved_root_and_no_mdns_is_built(monkeypatc
     config = PlayerConfig(central_origin="http://192.0.2.20:8000")
     found = asyncio.run(central_finder(config, Configured(CMDLINE), transport=gateway())())
     assert (found.root, found.source, found.central.origin) == (CMDLINE, "cmdline", LOCATED)
-    assert caplog.messages == ["player: central_origin http://192.0.2.20:8000 ignored: "
+    assert caplog.messages == ["player: the saved central_origin is ignored: "
                                "the kernel command line names http://photo-wall.localdomain"]
 
 
@@ -418,7 +422,7 @@ def test_the_websocket_url_comes_from_the_located_origin(tmp_path):
             uris.append(uri)
             raise ServiceError("stop")
 
-        service.websocket_connect = connect
+        service.link.websocket_connect = connect
         try:
             await service.locate_central()
             await service.enroll()
@@ -627,8 +631,8 @@ def test_a_failed_locate_is_retried_on_the_next_cycle_without_restart(tmp_path, 
     async def check():
         service, server = await finder_rig(find)
         steady = asyncio.Event()
-        await service.client.aclose()
-        service.client = service.time_client = httpx.AsyncClient(
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
             transport=httpx.MockTransport(_until_steady(server, steady)))
         task = asyncio.create_task(service.run())
         try:
@@ -644,16 +648,17 @@ def test_a_failed_locate_is_retried_on_the_next_cycle_without_restart(tmp_path, 
 
 
 def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, monkeypatch):
-    """0014: a failed cycle (here Central answering 503) is followed by a new locate; the
-    registration is kept (no credential binding), so no second enrollment."""
+    """0014: a failed cycle (here Central answering 503) is followed by a new locate; it lands
+    on the origin that issued the registration, so the registration is kept (U8) and there is
+    no second enrollment."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     find = finding("http://central")
 
     async def check():
         service, server = await finder_rig(find)
         steady = asyncio.Event()
-        await service.client.aclose()
-        service.client = service.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
             _until_steady(server, steady, fail_first_state=True)))
         task = asyncio.create_task(service.run())
         try:
@@ -679,8 +684,8 @@ def test_a_redirect_on_a_player_request_is_named_and_relocates(tmp_path, monkeyp
     async def check():
         service, server = await finder_rig(find)
         steady = asyncio.Event()
-        await service.client.aclose()
-        service.client = service.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
             _until_steady(server, steady, redirect_first_state=True)))
         task = asyncio.create_task(service.run())
         try:
@@ -796,12 +801,12 @@ def test_metadata_rejects_unsafe_response_without_following_redirect(tmp_path, k
                 "unauthorized": httpx.Response(401),
                 "invalid_json": httpx.Response(200, content=b'{"a":NaN}', headers={"Content-Type": "application/json"}),
             }
-            await service.client.aclose()
+            await service.link.client.aclose()
             calls = []
             def handle(request):
                 calls.append(request.url)
                 return responses[kind]
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
             if kind == "unauthorized":
                 with pytest.raises(Unauthorized):
                     await service.request("GET", "/v1/player/state")
@@ -879,8 +884,8 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
             async def waiting(request):
                 entered.set()
                 await asyncio.Event().wait()
-            await service.client.aclose()
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(waiting))
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(waiting))
             task = asyncio.create_task(service.download(service._jobs[0]))
             await entered.wait()
             task.cancel()
@@ -972,7 +977,7 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
             return httpx.Response(200, headers={"Content-Type": "application/json"},
                                   stream=DelayedBody())
         try:
-            service.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             assert not await service.probe_time()
             assert service.mapping.uncertainty == math.inf
             assert service.mapping.diagnostics.uncertainty == pytest.approx(.2)
@@ -1255,7 +1260,7 @@ def test_websocket_has_explicit_bounds_and_rejects_oversized_state(tmp_path):
         def connect(uri, **options):
             calls.append((uri, options))
             return Socket()
-        service.websocket_connect = connect
+        service.link.websocket_connect = connect
         try:
             with pytest.raises(ServiceError, match="body_limit"):
                 await service._websocket_loop()
@@ -1275,14 +1280,14 @@ def test_the_websocket_refuses_401_as_unauthorized_and_names_a_redirect(tmp_path
         try:
             def refuses(uri, **options):
                 raise InvalidStatus(Http11Response(401, "Unauthorized", Headers(), b""))
-            service.websocket_connect = refuses
+            service.link.websocket_connect = refuses
             with pytest.raises(Unauthorized):
                 await service._websocket_loop()
 
             def redirects(uri, **options):
                 raise InvalidStatus(Http11Response(301, "Moved", Headers({
                     "Location": "https://other.example/x"}), b""))
-            service.websocket_connect = redirects
+            service.link.websocket_connect = redirects
             with pytest.raises(UplinkError) as excinfo:
                 await service._websocket_loop()
             assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
@@ -1300,7 +1305,7 @@ def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch
             load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
             client=client, time_client=client, health_path=None, boot_context=boot_context())
-        assert service.websocket_connect is None
+        assert service.link.websocket_connect is None
         try:
             await service.locate_central()
             await service.enroll()
@@ -1316,7 +1321,7 @@ def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch
                 async def __aexit__(self, *_):
                     return False
 
-            monkeypatch.setattr("player.service.DirectWebsocket", FakeConnector)
+            monkeypatch.setattr("player.central_link.DirectWebsocket", FakeConnector)
             with pytest.raises(ServiceError, match="stop"):
                 await service._websocket_loop()
             assert calls and calls[0][0] == "ws://central/v1/player/session"
@@ -1364,9 +1369,9 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
             if request.url.path == "/v1/player/readiness" and server.epoch == 2:
                 seen.set()
             return result
-        await service.client.aclose()
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        service.time_client = service.client
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.link.time_client = service.link.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -1375,7 +1380,7 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
         finally:
             service.stop()
             await asyncio.wait_for(task, 3)
-            await service.client.aclose()
+            await service.link.client.aclose()
         assert service.registration is None
     asyncio.run(check())
 
@@ -1384,7 +1389,7 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     async def check():
         service, server = await rig(tmp_path)
-        service.registration = None
+        service._session = service._session.unregistered()
         keys = []
         seen = asyncio.Event()
         def handle(request):
@@ -1392,9 +1397,9 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
             if len(keys) == 3:
                 seen.set()
             return httpx.Response(403, json={"error": "retired_player"})
-        await service.client.aclose()
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        service.time_client = service.client
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.link.time_client = service.link.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -1402,7 +1407,7 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
         finally:
             service.stop()
             await asyncio.wait_for(task, 3)
-            await service.client.aclose()
+            await service.link.client.aclose()
     asyncio.run(check())
 
 
@@ -1429,8 +1434,8 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
                 if request.url.path == "/v1/player/state":
                     seen.set()
                 return result
-            await service.client.aclose()
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
             task = asyncio.create_task(service._observation_loop())
             await asyncio.wait_for(seen.wait(), 2)
             await asyncio.sleep(.01)

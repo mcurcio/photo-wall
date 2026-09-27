@@ -43,10 +43,24 @@ async def choose_root(resolution: Configured | Unconfigured, *, saved: Origin | 
     if saved is not None:
         return saved, "saved"
     if discovery is not None:
-        root = await discovery.discover(resolution)
+        root = await _discover(discovery, resolution)
         if root is not None:
             return root, "discovered"
     return None
+
+
+async def _discover(discovery: CentralDiscovery, unconfigured: Unconfigured) -> Origin | None:
+    """discovery.discover(unconfigured), held to find_central's contract whatever the
+    implementation does: an UplinkError passes unchanged; any other Exception (an mDNS socket
+    that cannot open, a zeroconf bug) is UplinkError(CONFIGURATION, "absent",
+    detail="discovery_<type>"), i.e. nothing was discovered, named. Cancellation passes."""
+    try:
+        return await discovery.discover(unconfigured)
+    except UplinkError:
+        raise
+    except Exception as error:
+        raise UplinkError(Cause.CONFIGURATION, "absent",
+                          detail="discovery_" + type(error).__name__) from error
 
 
 async def find_central(resolution: Configured | Unconfigured, *, transport: Transport,
@@ -54,8 +68,8 @@ async def find_central(resolution: Configured | Unconfigured, *, transport: Tran
                        on_hop: Callable[[Url, int, str], None] | None = None) -> Found:
     """choose_root, then uplink.locate(root, transport=transport, on_hop=on_hop) on a worker
     thread (asyncio.to_thread). No root: UplinkError(CONFIGURATION, "absent",
-    detail="not_discovered"). Raises only UplinkError (a discovery keeps its protocol: a root
-    or None). Cancelling the caller does not stop the thread: it ends within LOCATE_DEADLINE
+    detail="not_discovered"). Raises only UplinkError: a discovery that raises anything else
+    is named by _discover. Cancelling the caller does not stop the thread: it ends within LOCATE_DEADLINE
     and its result is dropped. Nothing is persisted."""
     chosen = await choose_root(resolution, saved=saved, discovery=discovery)
     if chosen is None:

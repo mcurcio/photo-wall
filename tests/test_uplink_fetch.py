@@ -17,6 +17,7 @@ import pytest
 
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from tests import tls_fixture as tls
+from tests.test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
 from tests.uplink_fakes import FakeReply, FakeTransport, located
 from uplink.causes import Cause, UplinkError
 from uplink.fetch import (
@@ -343,3 +344,23 @@ def test_central_answering_a_miss_after_more_than_a_hop_is_named_as_central(tmp_
     error = caught.value
     assert (error.cause, error.reason, error.central_error) == (
         Cause.CENTRAL, "error", "base_timeout")
+
+
+# --- a trickling server, over a real socket: the acquisition deadline is absolute ------------
+
+@pytest.mark.parametrize(("head", "byte", "expected"), [
+    (b"HTTP/1.1 200 OK\r\nX-Slow: ", b"a", (Cause.CONNECT, "timeout")),     # inside the
+    (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"0",       # status wait
+     (Cause.TRANSFER, "deadline")),                                            # chunked body
+], ids=["headers", "chunked-body"])
+def test_a_trickling_server_fails_at_the_acquisition_deadline(tmp_path, head, byte, expected):
+    transport = HttpTransport(trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)))
+    with trickle_peer(head, byte) as port:
+        fetcher = DirectFetch(located(f"http://127.0.0.1:{port}/"), transport=transport,
+                              seconds=TRICKLE_DEADLINE)
+        started = time.monotonic()
+        with pytest.raises(UplinkError) as caught:
+            fetcher.get("/v1/netboot/base", 10_000)
+        elapsed = time.monotonic() - started
+    assert (caught.value.cause, caught.value.reason) == expected
+    assert elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK
