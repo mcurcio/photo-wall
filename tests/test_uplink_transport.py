@@ -384,3 +384,95 @@ def test_the_exchange_deadline_holds_over_tls(trust):
         elapsed = time.monotonic() - started
     assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
     assert TRICKLE_DEADLINE - 0.05 <= elapsed < TRICKLE_DEADLINE + TRICKLE_SLACK
+
+
+# --- _DeadlineSocket: the zero-time-left guard and the close deferral -------------------------
+
+@pytest.mark.parametrize("left", [0.0, -1.0], ids=["none-left", "overdue"])
+def test_a_bounded_socket_with_no_time_left_raises_timeout_not_value_error(left):
+    """With no time left, each send and receive is a TimeoutError before the socket is
+    touched: a zero timeout would make the socket non-blocking (BlockingIOError) and a negative
+    one is settimeout's ValueError, which no classify rule names."""
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        bounded = transport_module._DeadlineSocket(ours, deadline=100.0 + left,
+                                                   monotonic=lambda: 100.0)
+        for call in (lambda: bounded.recv(1), lambda: bounded.recv_into(bytearray(1)),
+                     lambda: bounded.sendall(b"x")):
+            with pytest.raises(TimeoutError):
+                call()
+        assert ours.gettimeout() is None            # never set: the guard came first
+
+
+def test_a_deadline_that_passes_mid_exchange_is_a_named_timeout(trust, monkeypatch):
+    """The whole exchange runs out between the TCP connect and the request: the bounded
+    socket's first send finds no time left. That is CONNECT/timeout, never a ValueError that
+    escapes classification."""
+    skew = [0.0]
+    real_connect = socket.socket.connect
+
+    def slow_connect(sock: socket.socket, address) -> None:
+        real_connect(sock, address)
+        skew[0] += 60                               # far past this address's deadline
+
+    monkeypatch.setattr(socket.socket, "connect", slow_connect)
+    transport = HttpTransport(trust=trust, monotonic=lambda: time.monotonic() + skew[0])
+    with raw_peer(hold=True) as port:
+        error = failure(transport, at(port), seconds=30)
+    assert (error.cause, error.reason) == (Cause.CONNECT, "timeout")
+
+
+class _Closes:
+    """A stand-in wrapped socket that counts close() calls."""
+
+    def __init__(self) -> None:
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+def _bounded(raw: _Closes) -> "transport_module._DeadlineSocket":
+    return transport_module._DeadlineSocket(raw, deadline=float("inf"),  # type: ignore[arg-type]
+                                            monotonic=time.monotonic)
+
+
+def test_the_bounded_socket_closes_only_once_its_last_file_is_closed():
+    raw = _Closes()
+    bounded = _bounded(raw)
+    first, second = bounded.makefile("rb"), bounded.makefile("rb")
+    bounded.close()                                 # http.client hands the socket over...
+    assert raw.closes == 0                          # ...while the response still reads it
+    first.close()
+    assert raw.closes == 0
+    second.close()
+    assert raw.closes == 1
+
+
+def test_the_bounded_socket_closes_at_once_without_an_open_file():
+    raw = _Closes()
+    _bounded(raw).close()
+    assert raw.closes == 1
+    raw = _Closes()
+    bounded = _bounded(raw)
+    bounded.makefile("rb").close()                  # a file closed while the socket is open
+    assert raw.closes == 0
+    bounded.close()
+    assert raw.closes == 1
+
+
+def test_a_body_is_read_after_http_client_closes_its_connection(trust):
+    """Connection: close makes http.client close the connection (so the bounded socket)
+    before the response is read: the response's file keeps the socket open until it ends.
+    The body trickles in after the head, so each read must reach the socket."""
+    head = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n"
+    with trickle_peer(head, b"o", every=0.05) as port:
+        reply = HttpTransport(trust=trust).send(at(port), headers={},
+                                                deadline=time.monotonic() + 5)
+        try:
+            body = b""
+            while chunk := reply.read(10, timeout=5):
+                body += chunk
+        finally:
+            reply.close()
+    assert body == b"oo"

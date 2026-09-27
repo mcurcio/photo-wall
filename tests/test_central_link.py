@@ -14,8 +14,10 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Inval
 from websockets.http11 import Response as Http11Response
 
 from player.central_link import (
+    CentralLink,
     DirectWebsocket,
     Exchange,
+    Session,
     central_http_client,
     central_url,
     read_refusal,
@@ -245,4 +247,82 @@ def test_read_refusal_reads_a_bounded_body():
         named = await _read(oversized, url)
         assert (named.cause, named.reason) == (Cause.HTTP, "status")
         assert named.detail == "status=503"
+    asyncio.run(check())
+
+
+# --- R3: the redirect guard, for every 3xx and on every client --------------------------------
+
+class _Refused(Exception):
+    pass
+
+
+def _moving(status: int, calls: list[str]):
+    """Central answers `status` with a Location elsewhere; anywhere else answers 200."""
+    def handle(request):
+        calls.append(str(request.url))
+        if request.url.host == "central":
+            return httpx.Response(status, headers={"Location": "http://upstream.example/copy"})
+        return httpx.Response(200, json={})
+    return handle
+
+
+async def _get(link: CentralLink, *, time: bool = False) -> int:
+    async with link.stream(Session(located("http://central")), "GET", "/v1/player/time",
+                           authenticated=False, time=time) as response:
+        return response.status_code
+
+
+@pytest.mark.parametrize("status", [300, 301, 302, 303, 307, 308, 399])
+def test_every_3xx_is_refused_before_a_client_that_follows_redirects_could(tmp_path, status):
+    async def check():
+        calls = []
+        client = httpx.AsyncClient(follow_redirects=True,
+                                   transport=httpx.MockTransport(_moving(status, calls)))
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused, client=client)
+        try:
+            with pytest.raises(UplinkError) as excinfo:
+                await _get(link)
+        finally:
+            await client.aclose()
+        assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
+        assert excinfo.value.detail == f"status={status};location=upstream.example"
+        assert calls == ["http://central/v1/player/time"]
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("status", [200, 299, 400, 503])
+def test_a_status_outside_3xx_is_left_to_the_caller(tmp_path, status):
+    async def check():
+        calls = []
+        client = httpx.AsyncClient(transport=httpx.MockTransport(_moving(status, calls)))
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused, client=client)
+        try:
+            assert await _get(link) == status
+        finally:
+            await client.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("how", ["constructor", "setter"])
+def test_an_injected_time_client_is_guarded_too(tmp_path, how):
+    """The clock probe's own client (distinct from the request client) never follows a
+    redirect either, whether it is injected at construction or set later."""
+    async def check():
+        calls = []
+        client = httpx.AsyncClient(transport=httpx.MockTransport(_moving(200, [])))
+        time_client = httpx.AsyncClient(follow_redirects=True,
+                                        transport=httpx.MockTransport(_moving(302, calls)))
+        link = CentralLink(_trust(tmp_path), unauthorized=_Refused, client=client,
+                           time_client=time_client if how == "constructor" else None)
+        if how == "setter":
+            link.time_client = time_client
+        try:
+            assert link.time_client is time_client
+            with pytest.raises(UplinkError) as excinfo:
+                await _get(link, time=True)
+        finally:
+            await client.aclose()
+            await time_client.aclose()
+        assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
+        assert calls == ["http://central/v1/player/time"]
     asyncio.run(check())

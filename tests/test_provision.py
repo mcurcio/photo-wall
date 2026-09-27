@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import uplink.watchdog
 from appliance import provision
 from appliance.provision import (
     APP_MANIFEST_PATH,
@@ -349,6 +350,51 @@ def test_watchdog_ready_is_never_sent_on_a_failed_or_incomplete_run():
         ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS)] * 3
 
 
+def test_every_attempt_renews_its_window_before_its_first_step():
+    """M5: the renewal OPENS each attempt, so the window it grants is that attempt plus the
+    backoff after it (what LONGEST_ATTEMPT_SECONDS sums) -- never process start-up plus attempt
+    1, and no exit from an attempt can skip it. Mutation probe: renew after the attempt instead
+    (the hand reconstruction's placement) and the order below changes."""
+    manifests = iter([FakeReply(503, body=b'{"error":"app_unconfigured"}'), reply(manifest_json())])
+    transport = gateway(manifest=lambda: next(manifests))
+    watchdog = Watchdog()
+    events = watchdog.calls
+    locate_it = functools.partial(find_central, Configured(CMDLINE), transport=transport)
+
+    async def find():
+        events.append(("find",))
+        return await locate_it()
+
+    async def sleep(_seconds):
+        events.append(("sleep",))
+
+    subject = bootstrapper(transport, find=find, sleep=sleep,
+                           start_unit=lambda: events.append(("start_unit",)),
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready)
+    assert run(subject, 2) is True
+    window = ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS)
+    assert events == [window, ("find",), ("sleep",),
+                      window, ("find",), ("start_unit",), ("ready",)]
+
+
+def test_the_attempt_steps_run_under_the_bounds_the_window_sums(monkeypatch):
+    """Each term of LONGEST_ATTEMPT_SECONDS is the bound the step actually runs under: the
+    manifest and package DirectFetch deadlines here; the backoff's ceiling; dpkg, systemctl and
+    the mDNS browse in their own tests below."""
+    seconds = []
+    original = provision.DirectFetch
+
+    def recording(central, **kwargs):
+        seconds.append(kwargs["seconds"])
+        return original(central, **kwargs)
+
+    monkeypatch.setattr(provision, "DirectFetch", recording)
+    assert run(bootstrapper(gateway()), 1) is True
+    assert seconds == [provision.MANIFEST_SECONDS, provision.PACKAGE_SECONDS]
+    backoff = provision._default_backoff
+    assert max(backoff(attempt) for attempt in range(1, 1000)) == provision.MAX_BACKOFF_SECONDS
+
+
 def test_eventually_succeeds_once_central_has_an_app():
     """A malformed manifest (ProvisionError), then app_unconfigured, then a promoted app."""
     manifests = iter([reply(b"{}"), FakeReply(503, body=b'{"error":"app_unconfigured"}'),
@@ -498,6 +544,7 @@ def test_install_package_is_dpkg_alone_on_a_0600_temp_deb_removed_after(monkeypa
     [(argv, kwargs)] = dpkg.calls
     assert argv[:2] == ["dpkg", "--install"] and len(argv) == 3 and argv[2].endswith(".deb")
     assert kwargs["check"] is True
+    assert kwargs["timeout"] == provision.INSTALL_SECONDS
     assert kwargs["env"]["DEBIAN_FRONTEND"] == "noninteractive"
     assert dpkg.seen == [(BODY, 0o600)]
     assert not Path(argv[2]).exists()
@@ -508,7 +555,8 @@ def test_start_player_unit_is_one_systemctl_start(monkeypatch):
     monkeypatch.setattr("appliance.provision.subprocess.run",
                         lambda argv, **kwargs: calls.append((argv, kwargs)))
     start_player_unit()
-    assert calls == [(["systemctl", "start", "photo-wall-player.service"], {"check": True})]
+    assert calls == [(["systemctl", "start", "photo-wall-player.service"],
+                      {"check": True, "timeout": provision.START_UNIT_SECONDS})]
 
 
 # --- main -------------------------------------------------------------------------
@@ -527,7 +575,7 @@ class _Stubs:
     and a Bootstrapper.run that finds Central once and then fails with `error`."""
 
     def __init__(self, monkeypatch, transport, error):
-        self.found, self.discoveries = [], []
+        self.found, self.discoveries, self.bootstrappers = [], [], []
         clock = record(ClockState.UNSYNCED)
         stubs = self
 
@@ -537,11 +585,13 @@ class _Stubs:
                 return "trust"
 
         class Discovery(FixedDiscovery):
-            def __init__(self):
+            def __init__(self, **options):
                 super().__init__(None)
+                self.options = options
                 stubs.discoveries.append(self)
 
         async def run(bootstrapper, **_):
+            stubs.bootstrappers.append(bootstrapper)
             stubs.found.append(await bootstrapper._find())
             raise error
 
@@ -579,5 +629,21 @@ def test_main_without_a_cmdline_root_discovers_with_the_proof(tmp_path, monkeypa
         provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
     [discovery] = stubs.discoveries
     assert discovery.proofs == [Unconfigured("absent")]
+    assert discovery.options == {"timeout": provision.DISCOVERY_SECONDS}
     assert caplog.messages == [
         "provision: cause=configuration reason=absent detail=not_discovered"]
+
+
+def test_main_builds_a_bootstrapper_on_the_real_systemd_notify_calls(tmp_path, monkeypatch):
+    """M5: the deadline owner only works if production actually talks to systemd. The
+    Bootstrapper main() builds renews through uplink.watchdog.extend_start and ends the
+    starting phase through uplink.watchdog.ready -- the functions themselves, not a stand-in.
+    Mutation probe: default either parameter to a no-op lambda and this fails."""
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"console=tty1 photowall.central={CMDLINE}/\n")
+    stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired", host="central"))
+    with pytest.raises(SystemExit):
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+    [built] = stubs.bootstrappers
+    assert built._watchdog_extend is uplink.watchdog.extend_start
+    assert built._watchdog_ready is uplink.watchdog.ready

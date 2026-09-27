@@ -13,6 +13,7 @@ import os
 import socket
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from appliance.netboot_init import (
     MAX_RESOLVER_BYTES,
     NETBOOT_BASE_PATH,
     SERIAL_HEADER,
+    STAGE1_SEND_SECONDS,
     STAGE2_RESOLVER,
     NetbootError,
     NetbootOps,
@@ -312,15 +314,35 @@ def test_every_collaborator_is_required(tmp_path):
             netboot(cmdline(), tmp_path / "root", **partial)
 
 
-def test_a_pet_before_every_phase_line_one_per_block_and_hand_over_last(tmp_path):
+def test_a_pet_for_every_phase_line_block_send_and_read_and_hand_over_last(tmp_path):
+    """Every phase line pets; so does every base block (Keeper.paced), every send that returns
+    and every read (the stage-1 transport). Mutation probe: drop either transport pet and the
+    count is short."""
     keeper = FakeKeeper()
-    log = run(cmdline(), tmp_path, keeper=keeper,
-              answers=script(**{BASE: base_reply(step=8)}))
+    answers = script(**{BASE: base_reply(step=8)})
+    transport = FakeTransport(answers)
+    log = run(cmdline(), tmp_path, keeper=keeper, transport=transport)
     phase_lines = [line for line in log.lines if line.startswith("phase ") and
                    "hash compare" not in line]
     blocks = -(-len(BODY) // 8)
-    assert keeper.pets == len(phase_lines) + blocks
+    reads = sum(len(reply.reads) for reply in answers.values())
+    assert reads > blocks
+    assert keeper.pets == len(phase_lines) + blocks + len(transport.sent) + reads
     assert keeper.handed_over and keeper.pets_before_hand_over == keeper.pets
+
+
+def test_every_send_waits_at_most_the_stage1_send_cap(tmp_path):
+    """A send's wait for its status line is a sum over the addresses the lookup returns;
+    netboot() holds every send's absolute deadline to STAGE1_SEND_SECONDS from when it starts,
+    whatever the caller asked (the base's DirectFetch asks for BASE_FETCH_SECONDS). Mutation
+    probe: hand _run_netboot the bare transport and the base send gets the whole 300 s."""
+    transport = FakeTransport(script())
+    before = time.monotonic()
+    run(cmdline(), tmp_path, transport=transport)
+    after = time.monotonic()
+    deadlines = {url: deadline for url, _headers, deadline, _status in transport.sent}
+    assert all(deadline <= after + STAGE1_SEND_SECONDS for deadline in deadlines.values())
+    assert before + STAGE1_SEND_SECONDS <= deadlines[BASE] < before + BASE_FETCH_SECONDS
 
 
 def test_hand_over_never_runs_on_a_failed_boot_and_the_failed_line_pets(tmp_path):

@@ -22,7 +22,7 @@ from collections.abc import Awaitable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 import httpx
 from pydantic import ConfigDict, Field, model_validator
@@ -87,11 +87,12 @@ class PlayerConfig(Model):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
     schema_version: Literal[1] = Field(default=1, alias="schema")
     # The saved root (R1): written by provisioning only when its root came from mDNS, and
-    # used only when the kernel command line names no Central. Validated by the one
-    # Central-root validator, uplink.origin.Origin.parse_root, only then (saved_root()): when
-    # the cmdline names Central it is never parsed, so a bad saved value cannot stop the
-    # Player (U3).
-    central_origin: str | None = Field(default=None, max_length=2048)
+    # used only when the kernel command line names no Central. Opaque until saved_root():
+    # any JSON value loads (no type or length check here), and only saved_root() -- called
+    # only when the cmdline names no Central -- validates it, with the one Central-root
+    # validator, uplink.origin.Origin.parse_root. So when the cmdline names Central, no
+    # saved value of any type or length can stop the Player (U3).
+    central_origin: Any = Field(default=None, repr=False)
     # The base tag this boot's diskless base was served, handed forward by the
     # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
     # set, the enrolled player reports it healthy on /v1/player/base-health so
@@ -124,7 +125,8 @@ class PlayerConfig(Model):
 
     def saved_root(self) -> Origin | None:
         """The saved root, or None when no central_origin is configured. Raises
-        UplinkError(CONFIGURATION, "invalid") when it is not a Central root."""
+        UplinkError(CONFIGURATION, "invalid") when it is not a Central root, a non-string or
+        an over-long value included (Origin.parse_root refuses both)."""
         return None if self.central_origin is None else Origin.parse_root(self.central_origin)
 
 

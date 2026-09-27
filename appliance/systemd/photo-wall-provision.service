@@ -22,12 +22,17 @@ StartLimitAction=reboot-force
 # "a service of Type=notify/Type=notify-reload" only, and Type=oneshot's own WatchdogSec is
 # never armed while the unit is still starting either way. So this unit is Type=notify:
 # appliance.provision.Bootstrapper.run() calls uplink.watchdog.extend_start() with
-# PROVISION_ATTEMPT_TIMEOUT_SECONDS after every completed attempt (success, a retried failure,
-# or a discarded corrupt package) -- renewing TimeoutStartSec so a healthy run that keeps making
-# attempts is never killed for running long overall, while one attempt that truly hangs is
-# killed within that many seconds -- then calls uplink.watchdog.ready() right before the process
-# exits 0 (READY=1 is required to end Type=notify's starting phase at all). No WatchdogSec: once
-# READY=1 lands this process exits immediately, so there is no running phase to pet.
+# PROVISION_ATTEMPT_TIMEOUT_SECONDS as every attempt begins, renewing TimeoutStartSec so a run
+# that keeps making attempts is never killed for running long overall, then calls
+# uplink.watchdog.ready() right before the process exits 0 (READY=1 is required to end
+# Type=notify's starting phase at all). The window between two renewals is one whole attempt
+# plus its backoff; appliance.provision.LONGEST_ATTEMPT_SECONDS sums every blocking step at its
+# bound (the mDNS browse, locate, the manifest and package exchanges, the local sha256/temp/
+# handoff steps, dpkg --install, systemctl start of the Player, the backoff), and the window is
+# that sum x 1.25, rounded up: a healthy attempt, however slow, is never killed; a hung one is
+# killed within it. No
+# WatchdogSec: once READY=1 lands this process exits immediately, so there is no running phase
+# to pet.
 Type=notify
 NotifyAccess=main
 RemainAfterExit=yes
@@ -46,8 +51,9 @@ ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper
 Restart=on-failure
 RestartSec=5
 # Keep equal to appliance.provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS by hand: a systemd unit
-# file cannot import a Python constant.
-TimeoutStartSec=300
+# file cannot import a Python constant (tests/test_netboot_liveness.py pins the two, and the
+# sum and margin above).
+TimeoutStartSec=473
 UMask=0077
 
 [Install]

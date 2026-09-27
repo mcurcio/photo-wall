@@ -23,6 +23,7 @@ import time
 from secrets import token_hex
 
 import pytest
+import zeroconf
 from zeroconf import ServiceInfo, Zeroconf
 
 from player.mdns_discovery import SERVICE_TYPE, MdnsCentralDiscovery, origin_from_info
@@ -182,3 +183,60 @@ def test_a_failing_browse_reaches_find_central_as_an_uplink_error(monkeypatch):
                                  discovery=MdnsCentralDiscovery(timeout=.5)))
     assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "absent")
     assert excinfo.value.detail == "discovery_OSError"
+
+
+def _find_with(discovery: MdnsCentralDiscovery):
+    from tests.uplink_fakes import FakeTransport
+    from uplink.finder import find_central
+
+    return asyncio.run(find_central(PROOF, transport=FakeTransport({}), discovery=discovery))
+
+
+@pytest.mark.parametrize("error", [
+    zeroconf.EventLoopBlocked(), zeroconf.NotRunningException(),
+    zeroconf.BadTypeInNameException("bad type"), zeroconf.NonUniqueNameException(),
+    zeroconf.Error("any other"),
+], ids=lambda error: type(error).__name__)
+def test_a_zeroconf_error_is_a_named_discovery_failure_not_a_player_error(monkeypatch, error):
+    """R9: zeroconf's own errors are environmental, so the mDNS provider declares them
+    (DiscoveryError) and find_central names them CONFIGURATION/absent, with the zeroconf
+    type in the detail, instead of letting them reach the Player as "player_error"."""
+    from uplink.causes import Cause, UplinkError
+    from uplink.finder import DiscoveryError
+
+    async def broken(self):
+        raise error
+
+    monkeypatch.setattr(MdnsCentralDiscovery, "_browse", broken)
+    with pytest.raises(UplinkError) as excinfo:
+        _find_with(MdnsCentralDiscovery(timeout=.5))
+    assert (excinfo.value.cause, excinfo.value.reason, excinfo.value.detail) == (
+        Cause.CONFIGURATION, "absent", "discovery_" + type(error).__name__)
+    declared = excinfo.value.__cause__
+    assert isinstance(declared, DiscoveryError) and declared.__cause__ is error
+
+
+@pytest.mark.parametrize("error", [TypeError("a bug"), AttributeError("a bug")],
+                         ids=lambda error: type(error).__name__)
+def test_a_programming_error_in_the_browse_propagates_as_itself(monkeypatch, error):
+    async def broken(self):
+        raise error
+
+    monkeypatch.setattr(MdnsCentralDiscovery, "_browse", broken)
+    with pytest.raises(type(error)) as excinfo:
+        _find_with(MdnsCentralDiscovery(timeout=.5))
+    assert excinfo.value is error
+
+
+def test_the_real_library_error_for_a_bad_service_type_is_declared():
+    """This zeroconf raises BadTypeInNameException from the async browser itself."""
+    from uplink.finder import DiscoveryError
+
+    try:
+        with pytest.raises(DiscoveryError) as excinfo:
+            asyncio.run(MdnsCentralDiscovery(timeout=1.0, service_type="not-a-type")
+                        .discover(PROOF))
+    except OSError as error:
+        pytest.skip(f"no multicast socket in this sandbox: {error}")
+    assert excinfo.value.kind == "BadTypeInNameException"
+    assert isinstance(excinfo.value.__cause__, zeroconf.BadTypeInNameException)

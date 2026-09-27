@@ -31,11 +31,22 @@ from appliance.netboot_init import (
     BASE_FETCH_SECONDS,
     DEBUG_PAUSE_SECONDS,
     NETWORKING_TIMEOUT_SECONDS,
+    STAGE1_SEND_SECONDS,
 )
-from appliance.provision import PROVISION_ATTEMPT_TIMEOUT_SECONDS
+from appliance.provision import (
+    DISCOVERY_SECONDS,
+    INSTALL_SECONDS,
+    LOCAL_STEPS_SECONDS,
+    MANIFEST_SECONDS,
+    MAX_BACKOFF_SECONDS,
+    PACKAGE_SECONDS,
+    PROVISION_ATTEMPT_TIMEOUT_SECONDS,
+    START_UNIT_SECONDS,
+)
 from uplink.clock import GATE_BUDGET
 from uplink.fetch import READ_TIMEOUT, STATUS_TIMEOUT
 from uplink.locate import LOCATE_DEADLINE
+from uplink.transport import LOOKUP_TIMEOUT
 
 
 class ManualMonotonic:
@@ -244,18 +255,25 @@ def test_stage1_budget_covers_the_sum_of_stage1_bounds():
                              + BASE_FETCH_SECONDS + DEBUG_PAUSE_SECONDS)
 
 
-def test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait():
+@pytest.mark.parametrize("addresses", [1, 2, 3, 4, 16, 64])
+def test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait(addresses):
     # Between two pets: networking; the clock gate (phase 3 -> 4 lines); a whole locate, taken
-    # as if no hop line came; the debug pause after the FAILED line; and phase 6's first block,
-    # which is a SUM, not a single bound -- the phase-6 "base: GET" line pets once, and no pet
-    # fires again until the first body block is read. Getting there first waits up to
-    # STATUS_TIMEOUT for the response headers (Central's read-through miss, then one hop's
-    # connect/TLS bound), THEN up to READ_TIMEOUT for that first block
-    # (DirectFetch: min(READ_TIMEOUT, remaining)).
-    phase6_first_block_wait = STATUS_TIMEOUT + READ_TIMEOUT
+    # as if no hop line came; the debug pause after the FAILED line; and one network wait,
+    # which the stage-1 transport follows with a pet: one read (DirectFetch: at most
+    # READ_TIMEOUT), or one send up to its status line. A send is a SUM, not a single bound: the
+    # lookup, then one attempt per address the lookup returned, each up to STATUS_TIMEOUT
+    # (Central's read-through miss, then one hop's connect/TLS bound) -- three stalled
+    # addresses alone are 7 + 3 x 35 = 112 s. The transport caps that sum at
+    # STAGE1_SEND_SECONDS however many addresses come back.
+    send_wait = min(LOOKUP_TIMEOUT + addresses * STATUS_TIMEOUT, STAGE1_SEND_SECONDS)
     largest_wait = max(NETWORKING_TIMEOUT_SECONDS, GATE_BUDGET, LOCATE_DEADLINE,
-                       phase6_first_block_wait, DEBUG_PAUSE_SECONDS)
+                       send_wait, READ_TIMEOUT, DEBUG_PAUSE_SECONDS)
     assert STAGE1_WATCHDOG_TIMEOUT >= largest_wait + 16
+
+
+def test_the_stage1_send_cap_still_covers_a_dual_stack_host():
+    # The cap cuts only a third address onward: a host's AAAA and A are each tried in full.
+    assert STAGE1_SEND_SECONDS >= LOOKUP_TIMEOUT + 2 * STATUS_TIMEOUT
 
 
 # --- S0-AC10: the provisioning unit's start-limit keys; watchdog.conf gone --
@@ -310,3 +328,20 @@ def test_provision_unit_has_exactly_one_deadline_owner():
     assert service.get("NotifyAccess") == ["main"]
     assert "WatchdogSec" not in service
     assert service.get("TimeoutStartSec") == [str(int(PROVISION_ATTEMPT_TIMEOUT_SECONDS))]
+
+
+def test_provision_unit_outlasts_the_longest_healthy_attempt_by_the_margin():
+    """M5: Bootstrapper.run() renews TimeoutStartSec as each attempt begins, so the longest wait
+    between two renewals is one whole attempt plus the backoff after it: the SUM of every
+    blocking step at the bound it runs under (tests/test_provision.py pins each bound to its
+    step). The unit's TimeoutStartSec, and the constant it must equal, exceed that sum by at
+    least 1.25x, or a healthy but slow attempt is killed mid-install. Summed here from the
+    constants, independently of provision.py's own derivation. Mutation probe: raise any term
+    (e.g. PACKAGE_SECONDS to 250) without raising TimeoutStartSec and this fails."""
+    longest_attempt = (DISCOVERY_SECONDS + LOCATE_DEADLINE + MANIFEST_SECONDS + PACKAGE_SECONDS
+                       + LOCAL_STEPS_SECONDS + INSTALL_SECONDS + START_UNIT_SECONDS
+                       + MAX_BACKOFF_SECONDS)
+    service = _parse_unit(Path("appliance/systemd/photo-wall-provision.service").read_text())
+    [timeout] = service["Service"]["TimeoutStartSec"]
+    assert float(timeout) >= 1.25 * longest_attempt
+    assert PROVISION_ATTEMPT_TIMEOUT_SECONDS >= 1.25 * longest_attempt

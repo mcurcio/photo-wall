@@ -9,7 +9,7 @@ import pytest
 from contracts.central_identity import LOCATE_PATH
 from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink.causes import Cause, UplinkError
-from uplink.finder import Found, choose_root, find_central
+from uplink.finder import DiscoveryError, Found, choose_root, find_central
 from uplink.locate import LocatedCentral
 from uplink.origin import Origin
 from uplink.resolver import Configured, Unconfigured
@@ -117,13 +117,43 @@ class BrokenDiscovery:
         raise self.error
 
 
-def test_a_discovery_that_raises_is_named_so_find_central_raises_only_uplink_errors():
+@pytest.mark.parametrize("error,detail", [
+    (OSError(19, "no multicast"), "discovery_OSError"),
+    (TimeoutError(), "discovery_TimeoutError"),
+    (DiscoveryError("NotRunningException"), "discovery_NotRunningException"),
+], ids=["OSError", "TimeoutError", "DiscoveryError"])
+def test_an_expected_discovery_failure_is_named_so_find_central_raises_an_uplink_error(
+        error, detail):
     transport = FakeTransport({})
     with pytest.raises(UplinkError) as excinfo:
         asyncio.run(find_central(Unconfigured("absent"), transport=transport,
-                                 discovery=BrokenDiscovery(OSError(19, "no multicast"))))
+                                 discovery=BrokenDiscovery(error)))
     assert (excinfo.value.cause, excinfo.value.reason, excinfo.value.detail) == (
-        Cause.CONFIGURATION, "absent", "discovery_OSError")
+        Cause.CONFIGURATION, "absent", detail)
+    assert excinfo.value.__cause__ is error
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize("kind", ["", "no multicast", "détail", "a;b"])
+def test_a_discovery_error_kind_is_an_identifier(kind):
+    """The kind becomes the UplinkError's console detail token, so it is refused when the
+    DiscoveryError is built, not when the failure is being reported."""
+    with pytest.raises(ValueError):
+        DiscoveryError(kind)
+
+
+@pytest.mark.parametrize("error", [TypeError("a bug"), AttributeError("a bug"),
+                                   KeyError("a bug"), ValueError("a bug")],
+                         ids=["TypeError", "AttributeError", "KeyError", "ValueError"])
+def test_a_discovery_bug_is_never_dressed_up_as_configuration(error):
+    """R9: a programming error in a discovery propagates as itself (the Player reports it as
+    "player_error"), never as CONFIGURATION/absent."""
+    transport = FakeTransport({})
+    with pytest.raises(type(error)) as excinfo:
+        asyncio.run(find_central(Unconfigured("absent"), transport=transport,
+                                 discovery=BrokenDiscovery(error)))
+    assert excinfo.value is error
+    assert transport.sent == []
 
 
 def test_a_discovery_uplink_error_passes_unchanged():

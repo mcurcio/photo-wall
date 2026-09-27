@@ -5,9 +5,12 @@ systemd's watchdog (M5). Seeded from the review's bearer-leak probe and survivin
 
 import asyncio
 import errno
+import functools
 import json
 import logging
+import signal
 import sys
+import types
 from pathlib import Path
 
 import httpx
@@ -18,10 +21,13 @@ from player.mdns_discovery import DEFAULT_TIMEOUT as MDNS_TIMEOUT
 from player.service import (
     BACKOFF,
     PlayerConfig,
+    PlayerService,
     Registration,
     ServiceError,
+    StaleFeedback,
     Unauthorized,
     build_finder,
+    load_config,
 )
 from player.service import main as player_main
 from tests import tls_fixture as tls
@@ -38,7 +44,9 @@ from tests.test_player_service import (
 from tests.test_player_uplink_faults import _BrokenBody
 from tests.uplink_fakes import FakeTransport, central, finding, located
 from uplink.causes import Cause, UplinkError
+from uplink.finder import find_central
 from uplink.locate import LOCATE_DEADLINE
+from uplink.resolver import Unconfigured
 
 TOKEN = "1" * 32
 REGISTRATION = Registration(player_id="p-" + "a" * 32, token=TOKEN, authority_epoch=1)
@@ -235,6 +243,52 @@ def test_only_uplink_errors_are_named_as_network_causes(tmp_path):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("error", [ServiceError("central_origin_unavailable"),
+                                   Unauthorized("not_registered"),
+                                   StaleFeedback("state_changed")],
+                         ids=["ServiceError", "Unauthorized", "StaleFeedback"])
+def test_a_service_error_is_its_own_bounded_code(error):
+    async def check():
+        service, _ = await finder_rig(finding("http://central"))
+        try:
+            service._fault_for(error)
+            assert (service.last_fault, service.last_fault_detail) == (str(error), None)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_discovery_bug_reaches_the_player_as_player_error(monkeypatch):
+    """R9: a discovery that raises a programming error ends the cycle as "player_error" with
+    its type, not as a configuration cause; the Player keeps cycling."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    raised = []
+
+    class Buggy:
+        async def discover(self, unconfigured):
+            raised.append(1)
+            raise AttributeError("a bug")
+
+    find = functools.partial(find_central, Unconfigured("absent"), transport=FakeTransport({}),
+                             discovery=Buggy())
+
+    async def check():
+        service, _ = await finder_rig(find)
+        task = asyncio.create_task(service.run())
+        try:
+            async def cycled():
+                while len(raised) < 2:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(cycled(), 5)
+            assert (service.last_fault, service.last_fault_detail) == (
+                "player_error", "AttributeError")
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
 def _central_503(request):
     return httpx.Response(503, json={"error": "fixture_outage"})
 
@@ -375,7 +429,87 @@ def test_main_reads_the_kernel_command_line_before_anything_else(tmp_path, monke
     assert any("cause=configuration reason=invalid" in message for message in caplog.messages)
 
 
+# Saved central_origin values no Central root can be: wrong JSON types, and strings over the
+# 2048-character URL bound (one of which is otherwise a well-formed root).
+MALFORMED_SAVED = {
+    "int": 42, "float": 1.5, "bool": True, "list": ["http://central"],
+    "object": {"root": "http://central"}, "long-root": "http://" + "a" * 2048 + ".example",
+    "long-text": "x" * 5000, "not-a-root": "not a central root",
+}
+
+
+@pytest.mark.parametrize("saved", MALFORMED_SAVED.values(), ids=MALFORMED_SAVED.keys())
+def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatch, saved):
+    """U3, owner requirement: the cmdline wins outright. Whatever the saved central_origin
+    holds, the config loads and the cmdline root is used; the value is validated only when
+    the cmdline names no Central, and then refused."""
+    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
+    path = tmp_path / "public.json"
+    path.write_text(json.dumps({"schema": 1, "central_origin": saved}))
+    config = load_config(path)
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
+    found = asyncio.run(build_finder(config, transport=gateway(), cmdline_path=cmdline)())
+    assert (found.root, found.source, found.central.origin) == (CMDLINE, "cmdline", LOCATED)
+    with pytest.raises(UplinkError) as excinfo:
+        build_finder(config, transport=gateway(), cmdline_path=tmp_path / "absent")
+    assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "invalid")
+
+
+def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
+    """Runs main() with the cmdline naming Central and `saved` as central_origin, past every
+    pre-GTK step, with GLib, outputs, the boot context and the service thread stubbed. Returns
+    the order in which main started the service, signalled readiness and ran the loop."""
+    events: list[str] = []
+
+    class Loop:
+        def run(self):
+            events.append("loop")
+
+        def quit(self):
+            pass
+
+    glib = types.SimpleNamespace(MainLoop=Loop, timeout_add=lambda *_: None,
+                                 idle_add=lambda *_: None)
+    repository = types.ModuleType("gi.repository")
+    repository.GLib = glib
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *_: None
+    gi.repository = repository
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    monkeypatch.setattr(signal, "signal", lambda *_: None)
+    monkeypatch.setattr("player.service.load_identity", lambda: "identity")
+    monkeypatch.setattr("player.service.resolve_boot_context", lambda path: None)
+    monkeypatch.setattr("player.service.discover_outputs",
+                        lambda: types.SimpleNamespace(outputs=(), fault=None))
+    monkeypatch.setattr(PlayerService, "start", lambda self: events.append("start"))
+    monkeypatch.setattr("uplink.watchdog.ready", lambda: events.append("ready") or True)
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
+    monkeypatch.setattr("player.service.KERNEL_COMMAND_LINE", cmdline)
+    config = tmp_path / "public.json"
+    config.write_text(json.dumps({"schema": 1, "central_origin": saved,
+                                  "ca_file": str(tls.write_bundle(tmp_path / "ca.pem", tls.CA))}))
+    monkeypatch.setattr(sys, "argv", ["player", "--config", str(config)])
+    player_main()
+    return events
+
+
+@pytest.mark.parametrize("saved", [MALFORMED_SAVED["list"], MALFORMED_SAVED["long-root"]],
+                         ids=["list", "long-root"])
+def test_main_goes_on_past_a_malformed_saved_value_when_the_cmdline_names_central(
+        tmp_path, monkeypatch, saved):
+    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "ready", "loop"]
+
+
 # --- M5: the Player's deadline owner ---------------------------------------------------------
+
+def test_main_signals_ready_once_the_service_has_started(tmp_path, monkeypatch):
+    """Type=notify: main() sends READY=1 after starting the service and before the GLib loop,
+    so WatchdogSec runs from a started Player. Without it systemd times the start out."""
+    events = _main_until_the_loop(tmp_path, monkeypatch, saved="http://192.0.2.20:8000")
+    assert events == ["start", "ready", "loop"]
 
 def _unit() -> dict[str, str]:
     text = Path("appliance/systemd/player.service").read_text()

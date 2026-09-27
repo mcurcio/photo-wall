@@ -55,7 +55,7 @@ layer:
   base: photo-wall-debian
   # systemd + systemd-sysv as PID 1 and `systemctl` -- required both to boot
   # this rootfs at all and to run photo-wall-provision.service
-  # (Type=oneshot, WantedBy=multi-user.target, already enabled by a symlink
+  # (Type=notify, WantedBy=multi-user.target, already enabled by a symlink
   # the bootstrapper `.deb` bakes as data -- no enable-units hook needed).
   init: systemd-min
   # Our own layer: apt-get installs the rendered device set and the prebuilt

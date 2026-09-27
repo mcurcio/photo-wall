@@ -17,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from zeroconf import Error as ZeroconfError
 from zeroconf import ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 from uplink.causes import UplinkError
+from uplink.finder import DiscoveryError
 from uplink.origin import Origin
 from uplink.resolver import Unconfigured
 
@@ -84,13 +86,18 @@ class MdnsCentralDiscovery:
 
     async def discover(self, unconfigured: Unconfigured) -> Origin | None:
         """A Central root found on the LAN within `timeout`, or None. `unconfigured` is the
-        proof that the kernel command line names no Central (R1). Any other failure (e.g. no
-        multicast socket) propagates; uplink.finder names it as an UplinkError, so
-        find_central raises only UplinkError."""
+        proof that the kernel command line names no Central (R1). Expected failures are the
+        CentralDiscovery contract's: an OSError (e.g. no multicast socket) propagates as is,
+        and any zeroconf.Error (EventLoopBlocked, NotRunningException, BadTypeInNameException,
+        NonUniqueNameException, ...) is re-raised as DiscoveryError(<its type name>);
+        uplink.finder names both as UplinkError(CONFIGURATION, "absent"). Anything else (a
+        TypeError, an AttributeError) is a bug and propagates unchanged."""
         try:
             return await asyncio.wait_for(self._browse(), timeout=self._timeout)
         except asyncio.TimeoutError:
             return None
+        except ZeroconfError as error:
+            raise DiscoveryError(type(error).__name__) from error
 
     async def _browse(self) -> Origin | None:
         found: set[str] = set()

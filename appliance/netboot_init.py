@@ -18,7 +18,8 @@ located origin, which refuses any redirect. The Pi self-identifies by its hardwa
 (`X-PhotoWall-Serial`, read at boot from the devicetree); the corruption digest arrives in the
 `Digest` response header.
 
-Phases, each one console line that also pets the stage-1 watchdog (0014 rev 5, design §2.8):
+Phases, each one console line that also pets the stage-1 watchdog (0014 rev 5, design §2.8);
+every network send and read in them pets it too, each one bounded call (`_PacedTransport`):
 
 0. setup (in `main()`): arm the watchdog first, then read the cmdline, load the CA bundle
    (`Trust`) and the clock floor from the boot data. A missing bundle or floor is a broken
@@ -85,7 +86,7 @@ from uplink.clock import (
     step_realtime,
 )
 from uplink.diagnosis import failure_text, trust_provenance
-from uplink.fetch import DirectFetch
+from uplink.fetch import STATUS_TIMEOUT, DirectFetch
 from uplink.files import write_atomically
 from uplink.locate import locate
 from uplink.lookup import lookup
@@ -97,7 +98,7 @@ from uplink.resolver import (
     read_kernel_command_line,
     resolve_central,
 )
-from uplink.transport import LOOKUP_TIMEOUT, HttpTransport, Transport
+from uplink.transport import HOP_TIMEOUT, LOOKUP_TIMEOUT, HttpTransport, Reply, Transport
 from uplink.trust import DEBIAN_CA_BUNDLE, Trust
 
 RAM_IMAGE_NAME = "photo-wall-base.squashfs"
@@ -119,6 +120,14 @@ DEBUG_PAUSE_SECONDS = 60
 # floor of ~30 Mbit/s: 1 GiB / 30 Mbit ~= 286s. A slower link fails closed (transfer/deadline
 # -> restart -> retry), never a truncated mount.
 BASE_FETCH_SECONDS = 300
+# The longest one stage-1 send may wait for its status line. A send looks the host up, then tries
+# every address the lookup returned, each for up to its status_timeout, so uncapped the wait
+# before the next pet is a SUM over however many addresses DNS returns (three stalled addresses:
+# 7 + 3 x 35 = 112 s, past the watchdog's margin -- a silent reset, no FAILED line, R9). Capped
+# at the lookup plus two whole attempts (a dual-stack host's AAAA and A) through the Transport
+# contract's absolute `deadline`, so it holds for any Transport; a send that runs out is a named
+# CONNECT failure and the FAILED line.
+STAGE1_SEND_SECONDS: Final = LOOKUP_TIMEOUT + 2 * STATUS_TIMEOUT
 # This initrd's CA bundle (the boot data's copy of the base's), compared after mounting with
 # the mounted base's own at the same path (R5, Q3 = A).
 INITRD_CA_BUNDLE = DEBIAN_CA_BUNDLE
@@ -430,6 +439,58 @@ class _Console:
         _pre_reboot_pause(debug, self.log)
 
 
+class _PacedReply:
+    """A Reply that pets the keeper after every read that returns: a read is one bounded wait
+    (its caller's `timeout`), so a body drained in many reads -- a slow error body included --
+    is a run of short gaps, never one long one."""
+
+    __slots__ = ("_reply", "_keeper")
+
+    def __init__(self, reply: Reply, keeper: Keeper) -> None:
+        self._reply, self._keeper = reply, keeper
+
+    @property
+    def status(self) -> int:
+        return self._reply.status
+
+    @property
+    def headers(self) -> Mapping[str, str]:
+        return self._reply.headers
+
+    @property
+    def peer(self) -> str:
+        return self._reply.peer
+
+    def read(self, amount: int, *, timeout: float) -> bytes:
+        block = self._reply.read(amount, timeout=timeout)
+        self._keeper.pet()
+        return block
+
+    def close(self) -> None:
+        self._reply.close()
+
+
+class _PacedTransport:
+    """Stage 1's only Transport (0014 rev 5, design §2.8): every network wait is ONE bounded call
+    followed by a pet. A send's absolute deadline is held to STAGE1_SEND_SECONDS from now, and
+    its reply pets per read, so no gap between two pets is a sum over addresses or reads. A call
+    that raises does not pet: the FAILED line does."""
+
+    __slots__ = ("_transport", "_keeper", "_monotonic")
+
+    def __init__(self, transport: Transport, keeper: Keeper, *,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._transport, self._keeper, self._monotonic = transport, keeper, monotonic
+
+    def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
+             status_timeout: float = HOP_TIMEOUT) -> Reply:
+        reply = self._transport.send(
+            url, headers=headers, status_timeout=status_timeout,
+            deadline=min(deadline, self._monotonic() + STAGE1_SEND_SECONDS))
+        self._keeper.pet()
+        return _PacedReply(reply, self._keeper)
+
+
 def netboot(cmdline: Mapping[str, str] | None, rootmnt: Path, *, ops: NetbootOps,
             transport: Transport, clock_gate: ClockSettler, keeper: Keeper,
             trust_provenance: str, serial_reader: Callable[[], str | None],
@@ -443,7 +504,8 @@ def netboot(cmdline: Mapping[str, str] | None, rootmnt: Path, *, ops: NetbootOps
     debug = _is_truthy((cmdline or {}).get("photowall.debug"))
     console = _Console(log, keeper, provenance=trust_provenance)
     try:
-        _run_netboot(cmdline, rootmnt, console, ops=ops, transport=transport,
+        _run_netboot(cmdline, rootmnt, console, ops=ops,
+                     transport=_PacedTransport(transport, keeper),
                      clock_gate=clock_gate, serial_reader=serial_reader)
     except BaseException as error:
         console.failed(error, debug=debug)

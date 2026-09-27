@@ -36,6 +36,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -54,6 +55,7 @@ from uplink.diagnosis import failure_text
 from uplink.fetch import DirectFetch
 from uplink.files import write_atomically
 from uplink.finder import CentralDiscovery, Found, find_central
+from uplink.locate import LOCATE_DEADLINE
 from uplink.origin import Origin
 from uplink.resolver import (
     KERNEL_COMMAND_LINE,
@@ -96,13 +98,38 @@ DEFAULT_UNIT = "photo-wall-player.service"
 DEFAULT_PUBLIC_CONFIG: Final = Path("/etc/photo-wall/public.json")
 MANIFEST_SECONDS: Final = 30.0
 PACKAGE_SECONDS: Final = 120.0
-# M5: the one deadline owner after switch_root. Kept equal to TimeoutStartSec in
-# appliance/systemd/photo-wall-provision.service by hand -- a unit file cannot import a Python
-# constant (see test_provision_unit_has_exactly_one_deadline_owner). Renewed by
-# Bootstrapper.run() via uplink.watchdog.extend_start() after every completed attempt, so a
-# healthy run that keeps making attempts is never killed for running long overall, while one
-# attempt that truly hangs is killed within this many seconds.
-PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = 300.0
+# The mDNS browse (player.mdns_discovery), passed to it explicitly by main(). A command-line
+# root never browses.
+DISCOVERY_SECONDS: Final = 3.0
+# `dpkg --install` (subprocess timeout): the Player .deb is a pure unpack plus a postinst that
+# creates the `wall` user.
+INSTALL_SECONDS: Final = 60.0
+# `systemctl start` (subprocess timeout) waits for the Player's READY=1 (Type=notify).
+# photo-wall-player.service sets no TimeoutStartSec, so systemd fails that start itself after its
+# DefaultTimeoutStartSec, 90 s: waiting longer here would wait on a start systemd gave up on.
+START_UNIT_SECONDS: Final = 90.0
+MAX_BACKOFF_SECONDS: Final = 30.0
+# An allowance, NOT an enforced bound: the CPU- and RAM-local steps -- the sha256 of up to
+# MAX_APP_PACKAGE_BYTES, the 0600 temp .deb write and the handoff write.
+LOCAL_STEPS_SECONDS: Final = 15.0
+# M5: the one deadline owner after switch_root is the unit's TimeoutStartSec, which
+# Bootstrapper.run() renews through uplink.watchdog.extend_start() as each attempt BEGINS. The
+# longest wait between two renewals is therefore one whole attempt plus the backoff after it:
+# the SUM of every blocking step, each at its bound. The window is that sum with a 1.25x margin,
+# so a healthy attempt, however slow, is never killed, and a hung one is killed within it.
+ATTEMPT_MARGIN: Final = 1.25
+LONGEST_ATTEMPT_SECONDS: Final = (
+    DISCOVERY_SECONDS           # find: the mDNS browse (Unconfigured only)
+    + LOCATE_DEADLINE           # find: locate's whole redirect chain
+    + MANIFEST_SECONDS          # DirectFetch: the whole manifest exchange
+    + PACKAGE_SECONDS           # DirectFetch: the whole package exchange
+    + LOCAL_STEPS_SECONDS       # sha256, temp .deb, handoff (allowance)
+    + INSTALL_SECONDS           # dpkg --install
+    + START_UNIT_SECONDS        # systemctl start
+    + MAX_BACKOFF_SECONDS)      # the sleep before the next attempt's renewal
+# Kept equal to TimeoutStartSec in appliance/systemd/photo-wall-provision.service by hand -- a
+# unit file cannot import a Python constant (tests/test_netboot_liveness.py pins both).
+PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = math.ceil(ATTEMPT_MARGIN * LONGEST_ATTEMPT_SECONDS)
 
 
 class ProvisionError(ValueError):
@@ -160,8 +187,9 @@ def install_package(package: bytes, manifest: AppManifest) -> None:
     Player's Depends are already on the base, because the base installed
     packages("bootstrapper", "player") from the same declaration the Player's Depends come
     from. A Depends the base lacks makes dpkg exit non-zero with its own message naming the
-    package; that subprocess.CalledProcessError escapes (see Bootstrapper.run). dpkg's own
-    output goes to the journal. The temp file is removed in every case. Tests inject a stub."""
+    package; that subprocess.CalledProcessError escapes (see Bootstrapper.run), as does the
+    subprocess.TimeoutExpired of a dpkg that outlives INSTALL_SECONDS. dpkg's own output goes to
+    the journal. The temp file is removed in every case. Tests inject a stub."""
     environment = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
     # mkstemp creates the file 0600 whatever the umask; a failed write (a full RAM root) is
     # cleaned up like a failed install.
@@ -170,7 +198,8 @@ def install_package(package: bytes, manifest: AppManifest) -> None:
     try:
         with handle:
             handle.write(package)
-        subprocess.run(["dpkg", "--install", os.fspath(deb_path)], check=True, env=environment)
+        subprocess.run(["dpkg", "--install", os.fspath(deb_path)], check=True, env=environment,
+                       timeout=INSTALL_SECONDS)
     finally:
         deb_path.unlink(missing_ok=True)
 
@@ -208,13 +237,14 @@ def write_handoff(handoff: Handoff, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> No
 
 def start_player_unit(*, unit: str = DEFAULT_UNIT) -> None:
     """Thin, replaceable step: starts the Player systemd unit once the app is
-    installed and the handoff is written. Tests inject a stub instead of
-    shelling to real `systemctl`."""
-    subprocess.run(["systemctl", "start", unit], check=True)
+    installed and the handoff is written, waiting at most START_UNIT_SECONDS
+    (subprocess.TimeoutExpired escapes, like a failed start). Tests inject a stub
+    instead of shelling to real `systemctl`."""
+    subprocess.run(["systemctl", "start", unit], check=True, timeout=START_UNIT_SECONDS)
 
 
 def _default_backoff(attempt: int) -> float:
-    return min(2.0 * attempt, 30.0)
+    return min(2.0 * attempt, MAX_BACKOFF_SECONDS)
 
 
 class Bootstrapper:
@@ -274,13 +304,17 @@ class Bootstrapper:
         the process exits into the unit's start limit and the reboot path (rule 3).
         ProvisionError is retried. Install, handoff and start failures escape. With
         max_attempts=None (production) it retries forever; False after max_attempts.
-        M5: watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS) fires once per completed attempt
-        (a retried failure, a discarded corrupt package, or the successful one), renewing
-        TimeoutStartSec; watchdog_ready() fires exactly once, right after start_unit(), on the
-        successful return (Type=notify's starting phase does not end without READY=1)."""
+        M5: watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS) fires once as every attempt
+        begins -- the one renewal site, so no exit from an attempt (a retried failure, a
+        discarded corrupt package, a future branch) can skip it, and process start-up never
+        eats into attempt 1's window. Each window thus spans one attempt plus its backoff
+        (LONGEST_ATTEMPT_SECONDS). watchdog_ready() fires exactly once, right after
+        start_unit(), on the successful return (Type=notify's starting phase does not end
+        without READY=1)."""
         attempt = 0
         while max_attempts is None or attempt < max_attempts:
             attempt += 1
+            self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
             try:
                 found = await self._find()
                 LOG.info("provision: central %s (%s root %s)", found.central.origin,
@@ -293,26 +327,22 @@ class Bootstrapper:
                     raise
                 LOG.warning("provision: %s (attempt %d)",
                             failure_text(error, clock=self._clock), attempt)
-                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             except ProvisionError as error:
                 LOG.warning("provision: %s (attempt %d)", error, attempt)
-                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             if hashlib.sha256(package).hexdigest() != manifest.sha256:
                 # Corruption guard (0009 owner ruling: integrity, not authenticity). Never
                 # install or start on a mismatch.
                 LOG.warning("provision: app_integrity mismatch, discarding (attempt %d)", attempt)
-                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
                 await self._sleep(self._backoff(attempt))
                 continue
             self._install(package, manifest)
             self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
                                         manifest.tag))
             self._start_unit()
-            self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
             self._watchdog_ready()
             LOG.info("provision: app_installed %s", manifest.sha256)
             return True
@@ -323,8 +353,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     """--config PATH, --unit NAME, --cmdline PATH (default /proc/cmdline; as stage 1).
     Once: resolution = resolve_central(read_kernel_command_line(cmdline)); trust =
     Trust.public(); transport = HttpTransport(trust=trust); clock = RunClockRecord().read()
-    (read only, never stepped; used only by failure_text); discovery = MdnsCentralDiscovery()
-    only when resolution is Unconfigured (lazy import: zeroconf is not needed when the cmdline
+    (read only, never stepped; used only by failure_text); discovery =
+    MdnsCentralDiscovery(timeout=DISCOVERY_SECONDS) only when resolution is Unconfigured (lazy
+    import: zeroconf is not needed when the cmdline
     names Central). Then asyncio.run(Bootstrapper(...).run()). An UplinkError that escapes is logged with
     failure_text and exits 1 (systemd restarts; 10 exits in 10 minutes reboot the Pi)."""
     parser = argparse.ArgumentParser(description="Photo Wall base bootstrapper (0009)")
@@ -341,7 +372,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if isinstance(resolution, Unconfigured):
             from player.mdns_discovery import MdnsCentralDiscovery
 
-            discovery = MdnsCentralDiscovery()
+            discovery = MdnsCentralDiscovery(timeout=DISCOVERY_SECONDS)
         # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB is
         # set does the appliance send its serial and hand the served tag forward.
         serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
