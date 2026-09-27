@@ -11,8 +11,9 @@ Player and bootstrapper `.deb`s built by `scripts/build_player_deb.py` and
 
 - `photo-wall-base-<revision>.tar.gz`: the operator-stageable netboot bundle
   (kernel + initrd + Pi 5 DTBs + the base squashfs + the bundle's own
-  `SHA256SUMS`). The operator stages its `boot/` beneath their TFTP boot-server
-  tree (`docs/runbook.md`); every diskless Player netboots it. Its bytes are a
+  `SHA256SUMS`), in contracts/release.py's member layout. The operator stages its
+  `boot/` beneath their TFTP boot-server tree (`docs/runbook.md`); Central serves
+  the squashfs over HTTP; every diskless Player netboots both. Its bytes are a
   function of its inputs and `source_date_epoch` alone (every member's time, owner
   and the gzip header are fixed), so packaging the same build twice yields the same
   tarball and a re-run's seal finds the assets it already attached.
@@ -52,7 +53,11 @@ from pathlib import Path
 from typing import Final
 
 from contracts.release import (
+    BASE_BOOT,
+    BASE_CHECKSUMS,
     BASE_IMAGE,
+    BASE_ROOT,
+    BASE_SQUASHFS,
     BOOTSTRAPPER_DEB,
     CHECKSUMS,
     FILES,
@@ -62,6 +67,7 @@ from contracts.release import (
     MANIFEST_SCHEMA,
     MAX_MANIFEST_BYTES,
     PLAYER_DEB,
+    base_member,
 )
 
 MIB = 1024**2
@@ -197,12 +203,12 @@ def package(
 
     if not base_bundle.is_dir() or base_bundle.is_symlink():
         raise PackagingError("base_bundle_missing")
-    squashfs = base_bundle / "photo-wall-base.squashfs"
+    squashfs = base_bundle / BASE_SQUASHFS
     _require_file(squashfs, MAX_SQUASHFS_BYTES, label="base_squashfs")
-    boot_tree = base_bundle / "boot"
+    boot_tree = base_bundle / BASE_BOOT
     if not boot_tree.is_dir() or boot_tree.is_symlink() or not any(boot_tree.iterdir()):
         raise PackagingError("base_boot_tree_missing")
-    _require_file(base_bundle / "SHA256SUMS", MAX_SUMS_BYTES, label="base_sha256sums")
+    _require_file(base_bundle / BASE_CHECKSUMS, MAX_SUMS_BYTES, label="base_sha256sums")
 
     player_record = _deb_record(player_deb, label="player_deb")
     bootstrapper_record = _deb_record(bootstrapper_deb, label="bootstrapper_deb")
@@ -211,7 +217,7 @@ def package(
     staging = destination / ".staging"
     staging.mkdir(mode=0o700)
     try:
-        base_root = staging / "photo-wall-base"
+        base_root = staging / BASE_ROOT
         shutil.copytree(base_bundle, base_root, symlinks=True,
                         ignore=shutil.ignore_patterns(".staging"))
         base_tarball_name = f"photo-wall-base-{revision}.tar.gz"
@@ -220,7 +226,7 @@ def package(
         with (open(base_tarball, "xb") as raw,
               gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped,
               tarfile.open(fileobj=zipped, mode="w") as archive):
-            archive.add(base_root, arcname="photo-wall-base", filter=_fixed(source_date_epoch))
+            archive.add(base_root, arcname=BASE_ROOT, filter=_fixed(source_date_epoch))
 
         shutil.copyfile(player_deb, destination / player_record["filename"])
         shutil.copyfile(bootstrapper_deb, destination / bootstrapper_record["filename"])
@@ -303,19 +309,17 @@ def _actual(directory: Path, name: str) -> dict:
     return checked_file(path, MAX_TARBALL_BYTES)
 
 
-def verify(directory: Path, *, revision: str) -> Packaged:
-    """`directory` holds exactly the declared release for `revision`: a manifest of the declared
-    schema naming every declared file and image and nothing else, each file present with the
-    recorded sha256 and size, a checksum list that matches every other file, and no other
-    file. Raises PackagingError naming the first difference."""
-    directory = directory.absolute()
-    manifest_record = _actual(directory, MANIFEST)
-    if manifest_record["size"] > MAX_MANIFEST_BYTES:
-        raise PackagingError("manifest_too_large")
-    try:
-        manifest = json.loads((directory / MANIFEST).read_bytes())
-    except (ValueError, UnicodeError):
-        raise PackagingError("manifest_invalid") from None
+@dataclass(frozen=True, slots=True)
+class Declared:
+    """What a manifest declares: each FILES key's (filename, sha256, size), and each image."""
+    files: dict[str, tuple[str, str, int]]
+    images: tuple[Image, ...]
+
+
+def read_manifest(manifest: object, *, revision: str) -> Declared:
+    """`manifest` (parsed JSON) as the declared release for `revision`: the declared schema,
+    exactly the declared keys, a well-formed record for each file, distinct filenames, and
+    every declared image pinned by digest. Raises PackagingError naming the first difference."""
     expected_keys = {"schema", "revision", *FILES, IMAGES_KEY}
     if not isinstance(manifest, dict) or set(manifest) != expected_keys:
         raise PackagingError("manifest_keys_invalid")
@@ -323,7 +327,6 @@ def verify(directory: Path, *, revision: str) -> Packaged:
         raise PackagingError("manifest_schema_invalid")
     if manifest["revision"] != revision:
         raise PackagingError("manifest_revision_mismatch")
-
     files = {key: _file_record(key, manifest[key]) for key in FILES}
     names = [filename for filename, _, _ in files.values()]
     if len(set(names)) != len(names):
@@ -340,20 +343,66 @@ def verify(directory: Path, *, revision: str) -> Packaged:
         raise PackagingError(f"manifest_images_invalid:{error}") from None
     if pinned != block:
         raise PackagingError("manifest_images_invalid")
+    return Declared(files, tuple(Image(name, block[name]["repository"], block[name]["digest"])
+                                 for name in IMAGES))
+
+
+def _check_base_tarball(path: Path) -> None:
+    """The base tarball holds the declared layout (contracts/release.py): everything within
+    BASE_ROOT, no traversal, the squashfs and the bundle's sums as regular files, and a boot/
+    directory holding at least one file."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            members = archive.getmembers()
+    except (tarfile.TarError, OSError, EOFError):
+        raise PackagingError("base_tarball_invalid") from None
+    by_name = {}
+    for member in members:
+        parts = member.name.split("/")
+        if parts[0] != BASE_ROOT or "" in parts[1:] or ".." in parts or member.name in by_name:
+            raise PackagingError(f"base_tarball_member_invalid:{member.name}")
+        by_name[member.name] = member
+    for name in (BASE_SQUASHFS, BASE_CHECKSUMS):
+        member = by_name.get(base_member(name))
+        if member is None or not member.isfile():
+            raise PackagingError(f"base_tarball_missing:{base_member(name)}")
+    boot = by_name.get(base_member(BASE_BOOT))
+    if boot is None or not boot.isdir() or not any(
+            member.isfile() and member.name.startswith(base_member(BASE_BOOT) + "/")
+            for member in members):
+        raise PackagingError(f"base_tarball_missing:{base_member(BASE_BOOT)}/")
+
+
+def verify(directory: Path, *, revision: str) -> Packaged:
+    """`directory` holds exactly the declared release for `revision`: a manifest of the declared
+    schema naming every declared file and image and nothing else, each file present with the
+    recorded sha256 and size, the base tarball in the declared layout, a checksum list that
+    matches every other file, and no other file. Raises PackagingError naming the first
+    difference."""
+    directory = directory.absolute()
+    manifest_record = _actual(directory, MANIFEST)
+    if manifest_record["size"] > MAX_MANIFEST_BYTES:
+        raise PackagingError("manifest_too_large")
+    try:
+        manifest = json.loads((directory / MANIFEST).read_bytes())
+    except (ValueError, UnicodeError):
+        raise PackagingError("manifest_invalid") from None
+    declared = read_manifest(manifest, revision=revision)
 
     present = {path.name for path in directory.iterdir()}
-    declared = {MANIFEST, CHECKSUMS, *names}
-    if present != declared:
+    names = {MANIFEST, CHECKSUMS, *(filename for filename, _, _ in declared.files.values())}
+    if present != names:
         raise PackagingError("assets_mismatch:" + ",".join(
-            [f"missing {name}" for name in sorted(declared - present)]
-            + [f"undeclared {name}" for name in sorted(present - declared)]))
+            [f"missing {name}" for name in sorted(names - present)]
+            + [f"undeclared {name}" for name in sorted(present - names)]))
 
     assets = [Asset(MANIFEST, directory / MANIFEST, **manifest_record)]
-    for filename, sha256, size in files.values():
+    for filename, sha256, size in declared.files.values():
         actual = _actual(directory, filename)
         if actual != {"sha256": sha256, "size": size}:
             raise PackagingError(f"asset_digest_mismatch:{filename}")
         assets.append(Asset(filename, directory / filename, sha256, size))
+    _check_base_tarball(directory / declared.files[BASE_IMAGE][0])
 
     sums_record = _actual(directory, CHECKSUMS)
     listed = {}
@@ -366,6 +415,4 @@ def verify(directory: Path, *, revision: str) -> Packaged:
         raise PackagingError("checksums_mismatch")
     assets.append(Asset(CHECKSUMS, directory / CHECKSUMS, **sums_record))
 
-    return Packaged(manifest, tuple(assets),
-                    tuple(Image(name, block[name]["repository"], block[name]["digest"])
-                          for name in IMAGES))
+    return Packaged(manifest, tuple(assets), declared.images)

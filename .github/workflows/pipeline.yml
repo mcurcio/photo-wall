@@ -35,18 +35,21 @@ name: Pipeline
 # A RELEASE IS VISIBLE ONLY WHEN IT IS COMPLETE. The seal (scripts/release_seal.py) is the only
 # job with `contents: write` and the only one that reads the plan's tag: it claims the version
 # (the plan's `since` must still be the highest published tag, so a stale re-run refuses),
-# packages and verifies every declared asset (contracts/release.py) and image digest, tags each
-# image `:<version>` from its digest, attaches the assets to a DRAFT, re-reads the image tags,
-# and only then publishes it. It never deletes anything, reads GitHub back after an ambiguous
-# write, converges when re-run, and passes without writing when re-run after it published.
-# tests/test_release_seal.py holds it to each of these.
+# packages and verifies every declared asset (contracts/release.py) and image digest, attaches
+# the assets to an invisible DRAFT and reads each back, and only then tags each image
+# `:<version>` from its digest, re-reads the tags, and publishes the draft. It never deletes
+# anything, reads GitHub back after an ambiguous write, converges when re-run, and passes
+# without writing when re-run after it published. tests/test_release_seal.py holds it to each.
 #
 # A release that fails is not lost, and has ONE recovery, the normal flow: publishing creates
 # the version's tag, so a run that fails first leaves no tag, and the next push to main
 # releases whatever changed since the last published tag, from that push's commit. Until a
 # version is published THE NEWEST COMMIT WINS it: that push's seal, at main's tip, re-tags the
-# version's images from its own build even when a failed seal tagged them first, while a
-# re-run of an older seal refuses. There is no manual release path (no dispatch, no hand tag).
+# version's images from its own build even when a failed seal tagged them first, and a seal
+# that is not main's tip never moves another run's tags. So a re-run of an older seal refuses
+# once a newer run has sealed; before that, it publishes the version at its own commit (a
+# complete release of that commit) and the next push releases the rest. There is no manual
+# release path (no dispatch, no hand tag).
 #
 # The git tag is the SOLE version source of truth (pyproject `[tool.commitizen]`,
 # `version_provider = "scm"`): nothing writes a bumped number back to main, which would loop
@@ -70,7 +73,9 @@ permissions:
 concurrency:
   # A newer push to a pull request supersedes its run. main never cancels a run mid-publish:
   # runs queue (a newer queued run replaces an older queued one, and its plan still covers the
-  # older push, since it diffs against the last tag).
+  # older push, since it diffs against the last tag). A re-run of an older run queues the same
+  # way, so it can replace a newer push's pending run: the older commit may then release, and
+  # the newer push's changes ship with the next push.
   group: pipeline-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

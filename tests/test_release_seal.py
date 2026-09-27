@@ -58,12 +58,17 @@ REPO_PATH = "/repos/owner/repo"
 
 
 # --- a scripted GitHub ---------------------------------------------------------------------------
+#
+# Two hosts, as GitHub has: the API (api.github.com) and the upload/download host
+# (uploads.github.com, and the signed download host an asset URL redirects to). Each refuses the
+# other's requests, and the download host refuses a request still carrying the token.
 
 @dataclass
 class State:
     """One repository's releases and tags, as GitHub keeps them."""
     visible: bool = True
-    refs: dict[str, str] = field(default_factory=dict)
+    refs: dict[str, str] = field(default_factory=dict)          # tag -> commit or tag object
+    tag_objects: dict[str, str] = field(default_factory=dict)   # annotated tag -> what it tags
     heads: dict[str, str] = field(default_factory=lambda: {"main": REVISION})
     history: list[str] = field(default_factory=lambda: [PREVIOUS, REVISION, NEWER])  # main's
     releases: list[dict] = field(default_factory=list)       # newest first, as GitHub lists them
@@ -73,58 +78,77 @@ class State:
     # "drop" (apply, then close the connection unanswered), "reject" (422 unapplied), "broken"
     # (an upload left half-done, then 502) or "error" (a read's 500).
     faults: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    read_lag: int = 0          # reads of a release that still show it as it was before a PATCH
+    digest_lag: int = 0        # reads of a new asset that show its digest as null
     seen: list[tuple[str, str]] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     journal: list[str] = field(default_factory=list)          # shared with the registry
     ids: itertools.count = field(default_factory=lambda: itertools.count(100))
+    api: str = ""
+    uploads: str = ""
 
     def release(self, release_id: int) -> dict | None:
         return next((release for release in self.releases if release["id"] == release_id), None)
 
-    def add(self, tag: str, target: str, *, draft: bool) -> dict:
+    def add(self, tag: str, target: str, *, draft: bool, body: str = "") -> dict:
         release = {"id": next(self.ids), "tag_name": tag, "target_commitish": target,
-                   "name": tag, "body": "", "draft": draft, "prerelease": False, "assets": []}
+                   "name": tag, "body": body, "draft": draft, "prerelease": False, "assets": []}
         self.releases.insert(0, release)
         if not draft:
             self.refs.setdefault(tag, target)
         return release
 
-    def attach(self, release: dict, name: str, content: bytes, *, state: str = "uploaded") -> None:
+    def attach(self, release: dict, name: str, content: bytes, *, state: str = "uploaded") -> dict:
         release["assets"].append({
             "id": next(self.ids), "name": name, "size": len(content), "state": state,
             "digest": f"sha256:{hashlib.sha256(content).hexdigest()}" if state == "uploaded"
-            else None})
+            else None, "_pending": self.digest_lag})
         self.blobs[(release["id"], name)] = content
+        return release["assets"][-1]
+
+    def asset_view(self, asset: dict) -> dict:
+        view = {key: value for key, value in asset.items() if not key.startswith("_")}
+        view["url"] = f"{self.api}{REPO_PATH}/releases/assets/{asset['id']}"
+        if asset["_pending"] > 0:                     # GitHub has not computed the digest yet
+            asset["_pending"] -= 1
+            view["digest"] = None
+        return view
+
+    def view(self, release: dict) -> dict:
+        shown = release
+        if release.get("_stale"):                     # a read that lags the last PATCH
+            count, shown = release["_stale"]
+            release["_stale"] = (count - 1, shown) if count > 1 else None
+        return {**{key: value for key, value in shown.items() if not key.startswith("_")},
+                "html_url": f"https://github.com/owner/repo/releases/{release['id']}",
+                "upload_url": f"{self.uploads}{REPO_PATH}/releases/{release['id']}/assets"
+                              "{?name,label}",
+                "assets": [self.asset_view(asset) for asset in shown["assets"]]}
 
     def writes(self) -> list[tuple[str, str]]:
         return [(method, path) for method, path in self.seen if method != "GET"]
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
+class _Base(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     @property
     def state(self) -> State:
         return self.server.state
 
-    def _send(self, status: int, body: object) -> None:
-        payload = json.dumps(body).encode()
+    def _send(self, status: int, body: object, headers: dict[str, str] | None = None) -> None:
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
     def _fault(self, method: str, route: str) -> str | None:
         queued = self.state.faults.get((method, route)) or []
         return queued.pop(0) if queued else None
-
-    def _view(self, release: dict) -> dict:
-        base = f"http://127.0.0.1:{self.server.server_port}"
-        return {**release, "html_url": f"https://github.com/owner/repo/releases/{release['id']}",
-                "upload_url": f"{base}/uploads{REPO_PATH}/releases/{release['id']}/assets"
-                              "{?name,label}",
-                "assets": [dict(asset) for asset in release["assets"]]}
 
     def _answer(self, fault: str | None, status: int, body: object) -> None:
         if fault == "drop":
@@ -135,7 +159,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         self._send(status, body)
 
-    def do_GET(self):  # noqa: N802 (the stdlib's name)
+    def _body(self) -> bytes:
+        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
+
+    def _refuse(self, method: str, why: str) -> None:
+        self.state.seen.append((method, urlparse(self.path).path))
+        self.state.violations.append(f"{method} {self.path}: {why}")
+        self._send(405, {"message": why})
+
+    def do_DELETE(self):  # noqa: N802 (the stdlib's name)
+        self._refuse("DELETE", "the seal never deletes")
+
+    def do_PUT(self):  # noqa: N802
+        self._refuse("PUT", "the seal never replaces")
+
+    def log_message(self, *args):
+        pass
+
+
+class _Api(_Base):
+    """api.github.com."""
+
+    def do_GET(self):  # noqa: N802
         url = urlparse(self.path)
         state = self.state
         state.seen.append(("GET", url.path))
@@ -153,12 +198,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             name, refs = "/".join(parts[3:]), state.refs if parts[2] == "tags" else state.heads
             if name not in refs:
                 return self._send(404, {"message": "Not Found"})
+            kind = "tag" if refs[name] in state.tag_objects else "commit"
             return self._send(200, {"ref": f"refs/{parts[2]}/{name}",
-                                    "object": {"type": "commit", "sha": refs[name]}})
+                                    "object": {"type": kind, "sha": refs[name]}})
+        if parts[:2] == ["git", "tags"] and parts[2] in state.tag_objects:
+            tagged = state.tag_objects[parts[2]]
+            kind = "tag" if tagged in state.tag_objects else "commit"
+            return self._send(200, {"sha": parts[2], "object": {"type": kind, "sha": tagged}})
         if parts[0] == "compare":
             base, head = parts[1].split("...")
             if base not in state.history or head not in state.history:
-                return self._send(200, {"status": "diverged"})
+                return self._send(404, {"message": "No common ancestor"})
             order = state.history.index(head) - state.history.index(base)
             return self._send(200, {"status": "ahead" if order > 0 else "behind" if order < 0
                                     else "identical"})
@@ -166,49 +216,38 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             query = parse_qs(url.query)
             per_page, page = int(query["per_page"][0]), int(query["page"][0])
             chunk = state.releases[(page - 1) * per_page:page * per_page]
-            return self._send(200, [self._view(release) for release in chunk])
+            return self._send(200, [state.view(release) for release in chunk])
+        if parts[:2] == ["releases", "assets"]:
+            for release in state.releases:
+                for asset in release["assets"]:
+                    if str(asset["id"]) == parts[2]:
+                        location = f"{state.uploads}/cdn/{release['id']}/{asset['name']}"
+                        return self._send(302, b"", {"Location": location})
+            return self._send(404, {"message": "Not Found"})
         if len(parts) == 2 and parts[0] == "releases" and parts[1].isdigit():
             release = state.release(int(parts[1]))
             if release is None:
                 return self._send(404, {"message": "Not Found"})
-            return self._send(200, self._view(release))
+            return self._send(200, state.view(release))
         return self._send(404, {"message": "Not Found"})
-
-    def _body(self) -> bytes:
-        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
 
     def do_POST(self):  # noqa: N802
         url = urlparse(self.path)
         state, body = self.state, self._body()
+        if url.path != f"{REPO_PATH}/releases":
+            return self._refuse("POST", "the API host takes no upload")
         state.seen.append(("POST", url.path))
-        if url.path == f"{REPO_PATH}/releases":
-            fault = self._fault("POST", "create")
-            if fault in ("before", "reject"):
-                return self._send(502 if fault == "before" else 422, {"message": "scripted"})
-            request = json.loads(body)
-            if request.get("draft") is not True:
-                state.violations.append(f"created a non-draft release {request}")
-            release = state.add(request["tag_name"], request["target_commitish"], draft=True)
-            release.update(name=request["name"], body=request["body"])
-            state.journal.append(f"create {release['id']}")
-            return self._answer(fault, 201, self._view(release))
-        prefix = f"/uploads{REPO_PATH}/releases/"
-        if url.path.startswith(prefix) and url.path.endswith("/assets"):
-            release = state.release(int(url.path[len(prefix):].split("/")[0]))
-            name = parse_qs(url.query)["name"][0]
-            fault = self._fault("POST", "upload")
-            if release is None:
-                return self._send(404, {"message": "Not Found"})
-            if release["draft"] is not True:
-                state.violations.append(f"uploaded {name} to published release {release['id']}")
-            if fault in ("before", "reject"):
-                return self._send(502 if fault == "before" else 422, {"message": "scripted"})
-            if any(asset["name"] == name for asset in release["assets"]):
-                return self._send(422, {"message": "already_exists"})
-            state.attach(release, name, body, state="starter" if fault == "broken" else "uploaded")
-            state.journal.append(f"upload {name}")
-            return self._answer(fault, 201, release["assets"][-1])
-        return self._send(404, {"message": "Not Found"})
+        fault = self._fault("POST", "create")
+        if fault in ("before", "reject"):
+            return self._send(502 if fault == "before" else 422, {"message": "scripted"})
+        request = json.loads(body)
+        if request.get("draft") is not True:
+            state.violations.append(f"created a non-draft release {request}")
+        release = state.add(request["tag_name"], request["target_commitish"], draft=True,
+                            body=request["body"])
+        release["name"] = request["name"]
+        state.journal.append(f"create {release['id']}")
+        return self._answer(fault, 201, state.view(release))
 
     def do_PATCH(self):  # noqa: N802
         url = urlparse(self.path)
@@ -222,6 +261,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             state.violations.append(f"PATCH to published release {release['id']}: {request}")
         if fault in ("before", "reject"):
             return self._send(502 if fault == "before" else 422, {"message": "scripted"})
+        before = json.loads(json.dumps(release))
         tag = release["tag_name"]
         if request.get("draft") is False:
             if any(other["tag_name"] == tag and not other["draft"] for other in state.releases):
@@ -232,39 +272,83 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 state.latest = release["id"]
             state.journal.append(f"publish {release['id']}")
         release.update({key: request[key] for key in ("name", "body") if key in request})
-        return self._answer(fault, 200, self._view(release))
+        answer = state.view(release)
+        if state.read_lag:
+            before.pop("_stale", None)
+            release["_stale"] = (state.read_lag, before)
+        return self._answer(fault, 200, answer)
 
-    def do_DELETE(self):  # noqa: N802
-        self.state.seen.append(("DELETE", urlparse(self.path).path))
-        self.state.violations.append(f"DELETE {self.path}")
-        self._send(405, {"message": "the seal never deletes"})
 
-    def do_PUT(self):  # noqa: N802
-        self.state.seen.append(("PUT", urlparse(self.path).path))
-        self.state.violations.append(f"PUT {self.path}")
-        self._send(405, {"message": "the seal never replaces"})
+class _Uploads(_Base):
+    """uploads.github.com, and the signed download host asset URLs redirect to."""
 
-    def log_message(self, *args):
-        pass
+    def do_GET(self):  # noqa: N802
+        url = urlparse(self.path)
+        self.state.seen.append(("GET", url.path))
+        parts = url.path.strip("/").split("/")
+        if parts[0] != "cdn" or len(parts) != 3:
+            return self._refuse("GET", "the download host serves assets only")
+        if self.headers.get("Authorization"):
+            return self._send(400, {"message": "Only one auth mechanism allowed"})
+        return self._send(200, self.state.blobs[(int(parts[1]), parts[2])])
+
+    def do_POST(self):  # noqa: N802
+        url = urlparse(self.path)
+        state, body = self.state, self._body()
+        state.seen.append(("POST", url.path))
+        prefix = f"{REPO_PATH}/releases/"
+        if not (url.path.startswith(prefix) and url.path.endswith("/assets")):
+            return self._refuse("POST", "the upload host takes uploads only")
+        release = state.release(int(url.path[len(prefix):].split("/")[0]))
+        name = parse_qs(url.query)["name"][0]
+        fault = self._fault("POST", "upload")
+        if release is None:
+            return self._send(404, {"message": "Not Found"})
+        if release["draft"] is not True:
+            state.violations.append(f"uploaded {name} to published release {release['id']}")
+        if fault in ("before", "reject"):
+            return self._send(502 if fault == "before" else 422, {"message": "scripted"})
+        if any(asset["name"] == name for asset in release["assets"]):
+            return self._send(422, {"message": "already_exists"})
+        asset = state.attach(release, name, body,
+                             state="starter" if fault == "broken" else "uploaded")
+        state.journal.append(f"upload {name}")
+        return self._answer(fault, 201, state.asset_view(asset))
+
+
+def _serve(handler, state: State):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.state = state
+    threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+    return server
+
+
+@pytest.fixture(autouse=True)
+def naps(monkeypatch):
+    """The seal's read-back pauses, recorded instead of slept."""
+    slept: list[float] = []
+    monkeypatch.setattr(release_seal.time, "sleep", slept.append)
+    return slept
 
 
 @pytest.fixture
 def github(monkeypatch):
     """The scripted GitHub, holding v0.9.0 published at PREVIOUS, and the real adapter pointed
-    at it. At teardown: no DELETE or PUT was ever sent, and no published release was written."""
+    at its API host. At teardown: no DELETE or PUT was ever sent, nothing went to the wrong host,
+    and no published release was written."""
     for proxy in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
         monkeypatch.delenv(proxy, raising=False)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    server.state = State()
-    server.state.add(SINCE, PREVIOUS, draft=False)
-    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
-    thread.start()
-    yield server.state, GitHubApi(f"http://127.0.0.1:{server.server_port}", "owner/repo", "t0ken")
-    server.shutdown()
-    server.server_close()
-    assert server.state.violations == []
-    assert not [method for method, _ in server.state.seen if method not in ("GET", "POST",
-                                                                           "PATCH")]
+    state = State()
+    api, uploads = _serve(_Api, state), _serve(_Uploads, state)
+    state.api, state.uploads = (f"http://127.0.0.1:{server.server_port}"
+                                for server in (api, uploads))
+    state.add(SINCE, PREVIOUS, draft=False)
+    yield state, GitHubApi(state.api, "owner/repo", "t0ken")
+    for server in (api, uploads):
+        server.shutdown()
+        server.server_close()
+    assert state.violations == []
+    assert not [method for method, _ in state.seen if method not in ("GET", "POST", "PATCH")]
 
 
 # --- a scripted registry -------------------------------------------------------------------------
@@ -335,13 +419,13 @@ def test_a_seal_publishes_the_complete_release_as_the_newest(github, registry, b
 
 
 def test_the_release_is_invisible_until_every_asset_and_image_is_ready(github, registry, build):
-    """The images are tagged before the draft is made, every asset is attached to the draft,
-    and the one publish is the last write: nothing is ever visible half-made."""
+    """Every asset is attached to the (invisible) draft before the first visible write, the
+    images' version tags; the one publish is the last write: nothing is visible half-made."""
     state, api = github
     seal(api, registry, build)
     journal = state.journal
     assert [entry.split()[0] for entry in journal] == (
-        ["tag"] * len(IMAGES) + ["create"] + ["upload"] * len(_declared(build)) + ["publish"])
+        ["create"] + ["upload"] * len(_declared(build)) + ["tag"] * len(IMAGES) + ["publish"])
     assert state.writes()[-1][0] == "PATCH"
     assert [method for method, _ in state.writes()].count("PATCH") == 1
 
@@ -385,10 +469,6 @@ def test_the_highest_published_ignores_drafts_and_orders_by_version():
     assert highest_published([]) is None
 
 
-def _ref(sha, kind="commit"):
-    return {"ref": f"refs/tags/{TAG}", "object": {"type": kind, "sha": sha}}
-
-
 @pytest.mark.parametrize("setup", [
     lambda state: None,                                                  # a new version
     lambda state: state.refs.update({TAG: REVISION}),                    # tagged here
@@ -400,6 +480,21 @@ def test_the_claim_admits_a_version_that_is_this_revisions_and_unpublished(githu
     setup(state)
     claimed = claim(api, TAG, REVISION, SINCE)
     assert "unpublished, and follows v0.9.0" in claimed.summary and claimed.sealed is None
+
+
+@pytest.mark.parametrize("target, admitted", [(REVISION, True), (OTHER, False)])
+def test_the_claim_peels_an_annotated_tag_to_its_commit(github, target, admitted):
+    """A tag made by `git tag -a` (here an annotated tag of an annotated tag) names a tag
+    object; the claim peels it to the commit."""
+    state, api = github
+    state.tag_objects.update({"e" * 40: "f" * 40, "f" * 40: target})
+    state.refs[TAG] = "e" * 40
+    assert api.tag_commit(TAG) == target
+    if admitted:
+        assert claim(api, TAG, REVISION, SINCE).sealed is None
+    else:
+        with pytest.raises(SealError, match=f"{TAG} is tagged at {OTHER}"):
+            claim(api, TAG, REVISION, SINCE)
 
 
 def test_the_claim_refuses_a_tag_at_another_commit(github):
@@ -523,7 +618,7 @@ def test_the_tip_refuses_when_another_draft_of_the_version_is_at_a_later_commit(
     """The tip of main behind another run's draft (main was rewound): the newest commit is the
     draft's, so this seal refuses to take its image tags."""
     state, api = github
-    state.add(TAG, NEWER, draft=True)
+    state.add(TAG, NEWER, draft=True, body=release_seal.SEAL_MARKER)
     registry.manifests.add(reference("central", cut="-newer"))
     registry.tags[f"{REPOSITORY}/central:{TAG}"] = digest("central", cut="-newer")
     with pytest.raises(SealError, match=f"is at {NEWER}, a descendant of this run's {REVISION}"):
@@ -531,12 +626,26 @@ def test_the_tip_refuses_when_another_draft_of_the_version_is_at_a_later_commit(
     assert registry.writes == [] and state.writes() == []
 
 
-def test_a_promotion_that_does_not_take_refuses_before_the_release_is_staged(github, build):
+@pytest.mark.parametrize("target", ["main", NEWER], ids=["branch", "commit"])
+def test_a_draft_no_seal_made_never_blocks_a_version(github, registry, build, capsys, target):
+    """A draft made by hand -- targeting a branch, or a later commit, but without the seal's
+    marker -- is ignored with a warning, however the compare would come out."""
+    state, api = github
+    hand = state.add(TAG, target, draft=True, body="by hand")
+    registry.manifests.add(reference("central", cut="-newer"))
+    registry.tags[f"{REPOSITORY}/central:{TAG}"] = digest("central", cut="-newer")
+    release = seal(api, registry, build)
+    assert release["target_commitish"] == REVISION and hand["draft"] is True
+    assert f"draft {hand['id']} of {TAG} (target {target}) was not made by a seal" in \
+        capsys.readouterr().out
+
+
+def test_a_promotion_that_does_not_take_refuses_before_publishing(github, build):
     state, api = github
     registry = FakeRegistry(state.journal, retag_as=digest("central", cut="-rewrapped"))
     with pytest.raises(SealError, match="after promotion"):
         seal(api, registry, build)
-    assert state.writes() == []
+    assert "PATCH" not in [method for method, _ in state.writes()]
 
 
 # --- 5, 6, 7. stage, publish, reconcile ----------------------------------------------------------
@@ -603,34 +712,51 @@ def test_an_ambiguous_create_or_upload_is_read_back_never_duplicated(github, reg
     [published] = _for(state, TAG)
     names = [asset["name"] for asset in published["assets"]]
     assert sorted(names) == sorted(_declared(build))            # each once
-    creates = [path for method, path in state.seen if method == "POST" and "uploads" not in path]
+    creates = [path for method, path in state.seen
+               if method == "POST" and path == f"{REPO_PATH}/releases"]
     assert len(creates) == (2 if (route, fault) == ("create", "before") else 1)
 
 
 def test_a_rerun_after_a_partial_seal_converges_on_the_same_draft(github, registry, build):
-    """The first attempt promoted both images, made the draft and attached two assets before an
-    upload failed. The re-run (a fresh package of the same build) re-tags nothing, reuses that
-    draft, attaches only what it lacks, and publishes it."""
+    """The first attempt made the draft and attached two assets before an upload failed, so
+    nothing was visible: no image was tagged. The re-run (a fresh package of the same build)
+    reuses that draft, attaches only what it lacks, tags the images and publishes."""
     state, api = github
     state.faults[("POST", "upload")] = [None, None, "reject"]
     with pytest.raises(SealError, match="HTTP 422"):
         seal(api, registry, build)
     [draft] = _for(state, TAG)
     attached = {asset["name"] for asset in draft["assets"]}
-    assert len(attached) == 2 and len(registry.writes) == len(IMAGES)
+    assert len(attached) == 2 and registry.writes == [] and registry.tags == {}
     state.journal.clear()
     release = seal(api, registry, _again(build, "rerun"))
     assert release["id"] == draft["id"] and _for(state, TAG) == [draft]
     assert draft["draft"] is False
     uploaded = [entry.split(" ", 1)[1] for entry in state.journal if entry.startswith("upload")]
     assert sorted(uploaded) == sorted(set(_declared(build)) - attached)
-    assert not [entry for entry in state.journal if entry.startswith(("tag", "create"))]
+    assert not [entry for entry in state.journal if entry.startswith("create")]
+    assert len(registry.writes) == len(IMAGES)
+
+
+def test_a_seal_that_fails_before_promoting_leaves_no_version_tag_behind(github, registry,
+                                                                       build):
+    """The review's probe: the seal fails on its third upload and the next push plans another
+    version. v0.9.1's image tags were never written, so nothing names an unreleased build."""
+    state, api = github
+    state.faults[("POST", "upload")] = [None, None, "reject"]
+    with pytest.raises(SealError, match="HTTP 422"):
+        seal(api, registry, build)
+    state.heads["main"] = NEWER
+    newer = replace(_newer(build, "newer"), tag="v0.10.0")
+    registry.manifests.update(newer.images.values())
+    seal(api, registry, newer)
+    assert set(registry.tags) == {f"{REPOSITORY}/{name}:v0.10.0" for name in IMAGES}
 
 
 def test_a_rerun_whose_images_were_rebuilt_is_refused_once_main_moved_on(github, registry,
                                                                             build):
     state, api = github
-    state.faults[("POST", "upload")] = [None, "reject"]
+    state.faults[("PATCH", "publish")] = ["reject"]
     with pytest.raises(SealError):
         seal(api, registry, build)
     before = json.dumps(state.releases, sort_keys=True)
@@ -660,12 +786,13 @@ def test_a_draft_holding_a_broken_asset_is_left_and_a_new_one_published(github, 
 
 
 @pytest.mark.parametrize("attached", [False, True], ids=["empty", "with-an-asset"])
+@pytest.mark.parametrize("body", ["", release_seal.SEAL_MARKER], ids=["by-hand", "by-a-seal"])
 def test_a_draft_of_another_revision_is_never_used_or_touched(github, registry, build,
-                                                              attached):
+                                                              attached, body):
     """Another run's draft of the same version (an older attempt from another commit): the seal
     stages its own, so the tag is created at this revision."""
     state, api = github
-    foreign = state.add(TAG, OTHER, draft=True)
+    foreign = state.add(TAG, OTHER, draft=True, body=body)
     if attached:
         state.attach(foreign, MANIFEST, b"{}")
     snapshot = json.dumps(foreign, sort_keys=True)
@@ -675,23 +802,56 @@ def test_a_draft_of_another_revision_is_never_used_or_touched(github, registry, 
 
 
 def test_a_new_tag_that_reads_back_late_is_waited_for_and_one_elsewhere_refused(github, registry,
-                                                                              build):
+                                                                              build, naps):
     state, api = github
     release = seal(api, registry, build)
     packaged = verify(build.destination, revision=REVISION)
-    naps = []
+    naps.clear()
     del state.refs[TAG]
     with pytest.raises(SealError, match=f"its tag names None, not {REVISION}"):
-        release_seal.check_published(api, release, TAG, REVISION, packaged, sleep=naps.append)
-    assert naps == list(release_seal.TAG_READ_BACK)
+        release_seal.check_published(api, release, TAG, REVISION, packaged)
+    assert naps == list(release_seal.READ_BACK)
     naps.clear()
     tags = iter([None, REVISION])
     api_late = type("Late", (), {"tag_commit": lambda self, tag: next(tags)})()
-    release_seal.check_published(api_late, release, TAG, REVISION, packaged, sleep=naps.append)
+    release_seal.check_published(api_late, release, TAG, REVISION, packaged)
     assert naps == [1]
     state.refs[TAG] = OTHER
     with pytest.raises(SealError, match=f"its tag names {OTHER}"):
-        release_seal.check_published(api, release, TAG, REVISION, packaged, sleep=naps.append)
+        release_seal.check_published(api, release, TAG, REVISION, packaged)
+
+
+def test_a_publish_read_back_that_lags_is_waited_for_never_patched_again(github, registry,
+                                                                         build, naps):
+    """The PATCH landed but its answer was lost, and the next two reads still show the draft:
+    the seal waits for GitHub to catch up instead of publishing a published release again."""
+    state, api = github
+    state.faults[("PATCH", "publish")] = ["after"]
+    state.read_lag = 2
+    release = seal(api, registry, build)
+    assert release["draft"] is False and state.refs[TAG] == REVISION
+    assert [method for method, _ in state.seen].count("PATCH") == 1
+    assert naps[:2] == [1, 2]
+
+
+def test_an_upload_whose_digest_reads_back_null_is_waited_for(github, registry, build, naps):
+    """GitHub may show a just-uploaded asset's digest as null for a moment (its schema allows
+    it): the seal re-reads until it appears, and uploads nothing twice."""
+    state, api = github
+    state.digest_lag = 2
+    seal(api, registry, build)
+    [published] = _for(state, TAG)
+    assert len(published["assets"]) == len(_declared(build))
+    assert [method for method, _ in state.seen].count("POST") == 1 + len(_declared(build))
+    assert naps and set(naps) <= set(release_seal.READ_BACK)
+
+
+def test_a_digest_that_never_reads_back_refuses_without_publishing(github, registry, build):
+    state, api = github
+    state.digest_lag = 99
+    with pytest.raises(SealError, match="digest=None"):
+        seal(api, registry, build)
+    assert [release["draft"] for release in _for(state, TAG)] == [True] and registry.tags == {}
 
 
 # --- the newest commit wins an unpublished version; a published one is only checked --------------
@@ -703,11 +863,12 @@ def _newer(build: Build, name: str) -> Build:
 
 
 def _fail_after_promote(state: State, api: GitHubApi, registry: FakeRegistry, build: Build):
-    """A seal that promoted, staged its draft and attached two assets, then failed."""
-    state.faults[("POST", "upload")] = [None, None, "reject"]
+    """A seal that staged its complete draft and tagged its images, then failed to publish."""
+    state.faults[("PATCH", "publish")] = ["reject"]
     with pytest.raises(SealError, match="HTTP 422"):
         seal(api, registry, build)
     [draft] = _for(state, TAG)
+    assert set(registry.tags) == {f"{REPOSITORY}/{name}:{TAG}" for name in IMAGES}
     return draft
 
 
@@ -738,8 +899,8 @@ def test_a_new_push_recovers_a_seal_that_failed_after_promoting(github, registry
 
 def test_a_rerun_of_an_older_seal_never_takes_the_version_back(github, registry, build):
     """Both runs failed before publishing, the newer after promoting its own build. The older
-    run's re-run is not main's tip: it refuses and writes nothing. The newer run's re-run
-    publishes."""
+    run's re-run is not main's tip, and the tags are no longer its own: it refuses and writes
+    nothing. The newer run's re-run publishes."""
     state, api = github
     _fail_after_promote(state, api, registry, build)
     state.heads["main"] = NEWER
@@ -756,52 +917,78 @@ def test_a_rerun_of_an_older_seal_never_takes_the_version_back(github, registry,
     assert release["target_commitish"] == NEWER and release["draft"] is False
 
 
+def test_an_older_seal_rerun_before_any_newer_seal_publishes_its_own_commit(github, registry,
+                                                                            build):
+    """Main moved on, but no newer run has sealed yet: the tags are still the older run's own,
+    so its re-run publishes the version at its commit -- a complete release of that commit. The
+    next push releases the rest, as the next version."""
+    state, api = github
+    _fail_after_promote(state, api, registry, build)
+    state.heads["main"] = NEWER
+    release = seal(api, registry, _again(build, "old-rerun"))
+    assert release["target_commitish"] == REVISION and state.refs[TAG] == REVISION
+
+
 def test_the_publish_refuses_when_a_version_tag_names_another_build(github, registry, build,
                                                                    monkeypatch):
     """The last read before a release becomes visible: every image tag must still name this
     run's digest. One moved after promotion refuses, and the draft stays a draft."""
     state, api = github
-    staged = release_seal.stage
+    promoted = release_seal.promote
 
-    def stage_then_move(*args, **kwargs):
-        draft = staged(*args, **kwargs)
+    def promote_then_move(*args, **kwargs):
+        promoted(*args, **kwargs)
         registry.tags[f"{REPOSITORY}/central:{TAG}"] = digest("central", cut="-elsewhere")
-        return draft
 
-    monkeypatch.setattr(release_seal, "stage", stage_then_move)
+    monkeypatch.setattr(release_seal, "promote", promote_then_move)
     with pytest.raises(SealError, match=f"central:{TAG} names .* not this run's"):
         seal(api, registry, build)
     [draft] = _for(state, TAG)
     assert draft["draft"] is True and "PATCH" not in [method for method, _ in state.seen]
 
 
-def test_a_rerun_after_a_successful_publish_writes_nothing_and_passes(github, registry, build):
+def _rebuilt(registry: FakeRegistry, build: Build) -> Build:
+    """"Re-run all jobs": the images rebuilt with new digests, the base tarball repackaged."""
+    images = {name: reference(name, cut="-rebuilt") for name in IMAGES}
+    registry.manifests.update(images.values())
+    return replace(build, images=images, source_date_epoch=EPOCH + 1)
+
+
+@pytest.mark.parametrize("rerun", [lambda registry, build: build, _rebuilt],
+                         ids=["seal-job-alone", "every-job"])
+def test_a_rerun_after_a_successful_publish_writes_nothing_and_passes(github, registry, build,
+                                                                      rerun):
+    """Judged by the published release and ITS manifest, never this run's build: re-running
+    every job rebuilds the images with new digests, and still nothing is written."""
     state, api = github
     first = seal(api, registry, build)
     writes, tags = len(state.writes()), dict(registry.tags)
-    again = seal(api, registry, _again(build, "rerun"))
+    again = seal(api, registry, rerun(registry, _again(build, "rerun")))
     assert again["id"] == first["id"]
     assert len(state.writes()) == writes and registry.tags == tags and len(registry.writes) == 2
 
 
+def _drop_asset(state: State, name: str) -> None:
+    [published] = _for(state, TAG)
+    published["assets"] = [asset for asset in published["assets"] if asset["name"] != name]
+
+
 @pytest.mark.parametrize("change, match", [
-    (lambda registry, build: (registry.tags.update(
-        {f"{REPOSITORY}/central:{TAG}": digest("central", cut="-elsewhere")}), build)[1],
+    (lambda state, registry: registry.tags.update(
+        {f"{REPOSITORY}/central:{TAG}": digest("central", cut="-elsewhere")}),
      "names .* not this run's"),
-    (lambda registry, build: (registry.manifests.add(reference("central", cut="-rebuilt")),
-                              replace(build, images={**IMAGE_REFERENCES, "central": reference(
-                                  "central", cut="-rebuilt")}))[1],
-     "does not attach exactly the declared assets"),
-    (lambda registry, build: replace(build, source_date_epoch=EPOCH + 1),
-     "does not attach exactly the declared assets"),
-], ids=["tag-moved", "images-rebuilt", "assets-differ"])
-def test_a_rerun_after_a_publish_that_is_not_this_build_is_refused(github, registry, build,
-                                                                  change, match):
+    (lambda state, registry: _drop_asset(state, CHECKSUMS), "does not attach exactly"),
+    (lambda state, registry: state.blobs.update(
+        {(_for(state, TAG)[0]["id"], MANIFEST): b'{"schema": 1}'}), "not a release's|exactly"),
+], ids=["tag-moved", "asset-missing", "manifest-changed"])
+def test_a_rerun_after_a_publish_that_is_not_intact_is_refused(github, registry, build, change,
+                                                               match):
     state, api = github
     seal(api, registry, build)
+    change(state, registry)
     writes = len(state.writes())
     with pytest.raises(SealError, match=match):
-        seal(api, registry, change(registry, _again(build, "rerun")))
+        seal(api, registry, _again(build, "rerun"))
     assert len(state.writes()) == writes and len(registry.writes) == 2
 
 

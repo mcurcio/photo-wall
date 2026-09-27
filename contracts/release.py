@@ -13,6 +13,13 @@ from it (`scripts/release_seal.py`), and Central reads a release through it
   `<repository>:<tag>` names exactly that digest.
 - `CHECKSUMS`, the sha256 of every other attached file.
 
+THE BASE TARBALL (`BASE_IMAGE`'s file). One top-level directory, `BASE_ROOT`, holding the
+netboot bundle as scripts/build_netboot_bundle.sh lays it out: `BASE_SQUASHFS`, the base image
+Central extracts and serves over HTTP; `BASE_CHECKSUMS`, the bundle's own sums (the squashfs's
+among them); and `BASE_BOOT`, the directory an operator stages in TFTP, and the only one. The
+packager writes this layout, the seal's verify checks it, and Central reads the squashfs and
+its sum through it (`central/assets/os_image.py`).
+
 Nothing here is signed (home LAN, no threat model): every sha256 is a corruption check only.
 
 THE ROOTFS BOUND. The signed release manifest / boot ticket format (Release, BootRequest,
@@ -38,3 +45,13 @@ FILES: Final = (BASE_IMAGE, PLAYER_DEB, BOOTSTRAPPER_DEB)
 
 IMAGES_KEY: Final = "images"
 IMAGES: Final = ("central", "media-worker")    # the root Dockerfile's service targets
+
+BASE_ROOT: Final = "photo-wall-base"
+BASE_SQUASHFS: Final = "photo-wall-base.squashfs"   # each name is within BASE_ROOT
+BASE_CHECKSUMS: Final = "SHA256SUMS"
+BASE_BOOT: Final = "boot"
+
+
+def base_member(name: str) -> str:
+    """The base tarball member holding `name` (a name within BASE_ROOT)."""
+    return f"{BASE_ROOT}/{name}"

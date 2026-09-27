@@ -9,6 +9,7 @@ bootstrapper `.deb` -- no signed rootfs, no `release.pub.pem`.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tarfile
@@ -20,8 +21,19 @@ from support.release_build import base_bundle as _synthetic_base_bundle
 from support.release_build import bootstrapper_deb as _synthetic_bootstrapper_deb
 from support.release_build import player_deb as _synthetic_player_deb
 
+from central.assets.os_image import _SQUASHFS_MEMBER, _SUMS_MEMBER
 from central.origins.github import _asset_urls, _parse_manifest
-from contracts.release import CHECKSUMS, FILES, IMAGES, MANIFEST
+from contracts.release import (
+    BASE_BOOT,
+    BASE_CHECKSUMS,
+    BASE_ROOT,
+    BASE_SQUASHFS,
+    CHECKSUMS,
+    FILES,
+    IMAGES,
+    MANIFEST,
+    base_member,
+)
 from scripts.package_release_artifacts import PackagingError, verify
 from scripts.package_release_artifacts import package as _package
 
@@ -309,6 +321,56 @@ def test_verify_refuses_any_difference_from_the_declared_release(tmp_path, damag
     damage(destination, manifest)
     with pytest.raises(PackagingError, match=reason):
         verify(destination, revision=REVISION)
+
+
+def _retar(destination, manifest, keep=lambda name: True, extra=()):
+    """Rewrite the base tarball with only the members `keep` admits, plus `extra` (name,
+    bytes) members, and record it in the manifest and SHA256SUMS: only the layout is wrong."""
+    tarball = destination / manifest["base_image"]["filename"]
+    with tarfile.open(tarball) as source:
+        members = [(member, source.extractfile(member).read() if member.isfile() else None)
+                   for member in source.getmembers() if keep(member.name)]
+    with tarfile.open(tarball, "w:gz") as archive:
+        for member, data in members:
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+        for name, data in extra:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    data = tarball.read_bytes()
+    record = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    _rewrite_manifest(destination, lambda manifest: manifest["base_image"].update(record))
+    sums = [line for line in (destination / CHECKSUMS).read_text().splitlines()
+            if not line.endswith(f"  {tarball.name}")]
+    sums.append(f"{record['sha256']}  {tarball.name}")
+    (destination / CHECKSUMS).write_text("\n".join(sums) + "\n")
+
+
+@pytest.mark.parametrize("keep, extra, reason", [
+    (lambda name: not name.startswith(base_member(BASE_BOOT)), (), "missing:photo-wall-base/boot"),
+    (lambda name: name != base_member(BASE_SQUASHFS), (), "missing:photo-wall-base/photo-wall"),
+    (lambda name: name != base_member(BASE_CHECKSUMS), (), "missing:photo-wall-base/SHA256SUMS"),
+    (lambda name: True, (("stray.txt", b"x"),), "member_invalid:stray.txt"),
+    (lambda name: True, ((f"{BASE_ROOT}/../escape", b"x"),), "member_invalid"),
+], ids=["no-boot", "no-squashfs", "no-sums", "outside-root", "traversal"])
+def test_verify_refuses_a_base_tarball_outside_the_declared_layout(tmp_path, keep, extra,
+                                                                   reason):
+    destination, manifest = _packaged(tmp_path)
+    verify(destination, revision=REVISION)
+    _retar(destination, json.loads((destination / MANIFEST).read_bytes()), keep, extra)
+    with pytest.raises(PackagingError, match=f"base_tarball_{reason}"):
+        verify(destination, revision=REVISION)
+
+
+def test_the_packaged_tarball_is_the_declared_layout_central_reads(tmp_path):
+    """The members Central extracts (central/assets/os_image.py) are the declared ones."""
+    destination, manifest = _packaged(tmp_path)
+    with tarfile.open(destination / manifest["base_image"]["filename"]) as archive:
+        names = set(archive.getnames())
+    assert {BASE_ROOT, base_member(BASE_SQUASHFS), base_member(BASE_CHECKSUMS),
+            base_member(BASE_BOOT), f"{base_member(BASE_BOOT)}/config.txt"} <= names
+    assert (_SQUASHFS_MEMBER, _SUMS_MEMBER) == (base_member(BASE_SQUASHFS),
+                                                base_member(BASE_CHECKSUMS))
 
 
 def test_central_reads_the_packaged_manifest_as_a_deployable_release(tmp_path):

@@ -47,28 +47,45 @@ the one release trigger, a push to `main` that cuts a release:
 3. the `seal` job ([`scripts/release_seal.py`](../../scripts/release_seal.py)), the
    only job that writes a version. It records both digests in the release's
    `manifest.json` (`images`), checks that every declared release asset is packaged
-   and every digest resolves, and only then tags `:vX.Y.Z` from each digest with
-   `docker buildx imagetools create` (a copy, no rebuild), reads the tag back, and
-   publishes the GitHub Release.
+   and every digest resolves, attaches every asset to an invisible draft release and
+   reads each back, and only then tags `:vX.Y.Z` from each digest with
+   `docker buildx imagetools create` (a copy, no rebuild), reads the tags back, and
+   publishes the draft.
 
 So a published release always has its images, and `:vX.Y.Z` names exactly the
 digests its release's manifest records: the seal re-reads both tags just before it
-publishes, and refuses otherwise. `:vX.Y.Z` appears before its release by the time
-the seal takes to attach the release assets.
+publishes, and refuses otherwise. `:vX.Y.Z` is the first thing anyone can see, a
+moment before the release is published, and only once every asset is attached. A
+seal that fails while uploading leaves no `:vX.Y.Z` at all.
 
 Until the release is published, `:vX.Y.Z` belongs to no release, and **the newest
-commit wins it**. If a seal fails after tagging, the next push to `main` recovers
-with no hand step. Its seal runs at `main`'s tip, moves `:vX.Y.Z` to its own
-digests, and publishes its own release from its own draft. The failed run's draft
-is left in place, untouched and never deleted; drafts are invisible to Central. A
-later re-run of the older seal refuses: its revision is no longer the tip, or the
-version is already published at another commit. A seal also refuses when another
-draft of the version is at a later commit than its own.
+commit wins it**. If a seal fails between tagging and publishing, the next push to
+`main` recovers with no hand step: its seal runs at `main`'s tip, moves `:vX.Y.Z`
+to its own digests, and publishes its own release from its own draft. The failed
+run's draft is left in place, untouched and never deleted; drafts are invisible to
+Central. A seal whose revision is not `main`'s tip never moves tags another run
+wrote, and a seal also refuses when a seal's draft of the version is at a later
+commit than its own; a draft made by hand never counts. What a re-run of an older
+seal does depends on whether a newer run has sealed since. If a newer run has taken
+the tags or published the version, the re-run refuses. If `main` merely moved on
+and no newer run has sealed, the tags are still the re-run's own, so it publishes
+the version at its own commit. That is a complete, self-consistent release of that
+commit, and the next push releases the rest. The same holds when a re-run of an
+older run is queued behind the running one: in the pipeline's concurrency group it
+replaces a newer push's pending run, so the older commit may publish first, and the
+newer push's changes ship with the next push.
+
+**Cost: a stray version tag.** If a seal fails between tagging and publishing and
+the next push plans a *different* version (a commit bumped past it), `:vX.Y.Z`
+keeps naming a build no release records. It is harmless while the cluster pins
+images by tag, since nobody pins an unreleased version. Once iac pins digests, it
+means only that a tag names an unreleased build.
 
 Once a release is published, its tags never move and its images are never
-overwritten. A re-run of the seal that published it writes nothing and passes
-when the published release and its tags are exactly that build; any other
-published release is refused.
+overwritten. A re-run of the seal that published it writes nothing and passes when
+the published release is complete as its own manifest declares and `:vX.Y.Z` names
+the digests that manifest records. This holds even for a re-run of every job, which
+rebuilds the images with new digests. Any other published release is refused.
 
 *Amended:* this decision first also published on a `workflow_dispatch` of an
 existing tag, which backfilled images for `v0.2.0`. The pipeline has since removed

@@ -16,23 +16,32 @@ a seal that published writes nothing and passes:
                 from, is still the highest published `v*` (compare-and-swap: a stale run's plan
                 refuses, so what this seal publishes is the newest release, and `make_latest` is
                 true). A T already published is refused -- unless R published it and it is
-                exactly this build (its assets and its image tags), which is a no-op.
+                complete with `<repository>:T` naming the digests ITS manifest records: then the
+                seal passes and writes nothing, whatever this run rebuilt.
   2. package    the release assets (scripts/package_release_artifacts.py); the manifest names
                 this run's image digests.
   3. verify     the packaged set is exactly the release contracts/release.py declares, and every
-                image digest resolves in the registry -- before anything is written.
-  4. promote    `<repository>:T` names each recorded digest, copied as is (no rebuild). While T
-                is unpublished its image tags belong to no release: another run's are moved to
-                this run's digests only when THE NEWEST COMMIT WINS -- R is main's tip and no
-                other draft of T is at a descendant of R -- and refused otherwise.
-  5. stage      this tag's DRAFT at R whose every attached asset matches a declared one (name,
-                size, sha256), else a new draft; attach each declared asset it lacks. Another
-                run's draft of T is left in place, untouched (nothing reads drafts).
+                image digest resolves in the registry -- before anything is written. So is the
+                promotion rule below: a run that may not take T's image tags writes nothing.
+  4. stage      this tag's DRAFT at R, made by a seal, whose every attached asset matches a
+                declared one (name, size, sha256), else a new draft; attach each declared asset
+                it lacks, and read each back. Any other draft of T is left in place, untouched
+                (nothing reads drafts). Nothing staged is visible.
+  5. promote    `<repository>:T` names each recorded digest, copied as is (no rebuild): the
+                first thing anyone can see, and only once every asset is attached. While T is
+                unpublished its image tags belong to no release: another run's are moved to this
+                run's digests only when THE NEWEST COMMIT WINS -- R is main's tip and no seal's
+                draft of T is at a descendant of R -- and refused otherwise.
   6. publish    re-read `<repository>:T` (each must still name this run's digest) and the draft
                 (exactly the declared assets), then PATCH draft=false, make_latest=true: GitHub
                 creates the tag at R in that call.
   7. reconcile  after an ambiguous write (a 5xx, a timeout, a dropped connection: the server may
-                have applied it), read GitHub back and carry on toward the published state.
+                have applied it), read GitHub back -- waiting briefly for it to catch up -- and
+                carry on toward the published state.
+
+A seal that fails between steps 5 and 6 leaves `<repository>:T` naming an unreleased build. The
+next seal of T takes it over (the newest commit wins); if the next push plans another version,
+the tag stays, naming a build no release records (decision 0011 states the cost).
 
 NEVER A DELETE, NEVER A WRITE TO A PUBLISHED RELEASE. The GitHub adapter issues GET, POST and
 PATCH only (WRITES); it cannot build a DELETE. Uploads and the publish take a `Draft`, which
@@ -62,6 +71,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol, TypeVar
 
+from contracts.release import CHECKSUMS, MANIFEST, MAX_MANIFEST_BYTES
 from scripts.package_release_artifacts import (
     IMAGE_REFERENCE,
     Asset,
@@ -69,6 +79,7 @@ from scripts.package_release_artifacts import (
     Packaged,
     PackagingError,
     package,
+    read_manifest,
     verify,
 )
 from scripts.release_plan import FULL_SHA, REPO, STRICT_TAG, PlanError, git
@@ -78,7 +89,7 @@ T = TypeVar("T")
 PER_PAGE: Final = 100
 MAX_PAGES: Final = 20            # 2000 releases: past that the claim cannot see every one
 WRITE_TRIES: Final = 3           # writes per step; each is read back before the next
-TAG_READ_BACK: Final = (1, 2, 4, 8)   # seconds to wait for a new tag to read back
+READ_BACK: Final = (1, 2, 4, 8)   # seconds between re-reads of a write GitHub has not shown yet
 # The branch a release is cut from (pipeline.yml's release guard: refs/heads/main): its tip is
 # the newest commit, whose seal wins an unpublished version.
 RELEASE_BRANCH: Final = "main"
@@ -86,9 +97,14 @@ API_TIMEOUT: Final = 60
 UPLOAD_TIMEOUT: Final = 600
 
 
+# Every draft a seal makes carries this in its notes (an HTML comment, not rendered). A draft
+# without it -- one made by hand, say, targeting a branch -- is no seal's, and never counts.
+SEAL_MARKER: Final = "<!-- release: scripts/release_seal.py -->"
+
+
 class SealError(Exception):
-    """The seal refuses. Before the publish step, nothing is visible: no release, no version
-    tag (a promoted image tag names this release's own digest)."""
+    """The seal refuses. Before the promote step nothing is visible; after it, the only visible
+    thing is the version's image tags naming this run's build."""
 
 
 class Ambiguous(Exception):
@@ -140,6 +156,9 @@ class GitHub(Protocol):
 
     def release(self, release_id: int) -> dict | None:
         """One release; None only when it does not exist."""
+
+    def asset_bytes(self, asset: Mapping[str, object], limit: int) -> bytes:
+        """An attached asset's bytes, at most `limit` of them."""
 
     def create_draft(self, tag: str, revision: str, title: str, notes: str) -> dict:
         """A new draft for `tag` at `revision`."""
@@ -239,11 +258,21 @@ def verified(directory: Path, revision: str, registry: Registry) -> Packaged:
     return packaged
 
 
+def _seal_draft(release: Mapping[str, object], tag: str) -> bool:
+    """A draft of `tag` a seal made: at a full commit, its notes carrying SEAL_MARKER."""
+    return (release.get("draft") is True and release.get("tag_name") == tag
+            and FULL_SHA.match(str(release.get("target_commitish"))) is not None
+            and SEAL_MARKER in str(release.get("body") or ""))
+
+
 def require_newest(github: GitHub, tag: str, revision: str) -> None:
     """THE NEWEST COMMIT WINS an unpublished version: this run may take `tag`'s image tags from
-    another run only when `revision` is the release branch's tip and no other draft of `tag` is
+    another run only when `revision` is the release branch's tip and no seal's draft of `tag` is
     at a commit `revision` precedes. So the next push recovers a seal that failed after it
-    promoted, and a re-run of an older seal (no longer the tip) refuses."""
+    promoted, and a re-run of an older seal refuses once a newer run has taken the tags. (Before
+    any newer run takes them, a re-run of the older seal needs no rule: it publishes the version
+    at its own commit, a complete release of that commit, and the next push releases the rest.)
+    A draft no seal made never counts, so one made by hand cannot block a version."""
     head = github.branch_head(RELEASE_BRANCH)
     if head != revision:
         raise SealError(f"{tag}'s image tags name another run's build, and this run's {revision} "
@@ -251,23 +280,34 @@ def require_newest(github: GitHub, tag: str, revision: str) -> None:
                         "unpublished version, so this older run refuses. The next push to "
                         f"{RELEASE_BRANCH} releases it.")
     for release in github.releases():
-        other = release.get("target_commitish")
-        if (release.get("draft") is True and release.get("tag_name") == tag
-                and isinstance(other, str) and other != revision
-                and github.is_ancestor(revision, other)):
+        if release.get("draft") is not True or release.get("tag_name") != tag:
+            continue
+        other = str(release.get("target_commitish"))
+        if not _seal_draft(release, tag):
+            print(f"::warning title=release seal::draft {release.get('id')} of {tag} (target "
+                  f"{other}) was not made by a seal: ignored")
+        elif other != revision and github.is_ancestor(revision, other):
             raise SealError(f"draft {release.get('id')} of {tag} is at {other}, a descendant of "
                             f"this run's {revision}: the newest commit wins, so this run refuses")
 
 
-def promote(registry: Registry, github: GitHub, images: Sequence[Image], tag: str,
-            revision: str) -> None:
-    """Tag each image `<repository>:<tag>` at its recorded digest. The version is unpublished
-    (the claim holds it so), so its image tags belong to no release yet: tags another run left
-    naming other digests are moved to this run's only when this run is the newest
-    (`require_newest`), which is decided before any tag is written."""
+def promotable(registry: Registry, github: GitHub, images: Sequence[Image], tag: str,
+               revision: str) -> dict[Image, str | None]:
+    """What each `<repository>:<tag>` names now, once this run may promote over it. The version
+    is unpublished (the claim holds it so), so its image tags belong to no release yet: tags
+    another run left naming other digests may be moved to this run's only when this run is the
+    newest (`require_newest`). Reads only."""
     current = {image: registry.digest(f"{image.repository}:{tag}") for image in images}
     if any(digest is not None and digest != image.digest for image, digest in current.items()):
         require_newest(github, tag, revision)
+    return current
+
+
+def promote(registry: Registry, github: GitHub, images: Sequence[Image], tag: str,
+            revision: str) -> None:
+    """Tag each image `<repository>:<tag>` at its recorded digest, when `promotable`, and read
+    each tag back."""
+    current = promotable(registry, github, images, tag, revision)
     for image, digest in current.items():
         if digest != image.digest:
             registry.tag(f"{image.repository}:{tag}", image.reference)
@@ -277,35 +317,59 @@ def promote(registry: Registry, github: GitHub, images: Sequence[Image], tag: st
                             f"promotion, not {image.digest}")
 
 
+def _until(read: Callable[[], T], settled: Callable[[T], bool]) -> T:
+    """`read()`, and again after each READ_BACK pause until `settled`: GitHub's reads can lag
+    its writes. The last read, settled or not."""
+    value = read()
+    for delay in READ_BACK:
+        if settled(value):
+            break
+        time.sleep(delay)
+        value = read()
+    return value
+
+
 def _converge(observe: Callable[[], T | None], write: Callable[[], T | None], what: str) -> T:
     """Write until it is done: `observe` reads first, `write` returns the result when GitHub's
-    answer shows it done, and after an ambiguous write `observe` reads GitHub back -- never
-    assuming either way. At most WRITE_TRIES writes; a definite refusal (SealError) is final."""
+    answer shows it done, and after an ambiguous write `observe` reads GitHub back, waiting for
+    it to catch up -- never assuming either way. At most WRITE_TRIES writes; a definite refusal
+    (SealError) is final."""
+    unsure = False
     for attempt in range(WRITE_TRIES + 1):
-        if (done := observe()) is not None:
+        done = _until(observe, lambda found: found is not None) if unsure else observe()
+        if done is not None:
             return done
         if attempt == WRITE_TRIES:
             break
         try:
             if (done := write()) is not None:
                 return done
+            unsure = False
         except Ambiguous as error:
+            unsure = True
             print(f"::warning title=release seal::{what}: {error}; reading GitHub back")
     raise SealError(f"{what}: GitHub does not show it done after {WRITE_TRIES} attempts")
 
 
-def _matches(attached: Mapping[str, object], asset: Asset) -> bool:
-    return (attached.get("state") == "uploaded" and attached.get("size") == asset.size
-            and attached.get("digest") == f"sha256:{asset.sha256}")
+def _matches(attached: Mapping[str, object], sha256: str, size: int) -> bool:
+    return (attached.get("state") == "uploaded" and attached.get("size") == size
+            and attached.get("digest") == f"sha256:{sha256}")
+
+
+def _digest_pending(release: Mapping[str, object], name: str) -> bool:
+    """`name` is attached and uploaded, but GitHub has not shown its digest yet."""
+    return any(asset.get("name") == name and asset.get("state") == "uploaded"
+               and asset.get("digest") is None for asset in release.get("assets") or ())
 
 
 def _usable(release: Mapping[str, object], tag: str, revision: str,
             wanted: Mapping[str, Asset]) -> bool:
-    """A draft of `tag` at `revision` whose every attached asset is a declared one, intact."""
-    return (release.get("draft") is True and release.get("tag_name") == tag
-            and release.get("target_commitish") == revision
+    """A seal's draft of `tag` at `revision` whose every attached asset is a declared one,
+    intact."""
+    return (_seal_draft(release, tag) and release.get("target_commitish") == revision
             and all(isinstance(attached, dict) and attached.get("name") in wanted
-                    and _matches(attached, wanted[str(attached["name"])])
+                    and _matches(attached, wanted[str(attached["name"])].sha256,
+                                 wanted[str(attached["name"])].size)
                     for attached in release.get("assets") or ()))
 
 
@@ -313,7 +377,7 @@ def _require_exactly(release: Mapping[str, object], packaged: Packaged) -> None:
     """`release` attaches exactly the declared assets, each intact."""
     wanted = {asset.name: asset for asset in packaged.assets}
     attached = {str(asset.get("name")): asset for asset in release.get("assets") or ()}
-    if set(attached) != set(wanted) or not all(_matches(attached[name], asset)
+    if set(attached) != set(wanted) or not all(_matches(attached[name], asset.sha256, asset.size)
                                                for name, asset in wanted.items()):
         raise SealError(f"release {release.get('id')} does not attach exactly the declared "
                         f"assets intact: {sorted(attached)} against {sorted(wanted)}")
@@ -349,11 +413,14 @@ def _attach(github: GitHub, draft: Draft, asset: Asset) -> Draft:
     observed = [draft]
 
     def attached() -> Draft | None:
-        observed[:] = [current := Draft.of(_read(github, draft.id))]
+        # An upload's digest can read back null for a moment: wait for it, then judge.
+        release = _until(lambda: _read(github, draft.id),
+                         lambda release: not _digest_pending(release, asset.name))
+        observed[:] = [current := Draft.of(release)]
         found = current.asset(asset.name)
         if found is None:
             return None
-        if not _matches(found, asset):
+        if not _matches(found, asset.sha256, asset.size):
             raise SealError(f"draft {draft.id} holds {asset.name} as state={found.get('state')} "
                             f"size={found.get('size')} digest={found.get('digest')}, not "
                             f"sha256:{asset.sha256} ({asset.size} bytes): it is left as it is, "
@@ -361,7 +428,8 @@ def _attach(github: GitHub, draft: Draft, asset: Asset) -> Draft:
         return current
 
     def upload() -> Draft | None:
-        return observed[0] if _matches(github.upload(observed[0], asset), asset) else None
+        attached_now = github.upload(observed[0], asset)
+        return observed[0] if _matches(attached_now, asset.sha256, asset.size) else None
 
     return _converge(attached, upload, f"attach {asset.name} to draft {draft.id}")
 
@@ -388,8 +456,8 @@ def publish(github: GitHub, registry: Registry, draft: Draft, packaged: Packaged
         current = _read(github, draft.id)
         if current.get("draft") is not True:
             return current
-        require_promoted(registry, packaged.images, draft.tag)
         _require_exactly(current, packaged)
+        require_promoted(registry, packaged.images, draft.tag)
         observed[:] = [Draft.of(current)]
         return None
 
@@ -400,22 +468,47 @@ def publish(github: GitHub, registry: Registry, draft: Draft, packaged: Packaged
     return _converge(published, patch, f"publish {draft.tag}")
 
 
-def check_published(github: GitHub, release: Mapping[str, object], tag: str, revision: str,
-                    packaged: Packaged, *, sleep: Callable[[float], None] = time.sleep) -> None:
-    """The published release is `tag` at `revision` with exactly the declared assets. The tag
-    publishing created may take a moment to read back; a tag at another commit never passes."""
+def _published_at(github: GitHub, release: Mapping[str, object], tag: str,
+                  revision: str) -> None:
+    """`release` is `tag`, and its tag names `revision`. The tag publishing created may take a
+    moment to read back; a tag at another commit never passes."""
     if release.get("tag_name") != tag:
         raise SealError(f"release {release.get('id')} was published as "
                         f"{release.get('tag_name')}, not {tag}")
-    at = github.tag_commit(tag)
-    for delay in TAG_READ_BACK:
-        if at is not None:
-            break
-        sleep(delay)
-        at = github.tag_commit(tag)
+    at = _until(lambda: github.tag_commit(tag), lambda at: at is not None)
     if at != revision:
         raise SealError(f"{tag} was published, but its tag names {at}, not {revision}")
+
+
+def check_published(github: GitHub, release: Mapping[str, object], tag: str, revision: str,
+                    packaged: Packaged) -> None:
+    """The published release is `tag` at `revision` with exactly the declared assets."""
+    _published_at(github, release, tag, revision)
     _require_exactly(release, packaged)
+
+
+def check_sealed(github: GitHub, registry: Registry, release: Mapping[str, object], tag: str,
+                 revision: str) -> None:
+    """A re-run after a successful publish: `release` is `tag` at `revision`, it attaches exactly
+    what ITS OWN manifest declares, and each `<repository>:<tag>` names the digest that manifest
+    records. This run's own build plays no part -- a re-run of every job rebuilds the images
+    with new digests -- and nothing is written either way."""
+    _published_at(github, release, tag, revision)
+    attached = {str(asset.get("name")): asset for asset in release.get("assets") or ()}
+    if MANIFEST not in attached:
+        raise SealError(f"{tag} is published without its {MANIFEST}")
+    body = github.asset_bytes(attached[MANIFEST], MAX_MANIFEST_BYTES)
+    try:
+        declared = read_manifest(json.loads(body), revision=revision)
+    except (ValueError, UnicodeError, PackagingError) as error:
+        raise SealError(f"{tag}'s published {MANIFEST} is not a release's: {error}") from None
+    expected = {MANIFEST: (hashlib.sha256(body).hexdigest(), len(body)),
+                **{filename: (sha256, size) for filename, sha256, size in declared.files.values()}}
+    if set(attached) != {*expected, CHECKSUMS} or attached[CHECKSUMS].get("state") != "uploaded" \
+            or not all(_matches(attached[name], *record) for name, record in expected.items()):
+        raise SealError(f"{tag} is published, but does not attach exactly what its own "
+                        f"{MANIFEST} declares: {sorted(attached)}")
+    require_promoted(registry, declared.images, tag)
 
 
 # --- the release's words -----------------------------------------------------------------------
@@ -473,6 +566,8 @@ running Players are unaffected until then.
 
 See the [setup and recovery runbook]({blob}/docs/runbook.md) for
 the full operator procedure.
+
+{SEAL_MARKER}
 """
 
 
@@ -495,11 +590,16 @@ class Build:
 
 
 def seal(github: GitHub, registry: Registry, build: Build) -> dict:
-    """Claim, package, verify, promote, stage and publish `build`; returns the published
-    release. Nothing is written before the verify step passes, nor at all when this build is
-    already the published release."""
+    """Claim, package, verify, stage, promote and publish `build`; returns the published
+    release. Nothing is written before the verify step passes, nothing is visible before every
+    asset is attached, and nothing is written at all when this revision already published the
+    version and it is intact."""
     claimed = claim(github, build.tag, build.revision, build.since)
     print(f"claim: {claimed.summary}")
+    if claimed.sealed is not None:
+        check_sealed(github, registry, claimed.sealed, build.tag, build.revision)
+        print(f"seal: {build.tag} is published at this revision and intact: nothing written")
+        return claimed.sealed
     try:
         package(build.base_bundle, build.player_deb, build.bootstrapper_deb, build.destination,
                 revision=build.revision, images=build.images,
@@ -508,17 +608,13 @@ def seal(github: GitHub, registry: Registry, build: Build) -> dict:
         raise SealError(f"packaging failed: {error}") from None
     packaged = verified(build.destination, build.revision, registry)
     print(f"verify: {len(packaged.assets)} assets and {len(packaged.images)} images, as declared")
-    if claimed.sealed is not None:
-        check_published(github, claimed.sealed, build.tag, build.revision, packaged)
-        require_promoted(registry, packaged.images, build.tag)
-        print(f"seal: {build.tag} is already this build, published: nothing written")
-        return claimed.sealed
-    promote(registry, github, packaged.images, build.tag, build.revision)
-    print(f"promote: {', '.join(f'{image.repository}:{build.tag}' for image in packaged.images)}")
+    promotable(registry, github, packaged.images, build.tag, build.revision)
     heading = title(build.tag)
     body = notes(packaged, build.tag, build.revision, build.repository, build.server)
     draft = stage(github, build.tag, build.revision, packaged, heading, body)
     print(f"stage: draft {draft.id} attaches every declared asset")
+    promote(registry, github, packaged.images, build.tag, build.revision)
+    print(f"promote: {', '.join(f'{image.repository}:{build.tag}' for image in packaged.images)}")
     release = publish(github, registry, draft, packaged, heading, body)
     check_published(github, release, build.tag, build.revision, packaged)
     print(f"publish: {build.tag} at {build.revision}: {release.get('html_url')}")
@@ -650,6 +746,25 @@ class GitHubApi:
         raise SealError(f"more than {PER_PAGE * MAX_PAGES} releases: the claim cannot see "
                         "every one")
 
+    def asset_bytes(self, asset: Mapping[str, object], limit: int) -> bytes:
+        """Through the asset's API URL, which redirects to a signed download host; the token goes
+        to the API host only (the download host refuses a second credential)."""
+        url = str(asset.get("url"))
+        request = urllib.request.Request(url, headers={
+            "Accept": "application/octet-stream", "Authorization": f"Bearer {self.token}",
+            "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "photo-wall-release-seal"})
+        try:
+            with urllib.request.build_opener(_TokenStaysHome).open(request,
+                                                                   timeout=API_TIMEOUT) as got:
+                body = got.read(limit + 1)
+        except urllib.error.HTTPError as error:
+            raise SealError(f"GET {url}: HTTP {error.code} {error.reason}") from None
+        except (OSError, http.client.HTTPException) as error:
+            raise SealError(f"GET {url}: {error}") from None
+        if len(body) > limit:
+            raise SealError(f"GET {url}: more than {limit} bytes")
+        return body
+
     def release(self, release_id: int) -> dict | None:
         release = self._get(f"/releases/{release_id}")
         if release is not None and not isinstance(release, dict):
@@ -677,6 +792,17 @@ class GitHubApi:
         # make_latest is a string enum in the REST API ("true", "false", "legacy").
         return self._written("PATCH", self._api(f"/releases/{draft.id}"), payload={
             "draft": False, "make_latest": "true", "name": title, "body": notes})
+
+
+class _TokenStaysHome(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect, dropping the Authorization header when it leaves the host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 (stdlib's)
+        followed = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if followed is not None and (urllib.parse.urlsplit(newurl).netloc
+                                     != urllib.parse.urlsplit(req.full_url).netloc):
+            followed.remove_header("Authorization")
+        return followed
 
 
 @dataclass(frozen=True, slots=True)
