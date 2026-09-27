@@ -28,6 +28,21 @@ On the trusted provisioning LAN, central may use serial/MAC and similar observat
 
 Cold boot requires reachable trusted time, provisioning/release, enrollment, control, and media services. A running Player should preserve already authorized output through a temporary outage within its current authority lease. No playback guarantee applies after a cold reboot without central connectivity.
 
+## Failure visibility and recovery
+
+The owner stated these expectations on 2026-09-27. [Decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules) records the related rules for reaching Central (U3, U7, U8), the deferred U5, and which change delivers each expectation.
+
+| ID | Requirement |
+|---|---|
+| U1 | **Never dark by failure.** A failure never leaves a Frame's display dark. At minimum it shows an error page, which is Photo Wall's own rendered page, not operating-system UI. That page lets the owner see that the operating system loaded even though the application layer could not run. Authored darkness stays allowed, such as the [Good night](#reference-experiences) experience, [fading to black](#black-and-transparency), or a dark Scene. U1 applies from the moment the operating system is up. The error page must not depend on the Player package, because provisioning can fail before that package is installed. |
+| U2 | **Recovery time.** After a whole-house power restore, every Frame shows photos within a couple of hours. The slowest link is gigabit. |
+| U4 | **Media that cannot be fetched.** The Player adds its debug overlay to its output, showing the error, and may continue showing the image it had. Central notices when any enrolled Player, bound to a Frame or not, has not connected for a while. |
+| U6 | **Error detail.** A Frame shows a short status: the error page or the debug overlay. The Central console shows the detailed, named cause. Cost: while a Player cannot reach Central, the console can show only "not seen since …"; the detail is unavailable until the Player reconnects. |
+
+Assumption, not an owner statement: before the operating system is up, the text stage 1 prints on the screen is enough for U1.
+
+The debug overlay is a Player diagnostic, not a Scene overlay in the sense of [progression and visibility](#progression-visibility-and-target-control).
+
 ## Views and responsibilities
 
 Three complementary views describe the system:
