@@ -39,7 +39,7 @@ name = "cz_conventional_commits"
 # watcher's parse_semver accepts and orders exactly this shape.
 tag_format = "v$version"
 # The latest `v*` tag IS the current version; the next version is bumped from it
-# by the commits since that tag. This matches release.yml's model -- the tag is
+# by the commits since that tag. This matches pipeline.yml's model -- the tag is
 # the sole source of truth and we never write a bumped number back to pyproject
 # (a version-bump commit would re-trigger `push: main` and loop). With no tags
 # (first release ever) the base is 0.0.0, so a `feat` bootstraps to v0.1.0 and a

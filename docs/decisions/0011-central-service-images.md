@@ -30,7 +30,8 @@ the release tag:
 - `ghcr.io/mcurcio/photo-wall/media-worker:vX.Y.Z`
 
 The publishing lives in
-[`.github/workflows/release.yml`](../../.github/workflows/release.yml) as two new
+`.github/workflows/release.yml` (since renamed
+[`pipeline.yml`](../../.github/workflows/pipeline.yml)) as two new
 jobs gated on `needs.plan.outputs.should_release == 'true'` and keyed to
 `needs.plan.outputs.tag`:
 
@@ -43,10 +44,18 @@ jobs gated on `needs.plan.outputs.should_release == 'true'` and keyed to
    the same gha cache scope** `checks.yml` already uses, turning its `load: true`
    builds into `push: true` builds with the GHCR tags above.
 
-Because both jobs depend only on the `plan` job's outputs, they fire on **both**
-triggers `release.yml` already supports: a push to `main` that cuts a release, and
-a `workflow_dispatch` of an existing tag. The dispatch path is how the owner
-backfills images for the existing `v0.2.0` tag.
+Both jobs are keyed only to the `plan` job's tag and revision, and run on the one
+release trigger: a push to `main` that cuts a release. The pipeline's `publish` job
+needs `service-images`, so a release is published only after its images are pushed,
+and no published release lacks them. Before pushing, `service-images` runs
+`scripts/release_plan.py claim`, which refuses a version already published or tagged
+at another commit: a published release's images are never overwritten.
+
+*Amended:* this decision first also published on a `workflow_dispatch` of an
+existing tag, which backfilled images for `v0.2.0`. The pipeline has since removed
+dispatch. There is no manual release or rebuild path: a release that fails is
+recovered only by the normal flow, where the next push to `main` releases whatever
+changed since the last published tag.
 
 ## Rationale
 

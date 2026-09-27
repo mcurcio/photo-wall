@@ -1,6 +1,20 @@
 name: Shared media OS dependency
 
+# Called by checks.yml, software-e2e.yml and pipeline.yml's release. Dispatch it by hand with
+# prepare_base to prepare a missing media OS dependency for its declared definition.
 on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Runner architecture of the media OS image
+        required: true
+        type: choice
+        options: [amd64, arm64]
+      prepare_base:
+        description: Prepare a missing media OS dependency for its declared definition
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       architecture:
