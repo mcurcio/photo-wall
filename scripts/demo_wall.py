@@ -38,7 +38,7 @@ REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
 
 # This is the ONLY benchmark application code copied into the Player image.
-# It imports source-neutral Player/contracts and stdlib; no host harness follows.
+# It imports source-neutral Player/contracts/uplink and stdlib; no host harness follows.
 PLAYER_RUNNER = r'''
 import collections
 import hashlib
@@ -58,7 +58,10 @@ from pathlib import Path
 from contracts.enrollment import OutputReport
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
-from player.service import BootContext, PlayerConfig, PlayerService
+from player.service import BootContext, PlayerConfig, PlayerService, central_finder
+from uplink.resolver import read_kernel_command_line, resolve_central
+from uplink.transport import HttpTransport
+from uplink.trust import Trust
 
 class Recorder(RecordingRenderer):
     def __init__(self):
@@ -166,8 +169,16 @@ boot_context = BootContext.model_validate({
     'boot_id': str(uuid.uuid4()), 'release_id': secrets.token_hex(32),
     'trial': False, 'persistence': 'volatile', 'fault': None,
 })
+# The production wiring (R1): the container's kernel command line names no Central,
+# so the configured origin is the saved root, located before the first request.
+# One Trust for the whole process: the same anchors locate Central and every
+# later httpx/websocket request to it.
+trust = Trust.public()
+find_central = central_finder(config, resolve_central(read_kernel_command_line()),
+                              transport=HttpTransport(trust=trust))
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
-                         health_path=None, boot_context=boot_context)
+                         find_central=find_central, trust=trust, health_path=None,
+                         boot_context=boot_context)
 stopping = [False]
 def stop(*_):
     stopping[0] = True

@@ -1,48 +1,37 @@
-"""Build the Player application as a `.deb` package (0009; p4-deb-full-depends).
+"""Build the Player application as a `.deb` package (0009 p4-deb-full-depends; Project 2 design
+§2.7 rule 2, S5).
 
-Re-architected per the owner ruling of 2026-09-12 ("proceed full-steam",
-docs/decisions/0008-delivery-ledger.md p4-deb-full-depends, option b): the
-Player `.deb` no longer bakes a prebuilt venv/wheelhouse assembled in an arm64
-appliance chroot. Instead it **declares its full runtime dependency set as apt
-`Depends`** -- the native render stack (GTK/GStreamer/weston/Mesa) *and* the
-Python libraries (`python3-pydantic`, `python3-httpx`, ...) -- and the
-bootstrapper `apt-get install`s the `.deb` so every dependency is resolved from
-the distro repo (Debian trixie) at boot. The base OS stays minimal.
+The `.deb` ships EXACTLY the Player's computed first-party import closure
+(`scripts/module_closure.py` `PLAYER_POLICY`), staged PRIVATELY under `INSTALL_DIR` with a
+generated `__main__.py` and `closure.json` (a PEP 441 directory application, run as `python3 -I
+-B /usr/lib/photo-wall-player`). Nothing goes to `/usr/lib/python3/dist-packages`, so this
+package and the bootstrapper `.deb` never own the same file and `dpkg` installs both on one
+root. `Depends` is `debian_packages.packages("player")` -- the native render stack
+(GTK/GStreamer/weston/Mesa) and the Python libraries (`python3-pydantic`, `python3-httpx`, ...).
+The base already carries those packages (it is built from the same declaration); provisioning
+installs the Player with `dpkg --install` alone -- nothing on the device resolves packages.
 
-Consequences of the ruling (recorded, not relitigated):
+The closure's third-party imports must be declared in the declaration (`compute_closure` refuses
+an undeclared one) and every declared import must be reached (`stage_tree` refuses
+`unreached_imports`, exactly like the bootstrapper builder). Everything is computed over the
+sources `git archive`d at the given revision (`fetch_tree`).
 
-- **Python 3.12 -> 3.13.** trixie ships no `python3.12`; the `.deb` targets
-  whatever `python3` the base provides (trixie == 3.13). The cp312-pinned
-  wheelhouse is therefore dropped.
-- **Hash-pinned wheels -> distro versions.** The hashed-wheelhouse integrity
-  model is traded for trixie's own `python3-*` package versions. Accepted:
-  home LAN, no threat model (0009 owner ruling). App-compat on 3.13 with the
-  unpinned distro versions is validated on the owner's Pi later; this builder's
-  job is to produce the `.deb` and let CI prove the `Depends` resolve.
+Also ships the two systemd units (`player.service`, `weston.service`) at
+`/etc/systemd/system` with baked `.wants` enablement symlinks, `weston.ini` under
+`/etc/xdg/weston`, and the `postinst` that creates the `wall` user -- exactly as before.
 
-Payload shape (mirrors scripts/build_bootstrapper_deb.py exactly -- pure
-staging + `control_file` + `run_dpkg_deb`, `Architecture: all`, buildable on
-any host with `dpkg-deb`, NO chroot/venv):
+Pure Python, no venv, no wheelhouse, no arm64 chroot: it builds on any host with `dpkg-deb`.
 
-- The Player's FIRST-PARTY import closure (`player/*` + a subset of
-  `contracts/*`, empirically confirmed by importing `player.service` plus its
-  two lazy imports `player.native` and `player.mdns_discovery` and filtering
-  `sys.modules` to first-party roots) staged as `.py` files under
-  `/usr/lib/python3/dist-packages/` -- the distro `python3` default `sys.path`
-  entry. No `appliance/*` module is in the app's closure; `contracts/release.py`
-  (the retiring boot-ticket module) is deliberately NOT imported and NOT staged.
-- The two systemd units (`player.service`, `weston.service`) at
-  `/etc/systemd/system` with baked `.wants` enablement symlinks, `weston.ini`
-  under `/etc/xdg/weston`, and the `postinst` that creates the `wall` user --
-  exactly as before.
+Version scheme matches scripts/build_player.py: `{pyproject project.version}+g{revision}`, read
+from the given Git revision (not the working tree) -- one reproducible identifier across every
+artefact built from that commit. (scripts/build_bootstrapper_deb.py DELIBERATELY uses a different,
+content-derived scheme; see that module's docstring.)
 
-`control_file` and `run_dpkg_deb` are defined here and REUSED verbatim by
-scripts/build_bootstrapper_deb.py (which imports them); do not move them.
-
-Version scheme matches scripts/build_bootstrapper_deb.py / scripts/build_player.py:
-`{pyproject project.version}+g{revision}`, read from the given Git revision (not
-the working tree) -- one reproducible identifier across every artifact built
-from that commit.
+`control_file` and `run_dpkg_deb` are generic (parameterized on package, version, architecture,
+Depends, maintainer and description); `fetch_tree` computes the git-archived tree both `.deb`
+builders stage from; `assert_declaration_matches` refuses a revision whose
+`scripts/debian_packages.py` differs from the one the builder imported. All four are REUSED
+verbatim by scripts/build_bootstrapper_deb.py (which imports them); do not move or duplicate them.
 """
 
 from __future__ import annotations
@@ -56,12 +45,27 @@ import tarfile
 import tempfile
 import tomllib
 from pathlib import Path, PurePosixPath
+from typing import Final
 
 from packaging.version import Version
 
+from scripts import debian_packages
 from scripts.build_player import BuildError
+from scripts.debian_packages import packages
+from scripts.device_root_checks import watchdog_overrides
+from scripts.module_closure import (
+    PLAYER_POLICY,
+    Closure,
+    ClosureError,
+    closure_for,
+    stage_application,
+    unreached_imports,
+)
 
 PACKAGE = "photo-wall-player"
+# The private install dir (design §2.7, rule 2): the computed closure, a generated
+# __main__.py and closure.json, run as `python3 -I -B /usr/lib/photo-wall-player`.
+INSTALL_DIR: Final = PurePosixPath("/usr/lib/photo-wall-player")
 # The `.deb` now ships only interpreter-agnostic `.py` files and config -- no
 # compiled/arch-specific content (contrast the old prebuilt-venv `.deb`, which
 # was `arm64`). The native, arch-specific dependencies come from the base via
@@ -71,104 +75,42 @@ PACKAGE = "photo-wall-player"
 ARCHITECTURE = "all"
 MAINTAINER = "Photo Wall <photo-wall@localhost>"
 DESCRIPTION = (
-    "Photo Wall Player application: the player import closure staged under "
-    "/usr/lib/python3/dist-packages plus the player and weston systemd units. "
-    "Its full runtime dependency set (GTK/GStreamer/weston/Mesa and the Python "
-    "libraries) is declared as apt Depends and resolved from the distro repo "
-    "at install time (0009, p4-deb-full-depends). Deployment configuration and "
-    "central_origin are supplied at boot by the bootstrapper/central, never "
-    "baked into this package."
+    "Photo Wall Player application: its computed first-party import closure staged privately "
+    "under /usr/lib/photo-wall-player, plus the player and weston systemd units. Its full "
+    "runtime dependency set (GTK/GStreamer/weston/Mesa and the Python libraries) is declared as "
+    "apt Depends; the base carries them from the same declaration (0009, p4-deb-full-depends). "
+    "Deployment configuration and central_origin are supplied at boot by the "
+    "bootstrapper/central, never baked into this package."
 )
 
 # The systemd units this package ships, and the "photo-wall-" prefix the
 # appliance build already uses for the same units.
 UNIT_FILES = ("player.service", "weston.service")
 
-# The full runtime dependency set, OWNED here as a trixie-oriented constant
-# (deliberately NOT derived from appliance/os_definition.json RUNTIME_PACKAGES,
-# which is Ubuntu-named and retires with the OS-base pipeline in p4-retire).
-# Every name is a real Debian trixie package (verified against
-# packages.debian.org, 2026-09-12):
-#   - Native render stack: GTK 3, GStreamer (base/good/bad + libav), Mesa
-#     (DRI + EGL), weston.
-#   - GObject-introspection + typelibs the Python bindings need at runtime.
-#   - The Python libraries formerly vendored in the wheelhouse, now the distro's
-#     own `python3-*` packages (pydantic/httpx/websockets/cryptography/zeroconf).
-#   - `python3` itself (trixie == 3.13), under which the staged dist-packages
-#     closure runs.
-DEB_DEPENDS = (
-    "python3",
-    "python3-gi",
-    "python3-gst-1.0",
-    "python3-opengl",
-    "gir1.2-gtk-3.0",
-    "gir1.2-gst-plugins-base-1.0",
-    "gstreamer1.0-plugins-base",
-    "gstreamer1.0-plugins-good",
-    "gstreamer1.0-plugins-bad",
-    "gstreamer1.0-libav",
-    "libgl1-mesa-dri",
-    "libegl1",
-    "weston",
-    "python3-pydantic",
-    "python3-httpx",
-    "python3-websockets",
-    "python3-cryptography",
-    "python3-zeroconf",
-)
+# The full runtime dependency set (the native render stack and the distro
+# `python3-*` libraries) is NOT written here: the control file's Depends is
+# `debian_packages.packages("player")`, the Debian declaration's one list
+# (scripts/debian_packages.py), which also builds the base that carries them.
 
 # The bare PyPI project names a *vendored wheel* would have used. The distro
-# `python3-*` names above resolve from apt and are permitted; these bare roots
+# `python3-*` names in the declaration are permitted; these bare roots
 # are forbidden in Depends because their presence would imply a vendored wheel
 # (the model this slice retires). The guard matches on exact name equality, so
 # `python3-pydantic` passes while a bare `pydantic` is rejected.
 _PYPI_ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 
-# The Player's first-party import closure, as (repo-relative source path,
-# dist-packages-relative destination path) pairs. Confirmed empirically:
-#
-#   .venv/bin/python -c "import sys; import player.service; \
-#     import player.native, player.mdns_discovery; \
-#     print('\n'.join(sorted(m for m in sys.modules \
-#       if m.split('.')[0] in {'player','contracts'} \
-#       and getattr(sys.modules[m],'__file__',None))))"
-#
-# (`player.native` and `player.mdns_discovery` are lazy imports inside
-# player/service.py:999,1022, reached at runtime but not at import of
-# `player.service`, so they are added explicitly to observe the true runtime
-# closure.) The closure is all 11 player modules + 5 contracts modules; NO
-# `appliance/*` module and NOT `contracts/release.py` (the retiring
-# boot-ticket module, imported by nothing on this path).
-_MODULE_FILES = (
-    ("player/__init__.py", "player/__init__.py"),
-    ("player/cache.py", "player/cache.py"),
-    ("player/discovery.py", "player/discovery.py"),
-    ("player/executor.py", "player/executor.py"),
-    ("player/geometry.py", "player/geometry.py"),
-    ("player/identity.py", "player/identity.py"),
-    ("player/mdns_discovery.py", "player/mdns_discovery.py"),
-    ("player/native.py", "player/native.py"),
-    ("player/output_discovery.py", "player/output_discovery.py"),
-    ("player/rendering.py", "player/rendering.py"),
-    ("player/service.py", "player/service.py"),
-    ("contracts/__init__.py", "contracts/__init__.py"),
-    ("contracts/enrollment.py", "contracts/enrollment.py"),
-    ("contracts/equipment.py", "contracts/equipment.py"),
-    ("contracts/models.py", "contracts/models.py"),
-    ("contracts/time.py", "contracts/time.py"),
-)
+DECLARATION: Final = "scripts/debian_packages.py"
 
-# Generous ceiling for the git-archive of the closure + pyproject (the closure
-# is ~190 KiB today); guards against archiving an unexpectedly huge tree.
-MAX_SOURCE = 4 * 1024 * 1024
+# The first-party packages, the declaration and pyproject.toml (~1.4 MiB today); guards
+# against archiving an unexpectedly huge tree.
+MAX_SOURCE = 16 * 1024 * 1024
 
 
-def package_version(sources: dict[str, bytes], revision: str) -> str:
-    """The .deb version is `{pyproject version}+g{revision}` -- the same scheme
-    scripts/build_bootstrapper_deb.py / scripts/build_player.py use, read from
-    the given revision's `pyproject.toml`, not the working tree."""
-    project = tomllib.loads(sources["pyproject.toml"].decode())
-    base_version = Version(project["project"]["version"])
+def package_version(project_version: str, revision: str) -> str:
+    """The .deb version is `{pyproject version}+g{revision}` -- one reproducible identifier
+    across every artefact built from that commit (deliberately unlike
+    scripts/build_bootstrapper_deb.py's content-derived scheme; see that module's docstring)."""
+    base_version = Version(project_version)
     if base_version.local:
         raise BuildError("unsupported project version")
     return f"{base_version}+g{revision}"
@@ -224,71 +166,83 @@ def postinst_script() -> bytes:
     ).encode()
 
 
-def fetch_sources(repository: Path, revision: str) -> dict[str, bytes]:
-    """`git archive` the exact fixed file list this package ships, from
-    `revision` (not the working tree) -- an explicit full commit, exactly like
-    scripts/build_bootstrapper_deb.py:fetch_sources."""
+def fetch_tree(repository: Path, revision: str, into: Path) -> None:
+    """git archive of the first-party packages (every top-level directory holding an
+    `__init__.py` at `revision`), scripts/debian_packages.py and pyproject.toml at `revision`,
+    extracted into `into`, so the closure and the Depends are computed over exactly the
+    committed sources the package ships from. `revision` must be an explicit full commit.
+
+    REUSED verbatim by scripts/build_bootstrapper_deb.py -- do not duplicate it there.
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise BuildError("explicit full Git commit required")
     repository = repository.resolve(strict=True)
-    wanted = tuple(source for source, _dest in _MODULE_FILES) + ("pyproject.toml",)
-    result = subprocess.run(
-        ["git", "-C", str(repository), "archive", "--format=tar", revision, *wanted],
+    listing = subprocess.run(
+        ["git", "-C", str(repository), "ls-tree", "-r", "--name-only", "-z", revision],
         check=True, capture_output=True, timeout=30,
-    )
-    archive = result.stdout
+    ).stdout.decode().split("\0")
+    first_party = sorted({name.partition("/")[0] for name in listing
+                          if re.fullmatch(r"[^/]+/__init__\.py", name)})
+    wanted = (*first_party, DECLARATION, "pyproject.toml")
+    archive = subprocess.run(
+        ["git", "-C", str(repository), "archive", "--format=tar", revision, "--", *wanted],
+        check=True, capture_output=True, timeout=60,
+    ).stdout
     if len(archive) > MAX_SOURCE:
         raise BuildError("source archive too large")
-    sources: dict[str, bytes] = {}
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-        for member in tar:
-            if member.isdir():
-                # `git archive` on explicit file paths also emits their parent
-                # directory members (e.g. "player/") -- harmless, skipped.
-                continue
+        members = tar.getmembers()
+        for member in members:
             path = PurePosixPath(member.name)
-            if (path.is_absolute() or ".." in path.parts or member.name not in wanted
-                    or not member.isfile() or member.name in sources):
+            inside = (path.parts[0] in first_party
+                      or member.name in (DECLARATION, "pyproject.toml", "scripts"))
+            if (path.is_absolute() or ".." in path.parts or not inside
+                    or not (member.isfile() or member.isdir())):
                 raise BuildError("unexpected or nonregular source member")
-            sources[member.name] = tar.extractfile(member).read()
-    missing = set(wanted) - sources.keys()
-    if missing:
-        raise BuildError(f"missing_source:{','.join(sorted(missing))}")
-    return sources
+        into.mkdir(parents=True)
+        tar.extractall(into, members=members, filter="data")
 
 
-def stage_tree(deb_root: Path, *, sources: dict[str, bytes], systemd_source: Path,
-               weston_ini: bytes, version: str, depends: tuple[str, ...] = DEB_DEPENDS) -> None:
+def assert_declaration_matches(tree: Path) -> None:
+    """Refuses a revision whose `scripts/debian_packages.py` differs from the one this builder
+    imported: a closure policy's third-party table and a package's Depends must reflect exactly
+    the fetched revision's declaration, never a stale one. Shared by both `.deb` builders."""
+    if (tree / DECLARATION).read_bytes() != Path(debian_packages.__file__).read_bytes():
+        raise BuildError("declaration_differs_from_revision")
+
+
+def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: Path,
+               weston_ini: bytes, version: str) -> None:
     """Assemble the `.deb` staging tree.
 
-    Places the Player import closure at `/usr/lib/python3/dist-packages` (the
-    distro `python3` default `sys.path` entry) and the units at
-    `/etc/systemd/system`, shipped already enabled via `.wants` symlinks (a
-    symlink is data, not a maintainer script, so "install is an unpack" still
-    holds for activation). Carries NO `/etc/photo-wall` deployment
-    configuration and NO `central_origin` -- per 0009 those arrive at boot from
-    the bootstrapper/central, never from a published asset. NO venv: the runtime
-    dependencies are the package's `Depends`, resolved by apt.
+    Refuses a closure that leaves a declared import unreached (the declaration would put an
+    unused package in Depends and on the base) BEFORE creating `deb_root`, exactly as the
+    bootstrapper builder. Stages the computed closure PRIVATELY under `INSTALL_DIR`
+    (`stage_application`: the files, a generated `__main__.py`, `closure.json`) and the units at
+    `/etc/systemd/system`, shipped already enabled via `.wants` symlinks (a symlink is data, not
+    a maintainer script, so "install is an unpack" still holds for activation). Carries NO
+    `/etc/photo-wall` deployment configuration and NO `central_origin` -- per 0009 those arrive
+    at boot from the bootstrapper/central, never from a published asset. NO venv: the runtime
+    dependencies are the package's `Depends`, `debian_packages.packages("player")`.
     """
     if deb_root.exists():
         raise BuildError("stage_root_exists")
+    unreached = unreached_imports(closure, PLAYER_POLICY)
+    if unreached:
+        raise BuildError(f"declared_import_unreached:{','.join(unreached)}")
     deb_root.mkdir(parents=True)
 
     debian = deb_root / "DEBIAN"
     debian.mkdir(mode=0o755)
     control_path = debian / "control"
-    control_path.write_bytes(control_file(version, depends))
+    control_path.write_bytes(control_file(version, packages("player")))
     control_path.chmod(0o644)
     postinst_path = debian / "postinst"
     postinst_path.write_bytes(postinst_script())
     postinst_path.chmod(0o755)
 
-    dist_packages = deb_root / "usr/lib/python3/dist-packages"
-    for source, dest in _MODULE_FILES:
-        target = dist_packages / dest
-        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        target.write_bytes(sources[source])
-        target.chmod(0o644)
+    stage_application(closure, PLAYER_POLICY, repo=tree,
+                      into=deb_root / INSTALL_DIR.relative_to("/"))
 
     units_dir = deb_root / "etc/systemd/system"
     units_dir.mkdir(parents=True)
@@ -311,17 +265,26 @@ _FORBIDDEN_CONFIG_NAMES = frozenset({"public.json", "bootstrap.json", "ca.pem", 
 
 def assert_no_deployment_config(deb_root: Path) -> None:
     """0009 invariant: no application config, no central_origin, and (this
-    slice) no leaked venv in the `.deb`.
+    slice) no leaked venv or dist-packages file in the `.deb`.
 
     Configuration (Frame binding, assignments, calibration, central_origin)
     arrives at boot from the bootstrapper/central -- never baked into a
     published asset. A staged `/opt/photo-wall/venv` would mean the venv/
-    wheelhouse this slice dropped had crept back in; forbid it too.
+    wheelhouse this slice dropped had crept back in; forbid it too. A staged
+    `/usr/lib/python3/dist-packages` file would mean the closure leaked outside its
+    private directory -- the invariant that keeps this `.deb` and the bootstrapper `.deb` from
+    ever owning the same file. No systemd manager setting of the watchdog either: stage 1's
+    /run drop-in is the only one (design §2.8).
     """
     if (deb_root / "opt/photo-wall/venv").exists():
         raise BuildError("venv_in_deb")
+    overrides = watchdog_overrides(deb_root)
+    if overrides:
+        raise BuildError(f"watchdog_override_in_deb:{';'.join(overrides)}")
     if (deb_root / "etc/photo-wall").exists():
         raise BuildError("deployment_config_in_deb")
+    if (deb_root / "usr/lib/python3/dist-packages").exists():
+        raise BuildError("dist_packages_in_deb")
     for path in deb_root.rglob("*"):
         if path.name in _FORBIDDEN_CONFIG_NAMES or path.name == "central_origin":
             raise BuildError("deployment_config_in_deb")
@@ -345,22 +308,28 @@ def run_dpkg_deb(deb_root: Path, output: Path) -> Path:
 
 
 def build(repository: Path, revision: str, output_dir: Path) -> Path:
-    """End to end: fetch the closure at `revision` -> stage -> `dpkg-deb`.
+    """End to end: `fetch_tree` the committed sources at `revision` -> refuse a stale declaration
+    (`assert_declaration_matches`) -> compute the closure -> stage -> `dpkg-deb`.
 
-    No arm64 chroot and no `--root`: the `.deb` carries only `.py` files and
-    config, so it builds on any host with `dpkg-deb` (like the bootstrapper
-    `.deb`). The `weston.ini` content is generated from the running player
-    package, matching the previous builder's behaviour.
+    No arm64 chroot and no `--root`: the `.deb` carries only `.py` files, units and config, so it
+    builds on any host with `dpkg-deb` (like the bootstrapper `.deb`). `weston.ini` is generated
+    from the running player package, matching the previous builder's behaviour; the systemd
+    units come from the COMMITTED `appliance/systemd`, not the working tree's.
     """
     from player.output_discovery import weston_ini as render_weston_ini
 
     output_dir = output_dir.resolve()
     repository = repository.resolve(strict=True)
-    sources = fetch_sources(repository, revision)
-    version = package_version(sources, revision)
     with tempfile.TemporaryDirectory(prefix=".photo-wall-player-deb-", dir=output_dir) as tmp:
+        tree = Path(tmp) / "tree"
+        fetch_tree(repository, revision, tree)
+        assert_declaration_matches(tree)
+        closure = closure_for(PLAYER_POLICY, repo=tree)
+        project = tomllib.loads((tree / "pyproject.toml").read_text())
+        version = package_version(project["project"]["version"], revision)
         deb_root = Path(tmp) / "deb-root"
-        stage_tree(deb_root, sources=sources, systemd_source=repository / "appliance/systemd",
+        stage_tree(deb_root, closure=closure, tree=tree,
+                   systemd_source=tree / "appliance/systemd",
                    weston_ini=render_weston_ini().encode(), version=version)
         assert_no_deployment_config(deb_root)
         output = output_dir / f"{PACKAGE}_{version}_{ARCHITECTURE}.deb"
@@ -375,7 +344,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         output = build(args.repository, args.revision, args.output_dir)
-    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+    except (ValueError, OSError, subprocess.SubprocessError, ClosureError) as exc:
         parser.exit(1, f"Player .deb build failed: {exc}\n")
     print(str(output))
 

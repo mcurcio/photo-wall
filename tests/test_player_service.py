@@ -3,13 +3,16 @@
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import inspect
 import json
+import logging
 import math
 import stat
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -19,6 +22,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
 from test_executor import binding, layer
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response as Http11Response
 
 from contracts.enrollment import Enrollment, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
@@ -42,8 +48,17 @@ from player.service import (
     Unauthorized,
     _ChunkBridge,
     _json,
+    central_finder,
     load_config,
 )
+from tests import tls_fixture as tls
+from tests.uplink_fakes import FakeReply, FakeTransport, central, finding
+from uplink.causes import Cause, UplinkError
+from uplink.finder import find_central
+from uplink.origin import Origin
+from uplink.resolver import Configured, Unconfigured
+from uplink.transport import HttpTransport
+from uplink.trust import Trust
 
 
 def immediate(callback):
@@ -58,6 +73,12 @@ def immediate(callback):
 def private_dir(path):
     path.mkdir(mode=0o700)
     return path
+
+
+# One Trust for the whole module: minted once into its own private directory (never
+# tmp_path), so tests that assert tmp_path's exact contents see no incidental ca.pem.
+_TRUST_DIR = Path(tempfile.mkdtemp(prefix="photo-wall-test-trust-"))
+TRUST = Trust.public(tls.write_bundle(_TRUST_DIR / "ca.pem", tls.CA))
 
 
 def boot_context() -> BootContext:
@@ -114,12 +135,27 @@ def test_identity_is_fresh_signed_and_never_written(tmp_path):
     assert "_key=" not in repr(first)
 
 
-@pytest.mark.parametrize("origin", ["http://central", "https://user:secret@central", "https://central/path",
+@pytest.mark.parametrize("origin", ["https://user:secret@central", "https://central/path",
     "https://central?token=x", "https://central#x", "https://central\\evil", "file:///tmp/media",
     "https://central:bad", "https://central:0", "https://central\n"])
-def test_config_rejects_untrusted_or_non_origin_urls(tmp_path, origin):
-    with pytest.raises(ValidationError):
-        PlayerConfig(central_origin=origin)
+def test_the_saved_root_rejects_untrusted_or_non_origin_urls_only_when_read(tmp_path, origin):
+    """U3: loading the config never validates central_origin (a cmdline root must win over a
+    bad saved value); saved_root(), read only without a cmdline root, refuses it."""
+    config = PlayerConfig(central_origin=origin)
+    with pytest.raises(UplinkError) as excinfo:
+        config.saved_root()
+    assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "invalid")
+
+
+@pytest.mark.parametrize("allow_http", [{}, {"allow_http": False}, {"allow_http": True}])
+def test_config_accepts_an_http_root_and_allow_http_is_inert(tmp_path, allow_http):
+    """R2 makes an http root legal; allow_http is still accepted (older handoffs carry it) and
+    changes nothing."""
+    path = tmp_path / "public.json"
+    path.write_text(json.dumps({"schema": 1, "central_origin": "http://192.0.2.10:8000",
+                                **allow_http}))
+    assert load_config(path).saved_root() == Origin.parse_root("http://192.0.2.10:8000")
+    assert PlayerConfig().saved_root() is None
 
 
 def test_config_is_strict_bounded_public_json(tmp_path):
@@ -267,8 +303,10 @@ async def rig(tmp_path, *, server=None):
                           cache_bytes=1024**2)
     client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-        clock=clock, client=client, time_client=client, websocket_connect=False,
-        health_path=None, boot_context=boot_context())
+        find_central=finding("http://central"), trust=TRUST, clock=clock,
+        client=client, time_client=client,
+        websocket_connect=False, health_path=None, boot_context=boot_context())
+    await service.locate_central()
     await service.enroll()
     await service.probe_time()
     server.offer()
@@ -277,47 +315,120 @@ async def rig(tmp_path, *, server=None):
 
 
 async def close(service):
-    if service.time_client is not None and service.time_client is not service.client:
-        await service.time_client.aclose()
-    if service.client is not None:
-        await service.client.aclose()
+    if service.link.time_client is not None and service.link.time_client is not service.link.client:
+        await service.link.time_client.aclose()
+    if service.link.client is not None:
+        await service.link.client.aclose()
     if service.cache:
         service.cache.close()
     service._worker.shutdown(wait=True, cancel_futures=True)
 
 
-class FakeDiscovery:
-    def __init__(self, origin):
-        self.origin = origin
-        self.calls = 0
+# --- R1: the Player finds Central through find_central (design §2.3) -------------
 
-    async def discover(self):
-        self.calls += 1
-        return self.origin
+CMDLINE = Origin.parse_root("http://photo-wall.localdomain")
+LOCATED = Origin.parse_root("http://central")
 
 
-async def discovery_rig(tmp_path, *, central_origin, discovery):
+def gateway():
+    """The command line's root 301s to Central at http://central (the Server's host)."""
+    return FakeTransport({
+        str(CMDLINE.url("/v1/locate")): lambda: FakeReply(
+            301, location=str(LOCATED.url("/v1/locate"))),
+        str(LOCATED.url("/v1/locate")): central})
+
+
+class NoMdns:
+    """Fails the test if the wiring builds an mDNS browser."""
+
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("no mDNS object may be built")
+
+
+async def finder_rig(find, handle=None):
     clock = ManualClock(100)
     server = Server(clock)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-    config = PlayerConfig(central_origin=central_origin, allow_http=central_origin is not None)
-    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-        clock=clock, client=client, time_client=client, websocket_connect=False,
-        health_path=None, boot_context=boot_context(), discovery=discovery)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle or server), trust_env=False)
+    service = PlayerService(PlayerConfig(), load_identity(), (), RecordingRenderer(), immediate,
+        find_central=find, trust=TRUST, clock=clock, client=client, time_client=client,
+        websocket_connect=False, health_path=None, boot_context=boot_context())
     return service, server
 
 
-def test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted(tmp_path):
+def test_a_cmdline_root_wins_over_the_saved_root_and_no_mdns_is_built(monkeypatch, caplog):
+    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
+    caplog.set_level(logging.INFO, logger="photo_wall.player")
+    config = PlayerConfig(central_origin="http://192.0.2.20:8000")
+    found = asyncio.run(central_finder(config, Configured(CMDLINE), transport=gateway())())
+    assert (found.root, found.source, found.central.origin) == (CMDLINE, "cmdline", LOCATED)
+    assert caplog.messages == ["player: the saved central_origin is ignored: "
+                               "the kernel command line names http://photo-wall.localdomain"]
+
+
+@pytest.mark.parametrize("unconfigured", [Unconfigured("absent"), Unconfigured("no_cmdline")])
+def test_the_saved_root_is_used_without_a_cmdline_root_and_builds_no_mdns(
+        monkeypatch, unconfigured):
+    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
+    transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
+    config = PlayerConfig(central_origin="http://central")
+    found = asyncio.run(central_finder(config, unconfigured, transport=transport)())
+    assert (found.root, found.source, found.central.origin) == (LOCATED, "saved", LOCATED)
+
+
+def test_mdns_is_built_only_without_a_cmdline_or_saved_root(monkeypatch):
+    built = []
+
+    class Mdns:
+        def __init__(self):
+            self.proofs = []
+            built.append(self)
+
+        async def discover(self, unconfigured):
+            self.proofs.append(unconfigured)
+            return LOCATED
+
+    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", Mdns)
+    transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
+    find = central_finder(PlayerConfig(), Unconfigured("absent"), transport=transport)
+    found = asyncio.run(find())
+    assert (found.root, found.source) == (LOCATED, "discovered")
+    assert [mdns.proofs for mdns in built] == [[Unconfigured("absent")]]
+
+
+def test_every_request_goes_to_the_located_origin_not_the_root(tmp_path):
     async def check():
-        discovery = FakeDiscovery("http://rogue")
-        service, server = await discovery_rig(tmp_path, central_origin="http://central",
-                                              discovery=discovery)
+        find = functools.partial(find_central, Configured(CMDLINE), transport=gateway())
+        service, server = await finder_rig(find)
         try:
-            resolved = await service.resolve_origin()
-            assert resolved == "http://central"
-            assert discovery.calls == 0
+            with pytest.raises(ServiceError, match="central_origin_unavailable"):
+                service.central
+            located = await service.locate_central()
+            assert service.central is located and located.origin == LOCATED
             await service.enroll()
-            assert all(request.url.host == "central" for request in server.requests)
+            assert server.requests
+            assert all(str(request.url).startswith("http://central/")
+                       for request in server.requests)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_the_websocket_url_comes_from_the_located_origin(tmp_path):
+    async def check():
+        service, _ = await finder_rig(finding("https://central.example:8443"))
+        uris = []
+
+        def connect(uri, **options):
+            uris.append(uri)
+            raise ServiceError("stop")
+
+        service.link.websocket_connect = connect
+        try:
+            await service.locate_central()
+            await service.enroll()
+            with pytest.raises(ServiceError, match="stop"):
+                await service._websocket_loop()
+            assert uris == ["wss://central.example:8443/v1/player/session"]
         finally:
             await close(service)
     asyncio.run(check())
@@ -338,9 +449,11 @@ def test_d0_persistent_boot_context_enrolls_with_no_ticket_id(tmp_path):
                               cache_dir=str(directory), cache_bytes=1024**2)
         client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-            clock=clock, client=client, time_client=client, websocket_connect=False,
-            health_path=None, boot_context=d0_boot_context())
+            find_central=finding("http://central"), trust=TRUST, clock=clock,
+            client=client, time_client=client, websocket_connect=False, health_path=None,
+            boot_context=d0_boot_context())
         try:
+            await service.locate_central()
             await service.enroll()
             assert server.proofs[-1].ticket_id is None
             assert server.proofs[-1].device_id == d0_boot_context().device_id
@@ -379,9 +492,11 @@ def test_volatile_persistence_with_no_ticket_still_enrolls_ticketless(tmp_path):
         diskless = boot_context().model_copy(update={"ticket_id": None})
         assert diskless.persistence == "volatile"
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-            clock=clock, client=client, time_client=client, websocket_connect=False,
-            health_path=None, boot_context=diskless)
+            find_central=finding("http://central"), trust=TRUST, clock=clock,
+            client=client, time_client=client, websocket_connect=False, health_path=None,
+            boot_context=diskless)
         try:
+            await service.locate_central()
             await service.enroll()
             assert server.proofs[-1].ticket_id is None
         finally:
@@ -448,8 +563,9 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
             return Socket()
 
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-            clock=clock, client=client, time_client=client, websocket_connect=connect,
-            health_path=None, boot_context=d0_boot_context())
+            find_central=finding("http://central"), trust=TRUST, clock=clock,
+            client=client, time_client=client, websocket_connect=connect, health_path=None,
+            boot_context=d0_boot_context())
         task = asyncio.create_task(service.run())
         try:
             async def connected():
@@ -476,93 +592,52 @@ def test_d0_flashed_player_reaches_sustained_session_without_boot_health_crash_l
     asyncio.run(check())
 
 
-def test_absent_origin_resolves_and_enrolls_against_discovered_origin(tmp_path):
-    async def check():
-        discovery = FakeDiscovery("http://central")
-        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
-        try:
-            resolved = await service.resolve_origin()
-            assert resolved == "http://central"
-            assert discovery.calls == 1
-            await service.enroll()
-            assert all(request.url.host == "central" for request in server.requests)
-        finally:
-            await close(service)
-    asyncio.run(check())
+def _until_steady(server, steady, *, fail_first_state=False, redirect_first_state=False):
+    """Serves `server`, offers a plan the instant enrollment completes, and sets `steady` on
+    the first readiness report: only `_control_loop` sends one, i.e. only once run() is blocked
+    on its steady-state tasks, the one stable cancellation point every run()-driven test here
+    relies on. `fail_first_state` answers the first state poll 503 (one failed cycle);
+    `redirect_first_state` answers it 301 (one failed cycle named REDIRECT/unexpected)."""
+    failed = []
+
+    def handle(request):
+        if (fail_first_state or redirect_first_state) and not failed and (
+                request.url.path == "/v1/player/state"):
+            failed.append(request)
+            if redirect_first_state:
+                return httpx.Response(301, headers={
+                    "Location": "http://moved.example/v1/player/state"})
+            return httpx.Response(503, json={"error": "fixture_outage"})
+        result = server(request)
+        if request.url.path == "/v1/enrollment/register":
+            server.offer()
+        if request.url.path == "/v1/player/readiness":
+            steady.set()
+        return result
+    return handle
 
 
-def test_absent_origin_with_no_discovery_result_fails_clearly_then_explicit_config_recovers(tmp_path):
-    async def check():
-        discovery = FakeDiscovery(None)
-        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
-        try:
-            with pytest.raises(ServiceError, match="central_origin_unavailable"):
-                await service.resolve_origin()
-            assert service.registration is None
-            service.config = PlayerConfig(central_origin="http://central", allow_http=True)
-            resolved = await service.resolve_origin()
-            assert resolved == "http://central"
-            await service.enroll()
-            assert service.registration is not None
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypatch):
+def test_a_failed_locate_is_retried_on_the_next_cycle_without_restart(tmp_path, monkeypatch):
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    located = finding("http://central")
+    attempts = []
 
-    class LateDiscovery(FakeDiscovery):
-        """Fails discovery once, then returns an origin on a later cycle."""
-
-        async def discover(self):
-            self.calls += 1
-            if self.calls == 1:
-                return None
-            return self.origin
+    async def find():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise UplinkError(Cause.CONFIGURATION, "absent", detail="not_discovered")
+        return await located()
 
     async def check():
-        discovery = LateDiscovery("http://central")
-        service, server = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
-        # Offer a real plan the instant the late-discovered enroll completes
-        # (mirrors the `server.offer()`-on-register idiom already used above
-        # at line ~392 and ~1128). Without this, poll_state() has nothing to
-        # serve, so run()'s per-iteration task list stays empty every cycle
-        # (poll_state() faults before the control/media/time/observation
-        # tasks are ever created) and the retry loop spins at
-        # BACKOFF[0]==.001s -- racing service.stop()'s scheduled
-        # `self._task.cancel()` against the loop's own cooperative
-        # `_stop.is_set()` recheck. When the loop's own recheck wins, run()
-        # exits its `while` normally (no CancelledError, so run()'s
-        # `except asyncio.CancelledError: pass` never engages) and proceeds
-        # into the *unguarded* shutdown `finally:` -- and the still-pending,
-        # already-scheduled `task.cancel()` can then land on the
-        # `run_in_executor(self._worker, self.cache.close)` await there,
-        # propagating an uncaught CancelledError out of the task. That is
-        # exactly what CI saw at `await asyncio.wait_for(task, 10)`, after
-        # faults `central_origin_unavailable` then `connection_failed` (the
-        # server had no state to hand back). Reaching the real, long-lived
-        # `asyncio.wait(tasks, FIRST_COMPLETED)` steady state -- the same
-        # single stable cancellation point every other run()-driven test in
-        # this file relies on -- removes the race instead of tolerating it.
+        service, server = await finder_rig(find)
         steady = asyncio.Event()
-
-        def handle(request):
-            result = server(request)
-            if request.url.path == "/v1/enrollment/register":
-                server.offer()
-            if request.url.path == "/v1/player/readiness":
-                # Only sent from `_control_loop`, i.e. only once run() has
-                # created the steady-state tasks and is blocked on them.
-                steady.set()
-            return result
-        await service.client.aclose()
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        service.time_client = service.client
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_until_steady(server, steady)))
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(steady.wait(), 10)
-            assert discovery.calls >= 2
+            assert len(attempts) == 2           # located once for the session, not per request
             assert service.registration is not None
             assert all(request.url.host == "central" for request in server.requests)
         finally:
@@ -572,18 +647,58 @@ def test_late_discovery_recovers_reenrollment_without_restart(tmp_path, monkeypa
     asyncio.run(check())
 
 
-def test_discovered_http_origin_is_trusted_baseline_but_explicit_http_still_needs_allow_http(tmp_path):
+def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, monkeypatch):
+    """0014: a failed cycle (here Central answering 503) is followed by a new locate; it lands
+    on the origin that issued the registration, so the registration is kept (U8) and there is
+    no second enrollment."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    find = finding("http://central")
+
     async def check():
-        discovery = FakeDiscovery("http://central")
-        service, _ = await discovery_rig(tmp_path, central_origin=None, discovery=discovery)
+        service, server = await finder_rig(find)
+        steady = asyncio.Event()
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
+            _until_steady(server, steady, fail_first_state=True)))
+        task = asyncio.create_task(service.run())
         try:
-            resolved = await service.resolve_origin()
-            assert resolved == "http://central"
+            await asyncio.wait_for(steady.wait(), 10)
+            assert find.calls == 2
+            assert len(server.proofs) == 1
         finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
             await close(service)
     asyncio.run(check())
-    with pytest.raises(ValidationError):
-        PlayerConfig(central_origin="http://central")
+
+
+def test_a_redirect_on_a_player_request_is_named_and_relocates(tmp_path, monkeypatch, caplog):
+    """A 3xx on a direct Player request (R9) is REDIRECT/unexpected, not a bare transport
+    failure: the same "every failed cycle locates again, keeps the registration" recovery as a
+    503 (test_every_failed_cycle_locates_again_and_keeps_the_registration), and the fault it
+    logs names cause and reason instead of the old blanket "connection_failed"."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    caplog.set_level(logging.WARNING, logger="photo_wall.player")
+    find = finding("http://central")
+
+    async def check():
+        service, server = await finder_rig(find)
+        steady = asyncio.Event()
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
+            _until_steady(server, steady, redirect_first_state=True)))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(steady.wait(), 10)
+            assert find.calls == 2
+            assert len(server.proofs) == 1
+            assert all(request.url.host == "central" for request in server.requests)
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+    assert any("redirect_unexpected" in message for message in caplog.messages)
 
 
 def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path):
@@ -686,14 +801,23 @@ def test_metadata_rejects_unsafe_response_without_following_redirect(tmp_path, k
                 "unauthorized": httpx.Response(401),
                 "invalid_json": httpx.Response(200, content=b'{"a":NaN}', headers={"Content-Type": "application/json"}),
             }
-            await service.client.aclose()
+            await service.link.client.aclose()
             calls = []
             def handle(request):
                 calls.append(request.url)
                 return responses[kind]
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-            with pytest.raises(Unauthorized if kind == "unauthorized" else ServiceError):
-                await service.request("GET", "/v1/player/state")
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            if kind == "unauthorized":
+                with pytest.raises(Unauthorized):
+                    await service.request("GET", "/v1/player/state")
+            elif kind == "redirect":
+                with pytest.raises(UplinkError) as excinfo:
+                    await service.request("GET", "/v1/player/state")
+                assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
+                assert "location=upstream" in excinfo.value.detail
+            else:
+                with pytest.raises(ServiceError):
+                    await service.request("GET", "/v1/player/state")
             assert len(calls) == 1 and calls[0].host == "central"
         finally:
             await close(service)
@@ -732,7 +856,7 @@ class context_optional_error:
         return self
 
     def __exit__(self, kind, error, traceback):
-        return kind is not None and issubclass(kind, ServiceError)
+        return kind is not None and issubclass(kind, (ServiceError, UplinkError))
 
 
 def test_queue_backpressure_cancellation_unblocks_producer_and_consumer():
@@ -760,8 +884,8 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
             async def waiting(request):
                 entered.set()
                 await asyncio.Event().wait()
-            await service.client.aclose()
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(waiting))
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(waiting))
             task = asyncio.create_task(service.download(service._jobs[0]))
             await entered.wait()
             task.cancel()
@@ -853,7 +977,7 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
             return httpx.Response(200, headers={"Content-Type": "application/json"},
                                   stream=DelayedBody())
         try:
-            service.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             assert not await service.probe_time()
             assert service.mapping.uncertainty == math.inf
             assert service.mapping.diagnostics.uncertainty == pytest.approx(.2)
@@ -1069,9 +1193,11 @@ def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_p
         client = httpx.AsyncClient(transport=httpx.MockTransport(server))
         service = PlayerService(PlayerConfig(central_origin="http://central", allow_http=True,
             cache_dir=str(directory)), load_identity(), (), RecordingRenderer(), immediate,
-            clock=clock, client=client, time_client=client, cache_factory=fail, health_path=None,
+            find_central=finding("http://central"), trust=TRUST, clock=clock,
+            client=client, time_client=client, cache_factory=fail, health_path=None,
             boot_context=boot_context())
         try:
+            await service.locate_central()
             with pytest.raises(ServiceError, match="player_initialization"):
                 await service.enroll()
             assert service.cache is service.executor is service.registration is None
@@ -1134,7 +1260,7 @@ def test_websocket_has_explicit_bounds_and_rejects_oversized_state(tmp_path):
         def connect(uri, **options):
             calls.append((uri, options))
             return Socket()
-        service.websocket_connect = connect
+        service.link.websocket_connect = connect
         try:
             with pytest.raises(ServiceError, match="body_limit"):
                 await service._websocket_loop()
@@ -1146,6 +1272,84 @@ def test_websocket_has_explicit_bounds_and_rejects_oversized_state(tmp_path):
         finally:
             await close(service)
     asyncio.run(check())
+
+
+def test_the_websocket_refuses_401_as_unauthorized_and_names_a_redirect(tmp_path):
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            def refuses(uri, **options):
+                raise InvalidStatus(Http11Response(401, "Unauthorized", Headers(), b""))
+            service.link.websocket_connect = refuses
+            with pytest.raises(Unauthorized):
+                await service._websocket_loop()
+
+            def redirects(uri, **options):
+                raise InvalidStatus(Http11Response(301, "Moved", Headers({
+                    "Location": "https://other.example/x"}), b""))
+            service.link.websocket_connect = redirects
+            with pytest.raises(UplinkError) as excinfo:
+                await service._websocket_loop()
+            assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch):
+    async def check():
+        clock = ManualClock(100)
+        server = Server(clock)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
+        service = PlayerService(PlayerConfig(central_origin="http://central", allow_http=True),
+            load_identity(), (), RecordingRenderer(), immediate,
+            find_central=finding("http://central"), trust=TRUST, clock=clock,
+            client=client, time_client=client, health_path=None, boot_context=boot_context())
+        assert service.link.websocket_connect is None
+        try:
+            await service.locate_central()
+            await service.enroll()
+            calls = []
+
+            class FakeConnector:
+                def __init__(self, uri, **options):
+                    calls.append((uri, options))
+
+                async def __aenter__(self):
+                    raise ServiceError("stop")
+
+                async def __aexit__(self, *_):
+                    return False
+
+            monkeypatch.setattr("player.central_link.DirectWebsocket", FakeConnector)
+            with pytest.raises(ServiceError, match="stop"):
+                await service._websocket_loop()
+            assert calls and calls[0][0] == "ws://central/v1/player/session"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_fault_logs_the_code_and_detail_once_per_change(tmp_path, caplog):
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            caplog.set_level(logging.WARNING, logger="photo_wall.player")
+            caplog.clear()
+            service.fault("media_download")
+            service.fault("media_download")  # unchanged code: no second log line
+            service.fault("media_download", detail="retry")  # code unchanged: still no log
+            service.fault("clock_probe", detail="timeout")
+            assert caplog.messages == ["player fault: media_download",
+                                       "player fault: clock_probe timeout"]
+            assert (service.last_fault, service.last_fault_detail) == ("clock_probe", "timeout")
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_no_default_ssl_context_remains():
+    assert "ssl.create_default_context" not in Path("player/service.py").read_text()
 
 
 def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, monkeypatch):
@@ -1165,9 +1369,9 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
             if request.url.path == "/v1/player/readiness" and server.epoch == 2:
                 seen.set()
             return result
-        await service.client.aclose()
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        service.time_client = service.client
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.link.time_client = service.link.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -1176,7 +1380,7 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
         finally:
             service.stop()
             await asyncio.wait_for(task, 3)
-            await service.client.aclose()
+            await service.link.client.aclose()
         assert service.registration is None
     asyncio.run(check())
 
@@ -1185,7 +1389,7 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     async def check():
         service, server = await rig(tmp_path)
-        service.registration = None
+        service._session = service._session.unregistered()
         keys = []
         seen = asyncio.Event()
         def handle(request):
@@ -1193,9 +1397,9 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
             if len(keys) == 3:
                 seen.set()
             return httpx.Response(403, json={"error": "retired_player"})
-        await service.client.aclose()
-        service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        service.time_client = service.client
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service.link.time_client = service.link.client
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(seen.wait(), 3)
@@ -1203,7 +1407,7 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
         finally:
             service.stop()
             await asyncio.wait_for(task, 3)
-            await service.client.aclose()
+            await service.link.client.aclose()
     asyncio.run(check())
 
 
@@ -1230,8 +1434,8 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
                 if request.url.path == "/v1/player/state":
                     seen.set()
                 return result
-            await service.client.aclose()
-            service.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
             task = asyncio.create_task(service._observation_loop())
             await asyncio.wait_for(seen.wait(), 2)
             await asyncio.sleep(.01)
@@ -1316,13 +1520,19 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             "trial": False, "persistence": "volatile", "fault": None,
         })
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
-        service = PlayerService(PlayerConfig(central_origin=origin, allow_http=True,
-            cache_dir=str(cache_dir)), load_identity(),
-            (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
-            RecordingRenderer(), immediate, clock=registry.clock, client=client,
-            time_client=client, health_path=None, boot_context=context)
+        # An http root needs no trust store; the fixture CA keeps the host's out of it.
+        trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
+        transport = HttpTransport(trust=trust)
+        service = PlayerService(PlayerConfig(central_origin=origin, cache_dir=str(cache_dir)),
+            load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
+            RecordingRenderer(), immediate,
+            find_central=functools.partial(find_central, Configured(Origin.parse_root(origin)),
+                                           transport=transport),
+            trust=trust, clock=registry.clock, client=client, time_client=client,
+            health_path=None, boot_context=context)
         socket_task = None
         try:
+            assert (await service.locate_central()).origin == Origin.parse_root(origin)
             await service.enroll()
             registered = service.registration
             await service.probe_time()
@@ -1355,8 +1565,12 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await asyncio.gather(socket_task, return_exceptions=True)
             socket_task = None
             unavailable = True
-            with pytest.raises(ServiceError, match="http_503"):
+            # The outage middleware answers 503 with Central's own {"error": ...} body, so
+            # the exchange names it CENTRAL/error (not the bare HTTP/status a gateway would get).
+            with pytest.raises(UplinkError) as excinfo:
                 await service.poll_state()
+            assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CENTRAL, "error")
+            assert excinfo.value.central_error == "fixture_outage"
             service.tick_main()
             assert service.renderer.outputs["HDMI-A-1"].layers
             unavailable = False
@@ -1432,8 +1646,9 @@ def _base_health_rig(tmp_path, config):
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(capture), trust_env=False)
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-        clock=clock, client=client, time_client=client, websocket_connect=False,
-        health_path=None, boot_context=boot_context())
+        find_central=finding("http://central"), trust=TRUST, clock=clock,
+        client=client, time_client=client,
+        websocket_connect=False, health_path=None, boot_context=boot_context())
     return service, posts
 
 
@@ -1447,6 +1662,7 @@ def test_base_health_posted_once_per_epoch_after_enroll(tmp_path):
     async def check():
         service, posts = _base_health_rig(tmp_path, config)
         try:
+            await service.locate_central()
             await service.enroll()
             await service._report_base_health()
             await service._report_base_health()  # no re-post within the same epoch
@@ -1469,6 +1685,7 @@ def test_no_base_health_when_no_tag_handed_forward(tmp_path):
     async def check():
         service, posts = _base_health_rig(tmp_path, config)
         try:
+            await service.locate_central()
             await service.enroll()
             await service._report_base_health()
             assert posts == []

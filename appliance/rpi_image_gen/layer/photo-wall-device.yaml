@@ -1,0 +1,60 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-device
+# X-Env-Layer-Category: app
+# X-Env-Layer-Desc: Installs the Photo Wall device set and the bootstrapper
+#  `.deb` into the base. The device set is every Debian package the
+#  bootstrapper and the Player need, rendered by
+#  .github/workflows/base-image.yml from the Debian declaration
+#  (`python3 scripts/debian_packages.py packages bootstrapper player`) into
+#  the file `IGconf_app_device_packages` names: the declaration is the one
+#  place a package is named, so this layer names none. The `.deb`
+#  (`scripts/build_bootstrapper_deb.py`, "ALL our custom code ships as a
+#  portable .deb" -- the image-build tool owns none of it) is built before
+#  rpi-image-gen runs and named by `IGconf_app_bootstrapper_deb`. One
+#  customize-hook copies it into the chroot and installs both with apt-get
+#  against this build's snapshot sources (the pin the base itself is built
+#  from, layer/photo-wall-debian.yaml), without Recommends. That apt runs
+#  INSIDE the chroot and fetches over https, so the CA bundle must already be
+#  there: the declaration's "bootstrap" stage
+#  (`packages(*DEVICE_CONSUMERS, stage="bootstrap")`) is installed first by
+#  mmdebstrap's own package list with the host's apt, through the required
+#  rpi-image-gen layer of the same name (its `ca-certificates` layer is
+#  `mmdebstrap: packages: [ca-certificates]`). tests/test_debian_packages.py
+#  binds this Requires list to that stage, so neither can change alone. The
+#  `.deb` enables photo-wall-provision.service by a symlink it bakes as data,
+#  so no enable-units hook is needed. On the Pi nothing resolves packages:
+#  provisioning installs the Player `.deb` with dpkg alone, so its Depends
+#  must already be here (base-image.yml checks the built image with
+#  scripts/device_root_checks.py). No application code and no origin -- 0009
+#  rule #1.
+# X-Env-Layer-Version: 3.1.0
+# X-Env-Layer-Requires: systemd-min,ca-certificates
+#
+# X-Env-VarPrefix: app
+#
+# X-Env-Var-bootstrapper_deb:
+# X-Env-Var-bootstrapper_deb-Desc: Absolute host path to the prebuilt
+#  photo-wall-bootstrapper_<version>_all.deb (scripts/build_bootstrapper_deb.py),
+#  built by .github/workflows/base-image.yml before this build runs.
+# X-Env-Var-bootstrapper_deb-Required: y
+# X-Env-Var-bootstrapper_deb-Valid: file
+# X-Env-Var-bootstrapper_deb-Set: y
+#
+# X-Env-Var-device_packages:
+# X-Env-Var-device_packages-Desc: Absolute host path to the device set, one
+#  Debian package name per line, rendered by .github/workflows/base-image.yml
+#  from scripts/debian_packages.py before this build runs.
+# X-Env-Var-device_packages-Required: y
+# X-Env-Var-device_packages-Valid: file
+# X-Env-Var-device_packages-Set: y
+# METAEND
+---
+mmdebstrap:
+  customize-hooks:
+    - |-
+      set -eu
+      install -m 0644 "$IGconf_app_bootstrapper_deb" "$1/tmp/photo-wall-bootstrapper.deb"
+      # Unquoted on purpose: the device set is one package name per line.
+      chroot "$1" apt-get install -y --no-install-recommends \
+        $(cat "$IGconf_app_device_packages") /tmp/photo-wall-bootstrapper.deb
+      rm -f "$1/tmp/photo-wall-bootstrapper.deb"

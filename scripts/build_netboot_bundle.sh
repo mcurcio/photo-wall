@@ -3,44 +3,62 @@
 #
 # Given a built rpi-image-gen base squashfs plus the kernel/initrd/DTBs from a
 # scratch Debian-trixie-arm64 root (linux-image-rpi-2712 + raspi-firmware +
-# initramfs-tools), this stages the FROZEN bundle layout, writes config.txt and
-# a cmdline.txt template, computes a corruption-only SHA256SUMS over every
-# artifact, and content-verifies the initrd via scripts/verify_netboot_initrd.py.
+# initramfs-tools), this stages the FROZEN bundle layout, puts the boot data in
+# front of the cached initrd (scripts/build_boot_data.py: stage 1's computed
+# closure, the base's CA bundle and the clock floor; decision 0014 §5), writes
+# config.txt and a cmdline.txt template, computes a corruption-only SHA256SUMS
+# over every artifact, and content-verifies the initrd via
+# scripts/verify_netboot_initrd.py against the closure manifest.
 #
 #   photo-wall-base-bundle/
 #     boot/
 #       config.txt              (firmware directives; kernel + initramfs + dtb)
 #       cmdline.txt             (TEMPLATE -- operator sets Central's root ONCE)
 #       kernel_2712.img         (rpi-2712 kernel the Pi 5 SPI-EEPROM bootloader fetches)
-#       initrd.img              (mkinitramfs output carrying the slim netboot init)
+#       initrd.img              (boot data, then the cached mkinitramfs output)
 #       bcm2712-rpi-5-b.dtb     (Pi 5 device tree)
 #       overlays/*.dtbo         (optional device-tree overlays)
+#       pieeprom.upd            (bootloader self-update: BOOT_ORDER=0xf21, BOOT_WATCHDOG_TIMEOUT=120)
+#       pieeprom.sig            (rpi-eeprom-digest over pieeprom.upd)
 #     photo-wall-base.squashfs  (RAM-root, fetched over HTTP at boot)
 #     SHA256SUMS                (sha256 of every artifact above, incl. squashfs)
 #
 # This is deliberately a portable shell script, NOT part of appliance/build.py:
 # build.py and the old signed pipeline are slated for p4-retire, and this
 # assembly must survive that deletion (owner: portable packages). It shells out
-# only to coreutils + the repo's own stdlib verify script; no image-build tool
-# glue leaks into it.
+# only to coreutils, git, unsquashfs and the repo's own stdlib build scripts;
+# no image-build tool glue leaks into it.
 set -eu
 
 usage() {
     cat >&2 <<'EOF'
 usage: build_netboot_bundle.sh --kernel FILE --initrd FILE --dtb FILE \
-           --squashfs FILE --output DIR --verify SCRIPT [options]
+           --squashfs FILE --eeprom-image FILE --output DIR --verify SCRIPT \
+           --repo DIR --python-libdir DIR [options]
 
 required:
   --kernel FILE       rpi-2712 kernel image (staged as boot/kernel_2712.img)
-  --initrd FILE       mkinitramfs output    (staged as boot/initrd.img)
+  --initrd FILE       cached mkinitramfs output (boot/initrd.img is the boot
+                      data followed by these bytes unchanged)
   --dtb FILE          Pi 5 device tree       (staged as boot/bcm2712-rpi-5-b.dtb)
   --squashfs FILE     rpi-image-gen base squashfs (staged as photo-wall-base.squashfs)
+  --eeprom-image FILE packaged rpi-eeprom bootloader image (source for pieeprom.upd/.sig)
   --output DIR        bundle output directory (created; must be empty/absent)
-  --verify SCRIPT     path to verify_netboot_initrd.py (run against --initrd)
+  --verify SCRIPT     path to verify_netboot_initrd.py (run against boot/initrd.img)
+  --repo DIR          the checked-out revision: stage 1's closure and the clock
+                      floor (its HEAD commit time) come from here
+  --python-libdir DIR the initrd interpreter's stdlib dir (e.g. /usr/lib/python3.13)
 
 optional:
   --overlays-dir DIR  directory of *.dtbo overlays (staged under boot/overlays/)
-  --python BIN        interpreter for the verify script (default: python3)
+  --python BIN        interpreter for the verify script and eeprom_update.py (default: python3)
+  --eeprom-update SCRIPT  path to scripts/eeprom_update.py (default: alongside this script)
+  --rpi-eeprom-config FILE  the packaged rpi-eeprom-config to run (default: PATH lookup --
+                      local dev with the real rpi-eeprom package installed; CI passes the
+                      pinned scratch-root's own copy, never the runner's, which has none)
+  --rpi-eeprom-digest FILE  the packaged rpi-eeprom-digest to run (default: PATH lookup)
+  --build-boot-data SCRIPT  path to scripts/build_boot_data.py (default: alongside this script)
+  --snapshot-epoch N  the Debian snapshot pin; build_boot_data.py warns past 90 days
   --skip-verify       skip the lsinitramfs content-verify (local dev only;
                       lsinitramfs is unavailable off an initramfs-tools host)
 EOF
@@ -51,10 +69,18 @@ KERNEL=""
 INITRD=""
 DTB=""
 SQUASHFS=""
+EEPROM_IMAGE=""
 OUTPUT=""
 VERIFY=""
 OVERLAYS_DIR=""
 PYTHON="python3"
+EEPROM_UPDATE=""
+RPI_EEPROM_CONFIG=""
+RPI_EEPROM_DIGEST=""
+REPO=""
+PYTHON_LIBDIR=""
+BUILD_BOOT_DATA=""
+SNAPSHOT_EPOCH=""
 SKIP_VERIFY=0
 
 while [ "$#" -gt 0 ]; do
@@ -63,18 +89,34 @@ while [ "$#" -gt 0 ]; do
         --initrd) INITRD="$2"; shift 2 ;;
         --dtb) DTB="$2"; shift 2 ;;
         --squashfs) SQUASHFS="$2"; shift 2 ;;
+        --eeprom-image) EEPROM_IMAGE="$2"; shift 2 ;;
         --output) OUTPUT="$2"; shift 2 ;;
         --verify) VERIFY="$2"; shift 2 ;;
         --overlays-dir) OVERLAYS_DIR="$2"; shift 2 ;;
         --python) PYTHON="$2"; shift 2 ;;
+        --eeprom-update) EEPROM_UPDATE="$2"; shift 2 ;;
+        --rpi-eeprom-config) RPI_EEPROM_CONFIG="$2"; shift 2 ;;
+        --rpi-eeprom-digest) RPI_EEPROM_DIGEST="$2"; shift 2 ;;
+        --repo) REPO="$2"; shift 2 ;;
+        --python-libdir) PYTHON_LIBDIR="$2"; shift 2 ;;
+        --build-boot-data) BUILD_BOOT_DATA="$2"; shift 2 ;;
+        --snapshot-epoch) SNAPSHOT_EPOCH="$2"; shift 2 ;;
         --skip-verify) SKIP_VERIFY=1; shift ;;
         -h|--help) usage ;;
         *) echo "build_netboot_bundle: unknown argument: $1" >&2; usage ;;
     esac
 done
 
-for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" \
-            "squashfs:$SQUASHFS" "output:$OUTPUT" "verify:$VERIFY"; do
+if [ -z "$EEPROM_UPDATE" ]; then
+    EEPROM_UPDATE="$(dirname -- "$0")/eeprom_update.py"
+fi
+if [ -z "$BUILD_BOOT_DATA" ]; then
+    BUILD_BOOT_DATA="$(dirname -- "$0")/build_boot_data.py"
+fi
+
+for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" "squashfs:$SQUASHFS" \
+            "eeprom-image:$EEPROM_IMAGE" "output:$OUTPUT" "verify:$VERIFY" \
+            "repo:$REPO" "python-libdir:$PYTHON_LIBDIR"; do
     name=${pair%%:*}
     value=${pair#*:}
     if [ -z "$value" ]; then
@@ -83,7 +125,8 @@ for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" \
     fi
 done
 
-for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" "squashfs:$SQUASHFS"; do
+for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" "squashfs:$SQUASHFS" \
+            "eeprom-image:$EEPROM_IMAGE"; do
     name=${pair%%:*}
     value=${pair#*:}
     if [ ! -f "$value" ]; then
@@ -93,6 +136,22 @@ for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" "squashfs:$SQUASHFS"; d
 done
 if [ ! -f "$VERIFY" ]; then
     echo "build_netboot_bundle: --verify script not found: $VERIFY" >&2
+    exit 1
+fi
+if [ ! -f "$EEPROM_UPDATE" ]; then
+    echo "build_netboot_bundle: --eeprom-update script not found: $EEPROM_UPDATE" >&2
+    exit 1
+fi
+if [ -n "$RPI_EEPROM_CONFIG" ] && [ ! -f "$RPI_EEPROM_CONFIG" ]; then
+    echo "build_netboot_bundle: --rpi-eeprom-config file not found: $RPI_EEPROM_CONFIG" >&2
+    exit 1
+fi
+if [ -n "$RPI_EEPROM_DIGEST" ] && [ ! -f "$RPI_EEPROM_DIGEST" ]; then
+    echo "build_netboot_bundle: --rpi-eeprom-digest file not found: $RPI_EEPROM_DIGEST" >&2
+    exit 1
+fi
+if [ ! -f "$BUILD_BOOT_DATA" ]; then
+    echo "build_netboot_bundle: --build-boot-data script not found: $BUILD_BOOT_DATA" >&2
     exit 1
 fi
 
@@ -113,11 +172,12 @@ fi
 
 boot_dir="$OUTPUT/boot"
 mkdir -p "$boot_dir/overlays"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 # Stage the firmware-fetched artifacts under boot/ with the FROZEN names the Pi
 # 5 SPI-EEPROM bootloader expects (0008 boot-chain bundle-layout decision).
 cp -- "$KERNEL" "$boot_dir/kernel_2712.img"
-cp -- "$INITRD" "$boot_dir/initrd.img"
 cp -- "$DTB" "$boot_dir/bcm2712-rpi-5-b.dtb"
 
 overlay_count=0
@@ -133,6 +193,19 @@ echo "build_netboot_bundle: staged $overlay_count device-tree overlay(s)"
 # The (large) RAM-root squashfs is fetched over HTTP at boot, so it sits at the
 # bundle root, NOT under the TFTP-served boot/ directory (transport split).
 cp -- "$SQUASHFS" "$OUTPUT/photo-wall-base.squashfs"
+
+# boot/initrd.img: the boot data in front of the cached initrd (decision 0014
+# §5). The CA bundle is the BUILT BASE's, byte for byte (R5: the same list);
+# the floor is this revision's commit time, never SOURCE_DATE_EPOCH (a
+# hand-bumped snapshot pin). build_boot_data.py computes and stages stage 1's
+# closure, refuses a future floor or a bundle with no certificate, and writes
+# the manifest the verifier below reads.
+unsquashfs -cat "$SQUASHFS" etc/ssl/certs/ca-certificates.crt > "$work/ca-certificates.crt"
+floor=$(git -C "$REPO" log -1 --format=%ct)
+"$PYTHON" "$BUILD_BOOT_DATA" --repo "$REPO" --cached-initrd "$INITRD" \
+    --python-libdir "$PYTHON_LIBDIR" --ca-bundle "$work/ca-certificates.crt" \
+    --floor "$floor" --out "$boot_dir/initrd.img" --manifest "$work/closure-manifest.json" \
+    ${SNAPSHOT_EPOCH:+--snapshot-epoch "$SNAPSHOT_EPOCH"}
 
 # config.txt: Pi 5 uses the SPI-EEPROM bootloader and needs NO start*.elf /
 # fixup*.dat (those are Pi 4 and earlier). config.txt is MANDATORY on Pi 5 --
@@ -156,6 +229,24 @@ device_tree=bcm2712-rpi-5-b.dtb
 disable_overscan=1
 EOF
 
+# pieeprom.upd/.sig: the bootloader self-update carrying BOOT_ORDER=0xf21 and
+# BOOT_WATCHDOG_TIMEOUT=120 (0014 rev 5, design §2.8). eeprom_update.py refuses
+# (nonzero exit, caught by `set -eu`) if either setting is missing from the
+# built update once read back, so this step alone is the "check calls" gate --
+# a bundle whose self-update silently missed a setting never finishes assembly.
+# --rpi-eeprom-config/-digest, when given, point at the SAME pinned rpi-eeprom
+# package's tools (e.g. CI's scratch root) instead of eeprom_update.py's PATH
+# lookup default -- the runner itself never gets rpi-eeprom installed.
+"$PYTHON" "$EEPROM_UPDATE" --image "$EEPROM_IMAGE" --out "$boot_dir" \
+    ${RPI_EEPROM_CONFIG:+--rpi-eeprom-config "$RPI_EEPROM_CONFIG"} \
+    ${RPI_EEPROM_DIGEST:+--rpi-eeprom-digest "$RPI_EEPROM_DIGEST"}
+for f in pieeprom.upd pieeprom.sig; do
+    if [ ! -f "$boot_dir/$f" ]; then
+        echo "build_netboot_bundle: eeprom_update.py did not write $boot_dir/$f" >&2
+        exit 1
+    fi
+done
+
 # cmdline.txt is a TEMPLATE, not a bootable command line: the operator sets the
 # ONE @@PHOTOWALL_CENTRAL@@ placeholder to Central's ROOT URL before serving it
 # over TFTP, once per site. This line is then STATIC and fleet-wide immortal:
@@ -170,10 +261,17 @@ EOF
 #
 # Optional: append `photowall.debug=1` to raise console verbosity and lengthen
 # the pre-reboot pause on failure (field debugging on an HDMI/serial console).
+#
+# watchdog.stop_on_reboot=0 and hung_task_panic=1 (0014 rev 5, design §2.8):
+# the two kernel liveness parameters. Neither is a photowall.* parameter, and
+# neither can be set any other way before the moment each matters --
+# `missing_kernel_liveness()` (appliance/bootstrap.py) names any that a
+# running kernel does not show, so a template regression here is loud, not
+# silent.
 cat > "$boot_dir/cmdline.txt" <<'EOF'
 # TEMPLATE -- delete these comment lines, keep ONE command line. Substitute:
 #   @@PHOTOWALL_CENTRAL@@ -> Central's ROOT URL, e.g. http://photo-wall/ or http://10.0.20.5/ (required)
-console=tty1 ip=dhcp boot=photowall-netboot panic=10 photowall.central=@@PHOTOWALL_CENTRAL@@
+console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@
 EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).
@@ -191,7 +289,7 @@ if [ "$SKIP_VERIFY" -eq 1 ]; then
     echo "build_netboot_bundle: --skip-verify set; NOT running verify_netboot_initrd"
 else
     echo "build_netboot_bundle: verifying $boot_dir/initrd.img"
-    "$PYTHON" "$VERIFY" "$boot_dir/initrd.img"
+    "$PYTHON" "$VERIFY" "$boot_dir/initrd.img" --manifest "$work/closure-manifest.json"
 fi
 
 echo "build_netboot_bundle: bundle assembled at $OUTPUT"

@@ -91,7 +91,10 @@ def test_player_runner_imports_only_stdlib_and_source_neutral_packages():
         elif isinstance(node, ast.ImportFrom):
             imports.add(node.module.split(".")[0])
     import sys
-    assert imports <= sys.stdlib_module_names | {"player", "contracts"}
+    # uplink is the Player's Central client (R1: the runner finds Central through it); it runs
+    # on the stdlib and stdlib-only contracts (the initrd closure test, pyproject's import
+    # contract), so it carries nothing source-specific.
+    assert imports <= sys.stdlib_module_names | {"player", "contracts", "uplink"}
     assert "RecordingRenderer" in PLAYER_RUNNER and "simulated_actuation" in PLAYER_RUNNER
 
 

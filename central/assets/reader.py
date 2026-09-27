@@ -32,6 +32,7 @@ from central.kernel.jobs import asset_key
 from central.kernel.ports import AssetRecords, Candidates
 from central.kernel.publishing import Failed, JobHandle, Pending, Publisher, Ready
 from central.kernel.transactions import Transaction, Transactions
+from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from contracts.time import Clock
 
 LOG = logging.getLogger("central.assets.reader")
@@ -113,7 +114,7 @@ async def _open_in_thread(fn: Callable[..., Opened | None], *args: Any) -> Opene
 class AssetReader:
     def __init__(self, *, store: CacheStore, records: AssetRecords, transactions: Transactions,
                  publisher: Publisher, slots: WaiterSlots, clock: Clock,
-                 wait_timeout: timedelta = timedelta(seconds=30),
+                 wait_timeout: timedelta = timedelta(seconds=READ_THROUGH_WAIT_SECONDS),
                  touch_interval: timedelta = timedelta(minutes=5)) -> None:
         self._store = store
         self._records = records

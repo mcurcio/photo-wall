@@ -1,87 +1,89 @@
 """0009 slice 2: the minimal base image's boot-time provisioner ("the bootstrapper").
 
-Runs before the Player app exists on a diskless (RAM-root) base. It:
+Runs before the Player app exists on a diskless (RAM-root) base. Every attempt:
 
-1. discovers central by mDNS (bounded; retries with backoff -- a base with no
-   central on the LAN keeps trying, it never crashes or fabricates an origin);
-2. fetches the app manifest (`GET /v1/app/manifest` -> `{version, sha256,
-   size}`); a 503 `app_unconfigured` (no app promoted yet) is also retried;
-3. downloads the `.deb` (`GET /v1/app/package/{sha256}.deb`, bounded/streamed)
-   and verifies the downloaded bytes' sha256 against the manifest -- a
-   **corruption check only** (0009 owner ruling: home LAN, no threat model,
-   no signature anywhere). A mismatch discards the bytes and retries; it is
-   never installed or run;
-4. installs the `.deb` (`apt-get install -y <deb path>`) into the running RAM
-   root, so the Player `.deb`'s declared `Depends` (its full runtime stack,
-   0009 p4-deb-full-depends) resolve from the base's distro sources at boot;
-5. hands the resolved origin forward as the app's explicit `central_origin`
-   (`/etc/photo-wall/public.json`, the file `player.service.load_config`
-   reads) so the Player app's own `resolve_origin` -- which consults
-   discovery only when `central_origin is None`
-   ([player/service.py:419](../player/service.py) -- skips a second,
-   independently-resolved mDNS browse and enrolls against the exact central
-   that served its code (see "the hard part" in
-   docs/decisions/0009-minimal-base-and-app-package.md);
+1. finds Central through `uplink.finder.find_central` (R1): the kernel command line's
+   `photowall.central` root wins; only when the command line names no Central does it browse
+   mDNS (`player.mdns_discovery`, handed the `Unconfigured` proof). The root is then located
+   again (`uplink.locate`, the one request that follows redirects), so a gateway that moved
+   Central since the last attempt is followed;
+2. fetches the app manifest (`GET /v1/app/manifest` -> `{version, sha256, size}`) and the
+   `.deb` (`GET /v1/app/package/{sha256}.deb`) through `uplink.fetch.DirectFetch`, only from
+   the located origin, never through a redirect;
+3. verifies the downloaded bytes' sha256 against the manifest -- a **corruption check only**
+   (0009 owner ruling: home LAN, no threat model, no signature anywhere). A mismatch discards
+   the bytes and retries; they are never installed or run;
+4. installs the `.deb` with `dpkg --install` alone into the running RAM root. Nothing on the
+   device resolves packages: the base installed the Player's `Depends` at image build, from
+   the same declaration they are rendered from (`scripts/debian_packages.py`). A `Depends` the
+   base lacks makes dpkg exit non-zero naming it, and the unit's start limit reboots the Pi;
+5. writes the handoff, `/etc/photo-wall/public.json` (0644 in a 0755 directory, whatever the
+   unit's umask): `central_origin` only when the root came from mDNS, so the Player finds the
+   same Central without a second browse; a command-line root is read by the Player itself;
 6. starts `photo-wall-player.service`.
 
-It never enrolls -- the app enrolls by serial, once, after it starts
-(0009 gate #2; a bootstrapper that also enrolled would double-enroll).
-
-Reuse and the import-boundary decision
----------------------------------------
-- Discovery: `player.mdns_discovery.MdnsCentralDiscovery`, the exact class the
-  running app uses for the same LAN (the design's explicit call to share one
-  discovery implementation rather than growing a second). `appliance`
-  importing `player.mdns_discovery` crosses no import-linter contract: the
-  two contracts in `pyproject.toml` forbid `contracts -> {central, media,
-  player, appliance, ...}` and `player -> {central, appliance, ...}`; neither
-  restricts `appliance -> player`. This module deliberately imports only
-  `player.mdns_discovery`, never `player.service` (which pulls in GTK/
-  GStreamer) -- the same "no GTK import at bootstrap time" split the design
-  calls for.
-- HTTP fetch: the *discipline* of `appliance/bootstrap.py`'s `Fetcher`
-  (bounded deadline, no proxies/redirects, exact size bounds, streamed
-  verification) is reproduced here as `AppFetcher` rather than importing
-  `Fetcher` directly. `Fetcher` is constructed from a `BootConfig` that
-  requires a baked HTTPS `release_origin` plus a pinned `boot_abi`
-  (`appliance/bootstrap.py:92-125`); neither applies to an mDNS-*discovered*
-  origin, which may legitimately be plain HTTP (T0 baseline,
-  `player/mdns_discovery.py`) and carries no OS-ABI to pin. `AppFetcher`
-  keeps the same guarantees (bounded deadline, no redirects, exact
-  `Content-Length` bounds, streamed reads) without the initramfs-only
-  `BootConfig` shape.
+It never enrolls -- the app enrolls by serial, once, after it starts (0009 gate #2). It never
+steps the clock either: stage 1 did, once, and recorded it (rule 3). A `time` failure therefore
+leaves the process (exit 1); the unit's start limit reboots the Pi, and stage 1 tries again.
+Every other network failure is one named `uplink` cause, logged and retried.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import tempfile
-import time
-import urllib.error
-import urllib.request
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from typing import Final
+
+from appliance.bootstrap import read_pi_serial
+from contracts.clock_record import ClockRecord
+from contracts.strict_json import loads_object
+from uplink.causes import Cause, UplinkError
+from uplink.clock import RunClockRecord
+from uplink.diagnosis import failure_text
+from uplink.fetch import DirectFetch
+from uplink.files import write_atomically
+from uplink.finder import CentralDiscovery, Found, find_central
+from uplink.locate import LOCATE_DEADLINE
+from uplink.origin import Origin
+from uplink.resolver import (
+    KERNEL_COMMAND_LINE,
+    Unconfigured,
+    read_kernel_command_line,
+    resolve_central,
+)
+from uplink.transport import HttpTransport, Transport
+from uplink.trust import Trust
+from uplink.watchdog import extend_start
+from uplink.watchdog import ready as watchdog_ready
 
 LOG = logging.getLogger("photo_wall.appliance.provision")
 
 CHUNK = 64 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
-# Mirrors central.app_packages.MAX_APP_PACKAGE_BYTES by value, not by import:
-# the base bootstrapper must not depend on `central` (FastAPI/psycopg), so the
-# bound is restated here rather than shared.
+# The Player's own bound on public.json (player.service.MAX_JSON), restated by value: the
+# bootstrapper does not import player.service (GTK, httpx, pydantic).
+MAX_PUBLIC_CONFIG_BYTES = 1024 * 1024
+# Mirrors central.app_packages.MAX_APP_PACKAGE_BYTES by value, not by import: the base
+# bootstrapper must not depend on `central` (FastAPI/psycopg).
 MAX_APP_PACKAGE_BYTES = 1024**3
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-# Release tag shape, mirrors contracts.models.BaseHealth.running_tag by value
-# (the base bootstrapper must not import `contracts`/`central`, so the pattern
-# is restated here, like MAX_APP_PACKAGE_BYTES above).
+# Release tag shape, mirrors contracts.models.BaseHealth.running_tag by value: contracts.models
+# needs pydantic, which the bootstrapper does not carry.
 _TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*")
+MAX_TAG = 256
+MAX_VERSION = 256
 # Pinned by value on both sides (central.netboot_base.SERIAL_HEADER,
 # appliance.netboot_init.SERIAL_HEADER); the appliance sends its Pi serial so
 # central resolves the per-device tag it was served this boot.
@@ -90,386 +92,303 @@ SERIAL_HEADER = "X-PhotoWall-Serial"
 # device keeps 0010's global `.deb` (GET /v1/app/manifest) and posts no
 # base-health, so an appliance that has not opted in is unchanged.
 PER_DEVICE_ENV = "PHOTO_WALL_PER_DEVICE_DEB"
+APP_MANIFEST_PATH: Final = "/v1/app/manifest"
+DEVICE_MANIFEST_PATH: Final = "/v1/netboot/manifest"
 DEFAULT_UNIT = "photo-wall-player.service"
-DEFAULT_PUBLIC_CONFIG = Path("/etc/photo-wall/public.json")
+DEFAULT_PUBLIC_CONFIG: Final = Path("/etc/photo-wall/public.json")
+MANIFEST_SECONDS: Final = 30.0
+PACKAGE_SECONDS: Final = 120.0
+# The mDNS browse (player.mdns_discovery), passed to it explicitly by main(). A command-line
+# root never browses.
+DISCOVERY_SECONDS: Final = 3.0
+# `dpkg --install` (subprocess timeout): the Player .deb is a pure unpack plus a postinst that
+# creates the `wall` user. Unmeasured on a Pi 5 and deliberately generous until it is: a bound
+# that is too short breaks provisioning outright, while a generous one only slows detection of a
+# hung dpkg. Tighten once a real Pi 5 install time is measured.
+INSTALL_SECONDS: Final = 300.0
+# `systemctl start` (subprocess timeout) waits for the Player's READY=1 (Type=notify).
+# photo-wall-player.service sets no TimeoutStartSec, so systemd fails that start itself after its
+# DefaultTimeoutStartSec, 90 s: waiting longer here would wait on a start systemd gave up on.
+START_UNIT_SECONDS: Final = 90.0
+MAX_BACKOFF_SECONDS: Final = 30.0
+# An allowance, NOT an enforced bound: the CPU- and RAM-local steps -- the sha256 of up to
+# MAX_APP_PACKAGE_BYTES, the 0600 temp .deb write and the handoff write.
+LOCAL_STEPS_SECONDS: Final = 15.0
+# M5: the one deadline owner after switch_root is the unit's TimeoutStartSec, which
+# Bootstrapper.run() renews through uplink.watchdog.extend_start() as each attempt BEGINS. The
+# longest wait between two renewals is therefore one whole attempt plus the backoff after it:
+# the SUM of every blocking step, each at its bound. The window is that sum with a 1.25x margin,
+# so a healthy attempt, however slow, is never killed, and a hung one is killed within it.
+ATTEMPT_MARGIN: Final = 1.25
+LONGEST_ATTEMPT_SECONDS: Final = (
+    DISCOVERY_SECONDS           # find: the mDNS browse (Unconfigured only)
+    + LOCATE_DEADLINE           # find: locate's whole redirect chain
+    + MANIFEST_SECONDS          # DirectFetch: the whole manifest exchange
+    + PACKAGE_SECONDS           # DirectFetch: the whole package exchange
+    + LOCAL_STEPS_SECONDS       # sha256, temp .deb, handoff (allowance)
+    + INSTALL_SECONDS           # dpkg --install
+    + START_UNIT_SECONDS        # systemctl start
+    + MAX_BACKOFF_SECONDS)      # the sleep before the next attempt's renewal
+# Kept equal to TimeoutStartSec in appliance/systemd/photo-wall-provision.service by hand -- a
+# unit file cannot import a Python constant (tests/test_netboot_liveness.py pins both).
+PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = math.ceil(ATTEMPT_MARGIN * LONGEST_ATTEMPT_SECONDS)
 
 
 class ProvisionError(ValueError):
-    """A fixed diagnostic code; no untrusted command or HTTP output."""
+    """A content failure with a fixed code (e.g. provision_manifest_invalid). Network failures
+    are UplinkError, never this."""
 
 
-class AppUnconfigured(ProvisionError):
-    """Central has no app promoted yet (503 `app_unconfigured`) -- retry."""
-
-    def __init__(self):
-        super().__init__("app_unconfigured")
-
-
-def _json(data: bytes) -> dict:
-    def pairs(values):
-        result = {}
-        for key, value in values:
-            if key in result:
-                raise ProvisionError("provision_configuration")
-            result[key] = value
-        return result
-
-    try:
-        result = json.loads(
-            data, object_pairs_hook=pairs,
-            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
-        )
-        if not isinstance(result, dict):
-            raise ValueError
-        return result
-    except (ValueError, TypeError, UnicodeError, RecursionError):
-        raise ProvisionError("provision_configuration") from None
+@dataclass(frozen=True, slots=True)
+class AppManifest:
+    version: str            # 1..256 characters
+    sha256: str             # 64 lower-case hex
+    size: int               # 1..MAX_APP_PACKAGE_BYTES
+    tag: str | None         # per-device path only; the release-tag shape
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ProvisionError("provision_redirect")
-
-
-class AppFetcher:
-    """Bounded, no-redirect, deadline-guarded HTTP fetch for the app manifest
-    and `.deb`, against an mDNS-discovered origin (http or https).
-
-    Same discipline as `appliance/bootstrap.py`'s `Fetcher`: one deadline for
-    the whole acquisition, no proxies, no redirects, an exact `Content-Length`
-    bound enforced while streaming, `Content-Encoding` pinned to identity.
-    """
-
-    def __init__(self, origin: str, *, seconds: float = 60, opener=None,
-                 monotonic=time.monotonic):
-        if not 0 < seconds <= 300:
-            raise ProvisionError("provision_deadline")
-        self.origin = origin.rstrip("/")
-        self.monotonic = monotonic
-        self.deadline = monotonic() + seconds
-        self.opener = opener or urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _NoRedirect()
-        )
-
-    def chunks(self, path: str, maximum: int, *, headers=None, on_response=None):
-        """Stream `path`'s body in bounded blocks.
-
-        `headers` are merged into the request (the netboot base fetch sends the
-        Pi serial as `X-PhotoWall-Serial`); `on_response`, if given, is called
-        once with the response headers as soon as the 200 response opens --
-        before the body streams -- so the caller can read the `Digest`/
-        `Content-Length` the base fetch verifies against while it streams.
-        Both are optional; the manifest/`.deb` callers pass neither and are
-        unaffected."""
-        if type(maximum) is not int or not 0 < maximum <= MAX_APP_PACKAGE_BYTES:
-            raise ProvisionError("provision_limit")
-        remaining = self.deadline - self.monotonic()
-        if remaining <= 0:
-            raise ProvisionError("provision_deadline")
-        request = urllib.request.Request(
-            self.origin + path,
-            headers={"Accept-Encoding": "identity", **(headers or {})},
-        )
-        total = 0
-        try:
-            with self.opener.open(request, timeout=min(10, remaining)) as response:
-                if response.status == 503:
-                    raise AppUnconfigured()
-                if response.status != 200:
-                    raise ProvisionError("provision_http")
-                if on_response is not None:
-                    on_response(response.headers)
-                length = response.headers.get("Content-Length")
-                if length is not None and (
-                    not re.fullmatch(r"[0-9]{1,12}", length) or not 0 < int(length) <= maximum
-                ):
-                    raise ProvisionError("provision_limit")
-                if response.headers.get("Content-Encoding", "identity") != "identity":
-                    raise ProvisionError("provision_encoding")
-                while block := response.read(CHUNK):
-                    total += len(block)
-                    if total > maximum:
-                        raise ProvisionError("provision_limit")
-                    if self.monotonic() >= self.deadline:
-                        raise ProvisionError("provision_deadline")
-                    yield block
-                if not total or (length is not None and total != int(length)):
-                    raise ProvisionError("provision_truncated")
-        except (ProvisionError, AppUnconfigured):
-            raise
-        except urllib.error.HTTPError as error:
-            if error.code == 503:
-                raise AppUnconfigured() from None
-            raise ProvisionError("provision_http") from None
-        except (OSError, urllib.error.URLError, ValueError):
-            raise ProvisionError("provision_network") from None
-
-    def get(self, path: str, maximum: int, *, headers=None) -> bytes:
-        return b"".join(self.chunks(path, maximum, headers=headers))
-
-
-def fetch_manifest(origin: str, *, serial: str | None = None, seconds: float = 30,
-                   opener=None) -> dict:
-    """Fetch the app `.deb` manifest; raises `AppUnconfigured` on a 503.
-
-    Two modes, chosen by `serial` (0012 bead 6):
-
-    - **Global (default, `serial is None`)** -- `GET /v1/app/manifest` ->
-      `{version, sha256, size}`, the unchanged 0010 path. An appliance that has
-      not opted into the per-device path keeps this exactly.
-    - **Per-device (`serial` set, opt-in)** -- `GET /v1/netboot/manifest` with
-      the `X-PhotoWall-Serial` header (E6), so the `.deb` rides the exact tag
-      whose base bytes this device was served this boot (F4). Central returns
-      that served tag as `tag`, which the enrolled player reports as base-health
-      `running_tag` -- guaranteed to equal `devices.last_served_tag`, never a
-      guess, because it IS the recorded served tag.
-    """
-    fetcher = AppFetcher(origin, seconds=seconds, opener=opener)
-    if serial is None:
-        manifest = _json(fetcher.get("/v1/app/manifest", MAX_MANIFEST_BYTES))
-        required = {"version", "sha256", "size"}
-    else:
-        manifest = _json(fetcher.get("/v1/netboot/manifest", MAX_MANIFEST_BYTES,
-                                     headers={SERIAL_HEADER: serial}))
-        required = {"version", "sha256", "size", "tag"}
-    if (
-        set(manifest) != required
-        or not isinstance(manifest["version"], str)
-        or not 0 < len(manifest["version"]) <= 256
-        or not isinstance(manifest["sha256"], str)
-        or not _SHA256.fullmatch(manifest["sha256"])
-        or type(manifest["size"]) is not int
-        or not 0 < manifest["size"] <= MAX_APP_PACKAGE_BYTES
-        or (serial is not None and (
-            not isinstance(manifest["tag"], str)
-            or not _TAG.fullmatch(manifest["tag"])
-            or len(manifest["tag"]) > 256
-        ))
-    ):
+def parse_manifest(body: bytes, *, per_device: bool) -> AppManifest:
+    """contracts.strict_json.loads_object(body, max_bytes=MAX_MANIFEST_BYTES); exactly the
+    keys {version, sha256, size} (+ tag when per_device), each checked as today. Anything else
+    raises ProvisionError("provision_manifest_invalid")."""
+    document = loads_object(body, max_bytes=MAX_MANIFEST_BYTES)
+    required = {"version", "sha256", "size"} | ({"tag"} if per_device else set())
+    if document is None or set(document) != required:
         raise ProvisionError("provision_manifest_invalid")
-    return manifest
+    version, sha256, size = document["version"], document["sha256"], document["size"]
+    tag = document.get("tag")
+    if (not isinstance(version, str) or not 0 < len(version) <= MAX_VERSION
+            or not isinstance(sha256, str) or not _SHA256.fullmatch(sha256)
+            or type(size) is not int or not 0 < size <= MAX_APP_PACKAGE_BYTES
+            or (per_device and (not isinstance(tag, str) or len(tag) > MAX_TAG
+                                or not _TAG.fullmatch(tag)))):
+        raise ProvisionError("provision_manifest_invalid")
+    return AppManifest(version, sha256, size, tag)
 
 
-def fetch_package(origin: str, manifest: dict, *, seconds: float = 120, opener=None) -> bytes:
-    """`GET /v1/app/package/{sha256}.deb`, bounded to the manifest's declared size."""
-    fetcher = AppFetcher(origin, seconds=seconds, opener=opener)
-    return fetcher.get(f"/v1/app/package/{manifest['sha256']}.deb", manifest["size"])
+def fetch_manifest(fetch: DirectFetch, serial: str | None) -> AppManifest:
+    """serial None: GET /v1/app/manifest. serial set (opt-in PHOTO_WALL_PER_DEVICE_DEB):
+    GET /v1/netboot/manifest with X-PhotoWall-Serial, so the `.deb` rides the exact tag whose
+    base this device was served this boot (0012 bead 6). A 503 app_unconfigured arrives as
+    UplinkError(CENTRAL, "error", central_error="app_unconfigured")."""
+    if serial is None:
+        return parse_manifest(fetch.get(APP_MANIFEST_PATH, MAX_MANIFEST_BYTES), per_device=False)
+    body = fetch.get(DEVICE_MANIFEST_PATH, MAX_MANIFEST_BYTES, headers={SERIAL_HEADER: serial})
+    return parse_manifest(body, per_device=True)
 
 
-def apt_install(package: bytes, manifest: dict) -> None:
-    """Default install step: install the `.deb` into the running RAM root via
-    `apt-get install -y <deb path>`.
+def fetch_package(fetch: DirectFetch, manifest: AppManifest) -> bytes:
+    """GET /v1/app/package/{sha256}.deb, bounded to manifest.size."""
+    return b"".join(fetch.chunks(f"/v1/app/package/{manifest.sha256}.deb", manifest.size,
+                                 block=CHUNK))
 
-    `apt-get install` (not `dpkg -i`) so the `.deb`'s declared `Depends` -- the
-    full runtime dependency set the Player `.deb` now carries (GTK/GStreamer/
-    weston/Mesa + the `python3-*` libraries, 0009 p4-deb-full-depends) -- are
-    resolved and installed from the base's configured distro sources at boot.
-    A bare `dpkg -i` would unpack the `.deb` but leave every dependency
-    unsatisfied. The absolute temp path (it starts with `/` and ends in
-    `.deb`) is treated by apt as a file to install, not a package name.
 
-    Thin and replaceable -- tests inject a stub instead of shelling to real
-    `apt-get` (this codebase has no apt-backed CI sandbox; real installation is
-    the owner's Pi bench step)."""
-    with tempfile.NamedTemporaryFile(suffix=".deb", delete=False) as handle:
-        handle.write(package)
-        deb_path = Path(handle.name)
+def install_package(package: bytes, manifest: AppManifest) -> None:
+    """Write the bytes to a 0600 temp .deb, then `dpkg --install <tmp>.deb` with
+    DEBIAN_FRONTEND=noninteractive; nothing else. No apt, no package lists, no network: the
+    Player's Depends are already on the base, because the base installed
+    packages("bootstrapper", "player") from the same declaration the Player's Depends come
+    from. A Depends the base lacks makes dpkg exit non-zero with its own message naming the
+    package; that subprocess.CalledProcessError escapes (see Bootstrapper.run), as does the
+    subprocess.TimeoutExpired of a dpkg that outlives INSTALL_SECONDS. dpkg's own output goes to
+    the journal. The temp file is removed in every case. Tests inject a stub."""
+    environment = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    # mkstemp creates the file 0600 whatever the umask; a failed write (a full RAM root) is
+    # cleaned up like a failed install.
+    handle = tempfile.NamedTemporaryFile(suffix=".deb", delete=False)
+    deb_path = Path(handle.name)
     try:
-        subprocess.run(
-            ["apt-get", "install", "-y", os.fspath(deb_path)],
-            check=True,
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-        )
+        with handle:
+            handle.write(package)
+        subprocess.run(["dpkg", "--install", os.fspath(deb_path)], check=True, env=environment,
+                       timeout=INSTALL_SECONDS)
     finally:
         deb_path.unlink(missing_ok=True)
 
 
-def write_public_config(origin: str, *, path: Path = DEFAULT_PUBLIC_CONFIG,
-                        base_running_tag: str | None = None) -> None:
-    """The origin handoff ("the hard part", 0009): write the bootstrapper's
-    resolved central origin as the app's explicit `central_origin` in the
-    file `player.service.load_config` reads
-    (`/etc/photo-wall/public.json`, `appliance/systemd/player.service`'s
-    `--config`). `PlayerConfig.central_origin`, once set, always wins over
-    discovery -- `resolve_origin` consults `self.discovery` only when
-    `central_origin is None` ([player/service.py:419](../player/service.py))
-    -- so the app enrolls against the exact central that served its `.deb`,
-    with no second, independently-resolved mDNS browse.
+@dataclass(frozen=True, slots=True)
+class Handoff:
+    discovered_root: Origin | None   # set only when the root came from mDNS
+    base_running_tag: str | None     # per-device path only
 
-    A plain-HTTP discovered origin (the common home-LAN case, T0 baseline)
-    needs `allow_http: true` alongside it: `PlayerConfig`'s explicit-origin
-    validator requires that opt-in for an *explicit* HTTP origin even though
-    a *discovered* one is accepted unconditionally
-    (`player/service.py:_validate_origin`, `resolve_origin` passes
-    `allow_http=True` for discovery but not for config). Without this, a
-    home-LAN handoff of an `http://` origin would make the app's own
-    `PlayerConfig` fail to load. Existing keys in `path` (if any) are
-    preserved; only `schema`, `central_origin`, and (when needed)
-    `allow_http` are set.
 
-    On the opt-in per-device path (0012 bead 6) the bootstrapper also hands the
-    booted tag forward as `base_running_tag` (the `PlayerConfig` field the
-    enrolled player reads to post base-health for the exact tag it was served);
-    on the global path it is absent and no base-health is posted.
-    """
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-            if not isinstance(existing, dict):
-                existing = {}
-        except (json.JSONDecodeError, OSError):
-            existing = {}
-    payload = {**existing, "schema": 1, "central_origin": origin}
-    if urlsplit(origin).scheme == "http":
-        payload["allow_http"] = True
-    if base_running_tag is not None:
-        payload["base_running_tag"] = base_running_tag
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True))
+def _existing_keys(path: Path) -> dict[str, object]:
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_PUBLIC_CONFIG_BYTES + 1)
+    except OSError:
+        return {}
+    return loads_object(data, max_bytes=MAX_PUBLIC_CONFIG_BYTES) or {}
+
+
+def write_handoff(handoff: Handoff, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> None:
+    """Keep any existing keys; set schema 1; set central_origin to the discovered root or remove
+    it; remove allow_http; set or remove base_running_tag. Written with
+    uplink.files.write_atomically(path, ..., mode=0o644), so the `wall` user can read it
+    whatever the unit's umask."""
+    payload = {**_existing_keys(path), "schema": 1}
+    payload.pop("allow_http", None)
+    for key, value in (("central_origin", handoff.discovered_root),
+                       ("base_running_tag", handoff.base_running_tag)):
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = str(value)
+    write_atomically(path, json.dumps(payload, sort_keys=True).encode(), mode=0o644)
 
 
 def start_player_unit(*, unit: str = DEFAULT_UNIT) -> None:
     """Thin, replaceable step: starts the Player systemd unit once the app is
-    installed and the origin handoff is written. Tests inject a stub instead
-    of shelling to real `systemctl`."""
-    subprocess.run(["systemctl", "start", unit], check=True)
+    installed and the handoff is written, waiting at most START_UNIT_SECONDS
+    (subprocess.TimeoutExpired escapes, like a failed start). Tests inject a stub
+    instead of shelling to real `systemctl`."""
+    subprocess.run(["systemctl", "start", unit], check=True, timeout=START_UNIT_SECONDS)
 
 
 def _default_backoff(attempt: int) -> float:
-    return min(2.0 * attempt, 30.0)
+    return min(2.0 * attempt, MAX_BACKOFF_SECONDS)
 
 
 class Bootstrapper:
-    """Orchestrates discover -> fetch manifest -> fetch + verify `.deb` ->
-    install -> origin handoff -> start unit.
+    """Orchestrates find -> fetch manifest -> fetch + verify `.deb` -> install -> handoff ->
+    start unit. Every external effect is injected, so the sequencing, the corruption guard and
+    the handoff are unit tested with no real mDNS responder, Central, dpkg or systemd; the real
+    Pi boot is the owner's bench step. `transport` is the one the located origin is fetched
+    over (the same one `find` locates with, in production). `clock` is read only by
+    failure_text."""
 
-    Every external effect is an injected callable so the sequencing, the
-    corruption guard, and the origin handoff can be unit tested with no real
-    mDNS responder, HTTP server, dpkg, or systemd -- the actual Pi boot is
-    the owner's bench step (see module docstring).
+    def __init__(self, *, find: Callable[[], Awaitable[Found]], transport: Transport,
+                 clock: ClockRecord | None,
+                 fetch_manifest: Callable[[DirectFetch, str | None], AppManifest] = fetch_manifest,
+                 fetch_package: Callable[[DirectFetch, AppManifest], bytes] = fetch_package,
+                 install: Callable[[bytes, AppManifest], None] = install_package,
+                 write_handoff: Callable[[Handoff], None] = write_handoff,
+                 start_unit: Callable[[], None] = start_player_unit,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 backoff: Callable[[int], float] = _default_backoff,
+                 serial_reader: Callable[[], str | None] | None = None,
+                 watchdog_extend: Callable[[float], bool] = extend_start,
+                 watchdog_ready: Callable[[], bool] = watchdog_ready) -> None:
+        self._find, self._transport, self._clock = find, transport, clock
+        self._fetch_manifest, self._fetch_package = fetch_manifest, fetch_package
+        self._install, self._write_handoff, self._start_unit = install, write_handoff, start_unit
+        self._sleep, self._backoff = sleep, backoff
+        # `serial_reader` opts the device into the per-device `.deb` path (0012 bead 6): the
+        # manifest fetch carries the serial and Central returns the served tag, handed
+        # forward for base-health. Unset (default) keeps 0010's global `.deb`.
+        self._serial_reader = serial_reader
+        # M5: default to the real systemd-notify calls (no-ops, returning False, when not run
+        # under systemd's Type=notify -- see uplink.watchdog). Tests inject fakes.
+        self._watchdog_extend, self._watchdog_ready = watchdog_extend, watchdog_ready
 
-    `discovery` matches `player.discovery.CentralDiscovery`'s protocol
-    (async `discover() -> str | None`) -- in production this is a
-    `player.mdns_discovery.MdnsCentralDiscovery()`.
-    """
+    def _serial(self) -> str | None:
+        if self._serial_reader is None:
+            return None
+        try:
+            return self._serial_reader()
+        except OSError:
+            return None
 
-    def __init__(
-        self,
-        *,
-        discovery,
-        fetch_manifest=fetch_manifest,
-        fetch_package=fetch_package,
-        install=apt_install,
-        write_origin=None,
-        start_unit=start_player_unit,
-        sleep=asyncio.sleep,
-        backoff=_default_backoff,
-        serial_reader=None,
-        public_config_path: Path = DEFAULT_PUBLIC_CONFIG,
-    ):
-        self.discovery = discovery
-        self.fetch_manifest = fetch_manifest
-        self.fetch_package = fetch_package
-        self.install = install
-        # `serial_reader` opts the device into the per-device `.deb` path (0012
-        # bead 6): when set, the manifest fetch carries the serial and central
-        # returns the served tag, which is handed forward for base-health.
-        # Unset (default) keeps 0010's global `.deb` and posts no base-health.
-        self.serial_reader = serial_reader
-        self.public_config_path = public_config_path
-        self.running_tag: str | None = None
-        self.write_origin = write_origin if write_origin is not None else self._default_write_origin
-        self.start_unit = start_unit
-        self.sleep = sleep
-        self.backoff = backoff
-
-    def _default_write_origin(self, origin: str) -> None:
-        # Production handoff: write the origin AND (on the opt-in per-device
-        # path) the served tag so the enrolled player can post base-health.
-        write_public_config(origin, path=self.public_config_path,
-                             base_running_tag=self.running_tag)
+    def _fetch(self, found: Found, seconds: float) -> DirectFetch:
+        return DirectFetch(found.central, transport=self._transport, seconds=seconds)
 
     async def run(self, *, max_attempts: int | None = None) -> bool:
-        """Runs the provisioning state machine to completion.
-
-        Returns True once the app is installed, the origin is handed off,
-        and the unit is started. With `max_attempts=None` (production) it
-        retries forever -- a base with no central, or a central with no app
-        yet, must keep trying rather than crash or give up. Tests pass a
-        bounded `max_attempts` and check the False return: bounded retry,
-        no crash, no partial install.
-        """
+        """One attempt:
+          1. found = await find()                         (locates again on every attempt)
+          2. manifest = fetch_manifest(DirectFetch(found.central, seconds=30), serial)
+          3. package = fetch_package(DirectFetch(found.central, seconds=120), manifest)
+          4. sha256 mismatch -> log, back off, next attempt
+          5. install(package, manifest)                   (dpkg only)
+          6. write_handoff(Handoff(found.root if found.source == "discovered" else None, tag))
+          7. start_unit(); return True
+        An UplinkError is logged as failure_text(error, clock=clock) and retried after
+        backoff, EXCEPT cause TIME, which is re-raised: nothing in stage 2 can fix the clock, so
+        the process exits into the unit's start limit and the reboot path (rule 3).
+        ProvisionError is retried. Install, handoff and start failures escape. With
+        max_attempts=None (production) it retries forever; False after max_attempts.
+        M5: watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS) fires once as every attempt
+        begins -- the one renewal site, so no exit from an attempt (a retried failure, a
+        discarded corrupt package, a future branch) can skip it, and process start-up never
+        eats into attempt 1's window. Each window thus spans one attempt plus its backoff
+        (LONGEST_ATTEMPT_SECONDS). watchdog_ready() fires exactly once, right after
+        start_unit(), on the successful return (Type=notify's starting phase does not end
+        without READY=1)."""
         attempt = 0
         while max_attempts is None or attempt < max_attempts:
             attempt += 1
-            origin = await self.discovery.discover()
-            if not origin:
-                LOG.info("provision: no central discovered (attempt %d)", attempt)
-                await self.sleep(self.backoff(attempt))
-                continue
-            serial = None
-            if self.serial_reader is not None:
-                try:
-                    serial = self.serial_reader()
-                except OSError:
-                    serial = None
+            self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
             try:
-                manifest = (self.fetch_manifest(origin, serial=serial)
-                            if serial else self.fetch_manifest(origin))
-            except AppUnconfigured:
-                LOG.info("provision: app_unconfigured, retrying (attempt %d)", attempt)
-                await self.sleep(self.backoff(attempt))
+                found = await self._find()
+                LOG.info("provision: central %s (%s root %s)", found.central.origin,
+                         found.source, found.root)
+                manifest = self._fetch_manifest(self._fetch(found, MANIFEST_SECONDS),
+                                                self._serial())
+                package = self._fetch_package(self._fetch(found, PACKAGE_SECONDS), manifest)
+            except UplinkError as error:
+                if error.cause is Cause.TIME:
+                    raise
+                LOG.warning("provision: %s (attempt %d)",
+                            failure_text(error, clock=self._clock), attempt)
+                await self._sleep(self._backoff(attempt))
                 continue
             except ProvisionError as error:
-                LOG.warning("provision: manifest fetch failed: %s (attempt %d)", error, attempt)
-                await self.sleep(self.backoff(attempt))
+                LOG.warning("provision: %s (attempt %d)", error, attempt)
+                await self._sleep(self._backoff(attempt))
                 continue
-            # Carry the served tag forward for base-health (0012 bead 6): present
-            # only on the per-device path, absent (None) on the global path.
-            self.running_tag = manifest.get("tag")
-            try:
-                package = self.fetch_package(origin, manifest)
-            except ProvisionError as error:
-                LOG.warning("provision: package fetch failed: %s (attempt %d)", error, attempt)
-                await self.sleep(self.backoff(attempt))
-                continue
-            if hashlib.sha256(package).hexdigest() != manifest["sha256"]:
-                # Corruption guard (0009 owner ruling: integrity, not
-                # authenticity). Never install or start on a mismatch.
+            if hashlib.sha256(package).hexdigest() != manifest.sha256:
+                # Corruption guard (0009 owner ruling: integrity, not authenticity). Never
+                # install or start on a mismatch.
                 LOG.warning("provision: app_integrity mismatch, discarding (attempt %d)", attempt)
-                await self.sleep(self.backoff(attempt))
+                await self._sleep(self._backoff(attempt))
                 continue
-            self.install(package, manifest)
-            self.write_origin(origin)
-            self.start_unit()
-            LOG.info("provision: app_installed %s", manifest["sha256"])
+            self._install(package, manifest)
+            self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
+                                        manifest.tag))
+            self._start_unit()
+            self._watchdog_ready()
+            LOG.info("provision: app_installed %s", manifest.sha256)
             return True
         return False
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    """--config PATH, --unit NAME, --cmdline PATH (default /proc/cmdline; as stage 1).
+    Once: resolution = resolve_central(read_kernel_command_line(cmdline)); trust =
+    Trust.public(); transport = HttpTransport(trust=trust); clock = RunClockRecord().read()
+    (read only, never stepped; used only by failure_text); discovery =
+    MdnsCentralDiscovery(timeout=DISCOVERY_SECONDS) only when resolution is Unconfigured (lazy
+    import: zeroconf is not needed when the cmdline
+    names Central). Then asyncio.run(Bootstrapper(...).run()). An UplinkError that escapes is logged with
+    failure_text and exits 1 (systemd restarts; 10 exits in 10 minutes reboot the Pi)."""
     parser = argparse.ArgumentParser(description="Photo Wall base bootstrapper (0009)")
     parser.add_argument("--config", type=Path, default=DEFAULT_PUBLIC_CONFIG)
     parser.add_argument("--unit", default=DEFAULT_UNIT)
-    args = parser.parse_args()
+    parser.add_argument("--cmdline", type=Path, default=KERNEL_COMMAND_LINE)
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
+    clock = RunClockRecord().read()
+    try:
+        resolution = resolve_central(read_kernel_command_line(args.cmdline))
+        transport = HttpTransport(trust=Trust.public())
+        discovery: CentralDiscovery | None = None
+        if isinstance(resolution, Unconfigured):
+            from player.mdns_discovery import MdnsCentralDiscovery
 
-    from appliance.bootstrap import read_pi_serial
-    from player.mdns_discovery import MdnsCentralDiscovery
-
-    # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB
-    # is set does the appliance send its serial on the manifest fetch and hand the
-    # served tag forward for base-health. Unset -> unchanged 0010 global `.deb`.
-    serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
-
-    bootstrapper = Bootstrapper(
-        discovery=MdnsCentralDiscovery(),
-        serial_reader=serial_reader,
-        public_config_path=args.config,
-        start_unit=lambda: start_player_unit(unit=args.unit),
-    )
-    asyncio.run(bootstrapper.run())
+            discovery = MdnsCentralDiscovery(timeout=DISCOVERY_SECONDS)
+        # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB is
+        # set does the appliance send its serial and hand the served tag forward.
+        serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
+        bootstrapper = Bootstrapper(
+            find=functools.partial(find_central, resolution, transport=transport,
+                                   discovery=discovery),
+            transport=transport, clock=clock,
+            write_handoff=functools.partial(write_handoff, path=args.config),
+            start_unit=functools.partial(start_player_unit, unit=args.unit),
+            serial_reader=serial_reader)
+        asyncio.run(bootstrapper.run())
+    except UplinkError as error:
+        LOG.error("provision: %s", failure_text(error, clock=clock))
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

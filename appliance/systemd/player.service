@@ -6,7 +6,16 @@ After=network-online.target photo-wall-weston.service
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# The deadline owner after switch_root (0014 M5): the Player sends READY=1 once started and
+# WATCHDOG=1 at the end of every run cycle (success or failure) and after every completed
+# control-loop exchange (every ~0.5 s while a session is live). The longest healthy gap is one
+# backoff (60 s) plus one full reconnect before the first control exchange: locate (30 s
+# deadline + 3 s mDNS), challenge + register + base-health + clock + state (15 s each), then
+# one control exchange (up to 3 x 15 s): about 215 s. 300 s leaves margin; a hang past it is
+# killed with SIGABRT and restarted (Restart=always).
+Type=notify
+NotifyAccess=main
+WatchdogSec=300
 User=wall
 Group=wall
 SupplementaryGroups=render video
@@ -27,7 +36,9 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 # Native failure must still allow network registration with unavailable capacity.
 ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
-ExecStart=/usr/bin/python3 -m player.service --config /etc/photo-wall/public.json
+# -I: only the private dir's own closure is importable; -B: -I ignores
+# PYTHONDONTWRITEBYTECODE, and the dir is read-only package content.
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-player --config /etc/photo-wall/public.json
 Restart=always
 RestartSec=2
 TimeoutStopSec=150

@@ -5,6 +5,49 @@ ruling recorded.** This directory (`docs/decisions/`) holds accepted architectur
 decisions; this file is the ONE gate document for the re-architecture and
 replaces every prior note, brief, and sketch on it.
 
+## Amended by decision 0014 (2026-09-26)
+
+[0014](0014-reaching-central-from-every-boot-stage.md) supersedes several of
+this decision's specifics for what Projects 1-2 implement. This section is the
+current index; the sections below carry inline pointers at each superseded
+statement, and the history sections are left as the record of what was decided
+in 2026-09.
+
+- **Central is found by the cmdline first, mDNS only without it.** Every stage
+  (initramfs, provisioning, the Player) uses a `photowall.central=<root>`
+  kernel command-line value when present; mDNS discovery runs only when the
+  cmdline names no Central. Netboot always sets the cmdline, so mDNS applies
+  only to non-netboot use (a flashed or dev Player). See
+  [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **http and https are both legal; a locate step, not the discovered channel
+  itself, follows redirects.** A credential-free `GET /v1/locate` is the only
+  request that follows redirects (up to 10, cross-host, never https to http)
+  and must end at a server identifying itself as Central; every real request
+  goes straight to that located origin and refuses redirects. Nothing from
+  locate is persisted. See
+  [0014 R2/R3/R7/R8](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **The CA list is the Debian bundle**, with the Player's optional `ca_file`
+  able to replace it. See
+  [0014 R5](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **Only stage 1 steps the clock**, from a build-time floor plus one SNTP
+  step, and writes a clock record read by provisioning and the Player. See
+  [0014 R6](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **Every failure is logged with a named cause**, not a generic network
+  error. See
+  [0014 R9](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **The dependency model is reversed (Project 2).** `scripts/debian_packages.py`
+  is now the one Debian declaration (packages plus the snapshot.debian.org
+  pin); the base image installs the full device set (bootstrapper *and*
+  Player Debian packages) at image build time, and each `.deb`'s `Depends` is
+  rendered from that declaration. Installation is `dpkg --install` only — no
+  apt, no distro-repo resolution at boot.
+- **What still holds:** rule 1 (the base carries no Photo Wall application and
+  no origin baked in — it now carries the Player's Debian *platform*, not the
+  application) and rule 3's trust posture (the `.deb` sha256 is still a
+  corruption check only; the home LAN is still the trust boundary). What is
+  amended: rule 2's mDNS-only discovery (cmdline now wins) and the
+  distro-repo-at-boot dependency model.
+
 > **Owner ruling (2026-09-12).** This is a home LAN. There is no threat model.
 > Optimize for UX and simplicity over security. A player failing to connect is
 > visibly obvious to the operator — that is the monitoring. Accordingly **gate #1
@@ -51,8 +94,11 @@ the operator.
   everything at power-off. Whatever it runs is fetched fresh every boot.
 - **Two published GitHub assets, not one image:** (a) a generic base OS bundle
   that rarely revs, and (b) the Player application as a `.deb`.
-- **No baked origin.** The running base finds central over the LAN by mDNS, the
-  same way 0008's flashed baseline already does.
+- **No baked origin.** The running base finds central by the cmdline first,
+  falling back to mDNS only when the cmdline names no Central (amended by
+  [0014](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)
+  R1: the netboot cmdline always names Central, so mDNS now applies only to
+  non-netboot use).
 - **No signing anywhere.** Raspberry Pi 5 netboot requires no signature by
   default (facts table), so the bespoke release-signing key and its whole ledger
   retire. The app `.deb` is likewise unsigned: central serves it with a plain
@@ -116,7 +162,10 @@ graph LR
    from the boot server (PXE/TFTP path DHCP already points at); the base's only
    job is to find central and fetch the app. Nothing deployment-specific and
    no application code is baked into the published base bundle.
-2. **Central serves the app bytes; the base finds central by mDNS.** The `.deb`
+2. **Central serves the app bytes; the base finds central by the cmdline
+   first, mDNS otherwise** (amended by
+   [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)
+   — see [Amended by 0014](#amended-by-decision-0014-2026-09-26)). The `.deb`
    bytes, its sha256, and all operational config (Frame binding, assignments,
    calibration) come from central after discovery — never from the image. The
    app revs by publishing a new `.deb`; the base bundle almost never rebuilds.
@@ -138,11 +187,17 @@ graph LR
   + a minimal base root (squashfs). Rarely revs. Carries Python and mDNS but no
   Player app.
 - **Bootstrapper** — a tiny program in the base image that runs before the app:
-  discovers central (mDNS), fetches the app `.deb`, verifies its hash, installs
-  it into the RAM overlay, and starts it. Distinct from the full Player app.
+  discovers central (cmdline first, mDNS only otherwise — amended by
+  [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)),
+  fetches the app `.deb`, verifies its hash, installs it into the RAM overlay,
+  and starts it. Distinct from the full Player app.
 - **App package (`.deb`)** — the Player application, published by central and
-  fetched each boot. Self-contained (vendored Python deps); depends only on
-  native libraries the base already provides.
+  fetched each boot. Ships its computed first-party import closure privately
+  under `/usr/lib/photo-wall-player` (not `dist-packages`); its Debian
+  `Depends` names native/platform packages the base already installs from
+  `scripts/debian_packages.py` (amended by
+  [0014, Project 2](0014-reaching-central-from-every-boot-stage.md#delivery) —
+  see [Amended by 0014](#amended-by-decision-0014-2026-09-26)).
 - **App manifest** (central) — central's small, plain (unsigned) document
   naming the app version, `.deb` sha256, and size that central *holds and
   serves*. The sha256 is a **corruption check only**: the bootstrapper reads it
@@ -207,7 +262,8 @@ sequenceDiagram
   participant O as Operator
   D->>I: TFTP kernel + initramfs + base.squashfs
   I->>I: overlay-mount base (ro squashfs + tmpfs) in RAM, pivot
-  B->>M: browse _photowall._tcp (no origin baked)
+  B->>B: resolve cmdline photowall.central (amended by 0014: mDNS only if absent)
+  B->>M: browse _photowall._tcp (only when the cmdline names no Central)
   M-->>B: central_origin (deterministic lowest-name winner)
   B->>C: GET /v1/app/manifest {version, sha256, size}
   B->>C: GET /v1/app/package/<sha256>.deb
@@ -223,11 +279,15 @@ sequenceDiagram
 1. The OS arrives over the PXE/TFTP path; no signature, no central contact for
    the OS. The base squashfs is overlay-mounted in RAM exactly as
    [appliance/bootstrap.py:366](../../appliance/bootstrap.py) already does.
-2. The bootstrapper discovers central by mDNS (no baked origin), reusing
-   [player/mdns_discovery.py:46](../../player/mdns_discovery.py). The discovery
-   winner is deterministic (lowest-sorting name,
-   [mdns_discovery.py:100](../../player/mdns_discovery.py)); on a home LAN the
-   only advertiser is the operator's central.
+2. The bootstrapper resolves central from the kernel cmdline
+   (`photowall.central=<root>`) when present; only when the cmdline names no
+   Central does it fall back to mDNS discovery, reusing
+   [player/mdns_discovery.py:46](../../player/mdns_discovery.py) (amended by
+   [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)
+   — netboot always sets the cmdline, so this fallback applies only to
+   non-netboot use). The mDNS discovery winner is deterministic (lowest-sorting
+   name, [mdns_discovery.py:100](../../player/mdns_discovery.py)); on a home LAN
+   the only advertiser is the operator's central.
 3. The bootstrapper reads the manifest, then streams the `.deb` from the same
    central and checks the bytes against the manifest sha256 before install — a
    corruption guard. A truncated or garbled download is rejected and retried.
@@ -381,9 +441,14 @@ layer):
 - **Version:** the existing wheel version `base_version+g<commit>`
   ([scripts/build_player.py:382](../../scripts/build_player.py)) becomes the
   package version — one identifier for source, wheel, and `.deb`.
-- **Dependencies:** Python runtime deps stay **vendored in the venv** (preserving
-  the hashed-wheelhouse integrity model); the `.deb` `Depends:` only on the
-  native libraries the base provides (GTK, GStreamer, Mesa). Documented in
+- **Dependencies (amended by
+  [0014, Project 2](0014-reaching-central-from-every-boot-stage.md#delivery) —
+  see [Amended by 0014](#amended-by-decision-0014-2026-09-26)):** the
+  hand-kept vendored-venv model is replaced by a computed first-party import
+  closure (`/usr/lib/photo-wall-player`, run as `python3 -I -B <dir>`, nothing
+  in `dist-packages`); the `.deb` `Depends:` is rendered from
+  `scripts/debian_packages.py`, the one Debian declaration that also drives
+  what the base image installs at build time. Documented in
   [module-player-package.md](../module-player-package.md).
 
 ### Central storage
@@ -525,7 +590,7 @@ Ladder for costs: a design fails safe if the failure is caught at
 | 3 | App-version selection / rollout | **One global "current app" pointer the operator promotes** | No staged/per-device rollout and **no auto-rollback** (retires with the release authority); recovery is a manual re-promote of the prior `.deb` |
 | 4 | Base OS transport into RAM | **Base squashfs staged in the boot-server tree, loaded by initramfs; no central, no signature** | A larger TFTP/HTTP load than a bespoke initramfs; operator stages the GitHub bundle |
 | 5 | The orphaned release-authority / boot-ticket code | **Delete it in this workstream** (and land **both** enroll fixes — central guard move + the diskless ticketless/health gates) | Big diff; loses the signed-OS + per-device auto-rollback safety net; rollback of the decision needs git, not config |
-| 6 | `.deb` payload shape | **Prebuilt venv baked to `/opt/photo-wall/venv`, install = unpack** | Fixed install path; larger `.deb`; venv not relocatable |
+| 6 | `.deb` payload shape | **Prebuilt venv baked to `/opt/photo-wall/venv`, install = unpack** (superseded: see [Amended by 0014](#amended-by-decision-0014-2026-09-26) — replaced by a computed import closure under `/usr/lib/photo-wall-player` plus Debian `Depends`) | Fixed install path; larger `.deb`; venv not relocatable |
 
 **Gate #1 — options not chosen (recorded for the trail):** a *boot-tree app hash*
 (the app's expected sha256 dropped into the operator-trusted PXE/TFTP tree, out of
@@ -543,12 +608,18 @@ LAN, so the extra machinery buys nothing worth its UX cost. Do not resurrect the
    out of scope here and is left unchanged; if you also want D0 to fetch the
    `.deb`, that is a separate slice.
 2. The **whole home LAN is trusted** (owner ruling, 2026-09-12). There is no
-   threat model: the mDNS channel that carries both the app bytes and their
-   sha256 is trusted, so the sha256 is a corruption check and not an authenticity
+   threat model: the channel that carries both the app bytes and their sha256
+   (mDNS-discovered, or the cmdline-named origin per
+   [0014](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules))
+   is trusted, so the sha256 is a corruption check and not an authenticity
    proof. The boot-server (PXE/TFTP) path remains operator-trusted (0008's T0
    infra) for the OS bytes.
-3. The `.deb` is **self-contained** apart from native libraries the base
-   provides; the base image is the source of GTK/GStreamer/Mesa/Python.
+3. The `.deb` is **self-contained apart from platform packages the base
+   provides** (superseded: see
+   [Amended by 0014](#amended-by-decision-0014-2026-09-26) — the base now
+   installs the Player's Debian platform, including GTK/GStreamer/Mesa/Python,
+   from `scripts/debian_packages.py`, not just native libraries alongside a
+   vendored venv).
 4. Central's operational plane is otherwise **unchanged**; the only central-side
    behavioural change to existing routes is moving the enroll release-authority
    guard.
@@ -579,7 +650,7 @@ are ranked accordingly.
 |---|---|---|
 | **Promoted `.deb` crashes on boot, fleet-wide** | Every Player loops boot → fetch-same-`.deb` → crash → reboot, all at once; **and boot-health is retired, so central has NO down-signal** — the fleet goes dark with no telemetry. Recovery is manual: operator promotes a prior `.deb`. The dark screen is the intended (and only) monitoring, per the owner ruling | **documented** — no auto-rollback (retired, gate #3) **and no crash-detection signal**; ranked worst because it is self-inflicted by a normal promote and is invisible to central |
 | Release authority retired but **either** enroll fix omitted | Edit A omitted → all enroll 503s; edit B omitted → diskless enroll 404s fleet-wide **and** every loop POSTs the retired boot-health route | **construction** — both edits ([registry.py:92](../../central/registry.py) **and** the client ticket/health gates [service.py:489](../../player/service.py),[:511](../../player/service.py),[:826](../../player/service.py)) must land, enforced by a diskless-enroll test |
-| **mDNS multicast is unavailable / filtered** (VLAN, AP client-isolation, IGMP-snooping switch) | No central discovered; every Player blocks pre-app on bounded retry; the whole fleet stays dark until multicast works. A hard operational dependency of the origin-free design | **documented** — [player/mdns_discovery.py:75](../../player/mdns_discovery.py) returns None on timeout; fail-closed, but the network must carry multicast |
+| **mDNS multicast is unavailable / filtered** (VLAN, AP client-isolation, IGMP-snooping switch) | Netboot is unaffected — the cmdline always names Central (amended by [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)); only a non-netboot Player with no cmdline origin falls back to mDNS and blocks pre-app on bounded retry until multicast works | **documented** — [player/mdns_discovery.py:75](../../player/mdns_discovery.py) returns None on timeout; fail-closed, but a cmdline-less network must carry multicast |
 | **Per-boot bandwidth** — every Player re-fetches the full `.deb` on every boot | A fleet power-cycle (power blip, morning turn-on) is N × `.deb` + N × base-squashfs concurrent pulls off central and the boot server; large `.deb` (prebuilt venv, gate #6) makes this worse | **documented** — pull-at-boot with no local cache (diskless); a slow cold-start is expected, sized by the operator's LAN |
 | App `.deb` corrupted in transit | sha256 mismatch against the manifest; bootstrapper discards and retries; app never starts | **decision** — hash checked while streaming before install |
 | No app promoted on central | Player cannot fetch a manifest / matching `.deb`; stays pre-app and retries; no fabrication | **decision** — fail closed, no default app |
@@ -763,7 +834,11 @@ metadata-only ([device/photo-wall-device-none.yaml](../../appliance/rpi_image_ge
 so no kernel, initramfs, or boot firmware is produced. Kernel + slim initramfs
 + TFTP staging are net-new Phase-4 work, reusing the RAM-overlay mount
 ([appliance/bootstrap.py:366-399](../../appliance/bootstrap.py) `mount_root`)
-with the ticket/signature/trial layer removed.
+with the ticket/signature/trial layer removed. What that rootfs *installs* is
+amended by [0014, Project 2](0014-reaching-central-from-every-boot-stage.md#delivery):
+the base now installs the full device set (bootstrapper and Player Debian
+packages) from `scripts/debian_packages.py` at build time — see
+[Amended by 0014](#amended-by-decision-0014-2026-09-26).
 
 The boot chain, e2e migration, retirement list/order/risks, and slice
 breakdown are held in the workstream plan (this section is the durable index).

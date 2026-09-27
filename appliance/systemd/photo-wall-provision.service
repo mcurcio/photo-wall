@@ -5,11 +5,36 @@ Wants=network-online.target
 After=network-online.target
 # A base with no central on the LAN, or a central with no app promoted yet,
 # must keep retrying (appliance.provision.Bootstrapper.run loops forever by
-# default) rather than be restarted into a fresh attempt counter.
-StartLimitIntervalSec=0
+# default), so a single crash must not park the unit. But a unit that cannot
+# make ANY progress -- a crash, or an exception the provisioner does not
+# catch -- must not retry forever either (0014 rev 5, design §2.8): after 10
+# exits in 10 minutes (about a minute of crash-restarts) the Pi reboots into
+# PXE, which keeps retrying until the network answers and fetches the newest
+# base. A provisioner that is merely WAITING on a failed fetch loops
+# in-process (Restart is never triggered) and keeps waiting, uncounted.
+StartLimitIntervalSec=10min
+StartLimitBurst=10
+StartLimitAction=reboot-force
 
 [Service]
-Type=oneshot
+# M5: the one deadline owner after switch_root. A plain Type=oneshot cannot use
+# EXTEND_TIMEOUT_USEC to renew TimeoutStartSec -- systemd.service(5) ties that renewal to
+# "a service of Type=notify/Type=notify-reload" only, and Type=oneshot's own WatchdogSec is
+# never armed while the unit is still starting either way. So this unit is Type=notify:
+# appliance.provision.Bootstrapper.run() calls uplink.watchdog.extend_start() with
+# PROVISION_ATTEMPT_TIMEOUT_SECONDS as every attempt begins, renewing TimeoutStartSec so a run
+# that keeps making attempts is never killed for running long overall, then calls
+# uplink.watchdog.ready() right before the process exits 0 (READY=1 is required to end
+# Type=notify's starting phase at all). The window between two renewals is one whole attempt
+# plus its backoff; appliance.provision.LONGEST_ATTEMPT_SECONDS sums every blocking step at its
+# bound (the mDNS browse, locate, the manifest and package exchanges, the local sha256/temp/
+# handoff steps, dpkg --install, systemctl start of the Player, the backoff), and the window is
+# that sum x 1.25, rounded up: a healthy attempt, however slow, is never killed; a hung one is
+# killed within it. No
+# WatchdogSec: once READY=1 lands this process exits immediately, so there is no running phase
+# to pet.
+Type=notify
+NotifyAccess=main
 RemainAfterExit=yes
 User=root
 Group=root
@@ -19,10 +44,16 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # needs broad filesystem and service-manager access, so this unit is
 # deliberately unsandboxed (0009 owner ruling: home LAN, no threat model;
 # see docs/decisions/0009-minimal-base-and-app-package.md).
-ExecStart=/usr/bin/python3 -I -m appliance.provision
+# The package's private directory application (its computed closure and a generated
+# __main__.py, scripts/build_bootstrapper_deb.py). -B because -I ignores every PYTHON*
+# variable, PYTHONDONTWRITEBYTECODE above included.
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=infinity
+# Keep equal to appliance.provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS by hand: a systemd unit
+# file cannot import a Python constant (tests/test_netboot_liveness.py pins the two, and the
+# sum and margin above).
+TimeoutStartSec=773
 UMask=0077
 
 [Install]

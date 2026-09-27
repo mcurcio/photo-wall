@@ -73,6 +73,7 @@ def source_files():
         "player/service.py": b"import httpx\n",
         "contracts/__init__.py": b"",
         "contracts/models.py": b"import pydantic\n",
+        "uplink/__init__.py": b"",
         "pyproject.toml": b"",
         "uv.lock": b"",
     }
@@ -100,6 +101,7 @@ def test_player_wheel_is_deterministic_and_has_only_runtime_packages(inputs):
     assert set(path.split("/")[0] for path in contents) == {
         "player",
         "contracts",
+        "uplink",
         f"photo_wall_player-{VERSION}.dist-info",
     }
     metadata = contents[f"photo_wall_player-{VERSION}.dist-info/METADATA"].decode()
@@ -107,6 +109,23 @@ def test_player_wheel_is_deterministic_and_has_only_runtime_packages(inputs):
     assert metadata.count("Requires-Dist:") == len(package.ROOTS)
     assert "Requires-Dist: cryptography==1.0" in metadata
     assert b"sha256=" in contents[f"photo_wall_player-{VERSION}.dist-info/RECORD"]
+
+
+def test_player_wheel_ships_uplink(inputs):
+    runtime = package.locked_runtime(*inputs)
+    files = source_files()
+    files["uplink/finder.py"] = b"import websockets\n"
+    _, data = package.make_player_wheel(files, VERSION, runtime)
+    contents = wheel_files(data)
+    assert "uplink/__init__.py" in contents
+    assert "uplink/finder.py" in contents
+
+
+def test_archive_missing_uplink_init_rejected():
+    files = source_files()
+    del files["uplink/__init__.py"]
+    with pytest.raises(package.BuildError, match="incomplete"):
+        package.archive_sources(archive(files))
 
 
 def test_player_distribution_excludes_central_persistence_and_queue_packages():
@@ -297,7 +316,8 @@ def test_invalid_locks_fail_closed(inputs, fault):
         "../private.py",
         "/etc/passwd",
         "player//foo.py",
-        "central/app.py",
+        "central/x.py",
+        "media/x.py",
         "player/key.pem",
         "player/.private.py",
     ],
@@ -307,6 +327,13 @@ def test_unexpected_archive_paths_rejected(path):
     files[path] = b""
     with pytest.raises(package.BuildError):
         package.archive_sources(archive(files))
+
+
+def test_uplink_archive_path_accepted():
+    files = source_files()
+    files["uplink/x.py"] = b""
+    result = package.archive_sources(archive(files))
+    assert "uplink/x.py" in result
 
 
 @pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE])
@@ -338,12 +365,14 @@ def test_download_enforces_size_and_hash(inputs, tmp_path, chunks):
         package.save_download(item, tmp_path / item.filename, lambda _: iter(chunks))
 
 
-@pytest.fixture
-def committed_repo(inputs, tmp_path):
-    project, lock = inputs
+def _commit_source_repo(tmp_path, project, lock, *, uplink=True):
+    """Commit a synthetic repository at one revision, optionally predating `uplink` entirely
+    (no `uplink` path at all, as a real pre-0014 benchmark revision has none)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     files = source_files()
+    if not uplink:
+        del files["uplink/__init__.py"]
     files["pyproject.toml"] = (
         '[project]\nversion="0.1.0"\nrequires-python=">=3.12,<3.13"\ndependencies='
         + repr(project["project"]["dependencies"])
@@ -386,6 +415,12 @@ def committed_repo(inputs, tmp_path):
     return repo, revision
 
 
+@pytest.fixture
+def committed_repo(inputs, tmp_path):
+    project, lock = inputs
+    return _commit_source_repo(tmp_path, project, lock)
+
+
 def test_build_uses_commit_ignores_dirty_private_source_and_inventories_hashes(
     committed_repo, tmp_path
 ):
@@ -407,6 +442,31 @@ def test_build_uses_commit_ignores_dirty_private_source_and_inventories_hashes(
     assert wheel_files(app.read_bytes())["player/service.py"] == b"import httpx\n"
     other = package.build(repo, revision, tmp_path / "second", lambda _: iter([PAYLOAD]))
     assert other == result
+
+
+def test_build_omits_uplink_for_a_revision_that_predates_it(inputs, tmp_path):
+    """A benchmark revision from before `uplink` existed must still build: this is the class of
+    bug behind the demo/build_player default-revision regression, where WHEEL_PACKAGES
+    unconditionally required a package no old revision has."""
+    project, lock = inputs
+    repo, revision = _commit_source_repo(tmp_path, project, lock, uplink=False)
+    output = tmp_path / "artifact"
+    result = package.build(repo, revision, output, lambda _: iter([PAYLOAD]))
+    assert "uplink/__init__.py" not in result["sources"]
+    app = next((output / "wheels").glob("photo_wall_player*.whl"))
+    contents = wheel_files(app.read_bytes())
+    assert not any(name.startswith("uplink/") for name in contents)
+    assert {"player/__init__.py", "contracts/__init__.py"} <= contents.keys()
+
+
+def test_build_ships_uplink_for_a_revision_that_has_it(committed_repo, tmp_path):
+    """When `uplink` exists at the revision (the common case), the wheel still ships it."""
+    repo, revision = committed_repo
+    output = tmp_path / "artifact"
+    result = package.build(repo, revision, output, lambda _: iter([PAYLOAD]))
+    assert "uplink/__init__.py" in result["sources"]
+    app = next((output / "wheels").glob("photo_wall_player*.whl"))
+    assert any(name.startswith("uplink/") for name in wheel_files(app.read_bytes()))
 
 
 def test_failure_and_concurrent_build_never_publish_partial_output(committed_repo, tmp_path):

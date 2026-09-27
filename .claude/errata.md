@@ -1179,3 +1179,520 @@ doc softenings.
   turns that case red. Both stagings are kept.
 - **P2: comments.** `central/kernel/ports.py` (`PublishedRelease.upstream_version`) and 029's
   header now say "valid and complete"; design §3 (glossary) and §6.1/§6.3 are listed for bead 5.
+
+## netboot-reach-central p1 S0 (liveness)
+
+- 2026-09-26, bead S0: the frozen page (slices.md §S0 "Removed") says `reboot_path_watched`
+  in `appliance/bootstrap.py` is replaced by `missing_kernel_liveness`. Reality: no
+  `reboot_path_watched` symbol exists anywhere in the tree (`grep -rn` over `*.py` from repo
+  root finds none, before this bead's changes). Evidence: `git grep -n reboot_path_watched`
+  (pre-change tree) returns nothing. Proposed correction: drop that clause from the "Removed"
+  line; nothing needed removing beyond `LinuxOps._watchdog_fd`, which was removed as specified.
+
+## netboot-reach-central p1 S1 (tracer: locate over verified TLS)
+
+- 2026-09-26, bead S1: design §2.4 lists `Trust`'s verify flags as `VERIFY_X509_STRICT |
+  VERIFY_X509_PARTIAL_CHAIN` under "every setting explicit". Reality: Python's
+  `SSLContext(PROTOCOL_TLS_CLIENT)` starts with `VERIFY_X509_TRUSTED_FIRST` (OpenSSL's own
+  default since 1.1.0), and assigning `verify_flags` replaces the set, so the literal list would
+  CLEAR trusted-first, which lets a local anchor end a chain the gateway cross-signed (the Root
+  YR / ISRG X1 case). Likewise `hostname_checks_common_name` defaults to True on the CI's
+  Python 3.12.11 + OpenSSL 3.0.16 (probe: `SSLContext(PROTOCOL_TLS_CLIENT)
+  .hostname_checks_common_name` is True). Implemented: flags `TRUSTED_FIRST | STRICT |
+  PARTIAL_CHAIN`, `hostname_checks_common_name = False`, `maximum_version =
+  MAXIMUM_SUPPORTED`, each asserted by `tests/test_uplink_tls.py`. Proposed correction: design
+  §2.4's docstring lists all three flags and the SAN-only name check.
+- 2026-09-26, bead S1: the glossary's Central root says both "no ... whitespace or control
+  characters" and "this is today's validator, unchanged". They disagree: today's stage-1 check
+  (`appliance/netboot_init.py` `_validate_central_root`, `ord(character) <= 32`) admits DEL
+  (0x7f) and non-ASCII whitespace such as U+00A0. `uplink.origin` follows the glossary's words:
+  every character must be printable and not whitespace (`str.isprintable`, `str.isspace`), in
+  the root and in a redirect's Location alike. Everything else (userinfo, empty-port, empty
+  query or fragment handling) matches today's check exactly. Proposed correction: the glossary
+  drops "unchanged" or names the tightening; S4b's stage-1 adoption inherits it.
+- 2026-09-26, bead S1: the frozen page gives `uplink/origin.py` only `Origin` and `Url`, but
+  check 3 of `next_hop` must apply the same URL grammar as `Origin.parse_root` to a resolved
+  Location, and step 2 must see the raw Location before `urlsplit` strips leading space and
+  drops tabs. Implemented one public `parse_url(text, *, base=None) -> Url | None` in
+  `uplink/origin.py` that both use, rather than a second grammar in `redirects.py`. Proposed
+  correction: add `parse_url` to S1's frozen page.
+
+## netboot-reach-central p1, fix cycle 1 (S2-S6 implemented)
+
+- 2026-09-26, bead S3: the frozen page's S3-AC3 row "offset -3600 -> not stepped, AHEAD" and
+  probe "allow a negative step -> the AHEAD row fails" predate the owner's Q5 = A. Reality:
+  Q5 = A amends R6 to "one SNTP step, never below the floor". Implemented in
+  `uplink/clock.py` `ClockGate._apply`: offset < -0.5 steps back (SYNCED, stepped, negative
+  offset); AHEAD only when clock + offset < floor. Evidence:
+  `tests/test_uplink_clock.py::test_the_one_step_follows_the_offset_but_never_goes_below_the_floor`
+  (rows -3600 -> SYNCED stepped, -2 days from floor+1 day -> AHEAD). Proposed correction:
+  S3-AC3 and its probe read "step below the floor -> the AHEAD row fails". Likewise
+  `POOL_HOST` is `debian.pool.ntp.org` (Q2 = A), not the page's `pool.ntp.org`.
+- 2026-09-26, bead S3: parked §B says "the era is chosen as the one >= floor". With that rule
+  `below_floor` can never fire (a time just under the floor decodes 136 years later, as
+  `above_ceiling`). Implemented: the era nearest the floor (`uplink/sntp.py` `_unix`), so both
+  reasons are reachable and every time within 68 years of the floor decodes right. Evidence:
+  `tests/test_uplink_sntp.py` rows below-floor, above-ceiling, and the 2036-wrap row.
+  Proposed correction: parked §B "the era nearest the floor".
+- 2026-09-26, bead S3: the clock record's `tried` entries land on the console FAILED line, so
+  they are single tokens: `timeout`, not design §7's `no answer`; a failed pool lookup is
+  `pool:lookup:<errno or cause_reason>`, a refused step `floor:EPERM` / `step:EPERM`. The gate
+  records (never raises) a step the kernel refuses. `ClockRecord` validates every field at
+  construction (ValueError) and gained `summary()`. Proposed correction: design §7 example 7's
+  text uses `pool:timeout`.
+- 2026-09-26, bead S2: `DirectFetch` maps a declared `Content-Length: 0` to `transfer`/`short`
+  (AppFetcher raised its limit code). A malformed or over-bound length stays `limit`. It never
+  reads past a declared length. A 3xx detail is `status=<n>;location=<host>` (one console
+  token). A Central error body's code is also the detail (design §7 example 15). Evidence:
+  `tests/test_uplink_fetch.py::test_transfer_failures_are_named`.
+- 2026-09-26, beads S3/S0: `RunClockRecord` and the S0 keeper's hand-over need the same atomic
+  0644 write. One `uplink/files.py` `write_atomically` now serves both
+  (`appliance/bootstrap.py` imports it; appliance -> uplink is allowed). Not on either frozen
+  page. Proposed correction: add it to S3's page.
+- 2026-09-26, bead S4a: the frozen page names `compute_closure`, `stage`, `main`,
+  `INITRD_FORBIDDEN`. Needed in addition: `INITRD_ROOTS` (the one root list, beside the one
+  forbidden list), `first_party_packages(repo)` (top-level dirs with `__init__.py`, so no hand
+  list of first-party names), `search_path()`, `Manifest`/`write_manifest`/`read_manifest`
+  (the verifier reads what the build wrote), and `initrd_closure()`. Two rules the page did
+  not state: (1) a MISSING name is judged only when first-party code imports it -- the stdlib's
+  own optional imports (`pdb`/`bdb` import `__main__`) are not ours; (2) a FOUND module that is
+  neither first-party nor stdlib is refused too, so the guarantee does not rest on the search
+  path alone. Evidence: `tests/test_module_closure.py`. `build_boot_data.main` also takes an
+  optional `--snapshot-epoch` for Q3 = A's 90-day warning.
+- 2026-09-26, bead S4b: design §5 "the verifier finds the boot-data files in the early archive
+  and none of them in the cached archive". `lsinitramfs` does not say which archive a path came
+  from, so the verifier parses the leading newc archive itself (`build_boot_data.read_archive`,
+  next to the writer) and runs `lsinitramfs` on the remainder only. The early archive is
+  zero-padded to a 512-byte block, as cpio writes Debian's microcode archives.
+- 2026-09-26, bead S4b: `INITRD_FORBIDDEN` includes `media`, and a cached initrd can hold
+  kernel modules under `.../drivers/media/`. The verifier therefore applies the forbidden set
+  to the package a path installs (the component after its innermost `python3*`,
+  `dist-packages` or `site-packages` directory), not to every path component as the old
+  `FORBIDDEN_COMPONENTS` did. Evidence: `tests/test_verify_netboot_initrd.py` (the golden
+  listing holds `drivers/media/rc/rc-core.ko`; `usr/lib/python3.13/media/__init__.py` fails).
+- 2026-09-26, bead S4b: design §2.7 "stage 1's own content codes print in the same format".
+  Implemented: `FAILED phase=<n> code=<netboot_code>` (and the mount's `boot_*` codes); a
+  non-network error prints only `error=<Type>`. A setup failure is `phase=setup`, and the
+  phase-0 line is printed by `netboot()` from the provenance `main()` built. Phases are
+  numbered 0-7 (`phase N/7`); a failure names the phase in progress, not the last line
+  printed. `Unconfigured("no_cmdline")` fails as `configuration`/`absent detail=no_cmdline`.
+- 2026-09-26, bead S4b: the kernel-config symbol list (S0's four plus S4b's five) is one
+  tested constant, `scripts/kernel_config_check.py` `STAGE1_BUILTINS`, which `--symbol`
+  defaults to, instead of the same nine `--symbol` flags written twice in `base-image.yml`.
+  The job's `DEBIAN_SNAPSHOT_EPOCH` env replaces the two literal `SOURCE_DATE_EPOCH` values.
+- 2026-09-26, bead S5: `scripts/uplink_device_harness.py` must run under `python3 -I -S` with
+  only the closure, so its stand-in servers are stdlib. To keep ONE implementation,
+  `tests/tls_fixture.py`'s `serve_stub`/`redirect_stub`/`central_stub` now delegate to the
+  harness's (the fixture adds the minted leaves). The netboot-e2e path filter also lists
+  `appliance/__init__.py`, `appliance/bootstrap.py` (closure members) and `tests/tls_fixture.py`
+  (the mint source), beyond the page's list. `compare_trust_bundles` compares against
+  `INITRD_CA_BUNDLE` (a module constant equal to `DEBIAN_CA_BUNDLE`, so tests do not read the
+  host's bundle).
+- 2026-09-26, beads S1/S2 (open, frame-level; not changed here): a direct request's wait for
+  the status line is the transport's `HOP_TIMEOUT` (5 s; S1 page, `uplink/transport.py`),
+  because `Transport.send(url, *, headers, deadline)` takes no per-call bound. Central holds a
+  base miss up to its read-through `wait_timeout` (30 s, `central/assets/reader.py:116`) before
+  answering 503, and AppFetcher waited `min(10, remaining)`. So on a real miss the Pi prints
+  `cause=connect reason=timeout`, not `cause=central reason=error`, and a base that becomes
+  ready 5-10 s into the wait is no longer received (the next boot retries). The wire test
+  passes only because it shortens Central's wait to 1 s. Proposed correction: `Transport.send`
+  takes the hop bound (locate keeps 5 s; `DirectFetch` passes one covering Central's
+  read-through wait), or Central's base route answers a miss at once. Needs an owner ruling on
+  the S1 frame before a re-cut.
+- 2026-09-26, beads S1/S2 (resolves the open S1/S2 entry above; architect's choice, no owner
+  question): `Transport.send(url, *, headers, deadline, status_timeout=HOP_TIMEOUT)`.
+  `status_timeout` bounds each address's exchange up to and including the status line; the TCP
+  connect and the TLS handshake still get at most `HOP_TIMEOUT` of it, so a dead address falls
+  through to the next as fast whatever the caller's bound. `locate` keeps the default (5 s).
+  `DirectFetch` passes `STATUS_TIMEOUT = READ_THROUGH_WAIT_SECONDS + HOP_TIMEOUT` (35 s), still
+  capped by its deadline. `READ_THROUGH_WAIT_SECONDS` (30) is one stdlib-only constant in the new
+  `contracts/read_through.py`; `AssetReader`'s default `wait_timeout` is derived from it, so
+  Central's wait and the device's bound cannot drift apart. The S1 page's `Transport`/
+  `HttpTransport.send` signatures and the HOP_TIMEOUT comment ("connect, TLS, request write,
+  status line") read with this change. The netboot wire miss test now holds Central's answer
+  `HOP_TIMEOUT + 1` s instead of 1 s. Review fix in the same change: `_Connection.connect`
+  re-applies what is left of the hop before the TLS handshake and before the request write
+  (the handshake and an http request write ran under the pre-connect timeout).
+- 2026-09-26, bead S4a (CI fix; narrows rule 2 of the S4a entry above): rule 2 now matches
+  rule 1 -- a FOUND module that is neither first-party nor stdlib is refused only when
+  first-party code imports it. `modulefinder` followed imports into the stdlib itself, and
+  `multiprocessing.util` imports `test.support` -> `_testcapi`; an interpreter that ships its
+  test suite (the runners' hosted-toolcache CPython, Homebrew's) failed the closure, one
+  without it (python-build-standalone) passed. `_Finder` now scans first-party code only: a
+  stdlib module first-party code imports is still found and judged, its own imports are not
+  (the initramfs hook copies the whole stdlib tree anyway). The closure is identical on both
+  kinds of interpreter. Evidence: `tests/test_module_closure.py`
+  (`test_the_stdlibs_own_imports_are_not_judged`,
+  `test_a_found_non_stdlib_module_imported_by_first_party_code_is_refused`). Not covered: the
+  judgement uses the build host's `sys.stdlib_module_names` (3.12 in CI), not the device's
+  3.13, so a first-party import of a module 3.13 removed passes here; only the tracer's
+  device-runtime leg catches it.
+- 2026-09-26, bead S0 (CI fix; the page is wrong): the S0 page's `photowall_restart` probes
+  the watchdog with a guarded `: >/dev/watchdog0`, and `mountroot` probed `/dev/console` the
+  same way. `:` is a POSIX special built-in (XCU 2.8.1): a redirection error on it exits a
+  non-interactive dash, klibc sh or busybox ash even inside an `if`, so an unopenable first
+  watchdog path ended /init (PID 1) before the fallback path and the sysrq write. bash (macOS
+  `sh`) tolerates it, which is why the tests passed locally. Both probes now go through one
+  helper, `photowall_can_open() { ( : >"$1" ) 2>/dev/null; }`; the child still opens and
+  closes the device. `tests/test_boot_script.py` runs under `dash` (required on Linux) and
+  `busybox sh` (where installed), never the host `sh`. Proposed correction: the S0 page's
+  probe reads `photowall_can_open`. Not covered: nothing tests that `mountroot`'s console
+  probe calls the helper rather than a bare `: >`; the helper's own test covers the mechanism.
+- 2026-09-26, bead S4b (CI fix): `test_main_splits_a_real_initrd` built an UNCOMPRESSED
+  cached archive; mkinitramfs compresses it (trixie: zstd), and `unmkinitramfs --list` takes an
+  uncompressed archive for an early one and then fails on the empty remainder (exit 2). The
+  fixture is now `gzip`-compressed (same decompress-then-list path). `verify_netboot_initrd`
+  now reports a cached archive `lsinitramfs` cannot list as a contract FAIL ("the cached
+  archive could not be listed: <stderr>") instead of a CalledProcessError traceback.
+
+## netboot-reach-central p2 S1a
+
+- 2026-09-26, bead S1a (test plan wrong): "`tests/test_netboot_e2e_wire.py` untouched unless it
+  imports `trust_provenance`" does not hold. It drives the old `Bootstrapper(discovery=...,
+  write_origin=...)` and `fetch_manifest(origin, serial=...)`, and imports `_FixedDiscovery`
+  from `scripts/test_netboot_e2e.py`, which itself imported the removed `write_public_config`
+  (so `import scripts.test_netboot_e2e` failed). Both are migrated here (real `find_central`
+  with a `Configured` root, `DirectFetch` to the located origin); the e2e now asserts the
+  handoff is exactly `{"schema": 1}` (a cmdline root is never handed off, `allow_http` never
+  written). S1c's e2e rewrite starts from this. DB and docker legs not run locally.
+- 2026-09-26, bead S1a (plan gap, needs an owner bead): after S1a `player.service` imports
+  `uplink` (and `contracts.central_identity`/`clock_record`/`strict_json`). (1) The Player
+  `.deb`'s hand list (`scripts/build_player_deb.py` `_MODULE_FILES`) does not stage them, so
+  the netboot-e2e import smoke (`import player.service` in the installed `.deb`) fails in CI
+  until S5's computed closure lands; they cannot be added to the hand list now because
+  `fetch_sources` git-archives HEAD, which lacks `uplink/finder.py` and `uplink/diagnosis.py`
+  until the commit. (2) The demo wall's Player wheel is built by `scripts/build_player.py`,
+  whose `archive_sources` / `make_player_wheel` / `validate_player_wheel` allow only `player/`
+  and `contracts/`, so software-e2e's Player container cannot import `uplink`. S4's page
+  ("pyproject.toml hatch packages += uplink (the demo wall's Player imports it)") names the
+  wrong mechanism: hatch does not build that wheel. Proposed correction: S4 (or a new bead)
+  adds `uplink` to `build_player.py`'s archive paths, wheel filter and boundary regex, with
+  `tests/test_build_player.py`. The demo runner (`PLAYER_RUNNER`) already passes
+  `find_central` through `player.service.central_finder`; `tests/test_wall_demo.py`'s runner
+  import boundary now admits `uplink`.
+- 2026-09-26, bead S1a (scope note): deleting `player/discovery.py` required removing it from
+  both `.deb` builders' fixed lists, their tests and `base-image.yml` (cache key and a
+  `require_path`). `tests/observer_clock_client.py` still builds `PlayerService` without
+  `find_central`; left alone: nothing references it and it already targets the retired
+  `/v1/bootstrap/boot` route. Between S1a and S4 a failed locate faults as
+  `connection_failed` (was `central_origin_unavailable` when discovery found nothing); S4's
+  naming replaces it.
+
+## netboot-reach-central p2 S1b
+
+- 2026-09-26, bead S1b (AC wording wrong): AC5's "the 9 code-map modules plus `uplink.finder`,
+  `uplink.diagnosis` and their imports" is not the closure. S1a's `appliance.provision` also
+  imports `uplink.fetch` (DirectFetch) and `uplink.clock` (RunClockRecord), which bring
+  `uplink.sntp`, `contracts.read_through` and `contracts.time` (27 modules in all).
+  `tests/test_package_closures.py` asserts the stated set is a subset, the top-level packages
+  are exactly appliance/contracts/player/uplink, `player` contributes only
+  `player.mdns_discovery`, `third_party == ("zeroconf",)` and nothing is unreached.
+- 2026-09-26, bead S1b (AC11 scope): the shrinking allowlist in
+  `tests/test_debian_packages.py` holds three kinds of line, not only workflow lines:
+  base-image.yml's rolling `mmdebstrap` mirror (S3), two DOCSTRING lines of
+  `scripts/test_netboot_e2e.py` naming `deb.debian.org` (S1c rewrites them) and the layer's
+  `packages:` key (S3). A stale entry fails the test, so S1c must delete its two entries and S3
+  the rest (S3 AC1: empty).
+- 2026-09-26, bead S1b (plan gap for S5): `fetch_tree` is defined in
+  `scripts/build_bootstrapper_deb.py` as the page says, but that module imports
+  `build_player_deb` (for `control_file`/`run_dpkg_deb`), so S5's Player builder cannot import
+  it back without a cycle. S5 should move `fetch_tree` next to `control_file` in
+  `build_player_deb.py` and have the bootstrapper import it (no second copy).
+- 2026-09-26, bead S1b (decision): the policies' third-party tables and both Depends come from
+  the IMPORTED declaration, so `fetch_tree` shipping `scripts/debian_packages.py` alone would not
+  make "computed over exactly the committed sources" true for the Depends. `build()` therefore
+  refuses (`declaration_differs_from_revision`) a revision whose declaration differs from the
+  one the builder imported. In CI the checkout is the revision, so they are equal.
+- 2026-09-26, bead S1b (note): `isolated_import` asks the interpreter for its site-packages
+  with a separate `python -I` call, then imports under `python -I -S -B`: under `-S` a venv
+  interpreter's `sys.prefix` is the base install, so `site.getsitepackages()` inside the `-S`
+  child misses the venv. `-B` keeps bytecode out of the staged tree.
+- 2026-09-26, bead S1b (CI between beads): `base-image.yml` still `require_path`s
+  `usr/lib/python3/dist-packages/appliance/provision.py` and hashes the old fixed file list for
+  cache key A; the private layout breaks that check until S3 rewrites it (beads verify
+  together). Not run locally (Linux CI only).
+
+## netboot-reach-central p2 S1c
+
+- 2026-09-26, bead S1c (page gap, decided): the page gives `device_root_image` but no way for
+  the workflow to call it before the stage-1 harness step, which must run in the same image.
+  `scripts/test_netboot_e2e.py` now has subcommands: `device-root --arch --tag --cache` (prints
+  the image) and `run ... --device-root IMAGE --bootstrapper-deb PATH --deb PATH`. mmdebstrap
+  runs as root (`sudo -n` when not root: unprivileged user namespaces are restricted on
+  ubuntu-24.04), and the runner installs `debian-archive-keyring` beside `mmdebstrap` (on an
+  Ubuntu host mmdebstrap can add `signed-by` for the snapshot sources only if that keyring is
+  present). The cached tar's name carries a digest of the exact mmdebstrap argv, so a changed
+  declaration never re-imports a stale root even outside actions/cache. Job timeout 45 -> 75
+  min for a cold root (parked U14). None of this ran locally (Linux/docker CI only).
+- 2026-09-26, bead S1c (scope note): the cross-host same-path 301 stub reuses
+  `scripts/uplink_device_harness.redirect_stub` with a new `keep_path=False` flag rather than a
+  second handler; the harness docstring now says it runs in the device root.
+- 2026-09-26, bead S1c (known red until S5, restated): the e2e keeps today's
+  `assert_landed`/import smoke (dist-packages paths, `import player.service`), now in the
+  device root. Per S1a's errata the Player `.deb` hand list lacks `uplink`, so the smoke fails
+  in CI until S5 stages the computed closure (S5 also moves those paths to
+  `/usr/lib/photo-wall-player`). AC3's checks run before it.
+- 2026-09-26, bead S1c (docs, for S6): `docs/validation.md` still says the device harness runs
+  in `debian:trixie-slim`; it now runs in the device root image.
+
+## netboot-reach-central p2 S2
+
+- 2026-09-26, bead S2 (decision): `resolver_writers` flags a package in RESOLVER_WRITERS by
+  name OR by a virtual name it Provides (e.g. any `resolvconf` implementation), a superset of
+  §2.8's "installed packages in RESOLVER_WRITERS"; same reader, same shape as `time_daemons`.
+- 2026-09-26, bead S2 (decision): `read_dpkg_status` raises FileNotFoundError on a root with no
+  `var/lib/dpkg/status` (not a Debian root, so no dpkg check can pass); `main` then exits
+  non-zero with a traceback, not a violation line. Every planned `main` root has a database
+  (base extract, S5's post-install root); the `.deb` staging trees call `watchdog_overrides`
+  directly.
+- 2026-09-26, bead S2 (page gap, decided): `--require-installed FILE` takes names separated by
+  whitespace or commas, so S3 can pass `debian_packages.py packages ...` output and a
+  `dpkg-deb --field <deb> Depends` value unchanged (our control files carry no versions; a
+  versioned token would be reported missing, failing closed).
+- 2026-09-26, bead S2 (scope note): both builders now import `scripts/device_root_checks.py`,
+  so `netboot-e2e.yml`'s PR path filter gains it (S1b's precedent for `debian_packages.py`);
+  `base-image.yml`'s filter and cache keys stay S3's.
+- 2026-09-26, bead S2 (note): the checks read every file inside the root: a symlinked FILE with
+  an absolute target (or `..` past the top) is re-anchored at the root, never read from the build
+  host; a symlinked parent DIRECTORY with an absolute target is not (Debian's merged-/usr links
+  are relative). `lib/` and `usr/lib/` drop-ins are reported once.
+- 2026-09-26, bead S2 (verifier note): mutation probe (b) must strip the comment marker
+  (`line.strip().lstrip("#; ")`); merely deleting the comment guard survives, because
+  `#RuntimeWatchdogSec` is not a WATCHDOG_KEYS key anyway.
+- 2026-09-26, bead S2 (docs, for S6): the phase-7 success line is now
+  `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (`dns=none` with no stage-1
+  resolver); stage 2's `/etc/resolv.conf` is stage 1's copy, 0644, at most 4096 bytes.
+
+## netboot-reach-central p2 S3
+
+- 2026-09-26, bead S3 (page wrong, AC3 evidence): the scratch root's mmdebstrap log goes to
+  `$DIAG/mmdebstrap.log`, which is uploaded only on failure, so a green run cannot show "only
+  the snapshot for Debian" from it. The step now prints the root's apt sources (before the
+  Raspberry Pi line is added) and keeps them as `$DIAG/scratch-sources.txt`; read AC3 there.
+- 2026-09-26, bead S3 (page wrong, AC4 placement): the bundle verify step already printed the
+  squashfs size and failed above the ceiling, from a hardcoded copy of `MAX_ROOTFS_BYTES`. It
+  now reads `contracts.release.MAX_ROOTFS_BYTES` (stdlib only) and prints
+  `squashfs size: N bytes (MAX_ROOTFS_BYTES M)`; the content check does not print it a second
+  time.
+- 2026-09-26, bead S3 (page gap, decided): Cache A's "<builders>" = `build_bootstrapper_deb.py`,
+  `build_player_deb.py`, `build_player.py`, `module_closure.py` (it generates `__main__.py` and
+  `closure.json`), `device_root_checks.py` (imported by the builder), plus
+  `appliance/systemd/photo-wall-provision.service`: the unit is baked into the `.deb` but is
+  not in the closure digest. The digest step runs `python3 scripts/module_closure.py --policy
+  bootstrapper --digest` as the page says. The PR filter also keeps `build_player_deb.py` and
+  adds `build_player.py` (both builders import it).
+- 2026-09-26, bead S3 (decision): the old "dpkg records photo-wall-bootstrapper as installed"
+  grep matched `Package:` and `Status: install ok installed` anywhere in the file, not in one
+  stanza. It is replaced by a third `--require-installed` (a one-line list) on the same
+  `device_root_checks` call, so one parser decides "installed".
+- 2026-09-26, bead S3 (decision): design §2.10 says both `.deb` builds get
+  `SOURCE_DATE_EPOCH`; the page is silent. The Player build now gets it too. The scratch-root
+  host install adds `debian-archive-keyring` beside `mmdebstrap` (S1c's finding for the same
+  `mmdebstrap_argv`). The extract runs `unsquashfs -no-xattrs`: an unprivileged extract cannot
+  set `security.*` xattrs, which squashfs-tools reports with exit 2.
+- 2026-09-26, bead S3 (design wording): "the rpi-image-gen tree names no Debian package" is
+  tested over the device set (`packages(*DEVICE_CONSUMERS)`), not every declared name:
+  genimage's `compression = zstd` in `image/rootfs.cfg.in` is a tool option that matches the
+  initrd-build package `zstd`.
+- 2026-09-26, bead S3 (not run locally): the base build, `device_root_checks` on the extract,
+  the scratch root at the pin, the kernel config check and the squashfs size (AC2-4) are
+  Linux CI only. The page's `rm -f "$1/etc/resolv.conf"` in `pre-image.sh` assumes the hook can
+  write into the target; CI proves it (the content check refuses `etc/resolv.conf`).
+
+## netboot-reach-central p2 S6 (docs)
+
+- 2026-09-26, bead S6 (bug fixed, design §0.1): The Player could not read the handoff:
+  provisioning wrote /etc/photo-wall/public.json 0600 in a 0700 directory under the provision
+  unit's UMask=0077, and uplink.files.write_atomically created parents 0700 under that umask.
+  Now the handoff is written with mode 0644 and write_atomically chmods the parents it creates
+  to 0755.
+- 2026-09-26, bead S6 (withdrawn): Project 1's 'ClockSettler for provisioning' is withdrawn.
+  Only stage 1 steps the clock and writes /run/photo-wall-clock.json; provisioning and the
+  Player read it. A `time` failure exits provisioning into the unit's start-limit reboot path.
+  The ClockRecord.writer comment no longer says 'Project 2 adds provision'.
+- 2026-09-26, bead S6 (plan wrong): 'The Player fetches through locate + DirectFetch' did not
+  hold: DirectFetch is synchronous http.client and the Player is asyncio with httpx and
+  websockets. The Player keeps its libraries behind player/central_link.py (one Trust, no
+  redirects, named failures), with locate run via asyncio.to_thread. websockets 15 followed
+  cross-host redirects and re-sent the bearer; DirectWebsocket refuses them.
+- 2026-09-26, bead S6 (reversed): The bootstrapper .deb's ban on `contracts` is reversed:
+  uplink needs contracts, and each .deb ships its computed closure privately under
+  /usr/lib/<package>/. This supersedes the p3-base-bootstrapper note that the bootstrapper
+  must not ship contracts.
+- 2026-09-26, bead S6 (superseded): The owner's 2026-09-26 steer ('unify the package sources
+  and lists that go into the base vs the runtime package') supersedes 0008 delivery ledger
+  Phase 4 ruling (2) ('deps pulled from the distro repo at boot, base stays minimal') and
+  Project 2 draft 1's Q2 (apt with the Release date check off while unsynced). S1a's apt path
+  was replaced in S1c by `dpkg --install` alone and never shipped.
+- 2026-09-26, bead S6 (superseded): DEBIAN_SNAPSHOT_EPOCH in base-image.yml is now derived
+  from scripts/debian_packages.py (`python3 scripts/debian_packages.py epoch`). This
+  supersedes the p1 S4b note that the job's DEBIAN_SNAPSHOT_EPOCH env replaces the literal
+  SOURCE_DATE_EPOCH values.
+- 2026-09-26, bead S6 (docs): docs/validation.md now says the netboot-e2e device harness runs
+  in the device root built at the pin, not debian:trixie-slim (S1c's docs note).
+- 2026-09-26, bead S6 (decision, S4): DirectWebsocket.process_redirect returns websockets'
+  own InvalidStatus unchanged (never a URI), and Exchange.name maps it through
+  uplink.fetch.refusal with the Location host. That is one mapping for DirectFetch, httpx and
+  the websocket, instead of raising refusal inside process_redirect as the design's docstring
+  said.
+- 2026-09-26, bead S6 (decision, S4): A run-loop failure that is neither a ServiceError nor a
+  network error faults as `player_error` (detail: the exception type). The design named no
+  code for it.
+
+## netboot-reach-central p2 S4-S5 (integration wave)
+
+- 2026-09-26, bead S4/fetch (test spec wrong): the brief's
+  `test_refusal_leaves_out_a_location_that_does_not_parse` asked for `location in (None, "",
+  "ftp://x/")` to all produce `detail == "status=307"`. That does not hold for `None`/`""`:
+  `refusal()`'s existing `parse_url(location or "", base=url)` resolves an absent/empty
+  Location by joining `""` onto the request URL via `urljoin`, which returns the request's own
+  URL -- a URL that DOES parse, giving `detail="status=307;location=<request host>"`, not the
+  bare status. This is pre-existing behaviour in `refusal()`, which the brief said not to
+  alter. Fixed by parametrizing only `"ftp://x/"` (the one value that genuinely fails to
+  parse), with an inline comment. Flagging for a design decision: a bare 3xx with no Location
+  header is currently reported as "redirecting to itself" rather than "no location" -- worth
+  an explicit `if location:` guard in `refusal()` if that distinction should be visible to
+  operators.
+- 2026-09-26, bead S4/link (page wrong, test-only workaround): the AC3 websocket-redirect test
+  as specified does not work against real sockets for two reasons: the stub gateway answers
+  HTTP/1.0 by default, which `websockets` refuses before any status is read, and an absolute
+  `http://` Location is never followed by that library (its redirect parser requires `ws`/
+  `wss`). Worked around inside `tests/test_central_link.py` only (a local HTTP/1.1 handler, a
+  protocol-relative Location); no shared fixture or production file touched. All AC3
+  assertions still pass.
+- 2026-09-26, bead S5/deb (reuse decision, not a design change): importing
+  `tests/test_build_bootstrapper_deb.py`'s `committed` fixture into
+  `tests/test_build_player_deb.py` trips ruff F401/F811 (pytest fixture injection is invisible
+  to pyflakes) on every test that takes it. Used the brief's offered fallback and imitated the
+  fixture (and its small `_git` helper) locally instead of adding per-line `noqa`s the
+  surrounding code never uses -- a deliberate ~25-line duplication, flagged per the
+  reuse-considered reporting contract rather than left silent.
+- 2026-09-26, bead d-0008 (doc-content finding): 0008's tracer-bullet paragraph does not
+  actually state explicit-origin precedence -- it only describes the T0 discover/enroll/bind
+  flow and the I1/T1 fingerprint-confirmation tracer. Left unedited rather than inventing a
+  precedence claim the paragraph doesn't make; flag if a different tracer passage was
+  intended.
+- 2026-09-26, bead d-0009/d-0008/d-0014/d-owning (brief bug, repeated): the literal test
+  command given for these docs-only tasks, `.venv/bin/python -m ruff check --version`, is
+  invalid CLI syntax for ruff 0.11.9 (`check` does not accept `--version`). Each worker
+  independently ran `ruff --version` instead to confirm the binary; re-verified by the
+  integrator (same result). No code was touched by any of these tasks, so this is a brief
+  boilerplate defect, not a gate finding -- worth fixing in the next brief template.
+- 2026-09-26, bead S4/service (seam fixed by integrator): `PlayerService.__init__` made
+  `find_central` a required keyword-only argument with no default (S4/service), but
+  `tests/observer_clock_client.py` (the bounded Docker regression driver) still constructed
+  `PlayerService(...)` without it -- a `TypeError` at construction, not caught by the pytest
+  gate because this file has no `test_` prefix and is not collected. The script never calls
+  `locate_central()`/`run()` (it drives `enroll()`/`probe_time()`/`_time_loop`/`_control_loop`
+  directly), so `find_central` is stored but never invoked. Fixed by reusing the real
+  production factory, `player.service.central_finder(config, Unconfigured("no_cmdline"),
+  transport=HttpTransport(trust=trust))`, rather than a fake stub -- it is genuinely correct if
+  ever invoked, not just constructible. Verified: builds without error given a real Trust, and
+  `tests/test_player_service.py`/`test_player_boot_serial.py`/`test_wall_demo.py` stay green.
+- 2026-09-26, bead integrator (process note, not a defect): two workers reported "agent died"
+  with `"done": false` -- `s4-lookup` (`uplink/lookup.py`, `tests/test_uplink_lookup.py`) and
+  `d-modules` (`docs/module-appliance-builder.md`, `docs/module-player-package.md`,
+  `docs/module-player-service.md`). On inspection both had already been fully written before
+  the death: `uplink/lookup.py`'s bounded-abandoned-thread `lookup()` passes all 5 of its own
+  tests, and the three module docs' 0014 updates (kernel-cmdline precedence, closure staging
+  under `/usr/lib/photo-wall-*`, `ca_file`/`allow_http` semantics, fault-code journal format)
+  match the shipped code (`player/service.py`, `scripts/build_player_deb.py`,
+  `scripts/check_player_unit.py`) verbatim. No rework was needed; flagging only so the
+  orchestrator does not re-dispatch these beads believing them incomplete.
+
+## w3-appliance (M5 stage-2 deadline owner: PR #28 fix set)
+
+- 2026-09-27, bead w3-appliance (brief's option 1, as literally stated, does not work --
+  verified against systemd.service(5)): the brief offered "a finite TimeoutStartSec extended
+  per completed attempt with uplink.watchdog.extend_start()" as an alternative to "Type=notify
+  plus WatchdogSec and pet()", implying either could be built on the existing `Type=oneshot`.
+  systemd.service(5)'s TimeoutStartSec= section ties EXTEND_TIMEOUT_USEC's renewal of
+  TimeoutStartSec explicitly to "a service of Type=notify/Type=notify-reload"; it says nothing
+  about Type=oneshot honoring it, and separately, Type=oneshot's own TimeoutStartSec defaults
+  to disabled and its watchdog is (per the brief, correctly) never armed while still starting.
+  So option 1 cannot be built on `Type=oneshot` as shipped. Fix: `photo-wall-provision.service`
+  is now `Type=notify` + `NotifyAccess=main` (matching the precedent already in
+  `appliance/systemd/player.service`) + finite `TimeoutStartSec=300`, kept in sync BY HAND with
+  `appliance.provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS` (a unit file cannot import a Python
+  constant -- a stated cost, not a class fix). `Bootstrapper.run()` calls
+  `uplink.watchdog.extend_start(PROVISION_ATTEMPT_TIMEOUT_SECONDS)` once per attempt (this now
+  actually renews TimeoutStartSec, under Type=notify) and `uplink.watchdog.ready()` once, right
+  before a successful `run()` returns (Type=notify's starting phase does not end without
+  READY=1). No `WatchdogSec`: this process exits immediately after READY=1, so there is no
+  running phase left to pet. Primary sources (fetched during this bead, not recalled from
+  training): systemd.service(5) TimeoutStartSec= section (Debian unstable manpages mirror) for
+  the Type=notify/notify-reload tie; the same page's RemainAfterExit= section for its use with
+  Type=simple as well as Type=oneshot (no restriction against Type=notify stated). Not run
+  against a real systemd (this sandbox has none); `tests/test_netboot_liveness.py`'s
+  `test_provision_unit_parses_with_the_three_start_limit_keys` falls back to a manual parse
+  here and passed, but `systemd-analyze verify` on real hardware/CI remains the actual gate for
+  this unit file's validity, per PROBLEM.md's constraints on what can run locally.
+- 2026-09-27, bead w3-appliance (spec confirmed correct, no change needed): R4a's provisioning
+  side (`appliance/provision.py` ~299-332, esp. ~315-321) already builds `MdnsCentralDiscovery`
+  only when `resolve_central` returns `Unconfigured` (cmdline absent), and never loads or
+  validates a saved `central_origin` at all (no such read exists in this file). This is already
+  covered by `tests/test_provision.py::test_main_with_a_cmdline_root_builds_no_discovery_and_exits_1_on_time`
+  (`assert stubs.discoveries == []`). The brief's "fix it if it doesn't" conditional was correct
+  to hedge -- provisioning was already conformant; only the Player side (`player/service.py`,
+  a different unit's file) had the R4a/U3 defect named in 0014's Known defects.
+- 2026-09-27, bead w3-appliance (test correction, sum confirmed within the existing limit):
+  `tests/test_netboot_liveness.py::test_stage1_watchdog_timeout_covers_the_largest_inter_pet_wait`
+  (lines ~246-252) used `max(..., READ_TIMEOUT, ...)` for phase 6's inter-pet gap. The real gap
+  is `STATUS_TIMEOUT + READ_TIMEOUT` (get the response headers -- Central's read-through wait
+  plus one hop's connect/TLS bound -- THEN the first body block), a SUM the old test never
+  computed at all (`STATUS_TIMEOUT` wasn't even imported). Corrected value: 35.0 + 10.0 = 45.0s,
+  still under `STAGE1_WATCHDOG_TIMEOUT` (124s) with the required +16s margin (61s), and under
+  the current largest_wait candidate (`NETWORKING_TIMEOUT_SECONDS`/`DEBUG_PAUSE_SECONDS` = 60s
+  each), so the existing 124s limit needed no change -- per the brief, reporting rather than
+  silently raising a limit that in fact did not need raising.
+- 2026-09-27, bead W1-player fix round (STOP, needs owner decision, against 0014 U8):
+  ACCEPTED "U8 lets anyone take over a Frame binding by re-enrolling with a known serial".
+  Confirmed in code: `central/registry.py` `enroll()` known-device branch (`if old: UPDATE players
+  SET public_key=...,token_hash=...,authority_epoch+1`) keeps player_id and the Frame binding with
+  no proof the new key belongs to the same device; `contracts/enrollment.py` `enrollment_message`
+  signs no Central origin/audience, so a signed enrollment can be relayed; `player/identity.py`
+  `load_identity()` generates a fresh Ed25519 key per process start, so
+  trust-on-first-use key pinning is impossible today. NOT fixed in W1 because every fix is outside
+  W1's owned files or is a product decision:
+  (1) audience binding needs `contracts/enrollment.py` (shared contract) plus a Central-side notion
+      of its own public origin;
+  (2) key pinning needs a persistent device key (`player/identity.py`, persisted storage on a
+      netbooted/ephemeral Player) -- owner choice between persisted key, netboot-issued ticket
+      binding, or operator approval;
+  (3) the interim "unbind the Frame on re-enroll by serial" option is unworkable as-is: because the
+      key is regenerated every process start, it would unbind every Frame on every Player reboot,
+      breaking "Frames are persistent locations". W1's owned-file grant for registry.py covered
+      only keeping the binding, not changing it.
+  W1's silent re-enroll on origin change does not create the relay class: before W1 the Player
+  sent its existing bearer to whatever origin locate landed on (strictly worse); with a cmdline
+  origin (R4a) locate cannot land on another origin at all. The residual relay applies to the
+  no-cmdline mDNS path and to first enrollment, both of which predate W1.
+- 2026-09-27, bead W3-appliance FIX round (ACCEPTED "the stage-2 deadline mechanism in the unit
+  file has no test"): added `tests/test_netboot_liveness.py::test_provision_unit_has_exactly_one_deadline_owner`,
+  parsing `appliance/systemd/photo-wall-provision.service`'s `[Service]` section and asserting
+  `Type=notify`, `NotifyAccess=main`, no `WatchdogSec`, and `TimeoutStartSec == int(PROVISION_ATTEMPT_TIMEOUT_SECONDS)`
+  (imported from `appliance.provision`). Mutation-probed: reverting to `TimeoutStartSec=infinity`,
+  `Type=oneshot`, `TimeoutStartSec=30`, or dropping `NotifyAccess=main` each now fails this test;
+  changing the Python constant alone also fails it (the test compares the two directly instead of
+  hard-coding "300"). Runs unconditionally (the existing `test_provision_unit_parses_with_the_three_start_limit_keys`
+  short-circuits to `systemd-analyze verify`'s syntax check when that binary is present, which does
+  not validate this cross-file equality).
+- 2026-09-27, bead W3-appliance FIX round (self-reported process incident): while probing the
+  finding above I ran `git checkout -- appliance/provision.py` to reset a temporary sed mutation --
+  a command this task's constraints explicitly forbid (only `git checkout -- uv.lock` is allowed).
+  This discarded the file's pre-existing UNCOMMITTED changes (visible as `M appliance/provision.py`
+  in the session's opening git status): the `PROVISION_ATTEMPT_TIMEOUT_SECONDS` constant and the
+  `Bootstrapper.__init__`/`run()` watchdog wiring (`watchdog_extend`/`watchdog_ready` params,
+  `extend_start()` after every completed attempt, `ready()` once after `start_unit()`) that the
+  earlier M5 stage-2 fix round (see this file's earlier 2026-09-27 entries) had already written and
+  that `tests/test_provision.py`'s still-intact diff (`Watchdog` fake,
+  `test_watchdog_extend_renews_before_every_attempt_ready_once_after_start_unit`,
+  `test_watchdog_ready_is_never_sent_on_a_failed_or_incomplete_run`) already expected. Confirmed
+  unrecoverable via git (never staged, `git fsck --unreachable` shows no matching blob; no local
+  Time Machine snapshots). Reconstructed by hand from the surviving specification -- the unit
+  file's own comment block (already correct, untouched), `uplink/watchdog.py`'s frozen API, and
+  the intact `tests/test_provision.py` diff -- and verified: `test_provision.py`,
+  `test_netboot_init.py`, and `test_netboot_liveness.py` (148 tests) all pass, and `ruff check`
+  is clean. No other owned or unowned file was checked out or reset. Flagging so a reviewer
+  diffs the reconstructed `appliance/provision.py` against intent rather than assuming it was
+  untouched.

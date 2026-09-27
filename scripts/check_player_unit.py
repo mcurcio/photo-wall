@@ -22,6 +22,7 @@ import stat
 import subprocess
 import threading
 import uuid
+from typing import Final
 
 WALL_NAME = "wall"
 WALL_UID = 10001
@@ -30,6 +31,7 @@ MAX_UNIT_BYTES = 128 * 1024
 MAX_COMMAND_SECONDS = 40
 MAX_START_SECONDS = 45
 MAX_SOURCE_TEXT = 128 * 1024
+EXEC_START: Final = "ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-player --config /etc/photo-wall/public.json"
 
 
 class PreflightError(Exception):
@@ -240,6 +242,9 @@ def _source_text(source: pathlib.Path) -> str:
     )
     if any(line not in text.splitlines() for line in required):
         raise PreflightError("unit_sandbox_missing")
+    exec_start_lines = [line for line in text.splitlines() if line.startswith("ExecStart=")]
+    if exec_start_lines != [EXEC_START]:
+        raise PreflightError("unit_exec_start")
     return text
 
 
@@ -252,6 +257,7 @@ def render_unit(source_text: str, unit_name: str, probe_path: str) -> str:
     text = source_text.rstrip("\n")
     return (text + "\n\n[Unit]\nWants=\nAfter=\n"
             "\n[Service]\nType=oneshot\nRemainAfterExit=yes\nRestart=no\nTimeoutStartSec=30s\n"
+            "WatchdogSec=0\n"
             "ExecStart=\nExecStart=/usr/bin/python3 " + probe_path + "\n")
 
 

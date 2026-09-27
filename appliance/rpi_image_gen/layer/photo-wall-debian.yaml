@@ -1,0 +1,41 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-debian
+# X-Env-Layer-Category: distribution
+# X-Env-Layer-Desc: Debian trixie arm64 minbase built from the Debian
+#  declaration's pinned snapshot sources, and keeping them. The sources are
+#  not written here: .github/workflows/base-image.yml renders them
+#  (`python3 scripts/debian_packages.py sources`, one signed-by line per
+#  source) into the file `IGconf_app_debian_sources` names, and mmdebstrap
+#  copies that file into the image's /etc/apt/sources.list.d. This replaces
+#  rpi-image-gen's debian-trixie-arm64-minbase-snapshot layer, whose snapgen
+#  generator reads SOURCE_DATE_EPOCH from an environment rpi-image-gen
+#  clears (`env -i` around its layer pipeline, rpi-image-gen:218 at
+#  262d4df), so it built from the snapshot of the build's own time, not the
+#  pin. rpi-image-gen's bdebstrap expands variables in `mirrors` only (its
+#  patch 003-mmdebstrap-expand-environment-variables-in-mirror-pa), which is
+#  how the path below reaches mmdebstrap. base-image.yml checks the built
+#  image's sources are exactly the pin (scripts/device_root_checks.py
+#  --pinned-sources).
+# X-Env-Layer-Version: 1.0.0
+#
+# X-Env-VarPrefix: app
+#
+# X-Env-Var-debian_sources:
+# X-Env-Var-debian_sources-Desc: Absolute host path to the base's apt
+#  sources in one-line form, ending in .list, rendered by
+#  .github/workflows/base-image.yml from scripts/debian_packages.py before
+#  this build runs.
+# X-Env-Var-debian_sources-Required: y
+# X-Env-Var-debian_sources-Valid: file
+# X-Env-Var-debian_sources-Set: y
+# METAEND
+---
+mmdebstrap:
+  architectures:
+    - arm64
+  mode: auto
+  variant: minbase
+  # The declaration's PIN.suite (a test checks they agree).
+  suite: trixie
+  mirrors:
+    - ${IGconf_app_debian_sources}

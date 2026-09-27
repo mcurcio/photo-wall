@@ -9,9 +9,17 @@
 # (mirrors examples/nested_image/image/embedded_squashfs/pre-image.sh's
 # templating pattern, minus its hdimage/vfat/ext4 partitioning -- we emit a
 # single flat squashfs image block instead).
+#
+# It also removes the build host's etc/resolv.conf from the rootfs (this hook
+# runs after mmdebstrap's own cleanup): stage 1 writes stage 2's resolver
+# into the new root at boot (appliance/netboot_init.py hand_over_resolver),
+# and base-image.yml refuses an image that carries one.
 set -eu
 
+target=$1
 outputdir=$2
+
+rm -f "${target}/etc/resolv.conf"
 
 sed \
    -e "s|<IMAGE_NAME>|$IGconf_image_name|g" \
