@@ -49,16 +49,28 @@ The 2026-09-27 rows come from the owner's answers (U1-U8) to an adversarial revi
 and live in [requirements](../requirements.md#failure-visibility-and-recovery). U5 is
 [deferred](#deferred). The owner has not ruled on the case where the cmdline names no Central.
 
-Known defects against these rules, to be fixed in PR #28 (this revision changes no code):
+Known defects against these rules, fixed in PR #28:
 
-- **R1 (U3).** The Player loads and validates the saved `central_origin` even when the cmdline
-  names Central, and logs it as ignored (`PlayerConfig` and `central_finder` in
-  `player/service.py`). A malformed saved value stops the Player before it reads the cmdline.
-- **U7.** When the configured root is http, stage 1 prints
-  `note: … set photowall.central=<located origin>/` (`appliance/netboot_init.py`, phase 5). The
-  [runbook](../runbook.md)'s cmdline step repeats that advice.
-- **U8.** The Player keeps its registration across a new locate, so a newly located origin
-  receives the old bearer before it answers 401 and the Player re-enrolls.
+- **R1 (U3), fixed.** `PlayerConfig` no longer validates the saved `central_origin` at load;
+  `saved_root()` validates it, and is called only when the cmdline names no Central.
+  `central_finder` never parses the saved value when the cmdline is configured, and a pre-GTK
+  `build_finder(config, *, transport, cmdline_path=None)` (`player/service.py`) makes the
+  cmdline-first order testable at construction time. `appliance/provision.py` already read the
+  cmdline first and needed no change.
+- **U7, fixed.** Stage 1 no longer prints a value to pin. `appliance/netboot_init.py`'s phase 5
+  logs a fixed, value-free `note: configured root is http: the first hop is unauthenticated`
+  instead of a `set photowall.central=…` suggestion, and the runbook's cmdline step no longer
+  repeats that advice.
+- **U8, fixed.** `player/central_link.py` now has a `Session(central)` value that is the only
+  source of authenticated headers; a registration joins a session only through
+  `.enrolled()`, and `.relocated(new)` keeps it only when the new origin's scheme, host and port
+  match the one that issued it — any other origin forces a silent re-enroll rather than reusing
+  the old bearer. `central/registry.py`'s re-enroll path was checked against this: a known
+  serial's re-enroll only bumps `authority_epoch` and never touches `bindings`, so the Frame
+  binding is kept, matching the "returning equipment" requirement; no Central-side change was
+  needed. The audience-binding and device-key-pinning gap that would stop the same bearer being
+  relayed to a *different* Central is a separate, unresolved concern — recorded as a STOP errata
+  entry against this decision, not fixed here.
 
 ## Current design choices (revisable)
 
@@ -121,7 +133,7 @@ Known defects against these rules, to be fixed in PR #28 (this revision changes 
 | 1. Initramfs reaches Central | Liveness first, then the shared package core, the 10 s clock step, the CA bundle and clock floor in the boot data, the initramfs's computed module list, `/v1/locate` on Central | The loop stays alive for 24 hours, and the Pi fetches the base through the gateway's 301 and switch_roots |
 | 2. Provisioning and Player adopt it | Resolver-first provisioning and Player, computed module lists for the packages, the handoff readable by the Player (0644), private package directories, stage 1's resolver hand-over, device-root checks, and one Debian declaration for the base, the initrd root, CI and both packages | The Pi appears unbound in the console |
 | 3. Docs | Reword [0008](0008-generic-image-and-serial-identity.md), [0009](0009-minimal-base-and-app-package.md), the README, the runbook, and the module docs (Player service, Player package, appliance builder) to R1–R9 | Docs check passes |
-| 4. Owner UX fixes (in PR #28; fixes only) | R1 as amended (U3, cmdline first), U7's boot-screen text, the bearer leak (U8), and the media and time loops naming their cause and locating again | Not yet defined |
+| 4. Owner UX fixes (in PR #28; fixes only) | R1 as amended (U3, cmdline first), U7's boot-screen text, the bearer leak (U8), and the media and time loops naming their cause and locating again | Implemented; CI (base-image, netboot-e2e) and physical-hardware proof pending |
 | 5. Follow-up PR (not PR #28; everything new) | U1's error page, independent of the Player package; the Player's debug overlay (U4; none exists yet); Central staleness detection for every enrolled Player (U4); console fault detail (U6). Also a pre-existing defect: the console's "Player connected" dot comes from the Player-reported HDMI flag (`central/console/src/join.js`), and `players.last_seen` is set only at enrollment (`central/registry.py`), so a dead Pi shows as connected | Not yet defined |
 
 ## Deferred
@@ -140,4 +152,4 @@ owner's answers to Project 1's feature-layer briefing: R5 and R6 amended, livene
 initramfs's computed module list added to Project 1 (2026-09-26). Rev 6 recorded Project 2's
 feature layer (2026-09-26): the choices above adopted without a gate, and the owner's steer to
 unify the Debian package sources and lists.
-Rev 7 recorded the owner's UX answers to the adversarial review of PR #28 (2026-09-27): R1 amended (U3), U7 and U8 added, U5 deferred, the saved root and the known defects stated, and the fixes and the follow-up placed in Delivery; the owner's rulings on the flagged conflicts then moved all new work to the follow-up and widened U4's staleness to every enrolled Player.
+Rev 7 recorded the owner's UX answers to the adversarial review of PR #28 (2026-09-27): R1 amended (U3), U7 and U8 added, U5 deferred, the saved root and the known defects stated, and the fixes and the follow-up placed in Delivery; the owner's rulings on the flagged conflicts then moved all new work to the follow-up and widened U4's staleness to every enrolled Player. R1/U3, U7 and U8 landed in this PR: cmdline-first is now construction-time in `player/service.py` and already conformant in `appliance/provision.py`; stage 1's boot screen no longer prints a value to pin; and `Session`/`CentralLink` in `player/central_link.py` bind the bearer to the origin that issued it, verified against `central/registry.py`'s re-enroll path keeping the Frame binding — with CI and physical-hardware proof still pending, and the cross-Central relay gap left open per a STOP errata entry.
