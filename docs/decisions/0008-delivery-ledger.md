@@ -120,6 +120,8 @@ os-base pipeline, ~2,500 LOC, once proven); (2) the `.deb` DECLARES its full run
 (GTK/GStreamer/weston/Mesa/…) and the bootstrapper installs it **via apt** so those deps are
 pulled from the distro repo at boot — base stays minimal (OS + apt + sources + bootstrapper +
 python/zeroconf). (3) Retirement of the old signed netboot/release-authority is GREEN-LIT.
+
+> **Superseded in part (2026-09-26):** ruling (2) — the `.deb` declares its full runtime deps and the bootstrapper apt-installs them at boot, base stays minimal — is replaced by the owner steer to unify package sources and lists: one Debian declaration (`scripts/debian_packages.py`) at one snapshot pin builds the base **with** the Player's Debian dependencies, and provisioning installs the Player `.deb` with `dpkg --install` alone ([0014](0014-reaching-central-from-every-boot-stage.md)). Rulings (1) and (3) stand; the rows below are kept as history.
 pi-gen rejected (SD-only, no netboot). rpi-image-gen: Debian re-base, emits a squashfs via
 genimage; we still own a slim netboot init + TFTP assembly. Only runs in CI (arm64/podman).
 

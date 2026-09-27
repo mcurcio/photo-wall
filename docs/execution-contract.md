@@ -129,6 +129,14 @@ The build refuses a floor later than its own clock plus five minutes, and a bund
 
 The EEPROM settings are a provisioning requirement, not a per-Pi step. The build puts them in `pieeprom.upd` and `pieeprom.sig` in the TFTP bundle, and the bootloader updates itself from there ([`tests/test_eeprom_update.py`](../tests/test_eeprom_update.py)). The kernel must build in the watchdog, sysrq, the hung-task detector and its own DHCP; the build checks this on every run ([`tests/test_kernel_config_check.py`](../tests/test_kernel_config_check.py)).
 
+**Stage 2.** These are the contracts provisioning and the Player keep, as tested facts:
+
+- the root comes from the command line, else the saved root, else mDNS ([`tests/test_uplink_finder.py`](../tests/test_uplink_finder.py));
+- every Central request goes to the located origin and follows no redirect, and a refused redirect relocates on the next cycle;
+- provisioning installs with `dpkg --install` only and writes `/etc/photo-wall/public.json` atomically with mode 0644 in a 0755 directory, with `central_origin` only for an mDNS root ([`tests/test_provision.py`](../tests/test_provision.py));
+- a `time` failure exits provisioning (the unit's start limit reboots the Pi); other failures are retried with backoff, each logged as one `cause=` line;
+- stage 2's `/etc/resolv.conf` is stage 1's copy (0644, at most 4096 bytes) and the base carries none; only stage 1 writes the clock record.
+
 ## Failure behavior
 
 During a running-process outage, preserve already authorized visible output while its bounded lease permits it. Losing the server alone need not immediately blank a valid composition. New work, lease extension, and recovery after process restart or cold boot require central connectivity. Do not promise playback across cold reboot from cached files or old instructions.

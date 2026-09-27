@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-25 · **Layer:** module contracts and data flow · **Status:** Owner-reviewed
 at this layer. Feature-layer design (function names, algorithms) follows per project. Project 1's
-feature layer was reviewed on 2026-09-26; Projects 2 and 3 have not been designed at that layer.
+feature layer was reviewed on 2026-09-26. Project 2's feature layer was designed on 2026-09-26;
+its choices (Q1-Q4 below) were adopted as recommended without an owner gate (owner: "one big
+implementation"), and they stay revisable. Project 3 is docs only.
 
 Briefings reviewed by the owner:
 
@@ -52,13 +54,31 @@ Liveness needs two kernel parameters that are not `photowall.*` parameters.
   and is shared by the initramfs, provisioning and the Player. Central's identity format and the
   clock-record format live in `contracts`.
 - **Clock gate.** It gives NTP up to 10 seconds, so boots are conservative and would rather wait
-  than fail. It is best-effort even for http boots. Root stages write a clock record to `/run`;
-  the Player reads it and never sets the clock.
+  than fail. It is best-effort even for http boots. Stage 1 writes a clock record to `/run`;
+  provisioning and the Player read it and never set the clock. A `time` failure in provisioning
+  exits to the unit's reboot path, where stage 1 steps again.
 - **No credential binding.** The Player trusts whichever Central locate finds (owner: the Player
   keeps no state across boots). R2 accepts the LAN exposure.
 - **Nothing persisted from locate.** Each stage locates again from the cmdline.
 - **Computed module lists.** The build computes each artefact's import set, which replaces the
-  hand-kept lists that caused the crash.
+  hand-kept lists that caused the crash, for the initramfs and both packages.
+- **One Debian declaration; nothing on the device resolves packages.** `scripts/debian_packages.py`
+  names every Debian package and the one snapshot.debian.org pin. The rpi-image-gen base, the
+  initrd build root and the CI device root are built from it, and each `.deb`'s Depends is
+  rendered from it. The base carries the device set (the bootstrapper's and the Player's
+  packages), and provisioning installs the Player with `dpkg --install` alone (owner steer,
+  2026-09-26).
+- **Private package directories (Q1).** Each `.deb` ships its computed closure under
+  `/usr/lib/<package>/`, run as `python3 -I -B <dir>`. Nothing goes to dist-packages, so the two
+  packages share no file.
+- **A Player the base cannot satisfy (Q2).** dpkg refuses it, and the unit's start limit reboots
+  the Pi. The build checks one revision's base against its Player's Depends. Operator rule: stage
+  the base first.
+- **Stage-2 name resolution (Q3).** Stage 1 copies its resolver to the new root's
+  `/etc/resolv.conf`, and the base carries none. Lease renewal is deferred.
+- **The Player's link.** httpx and websockets are built from the one Trust. Neither follows
+  redirects: the websocket's own redirect following is refused, so the bearer never leaves the
+  located origin. Every failed cycle locates again.
 - **Time source.** The kernel's own `ip=dhcp` supplies option 42, because klibc `ipconfig`
   never requests it. The pool zone is `debian.pool.ntp.org` until a photo-wall vendor zone
   exists.
@@ -74,17 +94,20 @@ Liveness needs two kernel parameters that are not `photowall.*` parameters.
 | Project | Scope | Proven when |
 |---|---|---|
 | 1. Initramfs reaches Central | Liveness first, then the shared package core, the 10 s clock step, the CA bundle and clock floor in the boot data, the initramfs's computed module list, `/v1/locate` on Central | The loop stays alive for 24 hours, and the Pi fetches the base through the gateway's 301 and switch_roots |
-| 2. Provisioning and Player adopt it | Resolver-first provisioning and Player, computed module lists for the packages | The Pi appears unbound in the console |
-| 3. Docs | Reword [0008](0008-generic-image-and-serial-identity.md), [0009](0009-minimal-base-and-app-package.md), the README and the runbook to R1–R9 | Docs check passes |
+| 2. Provisioning and Player adopt it | Resolver-first provisioning and Player, computed module lists for the packages, the handoff readable by the Player (0644), private package directories, stage 1's resolver hand-over, device-root checks, and one Debian declaration for the base, the initrd root, CI and both packages | The Pi appears unbound in the console |
+| 3. Docs | Reword [0008](0008-generic-image-and-serial-identity.md), [0009](0009-minimal-base-and-app-package.md), the README, the runbook, and the module docs (Player service, Player package, appliance builder) to R1–R9 | Docs check passes |
 
 ## Deferred
 
 Central-served time between option 42 and the pool; writing a stepped clock back to the Pi 5
-RTC; a private CA in the initramfs.
+RTC; a private CA in the initramfs; DHCP lease renewal in stage 2; a `time` failure in a running
+Player (persists until reboot); pinning the Raspberry Pi archive packages.
 
 ## History
 
 Rev 1 went through two review rounds. Rev 3 was compressed to this layer. Rev 4 separated
 requirements from choices and recorded the owner's answers (2026-09-25). Rev 5 recorded the
 owner's answers to Project 1's feature-layer briefing: R5 and R6 amended, liveness and the
-initramfs's computed module list added to Project 1 (2026-09-26).
+initramfs's computed module list added to Project 1 (2026-09-26). Rev 6 recorded Project 2's
+feature layer (2026-09-26): the choices above adopted without a gate, and the owner's steer to
+unify the Debian package sources and lists.

@@ -14,6 +14,17 @@ This document replaces every prior note, thread, and sketch on the subject.
 
 ---
 
+## Amended by decision 0014 (2026-09-26)
+
+[Decision 0014](0014-reaching-central-from-every-boot-stage.md) replaces this document's "explicit config always wins over mDNS" rule with its precedence order **R1** (cmdline `photowall.central` > saved root > mDNS), and adjusts several details below. The rulings in this document otherwise stand as history; the notes inline mark exactly where 0014 supersedes it.
+
+- **Precedence:** T2's "explicit origin" is now the kernel cmdline key `photowall.central`; that beats a saved root, which beats mDNS. See [0014 R1](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **Transport:** both HTTP and HTTPS roots are legal (HTTPS is still better); only `GET /v1/locate` follows redirects, and every real request goes straight to Central's identity. See [0014 R2/R3/R8](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **Trust:** the Debian CA bundle is the baseline trust store; the Player's `ca_file` substitutes another PEM bundle. See [0014 R5](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+- **`allow_http`:** the Player config option is accepted but inert — R2 already makes HTTP legal, so there is nothing left for the flag to gate. See [0014 R2](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
+
+---
+
 ## The problem in plain words
 
 - **Baseline must assume almost nothing.** Flash the standard image, boot the Pi on a network with central, and it appears in central — discovered by its **serial number**. No boot server, no per-device setup, no certificate.
@@ -35,7 +46,7 @@ This document replaces every prior note, thread, and sketch on the subject.
 |---|---|---|
 | The appliance is **netboot-only**; the player generates a **fresh in-memory** key and enrolls by serial `device_id`; central keys the record by `device_id`. | [player/identity.py:49](../../player/identity.py), [central/registry.py:105](../../central/registry.py) | The as-built is I0 identity on D1 delivery. Flash, the certificate tier, and discovery are new. |
 | Enroll verifies the signature against the key **in the request** and **unconditionally overwrites** the stored key; there is no pin or compare. | [central/registry.py:96](../../central/registry.py), [:118](../../central/registry.py) | I1 pin/compare/downgrade-reject is **net-new central logic**, not "reuse 0002 wholesale." |
-| `central_origin` is **required config**; the HTTPS client trusts `ca_file` (a per-deployment value), or the system store when it is absent. | [player/service.py:69](../../player/service.py), [:744](../../player/service.py) | Discovery and the transport-trust ladder are greenfield; a LAN `.local` central has no public cert, hence T1/T2. |
+| `central_origin` is **required config**; the HTTPS client trusts `ca_file` (a per-deployment value), or the system store when it is absent. **(as of 2026-09-10)** — superseded by [0014](0014-reaching-central-from-every-boot-stage.md)'s cmdline/saved-root/mDNS discovery and Debian CA bundle. | [player/service.py:69](../../player/service.py), [:744](../../player/service.py) | Discovery and the transport-trust ladder are greenfield; a LAN `.local` central has no public cert, hence T1/T2. |
 | No mDNS/zeroconf and no flash-to-SD path exist. | (repo grep) | The flash baseline, discovery, and pinning are net-new; the netboot path already exists. |
 | Netboot binds config into the signed release via `configuration_sha256`. | [contracts/release.py:34](../../contracts/release.py), [bootstrap.py:125](../../appliance/bootstrap.py) | A **netboot-tier** decoupling, not a baseline concern. |
 
@@ -74,7 +85,7 @@ A deployment picks a rung on each ladder, independently. The **baseline** is the
 - **Ephemeral session key** — a keypair generated in RAM each boot; consumes the enrollment nonce; gone at reboot.
 - **Session token** — the short-lived bearer token central issues at enroll; authenticates that boot's calls.
 - **Certificate (I1)** — a **persistent** per-device keypair the player generates once and central **pins after an operator confirms its fingerprint**. Cryptographic, revocable.
-- **mDNS discovery** — the baseline way a flashed player finds central (`_photowall._tcp`), so nothing is baked. **Explicit config always wins over mDNS** (see precedence).
+- **mDNS discovery** — the baseline way a flashed player finds central (`_photowall._tcp`), so nothing is baked. As of this document, **explicit config always wins over mDNS** (see precedence); [0014](0014-reaching-central-from-every-boot-stage.md) refines this into the **R1** order (cmdline `photowall.central` > saved root > mDNS).
 - **D0 / D1 / I0 / I1 / T0 / T1 / T2** — the rungs: flash / netboot; serial / certificate; HTTP / pin-on-bind / explicit CA.
 - **Bind / unbind** — operator actions associating (or releasing) a serial's record and a Frame.
 
@@ -108,7 +119,7 @@ A flashed player learns `central_origin` from mDNS, but must still decide whethe
 | **T1 pin-on-bind** | Central presents a self-signed cert; the player pins it on first contact; the **operator confirms the fingerprint at the bind step**. | ✅ nothing baked | Bind gains a fingerprint confirm; the pre-confirm instant is TOFU, closed by the human check. Closes Edge 3. |
 | **T2 explicit CA/config** | Operator writes `central_origin` + CA (or "use public PKI") onto the SD **boot partition** at flash time (Pi-Imager style), or the netboot tree. | ✅ customization on the card, outside the build | Not zero-config; also the **private-CA and public-PKI** answer. |
 
-**Precedence (closes the silent-hijack gap):** an explicit origin (T2) **always wins**; mDNS is consulted **only when no explicit origin is present**. So a hijacking mDNS responder cannot override a configured central.
+**Precedence (closes the silent-hijack gap):** an explicit origin (T2) **always wins**; mDNS is consulted **only when no explicit origin is present**. So a hijacking mDNS responder cannot override a configured central. **Superseded in order, not in spirit, by [0014](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules) R1:** cmdline `photowall.central` beats a saved root, which beats mDNS; the security argument is unchanged — a configured (cmdline) root means mDNS is never consulted.
 
 **Clock/TLS note:** a freshly-flashed Pi has no RTC. T1 pins the cert regardless of `notBefore`, so it is unaffected; only T2-with-public-PKI needs a time source (an NTP server is then part of that deployment's boot-partition config), or a bounded first-boot skew.
 
@@ -227,7 +238,7 @@ This re-freezes `Release` to five fields (`revision, boot_abi, rootfs_sha256, ro
 |---|---|---|---|---|
 | 1 | Provisioning model | **Three-ladder progressive** | More surface: flash + netboot + discovery + pinning | Netboot-only — excludes the flash baseline |
 | 2 | Baseline identity | **Serial (I0)**, certificate (I1) opt-in | I0 LAN-spoofable (Edge 1); LAN accepted as trusted | Require I1 everywhere — breaks "assumes only a LAN" |
-| 3 | Baseline discovery | **mDNS**, explicit origin wins | multicast needed; ambiguity with multiple centrals | Require explicit `central_origin` always |
+| 3 | Baseline discovery | **mDNS**, explicit origin wins (order refined by [0014](0014-reaching-central-from-every-boot-stage.md) R1: cmdline > saved root > mDNS) | multicast needed; ambiguity with multiple centrals | Require explicit `central_origin` always |
 | 4 | Netboot config | **Decouple** (five-field `Release`); **image fully generic, GitHub-Releases-hosted, all customization outside the build** | The stored-blob migration | Keep `configuration_sha256` — per-deployment re-signs |
 | 5 | Bind UX | **Pending queue + new `unbind`**; new Frame bound by operator, rebooted Frame auto-resumes ([per tier](#decision-5-across-tiers)) | `unbind` is new code | Auto-bind new serials (no human checkpoint) |
 | 6 | Transport trust | **Progressive ladder T0→T1→T2** (HTTP baseline; pin-on-bind; explicit CA/config), image generic throughout | Pure baseline (T0) accepts Edge 3; T1/T2 add operator/flash steps | Mandate public-PKI (friction, non-generic) or bake a CA (violates decision 4) |
@@ -259,7 +270,7 @@ Ladder: **construction** > **transaction** > **decision** > **test** > **convent
 | I1: impostor with only the serial | Refused at enroll (no pinned key) | **decision** — proof-of-possession + downgrade-reject |
 | I0: duplicate serials | Session thrash, last-enroll-wins | **documented** (Edge 2); I1 removes it |
 | **T0: rogue mDNS serves content (Edge 3)** | Attacker paints every screen; cannot bind a Frame | **documented** (baseline cost; fix = T1/T2) |
-| Rogue mDNS vs a configured origin | Configured origin wins; mDNS ignored | **decision** — explicit-config precedence |
+| Rogue mDNS vs a configured origin | Configured origin wins; mDNS ignored (order per [0014](0014-reaching-central-from-every-boot-stage.md) R1: cmdline > saved root > mDNS) | **decision** — explicit-config precedence |
 | I1: attacker pins first over I0 (TOFU) | Prevented — pin requires operator fingerprint confirm | **decision** — operator-gated pin |
 | D1: rogue rootfs from `release_origin` | Rejected vs the project key | **decision** — Ed25519 signature ([bootstrap.py:421](../../appliance/bootstrap.py)) |
 | Operator retires a reusable Pi | That serial can never re-enroll | **documented** — use unbind |
@@ -304,7 +315,7 @@ graph LR
 
 - Break serial→equipment matching → the flash-baseline enroll/reboot test must fail.
 - Remove mDNS with no `central_origin` set → the player must fail to enroll; setting explicit config must recover it.
-- Answer mDNS *and* set an explicit origin → the explicit origin must win (precedence test).
+- Answer mDNS *and* set an explicit origin → the explicit origin must win (precedence test; order per [0014](0014-reaching-central-from-every-boot-stage.md) R1: cmdline > saved root > mDNS).
 - Under I1, let a serial-only enroll succeed for a pinned player, or let a first-enroll pin without operator confirmation → the impostor-refusal / operator-gate tests must fail.
 - Let an unbound serial fetch media → the media-denial test must fail.
 - D1: feed a six-field manifest → it must be rejected, not coerced.
