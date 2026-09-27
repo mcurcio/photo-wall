@@ -202,18 +202,20 @@ correction are recorded in [media evidence](evidence/2026-09-06-vm-media.md).
 
 ## Shared service and test dependencies
 
-Only `appliance.yml` constructs the Pi OS and signed appliance --
-[`release.yml`](../.github/workflows/release.yml) does not duplicate that
-machinery; it calls `appliance.yml` as a reusable workflow (its
-`workflow_call` trigger and dedicated `release-artifacts` job) to reassemble
-and sign an already-qualified revision with the persistent project key, then
-packages that job's uploaded build output (via `scripts/package_release_artifacts.py`)
+[`pipeline.yml`](../.github/workflows/pipeline.yml) is the one workflow for
+pull requests and pushes to `main`; its `gate` job is the one required check.
+It has no manual release path: a release that fails is recovered only by the next
+push to `main`, which releases whatever changed since the last published tag.
+Its `plan` job runs `scripts/release_plan.py`, whose package manifest decides
+which test workflows run and whether a push releases.
+Only `base-image.yml` builds the Pi base OS, the netboot bundle and both
+`.deb`s: the pipeline calls it for the plan's revision and, on a release,
+packages its uploaded build output (via `scripts/package_release_artifacts.py`)
 into a GitHub Release. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
-`software-e2e.yml`, and the appliance's manual `full` scope. The smoke scope
-skips that dependency. Both checks jobs share the AMD64 result; software E2E
-and full appliance qualification share the ARM64 definition.
+`software-e2e.yml` and the release's media worker image. Both checks jobs share
+the AMD64 result; software E2E shares the ARM64 definition.
 
 `scripts/service_base.py` reads the `media-os` recipe prefix ending at
 `# END MEDIA OS DEFINITION` in the root Dockerfile. The recipe and architecture

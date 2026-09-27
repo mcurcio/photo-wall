@@ -33,29 +33,13 @@ name: Netboot boot-chain e2e tracer (p4 s3)
 # the same device root: CI is Python 3.12 with a venv, the Pi is the pinned
 # trixie python3 (3.13) and OpenSSL (3.5) with the stdlib and the computed
 # closure only.
-
+#
+# Called by pipeline.yml (its `netboot-e2e` job) when scripts/release_plan.py finds a .deb or
+# one of the tracer's own paths changed -- the one manifest that decides what builds, what is
+# tested and what releases. workflow_dispatch runs it by hand.
 on:
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - scripts/test_netboot_e2e.py
-      - scripts/debian_packages.py
-      - scripts/device_root_checks.py
-      - scripts/build_bootstrapper_deb.py
-      - appliance/**
-      - player/**
-      - contracts/**
-      - uplink/**
-      - scripts/module_closure.py
-      - scripts/uplink_device_harness.py
-      - scripts/build_player.py
-      - tests/tls_fixture.py
-      - scripts/build_player_deb.py
-      - central/content_routes.py
-      - central/content_catalog/**
-      - central/assets/**
-      - central/infra/**
-      - .github/workflows/netboot-e2e.yml
 
 permissions:
   contents: read
@@ -67,10 +51,6 @@ permissions:
 defaults:
   run:
     shell: bash
-
-concurrency:
-  group: netboot-e2e-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   tracer:
@@ -86,14 +66,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.12.11'
+      - uses: ./.github/actions/python-uv
 
       - name: Install the locked harness environment
-        run: |
-          python -m pip install uv==0.7.8
-          uv sync --frozen
+        run: uv sync --frozen
 
       # The device root: mmdebstrap over the declaration's device set at its
       # pin (scripts/test_netboot_e2e.py device_root_image), kept as a tar and

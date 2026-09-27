@@ -444,9 +444,8 @@ CI installs the locked dependencies, lints, checks local documentation links, bu
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
 Application edits do not permit a missing OS dependency to be rebuilt. To
-prepare an unchanged missing definition explicitly, dispatch `checks.yml`,
-`software-e2e.yml`, or `appliance.yml` with `prepare_base=true`; select `scope=full`
-for appliance media qualification. Fork runs require the definition to have
+prepare an unchanged missing definition explicitly, dispatch `service-base.yml`
+with its architecture and `prepare_base=true`. Fork runs require the definition to have
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
 
@@ -476,7 +475,7 @@ The registry walkthrough proves rejected/accepted authentication, reconnection a
 
 All operator mutations use browser controls, and every page rejects uncaught JavaScript errors. The fixtures supply simulated equipment and generated public JPEGs through production source-refresh, acquisition-request, and publication transactions with an explicitly synthetic recipe and preparation metadata. Elapsed time advances through the production Runtime owner; natural finish waits for the current cycle boundary. The server binds an ephemeral loopback port, preserving the separate full demo's network isolation. These checks qualify operator controls and persistence. They do not run an upstream adapter, conversion worker, background scheduler, Player, or renderer, and do not qualify scheduled playback, PXE, or physical output. Run browser checks separately from the ordinary suite: synchronous Playwright owns an event loop for its session, while ordinary Player integration tests create their own loops.
 
-The bounded schema-2 `operator-browser.json` report records named assertions, pass/failure status, browser version, PostgreSQL/fixture scope, generated-media and controlled-time inputs, checkout revision, dirty state, and GitHub event/SHA. CI always uploads available reports and retains traces only for failed tests. Pull-request runs identify the synthetic merge checkout; dispatching `MVP checks` on the PR branch records the dispatched commit instead. A dirty local run is diagnostic evidence, not final committed-revision acceptance. Reports and failure traces contain only the disposable fixture's public test token and synthetic records; keep unrelated deployment data out of the fixture.
+The bounded schema-2 `operator-browser.json` report records named assertions, pass/failure status, browser version, PostgreSQL/fixture scope, generated-media and controlled-time inputs, checkout revision, dirty state, and GitHub event/SHA. CI always uploads available reports and retains traces only for failed tests. Pull-request runs identify the synthetic merge checkout. A dirty local run is diagnostic evidence, not final committed-revision acceptance. Reports and failure traces contain only the disposable fixture's public test token and synthetic records; keep unrelated deployment data out of the fixture.
 
 ## Recovery
 

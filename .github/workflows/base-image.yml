@@ -5,41 +5,17 @@ name: rpi-image-gen base OS build
 # squashfs with raspberrypi/rpi-image-gen, plus the Player and bootstrapper
 # `.deb`s and the assembled netboot base bundle. The old custom-image /
 # signed-disk pipeline (appliance.yml) was retired in p4-retire s5; this is now
-# the sole base-OS + package build, reused by release.yml via `workflow_call`.
+# the sole base-OS + package build.
 #
-# Scoped to workflow_dispatch (manual iteration), pull_request touching the
-# rpi-image-gen config or this workflow file (so it never runs on every push to
-# main), and workflow_call (release.yml, for an exact tagged revision).
+# pipeline.yml calls it (its `base-image` job) for the plan's exact revision:
+# on a pull request or push when scripts/release_plan.py finds the base bundle
+# or a .deb changed -- the one package manifest that decides what builds, what
+# is tested and what releases -- and on every release, whose assets it builds.
+# Every artifact is named by that revision so the publish job consumes it by
+# name. Nothing here is signed (home LAN, no threat model), so this call takes
+# no signing secret. workflow_dispatch builds by hand (manual iteration).
 on:
   workflow_dispatch:
-  pull_request:
-    # Whole packages, not file lists: stage 1's initramfs code and both .debs'
-    # code are COMPUTED closures (scripts/module_closure.py) over appliance,
-    # contracts, uplink and player, so no hand-kept file list here can fall
-    # behind them (decision 0014 §1). The Debian declaration decides what the
-    # base and the initrd root install, and the base check reads it.
-    paths:
-      - appliance/**
-      - contracts/**
-      - uplink/**
-      - player/**
-      - scripts/debian_packages.py
-      - scripts/device_root_checks.py
-      - scripts/build_netboot_bundle.sh
-      - scripts/build_boot_data.py
-      - scripts/module_closure.py
-      - scripts/verify_netboot_initrd.py
-      - scripts/kernel_config_check.py
-      - scripts/eeprom_update.py
-      - scripts/build_bootstrapper_deb.py
-      - scripts/build_player_deb.py
-      - scripts/build_player.py
-      - .github/workflows/base-image.yml
-  # Reused by release.yml to build the release assets (the netboot base bundle
-  # + the Player and bootstrapper .debs) for an exact tagged revision. Every
-  # artifact is named by that revision so release.yml can consume it by name.
-  # Nothing here is signed (home LAN, no threat model), so this call takes no
-  # signing secret.
   workflow_call:
     inputs:
       revision:
@@ -80,7 +56,7 @@ jobs:
     timeout-minutes: 60
     env:
       # The exact commit these assets are built for: the caller's `revision`
-      # when reused by release.yml, else the triggering commit. Threads through
+      # when called by pipeline.yml, else the triggering commit. Threads through
       # the .deb builds and every artifact name so a release consumes the
       # bytes built for its tag, not whatever ref the reusable call resolved.
       REVISION: ${{ inputs.revision || github.sha }}
@@ -124,16 +100,17 @@ jobs:
       # scripts/build_bootstrapper_deb.py's module docstring). Pure Python,
       # no arm64 chroot needed, so this runs directly on the runner before
       # rpi-image-gen is even cloned.
-      # Install uv via pipx (isolated env) rather than actions/setup-python:
-      # setup-python prepends its own python3 to PATH for the whole job, which
-      # would shadow the system python3 that rpi-image-gen's install_deps.sh
-      # provisions `yaml` (and its other deps) into, breaking `bin/ig`. pipx
-      # keeps the system python3 intact for the rpi-image-gen build below; the
-      # .deb build uses uv's own .venv explicitly.
-      - name: Install uv and sync the locked environment
-        run: |
-          pipx install uv==0.7.8
-          uv sync --frozen
+      # Install uv via pipx (isolated env) rather than actions/setup-python
+      # (`python: 'false'`): setup-python prepends its own python3 to PATH for
+      # the whole job, which would shadow the system python3 that rpi-image-gen's
+      # install_deps.sh provisions `yaml` (and its other deps) into, breaking
+      # `bin/ig`. pipx keeps the system python3 intact for the rpi-image-gen build
+      # below; the .deb build uses uv's own .venv explicitly.
+      - uses: ./.github/actions/python-uv
+        with:
+          python: 'false'
+      - name: Sync the locked environment
+        run: uv sync --frozen
 
       - name: Build the photo-wall-bootstrapper .deb
         id: bootstrapper-deb
@@ -906,7 +883,7 @@ jobs:
           retention-days: 7
 
       # The whole netboot bundle as ONE artifact (0008 boot-chain: kernel +
-      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS). release.yml consumes this
+      # initrd + Pi 5 DTBs + squashfs + SHA256SUMS). pipeline.yml publishes this
       # by name (photo-wall-base-bundle-<revision>).
       - name: Upload the netboot base bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -917,7 +894,7 @@ jobs:
           retention-days: 7
 
       # The two .debs built above, each as its own revision-named artifact so
-      # release.yml can publish them as standalone release assets alongside the
+      # pipeline.yml can publish them as standalone release assets alongside the
       # base bundle.
       - name: Upload the Player .deb
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

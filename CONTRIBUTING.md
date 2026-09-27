@@ -87,6 +87,6 @@ Keep credentials, tokens, private photos, and sensitive server responses out of 
 
 ## Pull requests and documentation
 
-Keep pull requests focused on a coherent scenario or correction. Explain the resulting behavior, relevant verification, and remaining limitations; link the affected decision or validation record. Add meaningful tests for behavior and failure boundaries, and avoid claiming checks that were not run.
+Keep pull requests focused on a coherent scenario or correction. Explain the resulting behavior, relevant verification, and remaining limitations; link the affected decision or validation record. Add meaningful tests for behavior and failure boundaries, and avoid claiming checks that were not run. Every commit is a Conventional Commit, and the pipeline's `plan` job enforces this and reports what merging will release.
 
 Use stable repository-relative links between project documents. Put each policy in its owning document and link to it elsewhere. Cite primary documentation for technical component claims and identify tested versions. Check links and preview Mermaid diagrams after editing them. Keep requirements, proposals, open decisions, and measured results clearly labeled; update affected documents together when a choice changes.

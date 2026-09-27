@@ -1,0 +1,420 @@
+name: Pipeline
+
+# One workflow for every pull request and every push to main.
+# Its `gate` job is the ONE required check.
+#
+#   plan            scripts/release_plan.py: the release rule, written once, and the only caller
+#                   of commitizen. Its `jobs` output lists the conditional jobs this run needs;
+#                   every `if:` below reads it, and the gate holds the run to it.
+#   checks, e2e     checks.yml and software-e2e.yml, on every pull request and push.
+#   base-image      base-image.yml, when the base bundle or a .deb changed -- and on every
+#                   release, whose assets it builds (no second base build).
+#   netboot-e2e     netboot-e2e.yml, when a .deb or the tracer's own paths changed.
+#   tested          the barrier every release job needs: each test job the plan listed passed.
+#   service-base, service-images, publish
+#                   the release, in that order: a push to main that changed a shipped package.
+#                   Each also requires that event in its own `if:` (the guard below).
+#                   publish needs service-images, so a published release always has its images.
+#   gate            the required check: every job the plan listed succeeded, and none failed
+#                   or was cancelled.
+#
+# WHEN IT RELEASES (scripts/release_plan.py owns the rule): a push to main releases exactly
+# when a shipped package's inputs (the script's package manifest) differ from the last `v*`
+# tag, at commitizen's next version -- or the next PATCH when no commit bumps. Commit types
+# pick the increment, never whether to release. A pull request's plan reports what merging it
+# releases and refuses a commit that is not a Conventional Commit (merge and rebase land every
+# commit on main).
+#
+# A PULL REQUEST NEVER RELEASES, twice over: its plan lists only test jobs (the script's
+# PullRequestRun has no release job), and every job that tags, publishes or pushes an image
+# also requires, in its own `if:`, a push to main:
+#   (github.event_name == 'push' && github.ref == 'refs/heads/main')
+# tests/test_release_plan.py holds every write-scoped job to that guard.
+#
+# A release that fails is not lost, and has ONE recovery, the normal flow: publish creates the
+# version's tag only by publishing its GitHub Release, after every asset is attached, so a run
+# that fails first leaves no tag, and the next push to main releases whatever changed since the
+# last published tag, from that push's commit. A re-run reuses its run's plan, which may be
+# stale: every job that writes a release artefact first runs `release_plan.py claim`, which
+# refuses a version that is published or tagged at another commit -- a published release and
+# its images are never rewritten. There is no manual release path (no dispatch, no hand tag).
+#
+# The git tag is the SOLE version source of truth (pyproject `[tool.commitizen]`,
+# `version_provider = "scm"`): nothing writes a bumped number back to main, which would loop
+# `push: main`. There is deliberately NO `push: tags: v*` trigger: publishing the release
+# creates the tag (server-side, at the exact built commit), and a run on that tag push would
+# double-release it. A tag created with the ambient GITHUB_TOKEN triggers no workflow.
+#
+# UNSIGNED BY DESIGN: per the owner ruling (home LAN, no threat model, UX over security) NONE
+# of these assets is signed -- there is no signing key anywhere in this workflow, and every
+# sha256 published alongside them is a corruption check only, never an authenticity anchor.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to a pull request supersedes its run. main never cancels a run mid-publish:
+  # runs queue (a newer queued run replaces an older queued one, and its plan still covers the
+  # older push, since it diffs against the last tag).
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      revision: ${{ steps.plan.outputs.revision }}
+    steps:
+      # Full history and tags: the plan diffs against the last v* tag and reads every commit
+      # since it. A pull request checks out its merge ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/python-uv
+      # Event values reach the script through env, never interpolated into the shell.
+      - name: Plan this run
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            pull_request) python scripts/release_plan.py pr --base "$BASE_SHA" --head "$HEAD_SHA" ;;
+            push) python scripts/release_plan.py push ;;
+            *) echo "::error::no release plan for the $EVENT event"; exit 1 ;;
+          esac
+
+  # checks and e2e are the only jobs a pull request runs with a write scope: `packages: write`,
+  # granted solely because their nested service-base.yml call publishes the content-addressed
+  # media OS test dependency for a changed definition (same-repository runs only; see
+  # docs/module-appliance-ci.md). They never hold `contents: write` and never tag or release.
+  checks:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.jobs), 'checks')
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/checks.yml
+
+  e2e:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.jobs), 'e2e')
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/software-e2e.yml
+
+  # The base OS, the netboot bundle and both .debs, built for the plan's exact revision (a pull
+  # request's merge commit or main's commit). Every artifact is
+  # named by that revision, so publish consumes the bytes built here.
+  base-image:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/base-image.yml
+    with:
+      revision: ${{ needs.plan.outputs.revision }}
+
+  netboot-e2e:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.jobs), 'netboot-e2e')
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/netboot-e2e.yml
+
+  # The release jobs need this one job, not each test job: a job whose `needs` include a
+  # skipped job is itself skipped (and `!failure()` passes a cancelled one), so the rule "every
+  # test the plan listed succeeded" is judged here, by the same code as the gate.
+  tested:
+    needs: [plan, checks, e2e, base-image, netboot-e2e]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Every test job the plan listed succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/release_plan.py gate
+
+  # The Kubernetes-hosted control plane (the iac repo's external cluster) cannot
+  # `build:` the compose `central`/`media-worker` targets the way local/CI does --
+  # it pulls prebuilt images. So at every release we publish those two targets to
+  # GHCR under the immutable release tag, BEFORE the appliance publish below (which
+  # needs service-images), keyed to the plan's tag + revision. See
+  # docs/decisions/0011-central-service-images.md.
+
+  # media-worker's target is `FROM ${MEDIA_BASE_IMAGE}` (Dockerfile), so it needs
+  # the shared media OS base image. Reuse the same reusable workflow checks.yml
+  # consumes; amd64 only (the control plane runs on x86 cluster nodes, not the
+  # arm Pis -- multi-arch is deferred per 0011). `central` is `FROM runtime` and
+  # needs no base image, so it does not depend on this.
+  service-base:
+    needs: [plan, tested]
+    if: >-
+      ${{ !cancelled() && needs.tested.result == 'success'
+      && contains(fromJSON(needs.plan.outputs.jobs), 'service-base')
+      && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/service-base.yml
+    with:
+      architecture: amd64
+
+  service-images:
+    needs: [plan, service-base]
+    if: >-
+      ${{ !cancelled() && needs.service-base.result == 'success'
+      && contains(fromJSON(needs.plan.outputs.jobs), 'service-images')
+      && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      REVISION: ${{ needs.plan.outputs.revision }}
+    steps:
+      # Build the plan's exact revision.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Set up the container build cache
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      # `:$TAG` is overwritten only while the version is this revision's and unpublished: a
+      # re-run of an older run (a stale plan) can never replace a published release's images.
+      - name: Claim the version for this revision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release_plan.py claim --tag "$TAG" --revision "$REVISION"
+      # Reuse checks.yml's amd64 build cache so a release does not rebuild from
+      # scratch. Immutable `:${tag}` only -- no `:latest`/mutable tag, matching
+      # the repo's pin-everything philosophy. github.repository is already
+      # lowercase (mcurcio/photo-wall), which ghcr requires.
+      - name: Publish the central service image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: central
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/central:${{ env.TAG }}
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+      - name: Publish the media worker service image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          target: media-worker
+          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/media-worker:${{ env.TAG }}
+          cache-from: type=gha,scope=photo-wall-checks-amd64-v1
+          cache-to: type=gha,scope=photo-wall-checks-amd64-v1,mode=max,ignore-error=true
+
+  # After service-images: a release is published only once its images are pushed, so no
+  # published release ever lacks them (and the claim, which refuses a published version,
+  # never races a publish).
+  publish:
+    needs: [plan, tested, service-images]
+    if: >-
+      ${{ !cancelled() && needs.tested.result == 'success'
+      && needs.service-images.result == 'success'
+      && contains(fromJSON(needs.plan.outputs.jobs), 'publish')
+      && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      REVISION: ${{ needs.plan.outputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Download the netboot base bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-base-bundle-${{ needs.plan.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bundle
+
+      - name: Download the Player .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-player-deb-${{ needs.plan.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/player-deb
+
+      - name: Download the bootstrapper .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-bootstrapper-deb-${{ needs.plan.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/bootstrapper-deb
+
+      - name: Package operator-consumable release artifacts
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          find_one_deb() {
+            python3 -c '
+          import glob, sys
+          matches = glob.glob(sys.argv[1] + "/*.deb")
+          assert len(matches) == 1, matches
+          print(matches[0])
+          ' "$1"
+          }
+          player_deb=$(find_one_deb "$release_root/player-deb")
+          bootstrapper_deb=$(find_one_deb "$release_root/bootstrapper-deb")
+          python3 -m scripts.package_release_artifacts \
+            --base-bundle "$release_root/bundle" \
+            --player-deb "$player_deb" \
+            --bootstrapper-deb "$bootstrapper_deb" \
+            --destination "$release_root/artifacts" \
+            --revision "$REVISION"
+
+      # Notes are rendered by Python (not a shell heredoc) so the Markdown's
+      # own backticks/`${...}` cannot be reinterpreted as shell substitution.
+      - name: Generate release notes
+        run: |
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          python3 - "$release_root/notes.md" "$release_root/artifacts" <<'PY'
+          import json
+          import os
+          import sys
+
+          revision = os.environ["REVISION"]
+          repo_blob = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['TAG']}"
+          manifest = json.load(open(os.path.join(sys.argv[2], "manifest.json")))
+          notes = f"""\
+          Photo Wall 0009 release assets for `{revision}`: the minimal base OS
+          image and the Player application, built for this exact commit.
+
+          **Unsigned, by design.** Per the project's home-LAN, no-threat-model
+          ruling ([0009]({repo_blob}/docs/decisions/0009-minimal-base-and-app-package.md)),
+          neither asset is signed. Every sha256 below (and in the attached
+          `SHA256SUMS`/`manifest.json`) is a **corruption check only** -- it
+          proves the download was not truncated or mangled in transit, never
+          who published it.
+
+          ## Base OS image (rarely changes)
+
+          Unpack `{manifest['base_image']['filename']}` (sha256
+          `{manifest['base_image']['sha256']}`) and stage its contents beneath
+          your TFTP boot-server tree -- see
+          [PXE service setup]({repo_blob}/docs/module-pxe-service.md). Every
+          diskless Player netboots this image and fetches the current app at
+          boot; it carries no application code itself.
+
+          ## Player application (revs independently of the base)
+
+          Central pulls `{manifest['player_deb']['filename']}` (sha256
+          `{manifest['player_deb']['sha256']}`) from this GitHub release
+          itself; there is nothing to copy or register by hand. It discovers
+          the release on its next release sync (every 15 minutes), or at once
+          after `POST /v1/operator/app/releases/refresh`. A fleet with no
+          bound Players follows the newest release automatically; otherwise
+          promote it (`Authorization: Bearer <PHOTO_WALL_ADMIN_TOKEN>`):
+
+                 curl -X POST http://<central>/v1/operator/app/releases/{os.environ['TAG']}/promote \\
+                   -H 'Authorization: Bearer <admin-token>'
+
+          Every Player fetches the newly promoted `.deb` on its next reboot;
+          running Players are unaffected until then.
+
+          See the [setup and recovery runbook]({repo_blob}/docs/runbook.md) for
+          the full operator procedure.
+          """
+          destination = sys.argv[1]
+          with open(destination, "w") as handle:
+              handle.write(notes)
+          PY
+
+      # The release must be this revision's to write: its tag absent or at REVISION, and no
+      # published release holding it (a published release is never deleted, edited or
+      # re-drafted). Only an HTTP 404 reads as absent; any other API failure fails the job.
+      - name: Claim the version for this revision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release_plan.py claim --tag "$TAG" --revision "$REVISION"
+
+      # ONE create, draft until last. With assets to attach, `gh release create` creates a
+      # DRAFT targeting REVISION, uploads every asset to that draft by its own upload URL, then
+      # publishes that draft by its own API URL -- or, if any of that fails, deletes the draft it
+      # created. It refuses when a published release already holds the tag. The central watcher
+      # discovers only NON-DRAFT releases and permanently freezes an `undeployable` one, so a
+      # release is never visible before all of its assets are attached.
+      #
+      # THE TAG IS CREATED BY PUBLISHING ALONE: publishing a draft creates its tag at the
+      # draft's target in the same call (a draft creates no tag). So a tag exists exactly when
+      # its release was published, and the plan -- which diffs from the last tag -- never
+      # mistakes a failed release for a shipped one. Nothing is tagged by hand.
+      #
+      # Nothing here deletes or edits an existing release. A draft left by a runner that died
+      # mid-create is left as it is (nothing reads drafts); this create works on its own draft
+      # alone, never on another found by tag name.
+      #
+      # RESIDUAL: a version whose publish failed is released by the next push from that push's
+      # commit (same number if no commit since bumps higher, else the next). That run's
+      # service-images first overwrites the unpublished `:$TAG` images the failed attempt
+      # pushed, so the release and its images always share a commit; an attempt whose number is
+      # never reused leaves its unpublished images and any stray draft behind, unread.
+      - name: Publish the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_root="$RUNNER_TEMP/photo-wall-release"
+          # failglob makes an empty artifacts/ fail loudly instead of passing a literal glob.
+          shopt -s failglob
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$REVISION" \
+            --title "Photo Wall appliance $TAG" --notes-file "$release_root/notes.md" \
+            "$release_root"/artifacts/*
+
+  # The ONE required check. It runs whatever happened, and fails when the plan failed, when a
+  # job the plan listed did not succeed, or when any job failed or was cancelled.
+  gate:
+    name: gate
+    needs: [plan, checks, e2e, base-image, netboot-e2e, tested, service-base, service-images, publish]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Every job the plan listed succeeded, and none failed or was cancelled
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/release_plan.py gate

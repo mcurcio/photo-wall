@@ -506,7 +506,8 @@ size-match, and streaming discipline.
   `TrialWatchdog` (`appliance/updates.py:151`).
 - The `p2-signing-key`, `PHOTO_WALL_RELEASE_PUBLIC_KEY`/`_BOOT_ABI` /
   `_INITIAL_RELEASE_*` config, `release.pub.pem` in the image, and the
-  signed-rootfs publish in [.github/workflows/release.yml](../../.github/workflows/release.yml).
+  signed-rootfs publish in `.github/workflows/release.yml` (since renamed
+  [`pipeline.yml`](../../.github/workflows/pipeline.yml)).
 - `Release.require_compatible` / `boot_abi` gating — ABI match is now by
   construction (kernel/initramfs/base squashfs published as one bundle).
 

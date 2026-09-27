@@ -295,7 +295,7 @@ def writing(data: bytes):
 
 
 def test_a_recut_os_image_is_a_new_key_and_the_old_keeps_its_facts(world):
-    # release.yml re-uploads a rebuilt image under its tag (--clobber): another tarball, so
+    # pipeline.yml re-uploads a rebuilt image under its tag (--clobber): another tarball, so
     # another key. The tag moves its reference; the old key's facts are never cleared, and the
     # new build is produced and recorded under its own key (PR #22 review P1: no
     # `not_reproducible` for good).

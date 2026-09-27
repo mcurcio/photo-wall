@@ -5,7 +5,7 @@ checks -- it only turns the outputs of `.github/workflows/base-image.yml` (the
 netboot base bundle assembled by `scripts/build_netboot_bundle.sh`, plus the
 Player and bootstrapper `.deb`s built by `scripts/build_player_deb.py` and
 `scripts/build_bootstrapper_deb.py`) into the flat file set
-`.github/workflows/release.yml` publishes as a GitHub Release:
+`.github/workflows/pipeline.yml` publishes as a GitHub Release:
 
 - `photo-wall-base-<revision>.tar.gz`: the operator-stageable netboot bundle
   (kernel + initrd + Pi 5 DTBs + the base squashfs + the bundle's own
