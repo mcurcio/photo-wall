@@ -50,6 +50,13 @@ on:
 permissions:
   contents: read
 
+# Every run step fails where it fails: an explicit `bash` is
+# `bash --noprofile --norc -eo pipefail {0}`, so a failing command on the left
+# of a pipe fails its step instead of being masked by the right-hand side.
+defaults:
+  run:
+    shell: bash
+
 # Human-bumpable cache epoch. The two expensive base-OS stages (the
 # rpi-image-gen squashfs and the scratch kernel+initrd) are content-addressed
 # and cached below, keyed by a hash of each stage's TRUE input closure. Every
@@ -86,14 +93,17 @@ jobs:
       # The Debian declaration (scripts/debian_packages.py) is the one place a
       # package list or mirror is written; the runner's system python3 runs it
       # (stdlib only). Its snapshot pin, as DEBIAN_SNAPSHOT_EPOCH, is the fixed
-      # instant the .deb mtimes, the base's snapshot mirror (snapgen) and the
-      # CA-age reference are pinned to, given to each step as
-      # SOURCE_DATE_EPOCH. The initrd's CA list is the base's, so it is as old
-      # as this pin: the bundle assembly warns (never fails) once it is over 90
-      # days old (decision 0014, Q3 = A). DEVICE_PACKAGES is the device set
-      # (the bootstrapper's and the Player's packages): the rpi-image-gen layer
-      # installs it and the base check requires it.
-      - name: Read the Debian pin and the device set from the declaration
+      # instant the .deb mtimes and the CA-age reference are pinned to, given
+      # to each step as SOURCE_DATE_EPOCH. The initrd's CA list is the base's,
+      # so it is as old as this pin: the bundle assembly warns (never fails)
+      # once it is over 90 days old (decision 0014, Q3 = A). DEVICE_PACKAGES is
+      # the device set (the bootstrapper's and the Player's packages): the
+      # rpi-image-gen layer installs it and the base check requires it.
+      # DEBIAN_SOURCES is the pin's apt sources, one signed-by line each: the
+      # base is built from them and keeps them (layer/photo-wall-debian.yaml),
+      # so the base's mirror is the pin by construction, not by an environment
+      # variable rpi-image-gen would clear.
+      - name: Read the Debian pin, the device set and the sources from the declaration
         run: |
           set -eu
           epoch=$(python3 scripts/debian_packages.py epoch)
@@ -101,8 +111,13 @@ jobs:
           device_packages="$RUNNER_TEMP/device.list"
           python3 scripts/debian_packages.py packages bootstrapper player > "$device_packages"
           echo "DEVICE_PACKAGES=$device_packages" >> "$GITHUB_ENV"
+          debian_sources="$RUNNER_TEMP/photo-wall-debian.list"
+          python3 scripts/debian_packages.py sources > "$debian_sources"
+          echo "DEBIAN_SOURCES=$debian_sources" >> "$GITHUB_ENV"
           echo "DEBIAN_SNAPSHOT_EPOCH=$epoch; device set:"
           cat "$device_packages"
+          echo "base apt sources:"
+          cat "$debian_sources"
 
       # ALL our own code ships to the base build as a portable `.deb`, never
       # a raw-file overlay this tool owns (see
@@ -207,12 +222,15 @@ jobs:
           sudo chmod o+x /home/runner
           sudo ./install_deps.sh
 
-      # SOURCE_DATE_EPOCH (the declaration's pin) pins the
-      # debian-trixie-arm64-minbase-snapshot layer's snapshot mirror (see
-      # bin/generators/snapgen) to a fixed instant, so this build's Debian
-      # package set is reproducible rather than "whatever the snapshot service
-      # has right now" (contrast rpi-image-gen's own CI, which uses
-      # `date -d 'today 00:00:00'`). The built image keeps those sources.
+      # The base's Debian package set comes from DEBIAN_SOURCES (the
+      # declaration's pin, rendered above) through our own
+      # layer/photo-wall-debian.yaml, so it is reproducible rather than
+      # "whatever the snapshot service has right now". SOURCE_DATE_EPOCH does
+      # NOT choose that mirror: rpi-image-gen runs its layer pipeline under
+      # `env -i PATH=$PATH` (rpi-image-gen:218 at 262d4df), so its own
+      # snapshot layer's snapgen never sees it and uses the build's clock. The
+      # built image keeps the pinned sources; the content check below asserts
+      # they are exactly the pin.
       # Cache A: the rpi-image-gen squashfs build (~20 min) is content-addressed
       # on its TRUE input closure -- the rpi-image-gen tree, the declaration
       # (the pin and the device set the base installs), the bootstrapper .deb
@@ -246,7 +264,8 @@ jobs:
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
-               "IGconf_app_device_packages=$DEVICE_PACKAGES"
+               "IGconf_app_device_packages=$DEVICE_PACKAGES" \
+               "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 
       # rpi-image-gen's genimage/deploy output can be root-owned and not
       # world-readable, so the unprivileged actions/cache post-job SAVE for
@@ -276,8 +295,8 @@ jobs:
       # scripts/device_root_checks.py reads (systemd config, apt sources, the
       # dpkg database): no watchdog override, no time daemon, no resolver
       # writer, every device package and every Player Depends installed
-      # (provisioning installs the Player with dpkg alone), and no apt source
-      # but the declaration's pin.
+      # (provisioning installs the Player with dpkg alone), and apt sources
+      # that are exactly the declaration's pin (none foreign, none missing).
       #
       # Squashfs location: rpi-image-gen's image-base layer places genimage's
       # output directly at $IGconf_image_outputdir =
@@ -417,7 +436,7 @@ jobs:
           # the Player .deb built above, and the bootstrapper itself are
           # installed (dpkg's own database: `install ok installed`); no
           # watchdog override, time daemon or resolver writer; the image's
-          # only apt sources are the declaration's pin.
+          # apt sources are exactly the declaration's pin.
           dpkg-deb -f "$PLAYER_DEB" Depends > "$RUNNER_TEMP/player-depends.list"
           printf '%s\n' photo-wall-bootstrapper > "$RUNNER_TEMP/bootstrapper-package.list"
           if python3 scripts/device_root_checks.py --root "$extract" \
@@ -505,11 +524,15 @@ jobs:
           set -x
           mkdir -p "$DIAG"
           sudo apt-get update
-          # mmdebstrap builds the scratch root (debian-archive-keyring lets it
-          # verify the snapshot sources on this Ubuntu host); initramfs-tools
-          # on the HOST provides lsinitramfs for the content-verify;
-          # squashfs-tools may already be present from the squashfs verify
-          # step above.
+          # mmdebstrap builds the scratch root. debian-archive-keyring provides
+          # the keyring each pinned line names (signed-by=, from the
+          # declaration): this Ubuntu host's apt trusts no Debian key by
+          # default, and mmdebstrap copies a full `deb ...` line verbatim
+          # (it adds signed-by only to a bare mirror URL). The same path
+          # exists in the trixie root, so its own apt verifies the same way.
+          # initramfs-tools on the HOST provides lsinitramfs for the
+          # content-verify; squashfs-tools may already be present from the
+          # squashfs verify step above.
           sudo apt-get install -y --no-install-recommends \
             mmdebstrap debian-archive-keyring ca-certificates gnupg curl initramfs-tools
 
@@ -646,19 +669,21 @@ jobs:
           # Locate the kernel image, Pi 5 DTB, and overlays for the assembler.
           # Names/locations are exactly what this run installs (no guessing);
           # the boot listings above are the evidence.
-          kernel_img=$(sudo find "$SCRATCH/boot" -maxdepth 2 -name 'vmlinuz-*' | head -n1)
+          # `-print -quit`, not `| head -n1`: under pipefail a find killed by
+          # SIGPIPE once head exits would fail the step.
+          kernel_img=$(sudo find "$SCRATCH/boot" -maxdepth 2 -name 'vmlinuz-*' -print -quit)
           if [ -z "$kernel_img" ]; then
             echo "no vmlinuz-* under $SCRATCH/boot" >&2
             cat "$DIAG/boot-listing.txt" >&2 || true
             exit 1
           fi
-          dtb=$(sudo find "$SCRATCH" -name 'bcm2712-rpi-5-b.dtb' | head -n1)
+          dtb=$(sudo find "$SCRATCH" -name 'bcm2712-rpi-5-b.dtb' -print -quit)
           if [ -z "$dtb" ]; then
             echo "bcm2712-rpi-5-b.dtb not found under $SCRATCH" >&2
             exit 1
           fi
           overlays_dir=""
-          any_dtbo=$(sudo find "$SCRATCH" -name '*.dtbo' -path '*overlays*' | head -n1)
+          any_dtbo=$(sudo find "$SCRATCH" -name '*.dtbo' -path '*overlays*' -print -quit)
           if [ -n "$any_dtbo" ]; then
             overlays_dir=$(dirname "$any_dtbo")
           fi
@@ -666,8 +691,10 @@ jobs:
           # rebuilds into pieeprom.upd/.sig (0014 rev 5, design §2.8). "default"
           # is the release rpi-eeprom recommends for boards already in the
           # field; sorted so the newest dated image wins if more than one ships.
-          eeprom_image=$(sudo find "$SCRATCH/usr/lib/firmware/raspberrypi/bootloader-2712/default" \
-            -maxdepth 1 -name 'pieeprom-*.bin' 2>/dev/null | sort | tail -n1)
+          # A missing directory is the empty result the check below reports
+          # (with a listing), not a pipefail exit here.
+          eeprom_image=$( { sudo find "$SCRATCH/usr/lib/firmware/raspberrypi/bootloader-2712/default" \
+            -maxdepth 1 -name 'pieeprom-*.bin' 2>/dev/null || true; } | sort | tail -n1)
           if [ -z "$eeprom_image" ]; then
             echo "no pieeprom-*.bin under bootloader-2712/default" >&2
             sudo find "$SCRATCH/usr/lib/firmware/raspberrypi" -maxdepth 3 >&2 || true
@@ -679,8 +706,8 @@ jobs:
           # SAME pinned rpi-eeprom package's copy, never installed on the
           # runner itself (which has neither; that is why the later content
           # check below greps pieeprom.upd's raw bytes instead of parsing it).
-          rpi_eeprom_config=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-config' | head -n1)
-          rpi_eeprom_digest=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-digest' | head -n1)
+          rpi_eeprom_config=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-config' -print -quit)
+          rpi_eeprom_digest=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-digest' -print -quit)
           if [ -z "$rpi_eeprom_config" ] || [ -z "$rpi_eeprom_digest" ]; then
             echo "rpi-eeprom-config/rpi-eeprom-digest not found under $SCRATCH/usr/bin" >&2
             sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-*' >&2 || true

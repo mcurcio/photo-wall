@@ -1,6 +1,6 @@
 """Device-root checks (`scripts/device_root_checks.py`, Project 2 design §2.8) over fixture roots:
-watchdog overrides, time daemons, resolver writers, missing packages and foreign apt sources,
-and the one-line-per-violation CLI. Generated fixtures only; the real base extract is CI's."""
+watchdog overrides, time daemons, resolver writers, missing packages, foreign and missing apt
+sources, and the one-line-per-violation CLI. Generated fixtures only; the real base extract is CI's."""
 
 from pathlib import Path
 
@@ -12,6 +12,7 @@ from scripts.device_root_checks import (
     foreign_sources,
     main,
     missing_packages,
+    missing_sources,
     read_dpkg_status,
     resolver_writers,
     time_daemons,
@@ -35,7 +36,9 @@ STOCK_SYSTEM_CONF = """\
 """
 
 # rpi-image-gen's templates/debian/apt/trixie-snapshot.sources at the pinned tool commit;
-# bin/generators/snapgen substitutes the SOURCE_DATE_EPOCH timestamp into the URIs.
+# bin/generators/snapgen substitutes the SOURCE_DATE_EPOCH timestamp into the URIs -- or the
+# build's own clock, since rpi-image-gen's `env -i` pipeline clears that variable (what the base
+# carried before it was built from the rendered pin).
 SNAPSHOT_TEMPLATE = """\
 X-IG-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 Types: deb
@@ -51,6 +54,10 @@ Components: main contrib non-free non-free-firmware
 Options: check-valid-until=no
 """
 SNAPSHOT_SOURCES = "etc/apt/sources.list.d/trixie-snapshot.sources"
+# What the base carries: `debian_packages.py sources`, rendered by base-image.yml to
+# photo-wall-debian.list and copied in by mmdebstrap as the first mirror file.
+PINNED_SOURCES = "etc/apt/sources.list.d/0000photo-wall-debian.list"
+PINNED_LINES = "".join(f"{source.line()}\n" for source in PIN.sources())
 
 # rpi-image-gen's rolling layer's replacement (the one the base drops).
 ROLLING_SOURCES = """\
@@ -90,11 +97,10 @@ def write(root: Path, relative: str, text: str) -> Path:
 
 def debian_root(root: Path, *stanzas: str) -> Path:
     """A root with a dpkg database of MINBASE plus `stanzas`, the stock system.conf and the
-    base's rendered snapshot sources."""
+    base's rendered pin sources."""
     write(root, "var/lib/dpkg/status", "\n".join([*MINBASE, *stanzas]))
     write(root, "etc/systemd/system.conf", STOCK_SYSTEM_CONF)
-    write(root, SNAPSHOT_SOURCES, SNAPSHOT_TEMPLATE.replace("${SNAPSHOT_ISO8601}", PIN.snapshot))
-    write(root, "etc/apt/sources.list", "# See sources.list(5); the base uses deb822 files.\n")
+    write(root, PINNED_SOURCES, PINNED_LINES)
     return root
 
 
@@ -186,11 +192,19 @@ def test_missing_packages_counts_config_files_as_missing(tmp_path):
 
 # --- AC6: foreign apt sources ------------------------------------------------------------------
 
-def test_the_snapgen_rendered_sources_at_the_pin_are_the_only_allowed_ones(tmp_path):
+def test_the_rendered_pin_sources_are_the_only_allowed_ones_and_all_present(tmp_path):
     debian_root(tmp_path)
     write(tmp_path, "etc/apt/sources.list.d/off.sources",
           "Enabled: no\nTypes: deb\nURIs: http://deb.debian.org/debian\nSuites: trixie\n")
     assert foreign_sources(tmp_path, PIN.sources()) == []
+    assert missing_sources(tmp_path, PIN.sources()) == []
+
+
+def test_snapgen_sources_at_the_pin_in_deb822_form_also_match(tmp_path):
+    write(tmp_path, SNAPSHOT_SOURCES,
+          SNAPSHOT_TEMPLATE.replace("${SNAPSHOT_ISO8601}", PIN.snapshot))
+    assert foreign_sources(tmp_path, PIN.sources()) == []
+    assert missing_sources(tmp_path, PIN.sources()) == []
 
 
 def test_deb_debian_org_is_foreign(tmp_path):
@@ -201,13 +215,24 @@ def test_deb_debian_org_is_foreign(tmp_path):
         "etc/apt/sources.list.d/trixie.sources: http://deb.debian.org/debian trixie-updates"]
 
 
-def test_a_different_snapshot_timestamp_is_foreign(tmp_path):
-    other = "20250101T000000Z"
+def test_a_different_snapshot_timestamp_is_foreign_and_leaves_the_pin_missing(tmp_path):
+    """What CI's base carried before it was built from the rendered pin: snapgen's sources at
+    the build's own time."""
+    other = "20260927T024516Z"
     write(tmp_path, SNAPSHOT_SOURCES, SNAPSHOT_TEMPLATE.replace("${SNAPSHOT_ISO8601}", other))
     assert foreign_sources(tmp_path, PIN.sources()) == [
         f"{SNAPSHOT_SOURCES}: https://snapshot.debian.org/archive/debian/{other} trixie",
         f"{SNAPSHOT_SOURCES}: https://snapshot.debian.org/archive/debian-security/{other} "
         "trixie-security"]
+    assert missing_sources(tmp_path, PIN.sources()) == [
+        f"{source.uri} {source.suite}" for source in PIN.sources()]
+
+
+def test_a_root_with_no_sources_is_missing_the_pin(tmp_path):
+    assert foreign_sources(tmp_path, PIN.sources()) == []
+    assert missing_sources(tmp_path, PIN.sources()) == [
+        f"https://snapshot.debian.org/archive/debian/{PIN.snapshot} trixie",
+        f"https://snapshot.debian.org/archive/debian-security/{PIN.snapshot} trixie-security"]
 
 
 def test_a_one_line_entry_for_another_host_is_foreign(tmp_path):
@@ -258,3 +283,13 @@ def test_main_checks_sources_only_when_asked(tmp_path, capsys):
     write(root, "etc/apt/sources.list.d/trixie.sources", ROLLING_SOURCES)
     assert main(["--root", str(root)]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_main_refuses_a_base_that_names_no_pinned_source(tmp_path, capsys):
+    """--pinned-sources means exactly the pin: a root whose sources were all dropped (or never
+    written) is refused, not waved through for having nothing foreign."""
+    root = debian_root(tmp_path / "root")
+    (root / PINNED_SOURCES).unlink()
+    assert main(["--root", str(root), "--pinned-sources"]) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"missing source: {source.uri} {source.suite}" for source in PIN.sources()]

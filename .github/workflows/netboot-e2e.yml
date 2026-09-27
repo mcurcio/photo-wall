@@ -60,6 +60,14 @@ on:
 permissions:
   contents: read
 
+# Every run step fails where it fails: an explicit `bash` is
+# `bash --noprofile --norc -eo pipefail {0}`, so a failing command on the left
+# of a pipe (the device-root build below) fails its step instead of being
+# masked by the right-hand side.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: netboot-e2e-${{ github.ref }}
   cancel-in-progress: true
@@ -90,7 +98,10 @@ jobs:
       # The device root: mmdebstrap over the declaration's device set at its
       # pin (scripts/test_netboot_e2e.py device_root_image), kept as a tar and
       # cached on the declaration, then imported into docker. mmdebstrap is
-      # needed only to build it (a cache miss).
+      # needed only to build it (a cache miss); debian-archive-keyring is the
+      # keyring each pinned line names (signed-by=, from the declaration).
+      # mmdebstrap's whole stderr is kept in DEVICE_ROOT_LOG (uploaded below)
+      # and echoed into this step's log on a failure.
       - name: Cache the device root
         id: device-root-cache
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -106,11 +117,14 @@ jobs:
 
       - name: Build or import the device root image
         id: device-root
+        env:
+          DEVICE_ROOT_LOG: ${{ runner.temp }}/device-root/mmdebstrap.log
         run: |
           set -eu
           image=$(.venv/bin/python -m scripts.test_netboot_e2e device-root \
             --arch arm64 --tag photo-wall-device-root:ci \
-            --cache "$RUNNER_TEMP/device-root-cache" | tail -n1)
+            --cache "$RUNNER_TEMP/device-root-cache" --log "$DEVICE_ROOT_LOG" | tail -n1)
+          test -n "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # Stage 1's computed closure, imported and exercised under `python3 -I -S`
@@ -197,6 +211,8 @@ jobs:
             --bootstrapper-deb "$BOOTSTRAPPER_DEB" \
             --deb "$PLAYER_DEB"
 
+      # Always, so a failed device-root build (whose later steps are skipped)
+      # still uploads mmdebstrap's whole log.
       - name: Upload tracer diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -207,5 +223,6 @@ jobs:
             ${{ runner.temp }}/netboot-e2e/central.log
             ${{ runner.temp }}/netboot-e2e/compose-ps.txt
             ${{ runner.temp }}/netboot-e2e/provision.log
+            ${{ runner.temp }}/device-root/mmdebstrap.log
           if-no-files-found: warn
           retention-days: 7

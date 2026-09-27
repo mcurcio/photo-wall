@@ -91,6 +91,7 @@ from uplink.resolver import Configured
 from uplink.transport import HOP_TIMEOUT, HttpTransport
 from uplink.trust import Trust
 
+REPO = Path(__file__).resolve().parents[1]
 ADMIN = "e2e-netboot-admin-" + "x" * 32
 SQUASHFS = b"rpi-image-gen base squashfs payload, streamed over a real socket" * 64
 SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
@@ -566,15 +567,56 @@ def test_the_device_root_is_built_at_the_pin_once_then_reimported(monkeypatch, t
     assert kept.name.startswith("device-root-arm64-") and kept.read_bytes() == _Commands.TAR
 
 
-def test_a_failed_device_root_build_leaves_no_tar(monkeypatch, tmp_path):
+MMDEBSTRAP_STDERR = (
+    "I: automatically chosen mode: root\n"
+    "W: GPG error: https://snapshot.debian.org/archive/debian/20260904T000000Z trixie InRelease:"
+    " NO_PUBKEY 762F67A0B2C39DE4\n"
+    "E: The repository 'https://snapshot.debian.org/archive/debian/20260904T000000Z trixie "
+    "InRelease' is not signed.\n"
+    "E: apt-get update failed\n"
+    "E: mmdebstrap failed to run\n")
+
+
+def test_a_failed_device_root_build_leaves_no_tar_and_shows_its_whole_stderr(
+        monkeypatch, tmp_path, capsys):
+    """The PR #28 tracer showed only `E: mmdebstrap failed to run`: the cause is in the lines
+    before it. A failed build echoes all of them into the CI log and keeps them in `log` (the
+    workflow's artifact), besides leaving no tar."""
     def mmdebstrap_fails(argv, **kwargs):
         kwargs["stdout"].write(b"half a tar")
-        return subprocess.CompletedProcess(argv, 1, None, "E: snapshot unreachable\n")
+        return subprocess.CompletedProcess(argv, 1, None, MMDEBSTRAP_STDERR)
 
     monkeypatch.setattr(tracer.subprocess, "run", mmdebstrap_fails)
-    with pytest.raises(tracer.TracerError, match="snapshot unreachable"):
-        device_root_image(arch="arm64", tag="device-root:test", cache=tmp_path)
-    assert list(tmp_path.iterdir()) == []
+    cache, log = tmp_path / "cache", tmp_path / "logs" / "mmdebstrap.log"
+    with pytest.raises(tracer.TracerError, match="mmdebstrap failed to run"):
+        device_root_image(arch="arm64", tag="device-root:test", cache=cache, log=log)
+    assert list(cache.iterdir()) == []
+    assert log.read_text() == MMDEBSTRAP_STDERR
+    assert MMDEBSTRAP_STDERR.rstrip("\n") in capsys.readouterr().err
+
+
+def test_a_timed_out_device_root_build_keeps_what_it_printed(monkeypatch, tmp_path, capsys):
+    def mmdebstrap_hangs(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1, output=None, stderr=b"I: downloading...\n")
+
+    monkeypatch.setattr(tracer.subprocess, "run", mmdebstrap_hangs)
+    log = tmp_path / "mmdebstrap.log"
+    with pytest.raises(tracer.TracerError, match="command_failed"):
+        device_root_image(arch="arm64", tag="device-root:test", cache=tmp_path / "c", log=log)
+    assert log.read_text() == "I: downloading...\n"
+    assert "I: downloading..." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("workflow", ["base-image.yml", "netboot-e2e.yml"])
+def test_every_step_of_the_boot_chain_workflows_fails_where_it_fails(workflow):
+    """An explicit `shell: bash` is `bash -eo pipefail`; the default is `bash -e`, under which
+    `image=$(failing | tail -n1)` succeeds (the PR #28 tracer's green-while-failed step). No step
+    may override it."""
+    text = (REPO / ".github/workflows" / workflow).read_text()
+    assert "\ndefaults:\n  run:\n    shell: bash\n" in text
+    shells = [line.split(":", 1)[1].strip() for line in text.splitlines()
+              if line.strip().startswith("shell:")]
+    assert shells == ["bash"]
 
 
 def test_the_import_smoke_imports_every_closure_module_from_the_private_dir(tmp_path):

@@ -25,15 +25,18 @@
 # Nor does it name a Debian package: the declaration does (a test checks).
 #
 # Build (see .github/workflows/base-image.yml for the full recipe, including
-# building the `.deb` and rendering the device set before invoking this):
+# building the `.deb` and rendering the device set and the apt sources before
+# invoking this):
 #   rpi-image-gen build -S appliance/rpi_image_gen -c photo-wall-base.yaml \
 #     -- IGconf_app_bootstrapper_deb=/path/to/photo-wall-bootstrapper_<version>_all.deb \
-#        IGconf_app_device_packages=/path/to/device.list
+#        IGconf_app_device_packages=/path/to/device.list \
+#        IGconf_app_debian_sources=/path/to/photo-wall-debian.list
 #
-# Reproducibility: the Debian arm64 base is pulled from the snapshot.debian.org
-# mirror snapgen renders from SOURCE_DATE_EPOCH, which the CI job reads from
-# the declaration's pin (`python3 scripts/debian_packages.py epoch`), never a
-# rolling mirror.
+# Reproducibility: the Debian arm64 base is pulled from the declaration's
+# pinned snapshot.debian.org sources (`python3 scripts/debian_packages.py
+# sources`, rendered to a file by the CI job), never a rolling mirror and
+# never a timestamp taken from the environment: rpi-image-gen's own snapshot
+# layer reads SOURCE_DATE_EPOCH, which its `env -i` layer pipeline clears.
 
 device:
   # Satisfies image-base's X-Env-Layer-RequiresProvider: device (see
@@ -43,19 +46,21 @@ device:
   layer: photo-wall-device-none
 
 layer:
-  # Debian (not Raspberry Pi OS) trixie arm64 minbase from the pinned
-  # snapshot.debian.org mirror. The built image keeps those sources: nothing on
-  # the device resolves packages, and the image's sources then name the pin it
-  # was built from (base-image.yml checks it). The rolling layer, which only
-  # swapped them for the live mirror, is not used.
-  base: debian-trixie-arm64-minbase-snapshot
+  # Debian (not Raspberry Pi OS) trixie arm64 minbase from the declaration's
+  # pinned snapshot.debian.org sources (layer/photo-wall-debian.yaml). The
+  # built image keeps those sources: nothing on the device resolves packages,
+  # and the image's sources then name the pin it was built from (base-image.yml
+  # checks it). rpi-image-gen's debian-trixie-arm64-minbase-snapshot layer is
+  # not used: its snapshot follows the build's clock, not the pin.
+  base: photo-wall-debian
   # systemd + systemd-sysv as PID 1 and `systemctl` -- required both to boot
   # this rootfs at all and to run photo-wall-provision.service
   # (Type=oneshot, WantedBy=multi-user.target, already enabled by a symlink
   # the bootstrapper `.deb` bakes as data -- no enable-units hook needed).
   init: systemd-min
   # Our own layer: apt-get installs the rendered device set and the prebuilt
-  # photo-wall-bootstrapper `.deb`. See layer/photo-wall-device.yaml.
+  # photo-wall-bootstrapper `.deb`, after the declaration's "bootstrap" stage
+  # (the CA bundle) is in place. See layer/photo-wall-device.yaml.
   app: photo-wall-device
 
 image:

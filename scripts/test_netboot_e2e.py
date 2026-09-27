@@ -210,23 +210,46 @@ def release_seed_sql(tag: str, sha256: str, size: int, url: str = TRACER_DEB_URL
     )
 
 
+def _text(output: str | bytes | None) -> str:
+    return output.decode(errors="replace") if isinstance(output, bytes) else (output or "")
+
+
 def run(args: list[str], *, timeout: int = 120, capture: bool = True,
-        stdin: IO[bytes] | None = None, stdout: IO[bytes] | None = None) -> str:
-    """Run `args`; a non-zero exit is a TracerError carrying the last output line. `stdin`
-    feeds it a file; `stdout` sends its output to a file instead of capturing it."""
+        stdin: IO[bytes] | None = None, stdout: IO[bytes] | None = None,
+        log: Path | None = None) -> str:
+    """Run `args`; a non-zero exit (or a timeout) echoes the command's WHOLE captured output to
+    our stderr, so the CI log shows the real cause, then raises a TracerError carrying its last
+    line. `stdin` feeds it a file; `stdout` sends its output to a file instead of capturing it;
+    `log` also keeps its whole stderr in that file, whatever the outcome (a workflow artifact)."""
     piped = subprocess.PIPE if capture else None
     try:
         result = subprocess.run(args, stdin=stdin, stdout=piped if stdout is None else stdout,
                                 stderr=piped, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        _keep(args, _text(error.stderr), _text(error.stdout), log=log, failed=capture)
+        raise TracerError(f"command_failed:{args[0]}") from error
     except (OSError, subprocess.SubprocessError) as error:
         raise TracerError(f"command_failed:{args[0]}") from error
-    if result.returncode != 0:
+    failed = result.returncode != 0
+    _keep(args, result.stderr or "", result.stdout or "", log=log, failed=failed and capture)
+    if failed:
         detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] if capture else []
         raise TracerError(f"command_failed:{args[0]}:{''.join(detail)[:200]}")
     return (result.stdout or "") if capture else ""
 
 
-def device_root_image(*, arch: str, tag: str, cache: Path) -> str:
+def _keep(args: list[str], stderr: str, stdout: str, *, log: Path | None, failed: bool) -> None:
+    """`stderr` into `log` (when given); on a failure, the whole output onto our stderr."""
+    if log is not None:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(stderr)
+    if failed:
+        output = (stderr or stdout).rstrip("\n")
+        print(f"--- {args[0]} failed; its whole output follows ---\n{output}\n"
+              f"--- end of {args[0]} output ---", file=sys.stderr, flush=True)
+
+
+def device_root_image(*, arch: str, tag: str, cache: Path, log: Path | None = None) -> str:
     """docker image name for the device root: mmdebstrap_argv(arch=arch, target="-",
     consumers=DEVICE_CONSUMERS) piped to `docker import - <tag>`; the tar is kept under `cache`
     (actions/cache key = hashFiles('scripts/debian_packages.py')) and re-imported on a hit.
@@ -234,7 +257,7 @@ def device_root_image(*, arch: str, tag: str, cache: Path) -> str:
     The tar's name carries a digest of the exact mmdebstrap command, so a changed declaration
     never re-imports a stale root, whatever the cache key. mmdebstrap runs as root (its root
     mode; unprivileged user namespaces are restricted on the runner); a failed build leaves no
-    tar behind."""
+    tar behind, and its whole stderr on ours (and in `log`, when given)."""
     argv = mmdebstrap_argv(arch=arch, target="-", consumers=DEVICE_CONSUMERS)
     digest = hashlib.sha256("\n".join(argv).encode()).hexdigest()[:16]
     tar = cache / f"device-root-{arch}-{digest}.tar"
@@ -244,7 +267,7 @@ def device_root_image(*, arch: str, tag: str, cache: Path) -> str:
         as_root = () if os.geteuid() == 0 else ("sudo", "-n")
         try:
             with partial.open("wb") as out:
-                run([*as_root, *argv], stdout=out, timeout=DEVICE_ROOT_SECONDS)
+                run([*as_root, *argv], stdout=out, timeout=DEVICE_ROOT_SECONDS, log=log)
             partial.replace(tar)
         finally:
             partial.unlink(missing_ok=True)
@@ -705,6 +728,8 @@ def main() -> None:
     root.add_argument("--tag", required=True)
     root.add_argument("--cache", type=Path, required=True,
                       help="where the root's tar is kept between runs (actions/cache)")
+    root.add_argument("--log", type=Path,
+                      help="where mmdebstrap's whole stderr is kept when it runs")
     tracer = commands.add_parser("run", help="run the tracer")
     tracer.add_argument("--state-dir", type=Path, required=True)
     tracer.add_argument("--central-image", required=True)
@@ -719,7 +744,8 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "device-root":
-            print(device_root_image(arch=args.arch, tag=args.tag, cache=args.cache))
+            print(device_root_image(arch=args.arch, tag=args.tag, cache=args.cache,
+                                    log=args.log))
             return
         result = run_tracer(args.state_dir, central_image=args.central_image,
                             device_root=args.device_root,

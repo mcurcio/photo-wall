@@ -11,8 +11,8 @@ the snapshot it was built from.
 - Resolver writer: a package in RESOLVER_WRITERS would replace the resolver stage 1 hands over.
 - Missing package: `dpkg --install` of the Player refuses to configure when its `Depends` are
   not installed, so the base must carry them.
-- Foreign source: every apt source must be one of the allowed ones (`--pinned-sources`: the
-  declaration's `PIN.sources()`).
+- Pinned sources (`--pinned-sources`): the apt sources are exactly the declaration's
+  `PIN.sources()` -- no foreign source, and none of the pin's missing.
 
 Run over the base squashfs extract (all five), both `.deb` staging trees (watchdog only, from the
 builders) and the e2e device root after provisioning (watchdog, time daemon, resolver writer).
@@ -217,19 +217,27 @@ def _apt_sources(root: Path) -> Iterator[tuple[str, str, str]]:
 def foreign_sources(root: Path, allowed: Sequence[AptSource]) -> list[str]:
     """'<path>: <uri> <suite>' for every apt source under etc/apt/sources.list and
     etc/apt/sources.list.d (one-line and deb822 forms) whose (URI, suite) is not in `allowed`
-    (a trailing slash on a URI is insignificant). On the base, allowed = PIN.sources(): the
-    image names only the pin it was built from, which also proves rpi-image-gen's snapgen
-    rendered the same timestamp as the declaration."""
+    (a trailing slash on a URI is insignificant). On the base, allowed = PIN.sources(): a
+    source at any other snapshot timestamp (the build's own clock, say) is foreign."""
     permitted = {(source.uri.rstrip("/"), source.suite) for source in allowed}
     return [f"{name}: {uri} {suite}" for name, uri, suite in _apt_sources(root)
             if (uri.rstrip("/"), suite) not in permitted]
+
+
+def missing_sources(root: Path, required: Sequence[AptSource]) -> list[str]:
+    """'<uri> <suite>' for every `required` source no apt source under the root names (same
+    matching as foreign_sources). With foreign_sources over the same list: the root's sources
+    are exactly the pin, so a base built from no pinned source at all cannot pass."""
+    present = {(uri.rstrip("/"), suite) for _, uri, suite in _apt_sources(root)}
+    return [f"{source.uri} {source.suite}" for source in required
+            if (source.uri.rstrip("/"), source.suite) not in present]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """--root DIR [--require-installed FILE]... [--pinned-sources]; exit 1 with one line per
     violation, 0 on a clean root. Watchdog, time-daemon and resolver-writer checks always run;
     each FILE names packages separated by whitespace or commas (a `packages` listing or a
-    `Depends` value); --pinned-sources allows only debian_packages.PIN.sources()."""
+    `Depends` value); --pinned-sources requires exactly debian_packages.PIN.sources()."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--require-installed", type=Path, action="append", default=[],
@@ -247,6 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         violations += [f"missing package: {name}" for name in missing_packages(root, required)]
     if args.pinned_sources:
         violations += [f"foreign source: {line}" for line in foreign_sources(root, PIN.sources())]
+        violations += [f"missing source: {line}" for line in missing_sources(root, PIN.sources())]
     for line in violations:
         print(line)
     return 1 if violations else 0

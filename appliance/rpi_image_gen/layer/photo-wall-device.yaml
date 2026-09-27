@@ -13,14 +13,22 @@
 #  rpi-image-gen runs and named by `IGconf_app_bootstrapper_deb`. One
 #  customize-hook copies it into the chroot and installs both with apt-get
 #  against this build's snapshot sources (the pin the base itself is built
-#  from), without Recommends. The `.deb` enables photo-wall-provision.service
-#  by a symlink it bakes as data, so no enable-units hook is needed. On the Pi
-#  nothing resolves packages: provisioning installs the Player `.deb` with
-#  dpkg alone, so its Depends must already be here (base-image.yml checks the
-#  built image with scripts/device_root_checks.py). No application code and
-#  no origin -- 0009 rule #1.
-# X-Env-Layer-Version: 3.0.0
-# X-Env-Layer-Requires: systemd-min
+#  from, layer/photo-wall-debian.yaml), without Recommends. That apt runs
+#  INSIDE the chroot and fetches over https, so the CA bundle must already be
+#  there: the declaration's "bootstrap" stage
+#  (`packages(*DEVICE_CONSUMERS, stage="bootstrap")`) is installed first by
+#  mmdebstrap's own package list with the host's apt, through the required
+#  rpi-image-gen layer of the same name (its `ca-certificates` layer is
+#  `mmdebstrap: packages: [ca-certificates]`). tests/test_debian_packages.py
+#  binds this Requires list to that stage, so neither can change alone. The
+#  `.deb` enables photo-wall-provision.service by a symlink it bakes as data,
+#  so no enable-units hook is needed. On the Pi nothing resolves packages:
+#  provisioning installs the Player `.deb` with dpkg alone, so its Depends
+#  must already be here (base-image.yml checks the built image with
+#  scripts/device_root_checks.py). No application code and no origin -- 0009
+#  rule #1.
+# X-Env-Layer-Version: 3.1.0
+# X-Env-Layer-Requires: systemd-min,ca-certificates
 #
 # X-Env-VarPrefix: app
 #
