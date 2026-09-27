@@ -31,19 +31,24 @@ from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.kernel.ports import PublishedRelease, ReleaseListing, UpstreamVersion
 from central.kernel.types import release_version, require_sha256
-from contracts.release import MAX_ROOTFS_BYTES
+from contracts.release import (
+    BASE_IMAGE,
+    MANIFEST,
+    MANIFEST_SCHEMA,
+    MAX_MANIFEST_BYTES,
+    MAX_ROOTFS_BYTES,
+    PLAYER_DEB,
+)
 
 GITHUB_API_BASE: Final = "https://api.github.com"
 MAX_DOWNLOAD_BYTES: Final = MAX_ROOTFS_BYTES  # 1024**3: the largest artifact Central serves
 
 GITHUB_API_VERSION: Final = "2022-11-28"
-MANIFEST_ASSET_NAME: Final = "manifest.json"
 DEFAULT_REPO: Final = "mcurcio/photo-wall"
 
 CHUNK: Final = 64 * 1024
 PER_PAGE: Final = 100
 MAX_PAGES: Final = 20  # PER_PAGE * MAX_PAGES = up to 2000 releases scanned per listing
-MAX_MANIFEST_BYTES: Final = 64 * 1024
 MAX_RELEASES_PAGE_BYTES: Final = 8 * 1024 * 1024
 MAX_REDIRECTS: Final = 5
 
@@ -201,7 +206,7 @@ class GitHubReleaseOrigin:
                                 upstream_version=manifest.upstream_version)
 
     async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
-        manifest_asset = assets.get(MANIFEST_ASSET_NAME)
+        manifest_asset = assets.get(MANIFEST)
         if manifest_asset is None:
             return _Manifest(None, "no_manifest", None)
         try:
@@ -330,11 +335,11 @@ def _parse_manifest(body: bytes, assets: dict[str, _Asset],
         return _Manifest(None, "manifest_invalid", None)
     if not isinstance(manifest, dict):
         return _Manifest(None, "manifest_invalid", None)
-    if manifest.get("schema") != 1:
+    if manifest.get("schema") != MANIFEST_SCHEMA:
         return _Manifest(None, "schema_mismatch", None)
     # The OS image is independent of the .deb: parsed whatever the player_deb outcome.
-    os_image = _locator(manifest.get("base_image"), assets, suffix="", max_size=None)
-    player = manifest.get("player_deb")
+    os_image = _locator(manifest.get(BASE_IMAGE), assets, suffix="", max_size=None)
+    player = manifest.get(PLAYER_DEB)
     if _declared_file(player, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES) is None:
         return _Manifest(None, "manifest_invalid", os_image)
     package = _locator(player, assets, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES)

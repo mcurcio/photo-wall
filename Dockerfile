@@ -49,7 +49,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Build the operator console (React/Vite) bundle so EVERY image build path --
-# pipeline.yml's service-images publish, checks.yml, `docker compose up`, and a
+# pipeline.yml's release images job, checks.yml, `docker compose up`, and a
 # bare `docker build` -- ships central/console/dist/, independent of any
 # workspace pre-build. This is the fix for the published central image 500ing on
 # `GET /`: previously dist/ only reached the image when a caller happened to have

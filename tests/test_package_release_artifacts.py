@@ -1,4 +1,6 @@
-"""Operator release-artifact packaging: presence checks and hash correctness.
+"""Operator release-artifact packaging: presence checks and hash correctness, the manifest's
+image digests, byte-for-byte reproducibility, and `verify` against the declared release
+(contracts/release.py).
 
 The published set is the netboot base bundle tarball + the Player `.deb` + the
 bootstrapper `.deb` -- no signed rootfs, no `release.pub.pem`.
@@ -7,42 +9,30 @@ bootstrapper `.deb` -- no signed rootfs, no `release.pub.pem`.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import tarfile
+import time
 
 import pytest
+from support.release_build import EPOCH, IMAGE_REFERENCES, REVISION, digest, write
+from support.release_build import base_bundle as _synthetic_base_bundle
+from support.release_build import bootstrapper_deb as _synthetic_bootstrapper_deb
+from support.release_build import player_deb as _synthetic_player_deb
 
-from scripts.package_release_artifacts import PackagingError, package
-
-REVISION = "a" * 40
-
-
-def _write(path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
-
-
-def _synthetic_base_bundle(root):
-    """Build a fake bundle tree shaped like `scripts/build_netboot_bundle.sh`'s."""
-    bundle = root / "base-bundle"
-    _write(bundle / "photo-wall-base.squashfs", b"fake-base-squashfs-bytes")
-    _write(bundle / "boot" / "config.txt", b"[all]\narm_64bit=1\n")
-    _write(bundle / "boot" / "kernel_2712.img", b"fake-kernel-bytes")
-    _write(bundle / "boot" / "initrd.img", b"fake-initrd-bytes")
-    _write(bundle / "boot" / "bcm2712-rpi-5-b.dtb", b"fake-dtb-bytes")
-    _write(bundle / "SHA256SUMS", b"deadbeef  photo-wall-base.squashfs\n")
-    return bundle
+from central.origins.github import _asset_urls, _parse_manifest
+from contracts.release import CHECKSUMS, FILES, IMAGES, MANIFEST
+from scripts.package_release_artifacts import PackagingError, verify
+from scripts.package_release_artifacts import package as _package
 
 
-def _synthetic_player_deb(root):
-    path = root / "photo-wall-player_0.1.0+gdeadbeef_arm64.deb"
-    _write(path, b"fake-player-deb-bytes" * 100)
-    return path
+def package(bundle, player_deb, bootstrapper_deb, destination, *, revision,
+            images=IMAGE_REFERENCES, source_date_epoch=EPOCH):
+    return _package(bundle, player_deb, bootstrapper_deb, destination, revision=revision,
+                    images=images, source_date_epoch=source_date_epoch)
 
 
-def _synthetic_bootstrapper_deb(root):
-    path = root / "photo-wall-bootstrapper_0.1.0+gdeadbeef_arm64.deb"
-    _write(path, b"fake-bootstrapper-deb-bytes" * 100)
-    return path
+_write = write
 
 
 def test_package_produces_expected_bundle_and_debs(tmp_path):
@@ -209,3 +199,125 @@ def test_destination_must_not_already_exist(tmp_path):
     with pytest.raises(PackagingError, match="destination_exists"):
         package(bundle, _synthetic_player_deb(tmp_path),
                 _synthetic_bootstrapper_deb(tmp_path), destination, revision=REVISION)
+
+
+# --- the manifest's images, reproducibility, and the declared release ---------------------------
+
+def _packaged(tmp_path, name="release", **overrides):
+    root = tmp_path / f"{name}-inputs"
+    destination = tmp_path / name
+    manifest = package(_synthetic_base_bundle(root), _synthetic_player_deb(root),
+                       _synthetic_bootstrapper_deb(root), destination, revision=REVISION,
+                       **overrides)
+    return destination, manifest
+
+
+def test_the_manifest_carries_each_declared_image_by_digest(tmp_path):
+    destination, manifest = _packaged(tmp_path)
+    expected = {name: {"repository": f"ghcr.io/owner/repo/{name}", "digest": digest(name)}
+                for name in IMAGES}
+    assert manifest["images"] == expected
+    assert json.loads((destination / MANIFEST).read_bytes())["images"] == expected
+    assert set(manifest) == {"schema", "revision", *FILES, "images"}
+
+
+@pytest.mark.parametrize("images", [
+    {"central": IMAGE_REFERENCES["central"]},                                  # one missing
+    {**IMAGE_REFERENCES, "extra": IMAGE_REFERENCES["central"]},                # undeclared
+    {**IMAGE_REFERENCES, "central": "ghcr.io/owner/repo/central:v0.9.1"},      # a tag, no digest
+    {**IMAGE_REFERENCES, "central": "ghcr.io/owner/repo/central@sha256:abc"},  # a short digest
+    {**IMAGE_REFERENCES, "central": "GHCR.io/Owner/central@" + digest("central")},
+], ids=["missing", "undeclared", "tag", "short-digest", "upper-case"])
+def test_packaging_refuses_anything_but_every_declared_image_pinned_by_digest(tmp_path, images):
+    with pytest.raises(PackagingError, match="image"):
+        _packaged(tmp_path, images=images)
+    assert not (tmp_path / "release").exists()                  # refused before writing
+
+
+def test_packaging_the_same_build_twice_yields_the_same_bytes(tmp_path, monkeypatch):
+    """So a re-run's seal finds the assets its failed attempt attached (by sha256). The second
+    run packages later, from inputs whose file times differ, as two artifact downloads' do."""
+    first, _ = _packaged(tmp_path, "first")
+    later = time.time() + 86_400
+    monkeypatch.setattr(time, "time", lambda: later)
+    second_inputs = tmp_path / "second-inputs"
+    bundle = _synthetic_base_bundle(second_inputs)
+    for path in bundle.rglob("*"):
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+    package(bundle, _synthetic_player_deb(second_inputs),
+            _synthetic_bootstrapper_deb(second_inputs), tmp_path / "second", revision=REVISION)
+    for path in sorted(first.iterdir()):
+        assert path.read_bytes() == (tmp_path / "second" / path.name).read_bytes(), path.name
+    with tarfile.open(first / f"photo-wall-base-{REVISION}.tar.gz") as archive:
+        members = archive.getmembers()
+    assert {(member.mtime, member.uid, member.gid, member.uname, member.gname)
+            for member in members} == {(EPOCH, 0, 0, "", "")}
+
+
+def test_verify_admits_exactly_the_packaged_release(tmp_path):
+    destination, manifest = _packaged(tmp_path)
+    packaged = verify(destination, revision=REVISION)
+    assert {asset.name for asset in packaged.assets} == {
+        MANIFEST, CHECKSUMS, *(manifest[key]["filename"] for key in FILES)}
+    for asset in packaged.assets:
+        assert hashlib.sha256(asset.path.read_bytes()).hexdigest() == asset.sha256
+        assert asset.path.stat().st_size == asset.size
+    assert [(image.name, image.reference) for image in packaged.images] == [
+        (name, IMAGE_REFERENCES[name]) for name in IMAGES]
+
+
+def _rewrite_manifest(destination, edit):
+    """Edit the manifest and keep SHA256SUMS consistent with it, so only the edit is wrong."""
+    manifest = json.loads((destination / MANIFEST).read_bytes())
+    edit(manifest)
+    (destination / MANIFEST).write_text(json.dumps(manifest))
+    sums = [line for line in (destination / CHECKSUMS).read_text().splitlines()
+            if not line.endswith(f"  {MANIFEST}")]
+    sums.append(f"{hashlib.sha256((destination / MANIFEST).read_bytes()).hexdigest()}  "
+                f"{MANIFEST}")
+    (destination / CHECKSUMS).write_text("\n".join(sums) + "\n")
+
+
+def _drop(key):
+    return lambda manifest: manifest.pop(key)
+
+
+@pytest.mark.parametrize("damage, reason", [
+    (lambda d, m: (d / m["bootstrapper_deb"]["filename"]).unlink(), "missing"),
+    (lambda d, m: (d / CHECKSUMS).unlink(), "missing"),
+    (lambda d, m: (d / "stray.txt").write_text("x"), "undeclared stray.txt"),
+    (lambda d, m: (d / m["player_deb"]["filename"]).write_bytes(b"other"), "digest_mismatch"),
+    (lambda d, m: (d / CHECKSUMS).write_text("0" * 64 + "  manifest.json\n"),
+     "checksums_mismatch"),
+    (lambda d, m: _rewrite_manifest(d, _drop("images")), "manifest_keys_invalid"),
+    (lambda d, m: _rewrite_manifest(d, _drop("bootstrapper_deb")), "manifest_keys_invalid"),
+    (lambda d, m: _rewrite_manifest(d, lambda x: x.update(extra=1)), "manifest_keys_invalid"),
+    (lambda d, m: _rewrite_manifest(d, lambda x: x.update(schema=2)), "schema"),
+    (lambda d, m: _rewrite_manifest(d, lambda x: x.update(revision="b" * 40)), "revision"),
+    (lambda d, m: _rewrite_manifest(d, lambda x: x["images"].pop("central")), "images"),
+    (lambda d, m: _rewrite_manifest(
+        d, lambda x: x["images"]["central"].update(digest="sha256:" + "0" * 7)), "images"),
+    (lambda d, m: _rewrite_manifest(
+        d, lambda x: x["player_deb"].update(filename="../escape.deb")), "record_invalid"),
+    (lambda d, m: _rewrite_manifest(
+        d, lambda x: x["player_deb"].update(sha256="0" * 64)), "digest_mismatch"),
+], ids=["missing-deb", "missing-checksums", "stray-file", "changed-deb", "checksums",
+        "no-images", "no-bootstrapper", "unknown-key", "schema", "revision", "image-missing",
+        "image-digest", "path-escape", "recorded-sha"])
+def test_verify_refuses_any_difference_from_the_declared_release(tmp_path, damage, reason):
+    destination, manifest = _packaged(tmp_path)
+    damage(destination, manifest)
+    with pytest.raises(PackagingError, match=reason):
+        verify(destination, revision=REVISION)
+
+
+def test_central_reads_the_packaged_manifest_as_a_deployable_release(tmp_path):
+    """The images block is additive: Central's parser (central/origins/github.py) ignores it and
+    finds the .deb and the base tarball the packager attached."""
+    destination, manifest = _packaged(tmp_path)
+    assets = _asset_urls([{"name": path.name, "browser_download_url": f"https://x/{path.name}"}
+                          for path in destination.iterdir()])
+    parsed = _parse_manifest((destination / MANIFEST).read_bytes(), assets, None)
+    assert parsed.package_problem is None
+    assert parsed.package.sha256 == manifest["player_deb"]["sha256"]
+    assert parsed.os_image.sha256 == manifest["base_image"]["sha256"]

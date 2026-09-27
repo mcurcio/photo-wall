@@ -1,22 +1,19 @@
 """The release rule (scripts/release_plan.py): its decisions on scratch git repositories with the
-repository's real commitizen configuration, the claim against a scripted GitHub API, the gate's
-verdicts, the package manifest against the real tree, the Dockerfile and the computed closures,
-and pipeline.yml's wiring against the rule."""
+repository's real commitizen configuration, the gate's verdicts, the package manifest against the
+real tree, the Dockerfile and the computed closures, and pipeline.yml's wiring against the rule.
+The seal, the one job that writes a version, is tests/test_release_seal.py's."""
 
 import ast
-import http.server
 import json
 import os
 import re
 import shutil
-import socket
 import subprocess
-import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from contracts.release import IMAGES
 from scripts import release_plan
 from scripts.module_closure import POLICIES, closure_for
 from scripts.release_plan import (
@@ -29,7 +26,6 @@ from scripts.release_plan import (
     SUITES,
     Commitizen,
     DockerfileError,
-    GitHubApi,
     Plan,
     PlanError,
     PullRequestRun,
@@ -37,7 +33,6 @@ from scripts.release_plan import (
     Suite,
     changed_paths,
     check_commits,
-    claim,
     claimed_by,
     dockerfile_stages,
     gate,
@@ -47,6 +42,7 @@ from scripts.release_plan import (
     pyproject_digest,
     refuse_a_taken_tag,
 )
+from scripts.release_seal import RELEASE_BRANCH
 
 REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github/workflows"
@@ -256,7 +252,8 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
     assert values["revision"] == scratch.git("rev-parse", "HEAD")
-    assert (values["should_release"], values["tag"], values["version"]) == ("false", "", "")
+    assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
+        "false", "", "", "")
     assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e"]
     assert "Jobs: base-image, checks, e2e, netboot-e2e\n" in summary.read_text()
 
@@ -296,7 +293,8 @@ def test_a_pull_request_run_lists_no_publishing_job_whatever_its_plan_forecasts(
     run = PullRequestRun(plan)
     assert run.jobs == EVERY_SUITE and not run.releases
     assert not set(PUBLISH_JOBS) & set(run.jobs)
-    assert release_plan.outputs(run)["tag"] == "" and release_plan.outputs(run)["version"] == ""
+    assert {key: release_plan.outputs(run)[key] for key in ("tag", "version", "since")} == {
+        "tag": "", "version": "", "since": ""}
     assert set(RELEASE_JOBS) <= set(ReleaseRun(plan).jobs)
 
 
@@ -322,8 +320,8 @@ def test_pr_mode_never_lists_a_publishing_job_even_when_merging_releases(scratch
     assert scratch.plan().tag == "v0.9.0"                       # merging would release
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     jobs = json.loads(values["jobs"])
-    assert not {"publish", "service-base", "service-images"} & set(jobs), jobs
-    assert values["should_release"] == "false" and values["tag"] == ""
+    assert not {"seal", "service-base", "images"} & set(jobs), jobs
+    assert values["should_release"] == "false" and values["tag"] == "" and values["since"] == ""
 
 
 @needs_uvx
@@ -332,10 +330,10 @@ def test_push_mode_lists_every_release_job_when_a_release_is_due(scratch, tmp_pa
     output = tmp_path / "output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     values = scratch.main("push", output=output)
-    assert {"publish", "service-base", "service-images", "base-image"} <= set(
-        json.loads(values["jobs"]))
-    assert (values["should_release"], values["tag"], values["version"]) == (
-        "true", "v0.8.1", "0.8.1")
+    assert {"seal", "service-base", "images", "base-image"} <= set(json.loads(values["jobs"]))
+    # `since` is what the seal's compare-and-swap requires to still be the highest published.
+    assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
+        "true", "v0.8.1", "0.8.1", "v0.8.0")
 
 
 @needs_uvx
@@ -436,147 +434,15 @@ def test_pyproject_counts_only_through_its_build_tables():
         pyproject_digest("[project\n")
 
 
-def test_pipeline_yml_is_declared_unshipped_and_release_assets_holds_only_the_packager():
-    pipeline = ".github/workflows/pipeline.yml"
-    assert claimed_by(pipeline) == () and any(matches(pattern, pipeline)
-                                               for pattern in NOT_SHIPPED)
-    assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",)
-
-
-# --- the claim: a published release is never rewritten -----------------------------------------
-
-REVISION = "a" * 40
-OTHER = "b" * 40
-
-
-@dataclass
-class FakeGitHub:
-    at: str | None = None
-    is_published: bool = False
-
-    def tag_commit(self, tag):
-        return self.at
-
-    def published(self, tag):
-        return self.is_published
-
-
-class _Api(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802 (the stdlib's name)
-        self.server.seen.append((self.path, self.headers.get("Authorization")))
-        status, body = self.server.routes.get(self.path, (404, {"message": "Not Found"}))
-        payload = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args):
-        pass
-
-
-REPOSITORY = "/repos/owner/repo"
-
-
-@pytest.fixture
-def api(monkeypatch):
-    """A scripted GitHub REST API on localhost, and the real adapter pointed at it. Every route
-    not scripted answers 404; the repository itself answers 200."""
-    for proxy in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
-        monkeypatch.delenv(proxy, raising=False)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Api)
-    server.routes, server.seen = {REPOSITORY: (200, {"full_name": "owner/repo"})}, []
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server, GitHubApi(f"http://127.0.0.1:{server.server_port}", "owner/repo", "t0ken")
-    server.shutdown()
-    server.server_close()
-
-
-def _tag(sha, kind="commit"):
-    return (200, {"ref": "refs/tags/v0.9.1", "object": {"type": kind, "sha": sha}})
-
-
-@pytest.mark.parametrize("routes", [
-    {},                                                                        # a new version
-    {f"{REPOSITORY}/git/ref/tags/v0.9.1": _tag(REVISION)},                     # tagged, unpublished
-    {f"{REPOSITORY}/git/ref/tags/v0.9.1": _tag(REVISION),
-     f"{REPOSITORY}/releases/tags/v0.9.1": (200, {"draft": True})},            # tagged, a draft
-    {f"{REPOSITORY}/git/ref/tags/v0.9.1": _tag("c" * 40, "tag"),               # annotated, peeled
-     f"{REPOSITORY}/git/tags/{'c' * 40}": _tag(REVISION)},
-], ids=["untagged", "tagged-here", "tagged-here-draft", "annotated-here"])
-def test_the_claim_admits_a_version_that_is_this_revisions_and_unpublished(api, routes):
-    server, github = api
-    server.routes.update(routes)
-    assert "unpublished" in claim(github, "v0.9.1", REVISION)
-    assert {authorization for _, authorization in server.seen} == {"Bearer t0ken"}
-
-
-@pytest.mark.parametrize("release", [None, (200, {"draft": True}), (200, {"draft": False})])
-def test_the_claim_refuses_a_tag_at_another_commit(api, release):
-    """The stale re-run: its plan built REVISION, but the version was published from OTHER."""
-    server, github = api
-    server.routes[f"{REPOSITORY}/git/ref/tags/v0.9.1"] = _tag(OTHER)
-    if release:
-        server.routes[f"{REPOSITORY}/releases/tags/v0.9.1"] = release
-    with pytest.raises(PlanError, match=f"v0.9.1 is tagged at {OTHER}, but this run built "
-                                        f"{REVISION}"):
-        claim(github, "v0.9.1", REVISION)
-
-
-@pytest.mark.parametrize("release", [{"draft": False}, {"name": "no draft field"}])
-def test_the_claim_refuses_a_published_release_even_at_its_own_commit(api, release):
-    server, github = api
-    server.routes[f"{REPOSITORY}/git/ref/tags/v0.9.1"] = _tag(REVISION)
-    server.routes[f"{REPOSITORY}/releases/tags/v0.9.1"] = (200, release)
-    with pytest.raises(PlanError, match="v0.9.1 is already published at"):
-        claim(github, "v0.9.1", REVISION)
-
-
-@pytest.mark.parametrize("status", [500, 502, 403, 429, 401])
-@pytest.mark.parametrize("route", ["/git/ref/tags/v0.9.1", "/releases/tags/v0.9.1", ""])
-def test_the_claim_fails_on_any_api_error_but_404_instead_of_reading_it_as_absent(api, status,
-                                                                                  route):
-    server, github = api
-    server.routes[f"{REPOSITORY}{route}"] = (status, {"message": "trouble"})
-    with pytest.raises(PlanError, match=f"HTTP {status}"):
-        claim(github, "v0.9.1", REVISION)
-
-
-def test_the_claim_fails_when_the_token_cannot_see_the_repository(api):
-    """A private repository answers 404 for everything to a token that cannot read it."""
-    server, github = api
-    del server.routes[REPOSITORY]
-    with pytest.raises(PlanError, match="cannot read it"):
-        claim(github, "v0.9.1", REVISION)
-
-
-def test_the_claim_fails_when_github_is_unreachable():
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    with pytest.raises(PlanError, match="GET http://127.0.0.1"):
-        claim(GitHubApi(f"http://127.0.0.1:{port}", "owner/repo", "t"), "v0.9.1", REVISION)
-
-
-def test_the_claim_needs_a_token_a_strict_tag_and_a_full_commit(monkeypatch):
-    with pytest.raises(PlanError, match="set GH_TOKEN"):
-        GitHubApi.from_env({"GITHUB_REPOSITORY": "owner/repo"})
-    assert GitHubApi.from_env({"GITHUB_REPOSITORY": "o/r", "GH_TOKEN": "t"}).url == \
-        "https://api.github.com"
-    for tag, revision in (("0.9.1", REVISION), ("v0.9", REVISION), ("v0.9.1", "a" * 7),
-                          ("v0.9.1;x", REVISION)):
-        with pytest.raises(PlanError, match="claim needs"):
-            claim(FakeGitHub(), tag, revision)
-
-
-def test_the_claim_command(capsys):
-    args = ["claim", "--tag", "v0.9.1", "--revision", REVISION]
-    assert release_plan.main(args, github=FakeGitHub(at=REVISION)) == 0
-    assert "claim: v0.9.1 is tagged at this revision and unpublished" in capsys.readouterr().out
-    assert release_plan.main(args, github=FakeGitHub(at=REVISION, is_published=True)) == 1
-    assert "::error title=release claim::v0.9.1 is already published" in capsys.readouterr().out
+def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_assets():
+    """pipeline.yml and the seal (how a release is written) cut no version; the declaration of
+    what a release contains and the packager that writes it do."""
+    for path in (".github/workflows/pipeline.yml", "scripts/release_seal.py",
+                 "scripts/release_plan.py"):
+        assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
+    assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
+                                                "contracts/release.py")
+    assert "release-assets" in claimed_by("contracts/release.py")
 
 
 # --- the gate ----------------------------------------------------------------------------------
@@ -591,7 +457,7 @@ def _needs(jobs, **results):
 def test_the_gate_passes_when_every_listed_job_succeeded_and_the_rest_skipped():
     assert gate(_needs(["checks", "e2e"], checks="success", e2e="success", tested="success",
                        **{"base-image": "skipped", "netboot-e2e": "skipped",
-                          "publish": "skipped"})) == []
+                          "seal": "skipped"})) == []
 
 
 @pytest.mark.parametrize("result", ["skipped", "failure", "cancelled"])
@@ -603,8 +469,8 @@ def test_the_gate_fails_when_a_listed_job_did_not_succeed(result):
 
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_the_gate_fails_when_an_unlisted_job_failed_or_was_cancelled(result):
-    assert gate(_needs(["checks"], checks="success", tested="success", publish=result)) == [
-        f"publish: {result}"]
+    assert gate(_needs(["checks"], checks="success", tested="success", seal=result)) == [
+        f"seal: {result}"]
 
 
 def test_the_gate_fails_when_the_plan_or_the_barrier_failed():
@@ -867,11 +733,12 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
     assert [path for path in base if not _package("base-bundle").claims(path)] == []
-    # release_plan.py (the claim) decides whether publish may write; it shapes no artefact.
-    publish = _with_imports(_scripts_named(_job("pipeline.yml", "publish")))
-    assert publish == {"scripts/package_release_artifacts.py", "scripts/release_plan.py"}
-    publish.remove("scripts/release_plan.py")
-    assert all(_package("release-assets").claims(path) for path in publish)
+    # The seal and the plan it imports decide whether and how a release is written; they shape
+    # no artefact byte. The packager does, and ships as release-assets.
+    seal = _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
+    assert seal == {"scripts/release_seal.py", "scripts/package_release_artifacts.py",
+                    "scripts/release_plan.py"}
+    assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
 
@@ -900,15 +767,14 @@ def test_every_conditional_job_is_one_the_plan_lists_and_reads_the_plan():
 def test_the_barrier_needs_every_test_and_every_release_job_needs_the_barrier():
     jobs = _pipeline_jobs()
     assert set(_needs_of(jobs["tested"])) == {"plan"} | {suite.job for suite in SUITES}
-    for name in ("service-base", "publish"):
+    for name in ("service-base", "seal"):
         assert "tested" in _needs_of(jobs[name])
         assert "!cancelled() && needs.tested.result == 'success'" in jobs[name]
-    assert "service-base" in _needs_of(jobs["service-images"])
-    assert "!cancelled() && needs.service-base.result == 'success'" in jobs["service-images"]
-    # A release is published only after its images are pushed: none ever lacks them, and the
-    # claim (which refuses a published version) never races the publish.
-    assert "service-images" in _needs_of(jobs["publish"])
-    assert "&& needs.service-images.result == 'success'" in _condition(jobs["publish"])
+    assert "service-base" in _needs_of(jobs["images"])
+    assert "!cancelled() && needs.service-base.result == 'success'" in jobs["images"]
+    # The seal runs only after the images are pushed: it promotes their digests.
+    assert "images" in _needs_of(jobs["seal"])
+    assert "&& needs.images.result == 'success'" in _condition(jobs["seal"])
 
 
 def test_the_gate_is_the_one_stable_check_over_every_job():
@@ -976,33 +842,76 @@ def test_every_job_that_can_publish_runs_only_on_a_push_to_main():
                     called[1], nested)
 
 
-CLAIM = 'run: python3 scripts/release_plan.py claim --tag "$TAG" --revision "$REVISION"'
+def _code(text: str) -> str:
+    """A workflow's lines that are not comments."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def test_every_job_that_writes_a_release_artefact_claims_its_version_first():
-    """service-images claims before its first push, publish before its create, each for the
-    plan's tag and revision -- the very values it then writes."""
+# What makes a job a version writer: the plan's version (its tag, or the tag it follows), an
+# image tag that is not `:sha-*`, or a GitHub CLI / API call.
+VERSION_WRITES = ("needs.plan.outputs.tag", "needs.plan.outputs.since", "env.TAG", "$TAG",
+                  "imagetools", "gh release", "gh api", "claim")
+
+
+def test_only_the_seal_writes_a_version():
+    """The seal is the only job, in any workflow, with `contents: write`, and the only one that
+    reads the plan's version: no other job can create a tag or a release, or push an image under
+    a version tag. The images job pushes each image under `:sha-<revision>` alone."""
     jobs = _pipeline_jobs()
-    for name, write in (("service-images", "push: true"), ("publish", "gh release create")):
-        body = jobs[name]
-        assert "      TAG: ${{ needs.plan.outputs.tag }}\n" in body, name
-        assert "      REVISION: ${{ needs.plan.outputs.revision }}\n" in body, name
-        assert body.count(CLAIM) == 1 and body.index(CLAIM) < body.index(write), name
-        claim_step = body[body.rindex("      - name:", 0, body.index(CLAIM)):body.index(CLAIM)]
-        assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in claim_step, name
-    images = jobs["service-images"]
-    assert "needs.plan.outputs.tag" not in images.split(CLAIM, 1)[1]
-    assert images.count(":${{ env.TAG }}\n") == images.count("push: true") == 2
-    assert "GH_TOKEN" not in jobs["plan"]                       # the plan reads no GitHub API
+    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+        scopes = [_permissions(workflow.read_text(), "")] + [
+            _permissions(body, "    ") for name, body in _workflow_jobs(workflow.name).items()
+            if (workflow.name, name) != ("pipeline.yml", "seal")]
+        assert all("contents" not in _writes(scope) for scope in scopes), workflow.name
+    assert _writes(_permissions(jobs["seal"], "    ")) == {"contents", "packages"}
+    for name, body in jobs.items():
+        if name != "seal":
+            assert not [word for word in VERSION_WRITES if word in _code(body)], name
+    images = _code(jobs["images"])
+    tags = re.findall(r"^\s+tags: (.+)$", images, flags=re.MULTILINE)
+    assert tags == [f"ghcr.io/${{{{ github.repository }}}}/{name}:sha-"
+                    "${{ needs.plan.outputs.revision }}" for name in IMAGES]
+    assert images.count("push: true") == len(IMAGES)
 
 
-def test_publish_only_creates_a_release_and_reads_github_only_through_the_claim():
-    """No step deletes, edits, re-drafts or uploads to an existing release; the one create
-    works on the draft it makes itself."""
-    pipeline = (WORKFLOWS / "pipeline.yml").read_text()
-    code = "\n".join(line for line in pipeline.splitlines() if not line.lstrip().startswith("#"))
-    assert re.findall(r"\bgh release (\w+)", code) == ["create"]
-    assert "gh api" not in code and "--draft" not in code and "--clobber" not in code
+def test_the_images_job_hands_the_seal_exactly_the_digests_it_pushed():
+    """Each declared image: built from its Dockerfile target, output as `<repository>@<digest>`
+    of that very step, and passed to the seal under its name."""
+    jobs = _pipeline_jobs()
+    images, seal = jobs["images"], _code(jobs["seal"])
+    assert {package.target for package in PACKAGES if package.target} == set(IMAGES)
+    for name in IMAGES:
+        step = images.split(f"        id: {name}\n", 1)[1].split("      - ", 1)[0]
+        assert f"          target: {name}\n" in step, name
+        repository = f"ghcr.io/${{{{ github.repository }}}}/{name}"
+        assert f"          tags: {repository}:sha-" in step, name
+        output = f"      {name}: {repository}@${{{{ steps.{name}.outputs.digest }}}}\n"
+        assert output in images, name
+        variable = name.upper().replace("-", "_")
+        assert f"{variable}: ${{{{ needs.images.outputs.{name} }}}}" in seal, name
+        assert f'--image "{name}=${variable}"' in seal, name
+
+
+def test_the_seal_is_one_script_given_the_plan_and_the_images():
+    """Every write is scripts/release_seal.py's (claim, package, verify, promote, stage,
+    publish): the job itself runs no other command that reaches GitHub or the registry."""
+    seal = _code(_pipeline_jobs()["seal"])
+    runs = re.findall(r"^        run: (.*)$", seal, flags=re.MULTILINE)
+    assert len(runs) == 2 and "docker login ghcr.io" in runs[0] and runs[1] == "|"
+    for binding in ("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+                    "TAG: ${{ needs.plan.outputs.tag }}",
+                    "SINCE: ${{ needs.plan.outputs.since }}",
+                    "REVISION: ${{ needs.plan.outputs.revision }}"):
+        assert binding in seal, binding
+    assert ('python3 -m scripts.release_seal --tag "$TAG" --revision "$REVISION" '
+            '--since "$SINCE"') in seal
+    for forbidden in ("gh ", "curl", "DELETE", "imagetools", "--clobber"):
+        assert forbidden not in seal, forbidden
+    plan = _pipeline_jobs()["plan"]
+    assert "      since: ${{ steps.plan.outputs.since }}\n" in plan
+    # The branch whose tip wins an unpublished version is the one the release guard names.
+    assert f"github.ref == 'refs/heads/{RELEASE_BRANCH}'" in RELEASE_EVENT
+    assert "GH_TOKEN" not in plan                                # the plan reads no GitHub API
 
 
 def test_no_workflow_hands_its_secrets_to_a_called_workflow():
