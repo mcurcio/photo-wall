@@ -2,7 +2,7 @@
 """The release rule, written once: what ships, what a change releases, and whether a run passed.
 
 `.github/workflows/pipeline.yml` runs this script for every event, and nothing else calls
-commitizen. Four commands:
+commitizen. Three commands:
 
   pr --base SHA --head SHA  A pull request, checked out at its merge ref. Every commit in
                             base..head lands on main (merge and rebase keep them), so each must
@@ -10,9 +10,6 @@ commitizen. Four commands:
                             and runs only its tests (a PullRequestRun has no release job).
   push                      main. Releases exactly when a shipped package changed, and refuses
                             at once a next version whose tag already exists.
-  claim --tag T --revision R
-                            May this job write T's release artefacts (the GitHub Release, the
-                            service images) from R? Every job that writes one runs it first.
   gate                      A run passed when every job the plan expected succeeded and no job
                             failed or was cancelled (reads NEEDS, the workflow's `toJSON(needs)`).
 
@@ -22,14 +19,14 @@ commitizen's: `cz bump --get-next` under pyproject's [tool.commitizen] (feat -> 
 fix/perf/refactor -> patch; a breaking change -> major, capped to minor while
 `major_version_zero` holds). When packages changed but no commit bumps (chore:/ci:/test:, or a
 commit commitizen cannot parse), the increment is PATCH. So a shipped change is never skipped,
-and a release that failed is not forgotten: pipeline.yml's publish job creates a tag only by
-publishing its GitHub Release, so a failed release leaves no tag, and the next push still finds
-the packages changed since the last tag, whatever that push's own commits are. That is the one
-recovery: there is no manual release path (no dispatch, no hand tag).
+and a release that failed is not forgotten: pipeline.yml's seal job (scripts/release_seal.py)
+creates a tag only by publishing its GitHub Release, so a failed release leaves no tag, and the
+next push still finds the packages changed since the last tag, whatever that push's own commits
+are. That is the one recovery: there is no manual release path (no dispatch, no hand tag).
 
-A PUBLISHED RELEASE IS NEVER REWRITTEN. `claim` lets a job write a version's artefacts only
-while its tag is absent or names the job's own revision, and no published release holds it; only
-an HTTP 404 reads as "absent", so an API outage refuses instead of passing.
+WHO WRITES. The seal alone: it claims the version (the plan's `since` must still be the highest
+published tag), promotes the images, and publishes the release. This script only plans, and its
+`since` output is what the seal's compare-and-swap reads.
 
 WHO RELEASES. A Plan is a report: what releasing its revision would ship. Which jobs a run starts
 is its run type's: a PullRequestRun lists only the plan's test suites, whatever the plan
@@ -54,12 +51,10 @@ import shutil
 import subprocess
 import sys
 import tomllib
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Final, Protocol
+from typing import ClassVar, Final
 
 REPO: Final = Path(__file__).resolve().parents[1]
 
@@ -212,11 +207,13 @@ def image_inputs(target: str, text: str | None = None) -> tuple[str, ...]:
 # closure file and every script a build runs is claimed by the package it builds. The service
 # images' paths are read from the Dockerfile (image_inputs), so editing it edits them.
 #
-# NOT A RELEASE INPUT (owner ruling): .github/workflows/pipeline.yml. It holds the service
-# images' build and push, the release asset packaging call and the release notes, so a pipeline
-# change that alters how an artefact is built releases NOTHING by itself: it first reaches a
-# release with the next change to a package's inputs. Accepted, so that CI-only edits never cut
-# a version.
+# NOT A RELEASE INPUT (owner ruling): .github/workflows/pipeline.yml, and the seal it runs
+# (scripts/release_seal.py: the claim, the promotion, the release notes and the publish). They
+# hold the service images' build and push and how a release is written, so a pipeline change
+# that alters how an artefact is built releases NOTHING by itself: it first reaches a release
+# with the next change to a package's inputs. Accepted, so that CI-only edits never cut a
+# version. What a release CONTAINS is a release input: contracts/release.py declares it and
+# scripts/package_release_artifacts.py writes it (the release-assets package).
 
 # The locked Python project every build syncs. pyproject.toml counts only through DIGESTED below.
 _PROJECT: Final = ("pyproject.toml", "uv.lock")
@@ -265,9 +262,10 @@ PACKAGES: Final = (
              "scripts/build_boot_data.py", "scripts/verify_netboot_initrd.py",
              "scripts/kernel_config_check.py", "scripts/eeprom_update.py")),
     # The published files beyond the .debs: the base bundle tarball, manifest.json and
-    # SHA256SUMS, whose names, layout and contents this packager decides.
+    # SHA256SUMS, whose names, layout and contents this packager writes to the declaration.
     Package("release-assets", "the GitHub Release's operator asset set (base tarball, "
-            "manifest.json, SHA256SUMS)", ("scripts/package_release_artifacts.py",)),
+            "manifest.json, SHA256SUMS)", ("scripts/package_release_artifacts.py",
+                                           "contracts/release.py")),
 )
 
 # Every tracked path no package claims must match one of these, so a new top-level directory or
@@ -282,7 +280,8 @@ NOT_SHIPPED: Final = (
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
-    "scripts/provenance_models.py", "scripts/release_plan.py", "scripts/runtime_provenance.py",
+    "scripts/provenance_models.py", "scripts/release_plan.py", "scripts/release_seal.py",
+    "scripts/runtime_provenance.py",
     "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
 )
 
@@ -318,10 +317,11 @@ DIGESTED: Final[Mapping[str, Callable[[str | None], str | None]]] = {
 
 # --- the pipeline's jobs -----------------------------------------------------------------------
 
-# The jobs that write outside the run: tag, publish the GitHub Release, push the service images.
-# No test suite may be one, and pipeline.yml also guards each by event (a push to main), which
-# tests/test_release_plan.py holds it to.
-PUBLISH_JOBS: Final = ("service-base", "service-images", "publish")
+# The jobs that write outside the run: the media OS base (service-base), the service images by
+# digest (images), and the ONE job that writes a version -- its image tags, its git tag and its
+# GitHub Release (seal). No test suite may be one, and pipeline.yml also guards each by event (a
+# push to main), which tests/test_release_plan.py holds it to.
+PUBLISH_JOBS: Final = ("service-base", "images", "seal")
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,8 +350,8 @@ SUITES: Final = (
                  "central/assets/**", "central/infra/**")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
-# A release runs these; base-image doubles as the release build (its artifacts are what
-# publish uploads), so a release always runs it.
+# A release runs these; base-image doubles as the release build (its artifacts are what the
+# seal packages), so a release always runs it.
 RELEASE_JOBS: Final = ("base-image", *PUBLISH_JOBS)
 # Jobs every run requires, whatever the plan lists: `tested`, the barrier every release job
 # needs, and each suite that always runs.
@@ -568,7 +568,7 @@ def git_tag_exists(repo: Path, tag: str) -> bool:
 def refuse_a_taken_tag(repo: Path, plan: Plan) -> Plan:
     """A push's next version must be free. commitizen numbers from the last tag REACHABLE from
     the revision, so a tag off this history (a higher one, say) can already hold that number:
-    every push would then build for an hour and fail at publish. Refuse before any build."""
+    every push would then build for an hour and fail at the seal. Refuse before any build."""
     if plan.should_release and git_tag_exists(repo, plan.tag):
         at = git(repo, "rev-parse", f"refs/tags/{plan.tag}^{{commit}}").strip()
         raise PlanError(f"this push would release {plan.tag}, but that tag already exists (at "
@@ -610,103 +610,14 @@ def summary(run: Run) -> str:
 
 
 def outputs(run: Run) -> dict[str, str]:
-    """The run's action: a run that does not release outputs no tag or version to act on."""
+    """The run's action: a run that does not release outputs no tag, version or `since` to act
+    on. `since`, the last tag the plan diffed from (empty before the first release), is what the
+    seal's compare-and-swap requires to still be the highest published one."""
     plan, releases = run.plan, run.releases
     return {"should_release": str(releases).lower(), "tag": plan.tag if releases else "",
-            "version": (plan.version or "") if releases else "", "revision": plan.revision,
+            "version": (plan.version or "") if releases else "",
+            "since": (plan.since or "") if releases else "", "revision": plan.revision,
             "packages": json.dumps(list(plan.packages)), "jobs": json.dumps(list(run.jobs))}
-
-
-# --- the claim: may this job write a version's release artefacts? ------------------------------
-
-class GitHub(Protocol):
-    """The two facts the claim reads. Each raises PlanError when it cannot answer."""
-
-    def tag_commit(self, tag: str) -> str | None:
-        """The commit `refs/tags/<tag>` names; None only when the tag does not exist."""
-
-    def published(self, tag: str) -> bool:
-        """Whether a published (non-draft) release holds `tag`."""
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubApi:
-    """GitHub's REST API for one repository. Only HTTP 404 means "absent": any other failure (a
-    5xx, a rate limit, a network error) raises, so an outage can never read as a free tag."""
-    url: str
-    repository: str
-    token: str
-
-    @classmethod
-    def from_env(cls, environ: Mapping[str, str] = os.environ) -> GitHubApi:
-        token = environ.get("GH_TOKEN") or environ.get("GITHUB_TOKEN") or ""
-        repository = environ.get("GITHUB_REPOSITORY") or ""
-        if not token or not repository:
-            raise PlanError("the release claim reads GitHub: set GH_TOKEN (the job's token) and "
-                            "GITHUB_REPOSITORY (the runner sets it)")
-        return cls(environ.get("GITHUB_API_URL") or "https://api.github.com", repository, token)
-
-    def _get(self, path: str) -> dict | None:
-        url = f"{self.url}/repos/{self.repository}{path}"
-        request = urllib.request.Request(url, headers={
-            "Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}",
-            "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "photo-wall-release-plan"})
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = json.load(response)
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                return None
-            raise PlanError(f"GET {url}: HTTP {error.code} {error.reason}") from None
-        except (OSError, ValueError) as error:
-            raise PlanError(f"GET {url}: {error}") from None
-        if not isinstance(body, dict):
-            raise PlanError(f"GET {url}: expected one object, got {type(body).__name__}")
-        return body
-
-    def _require_repository(self) -> None:
-        # A token that cannot see a private repository gets 404 for everything in it; that must
-        # never read as "no tag" or "no release".
-        if self._get("") is None:
-            raise PlanError(f"GitHub answers 404 for {self.repository} itself: this token "
-                            "cannot read it, so no absence it reports can be trusted")
-
-    def tag_commit(self, tag: str) -> str | None:
-        self._require_repository()
-        # The single-ref endpoint: exactly this ref or 404 (git/matching-refs prefix-matches).
-        ref = self._get(f"/git/ref/tags/{tag}")
-        if ref is None:
-            return None
-        target = ref.get("object") or {}
-        while target.get("type") == "tag":                  # an annotated tag: peel it
-            target = (self._get(f"/git/tags/{target.get('sha')}") or {}).get("object") or {}
-        if target.get("type") != "commit" or not FULL_SHA.match(str(target.get("sha"))):
-            raise PlanError(f"refs/tags/{tag} names no commit: {ref}")
-        return str(target["sha"])
-
-    def published(self, tag: str) -> bool:
-        self._require_repository()
-        release = self._get(f"/releases/tags/{tag}")
-        return release is not None and release.get("draft") is not True     # unsure: published
-
-
-def claim(github: GitHub, tag: str, revision: str) -> str:
-    """Refuse unless a job may write `tag`'s release artefacts from `revision`: the tag is absent
-    or names `revision` (a tag is never moved), and no published release holds it (a published
-    release, its assets and its service images are never rewritten). Returns what it found."""
-    if not STRICT_TAG.match(tag) or not FULL_SHA.match(revision):
-        raise PlanError(f"claim needs a strict release tag and a full commit, got {tag!r} and "
-                        f"{revision!r}")
-    at = github.tag_commit(tag)
-    if at is not None and at != revision:
-        raise PlanError(f"{tag} is tagged at {at}, but this run built {revision}: refusing to "
-                        "write another commit's release (this run's plan is stale, or the tag "
-                        "was made outside the pipeline)")
-    if github.published(tag):
-        raise PlanError(f"{tag} is already published{f' at {at}' if at else ''}: a published "
-                        "release and its service images are never rewritten; a change ships as "
-                        "the next version")
-    return f"{tag} is {'tagged at this revision' if at else 'untagged'} and unpublished"
 
 
 # --- the gate ----------------------------------------------------------------------------------
@@ -760,7 +671,7 @@ def _publish(run: Run) -> None:
             handle.writelines(f"{key}={value}\n" for key, value in outputs(run).items())
 
 
-def main(argv: Sequence[str] | None = None, github: GitHub | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=REPO)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -768,10 +679,6 @@ def main(argv: Sequence[str] | None = None, github: GitHub | None = None) -> int
     pr.add_argument("--base", required=True)
     pr.add_argument("--head", required=True)
     commands.add_parser("push", help="plan main's HEAD")
-    claim_ = commands.add_parser("claim", help="refuse unless this job may write TAG's release "
-                                 "artefacts from REVISION")
-    claim_.add_argument("--tag", required=True)
-    claim_.add_argument("--revision", required=True)
     commands.add_parser("gate", help="judge the run from NEEDS (toJSON(needs))")
     args = parser.parse_args(argv)
     try:
@@ -781,9 +688,6 @@ def main(argv: Sequence[str] | None = None, github: GitHub | None = None) -> int
                 print(f"::error title=gate::{problem}")
             print("gate: " + ("failed" if problems else "passed"))
             return 1 if problems else 0
-        if args.command == "claim":
-            print(f"claim: {claim(github or GitHubApi.from_env(), args.tag, args.revision)}")
-            return 0
         cz = Commitizen(args.repo)
         run: Run
         if args.command == "pr":
@@ -794,8 +698,7 @@ def main(argv: Sequence[str] | None = None, github: GitHub | None = None) -> int
         _publish(run)
     except PlanError as error:
         for line in str(error).splitlines():
-            print(f"::error title=release {'claim' if args.command == 'claim' else 'plan'}::"
-                  f"{line}")
+            print(f"::error title=release plan::{line}")
         return 1
     return 0
 

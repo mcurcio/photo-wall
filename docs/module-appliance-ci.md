@@ -209,9 +209,13 @@ push to `main`, which releases whatever changed since the last published tag.
 Its `plan` job runs `scripts/release_plan.py`, whose package manifest decides
 which test workflows run and whether a push releases.
 Only `base-image.yml` builds the Pi base OS, the netboot bundle and both
-`.deb`s: the pipeline calls it for the plan's revision and, on a release,
-packages its uploaded build output (via `scripts/package_release_artifacts.py`)
-into a GitHub Release. The
+`.deb`s: the pipeline calls it for the plan's revision. On a release, the
+`images` job pushes the service images by digest, and the `seal` job
+(`scripts/release_seal.py`), the only one that writes a version, packages the
+uploaded build output and those digests (via `scripts/package_release_artifacts.py`)
+into the release [`contracts/release.py`](../contracts/release.py) declares. It
+publishes the GitHub Release only once every declared asset is attached to its
+draft and every image is tagged with the version. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
 `software-e2e.yml` and the release's media worker image. Both checks jobs share
