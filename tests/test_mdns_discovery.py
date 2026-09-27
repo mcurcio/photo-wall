@@ -1,4 +1,5 @@
-"""Real mDNS `CentralDiscovery` provider: bounded browse, TXT scheme, tiebreak.
+"""Real mDNS `uplink.finder.CentralDiscovery` provider: bounded browse, TXT scheme, tiebreak,
+and a root validated by `Origin.parse_root` (never a string).
 
 Registration uses zeroconf directly (the LAN-side "central" a player would
 discover); tests that need real loopback multicast are guarded to skip
@@ -24,7 +25,12 @@ from secrets import token_hex
 import pytest
 from zeroconf import ServiceInfo, Zeroconf
 
-from player.mdns_discovery import SERVICE_TYPE, MdnsCentralDiscovery
+from player.mdns_discovery import SERVICE_TYPE, MdnsCentralDiscovery, origin_from_info
+from uplink.origin import Origin
+from uplink.resolver import Unconfigured
+
+# `discover` requires the proof that the kernel command line names no Central (R1).
+PROOF = Unconfigured("absent")
 
 
 def _unique_service_type() -> str:
@@ -70,10 +76,10 @@ def test_discover_finds_advertised_central():
     service_type = _unique_service_type()
     with _advertised(("central-a", 8123, None), service_type=service_type):
         async def check():
-            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover()
+            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover(PROOF)
 
         origin = asyncio.run(check())
-    assert origin == "http://127.0.0.1:8123"
+    assert origin == Origin.parse_root("http://127.0.0.1:8123")
 
 
 def test_discover_returns_none_without_any_responder_bounded():
@@ -82,7 +88,7 @@ def test_discover_returns_none_without_any_responder_bounded():
     # stay invisible to this discovery. Registers nothing, so this needs no
     # multicast support to succeed and always runs.
     async def check():
-        return await MdnsCentralDiscovery(timeout=1.0, service_type=_unique_service_type()).discover()
+        return await MdnsCentralDiscovery(timeout=1.0, service_type=_unique_service_type()).discover(PROOF)
 
     started = time.monotonic()
     origin = asyncio.run(check())
@@ -100,7 +106,7 @@ def test_discover_ignores_real_photowall_responder_on_unique_type():
         async def check():
             return await MdnsCentralDiscovery(
                 timeout=1.0, service_type=_unique_service_type()
-            ).discover()
+            ).discover(PROOF)
 
         origin = asyncio.run(check())
     assert origin is None
@@ -110,10 +116,10 @@ def test_discover_honors_https_txt_scheme():
     service_type = _unique_service_type()
     with _advertised(("central-secure", 8443, {b"scheme": b"https"}), service_type=service_type):
         async def check():
-            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover()
+            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover(PROOF)
 
         origin = asyncio.run(check())
-    assert origin == "https://127.0.0.1:8443"
+    assert origin == Origin.parse_root("https://127.0.0.1:8443")
 
 
 def test_discover_multiple_centrals_deterministic_tiebreak():
@@ -124,7 +130,37 @@ def test_discover_multiple_centrals_deterministic_tiebreak():
         ("central-b", 8200, None), ("central-a", 8100, None), service_type=service_type
     ):
         async def check():
-            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover()
+            return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover(PROOF)
 
         origin = asyncio.run(check())
-    assert origin == "http://127.0.0.1:8100"
+    assert origin == Origin.parse_root("http://127.0.0.1:8100")
+
+
+class _Info:
+    """What `origin_from_info` reads from a resolved AsyncServiceInfo."""
+
+    def __init__(self, addresses, port, properties=None):
+        self._addresses, self.port, self.properties = addresses, port, properties
+
+    def parsed_addresses(self):
+        return self._addresses
+
+
+@pytest.mark.parametrize("info, root", [
+    (_Info(["192.0.2.10"], 8000), "http://192.0.2.10:8000"),
+    (_Info(["192.0.2.10"], 8443, {b"scheme": b" HTTPS "}), "https://192.0.2.10:8443"),
+    (_Info(["192.0.2.10"], 8000, {b"scheme": b"\xff"}), "http://192.0.2.10:8000"),
+    (_Info(["2001:db8::1", "192.0.2.10"], 8000), "http://[2001:db8::1]:8000"),
+])
+def test_an_advertisement_becomes_a_validated_root(info, root):
+    assert origin_from_info(info) == Origin.parse_root(root)
+
+
+@pytest.mark.parametrize("info", [
+    _Info([], 8000),
+    _Info(["192.0.2.10"], 0),
+    _Info(["192.0.2.10"], 70000),
+    _Info(["not a host"], 8000),
+])
+def test_an_advertisement_that_is_no_central_root_is_none(info):
+    assert origin_from_info(info) is None

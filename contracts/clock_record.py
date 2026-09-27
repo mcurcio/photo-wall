@@ -52,7 +52,7 @@ class ClockRecord:
     offset: float | None        # seconds, measured after any floor raise; applied only if `stepped`
     stepped: bool
     tried: tuple[str, ...]      # "tier:server:outcome", at most 8
-    writer: str                 # "netboot" (Project 2 adds "provision")
+    writer: str                 # "netboot": only stage 1 writes the record (decision 0014)
     written_at: float           # wall clock after any step
 
     def __post_init__(self) -> None:

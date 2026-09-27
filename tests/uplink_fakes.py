@@ -1,11 +1,13 @@
-"""Scripted uplink doubles shared by the uplink and stage-1 tests: a Reply that serves a body in
-bounded reads, a Transport that answers each URL from a script, and `located`, which builds a
-LocatedCentral the only way one can be built, through locate()."""
+"""Scripted uplink doubles shared by the uplink, stage-1, provisioning and Player tests: a Reply
+that serves a body in bounded reads, a Transport that answers each URL from a script, `located`,
+which builds a LocatedCentral the only way one can be built, through locate(), and `finding`, a
+find_central double that returns one Found."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 from contracts.central_identity import LOCATE_PATH, identity_body
 from uplink.causes import UplinkError
+from uplink.finder import Found, RootSource
 from uplink.locate import LocatedCentral, locate
 from uplink.origin import Origin, Url
 from uplink.transport import HOP_TIMEOUT
@@ -38,17 +40,28 @@ class FakeReply:
         self.closed = True
 
 
-class FakeTransport:
-    """Answers each URL from a script; records every request it was asked to send."""
+Answer = FakeReply | UplinkError
 
-    def __init__(self, script: dict[str, FakeReply | UplinkError]) -> None:
+
+class FakeTransport:
+    """Answers each URL from a script; records every request it was asked to send. A script
+    value that is a zero-argument callable is called for each request, so a URL asked again
+    (a retry, a second locate) gets a fresh answer."""
+
+    def __init__(self, script: dict[str, Answer | Callable[[], Answer]]) -> None:
         self.script = script
         self.sent: list[tuple[str, dict[str, str], float, float]] = []
+
+    @property
+    def urls(self) -> list[str]:
+        return [url for url, *_ in self.sent]
 
     def send(self, url: Url, *, headers, deadline: float,
              status_timeout: float = HOP_TIMEOUT) -> FakeReply:
         self.sent.append((str(url), dict(headers), deadline, status_timeout))
         answer = self.script[str(url)]
+        if callable(answer):
+            answer = answer()
         if isinstance(answer, UplinkError):
             raise answer
         return answer
@@ -63,3 +76,16 @@ def located(origin: str) -> LocatedCentral:
     """A LocatedCentral for `origin` (a root URL), located directly with no redirect."""
     root = Origin.parse_root(origin)
     return locate(root, transport=FakeTransport({str(root.url(LOCATE_PATH)): central()}))
+
+
+def finding(origin: str, source: RootSource = "cmdline") -> Callable[[], Awaitable[Found]]:
+    """A find_central double: every call returns the same Found for `origin`, located directly,
+    and counts itself in `.calls`."""
+    found = Found(Origin.parse_root(origin), source, located(origin))
+
+    async def find() -> Found:
+        find.calls += 1
+        return found
+
+    find.calls = 0
+    return find

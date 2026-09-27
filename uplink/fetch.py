@@ -26,6 +26,34 @@ _LENGTH = re.compile(r"[0-9]{1,12}")
 _CENTRAL_ERROR = re.compile(r"[a-z0-9_]{1,64}")
 
 
+def central_error_code(body: bytes) -> str | None:
+    """Central's own {"error": <[a-z0-9_]{1,64}>} from at most MAX_ERROR_BODY bytes, else None
+    (a longer body, one that is not a strict JSON object, or a code of another shape)."""
+    document = loads_object(body, max_bytes=MAX_ERROR_BODY)
+    code = None if document is None else document.get("error")
+    return code if isinstance(code, str) and _CENTRAL_ERROR.fullmatch(code) else None
+
+
+def refusal(url: Url, status: int, *, location: str | None, body: bytes) -> UplinkError:
+    """The one mapping of a non-200 answer to a direct request (DirectFetch, the Player's httpx
+    requests and its websocket handshake):
+      3xx               -> REDIRECT/unexpected, detail status and the Location host if it parses
+      Central's body    -> CENTRAL/error, central_error=<code>
+      anything else     -> HTTP/status
+    `body` is what the caller read: at most MAX_ERROR_BODY + 1 bytes (b"" when it read none)."""
+    host = url.origin.host
+    if 300 <= status < 400:
+        detail = f"status={status}"
+        target = parse_url(location or "", base=url)
+        if target is not None:
+            detail += f";location={target.origin.host}"
+        return UplinkError(Cause.REDIRECT, "unexpected", host=host, detail=detail)
+    code = central_error_code(body)
+    if code is not None:
+        return UplinkError(Cause.CENTRAL, "error", host=host, detail=code, central_error=code)
+    return UplinkError(Cause.HTTP, "status", host=host, detail=f"status={status}")
+
+
 def _positive_int(value: object, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive int")
@@ -121,23 +149,16 @@ class DirectFetch:
         return int(value)
 
     def _refusal(self, url: Url, reply: Reply) -> UplinkError:
-        """The one error a non-200 answer to a direct request becomes."""
-        status, host = reply.status, url.origin.host
-        if 300 <= status < 400:
-            detail = f"status={status}"
-            target = parse_url(reply.headers.get("Location") or "", base=url)
-            if target is not None:
-                detail += f";location={target.origin.host}"
-            return UplinkError(Cause.REDIRECT, "unexpected", host=host, detail=detail)
-        code = self._central_error(reply)
-        if code is not None:
-            return UplinkError(Cause.CENTRAL, "error", host=host, detail=code,
-                               central_error=code)
-        return UplinkError(Cause.HTTP, "status", host=host, detail=f"status={status}")
+        """DirectFetch's use of the shared `refusal`: a 3xx never reads the body (as today);
+        anything else reads at most MAX_ERROR_BODY + 1 bytes to look for Central's own error."""
+        status = reply.status
+        body = b"" if 300 <= status < 400 else self._error_body(reply)
+        return refusal(url, status, location=reply.headers.get("Location"), body=body)
 
-    def _central_error(self, reply: Reply) -> str | None:
-        """Central's own error code from a non-200 body, else None. A body that cannot be read
-        in time is no Central body: the status alone then names the failure."""
+    def _error_body(self, reply: Reply) -> bytes:
+        """At most MAX_ERROR_BODY + 1 bytes of a non-200 body, or b"" if it cannot be read in
+        time: a body that cannot be read is no Central body, so the status alone names the
+        failure."""
         body = bytearray()
         try:
             while len(body) <= MAX_ERROR_BODY:
@@ -150,7 +171,5 @@ class DirectFetch:
                     break
                 body += piece
         except UplinkError:
-            return None
-        document = loads_object(bytes(body), max_bytes=MAX_ERROR_BODY)
-        code = None if document is None else document.get("error")
-        return code if isinstance(code, str) and _CENTRAL_ERROR.fullmatch(code) else None
+            return b""
+        return bytes(body)

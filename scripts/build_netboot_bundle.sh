@@ -53,6 +53,10 @@ optional:
   --overlays-dir DIR  directory of *.dtbo overlays (staged under boot/overlays/)
   --python BIN        interpreter for the verify script and eeprom_update.py (default: python3)
   --eeprom-update SCRIPT  path to scripts/eeprom_update.py (default: alongside this script)
+  --rpi-eeprom-config FILE  the packaged rpi-eeprom-config to run (default: PATH lookup --
+                      local dev with the real rpi-eeprom package installed; CI passes the
+                      pinned scratch-root's own copy, never the runner's, which has none)
+  --rpi-eeprom-digest FILE  the packaged rpi-eeprom-digest to run (default: PATH lookup)
   --build-boot-data SCRIPT  path to scripts/build_boot_data.py (default: alongside this script)
   --snapshot-epoch N  the Debian snapshot pin; build_boot_data.py warns past 90 days
   --skip-verify       skip the lsinitramfs content-verify (local dev only;
@@ -71,6 +75,8 @@ VERIFY=""
 OVERLAYS_DIR=""
 PYTHON="python3"
 EEPROM_UPDATE=""
+RPI_EEPROM_CONFIG=""
+RPI_EEPROM_DIGEST=""
 REPO=""
 PYTHON_LIBDIR=""
 BUILD_BOOT_DATA=""
@@ -89,6 +95,8 @@ while [ "$#" -gt 0 ]; do
         --overlays-dir) OVERLAYS_DIR="$2"; shift 2 ;;
         --python) PYTHON="$2"; shift 2 ;;
         --eeprom-update) EEPROM_UPDATE="$2"; shift 2 ;;
+        --rpi-eeprom-config) RPI_EEPROM_CONFIG="$2"; shift 2 ;;
+        --rpi-eeprom-digest) RPI_EEPROM_DIGEST="$2"; shift 2 ;;
         --repo) REPO="$2"; shift 2 ;;
         --python-libdir) PYTHON_LIBDIR="$2"; shift 2 ;;
         --build-boot-data) BUILD_BOOT_DATA="$2"; shift 2 ;;
@@ -132,6 +140,14 @@ if [ ! -f "$VERIFY" ]; then
 fi
 if [ ! -f "$EEPROM_UPDATE" ]; then
     echo "build_netboot_bundle: --eeprom-update script not found: $EEPROM_UPDATE" >&2
+    exit 1
+fi
+if [ -n "$RPI_EEPROM_CONFIG" ] && [ ! -f "$RPI_EEPROM_CONFIG" ]; then
+    echo "build_netboot_bundle: --rpi-eeprom-config file not found: $RPI_EEPROM_CONFIG" >&2
+    exit 1
+fi
+if [ -n "$RPI_EEPROM_DIGEST" ] && [ ! -f "$RPI_EEPROM_DIGEST" ]; then
+    echo "build_netboot_bundle: --rpi-eeprom-digest file not found: $RPI_EEPROM_DIGEST" >&2
     exit 1
 fi
 if [ ! -f "$BUILD_BOOT_DATA" ]; then
@@ -218,7 +234,12 @@ EOF
 # (nonzero exit, caught by `set -eu`) if either setting is missing from the
 # built update once read back, so this step alone is the "check calls" gate --
 # a bundle whose self-update silently missed a setting never finishes assembly.
-"$PYTHON" "$EEPROM_UPDATE" --image "$EEPROM_IMAGE" --out "$boot_dir"
+# --rpi-eeprom-config/-digest, when given, point at the SAME pinned rpi-eeprom
+# package's tools (e.g. CI's scratch root) instead of eeprom_update.py's PATH
+# lookup default -- the runner itself never gets rpi-eeprom installed.
+"$PYTHON" "$EEPROM_UPDATE" --image "$EEPROM_IMAGE" --out "$boot_dir" \
+    ${RPI_EEPROM_CONFIG:+--rpi-eeprom-config "$RPI_EEPROM_CONFIG"} \
+    ${RPI_EEPROM_DIGEST:+--rpi-eeprom-digest "$RPI_EEPROM_DIGEST"}
 for f in pieeprom.upd pieeprom.sig; do
     if [ ! -f "$boot_dir/$f" ]; then
         echo "build_netboot_bundle: eeprom_update.py did not write $boot_dir/$f" >&2

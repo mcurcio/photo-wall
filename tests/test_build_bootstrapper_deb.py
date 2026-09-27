@@ -1,240 +1,247 @@
-"""The bootstrapper `.deb` staging/metadata logic.
+"""The bootstrapper `.deb` staging/metadata logic (Project 2 design §2.7).
 
-Per the owner directive that ALL of this repo's own code ships as a
-portable `.deb` (never a raw-file overlay an image-build tool owns), the
-base bootstrapper (`appliance.provision`) is built the same way the Player
-app already is (`scripts/build_player_deb.py`). Everything here runs on any
-host: no arm64 chroot is needed (pure Python, no venv), only a real git
-repository (this checkout) and, for the gated Tier 2 tests, `dpkg-deb`.
+The package ships the computed closure of `appliance.provision` privately under
+/usr/lib/photo-wall-bootstrapper (a directory application with a generated `__main__.py` and
+`closure.json`), with Depends from the Debian declaration, all computed over the sources
+`git archive`d at the given revision. Everything here runs on any host (pure Python, no venv, no
+chroot): a real git repository and, for the gated Tier 2 test, `dpkg-deb`.
 """
 
+import dataclasses
 import os
 import re
+import shutil
 import subprocess
 import sys
+from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
 from scripts import build_bootstrapper_deb as deb
 from scripts.build_player import BuildError
+from scripts.build_player_deb import DECLARATION
+from scripts.debian_packages import packages
+from scripts.module_closure import (
+    BOOTSTRAPPER_POLICY,
+    ClosurePolicy,
+    closure_for,
+    first_party_packages,
+    read_manifest,
+)
 
-REPO = deb.Path(__file__).resolve().parents[1]
-
-
-def _head_revision() -> str:
-    return subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True, timeout=30,
-    ).stdout.strip()
-
-
-HEAD = _head_revision()
-# A sample version in the new content-derived shape ({pyproject version}+{12
-# hex}); the control-file tests only need a valid version string to round-trip.
+REPO = Path(__file__).resolve().parents[1]
+PRIVATE_DIR = deb.INSTALL_DIR.relative_to("/")
+UNIT = (REPO / "appliance/systemd" / deb.UNIT_NAME).read_bytes()
+# A sample version in the content-derived shape ({pyproject version}+{12 hex}).
 VERSION = "0.1.0+0123456789ab"
 
 
-# --- control-file generation (reused from scripts.build_player_deb) --------
+@pytest.fixture(scope="module")
+def closure():
+    return closure_for(BOOTSTRAPPER_POLICY)
 
 
-def test_control_file_names_the_package_and_architecture_all():
-    control = deb.control_file(
-        VERSION, deb.DEB_DEPENDS, package=deb.PACKAGE, architecture=deb.ARCHITECTURE,
-        maintainer=deb.MAINTAINER, description=deb.DESCRIPTION,
-    ).decode()
-    assert "Package: photo-wall-bootstrapper" in control
-    assert f"Version: {VERSION}" in control
-    assert "Architecture: all" in control
-    assert "Depends: python3, python3-ifaddr, python3-zeroconf" in control
-
-
-def test_deb_depends_is_minimal_no_render_stack_no_vendored_python_packages():
-    """0009 rule: the bootstrapper's Depends are its own runtime import
-    closure ONLY (python3 + the one third-party import,
-    player.mdns_discovery's `zeroconf`, satisfied by the distro packages) --
-    never the render stack (that is the Player .deb's Depends), and never a
-    bare PyPI name (this package vendors nothing)."""
-    assert set(deb.DEB_DEPENDS) == {"python3", "python3-ifaddr", "python3-zeroconf"}
-    forbidden = (
-        "gir1.2-gtk-3.0", "weston", "libgl1-mesa-dri", "gstreamer1.0-plugins-good",
-        "python3-gi", "libegl1", "pydantic", "httpx", "websockets", "cryptography",
-    )
-    for name in forbidden:
-        assert name not in deb.DEB_DEPENDS
-
-
-def test_deb_depends_names_are_valid_debian_package_names():
-    """Mutation probe (reversed by hand -- see task report): temporarily
-    adding a render-stack package like `gir1.2-gtk-3.0` to DEB_DEPENDS does
-    NOT trip this particular check (it is a valid package-name string), but
-    DOES trip test_deb_depends_is_minimal_no_render_stack_no_vendored_python_packages
-    above, which asserts the exact minimal set."""
-    for name in deb.DEB_DEPENDS:
-        assert __import__("re").fullmatch(r"[a-z0-9][a-z0-9+.-]*", name)
-
-
-# --- version derivation (content-derived, NOT the git revision) --------------
-
-
-def _real_sources_and_unit():
-    sources = deb.fetch_sources(REPO, HEAD)
-    unit = (REPO / "appliance/systemd" / deb.UNIT_NAME).read_bytes()
-    return sources, unit
-
-
-def test_package_version_is_content_derived_and_revision_independent():
-    """`{pyproject version}+{12 hex}` over the packaged closure -- carries NO
-    git revision, so a commit that leaves the bootstrapper's packaged inputs
-    untouched yields an identical .deb version (keeping the base squashfs that
-    bakes it byte-stable, so its content-addressed cache is not busted)."""
-    sources, unit = _real_sources_and_unit()
-    version = deb.package_version(sources, unit)
-    assert re.fullmatch(r"0\.1\.0\+[0-9a-f]{12}", version)
-    # The git revision does NOT appear in the version.
-    assert HEAD not in version
-    # Deterministic: identical content -> identical version.
-    assert deb.package_version(dict(sources), bytes(unit)) == version
-
-
-def test_package_version_changes_when_a_packaged_input_changes():
-    """The hash covers each packaged file's bytes AND the unit, so touching
-    any of them (or the unit) changes the version -- the cache busts only when
-    a real input to this .deb changes."""
-    sources, unit = _real_sources_and_unit()
-    version = deb.package_version(sources, unit)
-    mutated = dict(sources)
-    mutated["player/discovery.py"] = sources["player/discovery.py"] + b"\n# x\n"
-    assert deb.package_version(mutated, unit) != version
-    assert deb.package_version(sources, unit + b"\n# x\n") != version
-
-
-def test_package_version_rejects_a_local_version_segment():
-    sources = {"pyproject.toml": b'[project]\nversion = "0.1.0+local"\n'}
-    # The local-segment check fires before the content hash touches the module
-    # files, so an otherwise-empty sources dict and empty unit suffice.
-    with pytest.raises(BuildError, match="unsupported project version"):
-        deb.package_version(sources, b"")
-
-
-# --- source fetch (real git archive of THIS checkout, any host) ------------
-
-
-def test_fetch_sources_rejects_a_non_full_commit_revision():
-    with pytest.raises(BuildError, match="explicit full Git commit required"):
-        deb.fetch_sources(REPO, "HEAD")
-    with pytest.raises(BuildError, match="explicit full Git commit required"):
-        deb.fetch_sources(REPO, "a" * 39)
-
-
-def test_fetch_sources_returns_exactly_the_fixed_module_closure_plus_pyproject():
-    sources = deb.fetch_sources(REPO, HEAD)
-    assert set(sources) == {
-        "appliance/__init__.py", "appliance/provision.py",
-        "player/__init__.py", "player/mdns_discovery.py", "player/discovery.py",
-        "pyproject.toml",
-    }
-    # No contracts module: appliance/provision.py imports none in this slice
-    # (see its own module docstring, "Reuse and the import-boundary
-    # decision", and .claude/errata.md p3-base-bootstrapper).
-    assert not any(name.startswith("contracts/") for name in sources)
-
-
-def test_package_version_from_the_real_head_closure_is_well_formed():
-    sources, unit = _real_sources_and_unit()
-    version = deb.package_version(sources, unit)
-    assert re.fullmatch(r"0\.1\.0\+[0-9a-f]{12}", version)
-
-
-# --- staging layout ----------------------------------------------------------
-
-
-def _staged(tmp_path):
-    sources, unit = _real_sources_and_unit()
-    version = deb.package_version(sources, unit)
+def _staged(tmp_path, closure):
     deb_root = tmp_path / "deb-root"
-    deb.stage_tree(deb_root, sources=sources, unit=unit, version=version)
+    deb.stage_tree(deb_root, closure=closure, tree=REPO, unit=UNIT, version=VERSION)
     return deb_root
 
 
-def test_stage_tree_places_the_module_closure_under_dist_packages(tmp_path):
-    deb_root = _staged(tmp_path)
-    dist = deb_root / "usr/lib/python3/dist-packages"
-    assert (dist / "appliance/__init__.py").is_file()
-    assert (dist / "appliance/provision.py").is_file()
-    assert (dist / "player/__init__.py").is_file()
-    assert (dist / "player/mdns_discovery.py").is_file()
-    assert (dist / "player/discovery.py").is_file()
-    # No contracts module staged.
-    assert not (dist / "contracts").exists()
+# --- control file: Depends from the declaration ------------------------------------------------
 
 
-def test_stage_tree_ships_no_venv(tmp_path):
-    """Pure Python, no venv (unlike the Player .deb) -- the whole point of
-    this package is staying uncompiled/interpreter-only."""
-    deb_root = _staged(tmp_path)
-    assert not (deb_root / "opt/photo-wall/venv").exists()
-    assert not (deb_root / "opt").exists()
+def test_the_control_file_depends_are_the_declarations_bootstrapper_list(tmp_path, closure):
+    control = (_staged(tmp_path, closure) / "DEBIAN/control").read_text()
+    assert "Package: photo-wall-bootstrapper" in control
+    assert f"Version: {VERSION}" in control
+    assert "Architecture: all" in control
+    assert f"Depends: {', '.join(packages('bootstrapper'))}\n" in control
+    # Its own closure's needs only: never the render stack, never a bare PyPI name.
+    assert "Depends: ca-certificates, python3, python3-zeroconf\n" in control
 
 
-def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path):
-    deb_root = _staged(tmp_path)
+# --- version derivation (content-derived, NOT the git revision) --------------------------------
+
+
+def test_package_version_is_content_derived_and_deterministic(closure):
+    version = deb.package_version(closure, UNIT, "0.1.0")
+    assert re.fullmatch(r"0\.1\.0\+[0-9a-f]{12}", version)
+    assert deb.package_version(dataclasses.replace(closure), bytes(UNIT), "0.1.0") == version
+
+
+def test_package_version_changes_when_what_the_package_ships_changes(closure, monkeypatch):
+    version = deb.package_version(closure, UNIT, "0.1.0")
+    assert deb.package_version(dataclasses.replace(closure, digest="0" * 64), UNIT,
+                               "0.1.0") != version
+    assert deb.package_version(closure, UNIT + b"\n# x\n", "0.1.0") != version
+    assert deb.package_version(closure, UNIT, "0.1.1") != version
+    monkeypatch.setattr(deb, "packages", lambda *consumers: ("python3",))
+    assert deb.package_version(closure, UNIT, "0.1.0") != version
+
+
+def test_package_version_rejects_a_local_version_segment(closure):
+    with pytest.raises(BuildError, match="unsupported project version"):
+        deb.package_version(closure, UNIT, "0.1.0+local")
+
+
+# --- fetch_tree and build (a committed fixture repository) ------------------------------------
+
+
+def _git(repository, *args):
+    return subprocess.run(["git", "-C", str(repository), *args], check=True,
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+@pytest.fixture
+def committed(tmp_path):
+    """A repository holding this checkout's first-party packages, the declaration and
+    pyproject.toml (the files git would commit from the working tree) as one commit, plus
+    files the package must never see."""
+    repository = tmp_path / "repository"
+    listed = _git(REPO, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
+                  *first_party_packages(REPO), DECLARATION, "pyproject.toml")
+    for name in filter(None, listed.split("\0")):
+        if (REPO / name).is_file():         # a deleted, not yet committed file is skipped
+            (repository / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / name, repository / name)
+    for name in ("scripts/other_tool.py", "tests/test_x.py", "docs/notes.md"):
+        (repository / name).parent.mkdir(parents=True, exist_ok=True)
+        (repository / name).write_text("never packaged\n")
+    _git(repository, "init", "-q")
+    _git(repository, "add", ".")
+    _git(repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+         "commit", "-qm", "fixture")
+    return repository, _git(repository, "rev-parse", "HEAD")
+
+
+def test_fetch_tree_rejects_a_non_full_commit_revision(tmp_path):
+    for revision in ("HEAD", "a" * 39):
+        with pytest.raises(BuildError, match="explicit full Git commit required"):
+            deb.fetch_tree(REPO, revision, tmp_path / "tree")
+
+
+def test_fetch_tree_extracts_the_committed_packages_declaration_and_pyproject(committed,
+                                                                              tmp_path, closure):
+    repository, revision = committed
+    (repository / "appliance/provision.py").write_text("import central\n")   # not committed
+    deb.fetch_tree(repository, revision, tmp_path / "tree")
+    tree = tmp_path / "tree"
+    assert sorted(path.name for path in tree.iterdir()) == sorted(
+        [*first_party_packages(REPO), "pyproject.toml", "scripts"])
+    assert [path.name for path in (tree / "scripts").iterdir()] == ["debian_packages.py"]
+    assert closure_for(BOOTSTRAPPER_POLICY, repo=tree).modules == closure.modules
+
+
+def test_build_stages_the_committed_closure(committed, tmp_path, monkeypatch, closure):
+    repository, revision = committed
+    built = {}
+
+    def fake_dpkg_deb(deb_root, output):
+        built["files"] = {path.relative_to(deb_root).as_posix() for path in deb_root.rglob("*")
+                          if path.is_file()}
+        built["control"] = (deb_root / "DEBIAN/control").read_text()
+        return output
+
+    monkeypatch.setattr(deb, "run_dpkg_deb", fake_dpkg_deb)
+    output = deb.build(repository, revision, tmp_path)
+    version = deb.package_version(closure, UNIT, "0.1.0")
+    assert output == tmp_path.resolve() / f"photo-wall-bootstrapper_{version}_all.deb"
+    assert {f"{PRIVATE_DIR}/{path.as_posix()}" for path in closure.files} | {
+        f"{PRIVATE_DIR}/__main__.py", f"{PRIVATE_DIR}/closure.json"} <= built["files"]
+    assert f"Version: {version}\n" in built["control"]
+
+
+def test_build_refuses_a_revision_whose_declaration_differs(committed, tmp_path):
+    repository, _ = committed
+    declaration = repository / DECLARATION
+    declaration.write_text(declaration.read_text() + "\n# a different pin\n")
+    _git(repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+         "commit", "-qam", "edit the declaration")
+    with pytest.raises(BuildError, match="declaration_differs_from_revision"):
+        deb.build(repository, _git(repository, "rev-parse", "HEAD"), tmp_path)
+
+
+# --- staging layout ---------------------------------------------------------------------------
+
+
+def test_stage_tree_ships_the_computed_closure_privately(tmp_path, closure):
+    deb_root = _staged(tmp_path, closure)
+    private = deb_root / PRIVATE_DIR
+    staged = sorted(path.relative_to(private).as_posix() for path in private.rglob("*")
+                    if path.is_file())
+    manifest = read_manifest(private / "closure.json")
+    assert manifest.modules == closure.modules
+    assert staged == sorted([*manifest.files, "__main__.py", "closure.json"])
+    # Inverted from the fixed-list era: uplink needs contracts, so it ships (privately).
+    assert (private / "contracts/equipment.py").is_file()
+    assert (private / "uplink/finder.py").is_file()
+    assert not (deb_root / "usr/lib/python3/dist-packages").exists()
+
+
+def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path, closure):
+    deb_root = _staged(tmp_path, closure)
     unit_path = deb_root / "lib/systemd/system/photo-wall-provision.service"
-    assert unit_path.is_file()
-    assert unit_path.read_bytes() == (REPO / "appliance/systemd" / deb.UNIT_NAME).read_bytes()
+    assert unit_path.read_bytes() == UNIT
     wants = deb_root / "etc/systemd/system/multi-user.target.wants/photo-wall-provision.service"
     assert os.readlink(wants) == "/lib/systemd/system/photo-wall-provision.service"
 
 
-def test_stage_tree_carries_no_deployment_config(tmp_path):
-    deb_root = _staged(tmp_path)
+def test_stage_tree_refuses_a_declared_import_no_code_reaches(tmp_path, closure, monkeypatch):
+    """Mutation probe (b): a declaration that gives the bootstrapper python3-cryptography."""
+    stale = ClosurePolicy("bootstrapper", BOOTSTRAPPER_POLICY.roots,
+                          BOOTSTRAPPER_POLICY.forbidden, MappingProxyType(
+                              {**BOOTSTRAPPER_POLICY.third_party,
+                               "cryptography": "python3-cryptography"}))
+    monkeypatch.setattr(deb, "BOOTSTRAPPER_POLICY", stale)
+    with pytest.raises(BuildError, match="declared_import_unreached:cryptography"):
+        _staged(tmp_path, closure)
+    assert not (tmp_path / "deb-root").exists()
+
+
+def test_stage_tree_refuses_an_existing_root(tmp_path, closure):
+    (tmp_path / "deb-root").mkdir()
+    with pytest.raises(BuildError, match="stage_root_exists"):
+        _staged(tmp_path, closure)
+
+
+def test_the_staged_tree_is_minimal(tmp_path, closure):
+    deb_root = _staged(tmp_path, closure)
     deb.assert_minimal(deb_root)
+    assert not (deb_root / "opt").exists()
     assert not (deb_root / "etc/photo-wall").exists()
 
 
-def test_stage_tree_control_file_matches_control_file_output(tmp_path):
-    deb_root = _staged(tmp_path)
-    sources, unit = _real_sources_and_unit()
-    version = deb.package_version(sources, unit)
-    control = (deb_root / "DEBIAN/control").read_bytes()
-    assert control == deb.control_file(
-        version, deb.DEB_DEPENDS, package=deb.PACKAGE, architecture=deb.ARCHITECTURE,
-        maintainer=deb.MAINTAINER, description=deb.DESCRIPTION,
-    )
+@pytest.mark.parametrize(("leak", "code"), [
+    ("opt/photo-wall/venv", "venv_in_bootstrapper_deb"),
+    ("etc/photo-wall", "deployment_config_in_bootstrapper_deb"),
+    ("usr/lib/python3/dist-packages/appliance", "dist_packages_in_bootstrapper_deb"),
+])
+def test_assert_minimal_catches_a_leak(tmp_path, leak, code):
+    """Mutation probe (c): anything staged into dist-packages is refused."""
+    (tmp_path / "deb-root" / leak).mkdir(parents=True)
+    with pytest.raises(BuildError, match=code):
+        deb.assert_minimal(tmp_path / "deb-root")
 
 
-def test_assert_minimal_catches_a_leaked_venv(tmp_path):
-    deb_root = tmp_path / "deb-root"
-    (deb_root / "opt/photo-wall/venv").mkdir(parents=True)
-    with pytest.raises(BuildError, match="venv_in_bootstrapper_deb"):
-        deb.assert_minimal(deb_root)
+def test_assert_minimal_refuses_a_watchdog_override(tmp_path):
+    """Stage 1's /run drop-in is the only watchdog setting (design §2.8)."""
+    dropin = tmp_path / "deb-root/usr/lib/systemd/system.conf.d/90-photo-wall.conf"
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text("[Manager]\nRuntimeWatchdogSec=30\n")
+    with pytest.raises(BuildError, match="watchdog_override_in_bootstrapper_deb:"
+                                         "usr/lib/systemd/system.conf.d/90-photo-wall.conf:2: "
+                                         "RuntimeWatchdogSec"):
+        deb.assert_minimal(tmp_path / "deb-root")
 
 
-def test_assert_minimal_catches_a_leaked_deployment_config(tmp_path):
-    deb_root = tmp_path / "deb-root"
-    (deb_root / "etc/photo-wall").mkdir(parents=True)
-    with pytest.raises(BuildError, match="deployment_config_in_bootstrapper_deb"):
-        deb.assert_minimal(deb_root)
-
-
-def test_assert_minimal_catches_a_leaked_contracts_module(tmp_path):
-    deb_root = tmp_path / "deb-root"
-    (deb_root / "usr/lib/python3/dist-packages/contracts").mkdir(parents=True)
-    with pytest.raises(BuildError, match="contracts_in_bootstrapper_deb"):
-        deb.assert_minimal(deb_root)
-
-
-# --- ExecStart uses python3, not python3.12 --------------------------------
-
-
-def test_provision_unit_execstart_uses_generic_python3_not_a_pinned_minor():
-    """The .deb targets whatever `python3` the base provides (Debian trixie
-    is 3.13) -- no cross-distro python3.12 symlink hack needed."""
+def test_provision_unit_runs_the_private_directory_application():
     unit = (REPO / "appliance/systemd" / deb.UNIT_NAME).read_text()
-    assert "ExecStart=/usr/bin/python3 -I -m appliance.provision" in unit
+    assert "ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper\n" in unit
     assert "python3.12" not in unit
 
 
-# --- Tier 2 (gated, not run here) -------------------------------------------
+# --- Tier 2 (gated, not run here) -------------------------------------------------------------
 
 linux_tools = pytest.mark.skipif(
     sys.platform != "linux" or os.environ.get("PHOTO_WALL_IMAGE_TOOL_TESTS") != "1",
@@ -248,7 +255,7 @@ linux_tools = pytest.mark.skipif(
 def test_real_dpkg_deb_build_and_inspection_finds_the_module_closure(tmp_path):
     """CI Linux runner only -- UNVERIFIED on this host (no dpkg-deb here).
     Exercises `build()` end to end: a real `dpkg-deb --build` plus
-    `dpkg-deb -c`/`-I` inspection proving the module closure and unit land
-    at their fixed paths and Depends match.
+    `dpkg-deb -c`/`-I` inspection proving the private closure and unit land
+    at their paths and Depends match.
     """
     pytest.skip("requires dpkg-deb; CI-only")

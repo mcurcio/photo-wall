@@ -25,7 +25,7 @@ import zipfile
 from dataclasses import dataclass
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable
+from typing import Callable, Final, Iterable
 from urllib.parse import unquote, urlsplit
 
 import packaging
@@ -36,6 +36,7 @@ from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
+WHEEL_PACKAGES: Final = ("player", "contracts", "uplink")
 ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 FORBIDDEN = frozenset({
     "central", "media", "fastapi", "psycopg", "psycopg-binary", "psycopg-pool",
@@ -169,10 +170,10 @@ def archive_sources(archive: bytes) -> dict[str, bytes]:
             path = PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts or str(path) != member.name.rstrip("/"):
                 raise BuildError("unsafe archive path")
-            if member.isdir() and path.parts[0] in ("player", "contracts"):
+            if member.isdir() and path.parts[0] in WHEEL_PACKAGES:
                 continue
             allowed = (member.name in ("pyproject.toml", "uv.lock")
-                       or (len(path.parts) >= 2 and path.parts[0] in ("player", "contracts")
+                       or (len(path.parts) >= 2 and path.parts[0] in WHEEL_PACKAGES
                            and all(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", p)
                                    for p in path.parts[:-1])
                            and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\.py", path.name)))
@@ -190,7 +191,7 @@ def archive_sources(archive: bytes) -> dict[str, bytes]:
                     if any(canonicalize_name(name.split(".")[0]) in FORBIDDEN for name in imports):
                         raise BuildError("Player source imports a forbidden runtime package")
             result[member.name] = data
-    required = {"player/__init__.py", "contracts/__init__.py", "pyproject.toml", "uv.lock"}
+    required = {f"{package}/__init__.py" for package in WHEEL_PACKAGES} | {"pyproject.toml", "uv.lock"}
     if not required <= result.keys():
         raise BuildError("incomplete Player archive")
     return result
@@ -207,7 +208,7 @@ def make_player_wheel(sources: dict[str, bytes], version: str,
     metadata += "".join(f"Requires-Dist: {wheel.name}=={wheel.version}\n"
                         for wheel in runtime if wheel.name in ROOTS)
     files = {path: value for path, value in sources.items()
-             if path.startswith(("player/", "contracts/"))}
+             if path.startswith(tuple(f"{package}/" for package in WHEEL_PACKAGES))}
     files[f"{name}.dist-info/METADATA"] = (metadata + "\n").encode()
     files[f"{name}.dist-info/WHEEL"] = (
         b"Wheel-Version: 1.0\nGenerator: photo-wall-stdlib\n"
@@ -241,7 +242,8 @@ def validate_player_wheel(data: bytes, expected: dict[str, bytes], version: str,
         allowed_metadata = {prefix + name for name in ("METADATA", "WHEEL", "RECORD")}
         if len(names) != len(set(names)) or set(names) != expected.keys():
             raise BuildError("unexpected Player wheel members")
-        if any(not (re.fullmatch(r"(?:player|contracts)/(?:[A-Za-z_]\w*/)*[A-Za-z_]\w*\.py",
+        package_alternation = "|".join(re.escape(package) for package in WHEEL_PACKAGES)
+        if any(not (re.fullmatch(rf"(?:{package_alternation})/(?:[A-Za-z_]\w*/)*[A-Za-z_]\w*\.py",
                                 name, re.ASCII))
                and name not in allowed_metadata for name in names):
             raise BuildError("unexpected Player wheel boundary")
@@ -370,7 +372,7 @@ def build(repository: Path, revision: str, output: Path,
     if inside_git.returncode == 0:
         raise BuildError("output must be outside every Git tree")
     archive = git("archive", "--format=tar", revision,
-                  "player", "contracts", "pyproject.toml", "uv.lock", limit=MAX_SOURCE)
+                  *WHEEL_PACKAGES, "pyproject.toml", "uv.lock", limit=MAX_SOURCE)
     sources = archive_sources(archive)
     project = tomllib.loads(sources["pyproject.toml"].decode())
     lock = tomllib.loads(sources["uv.lock"].decode())

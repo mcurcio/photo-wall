@@ -1,14 +1,15 @@
-"""Real mDNS/DNS-SD `CentralDiscovery` provider for the flash baseline (0008).
+"""Real mDNS/DNS-SD `uplink.finder.CentralDiscovery` provider for the flash baseline (0008).
 
 Browses `_photowall._tcp.local.` on the LAN and, if a central answers within
-a bounded timeout, returns its origin (`http://<host>:<port>`, or
-`https://` when the advertisement's TXT record says so). Returns `None` on
-timeout rather than blocking — `PlayerService.run`'s reconnect loop calls
-`discover()` every cycle it has no explicit `central_origin`, so an
+a bounded timeout, returns its root (`http://<host>:<port>`, or `https://`
+when the advertisement's TXT record says so) as an `uplink.origin.Origin`,
+validated by the one Central-root validator. Returns `None` on timeout rather
+than blocking: the caller retries every cycle it has no root, so an
 unbounded browse would stall reconnection on a LAN with no central.
 
-Kept out of `player.discovery` (the seam module) so that module continues to
-add no dependency; this module is the one that depends on `zeroconf`.
+`discover` takes the `Unconfigured` proof from `uplink.resolver`, so it cannot
+run while the kernel command line names Central (R1). This module is the one
+that depends on `zeroconf`; callers import it lazily, only on that branch.
 """
 
 from __future__ import annotations
@@ -19,13 +20,19 @@ import logging
 from zeroconf import ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from uplink.causes import UplinkError
+from uplink.origin import Origin
+from uplink.resolver import Unconfigured
+
 LOG = logging.getLogger("photo_wall.player.mdns")
 
 SERVICE_TYPE = "_photowall._tcp.local."
 DEFAULT_TIMEOUT = 3.0
 
 
-def _origin_from_info(info: AsyncServiceInfo) -> str | None:
+def origin_from_info(info: AsyncServiceInfo) -> Origin | None:
+    """The advertised address and port, scheme from TXT `scheme`, through Origin.parse_root;
+    an advertisement that does not parse is None (the caller logs it), never a string."""
     addresses = info.parsed_addresses()
     if not addresses or not info.port:
         return None
@@ -40,11 +47,14 @@ def _origin_from_info(info: AsyncServiceInfo) -> str | None:
                 scheme = "https"
         except UnicodeDecodeError:
             pass
-    return f"{scheme}://{host}:{info.port}"
+    try:
+        return Origin.parse_root(f"{scheme}://{host}:{info.port}")
+    except UplinkError:
+        return None
 
 
 class MdnsCentralDiscovery:
-    """Browses `_photowall._tcp` and returns the chosen central's origin.
+    """Browses `_photowall._tcp` and returns the chosen central's root.
 
     Bounded: `discover()` gives the LAN `timeout` seconds (default 3.0) to
     answer and returns `None` on expiry, never blocking past it.
@@ -72,13 +82,15 @@ class MdnsCentralDiscovery:
         self._timeout = timeout
         self._service_type = service_type
 
-    async def discover(self) -> str | None:
+    async def discover(self, unconfigured: Unconfigured) -> Origin | None:
+        """A Central root found on the LAN within `timeout`, or None. `unconfigured` is the
+        proof that the kernel command line names no Central (R1)."""
         try:
             return await asyncio.wait_for(self._browse(), timeout=self._timeout)
         except asyncio.TimeoutError:
             return None
 
-    async def _browse(self) -> str | None:
+    async def _browse(self) -> Origin | None:
         found: set[str] = set()
 
         def on_change(zeroconf, service_type, name, state_change):
@@ -100,8 +112,8 @@ class MdnsCentralDiscovery:
             for name in sorted(found):
                 info = AsyncServiceInfo(self._service_type, name)
                 if await info.async_request(aiozc.zeroconf, 1000):
-                    origin = _origin_from_info(info)
+                    origin = origin_from_info(info)
                     if origin is not None:
                         return origin
-                    LOG.warning("mdns: %s advertised no usable address/port", name)
+                    LOG.warning("mdns: %s advertised no usable Central root", name)
             return None

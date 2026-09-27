@@ -27,7 +27,9 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 # Native failure must still allow network registration with unavailable capacity.
 ExecStartPre=-/usr/bin/timeout 15 /bin/sh -c 'until test -S /run/user/10001/wayland-0; do sleep 0.1; done'
-ExecStart=/usr/bin/python3 -m player.service --config /etc/photo-wall/public.json
+# -I: only the private dir's own closure is importable; -B: -I ignores
+# PYTHONDONTWRITEBYTECODE, and the dir is read-only package content.
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-player --config /etc/photo-wall/public.json
 Restart=always
 RestartSec=2
 TimeoutStopSec=150

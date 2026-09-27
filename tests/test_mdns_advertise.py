@@ -23,6 +23,8 @@ from central import mdns_advertise
 from central.mdns_advertise import MdnsCentralAdvertiser
 from contracts.time import ManualClock
 from player.mdns_discovery import MdnsCentralDiscovery
+from uplink.origin import Origin
+from uplink.resolver import Unconfigured
 
 ADMIN = "mdns-test-operator-" + "x" * 32
 
@@ -135,14 +137,15 @@ def test_startup_registers_configured_port_and_player_discovers_http_origin(monk
         with TestClient(app):
 
             async def check():
-                return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover()
+                return await MdnsCentralDiscovery(timeout=3.0, service_type=service_type).discover(
+                    Unconfigured("absent"))
 
             origin = asyncio.run(check())
     except OSError as error:
         pytest.skip(f"loopback multicast unavailable in this sandbox: {error}")
     if origin is None:
         pytest.skip("loopback multicast unavailable in this sandbox (no responder seen)")
-    assert origin == "http://127.0.0.1:8321"
+    assert origin == Origin.parse_root("http://127.0.0.1:8321")
 
 
 def test_registration_failure_does_not_crash_startup(monkeypatch):

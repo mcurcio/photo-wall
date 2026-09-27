@@ -6,39 +6,49 @@ name: Netboot boot-chain e2e tracer (p4 s3)
 # QEMU kernel boot, and self-contained -- NO `release-artifacts` reusable
 # workflow, NO pre-qualified OS-base, NO `--root`.
 #
-# It builds the REAL new-model Player `.deb` IN-JOB (scripts.build_player_deb,
-# pure dpkg-deb, Architecture: all -- the apt-deps model, 0009
-# p4-deb-full-depends), stands up a REAL central (uvicorn) + REAL Postgres,
-# serves the `.deb`, and drives the REAL appliance.provision.Bootstrapper to
-# fetch + sha256-verify + INSTALL it with a genuine `apt-get install -y <deb>`
-# inside a `debian:trixie-slim` arm64 container with real apt sources -- so the
-# `.deb`'s declared Depends (GTK/GStreamer/Mesa + python3-*) resolve from
-# deb.debian.org. It then runs a Python-3.13 import smoke in that post-install
-# container, hands off the origin, invokes start, and proves a flip-a-byte
-# refusal. This job GATES retirement of the old signed netboot/release-authority
-# pipeline (s4/s5).
+# It builds the DEVICE ROOT (Project 2 S1c): the base's device set -- the
+# bootstrapper's and the Player's Debian packages from scripts/debian_packages.py
+# -- by mmdebstrap at the declared snapshot, cached on the declaration and
+# imported into docker. It builds the REAL bootstrapper and Player `.deb`s IN-JOB
+# (pure dpkg-deb, Architecture: all; each ships its own private install dir --
+# /usr/lib/photo-wall-bootstrapper, /usr/lib/photo-wall-player -- nothing
+# first-party in the shared dist-packages), stands up a REAL central (uvicorn) +
+# REAL Postgres serving the Player `.deb`, and installs BOTH packages with dpkg
+# on this one device root. It runs the PACKAGED provisioner as its unit does,
+# from a command line naming a gateway stub that 301s cross-host to Central. It
+# locates, fetches + sha256-verifies and INSTALLS the Player `.deb` with dpkg
+# alone (apt/apt-get are shims that fail the run: every Depends must already be
+# in the root, as on the Pi), writes the handoff and starts the unit (a
+# systemctl shim). It then imports every module of the Player's closure.json
+# from its private /usr/lib/photo-wall-player (the pinned trixie Python 3.13
+# with the real python3-gi etc.), runs scripts/device_root_checks.py on the
+# post-install root, and proves a flip-a-byte refusal. This job GATES
+# retirement of the old signed netboot/release-authority pipeline (s4/s5).
 #
 # Part B (ticketless enroll -> pending -> operator bind -> render smoke) is
 # proven by the re-keyed scripts/demo_wall.py runner under the existing
 # "Controller and Player software e2e" job; both green together gate s4.
 #
-# It also runs stage 1's uplink on the DEVICE's runtime (decision 0014 §11):
-# CI is Python 3.12 with a venv, the Pi is Debian trixie's python3 (3.13) and
-# OpenSSL (3.5) with the stdlib and the computed closure only.
+# It also runs stage 1's uplink on the DEVICE's runtime (decision 0014 §11), in
+# the same device root: CI is Python 3.12 with a venv, the Pi is the pinned
+# trixie python3 (3.13) and OpenSSL (3.5) with the stdlib and the computed
+# closure only.
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - scripts/test_netboot_e2e.py
-      - appliance/__init__.py
-      - appliance/bootstrap.py
-      - appliance/netboot_init.py
-      - appliance/provision.py
+      - scripts/debian_packages.py
+      - scripts/device_root_checks.py
+      - scripts/build_bootstrapper_deb.py
+      - appliance/**
+      - player/**
       - contracts/**
       - uplink/**
       - scripts/module_closure.py
       - scripts/uplink_device_harness.py
+      - scripts/build_player.py
       - tests/tls_fixture.py
       - scripts/build_player_deb.py
       - central/content_routes.py
@@ -57,7 +67,9 @@ concurrency:
 jobs:
   tracer:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    # A cold device root (a declaration change) fetches the whole device set from the
+    # snapshot archive; warm runs re-import the cached tar.
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: read
@@ -75,12 +87,41 @@ jobs:
           python -m pip install uv==0.7.8
           uv sync --frozen
 
+      # The device root: mmdebstrap over the declaration's device set at its
+      # pin (scripts/test_netboot_e2e.py device_root_image), kept as a tar and
+      # cached on the declaration, then imported into docker. mmdebstrap is
+      # needed only to build it (a cache miss).
+      - name: Cache the device root
+        id: device-root-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/device-root-cache
+          key: device-root-arm64-${{ hashFiles('scripts/debian_packages.py') }}
+
+      - name: Install mmdebstrap
+        if: steps.device-root-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mmdebstrap debian-archive-keyring
+
+      - name: Build or import the device root image
+        id: device-root
+        run: |
+          set -eu
+          image=$(.venv/bin/python -m scripts.test_netboot_e2e device-root \
+            --arch arm64 --tag photo-wall-device-root:ci \
+            --cache "$RUNNER_TEMP/device-root-cache" | tail -n1)
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
       # Stage 1's computed closure, imported and exercised under `python3 -I -S`
-      # in debian:trixie-slim with only the closure on sys.path: the 301 chain,
-      # a TLS-to-TLS hop, the downgrade refusal and the 62/64 name mismatches,
-      # against stdlib servers inside the container. Certificates are minted
-      # here on the runner (tests/tls_fixture.py); none is kept in the tree.
+      # in the device root (the pinned interpreter) with only the closure on
+      # sys.path: the 301 chain, a TLS-to-TLS hop, the downgrade refusal and the
+      # 62/64 name mismatches, against stdlib servers inside the container.
+      # Certificates are minted here on the runner (tests/tls_fixture.py); none
+      # is kept in the tree.
       - name: uplink on the device runtime (Python 3.13, OpenSSL 3.5)
+        env:
+          DEVICE_ROOT: ${{ steps.device-root.outputs.image }}
         run: |
           set -eu
           work="$RUNNER_TEMP/uplink-device"
@@ -89,9 +130,7 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -v "$work:/work:ro" \
             -v "$GITHUB_WORKSPACE/scripts/uplink_device_harness.py:/harness.py:ro" \
-            debian:trixie-slim sh -ec '
-              apt-get update >/dev/null
-              apt-get install -y --no-install-recommends python3 >/dev/null
+            "$DEVICE_ROOT" sh -ec '
               python3 --version
               python3 -I -S /harness.py run --closure /work/closure --certs /work/certs'
 
@@ -117,9 +156,22 @@ jobs:
             type=gha,scope=photo-wall-software-e2e-arm64-v1
           cache-to: type=gha,scope=photo-wall-software-e2e-arm64-v1,mode=max,ignore-error=true
 
-      # Build the REAL new-model Player .deb in-job (pure dpkg-deb, no chroot,
-      # no OS-base) -- the exact command base-image.yml uses.
-      - name: Build the photo-wall-player .deb (apt-deps model)
+      # Build the REAL bootstrapper and Player .debs in-job (pure dpkg-deb, no
+      # chroot, no OS-base) -- the exact commands base-image.yml uses. Their
+      # Depends come from the declaration the device root was built from.
+      - name: Build the photo-wall-bootstrapper .deb
+        id: bootstrapper-deb
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-bootstrapper-deb"
+          build_out=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
+            --repository "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/photo-wall-bootstrapper-deb")
+          printf '%s\n' "$build_out"
+          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+
+      - name: Build the photo-wall-player .deb
         id: player-deb
         run: |
           set -eu
@@ -134,11 +186,15 @@ jobs:
       - name: Run the boot-time app-delivery tracer
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
+          DEVICE_ROOT: ${{ steps.device-root.outputs.image }}
+          BOOTSTRAPPER_DEB: ${{ steps.bootstrapper-deb.outputs.deb_path }}
           PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
         run: |
           .venv/bin/python -m scripts.test_netboot_e2e run \
             --state-dir "$RUNNER_TEMP/netboot-e2e" \
             --central-image "$CENTRAL_IMAGE" \
+            --device-root "$DEVICE_ROOT" \
+            --bootstrapper-deb "$BOOTSTRAPPER_DEB" \
             --deb "$PLAYER_DEB"
 
       - name: Upload tracer diagnostics
@@ -150,6 +206,6 @@ jobs:
             ${{ runner.temp }}/netboot-e2e/evidence.json
             ${{ runner.temp }}/netboot-e2e/central.log
             ${{ runner.temp }}/netboot-e2e/compose-ps.txt
-            ${{ runner.temp }}/netboot-e2e/public.json
+            ${{ runner.temp }}/netboot-e2e/provision.log
           if-no-files-found: warn
           retention-days: 7

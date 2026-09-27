@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Uplink on the device's runtime (decision 0014 §11): the Pi runs Debian trixie's python3
 (3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's closure, while CI runs 3.12
-with a venv. This harness proves the seam there, in `debian:trixie-slim`:
+with a venv. This harness proves the seam there, in the CI device root (the device set at
+the declared pin, `scripts/test_netboot_e2e.py device-root`):
 
   mint DIR                        on the runner (the repo's venv): write the test CA bundle and
                                   the leaves tests/tls_fixture.py mints (no key kept in-tree)
@@ -91,13 +92,16 @@ def serve_stub(handler: type[http.server.BaseHTTPRequestHandler], *,
 
 
 def redirect_stub(location: str, *, context: ssl.SSLContext | None = None,
-                  status: int = 301) -> contextlib.AbstractContextManager[Stub]:
-    """A stand-in gateway that answers every GET with `status` and `Location: location`."""
+                  status: int = 301, keep_path: bool = False
+                  ) -> contextlib.AbstractContextManager[Stub]:
+    """A stand-in gateway that answers every GET with `status` and `Location: location`, or,
+    with `keep_path`, `location` followed by the request target (a gateway that moved every
+    path to another host)."""
 
     class Redirect(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             self.send_response(status)
-            self.send_header("Location", location)
+            self.send_header("Location", location + self.path if keep_path else location)
             self.send_header("Content-Length", "0")
             self.end_headers()
 

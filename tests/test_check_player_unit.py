@@ -197,3 +197,31 @@ def test_main_reports_only_sanitized_failure(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert output.strip() == '{"reason": "unit_start_failed", "schema": 1, "status": "failed"}'
     assert "/" not in output.replace("/", "", 1)
+
+
+def test_the_shipped_unit_runs_the_private_dir():
+    text = check._source_text(SOURCE)
+    assert check.EXEC_START in text
+
+
+def test_the_old_module_entry_is_refused(tmp_path):
+    unit = tmp_path / "player.service"
+    source_text = SOURCE.read_text(encoding="utf-8")
+    old_exec = "ExecStart=/usr/bin/python3 -m player.service --config /etc/photo-wall/public.json"
+    modified = source_text.replace(check.EXEC_START, old_exec)
+    unit.write_text(modified, encoding="utf-8")
+
+    with pytest.raises(check.PreflightError) as exc_info:
+        check._source_text(unit)
+    assert exc_info.value.code == "unit_exec_start"
+
+
+def test_a_second_exec_start_is_refused(tmp_path):
+    unit = tmp_path / "player.service"
+    source_text = SOURCE.read_text(encoding="utf-8")
+    modified = source_text.rstrip("\n") + "\nExecStart=/bin/true\n"
+    unit.write_text(modified, encoding="utf-8")
+
+    with pytest.raises(check.PreflightError) as exc_info:
+        check._source_text(unit)
+    assert exc_info.value.code == "unit_exec_start"

@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["central", "contracts", "media", "player"]
+packages = ["central", "contracts", "media", "player", "uplink"]
 
 [tool.commitizen]
 # Conventional-Commits ruleset: classify feat/fix/perf/BREAKING to pick the bump.

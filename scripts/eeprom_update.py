@@ -22,6 +22,8 @@ Settings:
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,10 +34,29 @@ from typing import Final
 EEPROM_SETTINGS: Final[Mapping[str, str]] = {"BOOT_ORDER": "0xf21", "BOOT_WATCHDOG_TIMEOUT": "120"}
 PIEEPROM_UPD_NAME: Final = "pieeprom.upd"
 PIEEPROM_SIG_NAME: Final = "pieeprom.sig"
+DEFAULT_CONFIG_TOOL: Final = "rpi-eeprom-config"
+DEFAULT_DIGEST_TOOL: Final = "rpi-eeprom-digest"
 
 
 class EepromUpdateError(RuntimeError):
-    """The rebuilt `pieeprom.upd`, read back, does not carry EEPROM_SETTINGS."""
+    """The rebuilt `pieeprom.upd`, read back, does not carry EEPROM_SETTINGS -- or a required
+    tool (rpi-eeprom-config/-digest) could not be found."""
+
+
+def _resolve_tool(path: str, label: str) -> str:
+    """`path` resolved to an existing file: a bare name (no path separator) is looked up on
+    PATH, e.g. a dev host with the real `rpi-eeprom` package installed; a path (CI's pinned
+    scratch-root copy, arch-independent so the runner's own interpreter/shell runs it directly)
+    is checked in place. Raises `EepromUpdateError` naming `label` and `path` -- a clear, named
+    error instead of a bare subprocess `FileNotFoundError` traceback."""
+    if os.sep in path:
+        if not Path(path).is_file():
+            raise EepromUpdateError(f"{label} not found: {path}")
+        return path
+    resolved = shutil.which(path)
+    if resolved is None:
+        raise EepromUpdateError(f"{label} not found on PATH: {path!r}")
+    return resolved
 
 
 def eeprom_config(packaged: str, settings: Mapping[str, str] = EEPROM_SETTINGS) -> str:
@@ -74,36 +95,46 @@ def eeprom_problems(config: str, settings: Mapping[str, str] = EEPROM_SETTINGS) 
     return problems
 
 
-def _read_config(image: Path) -> str:
-    result = subprocess.run(["rpi-eeprom-config", str(image)],
+def _read_config(image: Path, config_tool: str) -> str:
+    result = subprocess.run([config_tool, str(image)],
                             check=True, capture_output=True, text=True, timeout=30)
     return result.stdout
 
 
 def build_eeprom_update(image: Path, out_dir: Path, *,
-                        settings: Mapping[str, str] = EEPROM_SETTINGS) -> None:
+                        settings: Mapping[str, str] = EEPROM_SETTINGS,
+                        config_tool: str = DEFAULT_CONFIG_TOOL,
+                        digest_tool: str = DEFAULT_DIGEST_TOOL) -> None:
     """Write `out_dir/pieeprom.upd` (`rpi-eeprom-config --config ... --out`)
     and `out_dir/pieeprom.sig` (`rpi-eeprom-digest`) from the packaged
     bootloader `image`, then read the built update's config back and raise
     `EepromUpdateError` on any `eeprom_problems` -- never ship a bundle whose
-    self-update silently missed a setting."""
+    self-update silently missed a setting.
+
+    `config_tool`/`digest_tool`: the packaged rpi-eeprom-config/-digest to run -- a bare PATH
+    name (default; a dev host with the real `rpi-eeprom` package installed) or an explicit path
+    (CI: the pinned scratch-root's own copy, never the runner's, which has none). Resolved with
+    `_resolve_tool` before anything is written, so a missing tool is one named `EepromUpdateError`,
+    not a subprocess traceback partway through."""
+    config_tool = _resolve_tool(config_tool, "rpi-eeprom-config")
+    digest_tool = _resolve_tool(digest_tool, "rpi-eeprom-digest")
     out_dir.mkdir(parents=True, exist_ok=True)
     upd = out_dir / PIEEPROM_UPD_NAME
     sig = out_dir / PIEEPROM_SIG_NAME
-    new_config = eeprom_config(_read_config(image), settings)
+    new_config = eeprom_config(_read_config(image, config_tool), settings)
     fd, config_name = tempfile.mkstemp(suffix=".conf", prefix="pieeprom-")
     config_path = Path(config_name)
     try:
         with open(fd, "w") as handle:
             handle.write(new_config)
         subprocess.run(
-            ["rpi-eeprom-config", "--config", str(config_path), "--out", str(upd), str(image)],
+            [config_tool, "--config", str(config_path), "--out", str(upd), str(image)],
             check=True, timeout=60,
         )
     finally:
         config_path.unlink(missing_ok=True)
-    subprocess.run(["rpi-eeprom-digest", "-i", str(upd), "-o", str(sig)], check=True, timeout=30)
-    problems = eeprom_problems(_read_config(upd), settings)
+    subprocess.run([digest_tool, "-i", str(upd), "-o", str(sig)], check=True, timeout=30)
+    problems = eeprom_problems(_read_config(upd, config_tool), settings)
     if problems:
         raise EepromUpdateError(f"{upd} does not match required settings: {'; '.join(problems)}")
 
@@ -114,9 +145,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="the packaged rpi-eeprom PIEEPROM_BIN image")
     parser.add_argument("--out", required=True, type=Path,
                         help="bundle boot/ directory to write pieeprom.upd/.sig into")
+    parser.add_argument("--rpi-eeprom-config", dest="config_tool", default=DEFAULT_CONFIG_TOOL,
+                        help="rpi-eeprom-config to run: a bare PATH name (default) or an "
+                             "explicit path, e.g. CI's pinned scratch-root copy")
+    parser.add_argument("--rpi-eeprom-digest", dest="digest_tool", default=DEFAULT_DIGEST_TOOL,
+                        help="rpi-eeprom-digest to run: a bare PATH name (default) or an "
+                             "explicit path")
     args = parser.parse_args(argv)
     try:
-        build_eeprom_update(args.image, args.out)
+        build_eeprom_update(args.image, args.out,
+                            config_tool=args.config_tool, digest_tool=args.digest_tool)
     except (OSError, subprocess.CalledProcessError, EepromUpdateError) as error:
         print(f"eeprom_update: {error}", file=sys.stderr)
         return 1

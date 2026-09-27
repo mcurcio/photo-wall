@@ -27,7 +27,10 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # needs broad filesystem and service-manager access, so this unit is
 # deliberately unsandboxed (0009 owner ruling: home LAN, no threat model;
 # see docs/decisions/0009-minimal-base-and-app-package.md).
-ExecStart=/usr/bin/python3 -I -m appliance.provision
+# The package's private directory application (its computed closure and a generated
+# __main__.py, scripts/build_bootstrapper_deb.py). -B because -I ignores every PYTHON*
+# variable, PYTHONDONTWRITEBYTECODE above included.
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=infinity

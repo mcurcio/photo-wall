@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import json
 import secrets
-import ssl
 import time
 import uuid
 from concurrent.futures import Future
@@ -22,7 +21,10 @@ import httpx
 from contracts.enrollment import OutputReport
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
-from player.service import BootContext, PlayerConfig, PlayerService
+from player.service import BootContext, PlayerConfig, PlayerService, central_finder
+from uplink.resolver import Unconfigured
+from uplink.transport import HttpTransport
+from uplink.trust import Trust
 
 WINDOW_SECONDS = 75
 
@@ -50,21 +52,26 @@ async def main():
                 for path in source.rglob("*.py")}
     if observed != manifest:
         raise ValueError("clock_client_sources_changed")
-    context = ssl.create_default_context(cafile="/public/ca.pem")
+    trust = Trust.public(Path("/public/ca.pem"))
     probes, responses = [], []
-    async with httpx.AsyncClient(verify=context, trust_env=False, timeout=15,
+    async with httpx.AsyncClient(verify=trust.context, trust_env=False, timeout=15,
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2)) as client, \
-            httpx.AsyncClient(verify=context, trust_env=False, timeout=15,
+            httpx.AsyncClient(verify=trust.context, trust_env=False, timeout=15,
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=1)) as time_client:
         device, boot = "device-" + secrets.token_hex(32), str(uuid.uuid4())
         selected = await client.post("https://photo-wall.test/v1/bootstrap/boot", json=dict(
             device_id=device, boot_id=boot, request_id=secrets.token_hex(24)))
         selected.raise_for_status()
         ticket = selected.json()
-        service = PlayerService(PlayerConfig(central_origin="https://photo-wall.test",
-            ca_file="/public/ca.pem"), load_identity(),
+        config = PlayerConfig(central_origin="https://photo-wall.test", ca_file="/public/ca.pem")
+        # find_central is stored but never invoked below (locate_central()/run() are not
+        # exercised here), so this only needs to be constructible -- but central_finder is the
+        # real production wiring (R1), reused rather than faked.
+        find = central_finder(config, Unconfigured("no_cmdline"), transport=HttpTransport(trust=trust))
+        service = PlayerService(config, load_identity(),
             (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),),
-            RecordingRenderer(), dispatch, client=client, time_client=time_client,
+            RecordingRenderer(), dispatch, find_central=find, trust=trust, client=client,
+            time_client=time_client,
             health_path=None, boot_context=BootContext.model_validate(dict(schema=2,
                 ticket_id=ticket["ticket_id"], device_id=device, boot_id=boot,
                 release_id=ticket["release_id"], trial=ticket["trial"], persistence="volatile")))

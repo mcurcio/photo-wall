@@ -29,6 +29,9 @@ from player.service import (
     hardware_boot_context,
     resolve_boot_context,
 )
+from tests import tls_fixture as tls
+from tests.uplink_fakes import finding
+from uplink.trust import Trust
 
 RAW_PI_SERIAL = b"10000000abcd1234\n"
 
@@ -170,12 +173,15 @@ def test_hardware_boot_context_now_enrolls_against_a_real_registry_pending_unbou
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://central") as client:
             service = PlayerService(
-                PlayerConfig(central_origin="http://central", allow_http=True, cache_dir=str(cache)),
+                PlayerConfig(central_origin="http://central", cache_dir=str(cache)),
                 load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
-                RecordingRenderer(), _immediate, clock=registry.clock, client=client,
-                time_client=client, boot_context=context, health_path=None,
+                RecordingRenderer(), _immediate, find_central=finding("http://central"),
+                trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)),
+                clock=registry.clock, client=client, time_client=client, boot_context=context,
+                health_path=None,
             )
             try:
+                await service.locate_central()
                 await service.enroll()
                 return service.registration
             finally:

@@ -1,7 +1,9 @@
 """`scripts/eeprom_update.py`: the pure config-text functions, plus
 `build_eeprom_update`/`main` end to end against synthetic `rpi-eeprom-config`/
-`rpi-eeprom-digest` stand-ins on PATH (0014 rev 5, design §2.8). No real
-EEPROM image, no hardware."""
+`rpi-eeprom-digest` stand-ins on PATH (0014 rev 5, design §2.8), and again as
+explicit `--rpi-eeprom-config`/`--rpi-eeprom-digest` paths off PATH entirely
+(CI's pinned build-root copy, never the runner's own). No real EEPROM image,
+no hardware."""
 
 import os
 import stat
@@ -11,6 +13,7 @@ import pytest
 from scripts.eeprom_update import (
     EEPROM_SETTINGS,
     EepromUpdateError,
+    _resolve_tool,
     build_eeprom_update,
     eeprom_config,
     eeprom_problems,
@@ -162,3 +165,62 @@ def test_main_returns_0_on_success(tmp_path, stub_path):
     rc = main(["--image", str(image), "--out", str(tmp_path / "boot")])
     assert rc == 0
     assert (tmp_path / "boot" / "pieeprom.upd").exists()
+
+
+# --- explicit --rpi-eeprom-config/--rpi-eeprom-digest wiring (CI's pinned build-root tools,
+# never the bare PATH lookup a dev host with the real package relies on) --------------------
+
+def test_build_eeprom_update_runs_explicit_tool_paths_absent_from_path(tmp_path, monkeypatch):
+    # The stand-ins live in a directory that is NOT on PATH; PATH itself is a plain system PATH
+    # (needed by the stand-ins' own `cp`/`cat`/`[`, exactly like the real shell scripts) that
+    # carries no rpi-eeprom-config/-digest of its own -- true of every CI runner. If
+    # build_eeprom_update ever fell back to the bare "rpi-eeprom-config"/"rpi-eeprom-digest"
+    # names instead of honoring config_tool/digest_tool, this would fail with "not found on
+    # PATH" -- proving the explicit-path wiring, not PATH, is what runs.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    tool_dir = tmp_path / "pinned-tools"
+    tool_dir.mkdir()
+    config_tool = tool_dir / "rpi-eeprom-config"
+    digest_tool = tool_dir / "rpi-eeprom-digest"
+    config_tool.write_text(_RPI_EEPROM_CONFIG_STUB)
+    digest_tool.write_text(_RPI_EEPROM_DIGEST_STUB)
+    config_tool.chmod(config_tool.stat().st_mode | stat.S_IEXEC)
+    digest_tool.chmod(digest_tool.stat().st_mode | stat.S_IEXEC)
+    image = _seed_image(tmp_path)
+    build_eeprom_update(image, tmp_path / "boot",
+                        config_tool=str(config_tool), digest_tool=str(digest_tool))
+    upd = tmp_path / "boot" / "pieeprom.upd"
+    assert upd.exists()
+    assert eeprom_problems(upd.read_text()) == []
+
+
+def test_resolve_tool_names_a_missing_explicit_path():
+    missing = "/no/such/dir/rpi-eeprom-config"
+    with pytest.raises(EepromUpdateError, match="rpi-eeprom-config not found: /no/such/dir"):
+        _resolve_tool(missing, "rpi-eeprom-config")
+
+
+def test_resolve_tool_names_a_missing_bare_name_on_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))  # empty directory: nothing resolves
+    with pytest.raises(EepromUpdateError, match="rpi-eeprom-digest not found on PATH"):
+        _resolve_tool("rpi-eeprom-digest", "rpi-eeprom-digest")
+
+
+def test_build_eeprom_update_refuses_a_missing_tool_with_a_named_error_not_a_traceback(
+    tmp_path,
+):
+    image = _seed_image(tmp_path)
+    with pytest.raises(EepromUpdateError, match="rpi-eeprom-config not found:"):
+        build_eeprom_update(image, tmp_path / "boot",
+                            config_tool=str(tmp_path / "no-such-rpi-eeprom-config"),
+                            digest_tool="rpi-eeprom-digest")
+
+
+def test_main_names_the_missing_tool_given_an_explicit_bad_path(tmp_path, capsys):
+    image = _seed_image(tmp_path)
+    rc = main(["--image", str(image), "--out", str(tmp_path / "boot"),
+              "--rpi-eeprom-config", str(tmp_path / "no-such-rpi-eeprom-config")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "rpi-eeprom-config not found:" in err
+    assert "Traceback" not in err

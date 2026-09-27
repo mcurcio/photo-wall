@@ -25,7 +25,10 @@ from uplink.fetch import (
     READ_TIMEOUT,
     STATUS_TIMEOUT,
     DirectFetch,
+    central_error_code,
+    refusal,
 )
+from uplink.origin import Origin
 from uplink.transport import HOP_TIMEOUT, HttpTransport
 from uplink.trust import Trust
 
@@ -144,6 +147,63 @@ def test_a_non_200_without_central_body_is_an_http_status(body):
 def test_an_error_body_that_cannot_be_read_leaves_the_status():
     error = refused(FakeReply(502, fail=UplinkError(Cause.TRANSFER, "deadline")))
     assert (error.cause, error.reason) == (Cause.HTTP, "status")
+
+
+MANIFEST = Origin.parse_root("http://central").url("/v1/app/manifest")
+
+
+def test_refusal_names_a_redirect_and_its_location_host():
+    error = refusal(MANIFEST, 301, location="https://other.example/v1/app/manifest", body=b"")
+    assert (error.cause, error.reason, error.host, error.detail) == (
+        Cause.REDIRECT, "unexpected", "central", "status=301;location=other.example")
+
+
+def test_refusal_resolves_a_relative_location_against_the_request():
+    error = refusal(MANIFEST, 302, location="/elsewhere", body=b"")
+    assert error.detail == "status=302;location=central"
+
+
+def test_refusal_leaves_out_a_location_that_does_not_parse():
+    # None and "" are not exercised here: parse_url(location or "", base=url) resolves an
+    # absent/empty Location against the request itself, so it parses back to the same host
+    # rather than failing to parse (see specWrong in the delivering report).
+    error = refusal(MANIFEST, 307, location="ftp://x/", body=b"")
+    assert error.detail == "status=307"
+
+
+def test_refusal_names_central_own_error():
+    error = refusal(MANIFEST, 503, location=None, body=b'{"error":"app_unconfigured"}')
+    assert (error.cause, error.reason, error.central_error, error.detail) == (
+        Cause.CENTRAL, "error", "app_unconfigured", "app_unconfigured")
+
+
+@pytest.mark.parametrize("body", [
+    b"<html>bad gateway</html>",
+    b'{"error":"Not Valid"}',
+    b'{"error":1}',
+    b"[]",
+    b"",
+])
+def test_refusal_names_any_other_answer_an_http_status(body):
+    error = refusal(MANIFEST, 502, location=None, body=body)
+    assert (error.cause, error.reason, error.detail, error.central_error) == (
+        Cause.HTTP, "status", "status=502", None)
+
+
+def test_central_error_code_refuses_an_oversized_body():
+    padded = b'{"error":"app_unconfigured","pad":"' + b" " * MAX_ERROR_BODY + b'"}'
+    assert central_error_code(padded) is None
+    assert len(padded) > MAX_ERROR_BODY
+    fits = b'{"error":"app_unconfigured"}'
+    assert len(fits) <= MAX_ERROR_BODY
+    assert central_error_code(fits) == "app_unconfigured"
+
+
+def test_directfetch_refusal_is_the_shared_mapping():
+    body = b'{"error":"app_unconfigured"}'
+    error = refused(FakeReply(503, body=body))
+    url = Origin.parse_root(ORIGIN).url("/v1/netboot/base")
+    assert error.console() == refusal(url, 503, location=None, body=body).console()
 
 
 @pytest.mark.parametrize(("reply", "maximum", "reason"), [

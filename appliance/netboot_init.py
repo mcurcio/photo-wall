@@ -34,7 +34,9 @@ Phases, each one console line that also pets the stage-1 watchdog (0014 rev 5, d
    corruption check only (home LAN, no signature on this path). A mismatch, or no `Digest`,
    fails closed with no partial file and nothing mounted.
 7. mount and hand off: `LinuxOps.mount_root` unchanged, a note if the base's CA bundle differs
-   from this initrd's (R5, Q3 = A), then the watchdog hand-over to systemd, last.
+   from this initrd's (R5, Q3 = A), stage 1's working resolver copied onto the new root
+   (`hand_over_resolver`: stage 2 has no DHCP client of its own), then the watchdog hand-over
+   to systemd, last.
 
 Every failure prints one `FAILED phase=<n> ...` line and exits non-zero into the boot script's
 `photowall_restart`, the one way out. No boot-context file is written: the Player enrolls
@@ -55,6 +57,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Final
 
 from appliance.bootstrap import (
     CHUNK,
@@ -81,7 +84,9 @@ from uplink.clock import (
     read_floor,
     step_realtime,
 )
+from uplink.diagnosis import failure_text, trust_provenance
 from uplink.fetch import DirectFetch
+from uplink.files import write_atomically
 from uplink.locate import locate
 from uplink.origin import Url
 from uplink.resolver import (
@@ -116,6 +121,12 @@ BASE_FETCH_SECONDS = 300
 # This initrd's CA bundle (the boot data's copy of the base's), compared after mounting with
 # the mounted base's own at the same path (R5, Q3 = A).
 INITRD_CA_BUNDLE = DEBIAN_CA_BUNDLE
+# Stage 1's resolver: initramfs-tools' configure_networking renders it from the DHCP lease
+# (netinfo_to_resolv_conf). The phase-3 line reads it and phase 7 hands it to stage 2 at
+# STAGE2_RESOLVER (relative to the new root), bounded: resolv.conf(5) is a few lines.
+_STAGE1_RESOLVER: Final = Path("/etc/resolv.conf")
+STAGE2_RESOLVER: Final = Path("etc/resolv.conf")
+MAX_RESOLVER_BYTES: Final = 4096
 
 
 class NetbootError(ValueError):
@@ -170,6 +181,19 @@ class ConsoleLog:
             self._emit(message)
 
 
+def _resolver_entries(text: str) -> tuple[list[str], list[str]]:
+    """The nameservers and search domains a resolv.conf names (resolv.conf(5)), in order."""
+    nameservers: list[str] = []
+    search: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            nameservers.append(parts[1])
+        elif len(parts) >= 2 and parts[0] in ("search", "domain"):
+            search.extend(parts[1:])
+    return nameservers, search
+
+
 def _read_small(path: Path) -> str | None:
     try:
         with path.open("rb") as stream:
@@ -217,15 +241,7 @@ class NetbootOps(LinuxOps):
         except OSError:
             pass
         try:
-            nameservers: list[str] = []
-            search: list[str] = []
-            with open("/etc/resolv.conf") as handle:
-                for line in handle:
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[0] == "nameserver":
-                        nameservers.append(parts[1])
-                    elif len(parts) >= 2 and parts[0] in ("search", "domain"):
-                        search.extend(parts[1:])
+            nameservers, search = _resolver_entries(_STAGE1_RESOLVER.read_text())
             if nameservers:
                 info["dns"] = ",".join(nameservers)
             if search:
@@ -321,11 +337,23 @@ def fetch_verified(chunks, destination: Path, expected_digest, *, log=None) -> N
         raise
 
 
-def trust_provenance(trust: Trust, floor: int) -> str:
-    """Which CA list this initrd carries and how old the build is, printed with the setup line
-    and every certificate failure."""
-    date = time.strftime("%Y-%m-%d", time.gmtime(floor))
-    return f"bundle=sha256:{trust.sha256[:12]} anchors={trust.anchors} floor={date}"
+def hand_over_resolver(rootmnt: Path, *, source: Path = _STAGE1_RESOLVER) -> str:
+    """Copy stage 1's working resolver (at most MAX_RESOLVER_BYTES of it) to
+    rootmnt / STAGE2_RESOLVER, mode 0644, replacing whatever the base carries there: a file, or
+    a symlink, which is replaced and never followed. Returns the phase-7 console summary
+    'dns=<a,b> search=<x>'. A missing source writes an empty file and returns 'dns=none' (an
+    IP-literal root still works). A write failure raises OSError: one FAILED line, then the
+    restart."""
+    try:
+        with source.open("rb") as stream:
+            data: bytes | None = stream.read(MAX_RESOLVER_BYTES)
+    except FileNotFoundError:
+        data = None
+    write_atomically(rootmnt / STAGE2_RESOLVER, data or b"", mode=0o644)
+    if data is None:
+        return "dns=none"
+    nameservers, search = _resolver_entries(data.decode("ascii", "replace"))
+    return f"dns={','.join(nameservers) or 'none'} search={','.join(search) or 'none'}"
 
 
 def _sha256_of(path: Path) -> str | None:
@@ -346,17 +374,12 @@ def compare_trust_bundles(initrd_bundle: Path, base_bundle: Path) -> tuple[str, 
 
 def failure_line(phase: str, error: BaseException, *, clock: ClockRecord | None = None,
                  provenance: str = "") -> str:
-    """The one FAILED line: `FAILED phase=<n> cause=<cause> reason=<reason> host=<host>
-    detail=<detail>` for a named cause. A `time` or `tls`/`untrusted` failure appends the clock
-    state, the sources tried and the trust provenance. Stage 1's own content codes and the
-    mount's fixed codes print as `code=<code>`; anything else only by its type."""
+    """The one FAILED line: `FAILED phase=<n> ` + uplink.diagnosis.failure_text for a named
+    cause, so a `time` or `tls`/`untrusted` failure carries the clock record's summary and the
+    trust provenance. Stage 1's own content codes and the mount's fixed codes print as
+    `code=<code>`; anything else only by its type."""
     if isinstance(error, UplinkError):
-        text = error.console()
-        if error.cause is Cause.TIME or (error.cause, error.reason) == (Cause.TLS, "untrusted"):
-            if clock is not None:
-                text += f" clock={clock.state} tried={','.join(clock.tried) or 'none'}"
-            if provenance:
-                text += f" {provenance}"
+        text = failure_text(error, clock=clock, provenance=provenance)
     elif isinstance(error, (NetbootError, BootstrapError, BootstrapFatal)):
         text = f"code={error}"
     else:
@@ -512,7 +535,8 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
         if differs is not None:
             console.log.info(f"note: CA bundle differs from the base's: initrd=sha256:"
                              f"{differs[0]} base=sha256:{differs[1]}")
-        console.line(7, "mount + handoff: success")
+        resolver = hand_over_resolver(rootmnt)
+        console.line(7, f"mount + handoff: success {resolver}")
         console.keeper.hand_over()
     except BaseException:
         image.unlink(missing_ok=True)

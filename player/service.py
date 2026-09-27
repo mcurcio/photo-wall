@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -13,20 +14,21 @@ import queue
 import re
 import secrets
 import signal
-import ssl
 import tempfile
 import threading
 import uuid
 from collections import deque
+from collections.abc import Awaitable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Literal
-from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ConfigDict, Field, model_validator
+from websockets.exceptions import InvalidStatus
 
+from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.models import (
@@ -42,11 +44,33 @@ from contracts.models import (
 )
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
-from player.discovery import CentralDiscovery, NoDiscovery
+from player.central_link import (
+    REQUEST_TIMEOUT,
+    DirectWebsocket,
+    Exchange,
+    central_http_client,
+    central_url,
+    read_refusal,
+    websocket_url,
+)
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.output_discovery import discover_outputs, output_app_id
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
+from uplink.causes import UplinkError, classify
+from uplink.clock import RunClockRecord
+from uplink.diagnosis import failure_text
+from uplink.finder import CentralDiscovery, Found, find_central
+from uplink.locate import LocatedCentral
+from uplink.origin import Origin
+from uplink.resolver import (
+    Configured,
+    Unconfigured,
+    read_kernel_command_line,
+    resolve_central,
+)
+from uplink.transport import HttpTransport, Transport
+from uplink.trust import Trust
 
 MAX_JSON = 1024 * 1024
 CHUNK_SIZE = 64 * 1024
@@ -66,28 +90,12 @@ class StaleFeedback(ServiceError):
     pass
 
 
-def _validate_origin(value: str, *, allow_http: bool) -> None:
-    """Shared origin well-formedness check, for both configured and discovered origins."""
-    try:
-        parsed = urlsplit(value)
-        valid = (parsed.scheme in ("https", "http") and parsed.hostname
-                 and parsed.port != 0 and not parsed.username and not parsed.password
-                 and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
-                 and not any(c.isspace() or ord(c) < 32 for c in value)
-                 and "\\" not in value
-                 and (parsed.scheme != "http" or allow_http))
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ValueError("one trusted HTTPS origin required")
-
-
 class PlayerConfig(Model):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
     schema_version: Literal[1] = Field(default=1, alias="schema")
-    # Absent by default (the flash baseline, 0008): an unconfigured player
-    # resolves its origin from a discovery provider at run time instead.
-    # When present, it is explicit and always wins over discovery.
+    # The saved root (R1): written by provisioning only when its root came from mDNS, and
+    # used only when the kernel command line names no Central. Validated by the one
+    # Central-root validator, uplink.origin.Origin.parse_root.
     central_origin: str | None = Field(default=None, max_length=2048)
     # The base tag this boot's diskless base was served, handed forward by the
     # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
@@ -95,6 +103,8 @@ class PlayerConfig(Model):
     # the latest-verified frontier advances. Absent on the flashed/D0 baseline
     # and on the 0010 global `.deb` path -- no base-health is posted there.
     base_running_tag: str | None = Field(default=None, max_length=256)
+    # A PEM bundle used instead of the Debian bundle for every Central request this
+    # process makes (locate, httpx, websocket): main() builds the one Trust from it.
     ca_file: str | None = Field(default=None, max_length=4096)
     cache_dir: str | None = Field(default=None, max_length=4096)
     boot_context_file: str = Field(
@@ -103,12 +113,17 @@ class PlayerConfig(Model):
     cache_bytes: int = Field(default=512 * 1024**2, ge=1024**2, le=1024**4)
     decoder_limit: int = Field(default=4, ge=1, le=16)
     texture_budget: int = Field(default=512 * 1024**2, ge=1024**2, le=4 * 1024**3)
+    # Accepted and ignored: R2 makes an http root legal. Kept because the model forbids
+    # unknown keys and older handoffs and configs carry it.
     allow_http: bool = False
 
     @model_validator(mode="after")
     def trusted_origin(self):
         if self.central_origin is not None:
-            _validate_origin(self.central_origin, allow_http=self.allow_http)
+            try:
+                Origin.parse_root(self.central_origin)
+            except UplinkError as error:
+                raise ValueError("central_origin is not a Central root") from error
         if self.cache_dir is not None and not Path(self.cache_dir).is_absolute():
             raise ValueError("absolute cache directory required")
         if not Path(self.boot_context_file).is_absolute():
@@ -116,6 +131,10 @@ class PlayerConfig(Model):
         if self.ca_file is not None and not Path(self.ca_file).is_absolute():
             raise ValueError("absolute public CA path required")
         return self
+
+    def saved_root(self) -> Origin | None:
+        """The saved root, or None when no central_origin is configured."""
+        return None if self.central_origin is None else Origin.parse_root(self.central_origin)
 
 
 def _json(data: bytes | str) -> dict:
@@ -333,19 +352,22 @@ class _ChunkBridge:
 class PlayerService:
     def __init__(self, config: PlayerConfig, identity: Identity,
                  outputs: tuple[OutputReport, ...], renderer: Renderer, dispatcher: Callable,
-                 *, clock: Clock | None = None, client: httpx.AsyncClient | None = None,
+                 *, find_central: Callable[[], Awaitable[Found]], trust: Trust,
+                 clock: Clock | None = None, client: httpx.AsyncClient | None = None,
                  time_client: httpx.AsyncClient | None = None,
+                 clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext | None = None,
-                 discovery: CentralDiscovery = NoDiscovery()):
+                 boot_context: BootContext | None = None):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
         self.mapping = TimeMapping(self.clock)
         self.client = client
         self.time_client = time_client
+        self.trust = trust
+        self.clock_record = clock_record
         self.websocket_connect = websocket_connect
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
         self.health_path = health_path
@@ -356,8 +378,8 @@ class PlayerService:
         except OSError:
             self.boot_id = None
         self.boot_context = boot_context
-        self.discovery = discovery
-        self._discovered_origin: str | None = None
+        self._find_central = find_central
+        self._central: LocatedCentral | None = None
         self.cache = None
         self.executor = None
         self.registration: Registration | None = None
@@ -378,15 +400,30 @@ class PlayerService:
         self._loop = None
         self._task = None
         self.last_fault: str | None = None
+        self.last_fault_detail: str | None = None
         # The authority epoch whose base-health has been reported (0012 bead 6);
         # None until a check-in lands, then one report per epoch (a re-enroll
         # bumps the epoch and re-reports; central is monotonic per epoch).
         self._base_health_epoch: int | None = None
 
-    def fault(self, code: str):
+    def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
-            LOG.warning("player fault: %s", code)
-        self.last_fault = code
+            LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
+        self.last_fault, self.last_fault_detail = code, detail
+
+    def _fault_for(self, error: Exception, host: str | None) -> None:
+        """Names one session-ending failure of run()'s cycle (R9): a ServiceError is its own
+        code; an UplinkError, or an error classify(phase="connect") recognizes, is named
+        "<cause>_<reason>" with the console line (plus the clock summary for TIME/TLS) as its
+        detail; anything else is the bounded "player_error"."""
+        if isinstance(error, ServiceError):
+            self.fault(str(error))
+            return
+        named = error if isinstance(error, UplinkError) else classify(error, phase="connect", host=host)
+        if named is not None:
+            self.fault(f"{named.cause}_{named.reason}", detail=failure_text(named, clock=self.clock_record()))
+            return
+        self.fault("player_error", detail=type(error).__name__)
 
     def _main(self):
         if threading.get_ident() != self._owner:
@@ -396,29 +433,24 @@ class PlayerService:
         return await asyncio.wrap_future(self.dispatcher(callback))
 
     @property
-    def origin(self):
-        value = self.config.central_origin or self._discovered_origin
-        if value is None:
+    def central(self) -> LocatedCentral:
+        """The located Central of this session; ServiceError("central_origin_unavailable")
+        before the first locate. Every Central URL is built from its origin."""
+        if self._central is None:
             raise ServiceError("central_origin_unavailable")
-        return value.rstrip("/")
+        return self._central
 
-    async def resolve_origin(self) -> str:
-        """Resolve the effective origin: explicit config always wins over discovery.
+    async def locate_central(self) -> LocatedCentral:
+        """await find_central() (R1: cmdline root, else the saved root, else mDNS); keeps the
+        result for the session. Raises UplinkError."""
+        found = await self._find_central()
+        self._central = found.central
+        LOG.info("player: central %s (%s root %s)", found.central.origin, found.source,
+                 found.root)
+        return found.central
 
-        Discovery is consulted only when `central_origin` is unset (0008
-        precedence, closing the silent-hijack gap). A discovered origin may be
-        plain HTTP (T0, trusted-LAN baseline); `allow_http` continues to gate
-        only an *explicit* HTTP origin, unweakened. Raises `ServiceError` (not
-        a silent default) when neither an explicit nor a discovered origin is
-        available.
-        """
-        if self.config.central_origin is None:
-            discovered = await self.discovery.discover()
-            if not discovered:
-                raise ServiceError("central_origin_unavailable")
-            _validate_origin(discovered, allow_http=True)
-            self._discovered_origin = discovered
-        return self.origin
+    def _url(self, target: str) -> str:
+        return central_url(self.central, target)
 
     def _headers(self, authenticated=True):
         headers = {"Accept-Encoding": "identity"}
@@ -437,33 +469,40 @@ class PlayerService:
         selected_client = client or self.client
         if selected_client is None:
             raise ServiceError("client_unavailable")
-        async with asyncio.timeout(15):
-            async with selected_client.stream(method, self.origin + path, json=body,
-                    headers=self._headers(authenticated), follow_redirects=False) as response:
-                self._status(response)
-                if response.headers.get("content-encoding", "identity") != "identity":
-                    raise ServiceError("encoded_response")
-                if response.headers.get("content-type", "").split(";")[0] != "application/json":
-                    raise ServiceError("response_type")
-                self._length(response, MAX_JSON)
-                data = bytearray()
-                async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                    if len(data) + len(chunk) > MAX_JSON:
-                        raise ServiceError("body_limit")
-                    data.extend(chunk)
-                # Local JSON/schema work is not transport latency. Keep its delay
-                # visible to the later sample-age gate instead of inflating RTT.
-                received = self.clock.utc(), self.clock.monotonic()
-                return _json(bytes(data)), received
+        exchange = Exchange(self.central, path)
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT):
+                async with selected_client.stream(method, str(exchange.url), json=body,
+                        headers=self._headers(authenticated), follow_redirects=False) as response:
+                    exchange.answered()
+                    await self._check_status(response, exchange)
+                    if response.headers.get("content-encoding", "identity") != "identity":
+                        raise ServiceError("encoded_response")
+                    if response.headers.get("content-type", "").split(";")[0] != "application/json":
+                        raise ServiceError("response_type")
+                    self._length(response, MAX_JSON)
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                        if len(data) + len(chunk) > MAX_JSON:
+                            raise ServiceError("body_limit")
+                        data.extend(chunk)
+                    # Local JSON/schema work is not transport latency. Keep its delay
+                    # visible to the later sample-age gate instead of inflating RTT.
+                    received = self.clock.utc(), self.clock.monotonic()
+                    return _json(bytes(data)), received
+        except Exception as error:
+            named = exchange.name(error)
+            if named is None or named is error:
+                raise
+            raise named from error
 
-    @staticmethod
-    def _status(response):
+    async def _check_status(self, response, exchange):
         if response.status_code == 401:
             raise Unauthorized("unauthorized")
         if response.status_code == 409:
             raise StaleFeedback("state_changed")
         if response.status_code != 200:
-            raise ServiceError(f"http_{response.status_code}")
+            raise await read_refusal(response, exchange.url)
 
     @staticmethod
     def _length(response, maximum):
@@ -552,7 +591,7 @@ class PlayerService:
             })
             self._base_health_epoch = self.registration.authority_epoch
         except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
-                asyncio.TimeoutError):
+                UplinkError, asyncio.TimeoutError):
             LOG.info("player base-health check-in deferred")
 
     def _apply_state(self, state: State):
@@ -712,30 +751,38 @@ class PlayerService:
         worker = asyncio.get_running_loop().run_in_executor(self._worker,
             self.executor.acquire, job.layer.assignment_id, bridge.chunks())
         variant = job.layer.variant
+        exchange = Exchange(self.central, "/v1/media/" + variant.sha256)
         try:
-            async with asyncio.timeout(120):
-                async with self.client.stream("GET", self.origin + "/v1/media/" + variant.sha256,
-                        headers=self._headers(), follow_redirects=False) as response:
-                    self._status(response)
-                    if (response.headers.get("content-type", "").split(";")[0] != variant.media_type
-                            or response.headers.get("content-encoding", "identity") != "identity"):
-                        raise ServiceError("media_type")
-                    if self._length(response, variant.size) != variant.size:
-                        raise ServiceError("media_length")
-                    size = 0
-                    async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                        size += len(chunk)
-                        if worker.done():
-                            # Cache may have verified an existing exact blob without
-                            # consuming bytes; it owns this independent success gate.
-                            return worker.result()
-                        if size > variant.size:
+            try:
+                async with asyncio.timeout(120):
+                    async with self.client.stream("GET", str(exchange.url),
+                            headers=self._headers(), follow_redirects=False) as response:
+                        exchange.answered()
+                        await self._check_status(response, exchange)
+                        if (response.headers.get("content-type", "").split(";")[0] != variant.media_type
+                                or response.headers.get("content-encoding", "identity") != "identity"):
+                            raise ServiceError("media_type")
+                        if self._length(response, variant.size) != variant.size:
                             raise ServiceError("media_length")
-                        await bridge.put(chunk)
-                    if size != variant.size:
-                        raise ServiceError("media_length")
-                    await bridge.put(None)
-                    return await asyncio.shield(worker)
+                        size = 0
+                        async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                            size += len(chunk)
+                            if worker.done():
+                                # Cache may have verified an existing exact blob without
+                                # consuming bytes; it owns this independent success gate.
+                                return worker.result()
+                            if size > variant.size:
+                                raise ServiceError("media_length")
+                            await bridge.put(chunk)
+                        if size != variant.size:
+                            raise ServiceError("media_length")
+                        await bridge.put(None)
+                        return await asyncio.shield(worker)
+            except Exception as error:
+                named = exchange.name(error)
+                if named is None or named is error:
+                    raise
+                raise named from error
         finally:
             # No HTTP failure/cancellation leaves the worker blocked on queue.get.
             bridge.stopped.set()
@@ -756,7 +803,8 @@ class PlayerService:
                     success = await self.download(job)
                 except Unauthorized:
                     raise
-                except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
+                except (httpx.HTTPError, ServiceError, UplinkError, TimeoutError, OSError,
+                        AuthorityError):
                     success = False
                     self.fault("media_download")
                 attempts[job] = (min(count + 1, 3), self.clock.monotonic()
@@ -814,7 +862,7 @@ class PlayerService:
                 await self.probe_time()
             except Unauthorized:
                 raise
-            except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
+            except (httpx.HTTPError, ServiceError, UplinkError, TimeoutError, ValueError):
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
@@ -854,24 +902,31 @@ class PlayerService:
                     await self.poll_state()
 
     async def _websocket_loop(self):
-        from websockets.asyncio.client import connect
-
-        connector = self.websocket_connect or connect
-        scheme = "wss" if self.origin.startswith("https:") else "ws"
-        uri = scheme + self.origin[self.origin.index(":"): ] + "/v1/player/session"
+        exchange = Exchange(self.central, "/v1/player/session")
+        connector = self.websocket_connect or DirectWebsocket
         options = dict(additional_headers=self._headers(), max_size=MAX_JSON, max_queue=4,
                        compression=None, proxy=None, open_timeout=15, close_timeout=3,
                        ping_interval=10, ping_timeout=10)
-        if scheme == "wss":
-            options["ssl"] = ssl.create_default_context(cafile=self.config.ca_file)
-        async with connector(uri, **options) as socket:
-            async for message in socket:
-                body = _json(message)
-                if body.pop("type", None) != "state":
-                    raise ServiceError("message_type")
-                state = State.model_validate(body)
-                await self.dispatch(lambda: self._apply_state(state))
-            raise ServiceError("session_closed")
+        if self.central.origin.scheme == "https":
+            options["ssl"] = self.trust.context
+        uri = websocket_url(self.central, "/v1/player/session")
+        try:
+            async with connector(uri, **options) as socket:
+                exchange.answered()
+                async for message in socket:
+                    body = _json(message)
+                    if body.pop("type", None) != "state":
+                        raise ServiceError("message_type")
+                    state = State.model_validate(body)
+                    await self.dispatch(lambda: self._apply_state(state))
+                raise ServiceError("session_closed")
+        except Exception as error:
+            if isinstance(error, InvalidStatus) and error.response.status_code == 401:
+                raise Unauthorized("unauthorized") from error
+            named = exchange.name(error)
+            if named is None or named is error:
+                raise
+            raise named from error
 
     async def run(self):
         self._loop = asyncio.get_running_loop()
@@ -879,25 +934,18 @@ class PlayerService:
         owns_client = self.client is None
         owns_time_client = self.time_client is None
         if owns_client:
-            self.client = httpx.AsyncClient(verify=ssl.create_default_context(cafile=self.config.ca_file),
-                follow_redirects=False, trust_env=False, timeout=15,
-                limits=httpx.Limits(max_connections=4, max_keepalive_connections=2))
+            self.client = central_http_client(self.trust, connections=4, keepalive=2)
         if owns_time_client:
-            self.time_client = httpx.AsyncClient(
-                verify=ssl.create_default_context(cafile=self.config.ca_file),
-                follow_redirects=False,
-                trust_env=False,
-                timeout=15,
-                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
-            )
+            self.time_client = central_http_client(self.trust, connections=1, keepalive=1)
         attempt = 0
         try:
             while not self._stop.is_set():
                 tasks = []
                 session_started = None
                 try:
+                    if self._central is None:
+                        await self.locate_central()
                     if self.registration is None:
-                        await self.resolve_origin()
                         await self.enroll()
                         await self._report_base_health()
                     # Reconnection reconciles authority before any download work.
@@ -915,10 +963,15 @@ class PlayerService:
                         task.result()
                     attempt = 0
                 except Unauthorized:
+                    # Every failed cycle locates again; the registration is kept (no
+                    # credential binding) unless Central refused it.
+                    self._central = None
                     self.registration = None
                     self.fault("registration_required")
                 except Exception as error:
-                    self.fault(str(error) if isinstance(error, ServiceError) else "connection_failed")
+                    host = self._central.origin.host if self._central is not None else None
+                    self._central = None
+                    self._fault_for(error, host)
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
@@ -979,6 +1032,27 @@ class UnavailableRenderer:
         pass
 
 
+def central_finder(config: PlayerConfig, resolution: Configured | Unconfigured, *,
+                   transport: Transport) -> Callable[[], Awaitable[Found]]:
+    """R1's wiring for the Player (design §2.3): the cmdline root wins; the saved root
+    (config.central_origin) is used only when the cmdline names no Central, and a note is
+    logged when it is ignored; mDNS is built only when resolution is Unconfigured and nothing
+    is saved. The zeroconf import is deferred to that branch, so `import player.service` never
+    pulls it in."""
+    saved = config.saved_root()
+    discovery: CentralDiscovery | None = None
+    if isinstance(resolution, Configured):
+        if saved is not None:
+            LOG.info("player: central_origin %s ignored: the kernel command line names %s",
+                     saved, resolution.root)
+    elif saved is None:
+        from player.mdns_discovery import MdnsCentralDiscovery
+
+        discovery = MdnsCentralDiscovery()
+    return functools.partial(find_central, resolution, transport=transport, saved=saved,
+                             discovery=discovery)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Photo Wall Player")
     parser.add_argument("--config", type=Path, required=True)
@@ -986,6 +1060,14 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_config(args.config)
+    try:
+        trust = Trust.public(Path(config.ca_file)) if config.ca_file else Trust.public()
+        resolution = resolve_central(read_kernel_command_line())
+        find = central_finder(config, resolution, transport=HttpTransport(trust=trust))
+    except UplinkError as error:
+        # A bad cmdline or trust store: exit 1, and the unit restarts.
+        LOG.error("player: %s", failure_text(error, clock=None))
+        raise SystemExit(1) from None
     identity = load_identity()
     boot_context = resolve_boot_context(Path(config.boot_context_file))
     discovery = discover_outputs()
@@ -1006,19 +1088,6 @@ def main():
                 decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
         except Exception:
             native_fault = "native_initialization"
-    # Explicit config always wins over mDNS (0008 precedence); discovery is
-    # only ever consulted by resolve_origin() when central_origin is unset,
-    # so avoid standing up a browser at all when an explicit origin exists.
-    # The zeroconf-dependent import is deferred to this branch so that
-    # `import player.service` never pulls in zeroconf -- a netboot player
-    # with an explicit central_origin never needs it, and the appliance
-    # build's chroot smoke-test import must not require it either.
-    if config.central_origin:
-        central_discovery = NoDiscovery()
-    else:
-        from player.mdns_discovery import MdnsCentralDiscovery
-
-        central_discovery = MdnsCentralDiscovery()
     service = PlayerService(
         config,
         identity,
@@ -1026,7 +1095,8 @@ def main():
         renderer,
         GLibDispatcher(GLib),
         boot_context=boot_context,
-        discovery=central_discovery,
+        find_central=find,
+        trust=trust,
     )
     for fault in (discovery.fault, native_fault):
         if fault:

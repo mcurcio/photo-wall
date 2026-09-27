@@ -1344,3 +1344,258 @@ doc softenings.
   fixture is now `gzip`-compressed (same decompress-then-list path). `verify_netboot_initrd`
   now reports a cached archive `lsinitramfs` cannot list as a contract FAIL ("the cached
   archive could not be listed: <stderr>") instead of a CalledProcessError traceback.
+
+## netboot-reach-central p2 S1a
+
+- 2026-09-26, bead S1a (test plan wrong): "`tests/test_netboot_e2e_wire.py` untouched unless it
+  imports `trust_provenance`" does not hold. It drives the old `Bootstrapper(discovery=...,
+  write_origin=...)` and `fetch_manifest(origin, serial=...)`, and imports `_FixedDiscovery`
+  from `scripts/test_netboot_e2e.py`, which itself imported the removed `write_public_config`
+  (so `import scripts.test_netboot_e2e` failed). Both are migrated here (real `find_central`
+  with a `Configured` root, `DirectFetch` to the located origin); the e2e now asserts the
+  handoff is exactly `{"schema": 1}` (a cmdline root is never handed off, `allow_http` never
+  written). S1c's e2e rewrite starts from this. DB and docker legs not run locally.
+- 2026-09-26, bead S1a (plan gap, needs an owner bead): after S1a `player.service` imports
+  `uplink` (and `contracts.central_identity`/`clock_record`/`strict_json`). (1) The Player
+  `.deb`'s hand list (`scripts/build_player_deb.py` `_MODULE_FILES`) does not stage them, so
+  the netboot-e2e import smoke (`import player.service` in the installed `.deb`) fails in CI
+  until S5's computed closure lands; they cannot be added to the hand list now because
+  `fetch_sources` git-archives HEAD, which lacks `uplink/finder.py` and `uplink/diagnosis.py`
+  until the commit. (2) The demo wall's Player wheel is built by `scripts/build_player.py`,
+  whose `archive_sources` / `make_player_wheel` / `validate_player_wheel` allow only `player/`
+  and `contracts/`, so software-e2e's Player container cannot import `uplink`. S4's page
+  ("pyproject.toml hatch packages += uplink (the demo wall's Player imports it)") names the
+  wrong mechanism: hatch does not build that wheel. Proposed correction: S4 (or a new bead)
+  adds `uplink` to `build_player.py`'s archive paths, wheel filter and boundary regex, with
+  `tests/test_build_player.py`. The demo runner (`PLAYER_RUNNER`) already passes
+  `find_central` through `player.service.central_finder`; `tests/test_wall_demo.py`'s runner
+  import boundary now admits `uplink`.
+- 2026-09-26, bead S1a (scope note): deleting `player/discovery.py` required removing it from
+  both `.deb` builders' fixed lists, their tests and `base-image.yml` (cache key and a
+  `require_path`). `tests/observer_clock_client.py` still builds `PlayerService` without
+  `find_central`; left alone: nothing references it and it already targets the retired
+  `/v1/bootstrap/boot` route. Between S1a and S4 a failed locate faults as
+  `connection_failed` (was `central_origin_unavailable` when discovery found nothing); S4's
+  naming replaces it.
+
+## netboot-reach-central p2 S1b
+
+- 2026-09-26, bead S1b (AC wording wrong): AC5's "the 9 code-map modules plus `uplink.finder`,
+  `uplink.diagnosis` and their imports" is not the closure. S1a's `appliance.provision` also
+  imports `uplink.fetch` (DirectFetch) and `uplink.clock` (RunClockRecord), which bring
+  `uplink.sntp`, `contracts.read_through` and `contracts.time` (27 modules in all).
+  `tests/test_package_closures.py` asserts the stated set is a subset, the top-level packages
+  are exactly appliance/contracts/player/uplink, `player` contributes only
+  `player.mdns_discovery`, `third_party == ("zeroconf",)` and nothing is unreached.
+- 2026-09-26, bead S1b (AC11 scope): the shrinking allowlist in
+  `tests/test_debian_packages.py` holds three kinds of line, not only workflow lines:
+  base-image.yml's rolling `mmdebstrap` mirror (S3), two DOCSTRING lines of
+  `scripts/test_netboot_e2e.py` naming `deb.debian.org` (S1c rewrites them) and the layer's
+  `packages:` key (S3). A stale entry fails the test, so S1c must delete its two entries and S3
+  the rest (S3 AC1: empty).
+- 2026-09-26, bead S1b (plan gap for S5): `fetch_tree` is defined in
+  `scripts/build_bootstrapper_deb.py` as the page says, but that module imports
+  `build_player_deb` (for `control_file`/`run_dpkg_deb`), so S5's Player builder cannot import
+  it back without a cycle. S5 should move `fetch_tree` next to `control_file` in
+  `build_player_deb.py` and have the bootstrapper import it (no second copy).
+- 2026-09-26, bead S1b (decision): the policies' third-party tables and both Depends come from
+  the IMPORTED declaration, so `fetch_tree` shipping `scripts/debian_packages.py` alone would not
+  make "computed over exactly the committed sources" true for the Depends. `build()` therefore
+  refuses (`declaration_differs_from_revision`) a revision whose declaration differs from the
+  one the builder imported. In CI the checkout is the revision, so they are equal.
+- 2026-09-26, bead S1b (note): `isolated_import` asks the interpreter for its site-packages
+  with a separate `python -I` call, then imports under `python -I -S -B`: under `-S` a venv
+  interpreter's `sys.prefix` is the base install, so `site.getsitepackages()` inside the `-S`
+  child misses the venv. `-B` keeps bytecode out of the staged tree.
+- 2026-09-26, bead S1b (CI between beads): `base-image.yml` still `require_path`s
+  `usr/lib/python3/dist-packages/appliance/provision.py` and hashes the old fixed file list for
+  cache key A; the private layout breaks that check until S3 rewrites it (beads verify
+  together). Not run locally (Linux CI only).
+
+## netboot-reach-central p2 S1c
+
+- 2026-09-26, bead S1c (page gap, decided): the page gives `device_root_image` but no way for
+  the workflow to call it before the stage-1 harness step, which must run in the same image.
+  `scripts/test_netboot_e2e.py` now has subcommands: `device-root --arch --tag --cache` (prints
+  the image) and `run ... --device-root IMAGE --bootstrapper-deb PATH --deb PATH`. mmdebstrap
+  runs as root (`sudo -n` when not root: unprivileged user namespaces are restricted on
+  ubuntu-24.04), and the runner installs `debian-archive-keyring` beside `mmdebstrap` (on an
+  Ubuntu host mmdebstrap can add `signed-by` for the snapshot sources only if that keyring is
+  present). The cached tar's name carries a digest of the exact mmdebstrap argv, so a changed
+  declaration never re-imports a stale root even outside actions/cache. Job timeout 45 -> 75
+  min for a cold root (parked U14). None of this ran locally (Linux/docker CI only).
+- 2026-09-26, bead S1c (scope note): the cross-host same-path 301 stub reuses
+  `scripts/uplink_device_harness.redirect_stub` with a new `keep_path=False` flag rather than a
+  second handler; the harness docstring now says it runs in the device root.
+- 2026-09-26, bead S1c (known red until S5, restated): the e2e keeps today's
+  `assert_landed`/import smoke (dist-packages paths, `import player.service`), now in the
+  device root. Per S1a's errata the Player `.deb` hand list lacks `uplink`, so the smoke fails
+  in CI until S5 stages the computed closure (S5 also moves those paths to
+  `/usr/lib/photo-wall-player`). AC3's checks run before it.
+- 2026-09-26, bead S1c (docs, for S6): `docs/validation.md` still says the device harness runs
+  in `debian:trixie-slim`; it now runs in the device root image.
+
+## netboot-reach-central p2 S2
+
+- 2026-09-26, bead S2 (decision): `resolver_writers` flags a package in RESOLVER_WRITERS by
+  name OR by a virtual name it Provides (e.g. any `resolvconf` implementation), a superset of
+  §2.8's "installed packages in RESOLVER_WRITERS"; same reader, same shape as `time_daemons`.
+- 2026-09-26, bead S2 (decision): `read_dpkg_status` raises FileNotFoundError on a root with no
+  `var/lib/dpkg/status` (not a Debian root, so no dpkg check can pass); `main` then exits
+  non-zero with a traceback, not a violation line. Every planned `main` root has a database
+  (base extract, S5's post-install root); the `.deb` staging trees call `watchdog_overrides`
+  directly.
+- 2026-09-26, bead S2 (page gap, decided): `--require-installed FILE` takes names separated by
+  whitespace or commas, so S3 can pass `debian_packages.py packages ...` output and a
+  `dpkg-deb --field <deb> Depends` value unchanged (our control files carry no versions; a
+  versioned token would be reported missing, failing closed).
+- 2026-09-26, bead S2 (scope note): both builders now import `scripts/device_root_checks.py`,
+  so `netboot-e2e.yml`'s PR path filter gains it (S1b's precedent for `debian_packages.py`);
+  `base-image.yml`'s filter and cache keys stay S3's.
+- 2026-09-26, bead S2 (note): the checks read every file inside the root: a symlinked FILE with
+  an absolute target (or `..` past the top) is re-anchored at the root, never read from the build
+  host; a symlinked parent DIRECTORY with an absolute target is not (Debian's merged-/usr links
+  are relative). `lib/` and `usr/lib/` drop-ins are reported once.
+- 2026-09-26, bead S2 (verifier note): mutation probe (b) must strip the comment marker
+  (`line.strip().lstrip("#; ")`); merely deleting the comment guard survives, because
+  `#RuntimeWatchdogSec` is not a WATCHDOG_KEYS key anyway.
+- 2026-09-26, bead S2 (docs, for S6): the phase-7 success line is now
+  `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (`dns=none` with no stage-1
+  resolver); stage 2's `/etc/resolv.conf` is stage 1's copy, 0644, at most 4096 bytes.
+
+## netboot-reach-central p2 S3
+
+- 2026-09-26, bead S3 (page wrong, AC3 evidence): the scratch root's mmdebstrap log goes to
+  `$DIAG/mmdebstrap.log`, which is uploaded only on failure, so a green run cannot show "only
+  the snapshot for Debian" from it. The step now prints the root's apt sources (before the
+  Raspberry Pi line is added) and keeps them as `$DIAG/scratch-sources.txt`; read AC3 there.
+- 2026-09-26, bead S3 (page wrong, AC4 placement): the bundle verify step already printed the
+  squashfs size and failed above the ceiling, from a hardcoded copy of `MAX_ROOTFS_BYTES`. It
+  now reads `contracts.release.MAX_ROOTFS_BYTES` (stdlib only) and prints
+  `squashfs size: N bytes (MAX_ROOTFS_BYTES M)`; the content check does not print it a second
+  time.
+- 2026-09-26, bead S3 (page gap, decided): Cache A's "<builders>" = `build_bootstrapper_deb.py`,
+  `build_player_deb.py`, `build_player.py`, `module_closure.py` (it generates `__main__.py` and
+  `closure.json`), `device_root_checks.py` (imported by the builder), plus
+  `appliance/systemd/photo-wall-provision.service`: the unit is baked into the `.deb` but is
+  not in the closure digest. The digest step runs `python3 scripts/module_closure.py --policy
+  bootstrapper --digest` as the page says. The PR filter also keeps `build_player_deb.py` and
+  adds `build_player.py` (both builders import it).
+- 2026-09-26, bead S3 (decision): the old "dpkg records photo-wall-bootstrapper as installed"
+  grep matched `Package:` and `Status: install ok installed` anywhere in the file, not in one
+  stanza. It is replaced by a third `--require-installed` (a one-line list) on the same
+  `device_root_checks` call, so one parser decides "installed".
+- 2026-09-26, bead S3 (decision): design §2.10 says both `.deb` builds get
+  `SOURCE_DATE_EPOCH`; the page is silent. The Player build now gets it too. The scratch-root
+  host install adds `debian-archive-keyring` beside `mmdebstrap` (S1c's finding for the same
+  `mmdebstrap_argv`). The extract runs `unsquashfs -no-xattrs`: an unprivileged extract cannot
+  set `security.*` xattrs, which squashfs-tools reports with exit 2.
+- 2026-09-26, bead S3 (design wording): "the rpi-image-gen tree names no Debian package" is
+  tested over the device set (`packages(*DEVICE_CONSUMERS)`), not every declared name:
+  genimage's `compression = zstd` in `image/rootfs.cfg.in` is a tool option that matches the
+  initrd-build package `zstd`.
+- 2026-09-26, bead S3 (not run locally): the base build, `device_root_checks` on the extract,
+  the scratch root at the pin, the kernel config check and the squashfs size (AC2-4) are
+  Linux CI only. The page's `rm -f "$1/etc/resolv.conf"` in `pre-image.sh` assumes the hook can
+  write into the target; CI proves it (the content check refuses `etc/resolv.conf`).
+
+## netboot-reach-central p2 S6 (docs)
+
+- 2026-09-26, bead S6 (bug fixed, design §0.1): The Player could not read the handoff:
+  provisioning wrote /etc/photo-wall/public.json 0600 in a 0700 directory under the provision
+  unit's UMask=0077, and uplink.files.write_atomically created parents 0700 under that umask.
+  Now the handoff is written with mode 0644 and write_atomically chmods the parents it creates
+  to 0755.
+- 2026-09-26, bead S6 (withdrawn): Project 1's 'ClockSettler for provisioning' is withdrawn.
+  Only stage 1 steps the clock and writes /run/photo-wall-clock.json; provisioning and the
+  Player read it. A `time` failure exits provisioning into the unit's start-limit reboot path.
+  The ClockRecord.writer comment no longer says 'Project 2 adds provision'.
+- 2026-09-26, bead S6 (plan wrong): 'The Player fetches through locate + DirectFetch' did not
+  hold: DirectFetch is synchronous http.client and the Player is asyncio with httpx and
+  websockets. The Player keeps its libraries behind player/central_link.py (one Trust, no
+  redirects, named failures), with locate run via asyncio.to_thread. websockets 15 followed
+  cross-host redirects and re-sent the bearer; DirectWebsocket refuses them.
+- 2026-09-26, bead S6 (reversed): The bootstrapper .deb's ban on `contracts` is reversed:
+  uplink needs contracts, and each .deb ships its computed closure privately under
+  /usr/lib/<package>/. This supersedes the p3-base-bootstrapper note that the bootstrapper
+  must not ship contracts.
+- 2026-09-26, bead S6 (superseded): The owner's 2026-09-26 steer ('unify the package sources
+  and lists that go into the base vs the runtime package') supersedes 0008 delivery ledger
+  Phase 4 ruling (2) ('deps pulled from the distro repo at boot, base stays minimal') and
+  Project 2 draft 1's Q2 (apt with the Release date check off while unsynced). S1a's apt path
+  was replaced in S1c by `dpkg --install` alone and never shipped.
+- 2026-09-26, bead S6 (superseded): DEBIAN_SNAPSHOT_EPOCH in base-image.yml is now derived
+  from scripts/debian_packages.py (`python3 scripts/debian_packages.py epoch`). This
+  supersedes the p1 S4b note that the job's DEBIAN_SNAPSHOT_EPOCH env replaces the literal
+  SOURCE_DATE_EPOCH values.
+- 2026-09-26, bead S6 (docs): docs/validation.md now says the netboot-e2e device harness runs
+  in the device root built at the pin, not debian:trixie-slim (S1c's docs note).
+- 2026-09-26, bead S6 (decision, S4): DirectWebsocket.process_redirect returns websockets'
+  own InvalidStatus unchanged (never a URI), and Exchange.name maps it through
+  uplink.fetch.refusal with the Location host. That is one mapping for DirectFetch, httpx and
+  the websocket, instead of raising refusal inside process_redirect as the design's docstring
+  said.
+- 2026-09-26, bead S6 (decision, S4): A run-loop failure that is neither a ServiceError nor a
+  network error faults as `player_error` (detail: the exception type). The design named no
+  code for it.
+
+## netboot-reach-central p2 S4-S5 (integration wave)
+
+- 2026-09-26, bead S4/fetch (test spec wrong): the brief's
+  `test_refusal_leaves_out_a_location_that_does_not_parse` asked for `location in (None, "",
+  "ftp://x/")` to all produce `detail == "status=307"`. That does not hold for `None`/`""`:
+  `refusal()`'s existing `parse_url(location or "", base=url)` resolves an absent/empty
+  Location by joining `""` onto the request URL via `urljoin`, which returns the request's own
+  URL -- a URL that DOES parse, giving `detail="status=307;location=<request host>"`, not the
+  bare status. This is pre-existing behaviour in `refusal()`, which the brief said not to
+  alter. Fixed by parametrizing only `"ftp://x/"` (the one value that genuinely fails to
+  parse), with an inline comment. Flagging for a design decision: a bare 3xx with no Location
+  header is currently reported as "redirecting to itself" rather than "no location" -- worth
+  an explicit `if location:` guard in `refusal()` if that distinction should be visible to
+  operators.
+- 2026-09-26, bead S4/link (page wrong, test-only workaround): the AC3 websocket-redirect test
+  as specified does not work against real sockets for two reasons: the stub gateway answers
+  HTTP/1.0 by default, which `websockets` refuses before any status is read, and an absolute
+  `http://` Location is never followed by that library (its redirect parser requires `ws`/
+  `wss`). Worked around inside `tests/test_central_link.py` only (a local HTTP/1.1 handler, a
+  protocol-relative Location); no shared fixture or production file touched. All AC3
+  assertions still pass.
+- 2026-09-26, bead S5/deb (reuse decision, not a design change): importing
+  `tests/test_build_bootstrapper_deb.py`'s `committed` fixture into
+  `tests/test_build_player_deb.py` trips ruff F401/F811 (pytest fixture injection is invisible
+  to pyflakes) on every test that takes it. Used the brief's offered fallback and imitated the
+  fixture (and its small `_git` helper) locally instead of adding per-line `noqa`s the
+  surrounding code never uses -- a deliberate ~25-line duplication, flagged per the
+  reuse-considered reporting contract rather than left silent.
+- 2026-09-26, bead d-0008 (doc-content finding): 0008's tracer-bullet paragraph does not
+  actually state explicit-origin precedence -- it only describes the T0 discover/enroll/bind
+  flow and the I1/T1 fingerprint-confirmation tracer. Left unedited rather than inventing a
+  precedence claim the paragraph doesn't make; flag if a different tracer passage was
+  intended.
+- 2026-09-26, bead d-0009/d-0008/d-0014/d-owning (brief bug, repeated): the literal test
+  command given for these docs-only tasks, `.venv/bin/python -m ruff check --version`, is
+  invalid CLI syntax for ruff 0.11.9 (`check` does not accept `--version`). Each worker
+  independently ran `ruff --version` instead to confirm the binary; re-verified by the
+  integrator (same result). No code was touched by any of these tasks, so this is a brief
+  boilerplate defect, not a gate finding -- worth fixing in the next brief template.
+- 2026-09-26, bead S4/service (seam fixed by integrator): `PlayerService.__init__` made
+  `find_central` a required keyword-only argument with no default (S4/service), but
+  `tests/observer_clock_client.py` (the bounded Docker regression driver) still constructed
+  `PlayerService(...)` without it -- a `TypeError` at construction, not caught by the pytest
+  gate because this file has no `test_` prefix and is not collected. The script never calls
+  `locate_central()`/`run()` (it drives `enroll()`/`probe_time()`/`_time_loop`/`_control_loop`
+  directly), so `find_central` is stored but never invoked. Fixed by reusing the real
+  production factory, `player.service.central_finder(config, Unconfigured("no_cmdline"),
+  transport=HttpTransport(trust=trust))`, rather than a fake stub -- it is genuinely correct if
+  ever invoked, not just constructible. Verified: builds without error given a real Trust, and
+  `tests/test_player_service.py`/`test_player_boot_serial.py`/`test_wall_demo.py` stay green.
+- 2026-09-26, bead integrator (process note, not a defect): two workers reported "agent died"
+  with `"done": false` -- `s4-lookup` (`uplink/lookup.py`, `tests/test_uplink_lookup.py`) and
+  `d-modules` (`docs/module-appliance-builder.md`, `docs/module-player-package.md`,
+  `docs/module-player-service.md`). On inspection both had already been fully written before
+  the death: `uplink/lookup.py`'s bounded-abandoned-thread `lookup()` passes all 5 of its own
+  tests, and the three module docs' 0014 updates (kernel-cmdline precedence, closure staging
+  under `/usr/lib/photo-wall-*`, `ca_file`/`allow_http` semantics, fault-code journal format)
+  match the shipped code (`player/service.py`, `scripts/build_player_deb.py`,
+  `scripts/check_player_unit.py`) verbatim. No rework was needed; flagging only so the
+  orchestrator does not re-dispatch these beads believing them incomplete.

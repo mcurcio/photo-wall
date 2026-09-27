@@ -1,123 +1,100 @@
-"""0009 slice 2 -- the base bootstrapper (appliance/provision.py).
+"""0009 slice 2 -- the base bootstrapper (appliance/provision.py), on uplink (Project 2 S1a).
 
-All external effects (mDNS discovery, HTTP central, dpkg, systemctl) are
-faked or injected: this is not a real Pi boot, which per the task brief is
-the owner's bench step. The HTTP fake mirrors `tests/test_bootstrap.py`'s
-`Opener`/`Response` pattern used for `appliance/bootstrap.py`'s own
-`Fetcher`, so `AppFetcher` is exercised end to end (request path, headers,
-streaming, size bound) rather than mocked away.
+Central is a scripted `uplink` Transport (tests/uplink_fakes.py): provisioning finds it through
+the real `uplink.finder.find_central` and fetches through the real `uplink.fetch.DirectFetch`,
+so the request order, the located origin and every named failure are exercised end to end.
+dpkg, systemd and mDNS are injected: this is not a real Pi boot, which is the owner's bench step
+(the packaged provisioner runs for real in the netboot-e2e device root).
 """
 
 import asyncio
 import functools
 import hashlib
-import io
 import json
-import urllib.error
-from concurrent.futures import Future
-from urllib.parse import urlsplit
+import logging
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
+from appliance import provision
 from appliance.provision import (
+    APP_MANIFEST_PATH,
+    DEVICE_MANIFEST_PATH,
+    MAX_APP_PACKAGE_BYTES,
     SERIAL_HEADER,
-    AppUnconfigured,
+    AppManifest,
     Bootstrapper,
+    Handoff,
     ProvisionError,
-    apt_install,
     fetch_manifest,
     fetch_package,
+    install_package,
+    parse_manifest,
     start_player_unit,
-    write_public_config,
+    write_handoff,
 )
-from player.identity import load_identity
-from player.rendering import RecordingRenderer
-from player.service import PlayerService, load_config
+from contracts.central_identity import LOCATE_PATH
+from contracts.clock_record import ClockRecord, ClockState
+from player.service import load_config
+from tests.uplink_fakes import FakeReply, FakeTransport, central, finding, located
+from uplink.causes import Cause, UplinkError
+from uplink.diagnosis import failure_text
+from uplink.fetch import DirectFetch
+from uplink.finder import choose_root, find_central
+from uplink.origin import Origin
+from uplink.resolver import Configured, Unconfigured
 
+REPO = Path(__file__).resolve().parents[1]
 BODY = b"pretend photo-wall-player_1.2.3+gabc.deb bytes"
 SHA256 = hashlib.sha256(BODY).hexdigest()
+MANIFEST = AppManifest("1.2.3+gabc", SHA256, len(BODY), None)
 ORIGIN = "http://central.local:8080"
+# The command line names the gateway; locate follows its 301 to Central.
+CMDLINE = Origin.parse_root("http://photo-wall.localdomain")
+CENTRAL = Origin.parse_root("https://central.example:8443")
+DISCOVERED = Origin.parse_root("http://192.0.2.10:8000")
+SERIAL = "10000000cafef00d"
+TAG = "v9.9.9"
 
 
-def immediate(callback):
-    future = Future()
-    try:
-        future.set_result(callback())
-    except Exception as error:
-        future.set_exception(error)
-    return future
+def record(state):
+    return ClockRecord(state=state, floor=1790380800, raised_to_floor=False, tier=None,
+                       source=None, offset=None, stepped=False, tried=("dhcp:none",),
+                       writer="netboot", written_at=1790380810.0)
 
 
-class Response:
-    def __init__(self, body=b"", *, status=200, headers=None):
-        self.status = status
-        self.body = io.BytesIO(body)
-        self.headers = headers or {}
-
-    def read(self, size):
-        return self.body.read(size)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.body.close()
+def reply(body, **kwargs):
+    return FakeReply(200, body=body, headers={"Content-Length": str(len(body))}, **kwargs)
 
 
-class Central:
-    """Fake `_photowall._tcp` central: `/v1/app/manifest` and
-    `/v1/app/package/{sha256}.deb`, path-routed like the real one
-    (`central/app.py:458`, `:464`).
-    """
-
-    def __init__(self, *, manifest_status=200, manifest_body=b"", package_status=200,
-                 package_body=b""):
-        self.manifest_status = manifest_status
-        self.manifest_body = manifest_body
-        self.package_status = package_status
-        self.package_body = package_body
-        self.requests = []
-
-    def open(self, request, **kwargs):
-        self.requests.append(request.full_url)
-        path = urlsplit(request.full_url).path
-        if path == "/v1/app/manifest":
-            status, body = self.manifest_status, self.manifest_body
-        elif path.startswith("/v1/app/package/"):
-            status, body = self.package_status, self.package_body
-        else:
-            raise AssertionError(f"unexpected path {path}")
-        if status != 200:
-            raise urllib.error.HTTPError(request.full_url, status, "error", {}, None)
-        return Response(body, headers={"Content-Length": str(len(body))})
+def manifest_json(*, sha256=SHA256, size=len(BODY), version="1.2.3+gabc", **extra):
+    return json.dumps({"version": version, "sha256": sha256, "size": size, **extra}).encode()
 
 
-def manifest_json(*, sha256=SHA256, size=len(BODY), version="1.2.3+gabc"):
-    return json.dumps({"version": version, "sha256": sha256, "size": size}).encode()
+def url(origin, target):
+    return str(origin.url(target))
 
 
-class FakeDiscovery:
-    def __init__(self, origin):
-        self.origin = origin
-        self.calls = 0
-
-    async def discover(self):
-        self.calls += 1
-        return self.origin
+def served(origin, *, manifest=None, package=None):
+    """Central's app routes at `origin`, answered fresh on every request."""
+    return {url(origin, APP_MANIFEST_PATH): manifest or (lambda: reply(manifest_json())),
+            url(origin, f"/v1/app/package/{SHA256}.deb"): package or (lambda: reply(BODY))}
 
 
-class NeverDiscovery:
-    def __init__(self):
-        self.calls = 0
+def gateway(**routes):
+    """The command line's root 301s to CENTRAL, which serves the identity and the app."""
+    return FakeTransport({
+        url(CMDLINE, LOCATE_PATH): lambda: FakeReply(301, location=url(CENTRAL, LOCATE_PATH)),
+        url(CENTRAL, LOCATE_PATH): central,
+        **served(CENTRAL, **routes)})
 
-    async def discover(self):
-        self.calls += 1
-        return None
 
-
-class OrderRecorder:
-    """Records install/write_origin/start_unit calls in the order the
-    bootstrapper makes them, plus their arguments."""
+class Recorder:
+    """Records install / write_handoff / start_unit in the order the bootstrapper makes them."""
 
     def __init__(self):
         self.order = []
@@ -125,11 +102,26 @@ class OrderRecorder:
     def install(self, package, manifest):
         self.order.append(("install", package, manifest))
 
-    def write_origin(self, origin):
-        self.order.append(("write_origin", origin))
+    def write_handoff(self, handoff):
+        self.order.append(("write_handoff", handoff))
 
     def start_unit(self):
         self.order.append(("start_unit",))
+
+
+class Dpkg:
+    """subprocess.run as install_package calls it: records each call and what the temp file
+    held (and its mode) while dpkg ran; `fail` makes it exit non-zero."""
+
+    def __init__(self, *, fail=False):
+        self.calls, self.seen, self.fail = [], [], fail
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        deb = Path(argv[-1])
+        self.seen.append((deb.read_bytes(), stat.S_IMODE(deb.stat().st_mode)))
+        if self.fail:
+            raise subprocess.CalledProcessError(1, argv)
 
 
 class Sleeps:
@@ -140,348 +132,406 @@ class Sleeps:
         self.calls.append(seconds)
 
 
+class FixedDiscovery:
+    def __init__(self, root):
+        self.root, self.proofs = root, []
+
+    async def discover(self, unconfigured):
+        self.proofs.append(unconfigured)
+        return self.root
+
+
 def never_called(*_args, **_kwargs):
     raise AssertionError("must not be called")
 
 
-# --- AppFetcher / manifest+package fetch discipline -------------------------
+def bootstrapper(transport, *, find=None, clock=None, recorder=None, **options):
+    recorder = recorder or Recorder()
+    options.setdefault("install", recorder.install)
+    options.setdefault("write_handoff", recorder.write_handoff)
+    options.setdefault("start_unit", recorder.start_unit)
+    options.setdefault("sleep", Sleeps())
+    find = find or functools.partial(find_central, Configured(CMDLINE), transport=transport)
+    return Bootstrapper(find=find, transport=transport, clock=clock, **options)
 
 
-def test_fetch_manifest_and_package_roundtrip_and_content_length_enforced():
-    central = Central(manifest_body=manifest_json(), package_body=BODY)
-    manifest = fetch_manifest(ORIGIN, opener=central)
-    assert manifest == {"version": "1.2.3+gabc", "sha256": SHA256, "size": len(BODY)}
-    package = fetch_package(ORIGIN, manifest, opener=central)
-    assert package == BODY
-    assert central.requests[0] == ORIGIN + "/v1/app/manifest"
-    assert central.requests[1] == ORIGIN + f"/v1/app/package/{SHA256}.deb"
+def run(bootstrapper, attempts):
+    return asyncio.run(bootstrapper.run(max_attempts=attempts))
 
 
-def test_fetch_manifest_503_raises_app_unconfigured():
-    central = Central(manifest_status=503)
-    with pytest.raises(AppUnconfigured):
-        fetch_manifest(ORIGIN, opener=central)
+# --- manifest and package ------------------------------------------------------
 
 
-def test_fetch_package_oversize_body_rejected():
-    central = Central(package_body=b"x" * 10)
-    manifest = {"version": "v", "sha256": "a" * 64, "size": 1}
-    with pytest.raises(ProvisionError, match="provision_limit"):
-        fetch_package(ORIGIN, manifest, opener=central)
+@pytest.mark.parametrize("body", [
+    b"not json",
+    manifest_json(extra="key"),
+    json.dumps({"version": "v", "sha256": SHA256}).encode(),
+    manifest_json(sha256=SHA256.upper()),
+    manifest_json(size=0),
+    manifest_json(size=True),
+    manifest_json(size=MAX_APP_PACKAGE_BYTES + 1),
+    manifest_json(version=""),
+    manifest_json(version="v" * 257),
+    manifest_json(tag=TAG),
+])
+def test_a_manifest_that_is_not_exactly_the_contract_is_invalid(body):
+    with pytest.raises(ProvisionError, match="provision_manifest_invalid"):
+        parse_manifest(body, per_device=False)
 
 
-# --- Bootstrapper orchestration ----------------------------------------------
+def test_the_global_manifest_and_the_package_come_from_the_located_origin():
+    transport = FakeTransport(served(Origin.parse_root(ORIGIN)))
+    fetch = DirectFetch(located(ORIGIN), transport=transport, seconds=30)
+    assert fetch_manifest(fetch, None) == MANIFEST
+    assert fetch_package(fetch, MANIFEST) == BODY
+    assert transport.urls == [ORIGIN + APP_MANIFEST_PATH, f"{ORIGIN}/v1/app/package/{SHA256}.deb"]
+    assert all(SERIAL_HEADER not in headers for _url, headers, *_ in transport.sent)
 
 
-def test_bootstrapper_happy_path_installs_handsoff_origin_then_starts(tmp_path):
-    central = Central(manifest_body=manifest_json(), package_body=BODY)
-    discovery = FakeDiscovery(ORIGIN)
-    recorder = OrderRecorder()
-    bootstrapper = Bootstrapper(
-        discovery=discovery,
-        fetch_manifest=functools.partial(fetch_manifest, opener=central),
-        fetch_package=functools.partial(fetch_package, opener=central),
-        install=recorder.install,
-        write_origin=recorder.write_origin,
-        start_unit=recorder.start_unit,
-        sleep=Sleeps(),
-    )
-    result = asyncio.run(bootstrapper.run(max_attempts=1))
-    assert result is True
-    # Order matters: never start the unit before the origin handoff, never
-    # hand off the origin before the bytes are installed.
-    assert recorder.order == [
-        ("install", BODY, {"version": "1.2.3+gabc", "sha256": SHA256, "size": len(BODY)}),
-        ("write_origin", ORIGIN),
-        ("start_unit",),
-    ]
+def test_a_package_over_the_manifest_size_is_a_transfer_limit():
+    transport = FakeTransport(served(Origin.parse_root(ORIGIN),
+                                     package=lambda: reply(b"x" * (len(BODY) + 1))))
+    fetch = DirectFetch(located(ORIGIN), transport=transport, seconds=120)
+    with pytest.raises(UplinkError) as raised:
+        fetch_package(fetch, MANIFEST)
+    assert (raised.value.cause, raised.value.reason) == (Cause.TRANSFER, "limit")
 
 
-def test_bootstrapper_integrity_mismatch_never_installs_and_retries():
-    """Mutation probe: skip the sha256 check and this must fail -- install
-    would then be called on the corrupt bytes below."""
+def test_app_unconfigured_arrives_as_central_error():
+    transport = FakeTransport(served(Origin.parse_root(ORIGIN), manifest=lambda: FakeReply(
+        503, body=b'{"error":"app_unconfigured"}')))
+    with pytest.raises(UplinkError) as raised:
+        fetch_manifest(DirectFetch(located(ORIGIN), transport=transport, seconds=30), None)
+    assert (raised.value.cause, raised.value.reason, raised.value.central_error) == (
+        Cause.CENTRAL, "error", "app_unconfigured")
+
+
+# --- one attempt, end to end ----------------------------------------------------
+
+
+@pytest.mark.parametrize("clock", [record(ClockState.SYNCED), record(ClockState.UNSYNCED), None])
+def test_a_configured_run_locates_fetches_installs_hands_off_then_starts(clock):
+    """The clock record changes nothing about the install: dpkg reads no Release file."""
+    transport, recorder = gateway(), Recorder()
+    assert run(bootstrapper(transport, clock=clock, recorder=recorder), 1) is True
+    assert transport.urls == [url(CMDLINE, LOCATE_PATH), url(CENTRAL, LOCATE_PATH),
+                              url(CENTRAL, APP_MANIFEST_PATH),
+                              url(CENTRAL, f"/v1/app/package/{SHA256}.deb")]
+    # Never start the unit before the handoff, never hand off before the install. A command
+    # line root is read by the Player itself: the handoff names no Central.
+    assert recorder.order == [("install", BODY, MANIFEST),
+                              ("write_handoff", Handoff(None, None)),
+                              ("start_unit",)]
+
+
+@pytest.mark.parametrize("source, handed_off", [
+    ("cmdline", None), ("saved", None), ("discovered", Origin.parse_root(ORIGIN))])
+def test_only_a_discovered_root_is_handed_off(source, handed_off):
+    recorder = Recorder()
+    find = finding(ORIGIN, source)
+    transport = FakeTransport(served(Origin.parse_root(ORIGIN)))
+    assert run(bootstrapper(transport, find=find, recorder=recorder), 1) is True
+    assert recorder.order[1] == ("write_handoff", Handoff(handed_off, None))
+
+
+def test_an_unconfigured_run_discovers_with_the_proof_and_hands_the_root_off():
+    discovery, recorder = FixedDiscovery(DISCOVERED), Recorder()
+    transport = FakeTransport({url(DISCOVERED, LOCATE_PATH): central, **served(DISCOVERED)})
+    find = functools.partial(find_central, Unconfigured("absent"), transport=transport,
+                             discovery=discovery)
+    assert run(bootstrapper(transport, find=find, recorder=recorder), 1) is True
+    assert discovery.proofs == [Unconfigured("absent")]
+    assert recorder.order[1] == ("write_handoff", Handoff(DISCOVERED, None))
+
+
+# --- failures: named, logged, retried; TIME leaves ------------------------------
+
+
+def test_integrity_mismatch_never_installs_and_retries():
+    """Mutation probe: skip the sha256 check and this fails -- install would then be called on
+    the corrupt bytes below."""
     corrupt = BODY[:-1] + bytes([BODY[-1] ^ 1])
-    central = Central(manifest_body=manifest_json(), package_body=corrupt)
-    discovery = FakeDiscovery(ORIGIN)
     sleeps = Sleeps()
-    bootstrapper = Bootstrapper(
-        discovery=discovery,
-        fetch_manifest=functools.partial(fetch_manifest, opener=central),
-        fetch_package=functools.partial(fetch_package, opener=central),
-        install=never_called,
-        write_origin=never_called,
-        start_unit=never_called,
-        sleep=sleeps,
-    )
-    result = asyncio.run(bootstrapper.run(max_attempts=3))
-    assert result is False
-    assert len(sleeps.calls) == 3  # retried every attempt, never installed
-
-
-def test_bootstrapper_no_manifest_yet_waits_and_retries_without_installing():
-    central = Central(manifest_status=503)
-    discovery = FakeDiscovery(ORIGIN)
-    sleeps = Sleeps()
-    bootstrapper = Bootstrapper(
-        discovery=discovery,
-        fetch_manifest=functools.partial(fetch_manifest, opener=central),
-        fetch_package=never_called,
-        install=never_called,
-        write_origin=never_called,
-        start_unit=never_called,
-        sleep=sleeps,
-    )
-    result = asyncio.run(bootstrapper.run(max_attempts=2))
-    assert result is False
-    assert len(sleeps.calls) == 2
-
-
-def test_bootstrapper_no_central_bounded_retry_no_crash():
-    discovery = NeverDiscovery()
-    sleeps = Sleeps()
-    bootstrapper = Bootstrapper(
-        discovery=discovery,
-        fetch_manifest=never_called,
-        fetch_package=never_called,
-        install=never_called,
-        write_origin=never_called,
-        start_unit=never_called,
-        sleep=sleeps,
-    )
-    result = asyncio.run(bootstrapper.run(max_attempts=3))
-    assert result is False
-    assert discovery.calls == 3
+    subject = bootstrapper(gateway(package=lambda: reply(corrupt)), install=never_called,
+                           write_handoff=never_called, start_unit=never_called, sleep=sleeps)
+    assert run(subject, 3) is False
     assert len(sleeps.calls) == 3
 
 
-def test_bootstrapper_eventually_succeeds_once_central_and_app_appear():
-    """A base with no central, then a central with no app yet, then a
-    promoted app -- all bounded retries, one eventual success."""
-    central = Central(manifest_status=503)
-
-    class FlakyDiscovery:
-        def __init__(self):
-            self.calls = 0
-
-        async def discover(self):
-            self.calls += 1
-            return None if self.calls == 1 else ORIGIN
-
-    def flaky_fetch_manifest(origin):
-        # First origin-having attempt still sees no app; second succeeds.
-        if flaky_fetch_manifest.calls == 0:
-            flaky_fetch_manifest.calls += 1
-            return fetch_manifest(origin, opener=central)
-        return fetch_manifest(origin, opener=Central(manifest_body=manifest_json()))
-
-    flaky_fetch_manifest.calls = 0
-    recorder = OrderRecorder()
-    bootstrapper = Bootstrapper(
-        discovery=FlakyDiscovery(),
-        fetch_manifest=flaky_fetch_manifest,
-        fetch_package=lambda origin, manifest: fetch_package(
-            origin, manifest, opener=Central(package_body=BODY)
-        ),
-        install=recorder.install,
-        write_origin=recorder.write_origin,
-        start_unit=recorder.start_unit,
-        sleep=Sleeps(),
-    )
-    result = asyncio.run(bootstrapper.run(max_attempts=5))
-    assert result is True
-    assert [step[0] for step in recorder.order] == ["install", "write_origin", "start_unit"]
+def test_app_unconfigured_and_a_moved_central_are_logged_named_and_retried(caplog):
+    """A 503 app_unconfigured, then a 302 on the package (the gateway moved Central since
+    locate): each is one failure_text line and a retry that locates again."""
+    manifests = iter([FakeReply(503, body=b'{"error":"app_unconfigured"}'),
+                      reply(manifest_json()), reply(manifest_json())])
+    packages = iter([FakeReply(302, location="https://elsewhere.example/app.deb"), reply(BODY)])
+    transport = gateway(manifest=lambda: next(manifests), package=lambda: next(packages))
+    clock, recorder, sleeps = record(ClockState.UNSYNCED), Recorder(), Sleeps()
+    caplog.set_level(logging.WARNING, logger=provision.LOG.name)
+    subject = bootstrapper(transport, clock=clock, recorder=recorder, sleep=sleeps)
+    assert run(subject, 3) is True
+    unconfigured = UplinkError(Cause.CENTRAL, "error", host="central.example",
+                               detail="app_unconfigured", central_error="app_unconfigured")
+    moved = UplinkError(Cause.REDIRECT, "unexpected", host="central.example",
+                        detail="status=302;location=elsewhere.example")
+    assert caplog.messages == [
+        f"provision: {failure_text(unconfigured, clock=clock)} (attempt 1)",
+        f"provision: {failure_text(moved, clock=clock)} (attempt 2)"]
+    assert len(sleeps.calls) == 2
+    assert transport.urls.count(url(CMDLINE, LOCATE_PATH)) == 3     # every attempt locates
+    assert [step[0] for step in recorder.order] == ["install", "write_handoff", "start_unit"]
 
 
-# --- Origin handoff + resolve_origin precedence ------------------------------
+def test_an_untrusted_chain_is_logged_with_the_clock_record(caplog):
+    untrusted = UplinkError(Cause.TLS, "untrusted", host="central.example",
+                            detail="verify_code=20")
+    transport = gateway()
+    transport.script[url(CENTRAL, LOCATE_PATH)] = untrusted
+    clock = record(ClockState.UNSYNCED)
+    caplog.set_level(logging.WARNING, logger=provision.LOG.name)
+    assert run(bootstrapper(transport, clock=clock, install=never_called), 1) is False
+    assert caplog.messages == [f"provision: {untrusted.console()} {clock.summary()} (attempt 1)"]
 
 
-def test_origin_handoff_writes_explicit_central_origin_with_http_opt_in(tmp_path):
+def test_no_central_found_is_retried_without_a_crash():
+    discovery, sleeps = FixedDiscovery(None), Sleeps()
+    transport = FakeTransport({})
+    find = functools.partial(find_central, Unconfigured("absent"), transport=transport,
+                             discovery=discovery)
+    subject = bootstrapper(transport, find=find, install=never_called, sleep=sleeps)
+    assert run(subject, 3) is False
+    assert len(discovery.proofs) == 3 and len(sleeps.calls) == 3
+    assert transport.sent == []
+
+
+def test_eventually_succeeds_once_central_has_an_app():
+    """A malformed manifest (ProvisionError), then app_unconfigured, then a promoted app."""
+    manifests = iter([reply(b"{}"), FakeReply(503, body=b'{"error":"app_unconfigured"}'),
+                      reply(manifest_json())])
+    recorder, sleeps = Recorder(), Sleeps()
+    subject = bootstrapper(gateway(manifest=lambda: next(manifests)), recorder=recorder,
+                           sleep=sleeps)
+    assert run(subject, 5) is True
+    assert len(sleeps.calls) == 2
+    assert [step[0] for step in recorder.order] == ["install", "write_handoff", "start_unit"]
+
+
+@pytest.mark.parametrize("where", ["locate", "manifest"])
+def test_a_time_failure_leaves_run_for_the_reboot_path(where):
+    """Nothing in stage 2 steps the clock, so waiting would wait forever (rule 3)."""
+    expired = UplinkError(Cause.TIME, "not_yet_valid", host="central.example",
+                          detail="verify_code=9")
+    transport = gateway()
+    transport.script[url(CENTRAL, LOCATE_PATH if where == "locate" else APP_MANIFEST_PATH)] = (
+        expired)
+    sleeps = Sleeps()
+    subject = bootstrapper(transport, clock=record(ClockState.UNSYNCED), install=never_called,
+                           sleep=sleeps)
+    with pytest.raises(UplinkError) as raised:
+        run(subject, 3)
+    assert raised.value is expired
+    assert sleeps.calls == []
+
+
+def test_a_failed_dpkg_escapes_run(monkeypatch):
+    """The real install_package inside Bootstrapper.run: dpkg's non-zero exit (a Depends the
+    base lacks) is not retried in-process; it leaves for the unit's start limit."""
+    dpkg, sleeps = Dpkg(fail=True), Sleeps()
+    monkeypatch.setattr("appliance.provision.subprocess.run", dpkg)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run(bootstrapper(gateway(), install=install_package, write_handoff=never_called,
+                         start_unit=never_called, sleep=sleeps), 3)
+    assert raised.value.cmd[:2] == ["dpkg", "--install"]
+    assert dpkg.seen == [(BODY, 0o600)] and not Path(raised.value.cmd[-1]).exists()
+    assert sleeps.calls == []
+
+
+# --- the handoff ------------------------------------------------------------------
+
+
+def test_a_cmdline_handoff_keeps_other_keys_and_drops_central_origin_and_allow_http(tmp_path):
     path = tmp_path / "public.json"
-    write_public_config(ORIGIN, path=path)
-    written = json.loads(path.read_text())
-    # A plain-HTTP discovered origin (T0 home-LAN baseline) needs allow_http
-    # for PlayerConfig's explicit-origin validator (player/service.py
-    # _validate_origin) -- an *explicit* http origin is rejected without it,
-    # unlike a *discovered* one (resolve_origin passes allow_http=True only
-    # for discovery, service.py:423).
-    assert written == {"schema": 1, "central_origin": ORIGIN, "allow_http": True}
-    config = load_config(path)
-    assert config.central_origin == ORIGIN
-    assert config.allow_http is True
+    path.write_text(json.dumps({"schema": 1, "central_origin": "http://old.example:1",
+                                "allow_http": True, "cache_bytes": 2 * 1024**2,
+                                "base_running_tag": "v1.0.0"}))
+    write_handoff(Handoff(None, None), path=path)
+    assert json.loads(path.read_text()) == {"schema": 1, "cache_bytes": 2 * 1024**2}
 
 
-def test_origin_handoff_preserves_existing_keys(tmp_path):
+def test_a_discovered_root_is_written_and_is_the_players_saved_root(tmp_path):
+    """R2: the Player loads an http root with no allow_http, and uses it only while the
+    command line names no Central, without a second browse."""
     path = tmp_path / "public.json"
-    path.write_text(json.dumps({"schema": 1, "cache_bytes": 2 * 1024**2}))
-    write_public_config("https://central.local:8443", path=path)
-    written = json.loads(path.read_text())
-    assert written["cache_bytes"] == 2 * 1024**2
-    assert written["central_origin"] == "https://central.local:8443"
-    assert "allow_http" not in written
+    path.write_text(json.dumps({"schema": 1, "allow_http": True}))
+    write_handoff(Handoff(DISCOVERED, None), path=path)
+    assert json.loads(path.read_text()) == {"schema": 1, "central_origin": str(DISCOVERED)}
+    saved = load_config(path).saved_root()
+    assert saved == DISCOVERED
+    assert asyncio.run(choose_root(Unconfigured("absent"), saved=saved,
+                                   discovery=FixedDiscovery(None))) == (DISCOVERED, "saved")
 
 
-def test_origin_handoff_makes_app_skip_rediscovery(tmp_path):
-    """Mutation probe: skip the origin-handoff write and this must fail --
-    with no `central_origin` written, `resolve_origin` (player/service.py:419)
-    falls through to `self.discovery.discover()`, which this test's discovery
-    stub raises on. See also
-    tests/test_player_service.py:311
-    `test_explicit_origin_wins_over_discovery_and_provider_is_not_consulted`,
-    which proves the same precedence in the running app's own test suite.
-    """
-    path = tmp_path / "public.json"
-    write_public_config(ORIGIN, path=path)
-    config = load_config(path)
-
-    class RaisingDiscovery:
-        async def discover(self):
-            raise AssertionError("discovery must not be consulted: central_origin is set")
-
-    service = PlayerService(
-        config, load_identity(), (), RecordingRenderer(), immediate,
-        discovery=RaisingDiscovery(),
-    )
-    resolved = asyncio.run(service.resolve_origin())
-    assert resolved == ORIGIN
+def test_the_handoff_is_readable_by_the_player_whatever_the_umask(tmp_path):
+    path = tmp_path / "etc" / "photo-wall" / "public.json"
+    previous = os.umask(0o077)
+    try:
+        write_handoff(Handoff(None, None), path=path)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
-# --- dpkg / systemctl are thin, replaceable shell-outs -----------------------
+# --- 0012 bead 6: opt-in per-device `.deb` manifest + served-tag handoff -----------
 
 
-def test_apt_install_and_start_unit_are_real_but_easily_stubbed(monkeypatch, tmp_path):
-    """Not exercised against real apt-get/systemctl (no such sandbox in CI --
-    the owner's Pi bench step covers that); this just proves the default
-    implementations are simple, injectable `subprocess.run` calls, matching
-    the brief's "thin, injectable/mockable step" requirement.
-
-    The default install is `apt-get install -y <deb path>` (not `dpkg -i`) so
-    the Player .deb's declared Depends resolve from the base's distro sources
-    (0009 p4-deb-full-depends): a bare dpkg unpack would leave them unsatisfied.
-    """
-    calls = []
-    monkeypatch.setattr(
-        "appliance.provision.subprocess.run",
-        lambda *args, **kwargs: calls.append((args, kwargs)),
-    )
-    apt_install(BODY, {"sha256": SHA256})
-    start_player_unit()
-    args, kwargs = calls[0]
-    assert args[0][:3] == ["apt-get", "install", "-y"]
-    # A local .deb file path, not a bare package name to look up.
-    assert args[0][3].endswith(".deb")
-    # Non-interactive so the boot-time install never blocks on a prompt.
-    assert kwargs["env"]["DEBIAN_FRONTEND"] == "noninteractive"
-    assert calls[1][0][0] == ["systemctl", "start", "photo-wall-player.service"]
-
-
-# --- 0012 bead 6: opt-in per-device `.deb` manifest + served-tag handoff ------
-
-SERIAL = "10000000cafef00d"
-TAG = "v9.9.9"
-
-
-class PerDeviceCentral:
-    """Fake central serving BOTH the global (`/v1/app/manifest`) and the
-    per-device (`/v1/netboot/manifest`, serial-keyed, carries `tag`) manifest
-    routes; records the serial header the per-device request carried so we prove
-    it reached the server, and which route each request hit."""
-
-    def __init__(self, *, tag=TAG):
-        self.tag = tag
-        self.requests = []
-        self.serials = []
-
-    def open(self, request, **kwargs):
-        path = urlsplit(request.full_url).path
-        self.requests.append(path)
-        if path == "/v1/netboot/manifest":
-            serial = next((v for k, v in request.header_items()
-                           if k.lower() == SERIAL_HEADER.lower()), None)
-            self.serials.append(serial)
-            body = json.dumps({"version": "1.2.3+gabc", "sha256": SHA256,
-                               "size": len(BODY), "tag": self.tag}).encode()
-        elif path == "/v1/app/manifest":
-            body = manifest_json()
-        elif path.startswith("/v1/app/package/"):
-            body = BODY
-        else:
-            raise AssertionError(f"unexpected path {path}")
-        return Response(body, headers={"Content-Length": str(len(body))})
+def device_manifest(**extra):
+    return lambda: reply(manifest_json(**extra))
 
 
 def test_per_device_manifest_fetch_sends_serial_and_returns_served_tag():
-    # (criterion a) The opt-in fetch hits /v1/netboot/manifest with the serial
-    # header and returns the served tag central recorded -- the running_tag the
-    # player will echo. (criterion b) proof it is the served tag, not a guess:
-    # the value comes from the server response, keyed by the serial we sent.
-    central = PerDeviceCentral()
-    manifest = fetch_manifest(ORIGIN, serial=SERIAL, opener=central)
-    assert manifest == {"version": "1.2.3+gabc", "sha256": SHA256,
-                        "size": len(BODY), "tag": TAG}
-    assert central.requests == ["/v1/netboot/manifest"]
-    assert central.serials == [SERIAL]
+    transport = FakeTransport({ORIGIN + DEVICE_MANIFEST_PATH: device_manifest(tag=TAG)})
+    fetch = DirectFetch(located(ORIGIN), transport=transport, seconds=30)
+    assert fetch_manifest(fetch, SERIAL) == AppManifest("1.2.3+gabc", SHA256, len(BODY), TAG)
+    [(sent_url, headers, *_)] = transport.sent
+    assert (sent_url, headers[SERIAL_HEADER]) == (ORIGIN + DEVICE_MANIFEST_PATH, SERIAL)
 
 
-def test_global_manifest_fetch_unchanged_hits_app_route_no_tag():
-    # (criterion d) A device that has NOT opted in (serial=None) keeps 0010's
-    # global route and gets no tag -- the regression guard on existing appliances.
-    central = PerDeviceCentral()
-    manifest = fetch_manifest(ORIGIN, opener=central)
-    assert manifest == {"version": "1.2.3+gabc", "sha256": SHA256, "size": len(BODY)}
-    assert "tag" not in manifest
-    assert central.requests == ["/v1/app/manifest"]
-
-
-def test_per_device_manifest_missing_or_malformed_tag_is_rejected():
-    class NoTag(PerDeviceCentral):
-        def open(self, request, **kwargs):
-            self.requests.append("/v1/netboot/manifest")
-            body = json.dumps({"version": "v", "sha256": SHA256, "size": len(BODY)}).encode()
-            return Response(body, headers={"Content-Length": str(len(body))})
-
+@pytest.mark.parametrize("extra", [{}, {"tag": "not-a-tag"}, {"tag": 1}])
+def test_per_device_manifest_missing_or_malformed_tag_is_rejected(extra):
+    transport = FakeTransport({ORIGIN + DEVICE_MANIFEST_PATH: device_manifest(**extra)})
     with pytest.raises(ProvisionError, match="provision_manifest_invalid"):
-        fetch_manifest(ORIGIN, serial=SERIAL, opener=NoTag())
-
-    class BadTag(PerDeviceCentral):
-        def open(self, request, **kwargs):
-            body = json.dumps({"version": "v", "sha256": SHA256, "size": len(BODY),
-                               "tag": "not-a-tag"}).encode()
-            return Response(body, headers={"Content-Length": str(len(body))})
-
-    with pytest.raises(ProvisionError, match="provision_manifest_invalid"):
-        fetch_manifest(ORIGIN, serial=SERIAL, opener=BadTag())
+        fetch_manifest(DirectFetch(located(ORIGIN), transport=transport, seconds=30), SERIAL)
 
 
-def test_write_public_config_hands_the_served_tag_forward(tmp_path):
-    path = tmp_path / "public.json"
-    write_public_config(ORIGIN, path=path, base_running_tag=TAG)
-    written = json.loads(path.read_text())
-    assert written["base_running_tag"] == TAG
-    # The player reads it as PlayerConfig.base_running_tag.
-    assert load_config(path).base_running_tag == TAG
-    # Global path (no tag) writes no key -- existing appliances unaffected.
-    path2 = tmp_path / "public2.json"
-    write_public_config(ORIGIN, path=path2)
-    assert "base_running_tag" not in json.loads(path2.read_text())
-
-
-def test_bootstrapper_opt_in_fetches_per_device_manifest_and_hands_tag_forward(tmp_path):
-    # End-to-end through the Bootstrapper: a serial_reader opts in, the manifest
-    # fetch carries the serial, the served tag is captured on the bootstrapper
-    # AND handed forward via the default public.json handoff for base-health.
-    central = PerDeviceCentral()
+def test_opt_in_fetches_the_per_device_manifest_and_hands_the_tag_forward(tmp_path):
     public = tmp_path / "public.json"
-    bootstrapper = Bootstrapper(
-        discovery=FakeDiscovery(ORIGIN),
-        fetch_manifest=functools.partial(fetch_manifest, opener=central),
-        fetch_package=functools.partial(fetch_package, opener=central),
-        install=lambda package, manifest: None,
-        start_unit=lambda: None,
-        sleep=Sleeps(),
-        serial_reader=lambda: SERIAL,
-        public_config_path=public,
-    )
-    assert asyncio.run(bootstrapper.run(max_attempts=1)) is True
-    assert bootstrapper.running_tag == TAG
-    assert central.serials == [SERIAL]
-    assert json.loads(public.read_text())["base_running_tag"] == TAG
+    transport = FakeTransport({ORIGIN + DEVICE_MANIFEST_PATH: device_manifest(tag=TAG),
+                               **served(Origin.parse_root(ORIGIN))})
+    subject = bootstrapper(transport, find=finding(ORIGIN), install=lambda *_: None,
+                           write_handoff=functools.partial(write_handoff, path=public),
+                           start_unit=lambda: None, serial_reader=lambda: SERIAL)
+    assert run(subject, 1) is True
+    assert transport.sent[0][1][SERIAL_HEADER] == SERIAL
+    assert json.loads(public.read_text()) == {"schema": 1, "base_running_tag": TAG}
+    assert load_config(public).base_running_tag == TAG
+
+
+def test_an_unreadable_serial_keeps_the_global_manifest():
+    def unreadable():
+        raise OSError("no devicetree")
+
+    transport = FakeTransport(served(Origin.parse_root(ORIGIN)))
+    recorder = Recorder()
+    subject = bootstrapper(transport, find=finding(ORIGIN), recorder=recorder,
+                           serial_reader=unreadable)
+    assert run(subject, 1) is True
+    assert transport.urls[0] == ORIGIN + APP_MANIFEST_PATH
+    assert recorder.order[1] == ("write_handoff", Handoff(None, None))
+
+
+# --- dpkg / systemctl are thin, replaceable shell-outs ------------------------------
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_install_package_is_dpkg_alone_on_a_0600_temp_deb_removed_after(monkeypatch, fail):
+    """Not run against real dpkg here (the netboot-e2e device root runs it): exactly
+    `dpkg --install <tmp>.deb`, non-interactive, nothing else -- no apt, no lists. The temp
+    file holds the bytes at 0600 (even under a permissive umask) and is gone afterwards,
+    including when dpkg fails."""
+    dpkg = Dpkg(fail=fail)
+    monkeypatch.setattr("appliance.provision.subprocess.run", dpkg)
+    previous = os.umask(0o022)
+    try:
+        if fail:
+            with pytest.raises(subprocess.CalledProcessError):
+                install_package(BODY, MANIFEST)
+        else:
+            install_package(BODY, MANIFEST)
+    finally:
+        os.umask(previous)
+    [(argv, kwargs)] = dpkg.calls
+    assert argv[:2] == ["dpkg", "--install"] and len(argv) == 3 and argv[2].endswith(".deb")
+    assert kwargs["check"] is True
+    assert kwargs["env"]["DEBIAN_FRONTEND"] == "noninteractive"
+    assert dpkg.seen == [(BODY, 0o600)]
+    assert not Path(argv[2]).exists()
+
+
+def test_start_player_unit_is_one_systemctl_start(monkeypatch):
+    calls = []
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        lambda argv, **kwargs: calls.append((argv, kwargs)))
+    start_player_unit()
+    assert calls == [(["systemctl", "start", "photo-wall-player.service"], {"check": True})]
+
+
+# --- main -------------------------------------------------------------------------
+
+
+def test_help_runs_isolated_from_the_repo():
+    """`python -I` (as the unit runs it): no zeroconf or network import on the way to --help."""
+    result = subprocess.run([sys.executable, "-I", "-m", "appliance.provision", "--help"],
+                            cwd=REPO, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "--cmdline" in result.stdout
+
+
+class _Stubs:
+    """main()'s effects: a scripted transport, a fixed clock record, no system trust store,
+    and a Bootstrapper.run that finds Central once and then fails with `error`."""
+
+    def __init__(self, monkeypatch, transport, error):
+        self.found, self.discoveries = [], []
+        clock = record(ClockState.UNSYNCED)
+        stubs = self
+
+        class Trust:
+            @staticmethod
+            def public():
+                return "trust"
+
+        class Discovery(FixedDiscovery):
+            def __init__(self):
+                super().__init__(None)
+                stubs.discoveries.append(self)
+
+        async def run(bootstrapper, **_):
+            stubs.found.append(await bootstrapper._find())
+            raise error
+
+        monkeypatch.setattr(provision, "Trust", Trust)
+        monkeypatch.setattr(provision, "HttpTransport", lambda *, trust: transport)
+        monkeypatch.setattr(provision, "RunClockRecord", lambda: type(
+            "Record", (), {"read": staticmethod(lambda: clock)})())
+        monkeypatch.setattr(provision.Bootstrapper, "run", run)
+        monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", Discovery)
+        self.clock = clock
+
+
+def test_main_with_a_cmdline_root_builds_no_discovery_and_exits_1_on_time(
+        tmp_path, monkeypatch, caplog):
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"console=tty1 photowall.central={CMDLINE}/\n")
+    expired = UplinkError(Cause.TIME, "expired", host="central.example", detail="verify_code=10")
+    stubs = _Stubs(monkeypatch, gateway(), expired)
+    caplog.set_level(logging.ERROR, logger=provision.LOG.name)
+    with pytest.raises(SystemExit) as raised:
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+    assert raised.value.code == 1
+    assert [(found.root, found.source, found.central.origin) for found in stubs.found] == [
+        (CMDLINE, "cmdline", CENTRAL)]
+    assert stubs.discoveries == []
+    assert caplog.messages == [f"provision: {failure_text(expired, clock=stubs.clock)}"]
+
+
+def test_main_without_a_cmdline_root_discovers_with_the_proof(tmp_path, monkeypatch, caplog):
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=tty1 root=/dev/ram0\n")
+    stubs = _Stubs(monkeypatch, FakeTransport({}), AssertionError("unreached"))
+    caplog.set_level(logging.ERROR, logger=provision.LOG.name)
+    with pytest.raises(SystemExit):
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+    [discovery] = stubs.discoveries
+    assert discovery.proofs == [Unconfigured("absent")]
+    assert caplog.messages == [
+        "provision: cause=configuration reason=absent detail=not_discovered"]

@@ -13,20 +13,27 @@ name: rpi-image-gen base OS build
 on:
   workflow_dispatch:
   pull_request:
-    # Whole packages, not file lists: stage 1's initramfs code is a COMPUTED
-    # closure (scripts/module_closure.py) over appliance, contracts and uplink,
-    # so no hand-kept file list here can fall behind it (decision 0014 §1).
+    # Whole packages, not file lists: stage 1's initramfs code and both .debs'
+    # code are COMPUTED closures (scripts/module_closure.py) over appliance,
+    # contracts, uplink and player, so no hand-kept file list here can fall
+    # behind them (decision 0014 §1). The Debian declaration decides what the
+    # base and the initrd root install, and the base check reads it.
     paths:
       - appliance/**
       - contracts/**
       - uplink/**
+      - player/**
+      - scripts/debian_packages.py
+      - scripts/device_root_checks.py
       - scripts/build_netboot_bundle.sh
       - scripts/build_boot_data.py
       - scripts/module_closure.py
       - scripts/verify_netboot_initrd.py
       - scripts/kernel_config_check.py
       - scripts/eeprom_update.py
+      - scripts/build_bootstrapper_deb.py
       - scripts/build_player_deb.py
+      - scripts/build_player.py
       - .github/workflows/base-image.yml
   # Reused by release.yml to build the release assets (the netboot base bundle
   # + the Player and bootstrapper .debs) for an exact tagged revision. Every
@@ -45,12 +52,14 @@ permissions:
 
 # Human-bumpable cache epoch. The two expensive base-OS stages (the
 # rpi-image-gen squashfs and the scratch kernel+initrd) are content-addressed
-# and cached below, keyed by a hash of each stage's TRUE input closure. That
-# closure cannot capture inputs pulled UNPINNED at build time -- notably the
-# scratch kernel stage installs linux-image-rpi-2712 + raspi-firmware from
-# archive.raspberrypi.com and Debian trixie with no snapshot pin. Bump this
-# integer to force BOTH caches to miss and fully rebuild (e.g. to pick up a
-# newer upstream Pi kernel/firmware). It is part of BOTH cache keys.
+# and cached below, keyed by a hash of each stage's TRUE input closure. Every
+# Debian package either stage installs comes from the declaration's snapshot
+# pin (scripts/debian_packages.py, in both keys); only the Raspberry Pi archive
+# is unpinned (it has no snapshot service), so the scratch kernel stage's
+# linux-image-rpi-2712 + raspi-firmware + rpi-eeprom are the one input no key
+# can hash. Bump this integer to force BOTH caches to miss and fully rebuild
+# (e.g. to pick up a newer upstream Pi kernel/firmware). It is part of BOTH
+# cache keys.
 env:
   BASE_CACHE_EPOCH: "1"
 
@@ -68,17 +77,32 @@ jobs:
       # the .deb builds and every artifact name so a release consumes the
       # bytes built for its tag, not whatever ref the reusable call resolved.
       REVISION: ${{ inputs.revision || github.sha }}
-      # The Debian snapshot pin (2026-09-04T00:00:00Z): the fixed instant the
-      # .deb mtimes and the base's snapshot.debian.org mirror are pinned to,
-      # given to each step as SOURCE_DATE_EPOCH. The initrd's CA list is the
-      # base's, so it is as old as this pin: the bundle assembly warns (never
-      # fails) once it is over 90 days old (decision 0014, Q3 = A).
-      DEBIAN_SNAPSHOT_EPOCH: '1788480000'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
+
+      # The Debian declaration (scripts/debian_packages.py) is the one place a
+      # package list or mirror is written; the runner's system python3 runs it
+      # (stdlib only). Its snapshot pin, as DEBIAN_SNAPSHOT_EPOCH, is the fixed
+      # instant the .deb mtimes, the base's snapshot mirror (snapgen) and the
+      # CA-age reference are pinned to, given to each step as
+      # SOURCE_DATE_EPOCH. The initrd's CA list is the base's, so it is as old
+      # as this pin: the bundle assembly warns (never fails) once it is over 90
+      # days old (decision 0014, Q3 = A). DEVICE_PACKAGES is the device set
+      # (the bootstrapper's and the Player's packages): the rpi-image-gen layer
+      # installs it and the base check requires it.
+      - name: Read the Debian pin and the device set from the declaration
+        run: |
+          set -eu
+          epoch=$(python3 scripts/debian_packages.py epoch)
+          echo "DEBIAN_SNAPSHOT_EPOCH=$epoch" >> "$GITHUB_ENV"
+          device_packages="$RUNNER_TEMP/device.list"
+          python3 scripts/debian_packages.py packages bootstrapper player > "$device_packages"
+          echo "DEVICE_PACKAGES=$device_packages" >> "$GITHUB_ENV"
+          echo "DEBIAN_SNAPSHOT_EPOCH=$epoch; device set:"
+          cat "$device_packages"
 
       # ALL our own code ships to the base build as a portable `.deb`, never
       # a raw-file overlay this tool owns (see
@@ -118,12 +142,15 @@ jobs:
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
-      # p4-deb-full-depends: the player .deb now DECLARES its runtime deps
-      # (GTK/GStreamer/weston/Mesa + python3-*) as apt Depends and ships no
-      # venv, so it builds on any host with dpkg-deb (pure staging, like the
-      # bootstrapper .deb) -- no OS-base chroot. Build it here...
+      # The Player .deb ships no venv and declares its runtime deps as Depends
+      # (the declaration's player list), so it builds on any host with
+      # dpkg-deb (pure staging, like the bootstrapper .deb) -- no OS-base
+      # chroot. The base carries those Depends (the device set): the base
+      # check below requires every one of them installed in the built image.
       - name: Build the photo-wall-player .deb
         id: player-deb
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
         run: |
           set -eu
           install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-deb"
@@ -134,20 +161,15 @@ jobs:
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
-      # ...and PROVE its declared Depends actually resolve from the Debian
-      # trixie distro repo (the whole point of the apt-deps model), with no
-      # hardware: a --simulate install in a stock trixie arm64 container fails
-      # the job on any unmet/unlocatable dependency. This is the CI gate for
-      # p4-deb-full-depends; the s3 Part A tracer installs it for real.
-      - name: Prove the player .deb Depends resolve in Debian trixie
-        env:
-          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+      # The bootstrapper's computed closure digest (scripts/module_closure.py,
+      # the code the .deb ships): Cache A's code input, instead of a hand-kept
+      # file list that could fall behind the closure.
+      - name: Compute the bootstrapper closure digest
+        id: bootstrapper-closure
         run: |
           set -eu
-          docker run --rm --platform linux/arm64 \
-            -v "$(dirname "$PLAYER_DEB"):/pkgs:ro" debian:trixie-slim \
-            sh -ec 'apt-get update >/dev/null && \
-              apt-get install -y --simulate "/pkgs/$(basename "'"$PLAYER_DEB"'")"'
+          digest=$(python3 scripts/module_closure.py --policy bootstrapper --digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # Host tools used by the UNGATED content-verify + bundle-assembly steps
       # (squashfs `unsquashfs`, initrd `lsinitramfs`). Installed here, out of
@@ -185,28 +207,23 @@ jobs:
           sudo chmod o+x /home/runner
           sudo ./install_deps.sh
 
-      # SOURCE_DATE_EPOCH pins the debian-trixie-arm64-minbase-snapshot
-      # layer's snapshot.debian.org mirror (see bin/generators/snapgen) to a
-      # fixed instant, so this build's Debian package set is reproducible
-      # rather than "whatever snapshot.debian.org has right now". Fixed,
-      # not `date +%s` at run time (contrast rpi-image-gen's own CI, which
-      # uses `date -d 'today 00:00:00'` -- that pins to the day, not a
-      # specific stable revision).
+      # SOURCE_DATE_EPOCH (the declaration's pin) pins the
+      # debian-trixie-arm64-minbase-snapshot layer's snapshot mirror (see
+      # bin/generators/snapgen) to a fixed instant, so this build's Debian
+      # package set is reproducible rather than "whatever the snapshot service
+      # has right now" (contrast rpi-image-gen's own CI, which uses
+      # `date -d 'today 00:00:00'`). The built image keeps those sources.
       # Cache A: the rpi-image-gen squashfs build (~20 min) is content-addressed
-      # on its TRUE input closure -- the rpi-image-gen config, the bootstrapper
-      # .deb's packaged closure + its build script (the .deb is BAKED into the
-      # squashfs), the pyproject version, and this workflow. Deliberately EXACT
-      # match only (no restore-keys): a prefix-fallback could restore a stale
-      # base built from different inputs -- exactly the poisoning risk. The
-      # player APP source (player/service.py, cache.py, ...) is NOT in this
-      # closure because it is NOT baked into the base (it ships as the player
-      # .deb, served by reference), so a player-only change HITS this cache.
-      # The three player files that ARE listed (player/__init__.py,
-      # mdns_discovery.py, discovery.py) belong to the BOOTSTRAPPER's packaged
-      # closure and are legitimately baked in; build_player_deb.py/build_player.py
-      # are imported by build_bootstrapper_deb.py, so they can change the .deb's
-      # bytes and are (conservatively) included -- a change there rebuilds
-      # rather than risking a stale hit.
+      # on its TRUE input closure -- the rpi-image-gen tree, the declaration
+      # (the pin and the device set the base installs), the bootstrapper .deb
+      # (BAKED into the squashfs: its computed closure's digest, its unit and
+      # its builders, which also generate its __main__.py and Depends), the
+      # pyproject version, and this workflow. Deliberately EXACT match only (no
+      # restore-keys): a prefix-fallback could restore a stale base built from
+      # different inputs -- exactly the poisoning risk. The Player's code is NOT
+      # in this closure because it is NOT baked into the base (it ships as the
+      # Player .deb, served by reference), so a Player-code-only change HITS
+      # this cache; its Debian packages are, through the declaration.
       - name: Cache the rpi-image-gen base squashfs
         id: cache-squashfs
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -214,7 +231,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'appliance/__init__.py', 'appliance/provision.py', 'appliance/systemd/photo-wall-provision.service', 'player/__init__.py', 'player/mdns_discovery.py', 'player/discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -228,7 +245,8 @@ jobs:
           ./rpi-image-gen build \
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
-            -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB"
+            -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
+               "IGconf_app_device_packages=$DEVICE_PACKAGES"
 
       # rpi-image-gen's genimage/deploy output can be root-owned and not
       # world-readable, so the unprivileged actions/cache post-job SAVE for
@@ -250,13 +268,16 @@ jobs:
 
       # Proves the squashfs is CORRECT, not merely that rpi-image-gen exited
       # 0 -- see docs/decisions/0009-minimal-base-and-app-package.md, "Base
-      # OS bundle" (line ~669: "ship Python + zeroconf for the bootstrapper"
-      # / "strip the Player venv, release.pub.pem, ... from the netboot
-      # root") and layer/photo-wall-bootstrapper.yaml's own rule #1, "the
-      # base OS carries no application and no origin". Reads the rootfs
-      # tree straight out of the built squashfs via `unsquashfs -ll`
-      # (permissions/type + path, no extraction needed) rather than trusting
-      # the build's own exit code.
+      # OS bundle" (line ~669: "strip the Player venv, release.pub.pem, ...
+      # from the netboot root") and rule #1, "the base OS carries no
+      # application and no origin". Reads the rootfs tree straight out of the
+      # built squashfs via `unsquashfs -ll` (permissions/type + path) rather
+      # than trusting the build's own exit code, then extracts only what
+      # scripts/device_root_checks.py reads (systemd config, apt sources, the
+      # dpkg database): no watchdog override, no time daemon, no resolver
+      # writer, every device package and every Player Depends installed
+      # (provisioning installs the Player with dpkg alone), and no apt source
+      # but the declaration's pin.
       #
       # Squashfs location: rpi-image-gen's image-base layer places genimage's
       # output directly at $IGconf_image_outputdir =
@@ -273,6 +294,7 @@ jobs:
       - name: Verify the built base image is what 0009 requires (content, not just build success)
         env:
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
         run: |
           set -eu
           set -x
@@ -335,14 +357,14 @@ jobs:
           }
 
           echo "== MUST BE PRESENT =="
-          # The bootstrapper and its minimal import closure (never
-          # player.service, which pulls in GTK/GStreamer -- see
-          # scripts/build_bootstrapper_deb.py's own module docstring). All
-          # of this is now delivered by the photo-wall-bootstrapper `.deb`,
-          # not a raw-file overlay.
-          require_path - usr/lib/python3/dist-packages/appliance/provision.py 'the bootstrapper (appliance/provision.py)'
-          require_path - usr/lib/python3/dist-packages/player/mdns_discovery.py 'mDNS discovery (player/mdns_discovery.py)'
-          require_path - usr/lib/python3/dist-packages/player/discovery.py 'the discovery Protocol (player/discovery.py)'
+          # The bootstrapper's computed closure (scripts/module_closure.py,
+          # never player.service), shipped privately by the
+          # photo-wall-bootstrapper `.deb` as a directory application: the
+          # generated entry point, the manifest, and every file the manifest
+          # lists.
+          bootstrapper_dir=usr/lib/photo-wall-bootstrapper
+          require_path - "$bootstrapper_dir/__main__.py" 'the bootstrapper entry point'
+          require_path - "$bootstrapper_dir/closure.json" 'the bootstrapper closure manifest'
           # The unit ships at the vendor path (/lib/systemd/system, not
           # /etc/systemd/system -- this is a packaged unit now, not a raw
           # overlay file), AND is actually enabled (a `.wants` symlink the
@@ -364,33 +386,67 @@ jobs:
               violation "enablement symlink points at unexpected target: $target"
             fi
           fi
-          # Python 3 plus the bootstrapper's one third-party dependency
-          # closure (python3-zeroconf pulls in python3-ifaddr) -- both are
-          # now the `.deb`'s own Depends, resolved by apt at install time,
-          # not a second raw mmdebstrap.packages declaration.
           # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
-          # regular file on some distros), so accept either type here.
+          # regular file on some distros), so accept either type here. The
+          # unit runs it as `python3 -I -B /usr/lib/photo-wall-bootstrapper`.
           if grep -Eq -- '^[-l] squashfs-root/usr/bin/python3$' "$typed"; then
             echo "OK: found the python3 interpreter (usr/bin/python3, file or symlink)"
           else
             violation "missing required the python3 interpreter at usr/bin/python3"
           fi
-          require_path d usr/lib/python3/dist-packages/zeroconf 'the zeroconf library (python3-zeroconf)'
-          require_path d usr/lib/python3/dist-packages/ifaddr 'the ifaddr library (python3-ifaddr)'
 
-          # The package itself is INSTALLED, not just its files unpacked by
-          # some other means -- dpkg's own database records it.
-          status_dir="$RUNNER_TEMP/photo-wall-base-dpkg-status"
-          rm -rf "$status_dir"
-          unsquashfs -d "$status_dir" "$squashfs" var/lib/dpkg/status >/dev/null
-          if grep -Fxq 'Package: photo-wall-bootstrapper' "$status_dir/var/lib/dpkg/status" \
-              && grep -Fxq 'Status: install ok installed' "$status_dir/var/lib/dpkg/status"; then
-            echo "OK: dpkg records photo-wall-bootstrapper as installed"
-          else
-            violation "dpkg status does not record photo-wall-bootstrapper as installed"
+          # Only what scripts/device_root_checks.py reads: the systemd manager
+          # config, the apt sources, the dpkg database; plus the closure
+          # manifest. An extract path the image lacks is skipped, not an error;
+          # xattrs are not needed and an unprivileged extract cannot set them.
+          extract="$RUNNER_TEMP/photo-wall-base-extract"
+          rm -rf "$extract"
+          unsquashfs -no-xattrs -d "$extract" "$squashfs" \
+            etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
+            etc/apt var/lib/dpkg/status "$bootstrapper_dir/closure.json" >/dev/null
+          manifest="$extract/$bootstrapper_dir/closure.json"
+          if [ -f "$manifest" ]; then
+            closure_files=$(python3 -c 'import sys; from pathlib import Path; from scripts.module_closure import read_manifest; print("\n".join(read_manifest(Path(sys.argv[1])).files))' "$manifest")
+            for file in $closure_files; do
+              require_path - "$bootstrapper_dir/$file" "closure file $file"
+            done
           fi
 
-          echo "== MUST BE ABSENT (base stays minimal; app + render stack come from the .deb at boot) =="
+          echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
+          # Every device package (the rendered device set), every Depends of
+          # the Player .deb built above, and the bootstrapper itself are
+          # installed (dpkg's own database: `install ok installed`); no
+          # watchdog override, time daemon or resolver writer; the image's
+          # only apt sources are the declaration's pin.
+          dpkg-deb -f "$PLAYER_DEB" Depends > "$RUNNER_TEMP/player-depends.list"
+          printf '%s\n' photo-wall-bootstrapper > "$RUNNER_TEMP/bootstrapper-package.list"
+          if python3 scripts/device_root_checks.py --root "$extract" \
+              --require-installed "$DEVICE_PACKAGES" \
+              --require-installed "$RUNNER_TEMP/player-depends.list" \
+              --require-installed "$RUNNER_TEMP/bootstrapper-package.list" \
+              --pinned-sources; then
+            echo "OK: device_root_checks passed"
+          else
+            violation "device_root_checks refused the image (lines above)"
+          fi
+
+          echo "== MUST BE ABSENT (no application outside the private dirs, no origin) =="
+          # Each .deb ships its closure privately; nothing first-party lands
+          # in the shared dist-packages tree (two packages would own a file).
+          for package in appliance player uplink contracts; do
+            if grep -Eq -- "^. squashfs-root/usr/lib/python3/dist-packages/$package(/|\$)" "$typed"; then
+              violation "first-party $package under usr/lib/python3/dist-packages"
+            else
+              echo "OK: absent first-party $package under usr/lib/python3/dist-packages"
+            fi
+          done
+          # Stage 1 writes stage 2's resolver into the new root at boot; the
+          # build host's copy must not ship (image/pre-image.sh removes it).
+          if grep -Eq -- '^. squashfs-root/etc/resolv.conf$' "$typed"; then
+            violation "the build host's etc/resolv.conf is in the image"
+          else
+            echo "OK: absent etc/resolv.conf"
+          fi
           # No Player venv baked into the base.
           forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
           # No deployment config or app trust anchor baked into the base --
@@ -399,13 +455,6 @@ jobs:
           forbid_substring 'squashfs-root/etc/photo-wall/bootstrap.json' 'a baked /etc/photo-wall/bootstrap.json'
           forbid_substring 'squashfs-root/etc/photo-wall/ca.pem' 'a baked /etc/photo-wall/ca.pem'
           forbid_substring 'release.pub.pem' 'a baked release.pub.pem app trust anchor'
-          # No GTK/GStreamer/weston render stack -- that is the .deb's
-          # Depends, resolved against the live Debian mirror at boot (see
-          # config/photo-wall-base.yaml's "apt sources configured to the
-          # Debian distro repo" note). Multiarch-triplet-agnostic: matches
-          # the last path component, not a fixed usr/lib/<triplet>/ prefix.
-          forbid_substring 'usr/bin/weston' 'the weston compositor binary'
-          forbid_substring '/gstreamer-1.0' 'a GStreamer plugin directory'
 
           if [ "$fail" -ne 0 ]; then
             echo "FAIL: built base image does not match 0009's minimal-base-plus-bootstrapper contract; see VIOLATION lines above" >&2
@@ -427,19 +476,22 @@ jobs:
       # bundle and the clock floor are NOT in the cached initrd: they are the
       # boot data (scripts/build_boot_data.py), rebuilt on every run by the
       # uncached assembly step and placed in front of it, so no key has to list
-      # them (decision 0014 §5). NOT keyed on player/ or the rpi-image-gen
-      # config -- neither affects the kernel/initrd. EXACT match
-      # only (no restore-keys): a stale-base prefix-fallback is the poisoning
-      # risk. The kernel/firmware themselves are pulled UNPINNED at build time
-      # and are NOT in any file the key can hash -- bump BASE_CACHE_EPOCH to
-      # force them to refresh. Only the fixed-layout output dir ($KOUT below) is
-      # cached, never the full root-owned scratch rootfs ($SCRATCH).
+      # them (decision 0014 §5). The declaration is keyed: it names the root's
+      # Debian packages, its snapshot pin and the Raspberry Pi packages. NOT
+      # keyed on player/ or the rpi-image-gen config -- neither affects the
+      # kernel/initrd. EXACT match only (no restore-keys): a stale-base
+      # prefix-fallback is the poisoning risk. Only the Raspberry Pi archive is
+      # unpinned (it has no snapshot service): the kernel/firmware/eeprom are
+      # pulled from it at build time and are NOT in any file the key can hash
+      # -- bump BASE_CACHE_EPOCH to force them to refresh. Only the
+      # fixed-layout output dir ($KOUT below) is cached, never the full
+      # root-owned scratch rootfs ($SCRATCH).
       - name: Cache the scratch kernel + initrd + DTBs
         id: cache-kernel
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/netboot-kernel-out
-          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'scripts/build_netboot_bundle.sh', '.github/workflows/base-image.yml') }}
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'scripts/build_netboot_bundle.sh', 'scripts/debian_packages.py', '.github/workflows/base-image.yml') }}
 
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
@@ -453,24 +505,31 @@ jobs:
           set -x
           mkdir -p "$DIAG"
           sudo apt-get update
-          # mmdebstrap builds the scratch root; initramfs-tools on the HOST
-          # provides lsinitramfs for the content-verify; squashfs-tools may
-          # already be present from the squashfs verify step above.
+          # mmdebstrap builds the scratch root (debian-archive-keyring lets it
+          # verify the snapshot sources on this Ubuntu host); initramfs-tools
+          # on the HOST provides lsinitramfs for the content-verify;
+          # squashfs-tools may already be present from the squashfs verify
+          # step above.
           sudo apt-get install -y --no-install-recommends \
-            mmdebstrap ca-certificates gnupg curl initramfs-tools
+            mmdebstrap debian-archive-keyring ca-certificates gnupg curl initramfs-tools
 
           sudo rm -rf "$SCRATCH"
-          # Minimal Debian trixie arm64 root carrying the initrd toolchain +
-          # interpreter the netboot init needs. The rpi-2712 kernel itself comes
-          # from the Raspberry Pi archive, added below.
-          if ! sudo mmdebstrap --arch=arm64 --variant=minbase \
-              --include=initramfs-tools,python3,ca-certificates,gnupg,kmod,zstd \
-              trixie "$SCRATCH" http://deb.debian.org/debian \
+          # Minimal Debian trixie arm64 root at the declaration's pin, carrying
+          # the initrd toolchain + interpreter the netboot init needs
+          # (packages("initrd-build"); mmdebstrap_argv is the one way a root
+          # outside rpi-image-gen is built, with only the snapshot sources).
+          # The rpi-2712 kernel itself comes from the Raspberry Pi archive,
+          # added below.
+          if ! sudo python3 scripts/debian_packages.py mmdebstrap --arch arm64 \
+              --target "$SCRATCH" initrd-build \
               > "$DIAG/mmdebstrap.log" 2>&1; then
             echo "mmdebstrap failed; tail:" >&2
             tail -n 80 "$DIAG/mmdebstrap.log" >&2
             exit 1
           fi
+          echo "scratch root Debian sources (the pin only):"
+          sudo find "$SCRATCH/etc/apt" \( -name '*.list' -o -name '*.sources' \) \
+            -exec cat {} + | tee "$DIAG/scratch-sources.txt"
 
           # linux-image-rpi-2712 (BCM2712, 16K-page Pi 5 kernel) + raspi-firmware
           # (Pi 5 DTBs + SPI-EEPROM bootloader firmware) live in the Raspberry Pi
@@ -482,8 +541,7 @@ jobs:
           # 0009's no-threat-model / corruption-only ruling. If RPi later re-signs
           # its key with SHA256, restore `[signed-by=.../raspberrypi.gpg]` (fetch
           # + dearmor the key) in place of `[trusted=yes]`.
-          printf '%s\n' \
-            'deb [trusted=yes] http://archive.raspberrypi.com/debian trixie main' \
+          python3 scripts/debian_packages.py sources --archive raspberrypi \
             | sudo tee "$SCRATCH/etc/apt/sources.list.d/raspberrypi.list"
           sudo cp /etc/resolv.conf "$SCRATCH/etc/resolv.conf"
 
@@ -501,9 +559,13 @@ jobs:
           # rpi-eeprom (alongside the kernel + firmware) packages the bootloader
           # images build_eeprom_update.py rebuilds into the TFTP self-update
           # pair (0014 rev 5, design §2.8) -- pieeprom.upd/.sig, staged below.
+          # The list is the declaration's (one package name per line, split
+          # on purpose).
+          kernel_packages=$(python3 scripts/debian_packages.py packages \
+            --archive raspberrypi initrd-build)
+          # shellcheck disable=SC2086
           if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
-              apt-get install -y --no-install-recommends \
-              linux-image-rpi-2712 raspi-firmware rpi-eeprom \
+              apt-get install -y --no-install-recommends $kernel_packages \
               > "$DIAG/apt-install-kernel.log" 2>&1; then
             echo "kernel/raspi-firmware/rpi-eeprom install failed; tail:" >&2
             tail -n 80 "$DIAG/apt-install-kernel.log" >&2
@@ -611,6 +673,19 @@ jobs:
             sudo find "$SCRATCH/usr/lib/firmware/raspberrypi" -maxdepth 3 >&2 || true
             exit 1
           fi
+          # rpi-eeprom-config (python3) and rpi-eeprom-digest (shell) are
+          # arch-independent, so they run directly under the runner's own
+          # interpreter/shell -- no chroot needed -- but they must be THIS
+          # SAME pinned rpi-eeprom package's copy, never installed on the
+          # runner itself (which has neither; that is why the later content
+          # check below greps pieeprom.upd's raw bytes instead of parsing it).
+          rpi_eeprom_config=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-config' | head -n1)
+          rpi_eeprom_digest=$(sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-digest' | head -n1)
+          if [ -z "$rpi_eeprom_config" ] || [ -z "$rpi_eeprom_digest" ]; then
+            echo "rpi-eeprom-config/rpi-eeprom-digest not found under $SCRATCH/usr/bin" >&2
+            sudo find "$SCRATCH/usr/bin" -maxdepth 1 -name 'rpi-eeprom-*' >&2 || true
+            exit 1
+          fi
           echo "kernel_img=$kernel_img"       >> "$GITHUB_OUTPUT"
           echo "initrd=$SCRATCH/boot/initrd.img" >> "$GITHUB_OUTPUT"
           echo "dtb=$dtb"                       >> "$GITHUB_OUTPUT"
@@ -632,6 +707,9 @@ jobs:
           sudo cp "$SCRATCH/boot/initrd.img" "$KOUT/initrd.img"
           sudo cp "$dtb" "$KOUT/dtb"
           sudo cp "$eeprom_image" "$KOUT/pieeprom.bin"
+          sudo cp "$rpi_eeprom_config" "$KOUT/rpi-eeprom-config"
+          sudo cp "$rpi_eeprom_digest" "$KOUT/rpi-eeprom-digest"
+          sudo chmod 0755 "$KOUT/rpi-eeprom-config" "$KOUT/rpi-eeprom-digest"
           sudo cp "$kernel_config" "$KOUT/kernel-config"
           printf '%s\n' "$python_libdir" | sudo tee "$KOUT/python-libdir"
           if [ -n "$overlays_dir" ]; then
@@ -687,6 +765,8 @@ jobs:
             --snapshot-epoch "$DEBIAN_SNAPSHOT_EPOCH" \
             --dtb "$KOUT/dtb" \
             --eeprom-image "$KOUT/pieeprom.bin" \
+            --rpi-eeprom-config "$KOUT/rpi-eeprom-config" \
+            --rpi-eeprom-digest "$KOUT/rpi-eeprom-digest" \
             $overlay_arg \
             --squashfs "$squashfs" \
             --output "$BUNDLE" \
@@ -710,12 +790,13 @@ jobs:
             [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
           done
 
-          # squashfs under the release size ceiling (MAX_ROOTFS_BYTES, 1 GiB;
-          # contracts/release.py). Hardcoded here to avoid importing python into
-          # a shell assertion; kept in sync with that constant by comment.
-          max=1073741824
+          # squashfs under the release size ceiling, read from the constant
+          # stage 1 enforces (contracts/release.py, stdlib only). The base
+          # carries the Player's whole platform, so this is the number to
+          # watch.
+          max=$(python3 -c 'from contracts.release import MAX_ROOTFS_BYTES; print(MAX_ROOTFS_BYTES)')
           sq_bytes=$(stat -c %s "$BUNDLE/photo-wall-base.squashfs")
-          echo "squashfs size: $sq_bytes bytes (ceiling $max)"
+          echo "squashfs size: $sq_bytes bytes (MAX_ROOTFS_BYTES $max)"
           [ "$sq_bytes" -gt 0 ] && [ "$sq_bytes" -lt "$max" ] \
             || violation "squashfs size $sq_bytes not in (0, $max)"
 
