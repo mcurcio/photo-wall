@@ -102,8 +102,10 @@ PACKAGE_SECONDS: Final = 120.0
 # root never browses.
 DISCOVERY_SECONDS: Final = 3.0
 # `dpkg --install` (subprocess timeout): the Player .deb is a pure unpack plus a postinst that
-# creates the `wall` user.
-INSTALL_SECONDS: Final = 60.0
+# creates the `wall` user. Unmeasured on a Pi 5 and deliberately generous until it is: a bound
+# that is too short breaks provisioning outright, while a generous one only slows detection of a
+# hung dpkg. Tighten once a real Pi 5 install time is measured.
+INSTALL_SECONDS: Final = 300.0
 # `systemctl start` (subprocess timeout) waits for the Player's READY=1 (Type=notify).
 # photo-wall-player.service sets no TimeoutStartSec, so systemd fails that start itself after its
 # DefaultTimeoutStartSec, 90 s: waiting longer here would wait on a start systemd gave up on.

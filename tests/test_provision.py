@@ -112,15 +112,18 @@ class Recorder:
 
 class Dpkg:
     """subprocess.run as install_package calls it: records each call and what the temp file
-    held (and its mode) while dpkg ran; `fail` makes it exit non-zero."""
+    held (and its mode) while dpkg ran; `fail` makes it exit non-zero, `hang` makes it raise
+    subprocess.TimeoutExpired instead (outliving INSTALL_SECONDS)."""
 
-    def __init__(self, *, fail=False):
-        self.calls, self.seen, self.fail = [], [], fail
+    def __init__(self, *, fail=False, hang=False):
+        self.calls, self.seen, self.fail, self.hang = [], [], fail, hang
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         deb = Path(argv[-1])
         self.seen.append((deb.read_bytes(), stat.S_IMODE(deb.stat().st_mode)))
+        if self.hang:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
         if self.fail:
             raise subprocess.CalledProcessError(1, argv)
 
@@ -430,6 +433,20 @@ def test_a_failed_dpkg_escapes_run(monkeypatch):
     dpkg, sleeps = Dpkg(fail=True), Sleeps()
     monkeypatch.setattr("appliance.provision.subprocess.run", dpkg)
     with pytest.raises(subprocess.CalledProcessError) as raised:
+        run(bootstrapper(gateway(), install=install_package, write_handoff=never_called,
+                         start_unit=never_called, sleep=sleeps), 3)
+    assert raised.value.cmd[:2] == ["dpkg", "--install"]
+    assert dpkg.seen == [(BODY, 0o600)] and not Path(raised.value.cmd[-1]).exists()
+    assert sleeps.calls == []
+
+
+def test_a_hung_dpkg_escapes_run_the_same_way(monkeypatch):
+    """The real install_package inside Bootstrapper.run: a dpkg that outlives INSTALL_SECONDS
+    (subprocess.TimeoutExpired) is handled exactly like the non-zero exit above -- not retried
+    in-process; it leaves for the unit's start limit."""
+    dpkg, sleeps = Dpkg(hang=True), Sleeps()
+    monkeypatch.setattr("appliance.provision.subprocess.run", dpkg)
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
         run(bootstrapper(gateway(), install=install_package, write_handoff=never_called,
                          start_unit=never_called, sleep=sleeps), 3)
     assert raised.value.cmd[:2] == ["dpkg", "--install"]
