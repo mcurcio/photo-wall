@@ -15,6 +15,7 @@ Every assertion is BEHAVIORAL — role/text/visible state — and locates Player
 Frames by identity/label, never by SVG coordinates or DOM structure (design §1c).
 """
 
+import json
 import os
 import re
 
@@ -266,6 +267,17 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
         ).to_be_visible()
         assert registry.inventory().frames[0].player_id is None
 
+        # The attempt spent the stale choice: nothing is checked and Bind is disabled.
+        # Choosing again captures the live generation (2), and that bind succeeds.
+        option = _option(inspector, identity["player_id"])
+        expect(option).not_to_be_checked()
+        bind_button = inspector.get_by_role("button", name="Bind to stale-1", exact=True)
+        expect(bind_button).to_be_disabled()
+        option.check()
+        bind_button.click()
+        expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
+        assert registry.inventory().frames[0].player_id == identity["player_id"]
+
 
 def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, registry):
     # The tracer (slice 2 §10): a two-output Player has HDMI-A-1 bound; the operator
@@ -508,6 +520,22 @@ def test_an_unbind_that_gets_no_answer_reads_outcome_unknown(page, registry):
         expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
 
 
+def test_an_unbind_answered_by_a_gateway_error_reads_outcome_unknown(page, registry):
+    # A 5xx from Central or a gateway says nothing about whether the write applied.
+    _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _inspector, dialog = _open_unbind(page)
+        page.route("**/v1/operator/frames/*/binding", lambda route: route.fulfill(
+            status=502, content_type="text/html", body="<h1>Bad Gateway</h1>")
+            if route.request.method == "DELETE" else route.continue_())
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Central did not answer. Check this after the next refresh.")
+        expect(dialog.get_by_role("alert")).to_have_count(0)
+        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+
+
 def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
     _bound(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -560,7 +588,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
         pending = page.get_by_role("group", name="Pending players", exact=True)
-        expect(pending).to_contain_text(f"Serial {SERIAL} · Netboot seen, no image served yet")
+        expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
 
 
 def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
@@ -572,6 +600,40 @@ def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
         expect(pending).to_contain_text("No netboot record")
         # Without a serial the handle is the Player id's hash suffix.
         expect(_option(_binding_facet(page, "boot-2"), identity["player_id"])).to_be_visible()
+
+
+OLD, NEW = "v1.4.2", "v1.5.0"
+
+
+@pytest.mark.parametrize(("outcome", "served", "good", "failed", "label"), [
+    # healthy: netboot_base writes known_good = last_served with it.
+    ("healthy", OLD, OLD, None, f"Last netboot healthy on {OLD}"),
+    ("healthy", OLD, OLD, NEW, f"Rolled back from {NEW} · last netboot healthy on {OLD}"),
+    # pending: record_served moved last_served and left known_good behind.
+    ("pending", NEW, OLD, None, f"Netboot served {NEW}, not yet healthy · last healthy on {OLD}"),
+    ("pending", NEW, None, None, f"Netboot served {NEW}, not yet healthy"),
+    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, not yet healthy"),
+    # fenced with no known-good: the failed tag is served again (boot_policy.py).
+    ("pending", NEW, None, NEW,
+     f"Retrying {NEW} after a failed netboot · no healthy version to roll back to"),
+    ("failed", NEW, OLD, NEW, f"Last netboot of {NEW} failed · last healthy on {OLD}"),
+    ("failed", NEW, None, NEW, f"Last netboot of {NEW} failed · no healthy version to roll back to"),
+])
+def test_the_boot_outcome_names_each_tag_by_what_central_recorded(
+        page, registry, outcome, served, good, failed, label):
+    player_id = _netbooted_player(registry)
+    row = {"device_id": device_id_for_serial(SERIAL), "serial": SERIAL, "attached_tag": None,
+           "known_good_tag": good, "last_served_tag": served, "boot_outcome": outcome,
+           "failed_tag": failed}
+    page.route(NETBOOT, lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body=json.dumps({"frontier": NEW, "devices": [row]})))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        pending = _group(page, "Pending players")
+        expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        expect(pending.get_by_text(f"Reported serial {SERIAL} · {label}", exact=True)
+               ).to_be_visible()
 
 
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
@@ -717,6 +779,22 @@ def test_a_roster_bind_carries_the_generation_captured_on_selection(page, regist
         outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
         expect(outputs.get_by_role("alert")).to_contain_text("This Frame changed")
         assert registry.inventory().frames[0].player_id is None
+
+
+def test_a_roster_pick_whose_frame_is_bound_elsewhere_is_dropped_and_announced(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    other, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "lobby-left")
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _frame_select(page, player_id).select_option("lobby-left")
+        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0)
+        _poll(page)
+        roster = page.get_by_role("region", name="Equipment", exact=True)
+        expect(roster.get_by_role("status")).to_have_text(
+            "Frame lobby-left is no longer available. Choose another frame.")
 
 
 def test_unbind_all_lists_each_frame_and_its_live_runs(page, registry):

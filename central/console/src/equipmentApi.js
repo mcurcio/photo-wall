@@ -11,9 +11,10 @@ import { apiWrite } from "./apiWrite.js";
  *               unknown_frame).
  *  - "changed": 409 binding_generation_conflict — the Frame moved since the
  *               operator captured its generation. Never resent.
- *  - "refused": any other non-2xx, with the reason in plain words.
- *  - "unknown": the request threw (timeout or network error): Central may or
- *               may not have applied it.
+ *  - "refused": any other 4xx, with the reason in plain words.
+ *  - "unknown": the request threw (timeout or network error) or answered 5xx
+ *               (a gateway or server failure): Central may or may not have
+ *               applied it.
  *
  * Wrap each call in `useMutate()` at the call site so Plane A refreshes once
  * the write completes.
@@ -24,6 +25,11 @@ import { apiWrite } from "./apiWrite.js";
 
 export const UNKNOWN_MESSAGE = "Central did not answer. Check this after the next refresh.";
 
+// The one wording of the "changed" and "already" outcomes in the confirmation
+// dialogs (ConfirmAction.jsx); bind words its own conflict in BIND_MESSAGES.
+export const CHANGED_MESSAGE = "Changed since you opened this. Reopen to review.";
+export const ALREADY_MESSAGE = "Already done.";
+
 const GONE_PLAYER = "That Player is no longer available. Choose another.";
 
 const BIND_MESSAGES = {
@@ -32,12 +38,6 @@ const BIND_MESSAGES = {
   unknown_or_retired_player: GONE_PLAYER,
   unknown_output: GONE_PLAYER,
   unknown_frame: "This frame no longer exists.",
-};
-
-const UNBIND_MESSAGES = {
-  binding_generation_conflict: "Changed since you opened this. Reopen to review.",
-  not_bound: "Already done.",
-  unknown_frame: "Already done.",
 };
 
 const RETIRE_MESSAGES = {
@@ -65,6 +65,9 @@ async function send(path, init, messages, already, fallback) {
   }
   if (result.ok) {
     return { outcome: "done", code: null, message: null };
+  }
+  if (result.status >= 500) {
+    return { outcome: "unknown", code: null, message: UNKNOWN_MESSAGE };
   }
   const code = result.error ?? String(result.status);
   const outcome =
@@ -111,7 +114,7 @@ export function unbind(frameId, expectedGeneration) {
   return send(
     `/v1/operator/frames/${frameId}/binding`,
     { method: "DELETE", body: { expected_generation: expectedGeneration } },
-    UNBIND_MESSAGES,
+    {}, // its conflict and 404s are "changed" and "already", worded by the dialog
     new Set(["not_bound", "unknown_frame"]),
     "Unbind failed — please retry.",
   );

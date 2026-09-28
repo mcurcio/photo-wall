@@ -1,10 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import {
-  ConfirmAction,
-  retireRequest,
-  unbindAllRequest,
-} from "./ConfirmAction.jsx";
+import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind } from "./equipmentApi.js";
 import {
   BOOT_FACTS_UNAVAILABLE,
@@ -66,12 +62,20 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
   const [picks, setPicks] = useState(() => new Map());
   const [messages, setMessages] = useState(() => new Map());
   const [busy, setBusy] = useState(null);
-  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
-  const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [focusRetired, setFocusRetired] = useState(false);
   const [navigateTo, setNavigateTo] = useState(/** @type {string|null} */ (null));
-  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
   const headingRefs = useRef(/** @type {Record<string, HTMLElement|null>} */ ({}));
+  // The one dialog. After a retire the Retired group opens and takes focus;
+  // when the opener is gone, the Pending heading does.
+  const { open: openDialog, setStatus, confirmation } = useConfirm(
+    () => headingRefs.current.pending?.focus(),
+    (result, request) => {
+      if (request.key.startsWith("retire:")) {
+        setOpen((current) => ({ ...current, retired: true }));
+        setFocusRetired(true);
+      }
+    },
+  );
 
   const frames = snapshot?.inventory?.frames ?? [];
   const unbound = frames
@@ -79,11 +83,20 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const players = playersInOrder(snapshot);
 
-  // A pick whose Frame is no longer unbound is dropped by the next snapshot.
+  // A pick whose Frame is no longer unbound is dropped by the next snapshot and
+  // announced, as the Binding facet does — except the one whose bind is in
+  // flight: its own refresh shows the Frame bound.
   useEffect(() => {
     const available = new Set(unbound.map((frame) => frame.id));
-    if ([...picks.values()].some((pick) => !available.has(pick.frameId))) {
-      setPicks(new Map([...picks].filter(([, pick]) => available.has(pick.frameId))));
+    const gone = [...picks].filter(([, pick]) => !available.has(pick.frameId));
+    if (gone.length === 0) {
+      return;
+    }
+    setPicks(new Map([...picks].filter(([, pick]) => available.has(pick.frameId))));
+    const vanished = gone.filter(([key]) => key !== busy).map(([, pick]) => pick.frameId);
+    if (vanished.length > 0) {
+      const named = vanished.length === 1 ? `Frame ${vanished[0]} is` : `Frames ${vanished.join(", ")} are`;
+      setStatus(`${named} no longer available. Choose another frame.`);
     }
   }, [snapshot]);
 
@@ -135,28 +148,6 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
       setNavigateTo(chosen.frameId);
     } else {
       setKeyed(setMessages, key, result.message);
-    }
-  };
-
-  const openDialog = (event, request) => {
-    openerRef.current = event.currentTarget;
-    setStatus(null);
-    setConfirm(request);
-  };
-
-  const onConfirmClosed = (result) => {
-    const retiring = confirm?.key.startsWith("retire:");
-    setConfirm(null);
-    if (result?.state === "done") {
-      setStatus(result.message);
-      if (retiring) {
-        setOpen((current) => ({ ...current, retired: true }));
-        setFocusRetired(true);
-      }
-    } else if (openerRef.current?.isConnected) {
-      openerRef.current.focus();
-    } else {
-      headingRefs.current.pending?.focus();
     }
   };
 
@@ -240,7 +231,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
         {expanded && (
           <div id={detailsId} className="roster__details">
             <p className="roster__boot">
-              {[serial === null ? null : `Serial ${serial}`, boot].filter(Boolean).join(" · ")}
+              {[serial === null ? null : `Reported serial ${serial}`, boot].filter(Boolean).join(" · ")}
             </p>
             {outputs.length === 0 ? (
               <p className="roster__empty">No outputs reported</p>
@@ -326,12 +317,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
           </section>
         );
       })}
-      <p className="roster__status-line" role="status">
-        {status}
-      </p>
-      {confirm !== null && (
-        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
-      )}
+      {confirmation("roster__status-line")}
     </section>
   );
 }

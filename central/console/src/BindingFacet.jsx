@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { ConfirmAction, unbindRequest } from "./ConfirmAction.jsx";
+import { unbindRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind } from "./equipmentApi.js";
 import {
   BOOT_FACTS_UNAVAILABLE,
@@ -57,13 +57,18 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
       null
     ),
   );
-  const [announcement, setAnnouncement] = useState(/** @type {string|null} */ (null));
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
   const [focusSuccessor, setFocusSuccessor] = useState(false);
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
   const chooserRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-  const unbindRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  // The unbind dialog; its status line also announces a vanished choice.
+  const { open, setStatus: setAnnouncement, confirmation } = useConfirm(
+    () => setFocusSuccessor(true),
+    () => {
+      setReviewRequired(false);
+      setFocusSuccessor(true);
+    },
+  );
 
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
@@ -123,36 +128,23 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
       bind(frameId, chosen.playerId, chosen.outputId, chosen.generation),
     );
     setBusy(false);
+    // One policy for the bind verb (as the Equipment roster): an attempt spends
+    // the choice and its captured generation, whatever the outcome; the
+    // operator chooses again against the fresh snapshot.
+    setChoice(null);
     if (result.outcome === "done") {
       setReviewRequired(true);
       return;
     }
-    if (result.code === "output_already_bound" || result.code?.startsWith("unknown_")) {
-      setChoice(null);
-    }
     setMessage(result.message);
   };
 
-  const openUnbind = () => {
+  const openUnbind = (event) => {
     if (!bound) {
       return;
     }
     setMessage(null);
-    setAnnouncement(null);
-    setConfirm(unbindRequest(snapshot, bootFacts, frameId));
-  };
-
-  const onConfirmClosed = (result) => {
-    setConfirm(null);
-    if (result?.state === "done") {
-      setReviewRequired(false);
-      setAnnouncement(result.message);
-      setFocusSuccessor(true);
-    } else if (unbindRef.current?.isConnected) {
-      unbindRef.current.focus();
-    } else {
-      setFocusSuccessor(true);
-    }
+    open(event, unbindRequest(snapshot, bootFacts, frameId));
   };
 
   return (
@@ -192,17 +184,9 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
               </button>
             </div>
           )}
-          <button
-            ref={unbindRef}
-            type="button"
-            className="facet__unbind"
-            onClick={openUnbind}
-          >
+          <button type="button" className="facet__unbind" onClick={openUnbind}>
             Unbind
           </button>
-          <p className="chooser__status" role="status">
-            {announcement}
-          </p>
         </>
       ) : (
         <>
@@ -254,9 +238,6 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
               })
             )}
           </div>
-          <p className="chooser__status" role="status">
-            {announcement}
-          </p>
           <button
             type="button"
             className="facet__bind"
@@ -268,13 +249,11 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
         </>
       )}
 
+      {confirmation("chooser__status")}
       {message != null && (
         <p className="facet__conflict" role="alert">
           {message}
         </p>
-      )}
-      {confirm !== null && (
-        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
       )}
     </div>
   );

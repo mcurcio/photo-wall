@@ -7,7 +7,7 @@ export { isBound };
  * Wall health: the ONE classifier (console pass 2, slice 1 — design
  * docs/operator-console-ux-pass2.md §4). Every surface that says whether a frame
  * or Player is alright — the plan tile, the Inspector header, Commissioning,
- * Binding, the Equipment rail, the Unplaced tray, the Showrunner frame list and
+ * Binding, the Equipment roster, the Unplaced tray, the Showrunner frame list and
  * the attention strip — reads it through here, so the states, their precedence
  * and their wording live in exactly one place. Equipment standing (slice 2,
  * docs/operator-console-ux-pass2-onboarding.md §4) lives here too: a Player's
@@ -388,10 +388,24 @@ export function playerSerial(snapshot, bootFacts, playerId) {
 export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
 
 /**
- * A device's netboot outcome in plain words, from the boot facts (bootFacts.js):
- * rolled back (a sticky `failed_tag`), last healthy on a tag, served but not yet
- * healthy, or no netboot record at all. Null while the first read is pending;
- * "Boot records unavailable" when no read has succeeded.
+ * A device's netboot outcome in plain words, from the boot facts (bootFacts.js),
+ * branched on `boot_outcome` first, as Central writes it:
+ *
+ *  - none:    the row exists (created empty at the netboot seam) but no image was
+ *             ever served (`record_served` is the only writer of a first outcome).
+ *  - healthy: a healthy report for the tag last served (netboot_base.py writes
+ *             `known_good_tag = last_served_tag` with it). A fence still standing
+ *             (`failed_tag`) means this healthy boot was the rollback.
+ *  - pending: `last_served_tag` was served and no health report has confirmed it
+ *             yet (`record_served`); the known-good is an older tag, not this one.
+ *             With a fence on another tag it is the rollback boot; with a fence on
+ *             the served tag itself there was no known-good to fall back to and
+ *             the failed tag is being served again (boot_policy.py: it boot-loops
+ *             until an operator pins).
+ *  - failed:  the last served boot never reported healthy (DETECT or the sweep).
+ *
+ * Null while the first read is pending; "Boot records unavailable" when no read
+ * has succeeded.
  *
  * @param {{devices: Map<string, object>, loaded: boolean, unavailable: boolean}|null} bootFacts
  * @param {string} deviceId the Player's `device_id`
@@ -405,17 +419,28 @@ export function bootOutcomeLabel(bootFacts, deviceId) {
   if (row === undefined) {
     return "No netboot record";
   }
-  const healthy = row.known_good_tag ? `last netboot healthy on ${row.known_good_tag}` : null;
-  if (row.failed_tag) {
-    return `Rolled back from ${row.failed_tag}${healthy ? ` · ${healthy}` : ""}`;
+  const { last_served_tag: served, known_good_tag: good, failed_tag: failed } = row;
+  const fallback = good ? `last healthy on ${good}` : "no healthy version to roll back to";
+  switch (row.boot_outcome) {
+    case "healthy":
+      return failed
+        ? `Rolled back from ${failed} · last netboot healthy on ${served}`
+        : `Last netboot healthy on ${served}`;
+    case "pending":
+      if (failed && failed !== served) {
+        return `Rolled back from ${failed} · netboot served ${served}, not yet healthy`;
+      }
+      if (failed) {
+        return `Retrying ${served} after a failed netboot · ${fallback}`;
+      }
+      return good && good !== served
+        ? `Netboot served ${served}, not yet healthy · ${fallback}`
+        : `Netboot served ${served}, not yet healthy`;
+    case "failed":
+      return `Last netboot of ${served} failed · ${fallback}`;
+    default:
+      return "Netboot seen, no image served yet";
   }
-  if (healthy) {
-    return healthy.charAt(0).toUpperCase() + healthy.slice(1);
-  }
-  if (row.last_served_tag) {
-    return `Last netboot served ${row.last_served_tag}, not yet healthy`;
-  }
-  return "Netboot seen, no image served yet";
 }
 
 /**

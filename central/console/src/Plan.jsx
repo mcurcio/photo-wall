@@ -1,6 +1,6 @@
 import React, { useId, useRef, useState } from "react";
 
-import { ConfirmAction, deleteFrameRequest } from "./ConfirmAction.jsx";
+import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
 import { createFrame, dropFromTray, FRAME_ID_PATTERN, moveFrame } from "./framesApi.js";
 import { frameHealth } from "./health.js";
 import { nowShowing } from "./join.js";
@@ -103,11 +103,13 @@ export function Plan({
   const svgRef = useRef(null);
   const ownRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const planRef = regionRef ?? ownRegionRef;
-  // The open delete confirmation (captured at open), its opener, and the last
-  // done status line.
-  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
-  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
-  const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  // The delete confirmation: after a delete, or when its opener is gone, the
+  // plan region takes focus.
+  const focusPlan = () => planRef.current?.focus();
+  const { open, confirmation } = useConfirm(focusPlan, () => {
+    onDeleted?.();
+    focusPlan();
+  });
   // Each tile's status readout is clipped to its rect, so no text leaves the tile.
   const clipPrefix = "plan-clip" + useId().replace(/[^A-Za-z0-9_-]/g, "");
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
@@ -307,22 +309,7 @@ export function Plan({
     if (selection == null) {
       return;
     }
-    openerRef.current = event.currentTarget;
-    setStatus(null);
-    setConfirm(deleteFrameRequest(snapshot, selection));
-  };
-
-  const onConfirmClosed = (result) => {
-    setConfirm(null);
-    if (result?.state === "done") {
-      setStatus(result.message);
-      onDeleted?.();
-      planRef.current?.focus();
-    } else if (openerRef.current?.isConnected) {
-      openerRef.current.focus();
-    } else {
-      planRef.current?.focus();
-    }
+    open(event, deleteFrameRequest(snapshot, selection));
   };
 
   const draftRect = draft;
@@ -523,12 +510,7 @@ export function Plan({
           </button>
         </div>
       )}
-      <p className="plan__status-line" role="status">
-        {status}
-      </p>
-      {confirm !== null && (
-        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
-      )}
+      {confirmation("plan__status-line")}
     </section>
   );
 }

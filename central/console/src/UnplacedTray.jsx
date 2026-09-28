@@ -1,6 +1,6 @@
-import React, { useRef, useState } from "react";
+import React from "react";
 
-import { ConfirmAction, deleteFrameRequest } from "./ConfirmAction.jsx";
+import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
 import { frameHealth } from "./health.js";
 import { project } from "./projection.js";
 
@@ -37,9 +37,9 @@ import { project } from "./projection.js";
  *          onDeleted?: (frameId: string) => void}} props
  */
 export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
-  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
-  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
-  const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  const { open, confirmation } = useConfirm(null, (result, request) =>
+    onDeleted?.(request.frameId),
+  );
 
   const frames = snapshot?.inventory?.frames ?? [];
   const surfaces = [...new Set(frames.map((frame) => frame.surface_id))];
@@ -49,22 +49,8 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
     (surfaceId) => project(frames, surfaceId, { width: 1, height: 1 }).unplaced,
   );
 
-  const onDelete = (event, frameId) => {
-    openerRef.current = event.currentTarget;
-    setStatus(null);
-    setConfirm({ ...deleteFrameRequest(snapshot, frameId), frameId });
-  };
-
-  const onConfirmClosed = (result) => {
-    const frameId = confirm?.frameId;
-    setConfirm(null);
-    if (result?.state === "done") {
-      setStatus(result.message);
-      onDeleted?.(frameId);
-    } else {
-      openerRef.current?.focus();
-    }
-  };
+  const onDelete = (event, frameId) =>
+    open(event, { ...deleteFrameRequest(snapshot, frameId), frameId });
 
   return (
     <section className="tray" role="group" aria-label="Unplaced frames">
@@ -100,12 +86,7 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
           })}
         </ul>
       )}
-      <p className="tray__status-line" role="status">
-        {status}
-      </p>
-      {confirm !== null && (
-        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
-      )}
+      {confirmation("tray__status-line")}
     </section>
   );
 }

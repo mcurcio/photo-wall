@@ -1,6 +1,13 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { retirePlayer, unbind, unbindSequence, UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import {
+  ALREADY_MESSAGE,
+  CHANGED_MESSAGE,
+  retirePlayer,
+  unbind,
+  unbindSequence,
+  UNKNOWN_MESSAGE,
+} from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
@@ -28,8 +35,9 @@ import { useMutate } from "./useMutate.js";
  * closes the dialog anyway — so the dialog also carries `closedby="none"` while
  * in flight, and a `close` that still arrives re-opens it with its state kept.
  *
- * Each surface owns ONE of these at its top level, keyed by target and never
- * inside a list row, so a poll that regroups a Player cannot unmount it.
+ * Each surface owns ONE of these at its top level through {@link useConfirm},
+ * keyed by target and never inside a list row, so a poll that regroups a
+ * Player cannot unmount it.
  *
  * @typedef {"done"|"refused"|"changed"|"already"|"unknown"|"summary"} ConfirmState
  * @typedef {{frameId: string, outcome: string, label: string}} FrameResult
@@ -211,10 +219,60 @@ export function ConfirmAction({ request, onClose }) {
   );
 }
 
-// --- The verbs (slice 2 §7 table): what each says, captured when it opens.
+/**
+ * The owner's side of the one confirmation pattern: the open request, the
+ * opener, the done status line, and where focus goes when the dialog closes.
+ * Every surface that owns a ConfirmAction uses this, so the close policy is
+ * written once: done -> the status line states the result and `onDone` runs
+ * (the owner's successor); anything else -> focus returns to the opener, or,
+ * when a poll removed it, `successor` moves it on.
+ *
+ * `confirmation(statusClass)` renders the role=status line and the dialog; the
+ * owner places it once at its top level, never inside a list row.
+ *
+ * @param {(() => void)|null} successor moves focus when the opener is gone
+ * @param {((result: ConfirmResult, request: ConfirmRequest) => void)|null} [onDone]
+ * @returns {{open: (event: {currentTarget: Element}|null, request: ConfirmRequest) => void,
+ *            setStatus: (status: string|null) => void,
+ *            confirmation: (statusClass: string) => React.ReactNode}}
+ */
+export function useConfirm(successor, onDone = null) {
+  const [request, setRequest] = useState(/** @type {ConfirmRequest|null} */ (null));
+  const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
 
-const CHANGED_MESSAGE = "Changed since you opened this. Reopen to review.";
-const ALREADY_MESSAGE = "Already done.";
+  const open = (event, next) => {
+    openerRef.current = event?.currentTarget ?? null;
+    setStatus(null);
+    setRequest(next);
+  };
+
+  const onClosed = (result) => {
+    const closed = request;
+    setRequest(null);
+    if (result?.state === "done") {
+      setStatus(result.message);
+      onDone?.(result, closed);
+    } else if (openerRef.current?.isConnected) {
+      openerRef.current.focus();
+    } else {
+      successor?.();
+    }
+  };
+
+  const confirmation = (statusClass) => (
+    <>
+      <p className={statusClass} role="status">
+        {status}
+      </p>
+      {request !== null && <ConfirmAction key={request.key} request={request} onClose={onClosed} />}
+    </>
+  );
+
+  return { open, setStatus, confirmation };
+}
+
+// --- The verbs (slice 2 §7 table): what each says, captured when it opens.
 
 /**
  * An equipmentApi result as the dialog's result; `done` carries the status line.
