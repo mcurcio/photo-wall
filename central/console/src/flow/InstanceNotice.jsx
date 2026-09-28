@@ -90,6 +90,33 @@ export function DraftBar({ dirty, draftName, newLabel, newRef, onNew, onResume, 
 }
 
 /**
+ * A Scene handed over to a draft that keeps its own (flow/useSceneHandOver.js;
+ * presentational): "Your unsaved draft <drafts> Scene X." and "<action> Scene Y
+ * instead" (`onTake`). Nothing renders without an offer.
+ *
+ * @param {{offered: string|null, current: string, drafts: string, action: string,
+ *          onTake: () => void}} props `drafts` says what the draft does with its Scene
+ *   ("schedules", "shows"); `action` is the verb that takes the offer ("Schedule", "Show")
+ */
+export function OfferedScene({ offered, current, drafts, action, onTake }) {
+  if (offered === null) {
+    return null;
+  }
+  return (
+    <div className="notice notice--warn">
+      <p>
+        {current === ""
+          ? "Your unsaved draft has no Scene yet."
+          : `Your unsaved draft ${drafts} Scene ${current}.`}
+      </p>
+      <button type="button" onClick={onTake}>
+        {`${action} Scene ${offered} instead`}
+      </button>
+    </div>
+  );
+}
+
+/**
  * A flow running inline for another (flow/handOff.js; presentational): "This <noun> is
  * for <label>. Saving it takes you back there, with it chosen." and "Discard and return
  * to <label>" (`onDiscard`). Nothing renders without a pending hand-off. Not a live

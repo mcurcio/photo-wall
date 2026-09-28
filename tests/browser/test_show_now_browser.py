@@ -366,3 +366,61 @@ def test_a_protecting_scene_below_a_covering_run_says_central_will_refuse_it(pag
         expect(_outcome(page)).to_have_text(
             "Not started: this Scene protects frames that evening's Run (priority 5) covers; "
             "use priority at least 5.")
+
+
+def _show_scene_card(page, scene_id):
+    """A Scene card's "Show now", from the Scenes page."""
+    go(page, "scenes")
+    page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+        "button", name=f"Show Scene {scene_id} now", exact=True).click()
+    expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
+
+
+def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
+    """A card's "Show now" for another Scene keeps a changed draft and offers the Scene
+    instead, as the Schedule flow does (one shared hand-over rule)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = show_now(page, SCENE_ID, priority=2, submit=False)
+        _show_scene_card(page, "elsewhere")
+        assert _hash(page) == "#/now/show/scene"
+        scene = form.get_by_label("Scene to activate", exact=True)
+        expect(scene).to_have_value(SCENE_ID)
+        expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
+        form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
+        expect(scene).to_have_value("elsewhere")
+        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+               ).to_have_count(0)
+
+
+def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
+    """A clean draft whose last activation's outcome is unknown keeps its Scene and its key
+    when a card's "Show now" names another Scene (the retry must not start twice); the
+    Scene is offered instead. Mutation probe: follow the card while the outcome is
+    unknown."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        sent = _keys(page)
+        answer_first(page, ACTIVATIONS, lambda route: route.fulfill(
+            status=500, content_type="application/json", body='{"error": "internal"}'))
+        form = show_now(page, SCENE_ID, submit=False)
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(UNKNOWN)
+
+        _show_scene_card(page, "elsewhere")
+        assert _hash(page) == "#/now/show/scene"
+        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
+        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+               ).to_be_visible()
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        assert len(sent) == 2 and len(set(sent)) == 1, sent

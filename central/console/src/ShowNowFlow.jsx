@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useId, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { activationProblems } from "./authoring.js";
@@ -7,9 +7,11 @@ import { PriorityField, useProblems } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
+import { OfferedScene } from "./flow/InstanceNotice.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   editActivation,
@@ -55,7 +57,9 @@ const UNKNOWN_ACTIVATION =
  * operator makes (`editActivation`); an unknown outcome keeps it, so a retry cannot
  * start the Scene twice; a known outcome ends the flow (`finish`). The Scene step is
  * prefilled from the shell's `recentSceneId`: a clean draft follows it when it changes
- * (a Scene card's or the Scene flow's "Show now"); a dirty one is never replaced.
+ * (a Scene card's or the Scene flow's "Show now"); a dirty one, or one whose outcome is
+ * unknown, is kept, and its Scene step offers the handed-over Scene instead (the kit's
+ * `useSceneHandOver`, shared with the Schedule flow).
  *
  * PRIORITY defaults to showState.js `coveringPriority` of the Scene's frames, read from
  * the current snapshot until the operator sets one under Advanced. Review always shows
@@ -121,25 +125,24 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     problemList,
     problems,
     confirm,
-    onOpened: () => setOutcome(null),
+    onOpened: () => {
+      setOutcome(null);
+      handOver.clear();
+    },
   });
   const { step, focus } = flow;
 
-  // A clean draft follows the Scene the operator last saved or picked; a dirty one, or
-  // one whose outcome is unknown (its key must be kept for the retry), is never replaced.
-  useEffect(() => {
-    if (
-      draft.key !== null &&
-      !draft.dirty &&
-      !unknown &&
-      recentSceneId !== null &&
-      definitions[recentSceneId] !== undefined &&
-      value.sceneId !== recentSceneId
-    ) {
-      draft.reseed();
-    }
-    // Only a new recent Scene asks for this; the rest is read as it is then.
-  }, [recentSceneId]);
+  // A clean draft follows the Scene the operator last saved or picked, while it is
+  // stored; a dirty one, or one whose outcome is unknown (its key must be kept for the
+  // retry), is kept and offered it instead.
+  const handOver = useSceneHandOver({
+    recentSceneId,
+    draft,
+    sceneId: value.sceneId,
+    held: unknown,
+    accepts: (sceneId) => definitions[sceneId] !== undefined,
+    choose: (sceneId) => edit({ sceneId }, "scene"),
+  });
 
   const edit = (changes, field = null) => {
     draft.patch(editActivation(changes));
@@ -190,7 +193,14 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
   const stepProps = { value, problems, edit, snapshot, frames };
   const views = {
-    scene: () => <SceneStep {...stepProps} definitions={definitions} />,
+    scene: () => (
+      <SceneStep
+        {...stepProps}
+        definitions={definitions}
+        offered={handOver.offered}
+        onTake={handOver.take}
+      />
+    ),
     review: () => (
       <ReviewStep
         {...stepProps}
@@ -255,10 +265,20 @@ function SceneFramesValue({ snapshot, frames }) {
   return frames.length > 0 ? <FrameChips snapshot={snapshot} frameIds={frames} /> : "none";
 }
 
-/** Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. */
-function SceneStep({ value, problems, edit, snapshot, frames, definitions }) {
+/**
+ * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
+ * is a Scene handed over while the draft keeps its own: a button offers it instead.
+ */
+function SceneStep({ value, problems, edit, snapshot, frames, definitions, offered, onTake }) {
   return (
     <>
+      <OfferedScene
+        offered={offered}
+        current={value.sceneId}
+        drafts="shows"
+        action="Show"
+        onTake={onTake}
+      />
       <ScenePicker
         id={problems.idFor("scene")}
         label="Scene to activate"

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
@@ -11,6 +11,7 @@ import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import {
   NEW_PROGRAM_DRAFT,
   programDraftProblems,
@@ -80,7 +81,7 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
  * PREFILL. A new draft's Scene is the shell's `recentSceneId`: the Scene just saved, or
  * picked with a Scene card's "Schedule it". A later hand-over refills a draft the
  * operator has not changed; a changed draft is kept, and its Scene step offers the
- * handed-over Scene instead.
+ * handed-over Scene instead (the kit's `useSceneHandOver`, shared with Show now).
  *
  * THE WRITE (authoring.js owns every rule). One window: ONE `PUT` of `<id>`, "Schedule
  * Program". More: "Add separate windows" sends one `PUT` per window. A partial failure
@@ -113,14 +114,20 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   const [batch, setBatch] = useState(
     /** @type {{draft: object, ids: string[], confirmed: string[]}|null} */ (null),
   );
-  // A Scene handed over while the draft was changed (see PREFILL).
-  const [offered, setOffered] = useState(/** @type {string|null} */ (null));
 
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
   const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+
+  // PREFILL: a Scene handed over after the draft opened (a new draft is seeded with it).
+  const handOver = useSceneHandOver({
+    recentSceneId,
+    draft,
+    sceneId: value.sceneId,
+    choose: (sceneId) => draft.patch({ sceneId }),
+  });
 
   const pending = batch !== null && sameValue(batch.draft, value) ? batch : null;
   const problemList = useMemo(
@@ -158,30 +165,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     confirm,
     onOpened: () => {
       setBatch(null);
-      setOffered(null);
+      handOver.clear();
     },
   });
   const { step, focus } = flow;
-
-  // PREFILL: a Scene handed over after the draft opened (a new draft is seeded with it).
-  const { key: draftKey, dirty, reseed, patch } = draft;
-  const handedRef = useRef(recentSceneId);
-  useEffect(() => {
-    if (handedRef.current === recentSceneId) {
-      return;
-    }
-    handedRef.current = recentSceneId;
-    if (recentSceneId === null || draftKey === null) {
-      return;
-    }
-    if (dirty) {
-      patch((current) => (current.sceneId === "" ? { sceneId: recentSceneId } : null));
-      setOffered(recentSceneId);
-    } else {
-      reseed();
-      setOffered(null);
-    }
-  }, [recentSceneId, draftKey, dirty, patch, reseed]);
 
   // --- The write.
   const put = (programId, startsAt, endsAt) =>
@@ -200,7 +187,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   const stored = (message) => {
     confirm.setStatus(message);
     setBatch(null);
-    setOffered(null);
+    handOver.clear();
     flow.finish(() => savedRef.current);
   };
 
@@ -306,11 +293,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
       <SceneStep
         {...stepProps}
         definitions={definitions}
-        offered={offered}
-        onUseOffered={() => {
-          draft.patch({ sceneId: offered });
-          setOffered(null);
-        }}
+        offered={handOver.offered}
+        onUseOffered={handOver.take}
       />
     ),
     when: () => <WhenStep {...stepProps} advanced={advanced("when")} />,

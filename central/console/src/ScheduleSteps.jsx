@@ -4,6 +4,7 @@ import { draftId, idFromName, MAX_WINDOWS, planWindows, timeZoneName } from "./a
 import { Field, IdField, idNeeded, NameField, PriorityField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
+import { OfferedScene } from "./flow/InstanceNotice.jsx";
 import { separateWindows } from "./scheduleFlowModel.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import { windowLabel } from "./showState.js";
@@ -84,18 +85,13 @@ export function TimeZoneNote() {
 export function SceneStep({ value, patch, problems, definitions, offered, onUseOffered }) {
   return (
     <>
-      {offered !== null && offered !== value.sceneId && (
-        <div className="notice notice--warn">
-          <p>
-            {value.sceneId === ""
-              ? "Your unsaved draft has no Scene yet."
-              : `Your unsaved draft schedules Scene ${value.sceneId}.`}
-          </p>
-          <button type="button" onClick={onUseOffered}>
-            {`Schedule Scene ${offered} instead`}
-          </button>
-        </div>
-      )}
+      <OfferedScene
+        offered={offered}
+        current={value.sceneId}
+        drafts="schedules"
+        action="Schedule"
+        onTake={onUseOffered}
+      />
       <ScenePicker
         id={problems.idFor("scene")}
         label="Scene"
