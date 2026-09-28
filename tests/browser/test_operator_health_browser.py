@@ -274,3 +274,126 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         report_readiness(registry, identity["player_id"])
         page.clock.run_for(5000)
         expect(_tile(page)).to_contain_text("Needs commissioning")
+
+
+# --- The attention strip and navigation (pass 2 §5).
+
+
+def _strip(page):
+    return page.get_by_role("region", name="Wall attention", exact=True)
+
+
+def _open_list(page):
+    _strip(page).get_by_role("button", name="Show frames", exact=True).click()
+    return _strip(page).get_by_role("list", name="Frames needing attention", exact=True)
+
+
+def _seed_attention(registry):
+    """Two silent frames (one also uncommissioned: silence precedes commissioning), one
+    heard frame needing commissioning, one unbound frame, and one ok frame."""
+    silent_a = _bound_frame(registry, "silent-a", x_mm=100, commissioned=False)
+    silent_b = _bound_frame(registry, "silent-b", x_mm=500)
+    for player_id in (silent_a, silent_b):
+        report_readiness(registry, player_id)
+    registry.clock.advance(240)
+    heard = _bound_frame(registry, "to-commission", x_mm=900, commissioned=False)
+    fine = _bound_frame(registry, "all-good", x_mm=1300)
+    for player_id in (heard, fine):
+        report_readiness(registry, player_id)
+    registry.create_frame(FrameCreate(
+        id="no-player", surface_id="wall", x_mm=1700, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+
+
+def test_the_strip_counts_alarms_apart_from_todos(page, registry):
+    _seed_attention(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_strip(page).get_by_role("status")).to_have_text(
+            "2 frames need attention · 2 to set up")
+        entries = _open_list(page).get_by_role("listitem")
+        # Alarms first, then to-dos; each names the frame and states its fact and age.
+        expect(entries).to_have_text([
+            "silent-a — Player silent · last heard 4 min ago",
+            "silent-b — Player silent · last heard 4 min ago",
+            "no-player — Needs a Player",
+            "to-commission — Needs commissioning",
+        ])
+
+
+def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_inspector(
+        page, registry):
+    _seed_attention(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _open_list(page).get_by_role("button", name="to-commission — Needs commissioning").click()
+        inspector = page.get_by_role("region", name="Frame to-commission inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+        expect(inspector.get_by_role("heading", name="Frame to-commission", exact=True)
+               ).to_be_focused()
+
+        _open_list(page).get_by_role(
+            "button", name="silent-a — Player silent · last heard 4 min ago").click()
+        inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+        expect(inspector.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+
+        # Plain selection keeps the open facet (no reset) and never moves focus.
+        page.get_by_role("button", name="Frame all-good", exact=True).click()
+        inspector = page.get_by_role("region", name="Frame all-good inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+        expect(inspector.get_by_role("heading", name="Frame all-good", exact=True)
+               ).not_to_be_focused()
+
+
+def test_showrunner_strip_entries_are_text_not_navigation(page, registry):
+    _seed_attention(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        page.get_by_role("button", name="Showrunner", exact=True).click()
+        entries = _open_list(page)
+        expect(entries).to_contain_text("silent-a — Player silent · last heard 4 min ago")
+        expect(entries.get_by_role("button")).to_have_count(0)
+
+
+def test_a_stalled_scheduler_collapses_silent_frames_into_one_causal_line(page, registry):
+    _seed_attention(registry)
+    page.route("**/healthz", lambda route: route.fulfill(
+        status=503, content_type="application/json",
+        body='{"status": "unavailable", "database": true, "protocol": 1, "scheduler": '
+             '{"enabled": true, "running": true, "status": "stale", "last_tick": null, '
+             '"error": null}}'))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(page.get_by_role("status", name="Central health: scheduler stale")).to_have_text(
+            "Central: scheduler stale")
+        entries = _open_list(page).get_by_role("listitem")
+        expect(entries).to_have_text([
+            "2 frames silent — Central's scheduler is stale; Players cannot report until it "
+            "recovers.",
+            "no-player — Needs a Player",
+            "to-commission — Needs commissioning",
+        ])
+
+
+def test_a_long_list_is_capped_with_a_count_of_the_rest(page, registry):
+    for index in range(10):
+        registry.create_frame(FrameCreate(
+            id=f"frame-{index:02d}", surface_id="wall", x_mm=100 + 400 * index, y_mm=100,
+            width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_strip(page).get_by_role("status")).to_have_text("10 to set up")
+        entries = _open_list(page).get_by_role("listitem")
+        expect(entries).to_have_count(9)
+        expect(entries.last).to_have_text("and 2 more")
+
+
+def test_first_run_has_no_strip(page, registry):
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(page.get_by_role("note", name="Getting started")).to_be_visible()
+        expect(_strip(page)).to_have_count(0)

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 
 import { BindingFacet } from "./BindingFacet.jsx";
 import { Commissioning } from "./Commissioning.jsx";
@@ -21,12 +21,15 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * last Player start, the bound Player/Output, and the capability-gated hardware
  * areas rendered "not yet available".
  *
- * Above the tabs, a health header states the frame's health from the one
- * classifier (health.js) — the same label its plan tile shows.
+ * Above the tabs, a heading names the frame and a health header states its
+ * health from the one classifier (health.js) — the same label its plan tile
+ * shows. When attention-strip navigation issues a new `focusRequest`, the
+ * heading takes focus, and the Inspector scrolls into view only if it is off
+ * screen; plain selection passes no request and never moves focus.
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * @param {{snapshot: object|null, frameId: string, facet: Facet,
- *          onFacet: (facet: Facet) => void}} props
+ *          onFacet: (facet: Facet) => void, focusRequest?: number|null}} props
  */
 const FACETS = [
   { key: "commissioning", label: "Commissioning" },
@@ -34,17 +37,35 @@ const FACETS = [
   { key: "nowshowing", label: "Now-showing" },
 ];
 
-export function Inspector({ snapshot, frameId, facet, onFacet }) {
+export function Inspector({ snapshot, frameId, facet, onFacet, focusRequest = null }) {
   const active = facet ?? "commissioning";
+  const sectionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
+
+  useEffect(() => {
+    if (focusRequest === null || headingRef.current === null) {
+      return;
+    }
+    headingRef.current.focus({ preventScroll: true });
+    const box = sectionRef.current.getBoundingClientRect();
+    const offScreen = box.top < 0 || box.top >= window.innerHeight || box.bottom <= 0;
+    if (offScreen) {
+      sectionRef.current.scrollIntoView({ block: "start" });
+    }
+  }, [focusRequest]);
   const activeLabel = FACETS.find((entry) => entry.key === active)?.label ?? active;
   const health = frameHealth(snapshot, frameId);
 
   return (
     <section
+      ref={sectionRef}
       className="inspector"
       role="region"
       aria-label={`Frame ${frameId} inspector`}
     >
+      <h2 ref={headingRef} className="inspector__title" tabIndex={-1}>
+        {`Frame ${frameId}`}
+      </h2>
       {health !== null && (
         <p className={`inspector__health health--${health.severity}`}>{health.label}</p>
       )}

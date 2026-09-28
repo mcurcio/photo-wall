@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import "./index.css";
+import { AttentionStrip } from "./AttentionStrip.jsx";
 import { EquipmentRail } from "./EquipmentRail.jsx";
 import { Guidance } from "./Guidance.jsx";
+import { facetFor, frameHealth } from "./health.js";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
 import { detectRecovery } from "./recovery.js";
@@ -39,8 +41,14 @@ export default function App() {
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
   // Which Inspector facet is open (Plane B, component-local). Defaults to
-  // "commissioning" and resets to it each time a new Frame is selected.
+  // "commissioning"; selecting another Frame keeps it (pass 2 §4 — no reset),
+  // and only attention-strip navigation moves it, to the facet showing the cause.
   const [facet, setFacet] = useState(/** @type {string} */ ("commissioning"));
+  // A request for the Inspector to take focus, issued ONLY by attention-strip
+  // navigation (a fresh number each time); plain tile or tray selection clears
+  // it, so selecting a Frame never moves focus.
+  const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
+  const focusSeqRef = useRef(0);
   // The pending/retired Player last selected in the Equipment rail (Plane B).
   const [selectedPlayer, setSelectedPlayer] = useState(/** @type {string|null} */ (null));
 
@@ -79,11 +87,30 @@ export default function App() {
     prevSnapshotRef.current = snapshot;
   }, [snapshot]);
 
-  // Selecting a Frame (on the plan or in the tray) opens its Inspector on the
-  // default facet; the facet contract's default is "commissioning".
-  const selectFrame = (frameId) => {
+  // Selecting a Frame opens its Inspector. Plain selection (plan or tray) keeps
+  // the open facet and never moves focus; attention-strip navigation passes the
+  // facet that shows the frame's cause (health.js facetFor) and asks the
+  // Inspector to take focus.
+  const selectFrame = (frameId, nextFacet = null) => {
     setSelection(frameId);
-    setFacet("commissioning");
+    if (nextFacet === null) {
+      setFocusRequest(null);
+      return;
+    }
+    setFacet(nextFacet);
+    focusSeqRef.current += 1;
+    setFocusRequest(focusSeqRef.current);
+  };
+
+  // Attention-strip navigation (Wall mode only): show the frame's Surface, select
+  // it, and open the facet for its health.
+  const navigateToFrame = (frameId) => {
+    const frame = (snapshot?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
+    if (frame === undefined) {
+      return;
+    }
+    setSurfaceId(frame.surface_id);
+    selectFrame(frameId, facetFor(frameHealth(snapshot, frameId), facet));
   };
 
   // Surfaces present in the snapshot, sorted for a deterministic default.
@@ -192,6 +219,14 @@ export default function App() {
         </div>
       )}
 
+      {snapshot !== null && (
+        <AttentionStrip
+          snapshot={snapshot}
+          central={health}
+          onNavigate={mode === "wall" ? navigateToFrame : null}
+        />
+      )}
+
       {snapshot !== null && <Guidance snapshot={snapshot} />}
 
       <main className="console__body">
@@ -265,6 +300,7 @@ export default function App() {
                 frameId={selection}
                 facet={facet}
                 onFacet={setFacet}
+                focusRequest={focusRequest}
               />
             )}
           </>
