@@ -343,3 +343,26 @@ def test_a_priority_zero_run_covering_the_frames_is_named_as_the_default(page, r
             "0 (the default: the highest Run on its frames has priority 0; "
             "at equal priority the newer Run shows on top)")
         expect(form).not_to_contain_text("no Run covers its frames")
+
+
+def test_a_protecting_scene_below_a_covering_run_says_central_will_refuse_it(page, registry):
+    """A Scene that protects its frames is refused below a higher Run covering them
+    (central/runtime.py `_protected_conflict`, `protection_not_visible`), so Review says
+    so instead of "stays underneath", and Central's answer agrees."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("evening"))
+    runtime.command("set_scene", _scene(SCENE_ID, protect_frames=True))
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = show_now(page, SCENE_ID, priority=3, submit=False)
+        expect(form.get_by_role("status").filter(has_text="refuse")).to_have_text(
+            f"At priority 3 Central will refuse this: it protects {VALID_FRAME}, which the "
+            "Run of evening (priority 5) covers. Use priority at least 5.")
+        expect(form.get_by_text(re.compile("stays underneath"))).to_have_count(0)
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(
+            "Not started: this Scene protects frames that evening's Run (priority 5) covers; "
+            "use priority at least 5.")

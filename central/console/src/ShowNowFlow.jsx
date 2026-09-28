@@ -27,6 +27,7 @@ import {
   cycleWording,
   protectorOf,
   sceneFrames,
+  sceneProtectedFrames,
   underneathSentence,
 } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
@@ -59,7 +60,8 @@ const UNKNOWN_ACTIVATION =
  * PRIORITY defaults to showState.js `coveringPriority` of the Scene's frames, read from
  * the current snapshot until the operator sets one under Advanced. Review always shows
  * it; a priority below that default holds Advanced open with where the Run would stay
- * underneath. Refusals keep slice 3's wording (`admissionSentence`).
+ * underneath (or, when the Scene protects frames a higher Run covers, that Central will
+ * refuse it). Refusals keep slice 3's wording (`admissionSentence`).
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
@@ -296,7 +298,8 @@ function priorityWords(value, priority, covering, covered) {
 /**
  * Step 2, Review: a check-answers list of every value, the advanced ones included;
  * under Advanced, "Activation priority" and "If it is already running". A priority
- * below the default holds Advanced open and says where the Run stays underneath.
+ * below the default holds Advanced open and says where the Run stays underneath, or,
+ * for a Scene that protects those frames, that Central will refuse it.
  */
 function ReviewStep({
   value,
@@ -314,7 +317,14 @@ function ReviewStep({
 }) {
   const repeatName = useId();
   const hintId = useId();
-  const underneath = priorityValid ? underneathSentence(snapshot, frames, Number(priority)) : null;
+  const underneath = priorityValid
+    ? underneathSentence(
+        snapshot,
+        frames,
+        Number(priority),
+        sceneProtectedFrames(definitions[value.sceneId]),
+      )
+    : null;
   const restartsFor = cycleWording(definitions[value.sceneId]) ?? "plays until finished";
   return (
     <>

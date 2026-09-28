@@ -236,6 +236,22 @@ export function sceneFrames(scene) {
 }
 
 /**
+ * The frames a stored Scene protects (central/runtime.py `Scene.protected_frames`): all
+ * of its frames when it protects them (`protect_frames`), otherwise those its child
+ * Scenes protect, sorted.
+ *
+ * @param {object|null|undefined} scene a served Scene definition
+ * @returns {string[]}
+ */
+export function sceneProtectedFrames(scene) {
+  if (scene?.protect_frames === true) {
+    return sceneFrames(scene);
+  }
+  const frames = new Set((scene?.children ?? []).flatMap((child) => sceneProtectedFrames(child.scene)));
+  return [...frames].sort();
+}
+
+/**
  * The live root Runs covering any of `frameIds`, each with the frames of `frameIds` it
  * covers, highest priority first (at equal priority the later admission first: the
  * served order is admission order). Only roots: a child Run carries its root's
@@ -280,20 +296,40 @@ export function coveringPriority(snapshot, frameIds) {
 }
 
 /**
- * Where an activation on `frameIds` at `priority` stays underneath (§7 J7): each live
- * root Run of a strictly higher priority covering its frames, highest first, as "At
- * priority P this stays underneath the Run of X (priority Q) on a, b." Null when no
+ * What happens to an activation on `frameIds` at `priority` below the live root Runs of
+ * a strictly higher priority covering its frames (§7 J7), highest first; null when no
  * covering Run is higher.
+ *
+ * A Scene that protects frames (`protectedFrames`, {@link sceneProtectedFrames}) is
+ * refused when such a Run covers any of them (central/runtime.py `_protected_conflict`,
+ * `protection_not_visible`): "At priority P Central will refuse this: it protects a,
+ * which the Run of X (priority Q) covers. Use priority at least Q." Otherwise it stays
+ * underneath them: "At priority P this stays underneath the Run of X (priority Q) on a,
+ * b."
  *
  * @param {object|null} snapshot
  * @param {ReadonlyArray<string>} frameIds
  * @param {number} priority
+ * @param {ReadonlyArray<string>} [protectedFrames] the frames the Scene protects
  * @returns {string|null}
  */
-export function underneathSentence(snapshot, frameIds, priority) {
+export function underneathSentence(snapshot, frameIds, priority, protectedFrames = []) {
   const above = coveringRuns(snapshot, frameIds).filter(({ run }) => run.priority > priority);
   if (above.length === 0) {
     return null;
+  }
+  const refusing = above
+    .map(({ run, frames }) => ({ run, frames: frames.filter((frameId) => protectedFrames.includes(frameId)) }))
+    .filter(({ frames }) => frames.length > 0);
+  if (refusing.length > 0) {
+    const covers = refusing.map(
+      ({ run, frames }) =>
+        `${frames.join(", ")}, which the Run of ${run.scene_id} (priority ${run.priority}) covers`,
+    );
+    return (
+      `At priority ${priority} Central will refuse this: it protects ${covers.join(", and ")}. ` +
+      `Use priority at least ${refusing[0].run.priority}.`
+    );
   }
   const parts = above.map(
     ({ run, frames }) => `the Run of ${run.scene_id} (priority ${run.priority}) on ${frames.join(", ")}`,

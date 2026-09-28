@@ -47,6 +47,24 @@ out.underneath = [
   show.underneathSentence(snapshot, ["lobby", "hall"], 2),
   show.underneathSentence(snapshot, ["lobby"], 0),
 ];
+// A Scene that protects frames is refused below a higher covering Run
+// (central/runtime.py `_protected_conflict`: `protection_not_visible`).
+out.refused = [
+  show.underneathSentence(snapshot, ["lobby", "hall"], 2, ["lobby"]),
+  show.underneathSentence(snapshot, ["lobby", "hall"], 2, ["lobby", "hall"]),
+  show.underneathSentence(snapshot, ["lobby", "hall"], 5, ["lobby", "hall"]),
+  show.underneathSentence(snapshot, ["lobby"], 0, ["attic"]),
+];
+out.protectedFrames = [
+  show.sceneProtectedFrames({ protect_frames: true,
+    contributions: [{ target: "frame:b" }, { target: "actuator:x" }],
+    outro_contributions: [{ target: "frame:a" }],
+    children: [{ scene: { contributions: [{ target: "frame:c" }] } }] }),
+  show.sceneProtectedFrames({ contributions: [{ target: "frame:a" }],
+    children: [{ scene: { protect_frames: true, contributions: [{ target: "frame:c" }] } }] }),
+  show.sceneProtectedFrames({ contributions: [{ target: "frame:a" }] }),
+  show.sceneProtectedFrames(undefined),
+];
 out.sceneFrames = [
   show.sceneFrames({ contributions: [{ target: "frame:b" }, { target: "actuator:x" }],
                      outro_contributions: [{ target: "frame:a" }],
@@ -111,6 +129,22 @@ def test_covering_priority_and_the_show_now_model():
         "At priority 0 this stays underneath the Run of later (priority 5) on lobby; "
         "and the Run of low (priority 1) on lobby.",
     ]
+    # A protecting Scene below a higher covering Run is refused, not "underneath": each
+    # refusing Run is named with the protected frames it covers, and the priority that
+    # would be accepted.
+    assert out["refused"] == [
+        "At priority 2 Central will refuse this: it protects lobby, which the Run of later "
+        "(priority 5) covers. Use priority at least 5.",
+        "At priority 2 Central will refuse this: it protects lobby, hall, which the Run of "
+        "later (priority 5) covers, and hall, which the Run of high (priority 5) covers. "
+        "Use priority at least 5.",
+        None,
+        "At priority 0 this stays underneath the Run of later (priority 5) on lobby; "
+        "and the Run of low (priority 1) on lobby.",
+    ]
+    # The frames a Scene protects (central/runtime.py `Scene.protected_frames`): all of
+    # its frames when it protects them, else its children's protected frames.
+    assert out["protectedFrames"] == [["a", "b", "c"], ["c"], [], []]
     # A Scene reaches its own, its outro's and its children's frames.
     assert out["sceneFrames"] == [["a", "b", "c"], []]
 
