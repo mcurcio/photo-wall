@@ -23,7 +23,7 @@ import {
   separateWindows,
 } from "./scheduleFlowModel.js";
 import { ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./ScheduleSteps.jsx";
-import { programState, windowLabel } from "./showState.js";
+import { isPastProgram, programState, windowLabel } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
 const EMPTY = {};
@@ -279,8 +279,9 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     }
   };
 
-  const past = programs.filter((program) => program.ends_at <= now);
-  const current = programs.filter((program) => !(program.ends_at <= now));
+  // "Past": the window has ended and the Program is neither running nor due.
+  const past = programs.filter((program) => isPastProgram(snapshot, program));
+  const current = programs.filter((program) => !isPastProgram(snapshot, program));
 
   // --- Views.
   const stepProps = { value, patch: draft.patch, problems };

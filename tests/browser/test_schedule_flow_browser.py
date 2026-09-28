@@ -38,6 +38,8 @@ from test_operator_showrunner_browser import (
     _seed_source,
 )
 
+from central.runtime import Program
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
@@ -254,3 +256,25 @@ def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, regis
         go(page, "schedule")
         expect(programs.get_by_role("button", name="Schedule a Program", exact=True)
                ).to_be_visible()
+
+
+def test_a_program_whose_window_ended_while_its_run_finishes_is_not_past(page, registry):
+    """A Program's window has ended but its Run is still finishing its cycle (Central asks
+    it to finish at the window's end): it is running, so its card stays with the current
+    Programs, not under "Past". Mutation probe: file a Program as past by its window's end
+    alone."""
+    _seed(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene("evening", cycle_seconds=600))
+    now = registry.clock.utc()
+    runtime.command("advance", now)  # Central has ticked: a warm Runtime
+    runtime.command("set_program", Program(
+        program_id="closing", scene_id="evening", starts_at=now + 10, ends_at=now + 20))
+    registry.clock.advance(25)  # the window has ended; the 600 s cycle has not
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "schedule")
+        programs = _programs(page)
+        card = programs.get_by_label("Program closing", exact=True)
+        expect(card).to_be_visible()
+        expect(card).to_contain_text("Running since")
+        expect(programs.get_by_text(re.compile(r"^Past \("))).to_have_count(0)

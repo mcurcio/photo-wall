@@ -130,6 +130,23 @@ export function programState(snapshot, programId) {
   return state("refused", `Did not start: ${outcome.reason ?? outcome.status}.`, "alarm");
 }
 
+/**
+ * Whether a stored Program is filed under "Past" (§9, flow design §7 J6): its window has
+ * ended on Central's clock and it is neither running (its Run is asked to finish at the
+ * window's end and may play on to the end of its cycle and its outro) nor due.
+ *
+ * @param {object|null} snapshot
+ * @param {{program_id: string, ends_at: number}} program
+ * @returns {boolean}
+ */
+export function isPastProgram(snapshot, program) {
+  if (!(program.ends_at <= snapshot?.runtime?.current?.now)) {
+    return false;
+  }
+  const state = programState(snapshot, program.program_id)?.state;
+  return state !== "running" && state !== "due";
+}
+
 const REFUSALS = {
   protected_frames: ({ run, frames }) =>
     run !== null
