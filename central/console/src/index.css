@@ -983,3 +983,11 @@ label {
   color: var(--fg-muted);
   overflow-wrap: anywhere;
 }
+
+/* The new-frame form's id rule (slice 2 §8), shown as you type. */
+.plan__new-frame-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}

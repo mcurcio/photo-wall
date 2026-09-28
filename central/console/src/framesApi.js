@@ -11,6 +11,14 @@ import { dragToPlacement } from "./projection.js";
  */
 
 /**
+ * The usable Frame id rule (slice 2 §8): letters, digits, `-`, `_` or `.`, at
+ * most 96 characters, no `:` — the only ids a Scene can target. It mirrors
+ * contracts/models.py `TARGET_ID_PATTERN` (which `FrameCreate.id` enforces); a
+ * pytest pins the two equal, so there is one rule.
+ */
+export const FRAME_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/;
+
+/**
  * Normalize a create/move `apiWrite` result to the frame-write shape. On success
  * the parsed Frame row is returned as `frame`; on failure the server error code
  * (or the raw status) is surfaced for the caller's inline reason.
@@ -26,19 +34,19 @@ function interpretFrame(result) {
 }
 
 /**
- * Create a Frame (Bead 10): POST /v1/operator/frames with the drag placement +
- * the operator-supplied display profile. `FrameCreate` requires an `id` that the
- * design/POST body do not carry, so a client id is generated here (matching the
- * `Identifier` pattern `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`) — see the report.
- * The server re-runs the orientation-coherence guard and 422s an incoherent
- * profile. Wrap in `useMutate()` at the call site so the plan refreshes.
+ * Create a Frame (Bead 10; slice 2 §8): POST /v1/operator/frames with the
+ * operator's readable id, the drag placement and the display profile. The id
+ * must match {@link FRAME_ID_PATTERN} (the caller checks it before sending) and
+ * cannot be changed later; a taken id answers 409 `frame_exists`. The server
+ * re-runs the orientation-coherence guard and 422s an incoherent profile. Wrap
+ * in `useMutate()` at the call site so the plan refreshes.
  *
+ * @param {string} id the operator-chosen Frame id
  * @param {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}} placement
  * @param {{width_px: number, height_px: number, diagonal_inches: number, video: boolean}} profile
  * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
  */
-export async function createFrame(placement, profile) {
-  const id = `frame-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+export async function createFrame(id, placement, profile) {
   const result = await apiWrite("/v1/operator/frames", {
     method: "POST",
     body: { id, ...placement, profile },

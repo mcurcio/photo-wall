@@ -283,6 +283,7 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         # Drag a landscape rectangle across the middle of the empty canvas, then
         # capture a coherent (landscape) display profile in the new-frame form.
         _drag(page, box, 0.30, 0.30, 0.60, 0.50)
+        page.get_by_label("Frame id", exact=True).fill("lobby-left")
         _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         # The form closes on a successful POST -> the row exists server-side.
@@ -291,6 +292,8 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         created = [frame for frame in registry.inventory().frames if frame.id not in before]
         assert len(created) == 1
         frame = created[0]
+        # The operator's readable id is the stored id (slice 2 §8).
+        assert frame.id == "lobby-left"
         # STORED placement matches the dragged region under the px->mm scale:
         # start viewBox (0.30*960, 0.30*600), end (0.60*960, 0.50*600).
         assert abs(frame.x_mm - 0.30 * 960 * SCALE) <= TOL       # ~1200
@@ -300,6 +303,41 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
 
         # And it renders on the plan by identity (not in the tray).
         expect(page.get_by_role("button", name=f"Frame {frame.id}", exact=True)).to_be_visible()
+
+
+def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        posts = []
+        page.on("request", lambda request: posts.append(request.url)
+                if request.method == "POST" and request.url.endswith("/v1/operator/frames")
+                else None)
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        field = page.get_by_label("Frame id", exact=True)
+        field.fill("lobby:left")
+        # Checked as you type: the rule is stated against the field.
+        expect(field).to_have_attribute("aria-invalid", "true")
+        expect(field).to_have_accessible_description(re.compile(r"^Not usable\."))
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("form", name="New frame").get_by_role("alert")
+               ).to_contain_text("up to 96")
+        page.wait_for_timeout(300)
+        assert posts == []
+        assert {frame.id for frame in registry.inventory().frames} == {"origin-seed"}
+
+
+def test_a_taken_frame_id_says_so(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        page.get_by_label("Frame id", exact=True).fill("origin-seed")
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("form", name="New frame").get_by_role("alert")
+               ).to_have_text("A frame named origin-seed already exists.")
 
 
 def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
@@ -315,6 +353,7 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         # non-origin nudge (errata: isUnplaced heuristic) must push it off (0,0) so
         # it is DRAWN, not routed into the Unplaced tray.
         _drag(page, box, 0.40, 0.40, 0.0, 0.0)
+        page.get_by_label("Frame id", exact=True).fill("corner.1")
         _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
@@ -322,6 +361,7 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         created = [frame for frame in registry.inventory().frames if frame.id not in before]
         assert len(created) == 1
         frame = created[0]
+        assert frame.id == "corner.1"
         # Never the exact origin -> never mis-routed to the tray.
         assert (frame.x_mm, frame.y_mm) != (0, 0)
         assert frame.x_mm >= 1

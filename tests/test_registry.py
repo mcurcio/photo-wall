@@ -2,9 +2,11 @@
 
 import base64
 import hashlib
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -25,7 +27,7 @@ from central.registry import (
     enrollment_message,
 )
 from central.runtime import Target
-from contracts.models import Calibration, FrameProfile
+from contracts.models import TARGET_ID_PATTERN, Calibration, FrameProfile
 
 ADMIN = "test-operator-" + "x" * 40
 
@@ -523,6 +525,13 @@ def test_frame_create_ids_follow_the_one_target_id_rule():
             FrameCreate(id=unusable, width_mm=400, height_mm=300, profile=profile)
         with pytest.raises(ValidationError):
             targets.validate_python("frame:" + unusable)
+
+
+def test_the_console_frame_id_pattern_is_the_contracts_target_id_rule():
+    source = (Path(__file__).parents[1] / "central/console/src/framesApi.js").read_text()
+    pinned = re.search(r"^export const FRAME_ID_PATTERN = /(.+)/;$", source, re.MULTILINE)
+    assert pinned is not None, "framesApi.js no longer exports FRAME_ID_PATTERN as a literal"
+    assert pinned.group(1) == "^" + TARGET_ID_PATTERN + "$"
 
 
 def test_frame_create_still_rejects_an_incoherent_profile(registry):
