@@ -73,3 +73,31 @@ printf '%s\n' '127.0.0.1 localhost' '::1 localhost' > "${DESTDIR}/etc/hosts"
 for module in squashfs overlay loop; do
     manual_add_modules "$module"
 done
+
+# The Player's display drivers: vc4 (KMS and HDMI, for weston's DRM backend)
+# and v3d (Mesa's GL). MODULES=most (initramfs-tools' default) leaves them
+# out. The base has no kernel and no modules, so they travel with the kernel
+# they were built for, and stage 1 copies this initrd's whole module tree onto
+# the new root (appliance.netboot_init hand_over_modules), where the base's
+# udev can load any of them later.
+#
+# They load in STAGE 1, on purpose: initramfs-tools' own udev (init-top/udev)
+# loads every initrd module whose alias matches a device, and config.txt's
+# vc4-kms-v3d-pi5 overlay turns the display nodes on and the legacy firmware
+# framebuffer (brcm,bcm2708-fb) off. vc4's framebuffer is then the console
+# stage 1 prints its phase and FAILED lines on; holding vc4 back to stage 2
+# could leave the HDMI console dark for all of stage 1. The drivers stay
+# loaded across switch_root.
+#
+# manual_add_modules resolves each through `modprobe --show-depends`, so
+# dependencies and softdeps come too; for vc4 on 6.18.50+rpt-rpi-2712: drm,
+# drm_kms_helper, drm_dma_helper, drm_display_helper, drm_exec,
+# drm_client_lib, cec, snd-soc-core, snd-pcm and the softdep
+# snd-soc-hdmi-codec; for v3d: gpu-sched and drm_shmem_helper. Input (evdev,
+# hid, hid-generic, usbhid) and the watchdog are built into this kernel. The
+# Player plays no audio and decodes in software (avdec_h264), so nothing else
+# is needed. scripts/verify_netboot_initrd.py requires vc4 and v3d in the
+# built initrd.
+for module in vc4 v3d; do
+    manual_add_modules "$module"
+done

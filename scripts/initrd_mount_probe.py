@@ -7,11 +7,19 @@ the initrd's own userland. This does, with no fakes:
 
   1. unpack the shipped `initrd.img` the way the kernel does -- the boot data (stage 1's code,
      uncompressed) first, then the cached compressed archive over it -- into a directory;
-  2. build a tiny squashfs holding one marker file inside that tree;
+  2. build a tiny squashfs holding one marker file inside that tree, shaped like the base where
+     it matters here (merged /usr: `lib -> usr/lib`, and no kernel modules);
   3. chroot into the tree (devtmpfs, proc and sysfs mounted, as initramfs-tools' init does) and
      run `NetbootOps().mount_root` with the initrd's OWN python3 and PATH, so its own
-     mount/umount/modprobe: loop attach, squashfs, tmpfs, overlay;
-  4. pass only if the marker reads back through the merged overlay root.
+     mount/umount/modprobe: loop attach, squashfs, tmpfs, overlay; then
+     `NetbootOps().hand_over_modules`, stage 1's copy of its module tree onto the new root;
+  4. pass only if the marker reads back through the merged overlay root, and the initrd's own
+     modprobe resolves every display module (verify_netboot_initrd.DISPLAY_MODULES: vc4, v3d)
+     against the NEW root for the initrd's kernel version, each file it names present there.
+
+Step 4 asserts resolvability only (`modprobe --show-depends`): this runner boots its own
+kernel, not the Pi's, so nothing is loaded. On the Pi the kernel is the initrd's own, so
+`uname -r` names the same tree and the base's udev loads the drivers by alias at coldplug.
 
 Afterwards it always unmounts everything under the tree, deepest first, and fails if a loop
 device is still bound to the probe image once its mount is gone (AUTOCLEAR). The tree is
@@ -41,7 +49,9 @@ REPO: Final = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from appliance.netboot_init import INITRD_MODULES as STAGE1_MODULES  # noqa: E402
 from scripts.build_boot_data import read_archive  # noqa: E402
+from scripts.verify_netboot_initrd import DISPLAY_MODULES  # noqa: E402
 
 # initramfs-tools' init: `export PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
 INITRAMFS_PATH: Final = "/sbin:/usr/sbin:/bin:/usr/bin"
@@ -50,6 +60,9 @@ PROBE_DIR: Final = "probe"
 PROBE_IMAGE: Final = "stage1-mount-probe.squashfs"
 MARKER: Final = "stage1-mount-probe"
 PROBE_SECONDS: Final = 120
+# Where mkinitramfs puts the kernel's modules, relative to the unpacked initrd: stage 1's own
+# INITRD_MODULES, the tree it hands over.
+INITRD_MODULES: Final = STAGE1_MODULES.relative_to("/")
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
 SYS_BLOCK: Final = Path("/sys/block")
 
@@ -61,18 +74,31 @@ DECOMPRESSORS: Final = (
 )
 
 # Run by the INITRD's python3 inside the chroot: only stage 1's closure is importable there.
-# argv: image, rootmnt, marker (relative to rootmnt).
+# argv: image, rootmnt, marker (relative to rootmnt), the initrd's kernel release, then the
+# modules to resolve on the new root. One `resolve` line per module (resolution_violations).
 PROBE_PROGRAM: Final = """\
+import subprocess
 import sys
 from pathlib import Path
 from appliance.netboot_init import NetbootOps, failure_line
-image, rootmnt, marker = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+image, rootmnt, marker, release = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+ops = NetbootOps()
 try:
-    NetbootOps().mount_root(image, rootmnt)
+    ops.mount_root(image, rootmnt)
+    print(ops.hand_over_modules(rootmnt, pet=lambda: None, release=release))
 except Exception as error:
     print(failure_line("7", error))
     sys.exit(1)
 print("marker=" + (rootmnt / marker).read_text().strip())
+for module in sys.argv[5:]:
+    shown = subprocess.run(["modprobe", "--dirname", str(rootmnt), "--set-version", release,
+                            "--show-depends", module], capture_output=True, text=True)
+    files = [line.split()[1] for line in shown.stdout.splitlines()
+             if line.startswith("insmod ") and len(line.split()) > 1]
+    missing = sum(1 for name in files if not Path(name).is_file())
+    last = Path(files[-1]).name if files else "none"
+    print(f"resolve {module} exit={shown.returncode} files={len(files)} missing={missing} "
+          f"last={last}")
 """
 
 Run = Callable[..., subprocess.CompletedProcess]
@@ -114,11 +140,43 @@ def unpack(initrd: Path, root: Path, *, run: Run = subprocess.run) -> list[str]:
     return []
 
 
-def chroot_argv(root: Path, image: str, rootmnt: str) -> list[str]:
-    """PURE. Stage 1's mount_root under the initrd's python3, with init's PATH and nothing
-    else from the host environment."""
+def chroot_argv(root: Path, image: str, rootmnt: str, release: str,
+                modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
+    """PURE. Stage 1's mount_root and module hand-over under the initrd's python3, with init's
+    PATH and nothing else from the host environment."""
     return ["env", "-i", f"PATH={INITRAMFS_PATH}", "chroot", str(root), INITRD_PYTHON, "-I",
-            "-c", PROBE_PROGRAM, image, rootmnt, MARKER]
+            "-c", PROBE_PROGRAM, image, rootmnt, MARKER, release, *modules]
+
+
+def kernel_release(root: Path) -> str | list[str]:
+    """The one kernel release the unpacked initrd carries modules for (the name of its only
+    directory under INITRD_MODULES), or the violations."""
+    releases = sorted(path.name for path in (root / INITRD_MODULES).glob("*") if path.is_dir())
+    if len(releases) != 1:
+        return [f"the initrd carries modules for {len(releases)} kernel releases "
+                f"({', '.join(releases) or 'none'}), not exactly one"]
+    return releases[0]
+
+
+def resolution_violations(output: str, modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
+    """PURE. The chroot program's `resolve` lines -> the modules that did not resolve on the
+    new root: modprobe failed, named no file, named a file the root lacks, or did not end at
+    the module itself."""
+    results = {fields[1]: dict(field.split("=", 1) for field in fields[2:] if "=" in field)
+               for fields in (line.split() for line in output.splitlines())
+               if len(fields) > 1 and fields[0] == "resolve"}
+    violations = []
+    for module in modules:
+        result = results.get(module)
+        if result is None:
+            violations.append(f"{module}: not resolved on the new root (no result)")
+        elif (result.get("exit") != "0" or result.get("files", "0") == "0"
+              or result.get("missing") != "0"
+              or not result.get("last", "").startswith(f"{module}.ko")):
+            violations.append(f"{module}: does not resolve on the new root "
+                              f"(exit={result.get('exit')} files={result.get('files')} "
+                              f"missing={result.get('missing')} last={result.get('last')})")
+    return violations
 
 
 def _unescape(field: str) -> str:
@@ -180,9 +238,13 @@ def probe(initrd: Path, work: Path, *, run: Run = subprocess.run,
     violations = unpack(initrd, root, run=run)
     if violations:
         return violations
+    release = kernel_release(root)
+    if isinstance(release, list):
+        return release
     token = secrets.token_hex(8)
     source = work / "source"
-    source.mkdir()
+    (source / "usr/lib").mkdir(parents=True)
+    (source / "lib").symlink_to("usr/lib")        # the base is merged-/usr
     (source / MARKER).write_text(token + "\n")
     probe_dir = root / PROBE_DIR
     probe_dir.mkdir()
@@ -195,7 +257,8 @@ def probe(initrd: Path, work: Path, *, run: Run = subprocess.run,
             (root / target).mkdir(exist_ok=True)
             run(["mount", "-t", fstype, fstype, str(root / target)], check=True,
                 capture_output=True)
-        result = run(chroot_argv(root, f"/{PROBE_DIR}/{PROBE_IMAGE}", f"/{PROBE_DIR}/root"),
+        result = run(chroot_argv(root, f"/{PROBE_DIR}/{PROBE_IMAGE}", f"/{PROBE_DIR}/root",
+                                 release),
                      check=False, capture_output=True, text=True, timeout=PROBE_SECONDS)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
@@ -204,6 +267,8 @@ def probe(initrd: Path, work: Path, *, run: Run = subprocess.run,
                               f"{result.returncode}): {result.stdout.strip()}")
         elif f"marker={token}" not in result.stdout.splitlines():
             violations.append("the marker did not read back through the overlay root")
+        else:
+            violations += resolution_violations(result.stdout)
     finally:
         violations += teardown(root, run=run, mountinfo=mountinfo)
         for device in bound_loops(sys_block, PROBE_IMAGE):
@@ -238,10 +303,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     for violation in violations:
         print(violation)
     if violations:
-        print(f"FAIL: stage 1's mount path does not work from the built initrd "
-              f"({len(violations)} violation(s))")
+        print("FAIL: stage 1's mount path or module hand-over does not work from the built "
+              f"initrd ({len(violations)} violation(s))")
         return 1
-    print("OK: stage 1 mounted a squashfs through the built initrd's own userland")
+    print("OK: stage 1 mounted a squashfs through the built initrd's own userland, and "
+          f"{', '.join(DISPLAY_MODULES)} resolve on the new root from the modules it handed over")
     return 0
 
 

@@ -111,7 +111,7 @@ class BootstrapFatal(RuntimeError):
     """Mount cleanup failed, so another root must not be tried this boot."""
 
 
-def _errno_name(error: OSError) -> str:
+def errno_name(error: OSError) -> str:
     return errno.errorcode.get(error.errno or 0, type(error).__name__)
 
 
@@ -209,7 +209,7 @@ def attached_loop(image: Path, *, control: Path = LOOP_CONTROL) -> Iterator[Path
         finally:
             os.close(backing)  # the loop device holds its own reference to the file
     except OSError as error:
-        raise BootstrapError("boot_loop", _errno_name(error)) from None
+        raise BootstrapError("boot_loop", errno_name(error)) from None
     try:
         yield node
     finally:
@@ -241,7 +241,7 @@ class LinuxOps:
             except subprocess.TimeoutExpired:
                 raise BootstrapError("boot_command", f"{argv[0]}: timeout {timeout}s") from None
             except OSError as error:
-                raise BootstrapError("boot_command", f"{argv[0]}: {_errno_name(error)}") from None
+                raise BootstrapError("boot_command", f"{argv[0]}: {errno_name(error)}") from None
             if result.returncode:
                 size = errors.seek(0, os.SEEK_END)
                 errors.seek(max(0, size - STDERR_TAIL))

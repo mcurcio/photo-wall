@@ -576,6 +576,129 @@ def test_start_player_unit_is_one_systemctl_start(monkeypatch):
                       {"check": True, "timeout": provision.START_UNIT_SECONDS})]
 
 
+# systemctl show, as systemd 257 printed it for v0.9.1's Player on a base with no render group.
+GROUP_FAILURE = ("ActiveState=activating\nSubState=auto-restart\nResult=exit-code\n"
+                 "ExecMainCode=1\nExecMainStatus=216\n")
+
+
+class Systemctl:
+    """`systemctl start` fails (or times out); `systemctl show` answers `shown` (or raises)."""
+
+    def __init__(self, shown, *, start_error=None, show_error=None):
+        self.calls, self.shown = [], shown
+        self.start_error = start_error or subprocess.CalledProcessError(1, ["systemctl"])
+        self.show_error = show_error
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if argv[1] == "start":
+            raise self.start_error
+        if self.show_error:
+            raise self.show_error
+        return subprocess.CompletedProcess(argv, 0, self.shown, "")
+
+
+# systemctl show, as systemd 257 printed it for the Player still in ExecStartPre (waiting for
+# the compositor's socket), three seconds into `systemctl start --no-block` on the fixed base.
+ACTIVATING = ("Result=success\nExecMainCode=0\nExecMainStatus=0\nActiveState=activating\n"
+              "SubState=start-pre\n")
+
+
+def test_a_failed_start_is_named_from_the_units_own_status(monkeypatch):
+    start_error = subprocess.CalledProcessError(1, ["systemctl"])
+    systemctl = Systemctl(GROUP_FAILURE, start_error=start_error)
+    monkeypatch.setattr("appliance.provision.subprocess.run", systemctl)
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=exit-code "
+                                 "detail=photo-wall-player.service/status=216/GROUP")
+    assert raised.value.__cause__ is start_error
+    [_, (show, kwargs)] = systemctl.calls
+    assert show == ["systemctl", "show", "--property=ActiveState", "--property=SubState",
+                    "--property=Result", "--property=ExecMainCode", "--property=ExecMainStatus",
+                    "photo-wall-player.service"]
+    assert kwargs["timeout"] == provision.UNIT_STATUS_SECONDS and kwargs["check"] is False
+
+
+def test_a_start_that_outlives_its_bound_is_named_a_timeout_with_the_units_state(monkeypatch):
+    """systemctl's own wait ran out while the unit was still activating: systemd has recorded no
+    failure (Result=success, status 0), so naming its Result would read `reason=success`."""
+    start_error = subprocess.TimeoutExpired(["systemctl"], provision.START_UNIT_SECONDS)
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        Systemctl(ACTIVATING, start_error=start_error))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=timeout "
+                                 "detail=photo-wall-player.service/state=activating/start-pre")
+    assert raised.value.__cause__ is start_error
+
+
+def test_a_failed_start_with_no_recorded_failure_is_unfinished_not_success(monkeypatch):
+    monkeypatch.setattr("appliance.provision.subprocess.run", Systemctl(ACTIVATING))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=unfinished "
+                                 "detail=photo-wall-player.service/state=activating/start-pre")
+
+
+def test_a_timeout_after_systemd_recorded_a_failure_still_names_the_state(monkeypatch):
+    start_error = subprocess.TimeoutExpired(["systemctl"], provision.START_UNIT_SECONDS)
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        Systemctl(GROUP_FAILURE, start_error=start_error))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=timeout "
+                                 "detail=photo-wall-player.service/state=activating/auto-restart")
+
+
+@pytest.mark.parametrize("show_error", [OSError("no systemctl"),
+                                        subprocess.TimeoutExpired(["systemctl"], 5)])
+def test_an_unreadable_status_still_fails_the_start_naming_nothing(monkeypatch, show_error):
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        Systemctl("", show_error=show_error))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=unknown "
+                                 "detail=photo-wall-player.service/status=unknown")
+
+
+@pytest.mark.parametrize("code,status,ending", [
+    ("1", "216", "status=216/GROUP"),
+    ("1", "217", "status=217/USER"),
+    ("1", "203", "status=203/EXEC"),
+    ("1", "1", "status=1"),              # the program's own exit
+    ("1", "234", "status=234"),          # unassigned by systemd
+    ("2", "9", "signal=9"),              # killed
+    ("3", "6", "signal=6"),              # dumped
+    ("0", "216", "status=216"),          # not an exit: the number is not systemd's status
+    ("1", "", "status=unknown"),
+    ("1", "2x", "status=unknown"),
+])
+def test_unit_ending_names_systemds_own_statuses_only(code, status, ending):
+    assert provision.unit_ending({"ExecMainCode": code, "ExecMainStatus": status}) == ending
+
+
+def test_a_start_failure_line_is_one_token_per_field():
+    """Result comes from systemd; anything that is not a plain token is not printed."""
+    error = provision.UnitStartError("photo-wall-player.service",
+                                     {"Result": "exit code\ninjected", "ExecMainCode": "1",
+                                      "ExecMainStatus": "217"})
+    assert str(error) == ("cause=unit reason=unknown "
+                          "detail=photo-wall-player.service/status=217/USER")
+
+
+def test_the_status_read_fits_in_the_backoff_the_exiting_path_never_sleeps():
+    """A failed start exits instead of backing off, so the window's MAX_BACKOFF_SECONDS term
+    covers the status read: LONGEST_ATTEMPT_SECONDS needs no term of its own for it."""
+    assert provision.UNIT_STATUS_SECONDS <= provision.MAX_BACKOFF_SECONDS
+
+
+def test_parse_unit_properties_reads_key_value_lines():
+    assert provision.parse_unit_properties(GROUP_FAILURE + "\nnoise\nEmpty=\n") == {
+        "ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code",
+        "ExecMainCode": "1", "ExecMainStatus": "216", "Empty": ""}
+
+
 # --- main -------------------------------------------------------------------------
 
 
@@ -649,6 +772,24 @@ def test_main_without_a_cmdline_root_discovers_with_the_proof(tmp_path, monkeypa
     assert discovery.options == {"timeout": provision.DISCOVERY_SECONDS}
     assert caplog.messages == [
         "provision: cause=configuration reason=absent detail=not_discovered"]
+
+
+def test_main_logs_a_failed_player_start_as_one_named_line_and_exits_1(
+        tmp_path, monkeypatch, caplog):
+    """R9: v0.9.1's Player failed at spawn (216/GROUP) and provisioning died on an uncaught
+    CalledProcessError. The start failure is one `cause=unit` line, and the process still
+    exits 1 into the unit's start limit."""
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"console=tty1 photowall.central={CMDLINE}/\n")
+    failure = provision.UnitStartError("photo-wall-player.service",
+                                       provision.parse_unit_properties(GROUP_FAILURE))
+    _Stubs(monkeypatch, gateway(), failure)
+    caplog.set_level(logging.ERROR, logger=provision.LOG.name)
+    with pytest.raises(SystemExit) as raised:
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+    assert raised.value.code == 1
+    assert caplog.messages == ["provision: cause=unit reason=exit-code "
+                               "detail=photo-wall-player.service/status=216/GROUP"]
 
 
 def test_main_builds_a_bootstrapper_on_the_real_systemd_notify_calls(tmp_path, monkeypatch):

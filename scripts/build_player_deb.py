@@ -149,6 +149,10 @@ def postinst_script() -> bytes:
     the one maintainer script this package needs. Installing the code itself
     remains a pure unpack -- this script only provisions the identity the
     shipped units run as.
+
+    The device groups are required, never skipped: player.service names render and video as
+    SupplementaryGroups, and a missing one fails every start at spawn (216/GROUP). The groups
+    come from udev, a Depends, so a missing one stops the install here, named.
     """
     return (
         "#!/bin/sh\n"
@@ -158,9 +162,11 @@ def postinst_script() -> bytes:
         "--shell /usr/sbin/nologin wall\n"
         "fi\n"
         "for group in video render input; do\n"
-        "  if getent group \"$group\" >/dev/null; then\n"
-        "    usermod -a -G \"$group\" wall\n"
+        "  if ! getent group \"$group\" >/dev/null; then\n"
+        "    echo \"photo-wall-player: group $group does not exist (udev creates it)\" >&2\n"
+        "    exit 1\n"
         "  fi\n"
+        "  usermod -a -G \"$group\" wall\n"
         "done\n"
         "systemctl daemon-reload || true\n"
     ).encode()

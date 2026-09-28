@@ -329,6 +329,39 @@ def test_stage_tree_ships_a_postinst_for_the_wall_user(tmp_path, closure):
     assert b"useradd" in postinst.read_bytes()
 
 
+@pytest.mark.parametrize("groups,code", [({"video", "render", "input"}, 0),
+                                         ({"video", "input"}, 1)])
+def test_postinst_refuses_a_root_without_a_device_group(tmp_path, groups, code):
+    """A missing device group stops the install, named, instead of being skipped into a
+    216/GROUP at every start (v0.9.1's base had no udev, so no render group). getent,
+    useradd, usermod and systemctl are shims; the script runs under the real /bin/sh."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls"
+    shims = {
+        "getent": 'case "$1 $2" in "passwd wall") exit 0;; esac\n'
+                  f'case " {" ".join(sorted(groups))} " in *" $2 "*) exit 0;; esac\nexit 2\n',
+        "usermod": f'echo "usermod $*" >> {log}\n',
+        "useradd": f'echo "useradd $*" >> {log}\n',
+        "systemctl": "exit 0\n",
+    }
+    for name, body in shims.items():
+        shim = bin_dir / name
+        shim.write_text("#!/bin/sh\n" + body)
+        shim.chmod(0o755)
+    script = tmp_path / "postinst"
+    script.write_bytes(deb.postinst_script())
+    result = subprocess.run(["/bin/sh", str(script), "configure"], capture_output=True,
+                            text=True, env={"PATH": f"{bin_dir}:/usr/bin:/bin"}, timeout=30)
+    assert result.returncode == code, result.stderr
+    calls = log.read_text().splitlines() if log.exists() else []
+    if code == 0:
+        assert calls == [f"usermod -a -G {group} wall" for group in ("video", "render", "input")]
+    else:
+        assert "group render does not exist" in result.stderr
+        assert calls == ["usermod -a -G video wall"]
+
+
 def test_stage_tree_control_file_depends_are_the_declarations_player_list(tmp_path, closure):
     deb_root = _staged(tmp_path, closure)
     control = (deb_root / "DEBIAN/control").read_bytes()

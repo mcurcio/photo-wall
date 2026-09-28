@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from scripts.build_boot_data import CA_BUNDLE_PATH, FLOOR_PATH, newc_archive
 from scripts.module_closure import INITRD_FORBIDDEN, Manifest
 from scripts.verify_netboot_initrd import (
     DEFAULT_BOOT_SCRIPT,
+    DISPLAY_MODULES,
     check_boot_script,
     check_listing,
     main,
@@ -62,6 +64,10 @@ CACHED = [
     "usr/lib/modules/6.12.0-rpi/kernel/fs/overlayfs/overlay.ko",
     # A kernel driver directory named like a forbidden package is not a Python package.
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/media/rc/rc-core.ko",
+    # Stage 2's display drivers, as the Pi 5 kernel package compresses its modules.
+    "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz",
+    "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz",
+    "usr/lib/modules/6.12.0-rpi/modules.dep",
 ]
 
 
@@ -90,7 +96,29 @@ REQUIRED_CACHED = [
     ("mount helper", "usr/bin/mount"),
     ("umount helper", "usr/bin/umount"),
     ("modprobe helper", "usr/sbin/modprobe"),
+    # v0.9.1's initrd carried neither, so /dev/dri never appeared in stage 2.
+    ("vc4 module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz"),
+    ("v3d module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz"),
+    ("depmod index", "usr/lib/modules/6.12.0-rpi/modules.dep"),
 ]
+
+
+def test_v0_9_1s_initrd_without_the_display_drivers_is_refused():
+    mutated = [m for m in CACHED if "/gpu/drm/" not in m]
+    assert check(cached=mutated) == [
+        "missing required display module vc4 (pattern '*lib/modules/*/kernel/*/vc4.ko*')",
+        "missing required display module v3d (pattern '*lib/modules/*/kernel/*/v3d.ko*')"]
+
+
+def test_the_hook_adds_exactly_the_display_modules_the_verify_requires():
+    """The hook is shell and cannot import the list: bound here, so neither changes alone."""
+    hook = (Path(__file__).resolve().parents[1]
+            / "appliance/netboot_initramfs/hooks/photo-wall-netboot").read_text()
+    loops = re.findall(r"^for module in ([^;]+); do\n    manual_add_modules \"\$module\"$",
+                       hook, flags=re.MULTILINE)
+    assert loops == ["squashfs overlay loop", " ".join(DISPLAY_MODULES)]
+    # No blacklist: with the KMS overlay, vc4's framebuffer is stage 1's console.
+    assert "blacklist" not in hook
 
 
 @pytest.mark.parametrize("label,member", REQUIRED_CACHED, ids=[r[0] for r in REQUIRED_CACHED])

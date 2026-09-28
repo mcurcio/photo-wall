@@ -164,6 +164,9 @@ class _Ops:
     def mount_root(self, image, rootmnt):
         self.mounted.append((image.read_bytes(), rootmnt))
 
+    def hand_over_modules(self, rootmnt, *, pet, release=None):
+        return "modules=none (no kernel modules in this harness)"
+
 
 class _InstallCapture:
     """Chain-flow install seam: records the package bytes/sha the Bootstrapper
