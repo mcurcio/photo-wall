@@ -321,3 +321,25 @@ def test_run_cards_and_the_why_disclosures(page, registry):
         why_button.click()
         expect(precedence).to_have_count(0)
         expect(chain).to_be_visible()
+
+
+# --- Review's words, prefill hand-overs and answers that keep the draft (review fixes).
+
+
+def test_a_priority_zero_run_covering_the_frames_is_named_as_the_default(page, registry):
+    """A covering Run of priority 0 still covers the frames: Review says the default comes
+    from it, never "no Run covers its frames". Mutation probe: branch on the covering
+    priority's value (0) instead of on whether a Run covers the frames."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("evening"))
+    runtime.command("set_scene", _scene(SCENE_ID))
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=0)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = show_now(page, SCENE_ID, submit=False)
+        expect(form).to_contain_text(
+            "0 (the default: the highest Run on its frames has priority 0; "
+            "at equal priority the newer Run shows on top)")
+        expect(form).not_to_contain_text("no Run covers its frames")

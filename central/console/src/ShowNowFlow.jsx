@@ -23,6 +23,7 @@ import {
 } from "./showNowModel.js";
 import {
   coveringPriority,
+  coveringRuns,
   cycleWording,
   protectorOf,
   sceneFrames,
@@ -84,6 +85,8 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
 
   const frames = useMemo(() => sceneFrames(definitions[value.sceneId]), [definitions, value.sceneId]);
   const covering = coveringPriority(snapshot, frames);
+  // Whether a live Run covers the frames at all: one may itself have priority 0.
+  const covered = coveringRuns(snapshot, frames).length > 0;
   const priority = shownPriority(value, covering);
 
   const problemList = useMemo(
@@ -191,6 +194,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
         {...stepProps}
         definitions={definitions}
         covering={covering}
+        covered={covered}
         priority={priority}
         priorityValid={priorityValid}
         advanced={{
@@ -273,14 +277,17 @@ function SceneStep({ value, problems, edit, snapshot, frames, definitions }) {
   );
 }
 
-/** Review's words for the priority: its value, and where a default comes from. */
-function priorityWords(value, priority, covering) {
+/**
+ * Review's words for the priority: its value, and where a default comes from. `covered`
+ * says whether any live Run covers the frames (a covering Run may have priority 0).
+ */
+function priorityWords(value, priority, covering, covered) {
   if (value.priority !== null) {
     return Number(priority) < covering
       ? `${priority} (below ${covering}, the highest Run on its frames)`
       : String(priority);
   }
-  return covering === 0 && priority === 0
+  return !covered
     ? "0 (the default: no Run covers its frames)"
     : `${priority} (the default: the highest Run on its frames has priority ${covering}; ` +
         "at equal priority the newer Run shows on top)";
@@ -299,6 +306,7 @@ function ReviewStep({
   frames,
   definitions,
   covering,
+  covered,
   priority,
   priorityValid,
   advanced,
@@ -315,7 +323,7 @@ function ReviewStep({
         rows={[
           { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : value.sceneId },
           { label: "Frames", value: <SceneFramesValue snapshot={snapshot} frames={frames} /> },
-          { label: "Priority", field: "priority", value: priorityWords(value, priority, covering) },
+          { label: "Priority", field: "priority", value: priorityWords(value, priority, covering, covered) },
           { label: "If it is already running", field: "repeat", value: REPEAT_LABELS[value.repeat] },
         ]}
       />
