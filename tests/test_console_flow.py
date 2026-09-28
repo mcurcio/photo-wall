@@ -23,6 +23,7 @@ SCRIPT = r"""
 const draft = await import(process.argv[1]);
 const steps = await import(process.argv[2]);
 const scene = await import(process.argv[3]);
+const instance = await import(process.argv[4]);
 const out = {};
 
 // --- One draft per flow.
@@ -73,14 +74,47 @@ out.previous = [steps.previousStep(S, "a"), steps.previousStep(S, "c")];
 // --- The Scene flow's shape.
 out.liveSteps = scene.sceneSteps("live").map((s) => s.id);
 out.handPickedSteps = scene.sceneSteps("authored").map((s) => s.id);
+const K = scene.SCENE_KEYS;
 out.keys = [
-  scene.sceneKey({ section: "scenes", flow: "new", step: "kind" }),
-  scene.sceneKey({ section: "scenes", id: "new", flow: "edit", step: "review" }),
-  scene.sceneKey({ section: "scenes" }),
-  scene.sceneKey({ section: "now", flow: "show", step: "scene" }),
+  K.fromRoute({ section: "scenes", flow: "new", step: "kind" }),
+  K.fromRoute({ section: "scenes", id: "new", flow: "edit", step: "review" }),
+  K.fromRoute({ section: "scenes" }),
+  K.fromRoute({ section: "now", flow: "show", step: "scene" }),
+  K.fromRoute(null),
 ];
-out.routes = [scene.sceneRoute("new", "frames"), scene.sceneRoute("edit/new", "review")];
-out.first = [scene.firstStep("new"), scene.firstStep("edit/a")];
+out.routes = [K.toRoute("new", "frames"), K.toRoute("edit/new", "review")];
+out.first = [K.firstStep("new"), K.firstStep("edit/a")];
+out.describe = [K.describe("new"), K.describe("edit/new")];
+
+// --- The flow kit's instances (flow/instance.js).
+const show = instance.flowKeys({ section: "now", newFlow: "show", firstStep: { create: "scene" },
+                                 describe: { create: "a new activation" } });
+out.showKeys = [
+  show.fromRoute({ section: "now", flow: "show", step: "review" }),
+  show.fromRoute({ section: "now", id: "x", flow: "edit", step: "review" }),
+  show.fromRoute({ section: "now" }),
+];
+out.showRoute = show.toRoute("new", "review");
+out.edited = [instance.editedId("edit/a/b"), instance.editedId("new"), instance.editedId(null),
+              instance.editKey("x")];
+const place = (routeKey, available, draftKey, dirty) =>
+  instance.instancePlace({ routeKey, available, draftKey, dirty });
+out.places = [
+  place(null, "ok", "new", true),
+  place("edit/a", "missing", "edit/a", true),
+  place("edit/a", "unavailable", null, false),
+  place("new", "ok", "new", false),
+  place("edit/a", "ok", "new", true),
+  place("edit/a", "ok", "new", false),
+  place("edit/a", "ok", null, false),
+];
+const LIVE = scene.sceneSteps("live");
+out.shown = [
+  instance.shownStep("open", LIVE, "frames"),
+  instance.shownStep("open", LIVE, "media"),
+  instance.shownStep("open", LIVE, undefined),
+  instance.shownStep("blocked", LIVE, "frames"),
+];
 out.fieldSteps = ["mode", "source", "targets", "media:lobby", "cycle", "loop", "name", "id"]
   .map((field) => steps.stepOfField(scene.SCENE_FIELD_STEP, field));
 out.advanced = [...scene.SCENE_ADVANCED_FIELDS].sort();
@@ -101,7 +135,7 @@ def test_flow_kit_and_scene_flow_shape():
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
          (SRC / "flow/draftState.js").as_uri(), (SRC / "flow/steps.js").as_uri(),
-         (SRC / "sceneFlowModel.js").as_uri()],
+         (SRC / "sceneFlowModel.js").as_uri(), (SRC / "flow/instance.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -128,11 +162,22 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["liveSteps"] == ["kind", "photos", "frames", "playback", "review"]
     assert out["handPickedSteps"] == ["kind", "photos", "frames", "media", "playback", "review"]
     # A Scene whose id is "new" is an edit key of its own, never the new Scene.
-    assert out["keys"] == ["new", "edit/new", None, None]
+    assert out["keys"] == ["new", "edit/new", None, None, None]
     assert out["routes"] == [
         {"section": "scenes", "flow": "new", "step": "frames"},
         {"section": "scenes", "id": "new", "flow": "edit", "step": "review"}]
     assert out["first"] == ["kind", "review"]
+    assert out["describe"] == ["a new Scene", "Scene new"]
+    # The kit's keys serve a flow with another segment and no edits (Show now).
+    assert out["showKeys"] == ["new", None, None]
+    assert out["showRoute"] == {"section": "now", "flow": "show", "step": "review"}
+    assert out["edited"] == ["a/b", None, None, "edit/x"]
+    # What the section shows: another section or the list; a gone or unauthorable edit;
+    # the open instance; another one, blocked by a dirty draft or opening over a clean one.
+    assert out["places"] == [
+        "list", "missing", "unavailable", "open", "blocked", "opening", "opening"]
+    # A step not among the draft's steps (Media for a live Scene) is normalised away.
+    assert out["shown"] == ["frames", None, None, None]
     assert out["fieldSteps"] == [
         "kind", "photos", "frames", "media", "playback", "playback", "review", "review"]
     assert out["advanced"] == ["id", "loop"]

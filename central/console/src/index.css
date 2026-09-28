@@ -1314,14 +1314,14 @@ label {
   margin-top: 8px;
 }
 
-.scene-flow__toolbar {
+.flow__toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
 }
 
-.scene-flow__draft-note {
+.flow__draft-note {
   flex-basis: 100%;
   margin: 0;
   color: var(--fg-muted);

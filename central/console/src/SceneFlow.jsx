@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import {
@@ -12,22 +12,19 @@ import {
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { fieldControl, ProblemSummary, useProblems } from "./Field.jsx";
+import { ProblemSummary, useProblems } from "./Field.jsx";
+import { editedId, editKey, NEW_KEY } from "./flow/instance.js";
+import { DraftBar, InstanceNotice } from "./flow/InstanceNotice.jsx";
 import { StepForm } from "./flow/StepForm.jsx";
 import { Stepper } from "./flow/Stepper.jsx";
-import { inStepOrder, nextStep, previousStep, problemsOf, stepOfField } from "./flow/steps.js";
+import { inStepOrder, stepOfField } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
-import { useFlowFocus } from "./flow/useFlowFocus.js";
+import { useFlowInstance } from "./flow/useFlowInstance.js";
 import {
   changedSceneFields,
-  describeKey,
-  editedId,
-  firstStep,
-  NEW_KEY,
   SCENE_ADVANCED_FIELDS,
   SCENE_FIELD_STEP,
-  sceneKey,
-  sceneRoute,
+  SCENE_KEYS,
   sceneSteps,
   seedScene,
 } from "./sceneFlowModel.js";
@@ -61,21 +58,13 @@ const HEADINGS = {
  * no-ops while the snapshot is null (§6 (c)). The step views (SceneSteps.jsx) hold no
  * draft state.
  *
- * ROUTES. `#/scenes` shows the cards; `#/scenes/new/<step>` and
- * `#/scenes/<id>/edit/<step>` show a step. Steps move with `replace`, so a flow is one
- * history entry and browser Back leaves it with the draft kept (Question 2); Save
- * replaces the flow entry with `#/scenes`. An unknown or inapplicable step is replaced
- * by the instance's first step (Kind for new, Review for an edit). Opening another
- * instance never replaces a dirty draft silently: an in-app Edit asks through
- * `useConfirm`, and a typed or Back URL shows "Unsaved draft for X: Resume or Discard".
- * An edit route whose Scene the loaded snapshot does not list says "This Scene no
- * longer exists".
- *
- * STEPS. Continue checks the current step's problems; Review checks them all. Problems
- * route through `SCENE_FIELD_STEP` (sceneFlowModel.js): a summary entry opens its step (and
- * its Advanced, for "loop" and "id") and focuses the field once it mounts
- * (flow/useFlowFocus.js). After a Change link or a routed problem, Continue returns
- * toward Review.
+ * ROUTES AND STEPS are the flow kit's (flow/useFlowInstance.js): `#/scenes` shows the
+ * cards; `#/scenes/new/<step>` and `#/scenes/<id>/edit/<step>` show a step, a new
+ * Scene opening at Kind and an edit at Review (sceneFlowModel.js `SCENE_KEYS`). Another
+ * instance never replaces a dirty draft silently. An edit route whose Scene the loaded
+ * snapshot does not list says "This Scene no longer exists"; one the console cannot
+ * author says why. Problems route through `SCENE_FIELD_STEP`: a summary entry opens its
+ * step (and its Advanced, for "loop" and "id") and focuses the field.
  *
  * EDIT opens at Review, seeded from the stored Scene, with `baseRevision`. When a poll
  * shows a newer stored revision, Review says so, withholds Replace and offers Reload
@@ -83,8 +72,8 @@ const HEADINGS = {
  * remains the backstop for a change between polls. Replace goes through ConfirmAction
  * (slice 3 §13).
  *
- * SAVE writes ONE request (authoring.js `buildSave`) inside `useMutate()`, discards the
- * draft, remembers the Scene for the next flows (`rememberScene`, the shell's
+ * SAVE writes ONE request (authoring.js `buildSave`) inside `useMutate()`, ends the flow
+ * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
  * `recentSceneId`) and offers "Show now" and "Schedule it".
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
@@ -102,39 +91,17 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
   const { patch } = draft;
   const value = draft.value ?? NEW_SCENE_DRAFT;
   const editingId = editedId(draft.key);
+  const steps = sceneSteps(value.mode);
   const mutate = useMutate();
 
   const [vanished, setVanished] = useState(/** @type {string|null} */ (null));
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
-  const [returning, setReturning] = useState(false);
   const [saving, setSaving] = useState(false);
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
-  // The step the open draft last showed, for Resume.
-  const lastStepRef = useRef(/** @type {string|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
   const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-
-  // --- Where the route points, and what the draft can show there.
-  const routeKey = sceneKey(route);
-  const routeId = editedId(routeKey);
-  const routeScene = routeId === null ? undefined : definitions[routeId];
-  let place = "list";
-  if (routeKey !== null) {
-    if (routeId !== null && routeScene === undefined) {
-      place = "missing";
-    } else if (routeId !== null && sceneEditDraft(routeScene) === null) {
-      place = "unauthorable";
-    } else if (routeKey === draft.key) {
-      place = "open";
-    } else {
-      place = draft.dirty ? "blocked" : "opening";
-    }
-  }
-  const steps = sceneSteps(value.mode);
-  const step =
-    place === "open" && steps.some((candidate) => candidate.id === route.step) ? route.step : null;
 
   // --- The draft effects: they run whichever step (or section) is showing.
   const frameKey = (snapshot?.inventory?.frames ?? []).map((frame) => frame.id).join(" ");
@@ -180,10 +147,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     });
   }, [loaded, candidates.ready, candidates.byFrame, patch]);
 
-  useEffect(() => {
-    markDraft("scenes", draft.dirty);
-  }, [markDraft, draft.dirty]);
-
   // --- Problems, in step order.
   const problemList = useMemo(
     () =>
@@ -198,22 +161,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
   );
   const problems = useProblems(problemList);
 
-  const goToStep = useCallback(
-    (stepId) => {
-      if (draft.key !== null) {
-        navigate(sceneRoute(draft.key, stepId), { replace: true });
-      }
-    },
-    [draft.key, navigate],
-  );
-  const focus = useFlowFocus({
-    step,
-    fieldStep: SCENE_FIELD_STEP,
-    advancedFields: SCENE_ADVANCED_FIELDS,
-    goToStep,
-    controlFor: (field) => fieldControl(problems.idFor(field)),
-  });
-
   // One confirmation (ConfirmAction) for this section: Replace, and discarding a
   // draft. A request's `after` runs once it is done.
   const confirm = useConfirm(
@@ -221,76 +168,38 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     (_result, request) => request.after?.(),
   );
 
-  // --- Opening instances.
-  /** Open `key`; false when a dirty draft of another instance refused it. */
-  const openInstance = (key) => {
-    const before = draft.key;
-    if (draft.open(key) !== key) {
-      return false;
-    }
-    if (before !== key) {
+  // --- The instance, its route and its steps (the flow kit).
+  const flow = useFlowInstance({
+    section: "scenes",
+    draft,
+    route,
+    navigate,
+    markDraft,
+    keys: SCENE_KEYS,
+    availability: (key) => {
+      const id = editedId(key);
+      if (id === null) {
+        return "ok";
+      }
+      if (definitions[id] === undefined) {
+        return "missing";
+      }
+      return sceneEditDraft(definitions[id]) === null ? "unavailable" : "ok";
+    },
+    steps,
+    fieldStep: SCENE_FIELD_STEP,
+    advancedFields: SCENE_ADVANCED_FIELDS,
+    problemList,
+    problems,
+    confirm,
+    onOpened: () => {
       confirm.setStatus(null);
-      problems.reset();
-      focus.reset();
       setVanished(null);
       setReloaded(null);
-      setReturning(false);
       setSaved(null);
-      lastStepRef.current = null;
-    }
-    return true;
-  };
-
-  useLayoutEffect(() => {
-    if (place === "opening") {
-      openInstance(routeKey);
-    } else if (place === "open" && step === null) {
-      navigate(sceneRoute(routeKey, lastStepRef.current ?? firstStep(routeKey)), { replace: true });
-    }
+    },
   });
-
-  if (step !== null) {
-    lastStepRef.current = step;
-  }
-
-  const resumeRoute = () => sceneRoute(draft.key, lastStepRef.current ?? firstStep(draft.key));
-
-  /** Discard the dirty draft (asked through useConfirm), then `then()`. */
-  const askToDiscard = (event, then) =>
-    confirm.open(event, {
-      key: `discard:${draft.key}`,
-      title: "Discard your unsaved draft?",
-      confirmLabel: "Discard draft",
-      body: <p>{`Your unsaved changes to ${describeKey(draft.key)} will be lost.`}</p>,
-      run: async () => ({ state: "done", message: `Discarded the draft for ${describeKey(draft.key)}.` }),
-      after: () => {
-        draft.discard();
-        then?.();
-      },
-    });
-
-  /** Show `target` (a step route) and move focus to its step heading. */
-  const enter = (target, options) => {
-    navigate(target, options);
-    focus.focusStep();
-  };
-
-  const startNew = () => {
-    if (openInstance(NEW_KEY)) {
-      enter(sceneRoute(NEW_KEY, firstStep(NEW_KEY)));
-    }
-  };
-
-  const startEdit = (sceneId, event) => {
-    const key = `edit/${sceneId}`;
-    if (draft.key === key) {
-      enter(resumeRoute());
-    } else if (openInstance(key)) {
-      enter(sceneRoute(key, firstStep(key)));
-    } else {
-      askToDiscard(event, () => enter(sceneRoute(key, firstStep(key))));
-    }
-  };
+  const { place, step, focus } = flow;
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
@@ -324,40 +233,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
       return { selections };
     });
 
-  /** Route a problem (a summary entry) or a Change link to its field. */
-  const openField = (field) => {
-    if (stepOfField(SCENE_FIELD_STEP, field) !== "review") {
-      setReturning(true);
-    }
-    focus.openField(field);
-  };
-
-  // --- Moving through the steps.
-  const onContinue = () => {
-    const own = problemsOf(problemList, SCENE_FIELD_STEP, step);
-    if (!problems.check(own)) {
-      focus.openField(own[0].field);
-      return;
-    }
-    const problemSteps = new Set(problemList.map((problem) => stepOfField(SCENE_FIELD_STEP, problem.field)));
-    const next = nextStep(steps, step, { returning, problemSteps });
-    if (next === "review") {
-      setReturning(false);
-    }
-    goToStep(next);
-    focus.focusStep();
-  };
-
-  const onBack = () => {
-    const previous = previousStep(steps, step);
-    if (previous === null) {
-      navigate({ section: "scenes" }, { replace: true });
-      return;
-    }
-    goToStep(previous);
-    focus.focusStep();
-  };
-
   // --- Edit: a newer stored revision than the draft's base.
   const stored = editingId === null ? undefined : definitions[editingId];
   const storedRevision = stored === undefined ? null : normalizeScene(stored).revision;
@@ -382,16 +257,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
 
   // --- Save.
   const finish = (sceneId) => {
-    draft.discard();
-    problems.reset();
-    focus.reset();
+    flow.finish();
     setVanished(null);
     setReloaded(null);
-    setReturning(false);
-    lastStepRef.current = null;
     setSaved(sceneId);
     rememberScene(sceneId);
-    navigate({ section: "scenes" }, { replace: true });
     focus.focusWhenShown(() => savedRef.current);
   };
 
@@ -480,13 +350,14 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
           editingId={editingId}
           candidates={candidates}
           advanced={advanced("review")}
-          onChange={openField}
+          onChange={flow.openField}
         />
       </>
     ),
   };
 
   const stepLabel = steps.find((candidate) => candidate.id === step)?.label ?? "";
+  const draftName = SCENE_KEYS.describe(draft.key);
 
   return (
     <div className="scene-flow" ref={focus.rootRef}>
@@ -506,86 +377,46 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
 
       {place === "list" && (
         <>
-          <div className="scene-flow__toolbar">
-            {draft.dirty ? (
-              <>
-                <p className="scene-flow__draft-note">
-                  {`Unsaved draft for ${describeKey(draft.key)}.`}
-                </p>
-                <button type="button" className="button--primary" onClick={() => enter(resumeRoute())}>
-                  Resume draft <span className="scene-flow__draft-word">(Draft)</span>
-                </button>
-                <button type="button" onClick={(event) => askToDiscard(event)}>
-                  Discard draft
-                </button>
-              </>
-            ) : (
-              <button type="button" className="button--primary" onClick={startNew}>
-                New Scene
-              </button>
-            )}
-          </div>
-          <SceneList snapshot={snapshot} onEdit={startEdit} onShowNow={showNow} onSchedule={schedule} />
+          <DraftBar
+            dirty={draft.dirty}
+            draftName={draftName}
+            newLabel="New Scene"
+            onNew={() => flow.start(NEW_KEY)}
+            onResume={() => flow.resume()}
+            onDiscard={(event) => confirm.open(event, flow.discardRequest())}
+          />
+          <SceneList
+            snapshot={snapshot}
+            onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
+            onShowNow={showNow}
+            onSchedule={schedule}
+          />
         </>
       )}
 
-      {place === "missing" && (
-        <div className="notice">
-          <p>{`Scene ${routeId}: This Scene no longer exists.`}</p>
-          <a href="#/scenes">Back to Scenes</a>
-        </div>
-      )}
-
-      {place === "unauthorable" && (
-        <div className="notice">
-          <p>{`Scene ${routeId} can't be edited here: ${UNAUTHORABLE_REASON}`}</p>
-          <a href="#/scenes">Back to Scenes</a>
-        </div>
-      )}
-
-      {place === "blocked" && (
-        <div className="notice notice--warn">
-          <p>{`Unsaved draft for ${describeKey(draft.key)}: Resume or Discard`}</p>
-          <p>{`Discarding it opens ${describeKey(routeKey)}.`}</p>
-          <div className="record__actions">
-            <button
-              type="button"
-              className="button--primary"
-              onClick={() => enter(resumeRoute(), { replace: true })}
-            >
-              Resume
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                draft.discard();
-                focus.focusStep();
-              }}
-            >
-              Discard
-            </button>
-          </div>
-        </div>
-      )}
+      <InstanceNotice
+        place={place}
+        draftName={draftName}
+        targetName={flow.routeKey === null ? "" : SCENE_KEYS.describe(flow.routeKey)}
+        noun="Scene"
+        unavailableReason={UNAUTHORABLE_REASON}
+        sectionHref="#/scenes"
+        sectionLabel="Scenes"
+        onResume={() => flow.resume({ replace: true })}
+        onDiscard={() => flow.discard(focus.focusStep)}
+      />
 
       {step !== null && (
         <>
           <h2 className="scene-flow__title">
             {editingId === null ? "New Scene" : `Edit Scene ${editingId}`}
           </h2>
-          <Stepper
-            steps={steps}
-            current={step}
-            onStep={(stepId) => {
-              goToStep(stepId);
-              focus.focusStep();
-            }}
-          />
+          <Stepper steps={steps} current={step} onStep={flow.showStep} />
           <StepForm
             label="Author a Scene"
             heading={HEADINGS[step] ?? stepLabel}
-            onSubmit={step === "review" ? onSave : onContinue}
-            onBack={onBack}
+            onSubmit={step === "review" ? onSave : flow.onContinue}
+            onBack={flow.onBack}
             submitLabel={
               step !== "review" ? "Continue" : editingId === null ? "Save Scene" : "Replace Scene"
             }
@@ -601,7 +432,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
               ref={summaryRef}
               summary={problems.summary}
               label="Scene problems"
-              onOpen={openField}
+              onOpen={flow.openField}
             />
             {views[step]()}
           </StepForm>

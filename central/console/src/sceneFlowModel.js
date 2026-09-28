@@ -4,13 +4,13 @@
  * tests/test_console_flow.py drives it under Node. The Scene's own rules (problems,
  * defaults, the lossless edit) stay in authoring.js.
  *
- * INSTANCES. A draft is keyed `new`, or `edit/<id>` for the stored Scene it edits.
- * (The design keys an edit by its stored id; the prefix keeps a Scene whose id is
- * "new" apart from a new Scene. Ids never hold a `/`.)
+ * INSTANCES. A draft is keyed `new`, or `edit/<id>` for the stored Scene it edits
+ * (flow/instance.js); a new Scene opens at Kind, an edit at Review.
  */
 
 import { NEW_SCENE_DRAFT, sceneEditDraft } from "./authoring.js";
 import { sameValue } from "./flow/draftState.js";
+import { editedId, flowKeys } from "./flow/instance.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -52,58 +52,12 @@ export const SCENE_FIELD_STEP = Object.freeze({
 /** The fields that sit under their step's Advanced (they have a stated default). */
 export const SCENE_ADVANCED_FIELDS = Object.freeze(new Set(["loop", "id"]));
 
-export const NEW_KEY = "new";
-
-/**
- * The draft key a route names, or null when the route is not a Scene flow.
- *
- * @param {import("./routes.js").Route|null} route
- * @returns {string|null}
- */
-export function sceneKey(route) {
-  if (route?.section !== "scenes") {
-    return null;
-  }
-  if (route.flow === "new") {
-    return NEW_KEY;
-  }
-  return route.flow === "edit" ? `edit/${route.id}` : null;
-}
-
-/**
- * The stored Scene id an edit key names, or null for a new Scene.
- *
- * @param {string|null} key
- * @returns {string|null}
- */
-export function editedId(key) {
-  return key?.startsWith("edit/") ? key.slice("edit/".length) : null;
-}
-
-/**
- * The route of step `step` of instance `key`.
- *
- * @param {string} key
- * @param {string} step
- * @returns {import("./routes.js").Route}
- */
-export function sceneRoute(key, step) {
-  const id = editedId(key);
-  return id === null
-    ? { section: "scenes", flow: "new", step }
-    : { section: "scenes", id, flow: "edit", step };
-}
-
-/** Where an instance opens: a new Scene at Kind, an edit at Review. */
-export function firstStep(key) {
-  return editedId(key) === null ? KIND.id : REVIEW.id;
-}
-
-/** The instance in words: "a new Scene" or "Scene <id>". */
-export function describeKey(key) {
-  const id = editedId(key);
-  return id === null ? "a new Scene" : `Scene ${id}`;
-}
+/** The Scene flow's instances and their routes (flow/instance.js `flowKeys`). */
+export const SCENE_KEYS = flowKeys({
+  section: "scenes",
+  firstStep: { create: KIND.id, edit: REVIEW.id },
+  describe: { create: "a new Scene", edit: (id) => `Scene ${id}` },
+});
 
 /**
  * The Scene flow's seed over the stored definitions: `new` gets the defaults, an
