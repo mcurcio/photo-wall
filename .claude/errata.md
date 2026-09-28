@@ -1844,3 +1844,58 @@ doc softenings.
   `projection.diagnostics` (coordination.py:403) so "Check this frame" reports what planning actually
   concluded (pool order, cycle pick, `no_eligible_candidates`) instead of a tally of per-candidate
   standings.
+
+## console pass 2, pass A (stay signed in) — docs/operator-console-ux-pass2-session.md
+
+- 2026-09-28, bead A-1 (backend), SPEC AMENDMENTS from the final security review (docs bead A-3
+  to fold into §5/§8/§10): (1) A cookie-authenticated write with a MISSING `Origin` is refused
+  403 `origin_mismatch`, exactly as at sign-in (§5 "an `Origin` that differs" now reads "a missing
+  or different `Origin`"); pytest pins the missing case. (2) `Cache-Control: no-store` on every
+  `/v1/operator/*` response is delivered by a pure-ASGI path-prefix middleware (covers the route
+  and every `app.exception_handler` response, incl. 404/405) PLUS an `Exception` handler, because
+  an unhandled exception is answered by Starlette's outermost `ServerErrorMiddleware`, outside all
+  user middleware; that handler keeps the old body ("Internal Server Error", 500) and adds
+  `no-store` only under `/v1/operator/`. pytest forces a 500 on inventory. (3) The scrypt
+  parameters are module constants in `central/operator_session.py`; tests never lower them; a
+  pytest pins `session_key` equal to `hashlib.scrypt` with §3's exact parameters; the
+  per-process `lru_cache` keyed by token bytes keeps the suite fast. (4) http→https on the same
+  host is a named behaviour: the plain (non-`Secure`) cookie is still sent over https, so reads
+  work and every write is 403 `origin_mismatch` (the bound Origin is `http://…`) until the
+  operator signs in again at the https address (pytest). Add a failure-table row.
+- 2026-09-28, bead A-1, IMPLEMENTATION CHOICES the spec left open (A-3 to state): (a) `expires_at`
+  is ZERO-PADDED to 10 digits (`%010d`); the test clocks run at unix 1000, so an unpadded value
+  would not be 10 digits. (b) The Bearer compare is over the bytes the client SENT (Starlette
+  decodes headers as latin-1, so `.encode("latin-1")` recovers them) against the token's UTF-8
+  bytes; the sign-in JSON token is UTF-8-encoded (a lone surrogate → 401, never 500). One
+  `SessionCodec.token_matches(bytes)` serves both. (c) A bindable sign-in Origin is
+  `http(s)://authority` (ASCII, no path) of at most 258 characters (its base64url fits the 344-char
+  part); `null`, `file://`, paths and longer values are 403 `origin_mismatch`. (d) The sign-in gate
+  (marker, Origin, Sec-Fetch-Site) is a dependency, so it runs before body validation — except a
+  body that is not JSON at all, which FastAPI rejects (422 `invalid_request`) before any
+  dependency; no state changes and no cookie either way. (e) Log out needs only the marker; its
+  `Origin` is read only to decide the plain clearing header's `Secure`. (f) When the `__Host-`
+  cookie is present it alone is verified (an invalid one is 401 even beside a valid plain one).
+  (g) Code layout: `central/operator_session.py` (stdlib codec, key, token compare) and
+  `central/operator_auth.py` (`OperatorAuth.admin`, the session routes, no-store middleware and
+  500 handler, mounted from `create_app`; `app.state.operator_auth` is how the route-table test
+  identifies the dependency). (h) A `\d`-without-`re.ASCII` regex would admit Unicode digits and
+  then raise on `.encode("ascii")`; the codec unit test pins this (the explicit `[0-9]` classes
+  make `re.ASCII` itself redundant, so dropping only the flag is an equivalent mutant).
+- 2026-09-28, bead A-2 (console), IMPLEMENTATION CHOICES (A-3 to state in §7): (a) Sign in and
+  Log out go through `apiWrite` (POST/DELETE `/v1/operator/session`), so the marker header is
+  added in exactly two places (`apiWrite`, `useSnapshot.fetchJson`) and both calls move the write
+  fence like any write. (b) The 403 `request_unmarked`/`origin_mismatch` copy is ONE dismissible
+  alert in the shell, raised by `apiWrite` through a `session.js` listener (`onOriginRefused`), not
+  added to each caller's message table; the caller still shows its own generic failure. A sign-in
+  refused 403 shows the same alert. (c) A Log out whose DELETE fails (network/5xx) keeps the tab
+  signed in and says "Log out failed: Central did not answer. Try again." (the spec was silent; the
+  cookie may still be set). (d) Notices: "Operator token was not accepted. Re-enter the token to
+  sign in." / "Signed out: the session expired or the token changed. Sign in again." / "Your
+  browser did not keep the sign-in; allow cookies for this site." / "Sign-in failed: Central did
+  not answer. Try again." (e) The empty body still reads "Console ready." while checking or
+  signed out. (f) Browser harness: `operator_harness.sign_in(page, origin, token=ADMIN)` is the
+  suite's one sign-in step (the five `_connect` helpers are gone); it clears the context's
+  cookies first, because cookies ignore the port and a cookie from an earlier loopback server
+  would already be sent (reads OK, writes 403). `operator_server` takes `admin_token=` for the
+  rotation test. Tests that clicked "Connect" as a refresh now click the status bar's "Refresh".
+  The evidence-mapped test name `test_connect_with_a_rejected_token_…` is kept (conftest CHECKS).
