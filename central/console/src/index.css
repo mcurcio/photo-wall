@@ -1300,6 +1300,12 @@ label {
   outline: none;
 }
 
+/* Nothing to say yet: the empty live region stays rendered (so a later message is
+   announced) and takes back the gap it would add. */
+.scene-flow__saved:not(:has(.scene-flow__status-line:not(:empty), .record__actions)) {
+  margin-bottom: -16px;
+}
+
 .scene-flow__status-line:empty {
   display: none;
 }

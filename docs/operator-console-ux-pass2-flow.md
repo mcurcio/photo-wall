@@ -206,6 +206,8 @@ They run whichever step is showing, and the "was deleted and removed from this S
 
 **Edit** opens the flow at Review, seeded from the stored Scene. The draft records `baseRevision`. When a poll shows a newer stored revision, Review says "This Scene was changed (revision N) since you opened it", disables Save, and offers **Reload**, which reseeds the draft and names the changed fields. So there is no 409 loop. Central's guard (409 `scene_revision_conflict`) remains the backstop for a change between polls. After Save, the next actions are "Show now" and "Schedule it".
 
+**As built (bead 2).** Step ids are `kind`, `photos`, `frames`, `media`, `playback` and `review`. The kit lives in `central/console/src/flow/`: besides the frozen surfaces, `StepForm` (the Back and Continue footer), `useFlowFocus` (FIELD_STEP routing and the one-shot focus request) and the pure `draftState.js` and `steps.js`. A draft is keyed `new` or `edit/<id>`, so a Scene whose id is "new" stays apart from a new Scene. A seeded value's `revision` is its `baseRevision`. After a Change link or a routed problem, Continue goes to the next step that still has a problem, else Review. Edit keeps slice 3's Replace confirmation. The shell's context carries `recentSceneId` (set by the Scene flow on Save and by a card's Show now or Schedule it) for beads 4 and 5 to prefill their Scene step, and `markDraft(section, dirty)` for the sidebar's "Draft".
+
 **J5 Add a photo source** (`#/sources/new/...`). The intro reads: "Photo Wall selects media that lives in your photo library. It never uploads, edits or deletes anything there."
 
 | Step | Asks | Default, and its source | Advanced |
