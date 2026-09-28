@@ -38,6 +38,24 @@ def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
     assert (refused["reason"], refused["blocking_run_id"]) == ("protected_frames", guard["run_id"])
 
 
+def test_a_stale_scene_put_is_refused_with_409_and_an_identical_retry_is_not(registry):
+    """Both Scene routes store through Runtime.set_scene, so both refuse a save that
+    does not move past the stored revision (slice 3 §13, Question 4 flipped)."""
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
+    scene = {"scene_id": "night", "revision": 1, "cycle_seconds": 30, "loop": True,
+             "contributions": [{"target": "frame:portrait", "source_refs": ["holiday:1"]}]}
+    with TestClient(app) as client:
+        def put(body):
+            return client.put("/v1/operator/scenes/night", headers=AUTH, json=body)
+        assert put(scene).status_code == 200
+        assert put(scene).status_code == 200  # the same save, retried
+        stale = put({**scene, "cycle_seconds": 45})
+        assert (stale.status_code, stale.json()) == (409, {"error": "scene_revision_conflict"})
+        assert put({**scene, "revision": 2, "cycle_seconds": 45}).status_code == 200
+        stored = client.get("/v1/operator/runtime", headers=AUTH).json()["definitions"]["night"]
+    assert (stored["revision"], stored["cycle_seconds"]) == (2, 45)
+
+
 def _console_literal(name):
     source = (Path(__file__).parents[1] / "central/console/src/authoring.js").read_text()
     pinned = re.search(rf"^export const {name} = (\{{.*?^\}});$", source, re.MULTILINE | re.DOTALL)

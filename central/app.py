@@ -35,7 +35,7 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
-from central.runtime import Program, Scene
+from central.runtime import Program, RuntimeConflict, Scene
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     BaseHealth,
@@ -290,6 +290,10 @@ def create_app(
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.exception_handler(RuntimeConflict)
+    async def runtime_conflict(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=409)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(request, exc):

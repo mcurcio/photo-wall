@@ -1,12 +1,13 @@
 """PostgreSQL checks for Frame-aware authored media validation."""
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from central.coordination import Coordinator
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
-from contracts.models import FrameProfile
-from tests.test_authored_media import asset, setup_source
+from contracts.models import FrameProfile, Variant
+from tests.test_authored_media import RECIPE, asset, setup_source
 
 
 def add_frame(registry, frame_id: str, *, portrait: bool = True):
@@ -38,6 +39,50 @@ def test_source_candidates_filters_originals_with_the_planner_policy(registry):
         spec.source_ref, profile=portrait_profile)["candidates"]] == [portrait.asset_id]
     assert {c["asset_id"] for c in repo.source_candidates(
         spec.source_ref, profile=landscape_profile)["candidates"]} == {landscape.asset_id, portrait.asset_id}
+
+
+def _prepared(conn, asset_id, *, state="ready", variant=None, failure=None, retry_at=0):
+    """One current-recipe job for an asset, as the worker leaves it: a ready job holds a
+    ready blob of `variant`; any other state holds none."""
+    digest = None
+    if variant is not None:
+        digest = variant.sha256
+        conn.execute("INSERT INTO media_blobs VALUES(%s,%s,%s,'ready',0)",
+                     (digest, Jsonb(variant.model_dump(mode="json")), variant.size))
+    conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,retry_at,failure_code,"
+                 "earliest_start,variant_sha,updated_at) VALUES(%s,%s,%s,%s,%s,%s,0,%s,0)",
+                 ("job-" + asset_id[-8:], asset_id, RECIPE, state, retry_at, failure, digest))
+
+
+def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
+    """Pass 2 slice 3 §14 "Check this frame": each candidate carries what planning
+    does with it for this Frame (planner.candidate_standing) — the console tallies it
+    and restates no rule. Mutation probe: serve "usable" for every candidate."""
+    usable, wrong_shape, failed, retrying, waiting = (asset(i) for i in range(1, 6))
+    repo, spec, _ = setup_source(registry, assets=(usable, wrong_shape, failed, retrying, waiting))
+    portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
+    still = dict(size=10, media_type="image/jpeg")
+    with registry.db.transaction() as conn:
+        _prepared(conn, usable.asset_id,
+                  variant=Variant(sha256="1" * 64, width=30, height=50, **still))
+        # A portrait original prepared landscape: no version this portrait frame can use.
+        _prepared(conn, wrong_shape.asset_id,
+                  variant=Variant(sha256="2" * 64, width=50, height=30, **still))
+        _prepared(conn, failed.asset_id, state="failed", failure="asset_missing")
+        # A retry not yet due is a failure to planning until then (catalog hydration).
+        _prepared(conn, retrying.asset_id, state="retry", failure="asset_missing",
+                  retry_at=registry.clock.utc() + 60)
+
+    served = repo.source_candidates(spec.source_ref, profile=portrait)["candidates"]
+    assert {c["asset_id"]: c["standing"] for c in served} == {
+        usable.asset_id: "usable",
+        wrong_shape.asset_id: "no_compatible_variant",
+        failed.asset_id: "failed_to_prepare",
+        retrying.asset_id: "failed_to_prepare",
+        waiting.asset_id: "preparing",
+    }
+    # Without a frame there is no profile to stand against.
+    assert all("standing" not in c for c in repo.source_candidates(spec.source_ref)["candidates"])
 
 
 def test_registry_reads_persistent_profiles_and_rejects_unknown_frames(registry):

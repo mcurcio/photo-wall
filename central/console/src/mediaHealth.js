@@ -38,7 +38,7 @@ function age(seconds) {
 }
 
 /** A code as words: "storage_pressure" → "storage pressure". */
-function codeWords(code) {
+export function codeWords(code) {
   return String(code).replaceAll("_", " ");
 }
 
@@ -50,16 +50,21 @@ function gigabytes(bytes) {
 }
 
 /**
- * The worker's jobs and cache: "preparing 3 · waiting 12 · failed 2 · cache
- * 4.1 of 8 GB". Preparing is running or publishing; waiting is queued or
- * retrying (central/migrations/005_media_jobs.sql states).
+ * The worker's jobs of its current recipe (central/media_repository.py
+ * `health`) and cache: "preparing 3 · waiting 12 · failed 2 · failed, retry
+ * pending 1 · cache 4.1 of 8 GB". Preparing is running or publishing; waiting
+ * is queued (central/migrations/005_media_jobs.sql states). A job waiting to
+ * retry reads as failed, as planning treats it until its retry is due (the
+ * catalog hydrates it as a preparation failure); that part shows only when
+ * there is one.
  */
 export function workerLoad(health) {
   const jobs = Object.fromEntries((health?.jobs ?? []).map((row) => [row.state, row.count]));
   const count = (...states) => states.reduce((sum, state) => sum + (jobs[state] ?? 0), 0);
+  const retrying = count("retry") > 0 ? ` · failed, retry pending ${count("retry")}` : "";
   return (
-    `preparing ${count("running", "publishing")} · waiting ${count("queued", "retry")} · ` +
-    `failed ${count("failed")} · cache ${gigabytes(health?.accounted_bytes)} of ` +
+    `preparing ${count("running", "publishing")} · waiting ${count("queued")} · ` +
+    `failed ${count("failed")}${retrying} · cache ${gigabytes(health?.accounted_bytes)} of ` +
     `${gigabytes(health?.max_bytes)} GB`
   );
 }
@@ -141,7 +146,9 @@ export function sourceFilters(spec) {
     const year = new Date(from * 1000).getFullYear();
     const wholeYear =
       newYear(from) && newYear(until) && new Date(until * 1000).getFullYear() === year + 1;
-    filters.push(wholeYear ? `taken ${year}` : `taken ${day(from)} to ${day(until - 86400)}`);
+    // "Taken until" is exclusive: the last day named is the one holding its
+    // last included second, so a day made 23 or 25 h long by DST is still whole.
+    filters.push(wholeYear ? `taken ${year}` : `taken ${day(from)} to ${day(until - 1)}`);
   } else if (from !== null) {
     filters.push(`taken from ${day(from)}`);
   } else if (until !== null) {
@@ -153,8 +160,9 @@ export function sourceFilters(spec) {
 /**
  * One Source's state, first match (§14): awaiting its first refresh
  * (`next_refresh = 0`, 005_media_jobs.sql), failing, overdue past
- * {@link REFRESH_OVERDUE_AFTER}, no usable media, ok. The label carries the
- * Source's filters.
+ * {@link REFRESH_OVERDUE_AFTER}, nothing valid in its last refresh, ok. "Valid"
+ * is the refresh's own count (`counts.valid`): items it found and accepted,
+ * not items ready for any frame. The label carries the Source's filters.
  *
  * @param {object} source a `/v1/operator/media` `sources` row
  * @param {number} now Central's clock
@@ -181,83 +189,43 @@ export function sourceState(source, now) {
   if (!(late <= REFRESH_OVERDUE_AFTER)) {
     return said("overdue", "alarm", `Refresh overdue by ${age(late)}`);
   }
-  const usable = Number(source.counts?.valid ?? 0);
-  if (!(usable > 0)) {
-    return said("empty", "todo", "no usable media");
+  const valid = Number(source.counts?.valid ?? 0);
+  if (!(valid > 0)) {
+    return said("empty", "todo", "nothing valid in the last refresh");
   }
   return said(
     "ok",
     "ok",
-    `refreshed ${age(ageAt(now, source.last_success))} ago · ${usable} usable`,
+    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh`,
   );
 }
 
-// --- One candidate, as the planner would treat it for one frame.
+// --- One candidate's standing for a frame, as Central serves it.
 
-/**
- * Whether a prepared variant suits a frame's profile: the rule of
- * central/planner.py `_variant_usable`, restated because the candidates route
- * serves variants but not this verdict (slice 3 §18 cost: inferred, not served).
- */
-function variantUsable(candidate, profile) {
-  const variant = candidate.variant;
-  const portrait = profile != null && profile.height_px > profile.width_px;
-  if (candidate.kind === "image") {
-    return (
-      ["image/jpeg", "image/png"].includes(variant.media_type) &&
-      variant.duration == null &&
-      !(portrait && variant.width > variant.height)
-    );
-  }
-  return (
-    variant.media_type === "video/mp4" &&
-    variant.duration != null &&
-    (profile == null || profile.diagonal_inches < 40 || Math.min(variant.width, variant.height) >= 1080)
-  );
-}
-
-/**
- * A candidate's standing for a frame, in the planner's exclusion order
- * (central/planner.py `_pool` drops a failed preparation; `add` then waits on a
- * missing variant and refuses an unusable one): "failed", "preparing",
- * "incompatible" or "usable".
- *
- * @param {object} candidate a served Candidate (variant and failure hydrated)
- * @param {object|null} profile the frame's FrameProfile
- */
-export function candidateStanding(candidate, profile) {
-  if (candidate.preparation_failure != null) {
-    return "failed";
-  }
-  if (candidate.variant == null) {
-    return "preparing";
-  }
-  return variantUsable(candidate, profile) ? "usable" : "incompatible";
-}
-
+// The words for each served standing (central/planner.py `candidate_standing`).
 const STANDING_WORDS = {
   usable: "ready",
   preparing: "preparing",
-  failed: "failed to prepare",
-  incompatible: "no compatible version",
+  failed_to_prepare: "failed to prepare",
+  no_compatible_variant: "no compatible version",
 };
 
 /**
  * Chooser labels, in the candidates' order: "Photo 108×192 · taken 3 Mar 2025
  * 14:02 · ready", with " (2)" added only to a label that repeats an earlier one.
+ * The readiness is the candidate's served `standing` for the chooser's frame.
  *
- * @param {Array<object>} candidates
- * @param {object|null} profile
+ * @param {Array<object>} candidates candidates read for one frame
  * @returns {string[]}
  */
-export function candidateLabels(candidates, profile) {
+export function candidateLabels(candidates) {
   const seen = new Map();
   return candidates.map((candidate) => {
     const kind = candidate.kind === "video" ? "Video" : "Photo";
     const label =
       `${kind} ${candidate.original_width}×${candidate.original_height} · taken ` +
       `${day(candidate.captured_at)} ${clockTime(candidate.captured_at)} · ` +
-      STANDING_WORDS[candidateStanding(candidate, profile)];
+      (STANDING_WORDS[candidate.standing] ?? codeWords(candidate.standing));
     const repeat = (seen.get(label) ?? 0) + 1;
     seen.set(label, repeat);
     return repeat === 1 ? label : `${label} (${repeat})`;
@@ -265,16 +233,26 @@ export function candidateLabels(candidates, profile) {
 }
 
 /**
- * "Check this frame" (§14 step 5): the frame's candidates split by standing.
+ * "Check this frame" (§14 step 5): a tally of the served standings of the
+ * frame's items across the Scene's Sources. A Source whose last refresh
+ * failed is left out, as planning leaves it out (central/planner.py `_pool`),
+ * and an item several Sources share counts once: its standing is the same
+ * from each, since Central reads it per item, not per Source.
  *
- * @param {Array<object>} candidates the profile-filtered candidates
- * @param {object|null} profile
- * @returns {Record<"usable"|"preparing"|"failed"|"incompatible", number>}
+ * @param {Array<{status: string, candidates: Array<object>}>} reads one
+ *   `readCandidates` result per Source
+ * @returns {Record<"usable"|"preparing"|"failed_to_prepare"|"no_compatible_variant", number>}
  */
-export function splitCandidates(candidates, profile) {
-  const counts = { usable: 0, preparing: 0, failed: 0, incompatible: 0 };
-  for (const candidate of candidates) {
-    counts[candidateStanding(candidate, profile)] += 1;
+export function checkCounts(reads) {
+  const standings = new Map();
+  for (const read of reads.filter((entry) => entry.status === "ok")) {
+    for (const candidate of read.candidates) {
+      standings.set(candidate.asset_id, candidate.standing);
+    }
+  }
+  const counts = { usable: 0, preparing: 0, failed_to_prepare: 0, no_compatible_variant: 0 };
+  for (const standing of standings.values()) {
+    counts[standing] += 1;
   }
   return counts;
 }
@@ -284,14 +262,18 @@ function checkStep(frameId, check) {
   if (check == null) {
     return {
       state: "check",
-      text: "Reads the Source's current items for this frame's shape, as Central's planner " +
-        "would count them.",
+      text: "Reads the Sources' current items for this frame's shape.",
     };
   }
   if (check.error != null) {
     return { state: "info", text: `Could not check: ${check.error}.` };
   }
-  const { usable, preparing, failed, incompatible } = check.counts;
+  const {
+    usable,
+    preparing,
+    failed_to_prepare: failed,
+    no_compatible_variant: incompatible,
+  } = check.counts;
   const rest = [
     preparing > 0 ? `${preparing} still preparing` : null,
     failed > 0 ? `${failed} failed to prepare` : null,

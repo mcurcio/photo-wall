@@ -1813,3 +1813,34 @@ doc softenings.
   chooser names §17 cites at `:486,:487,:489,:516` are now `:499,:500,:502,:529`; the three Why
   count assertions are scoped to the "Contribution precedence" list. Thresholds pytest lives in
   tests/test_media_queue.py.
+- 2026-09-28, console pass 2 slice 3B review fix cycle 1 (docs/operator-console-ux-pass2-showrunner.md
+  §13-§14, FRAME CHANGE — owner to confirm (a)): (a) OWNER QUESTION 4 DEFAULT FLIPPED: `Runtime.set_scene`
+  (the one Scene write path; both PUT routes) now refuses with 409 `scene_revision_conflict` a save whose
+  revision is at or below the stored one, unless it equals the stored Scene exactly (an idempotent retry
+  stays 200). It refuses only conflicting writes; no expected-revision field is added. New
+  `central.runtime.RuntimeConflict(code)`, mapped to 409 in app.py. Replace no longer pre-reads
+  /v1/operator/runtime; on the 409 it ends "Changed since you opened this. Reopen to review." A new Scene
+  whose id another operator saved meanwhile is refused too ("A Scene with this id was saved meanwhile;
+  nothing was replaced.") — §15's "silent replace, None (Question 4)" row no longer holds. Program PUTs
+  are unchanged. Callers checked: coordination.py configure_authored_scene, app.py configure_scene,
+  RuntimeStore.command; scripts/demo_wall.py (first write on a fresh Central; its frame POSTs already
+  require that); tests (one browser fixture re-stored a Scene at the same revision; now revision 2).
+  (b) Supersedes 3B errata (e): `planner.candidate_standing(candidate, profile)` is the planner's one
+  per-candidate verdict ("usable" / "preparing" / "failed_to_prepare" / "no_compatible_variant"); `_pool`
+  and `add` decide through it, and the candidates route serves it as `standing` per candidate when
+  `frame_id` is given. The JS `variantUsable`/`candidateStanding` are deleted; chooser labels and "Check
+  this frame" read the served standing. The check leaves out a Source whose served status is not ok and
+  counts an item shared by several Sources once (its standing is per item, not per Source).
+  (c) `readCandidates` moved from MediaPipeline.jsx to a new `candidatesApi.js` (returns `{status,
+  candidates}`); regions no longer import each other. (d) `MediaRepository.health()` jobs are scoped to
+  the current recipe (a recipe change fails the old recipe's queued jobs as `recipe_changed`). The worker
+  line reads a `retry` job as "failed, retry pending N" (shown only when N > 0), not "waiting", matching
+  the catalog's hydration of a not-yet-due retry as a preparation failure. (e) Wording: the Source step
+  says "N valid in the last refresh" / "nothing valid in the last refresh" (`counts.valid`), the Last
+  refresh row "valid N"; the check no longer claims "as Central's planner would count them"; a looping
+  Scene reads "keeps playing until its Program ends or, when started by hand, until you Finish or Cancel
+  it". (f) DST: the capture window's last day is `day(until - 1)` (the day holding the last included
+  second), not `until - 86400`. (g) RESIDUAL, not built: serve the planner's own per-frame
+  `projection.diagnostics` (coordination.py:403) so "Check this frame" reports what planning actually
+  concluded (pool order, cycle pick, `no_eligible_candidates`) instead of a tally of per-candidate
+  standings.

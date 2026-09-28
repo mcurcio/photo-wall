@@ -77,7 +77,9 @@ function SceneRow({ scene, snapshot, usedBy, running, onEdit }) {
           </dd>
           <dt>Cycle</dt>
           <dd>
-            {once ?? `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends`}
+            {once ??
+              `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends ` +
+                "or, when started by hand, until you Finish or Cancel it"}
           </dd>
           <dt>Revision</dt>
           <dd>{`revision ${filled.revision}`}</dd>

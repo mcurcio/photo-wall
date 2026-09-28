@@ -6,11 +6,11 @@ import { useConfirm } from "./ConfirmAction.jsx";
 import { CycleInput } from "./CycleInput.jsx";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { readCandidates } from "./candidatesApi.js";
 import { SceneList } from "./SceneList.jsx";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { TargetPicker } from "./TargetPicker.jsx";
 import { candidateLabels } from "./mediaHealth.js";
-import { readCandidates } from "./MediaPipeline.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -32,10 +32,10 @@ import { useMutate } from "./useMutate.js";
  *
  * EDIT (§13) loads a stored Scene the console can author losslessly into the
  * same form. It shows the stored id, never a derived one, and Replace goes
- * through ConfirmAction with the stored revision + 1. Central keeps no
- * precondition on the PUT (slice 3 Question 4), so the dialog reads the stored
- * revision first: if it moved since Edit was opened, nothing is sent and the
- * dialog ends "Changed since you opened this".
+ * through ConfirmAction with the stored revision + 1. Central refuses a save
+ * that does not move past the stored revision (409 `scene_revision_conflict`,
+ * central/runtime.py `set_scene`), so a Scene replaced since Edit was opened
+ * ends the dialog "Changed since you opened this" and stays as it is.
  *
  * @param {{snapshot: object|null}} props
  */
@@ -311,7 +311,6 @@ export function SceneAuthoring({ snapshot }) {
 
         {mode === "authored" && (
           <MediaChoosers
-            frames={frames}
             candidates={candidates}
             targetIds={targetIds}
             selections={selections}
@@ -347,12 +346,14 @@ export function SceneAuthoring({ snapshot }) {
   );
 }
 
-// The authored route's refusals in plain words (§13); media_repository.py
-// `author_candidates_in` answers them with 409.
+// Refusals in plain words (§13): media_repository.py `author_candidates_in`
+// answers the first two (authored route) with 409; runtime.py `set_scene` the
+// last (both routes) when another save of this id landed first.
 const SAVE_REFUSALS = {
   source_not_fresh:
     "The Source's last refresh failed; authored choices can be saved once it succeeds.",
   authored_asset_not_member: "That item is no longer in the Source; choose again.",
+  scene_revision_conflict: "A Scene with this id was saved meanwhile; nothing was replaced.",
 };
 
 /**
@@ -373,10 +374,9 @@ function refusal(lead, result, reload) {
 
 /**
  * Replace a stored Scene (§13), captured when the dialog opens: the body and
- * the revision it was opened at. The stored revision is read first, so a Scene
- * that changed in Plane A since Edit ends in the terminal "changed" and nothing
- * is sent (Central keeps no precondition, Question 4: a save racing this read
- * still replaces silently).
+ * the revision it was opened at. Central refuses it with 409
+ * `scene_revision_conflict` when the stored Scene moved past that revision
+ * since Edit, which ends in the terminal "changed".
  */
 function replaceRequest({ sceneId, revision }, { path, body }, reload) {
   return {
@@ -390,24 +390,12 @@ function replaceRequest({ sceneId, revision }, { path, body }, reload) {
       </p>
     ),
     run: async () => {
-      let stored;
-      try {
-        stored = await apiWrite("/v1/operator/runtime", { method: "GET" });
-      } catch {
-        stored = null;
-      }
-      if (!stored?.ok) {
-        return {
-          state: "refused",
-          message: "Could not read the stored Scene, so nothing was sent. Try again.",
-        };
-      }
-      if (stored.data?.definitions?.[sceneId]?.revision !== revision) {
-        return { state: "changed", message: CHANGED_MESSAGE };
-      }
       const result = await apiWrite(path, { method: "PUT", body });
       if (result.ok) {
         return { state: "done", message: `Replaced Scene ${sceneId}: now revision ${revision + 1}.` };
+      }
+      if (result.error === "scene_revision_conflict") {
+        return { state: "changed", message: CHANGED_MESSAGE };
       }
       if (result.status >= 500) {
         return { state: "unknown", message: UNKNOWN_MESSAGE };
@@ -419,7 +407,7 @@ function replaceRequest({ sceneId, revision }, { path, body }, reload) {
 
 /**
  * Each target Frame's candidates from one Source (Bead 14b), read through
- * MediaPipeline.jsx `readCandidates`, which Central HARD-FILTERS by the Frame's
+ * candidatesApi.js `readCandidates`, which Central HARD-FILTERS by the Frame's
  * profile — an asset ineligible for a Frame's profile is never returned, so it
  * can never be offered here. `loading` until they are read (§6); `ready`
  * once the lists for exactly this Source and these Frames are read; `reload`
@@ -449,7 +437,10 @@ function useCandidates(sourceRef, targetIds) {
     (async () => {
       try {
         const entries = await Promise.all(
-          frameIds.map(async (frameId) => [frameId, await readCandidates(sourceRef, frameId)]),
+          frameIds.map(async (frameId) => [
+            frameId,
+            (await readCandidates(sourceRef, frameId)).candidates,
+          ]),
         );
         if (!ignore) {
           setLoaded({ key, byFrame: Object.fromEntries(entries), error: null });
@@ -483,7 +474,7 @@ const EMPTY = {};
  * Frame's candidate list (`useCandidates`, profile-filtered by Central). The
  * whole selection is later saved in ONE `PUT …/scenes/{id}/authored`.
  */
-function MediaChoosers({ frames, candidates, targetIds, selections, onSelect, problems }) {
+function MediaChoosers({ candidates, targetIds, selections, onSelect, problems }) {
   const { byFrame, loading, error: loadError } = candidates;
   return (
     <fieldset
@@ -498,8 +489,7 @@ function MediaChoosers({ frames, candidates, targetIds, selections, onSelect, pr
       ) : (
         targetIds.map((frameId) => {
           const list = byFrame[frameId] ?? [];
-          const profile = frames.find((frame) => frame.id === frameId)?.profile ?? null;
-          const labels = candidateLabels(list, profile);
+          const labels = candidateLabels(list);
           const field = `media:${frameId}`;
           return (
             <Field

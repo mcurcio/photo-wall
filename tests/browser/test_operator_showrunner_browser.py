@@ -21,6 +21,7 @@ import os
 import re
 from datetime import UTC, datetime
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pytest
 from media_queue import RecordingMediaQueue
@@ -1139,7 +1140,8 @@ def test_a_refused_program_names_its_protector(page, registry):
     runtime, _now = _refused_by_guard(registry)
     registry.clock.advance(120)
     runtime.command("advance", registry.clock.utc())  # Central refuses "blocked" at +60
-    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME))
+    # An edit (revision 2): the Scene now reaches only INVALID_FRAME.
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME, revision=2))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _connect(page, origin)
         _to_showrunner(page)
@@ -1660,13 +1662,6 @@ def _scene_row(page, scene_id):
     return row
 
 
-def _scene_puts(page):
-    urls = []
-    page.on("request", lambda request: urls.append(request.url)
-            if request.method == "PUT" and "/v1/operator/scenes/" in request.url else None)
-    return urls
-
-
 def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):
     """§13: a Scene saved with its other fields at their defaults stays editable
     (mutation probe: compare without filling defaults); Edit shows the stored id and
@@ -1831,7 +1826,11 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
         expect(choice).to_have_value("")
 
 
-def test_a_scene_changed_since_edit_opened_ends_changed_and_sends_nothing(page, registry):
+def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry):
+    """§13, Question 4 flipped: both editors open revision 1; the first Replace lands
+    as revision 2, so Central refuses the second (409 scene_revision_conflict) and the
+    dialog ends "changed" with the first editor's Scene kept. Mutation probe: drop the
+    guard in Runtime.set_scene (the second silently replaces the first)."""
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
@@ -1844,16 +1843,24 @@ def test_a_scene_changed_since_edit_opened_ends_changed_and_sends_nothing(page, 
         form = _scenes_form(page)
         form.get_by_label("Seconds per cycle", exact=True).fill("45")
 
-        # Another operator replaces it meanwhile; no poll has shown it yet.
-        runtime.command("set_scene", _console_scene(SCENE_ID, revision=2))
-        puts = _scene_puts(page)
+        # The other editor replaces it meanwhile, as the console saves; no poll has
+        # shown it here yet.
+        first = _console_scene(SCENE_ID, revision=2, cycle_seconds=20).model_dump(mode="json")
+        response = page.request.put(origin + f"/v1/operator/scenes/{SCENE_ID}",
+                                    headers={"Authorization": "Bearer " + ADMIN}, data=first)
+        assert response.status == 200, response.text()
         form.get_by_role("button", name="Replace Scene", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Replace Scene {SCENE_ID}?")
-        dialog.get_by_role("button", name="Confirm replace", exact=True).click()
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
+        ) as info:
+            dialog.get_by_role("button", name="Confirm replace", exact=True).click()
+        assert (info.value.status, info.value.json()) == (409, {"error": "scene_revision_conflict"})
         expect(dialog.get_by_role("status")).to_have_text(
             "Changed since you opened this. Reopen to review.")
         expect(dialog.get_by_role("button", name="Confirm replace")).to_have_count(0)
-        assert puts == []
+        stored = _runtime(registry).read().export_state()["scenes"][SCENE_ID]
+        assert (stored["revision"], stored["cycle_seconds"]) == (2, 20)
 
 
 # Pass 2 slice 3B (§14): the media pipeline and "why nothing new?".
@@ -1904,11 +1911,12 @@ def test_the_media_pipeline_states_each_source(page, registry):
             return pipeline.get_by_label(f"Refresh of {ref}", exact=True)
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
-            "refreshed 1 min ago · 790 usable · photos only · only favourites · taken 2024")
-        expect(state("fresh:1")).to_contain_text("found 800 · usable 790 · pending 4 · rejected 6")
+            "refreshed 1 min ago · 790 valid in the last refresh · photos only · only favourites"
+            " · taken 2024")
+        expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
         expect(state("failing:1")).to_contain_text("Library unreachable · last good 2 h ago")
         expect(state("failing:1")).to_contain_text("source unavailable")
-        expect(state("empty:1")).to_contain_text("no usable media")
+        expect(state("empty:1")).to_contain_text("nothing valid in the last refresh")
 
         registry.clock.advance(30 + 125 + 240)  # every refresh is 6 min past due
         page.clock.run_for(5000)
@@ -1954,6 +1962,13 @@ def _why_chain(page, frame_id=VALID_FRAME):
         "group", name="Why", exact=True)
     why.get_by_label("Frame for why", exact=True).select_option(frame_id)
     return why.get_by_role("group", name=f"Why nothing new on {frame_id}?", exact=True)
+
+
+def _run_now(registry, scene):
+    """Store a Scene and start a Run of it now."""
+    runtime = _runtime(registry)
+    runtime.command("set_scene", scene)
+    runtime.command("activate", scene.scene_id, "live-act", registry.clock.utc())
 
 
 def _stop(chain):
@@ -2004,9 +2019,9 @@ def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
 
 
 def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
-    """§14 step 5: the frame's candidates split into usable, still preparing and failed
-    to prepare — the planner's exclusions. The candidates route's count includes a
-    failed preparation (mutation probe: count it as usable)."""
+    """§14 step 5: the frame's candidates tallied by the standing Central serves —
+    usable, still preparing, failed to prepare. The candidates route's count includes a
+    failed preparation (mutation probe: serve "usable" for every candidate)."""
     _seed(registry)
     portrait_a, portrait_b, landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
@@ -2014,15 +2029,14 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
     with registry.db.transaction() as conn:  # the refresh found them usable
         conn.execute("UPDATE media_sources SET counts=%s WHERE source_ref=%s",
                      (Jsonb({"valid": 3, "discovered": 3}), SOURCE))
-    runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene(SCENE_ID))
-    runtime.command("activate", SCENE_ID, "live-act", now)
+    _run_now(registry, _console_scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         pause_page_clock(page, now)
         _connect(page, origin)
         _to_showrunner(page)
         chain = _why_chain(page)
-        expect(chain).to_contain_text(f"The Source {SOURCE}: refreshed 0 s ago · 3 usable.")
+        expect(chain).to_contain_text(
+            f"The Source {SOURCE}: refreshed 0 s ago · 3 valid in the last refresh.")
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")
@@ -2041,12 +2055,58 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
             origin + f"/v1/operator/sources/{quote(SOURCE, safe='')}/candidates"
             f"?frame_id={VALID_FRAME}", headers={"Authorization": "Bearer " + ADMIN})
         assert response.json()["count"] == 2  # the route counts the failed one too
+        assert sorted(c["standing"] for c in response.json()["candidates"]) == [
+            "failed_to_prepare", "usable"]
         page.clock.run_for(5000)  # the next poll serves the worker's check-in
         chain.get_by_role("button", name="Check again", exact=True).click()
         check = chain.get_by_role("listitem").filter(has_text="Check this frame")
         expect(check).to_contain_text("1 usable · 1 failed to prepare.")
         expect(check).not_to_contain_text("Stops here.")
         expect(_stop(chain)).to_contain_text("Frame health")
+
+
+def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(page, registry):
+    """§14 step 5 across a Scene's Sources, as planning pools them (planner.py `_pool`):
+    a Source whose last refresh failed contributes nothing, and an item two Sources
+    share counts once. Mutation probes: keep the failing Source; count per Source."""
+    _seed(registry)
+    portrait_a, portrait_b, _landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b))
+    a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
+    now = registry.clock.utc()
+    _drop_member(registry, b)  # SOURCE holds a
+    fresh = dict(next_refresh=now + 30, last_success=now, counts={"valid": 1})
+    _set_source(registry, "shared:1", status="ok", **fresh)
+    _set_source(registry, "down:1", status="unavailable", **fresh)
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO source_members VALUES(%s,%s),(%s,%s)",
+                     ("shared:1", a, "down:1", b))
+    _run_now(registry, Scene(scene_id=SCENE_ID, loop=True, contributions=(Contribution(
+        target=f"frame:{VALID_FRAME}", source_refs=(SOURCE, "shared:1", "down:1")),)))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, now)
+        _connect(page, origin)
+        _to_showrunner(page)
+        chain = _why_chain(page)
+        chain.get_by_role("button", name="Check this frame", exact=True).click()
+        expect(_stop(chain)).to_contain_text(
+            "Check this frame Nothing usable yet: 1 still preparing.")
+
+
+@pytest.mark.browser_context_args(timezone_id="Europe/London")
+def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, registry):
+    """§7 "taken until" is exclusive: a window ending at local midnight on 1 April
+    names 31 March, though that day was 23 h long (mutation probe: until - 86400)."""
+    _seed(registry)
+    london = ZoneInfo("Europe/London")
+    start = datetime(2024, 3, 1, tzinfo=london).timestamp()
+    until = datetime(2024, 4, 1, tzinfo=london).timestamp()
+    _set_source(registry, "spring:1", spec={"captured_from": start, "captured_until": until})
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        expect(_pipeline(page).get_by_label("Refresh of spring:1", exact=True)).to_contain_text(
+            re.compile(r"taken (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
 
 
 def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, registry):

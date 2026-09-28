@@ -18,7 +18,7 @@ from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
 from central.media_ports import RefreshReceipt
 from central.media_queue import MediaTaskQueue
-from central.planner import AcquisitionRequest, eligible
+from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
 from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
 from contracts.time import Clock
@@ -267,7 +267,11 @@ class MediaRepository:
                      "DO UPDATE SET snapshot=EXCLUDED.snapshot", (source_ref, Jsonb(snapshot.model_dump(mode="json"))))
 
     def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None) -> dict:
-        """Return only neutral candidates from a configured source."""
+        """Return only neutral candidates from a configured source.
+
+        With a Frame profile, only the candidates eligible for it, each with the
+        planner's `standing` for that profile (`planner.candidate_standing`).
+        """
         with self.transaction() as conn:
             source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
             if source is None:
@@ -283,7 +287,11 @@ class MediaRepository:
             return {"source_ref": source_ref, "status": source["status"],
                     "refreshed_at": refreshed_at,
                     "count": len(candidates),
-                    "candidates": [candidate.model_dump(mode="json") for candidate in candidates]}
+                    "candidates": [
+                        candidate.model_dump(mode="json") | (
+                            {} if profile is None
+                            else {"standing": candidate_standing(candidate, profile)})
+                        for candidate in candidates]}
 
     @staticmethod
     def authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:
@@ -501,7 +509,13 @@ class MediaRepository:
         return snapshots, authored
 
     def health(self) -> dict:
+        """Worker check-in, cache and the jobs of the current recipe by state.
+
+        Jobs of an earlier recipe are left out: a recipe change fails them
+        (`recipe_changed`) and planning requests the asset again under the new one.
+        """
         with self.transaction() as conn:
             state = conn.execute("SELECT recipe_id,max_bytes,worker_seen,worker_error FROM media_settings WHERE singleton").fetchone()
             return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
-                "SELECT state,count(*) AS count FROM media_jobs GROUP BY state ORDER BY state").fetchall()}
+                "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
+                "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}

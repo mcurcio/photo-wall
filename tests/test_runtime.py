@@ -11,6 +11,7 @@ from central.runtime import (
     Program,
     RecordingActuator,
     Runtime,
+    RuntimeConflict,
     RuntimeView,
     RunView,
     Scene,
@@ -210,6 +211,22 @@ def test_cancel_is_downward_and_skips_outro():
     final = runtime.cancel(root, 3)
     assert get_run(final, root).phase == "cancelled"
     assert final.contributions == ()
+
+
+def test_a_scene_save_must_move_past_the_stored_revision():
+    """A save built from an older copy never silently replaces a newer Scene (slice 3
+    §13); an identical retry is idempotent. Mutation probe: drop the guard."""
+    runtime = Runtime()
+    stored = Scene(scene_id="scene", revision=2, cycle_seconds=10, contributions=(media(),))
+    runtime.set_scene(stored)
+    for stale in (stored.model_copy(update={"cycle_seconds": 45}),
+                  stored.model_copy(update={"revision": 1})):
+        with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+            runtime.set_scene(stale)
+        assert runtime.export_state()["scenes"]["scene"]["cycle_seconds"] == 10
+    runtime.set_scene(Scene.model_validate(stored.model_dump(mode="json")))  # a retry
+    runtime.set_scene(stored.model_copy(update={"revision": 3, "cycle_seconds": 45}))
+    assert runtime.export_state()["scenes"]["scene"]["revision"] == 3
 
 
 def test_tree_edits_adopt_only_on_next_root_including_delayed_child():

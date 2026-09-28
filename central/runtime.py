@@ -306,6 +306,14 @@ def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
     )
 
 
+class RuntimeConflict(Exception):
+    """A command refused because it conflicts with the stored state; nothing changed."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
@@ -329,6 +337,15 @@ class Runtime:
         self._state = _State()
 
     def set_scene(self, scene: Scene) -> None:
+        """Store a Scene; a save must move its revision past the stored one.
+
+        A revision at or below the stored one is refused (`scene_revision_conflict`)
+        so a save built from an older copy never silently replaces a newer one,
+        unless it is the stored Scene exactly (an idempotent retry).
+        """
+        stored = self._state.scenes.get(scene.scene_id)
+        if stored is not None and scene.revision <= stored.revision and scene != stored:
+            raise RuntimeConflict("scene_revision_conflict")
         self._state.scenes[scene.scene_id] = scene
 
     def set_program(self, program: Program) -> None:

@@ -1,39 +1,16 @@
 import React, { useState } from "react";
 
-import { apiWrite } from "./apiWrite.js";
+import { readCandidates } from "./candidatesApi.js";
 import { rankedContributions } from "./join.js";
 import {
+  checkCounts,
+  codeWords,
   mediaNow,
   sourceState,
-  splitCandidates,
   whyNothingNew,
   workerLoad,
   workerState,
 } from "./mediaHealth.js";
-
-/**
- * One frame's candidates from one Source: `GET /v1/operator/sources/{ref}/
- * candidates?frame_id=<frame>`, which Central HARD-FILTERS by the frame's
- * profile (design J4). The authoring choosers and "Check this frame" both read
- * through here. Throws on a refusal, with the served error code.
- *
- * @param {string} sourceRef
- * @param {string} frameId
- * @returns {Promise<Array<object>>}
- */
-export async function readCandidates(sourceRef, frameId) {
-  // frame_id makes Central drop every asset ineligible for THIS frame's
-  // profile — the profile hard-filter. Dropping it would offer incompatible
-  // assets, which is exactly what the chooser's mutation probe attacks.
-  const result = await apiWrite(
-    `/v1/operator/sources/${encodeURIComponent(sourceRef)}/candidates?frame_id=${encodeURIComponent(frameId)}`,
-    { method: "GET" },
-  );
-  if (!result.ok) {
-    throw new Error(result.error ?? `HTTP ${result.status}`);
-  }
-  return result.data?.candidates ?? [];
-}
 
 /**
  * The media pipeline (pass 2 slice 3 §14), in the "Now" column: the worker
@@ -97,7 +74,7 @@ function SourceRefresh({ source, now }) {
           <>
             <dt>Last refresh</dt>
             <dd>
-              {`found ${counts.discovered ?? 0} · usable ${counts.valid ?? 0} · pending ` +
+              {`found ${counts.discovered ?? 0} · valid ${counts.valid ?? 0} · pending ` +
                 `${counts.pending ?? 0} · rejected ${counts.rejected ?? 0}`}
             </dd>
           </>
@@ -105,7 +82,7 @@ function SourceRefresh({ source, now }) {
         {reported.length > 0 && (
           <>
             <dt>Reported</dt>
-            <dd>{reported.map((code) => code.replaceAll("_", " ")).join(", ")}</dd>
+            <dd>{reported.map(codeWords).join(", ")}</dd>
           </>
         )}
         {next !== null && Number.isFinite(next) && (
@@ -123,7 +100,7 @@ function SourceRefresh({ source, now }) {
  * "Why nothing new on <frame>?" (§14): its own group, beside the ranked Why
  * list and never inside it. Each step is a served fact; the first one that is
  * not ok is marked "Stops here". "Check this frame" reads the frame's
- * candidates on demand and splits them as Central's planner would.
+ * candidates on demand and tallies the standing Central serves for each.
  *
  * @param {{snapshot: object|null, frameId: string}} props
  */
@@ -135,15 +112,12 @@ export function WhyNothingNew({ snapshot, frameId }) {
 
   const runCheck = async () => {
     const [winner] = rankedContributions(snapshot?.runtime, frameId);
-    const frame = (snapshot?.inventory?.frames ?? []).find((entry) => entry.id === frameId);
     setChecking(true);
     try {
-      // Several Sources merge by asset id, as the planner merges them.
-      const lists = await Promise.all(
+      const reads = await Promise.all(
         (winner?.source_refs ?? []).map((ref) => readCandidates(ref, frameId)),
       );
-      const merged = new Map(lists.flat().map((candidate) => [candidate.asset_id, candidate]));
-      setCheck({ counts: splitCandidates([...merged.values()], frame?.profile ?? null) });
+      setCheck({ counts: checkCounts(reads) });
     } catch (error) {
       setCheck({ error: error instanceof Error ? error.message : "the request did not complete" });
     } finally {
