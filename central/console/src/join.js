@@ -113,3 +113,41 @@ export function boundOutput(snapshot, frameId) {
     ) ?? null
   );
 }
+
+/**
+ * The Frame an Output serves: the reverse of {@link boundOutput}, on the same
+ * COMPOUND key (player_id AND output_id). Null when no Frame is bound to it.
+ *
+ * @param {{inventory?: {frames?: Array<object>}}} snapshot
+ * @param {string} playerId
+ * @param {string} outputId
+ * @returns {object|null} the FrameInventory row, or null
+ */
+export function frameForOutput(snapshot, playerId, outputId) {
+  const frames = snapshot?.inventory?.frames ?? [];
+  return (
+    frames.find(
+      (frame) => isBound(frame) && frame.player_id === playerId && frame.output_id === outputId,
+    ) ?? null
+  );
+}
+
+// A Run is live in these phases: the same predicate the delete guard uses
+// (central/app.py `remove_frame`), so the console lists exactly the Runs that
+// would refuse a delete.
+const LIVE_PHASES = new Set(["body", "outro"]);
+
+/**
+ * The live Runs a Frame participates in (phase body or outro), in the runtime's
+ * order. A Run's `participants` holds target strings (`"frame:<id>"`).
+ *
+ * @param {{current?: {runs?: Array<{run_id: string, scene_id: string, phase: string, participants: string[]}>}}} runtime
+ * @param {string} frameId
+ * @returns {Array<object>}
+ */
+export function liveRunsFor(runtime, frameId) {
+  const target = "frame:" + frameId;
+  return (runtime?.current?.runs ?? []).filter(
+    (run) => LIVE_PHASES.has(run.phase) && (run.participants ?? []).includes(target),
+  );
+}

@@ -1,36 +1,17 @@
 import React from "react";
 
-import { apiWrite } from "./apiWrite.js";
-import { playerLiveness } from "./health.js";
+import { retirePlayer } from "./equipmentApi.js";
+import { playerLiveness, playerStanding } from "./health.js";
 import { useMutate } from "./useMutate.js";
-
-/**
- * Retire a Player (bead G1 — SR-retire): POST /v1/operator/players/{id}/retire.
- *
- * The route takes NO body (central/app.py `retire`). On success the store sets
- * the Player's `retired_at`, bumps its `authority_epoch`, and drops its bindings
- * (central/registry.py:290, decision 0006: a Player is a disposable box). After
- * the caller's `useMutate` refreshes Plane A the Player moves from the Pending to
- * the Retired rail, and — because the Binding facet's bindable-output set is the
- * Outputs of pending Players (`is_bound === false && retired_at == null`) — the
- * retired Player's Output(s) drop out of the bind choices with no extra wiring.
- *
- * @param {string} playerId
- * @returns {Promise<{ok: boolean, status: number, error: string|null, data: any}>}
- */
-export async function retirePlayer(playerId) {
-  return apiWrite(`/v1/operator/players/${playerId}/retire`, { method: "POST" });
-}
 
 /**
  * Equipment rails (Bead 9) — the onboarding surface for new and retired Players.
  *
  * Two rails, each driven straight from the snapshot's PlayerInventory rows:
- *  - **Pending**: `is_bound === false && retired_at == null` — freshly enrolled
- *    or replacement Pis awaiting an operator bind (design J1). This is the
- *    same predicate the store uses for its pending queue
- *    (central/registry.py, test_registry.py:80).
- *  - **Retired**: `retired_at` set — equipment withdrawn from service, kept
+ *  - **Pending**: health.js `playerStanding` "pending" — no Output bound and
+ *    not retired, the store's pending queue: freshly enrolled or replacement
+ *    Pis awaiting an operator bind (design J1).
+ *  - **Retired**: standing "retired" — equipment withdrawn from service, kept
  *    visible so the operator can see what was removed.
  *
  * Each entry is a selectable button keyed by the Player's identity (never an
@@ -52,10 +33,10 @@ export function EquipmentRail({ snapshot, onSelect }) {
   const mutate = useMutate();
   const retire = (playerId) => mutate(() => retirePlayer(playerId));
   const players = snapshot?.inventory?.players ?? [];
-  const pending = players.filter(
-    (player) => player.is_bound === false && player.retired_at == null,
-  );
-  const retired = players.filter((player) => player.retired_at != null);
+  const inState = (state) =>
+    players.filter((player) => playerStanding(snapshot, player.id)?.state === state);
+  const pending = inState("pending");
+  const retired = inState("retired");
 
   return (
     <div className="equipment-rail">

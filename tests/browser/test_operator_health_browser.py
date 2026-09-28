@@ -285,7 +285,9 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         writes = RequestGate(page, "**/v1/operator/frames/*/binding")
         reads = RequestGate(page, INVENTORY)
         writes.holding = True
-        inspector.get_by_role("button", name="Bind pending display", exact=True).click()
+        handle = identity["player_id"][-6:]
+        inspector.get_by_role("radio", name=f"{handle} · HDMI-A-1 · Free", exact=True).check()
+        inspector.get_by_role("button", name=f"Bind to {FRAME}", exact=True).click()
         writes.wait_held()
 
         # A poll starts while the bind is in flight...

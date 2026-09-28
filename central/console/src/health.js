@@ -1,4 +1,4 @@
-import { boundOutput, isBound } from "./join.js";
+import { boundOutput, frameForOutput, isBound } from "./join.js";
 
 // The one definition lives with the bound-output join; consumers read it through here.
 export { isBound };
@@ -9,7 +9,9 @@ export { isBound };
  * or Player is alright — the plan tile, the Inspector header, Commissioning,
  * Binding, the Equipment rail, the Unplaced tray, the Showrunner frame list and
  * the attention strip — reads it through here, so the states, their precedence
- * and their wording live in exactly one place.
+ * and their wording live in exactly one place. Equipment standing (slice 2,
+ * docs/operator-console-ux-pass2-onboarding.md §4) lives here too: a Player's
+ * standing, each Output's state, the bindable set, and the one Output wording.
  *
  * LIVENESS is Central's record of the last readiness report it ACCEPTED from a
  * Player on that Player's current authority epoch (`last_report_at`). Enrollment
@@ -164,7 +166,7 @@ export function frameHealth(snapshot, frameId) {
     return healthOf("player-silent", "alarm", "liveness", label, "Player silent", "binding");
   }
   // Fail closed: a missing output row reads as no display detected.
-  if (boundOutput(snapshot, frameId)?.observation?.connected !== true) {
+  if (!displayDetected(boundOutput(snapshot, frameId))) {
     return healthOf(
       "display-not-detected",
       "alarm",
@@ -229,4 +231,162 @@ export function wallAttention(snapshot) {
     }
   }
   return { frameCount: frames.length, alarms, todos };
+}
+
+// --- Equipment standing (slice 2 §4).
+
+/**
+ * @typedef {"retired"|"pending"|"in-service"} PlayerState
+ * @typedef {"retired"|"bound"|"no-display"|"free"} OutputState
+ * @typedef {{state: PlayerState, label: string}} PlayerStanding
+ * @typedef {{playerId: string, outputId: string, state: OutputState,
+ *            frameId: string|null, label: string}} OutputStanding
+ */
+
+/**
+ * Whether the Player reported a display on this Output when it last started
+ * (`observation.connected`). Fails closed: a missing row reads as no display.
+ *
+ * @param {object|null|undefined} output an OutputInventory row
+ * @returns {boolean}
+ */
+export function displayDetected(output) {
+  return output?.observation?.connected === true;
+}
+
+function findPlayer(snapshot, playerId) {
+  return (snapshot?.inventory?.players ?? []).find((player) => player.id === playerId) ?? null;
+}
+
+/** Players by registration, then id: the one Player order every list uses. */
+export function playersInOrder(snapshot) {
+  return [...(snapshot?.inventory?.players ?? [])].sort(
+    (a, b) =>
+      a.registered_at - b.registered_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
+
+/**
+ * Each Output of a Player, ordered by output id, with its state (first match):
+ * retired (its Player is retired), bound (a Frame is bound to it), no-display
+ * (unbound, and no display detected at the last Player start — a stale row
+ * cannot be told from an empty connector), free.
+ *
+ * @param {object|null} snapshot
+ * @param {string} playerId
+ * @returns {OutputStanding[]}
+ */
+export function outputStates(snapshot, playerId) {
+  const player = findPlayer(snapshot, playerId);
+  const outputs = (snapshot?.inventory?.outputs ?? [])
+    .filter((output) => output.player_id === playerId)
+    .sort((a, b) => (a.output_id < b.output_id ? -1 : a.output_id > b.output_id ? 1 : 0));
+  return outputs.map((output) => {
+    const standing = { playerId, outputId: output.output_id, frameId: null };
+    if (player?.retired_at != null) {
+      return { ...standing, state: "retired", label: "Retired with its Player" };
+    }
+    const frame = frameForOutput(snapshot, playerId, output.output_id);
+    if (frame !== null) {
+      return { ...standing, state: "bound", frameId: frame.id, label: `Shows frame ${frame.id}` };
+    }
+    if (!displayDetected(output)) {
+      return {
+        ...standing,
+        state: "no-display",
+        label: "No display detected at last Player start",
+      };
+    }
+    return { ...standing, state: "free", label: "Free" };
+  });
+}
+
+/**
+ * A Player's standing (first match): retired (`retired_at` set), pending (no
+ * Output bound — the store's pending queue), in service (at least one Output
+ * bound). The label states the fact; liveness is read separately
+ * ({@link playerLiveness}).
+ *
+ * @param {object|null} snapshot
+ * @param {string} playerId
+ * @returns {PlayerStanding|null} null when the Player is not in the inventory
+ */
+export function playerStanding(snapshot, playerId) {
+  const player = findPlayer(snapshot, playerId);
+  if (player === null) {
+    return null;
+  }
+  const readAt = snapshot.inventory.read_at;
+  if (player.retired_at != null) {
+    const age = ageAt(readAt, player.retired_at);
+    return {
+      state: "retired",
+      label: Number.isNaN(age) ? "Retired" : `Retired ${formatAge(age)} ago`,
+    };
+  }
+  const outputs = outputStates(snapshot, playerId);
+  if (!outputs.some((output) => output.state === "bound")) {
+    const age = ageAt(readAt, player.registered_at);
+    return {
+      state: "pending",
+      label: Number.isNaN(age) ? "New" : `New · enrolled ${formatAge(age)} ago`,
+    };
+  }
+  const free = outputs.filter((output) => output.state === "free").length;
+  return {
+    state: "in-service",
+    label: `In service · ${free} of ${outputs.length} outputs free`,
+  };
+}
+
+/**
+ * Every Output an operator may bind: `free` Outputs only, Players in
+ * registration order, Outputs by id. Bound, no-display and retired Outputs are
+ * never offered.
+ *
+ * @param {object|null} snapshot
+ * @returns {OutputStanding[]}
+ */
+export function bindableOutputs(snapshot) {
+  return playersInOrder(snapshot).flatMap((player) =>
+    outputStates(snapshot, player.id).filter((output) => output.state === "free"),
+  );
+}
+
+// A handle is this many trailing characters of the serial (or the Player id).
+const HANDLE_LENGTH = 6;
+
+/**
+ * A short handle for a Player: the last six characters of the last known
+ * serial for its `device_id` (boot facts), or else of the Player id. Without a
+ * serial it is a hash suffix and proves nothing physical; even with one, the
+ * serial is the Player's claim. Callers capture it when a dialog opens.
+ *
+ * @param {object|null} snapshot
+ * @param {{devices?: Map<string, object>}|null} bootFacts
+ * @param {string} playerId
+ * @returns {string}
+ */
+export function playerHandle(snapshot, bootFacts, playerId) {
+  const player = findPlayer(snapshot, playerId);
+  const serial = player === null ? null : bootFacts?.devices?.get(player.device_id)?.serial;
+  return (serial || playerId).slice(-HANDLE_LENGTH);
+}
+
+/**
+ * The one Output wording (chooser, roster and dialogs): handle · output id ·
+ * state label.
+ *
+ * @param {object|null} snapshot
+ * @param {{devices?: Map<string, object>}|null} bootFacts
+ * @param {string} playerId
+ * @param {string} outputId
+ * @returns {string}
+ */
+export function outputLabel(snapshot, bootFacts, playerId, outputId) {
+  const handle = playerHandle(snapshot, bootFacts, playerId);
+  const standing = outputStates(snapshot, playerId).find((output) => output.outputId === outputId);
+  return standing === undefined
+    ? `${handle} · ${outputId}`
+    : `${handle} · ${outputId} · ${standing.label}`;
 }

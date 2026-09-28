@@ -18,7 +18,7 @@ Frames by identity/label, never by SVG coordinates or DOM structure (design §1c
 import os
 
 import pytest
-from operator_harness import operator_server
+from operator_harness import operator_server, pause_page_clock
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -47,6 +47,34 @@ def _connect(page, origin):
     page.get_by_role("button", name="Connect", exact=True).click()
 
 
+def _binding_facet(page, frame_id):
+    """Select a frame on the plan and open its Binding facet; returns the Inspector."""
+    page.get_by_role("button", name=f"Frame {frame_id}", exact=True).click()
+    inspector = page.get_by_role("region", name=f"Frame {frame_id} inspector", exact=True)
+    inspector.get_by_role("tab", name="Binding", exact=True).click()
+    return inspector
+
+
+def _option(scope, player_id, output_id="HDMI-A-1"):
+    """A free Output in the chooser, by its one wording: handle · output id · Free (the
+    handle is the Player id's last six characters when there is no netboot record)."""
+    return scope.get_by_role("radio", name=f"{player_id[-6:]} · {output_id} · Free", exact=True)
+
+
+def _poll(page):
+    """Run the paused page clock one poll interval and wait for that read to answer."""
+    with page.expect_response("**/v1/operator/inventory"):
+        page.clock.run_for(5000)
+    page.wait_for_timeout(300)
+
+
+def _disconnect_output(registry, player_id, output_id):
+    """The Player's last start reported no display on this Output (connected=false)."""
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE outputs SET observation=jsonb_set(observation,'{connected}','false') "
+                     "WHERE player_id=%s AND output_id=%s", (player_id, output_id))
+
+
 def test_pending_player_appears_in_the_pending_rail(page, registry):
     # A freshly enrolled Player is unbound and not retired -> Pending rail.
     identity, _, _ = enroll(registry, count=2)
@@ -70,12 +98,11 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
             pending.get_by_role("button", name=identity["player_id"], exact=True)
         ).to_be_visible()
 
-        # Select the Frame on the plan, open the Binding facet, bind the pending
-        # Output.
-        page.get_by_role("button", name="Frame wall-1", exact=True).click()
-        inspector = page.get_by_role("region", name="Frame wall-1 inspector", exact=True)
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
-        inspector.get_by_role("button", name="Bind pending display", exact=True).click()
+        # Select the Frame on the plan, open the Binding facet, choose the pending
+        # Output and bind it.
+        inspector = _binding_facet(page, "wall-1")
+        _option(inspector, identity["player_id"]).check()
+        inspector.get_by_role("button", name="Bind to wall-1", exact=True).click()
 
         # The now-bound Player leaves the Pending rail (Plane A refreshed via
         # useMutate).
@@ -113,12 +140,9 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
         ).to_be_visible()
 
         # Precondition: the Player's Output IS a bind candidate — the Binding
-        # facet offers an ENABLED "Bind pending display".
-        page.get_by_role("button", name="Frame wall-r", exact=True).click()
-        inspector = page.get_by_role("region", name="Frame wall-r inspector", exact=True)
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
-        bind_button = inspector.get_by_role("button", name="Bind pending display", exact=True)
-        expect(bind_button).to_be_enabled()
+        # facet's chooser offers it.
+        inspector = _binding_facet(page, "wall-r")
+        expect(_option(inspector, player_id)).to_be_visible()
 
         # Retire the pending Player from the rail (a deliberate, labelled action).
         pending.get_by_role(
@@ -131,9 +155,11 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
             pending.get_by_role("button", name=player_id, exact=True)
         ).to_have_count(0)
 
-        # Its Output is no longer offered: the bind control has no pending Output
-        # to bind, so it is disabled (pendingOutput == null after retire).
-        expect(bind_button).to_be_disabled()
+        # The retired Player's Output is not an option: no radio names it, and the
+        # chooser says there is nothing free to bind.
+        expect(inspector.get_by_role("radio")).to_have_count(0)
+        expect(inspector.get_by_text("No free outputs with a detected display",
+                                     exact=False)).to_be_visible()
 
 
 def test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login(page, registry):
@@ -176,30 +202,111 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "stale-1")
     with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
         _connect(page, origin)
 
-        # Wait for the console to hold the Frame at generation 0.
-        page.get_by_role("button", name="Frame stale-1", exact=True).click()
-        inspector = page.get_by_role("region", name="Frame stale-1 inspector", exact=True)
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
-        expect(
-            inspector.get_by_role("button", name="Bind pending display", exact=True)
-        ).to_be_visible()
+        # The operator chooses the Output while the console holds the Frame at
+        # generation 0: the choice captures that generation.
+        inspector = _binding_facet(page, "stale-1")
+        _option(inspector, identity["player_id"]).check()
 
-        # Server-side, advance the Frame's generation out from under the console
-        # (bind then unbind each bump generation) without the console refreshing.
+        # Server-side, advance the Frame's generation (bind then unbind each bump it),
+        # and let a poll deliver the new generation to the console. The Output is free
+        # again, so the choice stands.
         registry.bind("stale-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
         registry.unbind("stale-1", expected_generation=1)
+        _poll(page)
+        expect(_option(inspector, identity["player_id"])).to_be_checked()
 
-        # The console still holds generation 0, so its bind carries a stale
-        # expected_generation -> 409 binding_generation_conflict -> reload/review.
-        # The distinctive generation-conflict wording (design §4b) — NOT a
-        # generic bind failure — proves the stale expected_generation was carried
-        # and the 409 binding_generation_conflict was surfaced.
-        inspector.get_by_role("button", name="Bind pending display", exact=True).click()
+        # The bind carries the CAPTURED generation (0), not the live one (2) -> 409
+        # binding_generation_conflict -> the distinctive reload/review wording.
+        inspector.get_by_role("button", name="Bind to stale-1", exact=True).click()
         expect(
             inspector.get_by_text("This Frame changed", exact=False)
         ).to_be_visible()
+        assert registry.inventory().frames[0].player_id is None
+
+
+def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, registry):
+    # The tracer (slice 2 §10): a two-output Player has HDMI-A-1 bound; the operator
+    # binds an unbound Frame to HDMI-A-2, chosen explicitly.
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "left")
+    registry.create_frame(FrameCreate(
+        id="right", surface_id="wall", x_mm=600, y_mm=100,
+        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _binding_facet(page, "right")
+
+        # The bound HDMI-A-1 is not offered; HDMI-A-2 is, and nothing is selected.
+        expect(inspector.get_by_role("radio")).to_have_count(1)
+        second = _option(inspector, player_id, "HDMI-A-2")
+        expect(second).not_to_be_checked()
+        second.check()
+        inspector.get_by_role("button", name="Bind to right", exact=True).click()
+        expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
+
+        frames = {frame.id: frame for frame in registry.inventory().frames}
+        assert (frames["right"].player_id, frames["right"].output_id) == (player_id, "HDMI-A-2")
+        assert (frames["left"].player_id, frames["left"].output_id) == (player_id, "HDMI-A-1")
+
+
+def test_bind_is_disabled_until_the_operator_chooses(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    _placed_frame(registry, "choose-1")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _binding_facet(page, "choose-1")
+        # One option, and still nothing is chosen for the operator.
+        option = _option(inspector, identity["player_id"])
+        expect(option).not_to_be_checked()
+        bind_button = inspector.get_by_role("button", name="Bind to choose-1", exact=True)
+        expect(bind_button).to_be_disabled()
+        option.check()
+        expect(bind_button).to_be_enabled()
+
+
+def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "mine")
+    registry.create_frame(FrameCreate(
+        id="theirs", surface_id="wall", x_mm=600, y_mm=100,
+        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        inspector = _binding_facet(page, "mine")
+        _option(inspector, player_id).check()
+
+        # Another operator binds that Output elsewhere; the next poll removes it.
+        registry.bind("theirs", player_id, "HDMI-A-1", expected_generation=0)
+        _poll(page)
+
+        expect(inspector.get_by_role("status")).to_contain_text(
+            f"{player_id[-6:]} · HDMI-A-1 · Free is no longer available")
+        expect(inspector.get_by_role("radio")).to_have_count(0)
+        expect(inspector.get_by_role("button", name="Bind to mine", exact=True)).to_be_disabled()
+
+
+def test_no_display_and_retired_outputs_are_never_offered(page, registry):
+    dark, _, _ = enroll(registry, count=2)
+    gone, _, _ = enroll(registry, count=1)
+    _disconnect_output(registry, dark["player_id"], "HDMI-A-2")
+    registry.retire(gone["player_id"])
+    _placed_frame(registry, "only")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _binding_facet(page, "only")
+        # Exactly the one free Output: the no-display HDMI-A-2 and the retired Player's
+        # HDMI-A-1 are excluded.
+        expect(inspector.get_by_role("radio")).to_have_count(1)
+        expect(_option(inspector, dark["player_id"], "HDMI-A-1")).to_be_visible()
+        expect(inspector.get_by_role("radio", name=gone["player_id"][-6:], exact=False)
+               ).to_have_count(0)
 
 
 def test_recovery_banner_is_suppressed_on_the_true_first_run(page, registry):
