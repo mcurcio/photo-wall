@@ -6,6 +6,7 @@ import {
   flowView,
   hashNamesInstance,
   instancePlace,
+  NEW_KEY,
   shownStep,
   stepView,
 } from "./instance.js";
@@ -48,6 +49,14 @@ import { useFlowFocus } from "./useFlowFocus.js";
  * discard it first. `onOpened(key)` runs when another instance opens, for the
  * container's own per-instance state. `markDraft(section, dirty)` tells the sidebar.
  *
+ * HAND-OFF (flow/handOff.js). With `handOff` (a pending hand-off addressed to this
+ * section, from flow/useHandOff.js `useHandOffTo`), the flow runs inline for another
+ * flow: when a hand-off with a new id arrives, the new instance opens as `start` opens
+ * it (its dirty draft resumes); leaving from the first step (`onBack`, or `leave()`)
+ * settles it with null, and `finish(focusAfter, result)` settles it with `result`. The
+ * origin then shows its own draft, so the flow neither returns to its section nor asks
+ * for `focusAfter`; when the origin no longer takes it, the flow ends as it would alone.
+ *
  * FOCUS. Moving to a step asks for its heading, with a request that lives only while
  * that step is on its way (flow/useFlowFocus.js LIFETIME); an instance that is missing
  * or unavailable asks for nothing.
@@ -66,7 +75,8 @@ import { useFlowFocus } from "./useFlowFocus.js";
  *          problemList: ReadonlyArray<import("./steps.js").Problem>,
  *          problems: ReturnType<typeof import("../Field.jsx").useProblems>,
  *          confirm: ReturnType<typeof import("../ConfirmAction.jsx").useConfirm>,
- *          onOpened?: ((key: string) => void)|null}} options
+ *          onOpened?: ((key: string) => void)|null,
+ *          handOff?: ReturnType<typeof import("./useHandOff.js").useHandOffTo>}} options
  */
 export function useFlowInstance({
   section,
@@ -83,6 +93,7 @@ export function useFlowInstance({
   problems,
   confirm,
   onOpened = null,
+  handOff = null,
 }) {
   const routeKey = keys.fromRoute(route);
   const place = instancePlace({
@@ -218,6 +229,26 @@ export function useFlowInstance({
     }
   };
 
+  // A hand-off addressed to this section opens the new instance, once per hand-off.
+  const handedRef = useRef(/** @type {number|null} */ (null));
+  const handOffId = handOff?.id ?? null;
+  useEffect(() => {
+    if (handOffId !== null && handOffId !== handedRef.current) {
+      handedRef.current = handOffId;
+      start(NEW_KEY);
+    }
+  });
+
+  /**
+   * Leave the flow without its write: back to a hand-off's origin (settled with null),
+   * else to the section. The draft is kept.
+   */
+  const leave = () => {
+    if (handOff === null || !handOff.settle(null, { show: true })) {
+      navigate({ section }, { replace: true });
+    }
+  };
+
   /** Show a step and move focus to its heading (the stepper). */
   const showStep = (stepId) => {
     goToStep(stepId);
@@ -249,7 +280,7 @@ export function useFlowInstance({
   const onBack = () => {
     const previous = previousStep(steps, step);
     if (previous === null) {
-      navigate({ section }, { replace: true });
+      leave();
       return;
     }
     showStep(previous);
@@ -257,11 +288,13 @@ export function useFlowInstance({
 
   /**
    * End the flow after its write (see FINISH): true when the flow was still shown and
-   * the section replaced its entry.
+   * the section (or a hand-off's origin) replaced its entry. `result` is what a
+   * hand-off's origin receives (see HAND-OFF).
    *
    * @param {(() => HTMLElement|null)|null} [focusAfter]
+   * @param {object|null} [result]
    */
-  const finish = (focusAfter = null) => {
+  const finish = (focusAfter = null, result = null) => {
     const key = draft.key;
     const here = hashNamesInstance(keys, window.location.hash, key);
     finishedRef.current = here ? null : { key, step: lastStepRef.current };
@@ -271,6 +304,9 @@ export function useFlowInstance({
     setReturning(false);
     setVisited(new Set());
     lastStepRef.current = null;
+    if (handOff !== null && handOff.settle(result, { show: here })) {
+      return here;
+    }
     if (here) {
       navigate({ section }, { replace: true });
       if (focusAfter !== null) {
@@ -289,6 +325,7 @@ export function useFlowInstance({
     start,
     resume: (options) => enter(resumeRoute(), options),
     discard,
+    leave,
     discardForRoute,
     discardRequest,
     showStep,

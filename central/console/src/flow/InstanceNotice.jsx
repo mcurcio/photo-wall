@@ -88,3 +88,26 @@ export function DraftBar({ dirty, draftName, newLabel, newRef, onNew, onResume, 
     </div>
   );
 }
+
+/**
+ * A flow running inline for another (flow/handOff.js; presentational): "This <noun> is
+ * for <label>. Saving it takes you back there, with it chosen." and "Discard and return
+ * to <label>" (`onDiscard`). Nothing renders without a pending hand-off. Not a live
+ * region: it describes the page, it does not announce a change.
+ *
+ * @param {{handOff: {label: string}|null, noun: string,
+ *          onDiscard: (event: React.MouseEvent<HTMLButtonElement>) => void}} props
+ */
+export function HandOffNotice({ handOff, noun, onDiscard }) {
+  if (handOff === null) {
+    return null;
+  }
+  return (
+    <div className="notice">
+      <p>{`This ${noun} is for ${handOff.label}. Saving it takes you back there, with it chosen.`}</p>
+      <button type="button" onClick={onDiscard}>
+        {`Discard and return to ${handOff.label}`}
+      </button>
+    </div>
+  );
+}

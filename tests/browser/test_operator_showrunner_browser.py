@@ -33,7 +33,9 @@ from console_tasks import (
     scene_form,
     schedule_program,
     show_now,
+    source_continue,
     start_scene,
+    start_source,
     visit,
 )
 from media_queue import RecordingMediaQueue
@@ -292,10 +294,29 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         # The Source must be present, so this is not vacuously true.
         expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
 
-        copy = sources.inner_text().lower()
-        assert "immich" not in copy
-        assert "album" not in copy
-        assert "open in" not in copy
+        # The intro says what a Source is, in neutral library words (flow design §2 req 4).
+        expect(sources.get_by_text(
+            "Photo Wall selects media that lives in your photo library. It never uploads, "
+            "edits or deletes anything there.", exact=True)).to_be_visible()
+        _assert_neutral(sources)
+
+        # Bead 3: every step of the Source flow, Advanced open, says the same.
+        form = start_source(page)
+        _assert_neutral(sources)
+        source_continue(page, "Name")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        _assert_neutral(sources)
+        source_continue(page, "Review")
+        _assert_neutral(sources)
+
+
+def _assert_neutral(region):
+    """No vendor, album or "open in" words in what `region` shows (design D-e)."""
+    copy = region.inner_text().lower()
+    assert "immich" not in copy
+    assert "album" not in copy
+    assert "open in" not in copy
 
 
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
@@ -1529,11 +1550,9 @@ def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registr
 def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "sources")
-        form = page.get_by_role("region", name="Sources", exact=True).get_by_role(
-            "form", name="Configure a Source", exact=True)
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
-        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        connect(page, origin)
+        # Bead 3: the filters are the Source flow's first step, "What to include".
+        form = start_source(page)
         form.get_by_label("Favourites", exact=True).select_option("only")
         until = form.get_by_label("Taken until", exact=True)
         form.get_by_label("Taken from", exact=True).fill("2024-01-01")
@@ -1541,6 +1560,10 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
         expect(until).to_have_accessible_description(
             re.compile("'Taken until' must be after 'Taken from'."))
         until.fill("2025-01-01")
+        source_continue(page, "Name")
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        source_continue(page, "Review")
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
             and r.request.method == "PUT"

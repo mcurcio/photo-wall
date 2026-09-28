@@ -1,0 +1,287 @@
+import React, { useCallback, useMemo, useRef, useState } from "react";
+
+import { apiWrite } from "./apiWrite.js";
+import { sourceProblems } from "./authoring.js";
+import { useConfirm } from "./ConfirmAction.jsx";
+import { ProblemSummary, useProblems } from "./Field.jsx";
+import { NEW_KEY } from "./flow/instance.js";
+import { DraftBar, HandOffNotice } from "./flow/InstanceNotice.jsx";
+import { StepForm } from "./flow/StepForm.jsx";
+import { Stepper } from "./flow/Stepper.jsx";
+import { inStepOrder } from "./flow/steps.js";
+import { SummaryCard } from "./flow/SummaryCard.jsx";
+import { useFlowDraft } from "./flow/useFlowDraft.js";
+import { useHandOffTo } from "./flow/useHandOff.js";
+import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { sourceFilters } from "./mediaHealth.js";
+import {
+  buildSourceSpec,
+  connectionRule,
+  NEW_SOURCE_DRAFT,
+  seedSource,
+  sourceAdvancedFields,
+  SOURCE_FIELD_STEP,
+  SOURCE_KEYS,
+  SOURCE_STEPS,
+} from "./sourceFlowModel.js";
+import { IncludeStep, NameStep, SourceReview } from "./SourceSteps.jsx";
+import { useMutate } from "./useMutate.js";
+
+const EMPTY = [];
+
+// Each step's heading: the one question it asks.
+const HEADINGS = {
+  include: "What to include",
+  name: "Name this photo source",
+  review: "Check your photo source",
+};
+
+/**
+ * The Photo sources section's content (flow design §7 J5, "Add a photo source"): the
+ * Source cards, each with Refresh, and the Source flow, What to include → Name →
+ * Review.
+ *
+ * THE CONTAINER owns the flow's one draft (`useFlowDraft`) and never unmounts (the
+ * shell keeps Show sections mounted, rule 2), so a step change, a section change, a
+ * poll or the sign-in overlay cannot lose the draft. The step views (SourceSteps.jsx)
+ * hold no draft state.
+ *
+ * ROUTES AND STEPS are the flow kit's (flow/useFlowInstance.js): `#/sources` shows the
+ * cards and "New source"; `#/sources/new/<step>` shows a step (sourceFlowModel.js
+ * `SOURCE_KEYS`). Continue checks its own step; Save checks them all and routes each
+ * problem through `SOURCE_FIELD_STEP` (opening Advanced for the connection when it
+ * sits there).
+ *
+ * THE CONNECTION RULE (sourceFlowModel.js `connectionRule`) is read from the served
+ * Sources on every render, so the Name step follows the library as it is; the seed
+ * prefills the one-value case.
+ *
+ * INLINE (flow/handOff.js). When the Scene flow hands off to "sources", the flow opens
+ * its new instance, says whom it is for, and returns there: after Save with
+ * `{sourceRef}`, on Back from its first step or "Discard and return" with nothing.
+ *
+ * SAVE writes ONE `PUT /v1/operator/sources/{ref}` (the ref is `name:rev` and may hold
+ * a colon, so it is path-encoded) with the stored `SourceSpec` body inside `useMutate()`
+ * (one Plane A refresh, so the new card, or the Scene's picker, lists it), says
+ * "Saved Source <ref>." and ends the flow (`finish`).
+ *
+ * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
+ *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
+ *          markDraft: (section: string, dirty: boolean) => void,
+ *          handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>}} props
+ */
+export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
+  const sources = snapshot?.media?.sources ?? EMPTY;
+  const rule = useMemo(() => connectionRule(sources), [sources]);
+  const draft = useFlowDraft(seedSource(sources));
+  const value = draft.value ?? NEW_SOURCE_DRAFT;
+  const handOff = useHandOffTo(handOffs, "sources");
+  const mutate = useMutate();
+
+  const [saving, setSaving] = useState(false);
+  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+
+  const problemList = useMemo(
+    () => inStepOrder(sourceProblems(value), SOURCE_FIELD_STEP, SOURCE_STEPS),
+    [value],
+  );
+  const problems = useProblems(problemList);
+
+  // One confirmation for this section (discarding a draft); its `after` runs once done.
+  const confirm = useConfirm(
+    () => newRef.current?.focus(),
+    (_result, request) => request.after?.(),
+  );
+
+  const flow = useFlowInstance({
+    section: "sources",
+    draft,
+    route,
+    navigate,
+    markDraft,
+    keys: SOURCE_KEYS,
+    availability: () => "ok",
+    steps: SOURCE_STEPS,
+    fieldStep: SOURCE_FIELD_STEP,
+    advancedFields: sourceAdvancedFields(rule),
+    problemList,
+    problems,
+    confirm,
+    handOff,
+  });
+  const { place, step, focus } = flow;
+
+  // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
+  // the cards refresh exactly once after the write.
+  const refreshSource = useCallback(
+    (sourceRef) =>
+      mutate(() =>
+        apiWrite(`/v1/operator/sources/${encodeURIComponent(sourceRef)}/refresh`, { method: "POST" }),
+      ),
+    [mutate],
+  );
+
+  /** "Discard and return": close the draft (asking first when it holds changes), then leave. */
+  const discardAndReturn = (event) => {
+    if (draft.dirty) {
+      confirm.open(event, flow.discardRequest(flow.leave));
+    } else {
+      flow.discard(flow.leave);
+    }
+  };
+
+  const onSave = async () => {
+    if (saving) {
+      return;
+    }
+    if (!problems.check(problemList)) {
+      focus.focusWhenShown(() => summaryRef.current);
+      return;
+    }
+    const ref = value.sourceRef.trim();
+    setSaving(true);
+    confirm.setStatus(null);
+    try {
+      const result = await mutate(() =>
+        apiWrite(`/v1/operator/sources/${encodeURIComponent(ref)}`, {
+          method: "PUT",
+          body: buildSourceSpec({ ...value, sourceRef: ref, connectionRef: value.connectionRef.trim() }),
+        }),
+      );
+      if (result.ok) {
+        confirm.setStatus(`Saved Source ${ref}.`);
+        flow.finish(() => savedRef.current, { sourceRef: ref });
+      } else {
+        confirm.setStatus(`Could not save Source: ${result.error ?? result.status}.`);
+      }
+    } catch {
+      confirm.setStatus("Could not save Source: the request did not complete.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const stepProps = { value, patch: draft.patch, problems };
+  const views = {
+    include: () => <IncludeStep {...stepProps} />,
+    name: () => (
+      <NameStep
+        {...stepProps}
+        rule={rule}
+        advanced={{ open: focus.advancedOpen("name"), onToggle: () => focus.toggleAdvanced("name") }}
+      />
+    ),
+    review: () => <SourceReview value={value} onChange={flow.openField} />,
+  };
+
+  return (
+    <div className="source-flow" ref={focus.rootRef}>
+      <div className="source-flow__saved" ref={savedRef} tabIndex={-1}>
+        {confirm.confirmation("source-flow__status-line")}
+      </div>
+
+      <HandOffNotice handOff={handOff} noun="photo source" onDiscard={discardAndReturn} />
+
+      {place === "list" && (
+        <>
+          <DraftBar
+            dirty={draft.dirty}
+            draftName={SOURCE_KEYS.describe(NEW_KEY)}
+            newLabel="New source"
+            newRef={newRef}
+            onNew={() => flow.start(NEW_KEY)}
+            onResume={() => flow.resume()}
+            onDiscard={(event) =>
+              confirm.open(
+                event,
+                flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)),
+              )
+            }
+          />
+          <SourceCards sources={sources} onRefresh={refreshSource} />
+        </>
+      )}
+
+      {step !== null && (
+        <>
+          <h2 className="source-flow__title">New photo source</h2>
+          <Stepper
+            steps={SOURCE_STEPS}
+            current={step}
+            onStep={saving ? undefined : flow.showStep}
+            answered={flow.answered}
+          />
+          <StepForm
+            label="Configure a Source"
+            heading={HEADINGS[step]}
+            onSubmit={step === "review" ? onSave : flow.onContinue}
+            onBack={flow.onBack}
+            submitLabel={step === "review" ? "Save source" : "Continue"}
+            submitDisabled={step === "review" && saving}
+            busy={saving}
+          >
+            <ProblemSummary
+              ref={summaryRef}
+              summary={problems.summary}
+              label="Source problems"
+              onOpen={flow.openField}
+            />
+            {views[step]()}
+          </StepForm>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The saved Sources as summary cards: each by its `name:rev`, with its status, when it
+ * was last refreshed ("Awaiting refresh" until its query first runs), what it includes
+ * and its connection, and Refresh ("Refresh <ref>").
+ *
+ * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void}} props
+ */
+function SourceCards({ sources, onRefresh }) {
+  if (sources.length === 0) {
+    return <p className="showrunner__empty">No Sources yet.</p>;
+  }
+  return (
+    <ul className="source-list" role="list">
+      {sources.map((source) => (
+        <li key={source.source_ref} className="source-list__item">
+          <SummaryCard
+            title={source.source_ref}
+            lines={[
+              { label: "Status", value: source.status },
+              {
+                label: "Refreshed",
+                value: source.last_success
+                  ? `Last refreshed ${new Date(source.last_success * 1000).toLocaleString()}`
+                  : "Awaiting refresh",
+              },
+              { label: "Includes", value: includesWords(source.spec) },
+              { label: "Connection", value: source.spec?.connection_ref ?? "" },
+            ]}
+            actions={
+              <button
+                type="button"
+                aria-label={`Refresh ${source.source_ref}`}
+                onClick={() => onRefresh(source.source_ref)}
+              >
+                Refresh
+              </button>
+            }
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** What a stored spec includes, in words: its filters, or everything. */
+function includesWords(spec) {
+  const filters = sourceFilters(spec);
+  return filters.length === 0 ? "All photos and videos" : filters.join(" · ");
+}

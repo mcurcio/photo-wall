@@ -19,6 +19,10 @@ As of bead 2 a Scene is made in the Scene flow (#/scenes/new/<step>): "New Scene
 Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback → Review, one step
 at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_continue` and
 `scene_form` are its parts, for tests about the flow's own steps.
+
+As of bead 3 a Photo source is added in the Source flow (#/sources/new/<step>): "New
+source", then What to include → Name → Review. `add_source` walks it; `start_source`,
+`source_continue`, `source_form` and `answer_connection` are its parts.
 """
 
 from collections.abc import Mapping
@@ -173,19 +177,62 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     return info.value
 
 
-def add_source(page, source_ref, connection, *, media_type=None, submit=True):
-    """Configure a Photo source named `source_ref` (`name:rev`) on library `connection`.
-
-    `media_type` picks "Media type" ("image", "video"); None keeps the form's default.
-    With `submit`, saves and returns the PUT response; without it, returns the filled form.
-    """
-    go(page, "sources")
-    form = page.get_by_role("region", name="Sources", exact=True).get_by_role(
+def source_form(page):
+    """The Source flow's current step: the form "Configure a Source" in the Sources region
+    (bead 3). Every step renders it, with the step's fields and its Back and Continue
+    (Review: Save source)."""
+    return page.get_by_role("region", name="Sources", exact=True).get_by_role(
         "form", name="Configure a Source", exact=True)
-    form.get_by_label("Source name and revision", exact=True).fill(source_ref)
-    form.get_by_label("Connection name", exact=True).fill(connection)
+
+
+def source_continue(page, step=None):
+    """Press the Source flow's Continue; with `step` (a stepper label such as "Name"), wait
+    until that step shows."""
+    source_form(page).get_by_role("button", name="Continue", exact=True).click()
+    if step is not None:
+        expect(page.get_by_role("navigation", name="Steps", exact=True).locator(
+            "[aria-current=step]")).to_contain_text(step)
+
+
+def start_source(page):
+    """Go to Photo sources and press "New source"; returns the flow's form, on its first
+    step, "What to include"."""
+    go(page, "sources")
+    page.get_by_role("region", name="Sources", exact=True).get_by_role(
+        "button", name="New source", exact=True).click()
+    form = source_form(page)
+    expect(form.get_by_role("heading", name="What to include", exact=True)).to_be_visible()
+    return form
+
+
+def answer_connection(form, connection):
+    """Answer "Connection name" on the Name step however the connection rule shows it: a
+    text field (no Source yet), under Advanced (every Source names the same one; opened
+    here first) or a chooser (several)."""
+    field = form.get_by_label("Connection name", exact=True)
+    if not field.is_visible():
+        form.get_by_role("button", name="Advanced", exact=True).click()
+    if field.evaluate("(element) => element.tagName") == "SELECT":
+        field.select_option(connection)
+    else:
+        field.fill(connection)
+
+
+def add_source(page, source_ref, connection, *, media_type=None, submit=True):
+    """Configure a Photo source named `source_ref` (`name:rev`) on library `connection`
+    through the Source flow: What to include → Name → Review, then Save source.
+
+    `media_type` picks "Media type" ("image", "video"); None keeps the flow's default.
+    With `submit`, saves, waits (on success) for the saved Source's card and returns the PUT
+    response; without it, returns the flow's form on Review, filled and unsaved.
+    """
+    form = start_source(page)
     if media_type is not None:
         form.get_by_label("Media type", exact=True).select_option(media_type)
+    source_continue(page, "Name")
+    form.get_by_label("Source name and revision", exact=True).fill(source_ref)
+    answer_connection(form, connection)
+    source_continue(page, "Review")
     if not submit:
         return form
     with page.expect_response(
@@ -193,6 +240,10 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
         and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name="Save source", exact=True).click()
+    if info.value.ok:
+        # The flow ended on the cards, which list it (the refresh after the save landed).
+        expect(page.get_by_role("region", name="Sources", exact=True).get_by_role(
+            "article", name=source_ref, exact=True)).to_be_visible()
     return info.value
 
 

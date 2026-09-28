@@ -39,7 +39,7 @@ export const showRoutes = Object.freeze(
     {
       section: "scenes",
       label: "Scenes",
-      render: ({ snapshot, route, navigate, rememberScene, markDraft }) => (
+      render: ({ snapshot, route, navigate, rememberScene, markDraft, handOffs }) => (
         <section className="showrunner__region" role="region" aria-label="Scenes">
           <h2 className="showrunner__region-title">Scenes</h2>
           <SceneFlow
@@ -48,6 +48,7 @@ export const showRoutes = Object.freeze(
             navigate={navigate}
             rememberScene={rememberScene}
             markDraft={markDraft}
+            handOffs={handOffs}
           />
         </section>
       ),
@@ -62,7 +63,15 @@ export const showRoutes = Object.freeze(
     {
       section: "sources",
       label: "Photo sources",
-      render: ({ snapshot }) => <SourcesRegion snapshot={snapshot} />,
+      render: ({ snapshot, route, navigate, markDraft, handOffs }) => (
+        <SourcesRegion
+          snapshot={snapshot}
+          route={route}
+          navigate={navigate}
+          markDraft={markDraft}
+          handOffs={handOffs}
+        />
+      ),
       samplePaths: SAMPLES.show.sources,
     },
   ].map(Object.freeze),

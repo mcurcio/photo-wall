@@ -2088,3 +2088,55 @@ label {
   margin: 0;
   color: var(--fg-muted);
 }
+
+/* The Photo sources section (flow design §7 J5; bead 3): Source cards, then the
+   Source flow, What to include → Name → Review. */
+.source-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.source-flow__saved:focus {
+  outline: none;
+}
+
+/* Nothing to say yet: the empty live region stays rendered (so a later message is
+   announced) and takes back the gap it would add. */
+.source-flow__saved:not(:has(.source-flow__status-line:not(:empty))) {
+  margin-bottom: -16px;
+}
+
+.source-flow__status-line:empty {
+  display: none;
+}
+
+.source-flow__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.source-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-list__item {
+  display: flex;
+  min-width: 0;
+}
+
+.source-list__item > .card {
+  flex: 1;
+}
+
+/* Pass B's slots (SourceSteps.jsx `LibrarySlot`): out of the layout while empty. */
+.source-flow__slot:empty {
+  display: none;
+}

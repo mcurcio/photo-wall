@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState }
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
+import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { PageHiddenContext } from "./pageVisibility.js";
@@ -20,11 +21,14 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            wall: import("./wallState.js").WallMemory,
  *            recovery: {recovered: string[], dismiss: () => void},
  *            recentSceneId: string|null, rememberScene: (sceneId: string) => void,
- *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void}} RouteContext
+ *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
+ *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>}} RouteContext
  *   `recentSceneId` is the Scene the operator last saved or picked on a Scene card
  *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
  *   prefill their Scene step from it. `markDraft` is how a Show section's flow says
  *   it holds an unsaved draft; the sidebar then marks that section "Draft".
+ *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
+ *   Scene flow's "New selection from your photo library" runs the Source flow inline).
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
  *            samplePaths: string[]}} RouteEntry
@@ -199,6 +203,8 @@ export function Shell({ hidden = false }) {
     });
   }, []);
 
+  const handOffs = useHandOff();
+
   // Pages mount their content at the first snapshot and keep it for this session
   // epoch (App keys the shell on it), so a draft outlives any later snapshot state.
   const [ready, setReady] = useState(false);
@@ -299,8 +305,10 @@ export function Shell({ hidden = false }) {
       recentSceneId,
       rememberScene,
       markDraft,
+      handOffs,
     }),
-    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentSceneId, rememberScene, markDraft],
+    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentSceneId, rememberScene, markDraft,
+      handOffs],
   );
 
   return (

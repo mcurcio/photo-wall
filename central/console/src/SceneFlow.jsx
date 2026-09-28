@@ -72,6 +72,12 @@ const HEADINGS = {
  * remains the backstop for a change between polls. Replace goes through ConfirmAction
  * (slice 3 §13).
  *
+ * NEW SOURCE. The Photos step's "New selection from your photo library" runs the Source
+ * flow inline (flow/handOff.js): it begins a hand-off to "sources" for this draft; the
+ * Source flow's Save returns here with the new Source chosen, and its Back or Discard
+ * returns here with the draft unchanged. Either way Photos shows again with focus on
+ * "Source"; a hand-off that returns after this draft closed changes nothing.
+ *
  * SAVE writes ONE request (authoring.js `buildSave`) inside `useMutate()`, ends the flow
  * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
  * `recentSceneId`) and offers "Show now" and "Schedule it".
@@ -79,9 +85,10 @@ const HEADINGS = {
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
  *          rememberScene: (sceneId: string) => void,
- *          markDraft: (section: string, dirty: boolean) => void}} props
+ *          markDraft: (section: string, dirty: boolean) => void,
+ *          handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>}} props
  */
-export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft }) {
+export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft, handOffs }) {
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
   const sources = snapshot?.media?.sources ?? [];
@@ -220,6 +227,31 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     navigate({ section: "schedule" });
   };
 
+  // --- A new Source, made inline (NEW SOURCE above). The return reads this render's
+  // draft and focus, whenever it comes back.
+  const returnRef = useRef(null);
+  returnRef.current = (key, result, { show }) => {
+    if (draft.key !== key) {
+      return false; // the draft it was begun for is gone
+    }
+    if (result !== null) {
+      draft.patch({ sourceRef: result.sourceRef });
+    }
+    if (show) {
+      focus.openField("source");
+    }
+    return true;
+  };
+  const newSource = () => {
+    const key = draft.key;
+    handOffs.begin({
+      from: "scenes",
+      to: "sources",
+      label: "your Scene",
+      onReturn: (result, options) => returnRef.current(key, result, options),
+    });
+  };
+
   // --- Draft edits the views ask for.
   const toggleTarget = (frameId) =>
     draft.patch((current) => {
@@ -338,7 +370,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
   const views = {
     kind: () => <KindStep {...stepProps} />,
     photos: () => (
-      <PhotosStep {...stepProps} sources={sources} onNewSource={() => navigate({ section: "sources" })} />
+      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} />
     ),
     frames: () => <FramesStep {...stepProps} snapshot={snapshot} onToggle={toggleTarget} />,
     media: () => <MediaStep {...stepProps} candidates={candidates} onSelect={selectMedia} />,

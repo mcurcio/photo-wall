@@ -261,3 +261,95 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["answerLabels"] == {
         "mode": "Kind", "source": "Photos", "targets": "Frames", "media": "Media per frame",
         "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends"}
+
+
+SOURCE_SCRIPT = r"""
+const hand = await import(process.argv[1]);
+const source = await import(process.argv[2]);
+const steps = await import(process.argv[3]);
+const authoring = await import(process.argv[4]);
+const out = {};
+
+// --- Inline hand-offs (flow/handOff.js).
+const first = hand.beginHandOff({ from: "scenes", to: "sources", label: "your Scene" }, 1);
+out.begun = first;
+out.to = [hand.handOffTo(first, "sources")?.id ?? null, hand.handOffTo(first, "schedule"),
+          hand.handOffTo(null, "sources")];
+const stale = hand.settleHandOff(first, 2);
+out.stale = { same: stale.next === first, settled: stale.settled };
+out.settled = hand.settleHandOff(first, 1);
+out.none = hand.settleHandOff(null, 1);
+
+// --- The Source flow's shape (sourceFlowModel.js).
+out.steps = source.SOURCE_STEPS.map((step) => [step.id, step.label]);
+out.fieldSteps = ["type", "favorites", "from", "until", "ref", "connection"]
+  .map((field) => steps.stepOfField(source.SOURCE_FIELD_STEP, field));
+const K = source.SOURCE_KEYS;
+out.keys = [K.fromRoute({ section: "sources", flow: "new", step: "name" }),
+            K.fromRoute({ section: "sources" }),
+            K.fromRoute({ section: "scenes", flow: "new", step: "kind" })];
+out.route = K.toRoute("new", K.firstStep("new"));
+out.describe = K.describe("new");
+const spec = (ref) => ({ source_ref: "x", spec: ref === undefined ? {} : { connection_ref: ref } });
+out.rules = [
+  source.connectionRule([]),
+  source.connectionRule([spec("home"), spec("home"), spec(undefined)]),
+  source.connectionRule([spec("work"), spec("home")]),
+];
+out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
+  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(sources))]);
+out.seeds = [source.seedSource([])("new"), source.seedSource([spec("home")])("new").connectionRef,
+             source.seedSource([spec("a"), spec("b")])("new").connectionRef];
+out.answers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, favorites: "only",
+                                     capturedFrom: "2024-01-01", sourceRef: " spring:1 " });
+out.problems = authoring.sourceProblems(source.NEW_SOURCE_DRAFT).map((p) => p.field);
+out.spec = source.buildSourceSpec({ sourceRef: "spring:1", connectionRef: "home",
+                                    mediaType: "image", favorites: "not" });
+out.specBoth = source.buildSourceSpec({ sourceRef: "s:1", connectionRef: "h", mediaType: "both" });
+console.log(JSON.stringify(out));
+"""
+
+
+def test_hand_offs_and_source_flow_shape():
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", SOURCE_SCRIPT, "--",
+         (SRC / "flow/handOff.js").as_uri(), (SRC / "sourceFlowModel.js").as_uri(),
+         (SRC / "flow/steps.js").as_uri(), (SRC / "authoring.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+
+    # A hand-off is addressed to one section and settles once, by its own id only.
+    assert out["begun"] == {"id": 1, "from": "scenes", "to": "sources", "label": "your Scene"}
+    assert out["to"] == [1, None, None]
+    assert out["stale"] == {"same": True, "settled": False}
+    assert out["settled"] == {"next": None, "settled": True}
+    assert out["none"] == {"next": None, "settled": False}
+
+    assert out["steps"] == [["include", "What to include"], ["name", "Name"], ["review", "Review"]]
+    assert out["fieldSteps"] == ["include", "include", "include", "include", "name", "name"]
+    assert out["keys"] == ["new", None, None]
+    assert out["route"] == {"section": "sources", "flow": "new", "step": "include"}
+    assert out["describe"] == "a new photo source"
+    # The connection rule: none -> a visible field; one value -> prefilled under Advanced
+    # (a Source without one adds no value); several -> a chooser, none chosen.
+    assert out["rules"] == [
+        {"shown": "field", "values": [], "prefill": ""},
+        {"shown": "advanced", "values": ["home"], "prefill": "home"},
+        {"shown": "chooser", "values": ["home", "work"], "prefill": ""}]
+    assert out["advanced"] == [[], ["connection"], []]
+    assert out["seeds"] == [
+        {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
+         "sourceRef": "", "connectionRef": ""}, "home", ""]
+    assert out["answers"] == [
+        {"label": "Media type", "field": "type", "value": "Images and video"},
+        {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
+        {"label": "Taken from", "field": "from", "value": "2024-01-01"},
+        {"label": "Taken until", "field": "until", "value": "No limit"},
+        {"label": "Source name and revision", "field": "ref", "value": "spring:1"},
+        {"label": "Connection name", "field": "connection", "value": None}]
+    assert out["problems"] == ["ref", "connection"]
+    assert out["spec"] == {"schema": 1, "source_ref": "spring:1", "connection_ref": "home",
+                           "media_types": ["image"], "favorites": False}
+    assert out["specBoth"]["media_types"] == ["image", "video"]
+    assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]

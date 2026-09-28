@@ -4,6 +4,7 @@ import { draftId, idFromName } from "./authoring.js";
 import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
+import { CheckAnswers } from "./flow/CheckAnswers.jsx";
 import { candidateLabels } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
@@ -71,7 +72,8 @@ export function KindStep({ value, patch, problems }) {
 }
 
 /**
- * Step 2, Photos: the Source (required), or a new selection from the photo library.
+ * Step 2, Photos: the Source (required), or a new selection from the photo library
+ * (`onNewSource`: the Source flow, run inline; it returns here).
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
@@ -287,24 +289,7 @@ export function ReviewStep({
           {` · revision ${value.revision}. Its id stays; Replace saves revision ${value.revision + 1}.`}
         </p>
       )}
-      <dl className="review" aria-label="Your answers">
-        {rows.map((row) => (
-          <div key={row.label} className="review__row">
-            <dt className="review__key">{row.label}</dt>
-            <dd className="review__value">{row.value}</dd>
-            <dd className="review__change">
-              <button
-                type="button"
-                className="review__change-button"
-                aria-label={`Change ${row.label}`}
-                onClick={() => onChange(row.field)}
-              >
-                Change
-              </button>
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <CheckAnswers rows={rows} onChange={onChange} />
       {editingId === null && (
         <>
           <NameField
