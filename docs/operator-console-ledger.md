@@ -66,3 +66,12 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 |---|---|---|---|---|
 | P2-S3A | Showrunner readability (beads 3A-1–3A-6: Scene loop, ids and reasons; layout; Central read; rows and precedence; activation; windows and Source form) | in_progress | c9a2505, b918e95, 9c44707, 3e8b29c, 4ea2e31, 1fba0b2; residual test e171caf | Verifier PASS (pytest 2996 passed, 14 skipped env-gated; browser 141 passed; 5 mutation probes red; weekday-evening job walked end to end). Review fix cycle 1 in progress. Errata (a)–(i) applied to the spec. |
 | P2-S3A-D | Docs — slice 3A (bead 3A-7: spec errata and fix-cycle decisions, runbook Showrunner, README summary) | in_progress | — | Owner questions 1–6 pending. Also marks the design's J4/§1b and delivery plan's "not on any operator GET" claims superseded, and documents `operator_projection` and `blocking_run_id` in `module-runtime.md`. |
+
+### Pass 2, slice 3B — Scene view and edit; media pipeline and why nothing new
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| P2-S3B | Scene view and lossless edit (3B-1); media pipeline and "why nothing new?" (3B-2) | in_progress | 27e1cce, 55824af | Verifier PASS (pytest 3002 passed; browser 155 passed; 5 mutation probes red). Errata (a)–(f) applied to the spec. |
+| P2-S3B-F1 | Review fix cycle 1: planner `candidate_standing` served as `standing`; Scene revision guard (409 `scene_revision_conflict`, flips Question 4's default, owner to confirm); `candidatesApi.js`; recipe-scoped job counts; wording | in_progress | — (working tree) | Under verification. Residual, not built: serve per-frame `projection.diagnostics` to "Check this frame". |
+| P2-S3B-3 | Queue, force and withdraw route (3B-3) | blocked | — | Deferred until the owner answers slice 3 Question 6. |
+| P2-S3B-D | Docs — slice 3B (bead 3B-4: spec errata and fix-cycle decisions, runbook Scene edit / media pipeline / why nothing new, `module-runtime.md` guard, `candidate_standing` in `module-planner.md` and `module-authored-media.md`, README) | in_progress | — | Owner questions 1–6 pending; Question 4 now builds on the guard default. |

@@ -11,7 +11,11 @@ source. An optional `frame_id` filters the list using the persistent Frame
 profile and the shared `central.planner.eligible` predicate. The unfiltered
 1,000-candidate limit still applies. Missing or failed variants remain visible
 with their preparation status; original-media compatibility does not imply
-playback readiness. Binding generations do not change the immutable Frame
+playback readiness. With `frame_id`, each candidate also carries `standing`,
+the planner's own verdict for that Frame (`central.planner.candidate_standing`:
+`usable`, `preparing`, `failed_to_prepare` or `no_compatible_variant`; a failed
+job awaiting its retry reads `failed_to_prepare`). Without `frame_id` there is
+no `standing`. Binding generations do not change the immutable Frame
 profile. An unknown Frame returns 404. `POST
 /v1/operator/authored-candidates` accepts `{ "source_ref": "…",
 "asset_ids": ["…"] }`, with one to 1,000 unique asset IDs. The central

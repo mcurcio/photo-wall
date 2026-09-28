@@ -523,7 +523,7 @@ Type an id yourself, with **Change** (it reveals an **Id** field), when:
 - the name has no Latin letter or digit — the Id field opens by itself with "This name needs a Latin letter or digit for its id; type an id."; or
 - you want a particular id. An id starts with a letter or digit, then letters, digits, `-`, `_`, `.` or `:`, up to 128 characters.
 
-A name whose id already exists is refused before anything is sent ("A Scene called `family-evening` already exists; choose another name."). A successful save clears the form. **Limit:** the check uses the last refresh, so two operators saving the same new id within a few seconds of each other still end with the later save replacing the earlier one (design Question 4). Activation ids are never shown.
+A name whose id already exists is refused before anything is sent ("A Scene called `family-evening` already exists; choose another name."). A successful save clears the form. The check uses the last refresh, so two operators can still pick the same new id within a few seconds of each other. For a **Scene**, Central refuses the later save and the form reads "A Scene with this id was saved meanwhile; nothing was replaced." Choose another name, or open the stored Scene and Edit it. For a **Program**, the later save still replaces the earlier one (Program saves have no guard; design Question 4). Activation ids are never shown.
 
 ### Every disabled control says why
 
@@ -543,11 +543,68 @@ To **create a Source**, fill **Source name and revision** (like `holiday:1`), th
 
 ### Scenes and "Keep playing until the Program ends"
 
-A Scene is a per-target composition. You author it either against a **live source** (a changing collection whose membership is re-checked centrally) or as **per-Frame authored** choices, where each participating Frame gets a chooser listing **only media compatible with that Frame's profile** — the candidate list is hard-filtered by profile server-side (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible asset cannot be chosen. The Scene and all its per-Frame references **save together in one request** (`PUT /v1/operator/scenes/{id}/authored`); source freshness, membership, and compatibility are re-checked centrally on save. While candidates load, the chooser can still read "No compatible media"; a loading state is later work (design bead 3B-2).
+A Scene is a per-target composition. You author it either against a **live source** (a changing collection whose membership is re-checked centrally) or as **per-Frame authored** choices, where each participating Frame gets a chooser listing **only media compatible with that Frame's profile** — the candidate list is hard-filtered by profile server-side (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible asset cannot be chosen. The Scene and all its per-Frame references **save together in one request** (`PUT /v1/operator/scenes/{id}/authored`); source freshness, membership, and compatibility are re-checked centrally on save. While candidates load, the chooser reads "Loading compatible media…". Each choice is labelled with its kind, size, capture time and what Central would do with it on that frame, for example "Photo 108×192 · taken 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version"); "(2)" is added only when two labels would otherwise read the same.
 
 Each Scene has **Seconds per cycle** and **Keep playing until the Program ends**, which is **on by default** for new Scenes (the design's default for its Question 1, pending owner confirmation):
 - **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Activated without a Program, it plays until you Finish or Cancel it.
 - **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run row reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
+
+### Viewing and editing a Scene
+
+The Scenes region lists every stored Scene as a closed disclosure named `Scene X`. Open it to read what feeds it ("live from `family:1`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), its **revision**, the Programs that use it, and whether a Run of it is running now. There is no Delete (design Question 3).
+
+**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the form cannot author (child Scenes, an outro, fades, and similar) shows "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the form would silently drop those features.
+
+To edit:
+1. Press **Edit Scene X**. The form fills with the stored Scene and reads "Editing `evening` · revision 4. Its id stays; Replace saves revision 5." The id is the **stored** one; there is no name field, and the id cannot change. To make a Scene with a new id, stop editing and save a new one.
+2. For an authored Scene, each frame's stored item is pre-selected while it is still in the Source. A frame whose item left the Source has no choice; pick again.
+3. Press **Replace Scene**, then **Confirm replace** in the dialog. **Stop editing** leaves the form without saving.
+
+**What Replace changes.** It stores the Scene as the next revision. **Runs already going keep the version they started with**, and so do activations already queued: each captured its Scene when Central admitted or queued it. Programs that start later, and new activations, use the new revision. Replace does not touch Programs, Sources or other Scenes.
+
+| The dialog ends | Means | What to do |
+|---|---|---|
+| "Replaced Scene evening: now revision 5." | Stored. | Nothing. |
+| "Changed since you opened this. Reopen to review." | Someone else replaced this Scene after you pressed Edit. Central refused yours (409 `scene_revision_conflict`), so **nothing was replaced** and their version stands. | Close, open the Scene again (it shows their revision), and redo your change if it still applies. |
+| "Not replaced. The Source's last refresh failed; authored choices can be saved once it succeeds." | An authored Scene's Source is failing. | Fix the Source (see [the media pipeline](#the-media-pipeline)), Refresh it, then try again. |
+| "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source. The choosers reload. | Pick again and Replace. |
+| "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, open the Scene and read its revision: if it moved to yours, it was stored. |
+
+Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
+
+### The media pipeline
+
+The **Media pipeline** panel sits in the Now column. Central fetches media from the photo library and prepares it; Players get it only from Central. All ages are on Central's clock.
+
+**Worker.** One line:
+- "checked in 40 s ago · preparing 3 · waiting 12 · failed 2 · failed, retry pending 1 · cache 4.1 of 8 GB" when it is healthy. Preparing is running or publishing; waiting is queued; "failed, retry pending" appears only when a failed job is waiting to be retried (planning treats it as failed until then). Only jobs of the **current preparation recipe** are counted; a recipe change fails the old recipe's queued jobs and planning asks for them again.
+- "never checked in", "reported: storage is full" (or another reported error), or "quiet for 14 min" (no check-in for over 11 min; it checks in every 5 min) is an alarm, and a separate **Jobs and cache** line shows the counts. Check the worker process and its logs; for storage pressure, free space or raise the cache limit.
+
+**Each Source** gets a row: its `name:rev`, a **State**, the **Last refresh** counts ("found 800 · valid 790 · pending 4 · rejected 6"), any **Reported** diagnostic codes in words, and when it next refreshes. The State carries the Source's **filters** (media types, favourites, capture window such as "taken 2024" or "taken 1 Mar 2025 to 31 Mar 2025"):
+
+| State | Reads | What to do |
+|---|---|---|
+| Awaiting refresh (to-do) | "Awaiting refresh" | New Source; wait for its first refresh, or press Refresh in the Sources region. |
+| Failing (alarm) | "Library unreachable", "Library refused access" or "Library unsupported", then "· last good 2 h ago" | Unreachable: check the library host and network. Refused: check the worker's library key and its permissions. Unsupported: check the library version. Authored Scenes from this Source cannot be saved until it succeeds. |
+| Overdue (alarm) | "Refresh overdue by 6 min" | Refreshes run every 30 s; check that the worker is running. |
+| Nothing valid (to-do) | "nothing valid in the last refresh" | The query found no acceptable item: widen the filters, or read the Reported codes. |
+| OK | "refreshed 1 min ago · 790 valid in the last refresh · only favourites · taken 2024" | Nothing. "Valid" counts items the refresh accepted, not items ready for a particular frame. |
+
+### Why nothing new on a frame?
+
+In the Runs region's **Why** panel, choose a **Frame for why**. Below Central's plan for that frame is a separate group, **"Why nothing new on lobby-left?"**. It walks from intent to equipment; each step restates a served fact, and the first step that is not ok is marked **Stops here**. Fix that one first.
+
+| Step | Stops when | What to do at that stop |
+|---|---|---|
+| 1. Intended? | No Scene is intended for the frame now. (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | Activate a Scene, or schedule a Program, that targets the frame. |
+| 2. Run ended? | The last Run on the frame ended ("evening's Run ended at 18:00:30 after one cycle") or was cancelled. If the Scene keeps its last still, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)". | "After one cycle" means Keep playing was off: edit the Scene and turn it on, then start it again. |
+| 3. Authored? | The winning Scene uses fixed, hand-picked media ("new photos never appear by design"), or shows black by design. | Nothing is wrong. To show new photos, use a live-source Scene. |
+| 4. The Source | None of the Scene's Sources is ok. | Read the [Source states](#the-media-pipeline) above. |
+| 5. Check this frame | Press **Check this frame**. It reads each ok Source's items that fit the frame's shape and counts what Central would do with them: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version". It stops on "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." | Still preparing: wait for the worker. Failed to prepare: read the worker line. No compatible version, or nothing fits: the frame's shape (for example portrait) excludes the Source's items; widen the Source. An item two Sources share is counted once; a failing Source is left out, as planning leaves it out. |
+| 6. The worker | The worker is not ok. | See the worker line above. |
+| 7. Frame health | The frame's health is not ok. | Fix it in Wall mode ([wall health](#operator-console-wall-health-and-the-attention-strip)). |
+
+**Limit:** the check is a count of each item's standing. It does not report which item Central picks for the next cycle; with some items usable and others not ready, a cycle that lands on one not ready plans the next layer down, as the step's note says.
 
 ### Programs and the windows helper
 
@@ -603,7 +660,7 @@ Choose the **Scene to activate** and an **Activation priority**, then choose wha
 | Other refusal | "Not started: 16 activations are already waiting.", or "Not started: `<error>`." | Correct the cause and try again. |
 | Outcome unknown | "Outcome unknown. Try again; it will not start twice." | The request failed or Central answered with a server error, so the Run may or may not have started. **Try again unchanged**: the retry reuses the same hidden activation key, and Central answers a known key with its stored result, so it cannot start twice. **Changing the form makes this a new activation** with a new key, as the form reminds you. |
 
-Queueing an activation and overriding protection ("force") are not offered yet (design slice 3B).
+Queueing an activation and overriding protection ("force") are not offered: design bead 3B-3 is deferred until the owner answers its Question 6 ([slice 3 design](operator-console-ux-pass2-showrunner.md#18-costs-deferrals-and-questions)).
 
 ## Tests and local development
 

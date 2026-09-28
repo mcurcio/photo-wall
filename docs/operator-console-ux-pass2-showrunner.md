@@ -10,7 +10,7 @@
 | Part | Ships | Backend | Size |
 |---|---|---|---|
 | **3A** (first) | loop, ids, reasons, layout, rows, precedence, leave/restart activation, windows, Source filters | one read-only addition (§8) | 7 beads; ≈900 net production lines (≈300 CSS and moves), ≈650 test |
-| **3B** | Scene view and edit, media pipeline, queue, force | one small write: withdraw a queued activation (Question 6) | 4 beads; ≈600 production, ≈450 test |
+| **3B** | Scene view and edit, media pipeline and "why nothing new?"; queue and force (3B-3) **deferred** until the owner answers Question 6 | a Scene revision guard (409, Question 4 flipped, §13); a served per-candidate `standing` and recipe-scoped job counts (§14); 3B-3 would add a withdraw write (Question 6) | 4 beads (3B-3 deferred); ≈600 production, ≈450 test |
 
 Neither part needs a migration.
 
@@ -31,16 +31,17 @@ Neither part needs a migration.
 | Runs omit fields; a missed window is not on `/runtime` | **Confirmed.** `RunView` has participants, `started_at` and `finish_requested_at` (`runtime.py:171-182`), and none are rendered. It lacks `program_id`, `priority` and protection. Outcomes stay server-side (`app.py:634-641`). |
 | Media health is fetched but not rendered | **Confirmed.** It is fetched at `useSnapshot.js:91-95` and nothing reads it. Worker, jobs and cache: `media_repository.py:503-507`. Per-Source fields: `:91-95`. |
 | The chooser lists "Photo 108×192" three times | **Mechanism confirmed; not reproduced.** The fixture's photos differ in size. The label is kind plus size (`SceneAuthoring.jsx:344-347`). While candidates load, it reads "No compatible media" (`:486-489`). |
-| *(new)* New saves silently replace | Every save sends `revision: 1`, and `set_scene` and `set_program` overwrite (`runtime.py:295,300`). |
+| *(new)* New saves silently replace | Every save sends `revision: 1`, and `set_scene` and `set_program` overwrite (`runtime.py:295,300`). **3B:** `set_scene` now refuses a conflicting Scene save (§13); Program saves still overwrite. |
 
 ## 2. One picture, three rules
 
 ```mermaid
 flowchart LR
-  S["Plane A: inventory, runtime (+ program_outcomes; 3B: queue), media"] --> H["health.js: frames, ages"]
+  S["Plane A: inventory, runtime (+ program_outcomes; 3B-3, deferred: queue), media"] --> H["health.js: frames, ages"]
   S --> J["join.js: LIVE_PHASES, explainPrecedence"]
   S --> P["showState.js: Program + Run display states"]
   S --> M["mediaHealth.js (3B)"]
+  K["candidatesApi.js (3B): candidates + served standing"] --> R
   D["Plane B drafts"] --> A["authoring.js: ids, problems"]
   H & J & P & M & A --> R["Regions: Runs + Why | Scenes, Programs, Sources (3B: Media pipeline)"]
   R -->|"apiWrite / ConfirmAction"| C["Central"]
@@ -62,7 +63,12 @@ flowchart LR
 | `ScenePicker.jsx`, `SourcePicker.jsx`, `CycleInput.jsx` | One Scene picker (Programs and activation), one Source picker (both modes, and 3B's Why), one cycle-and-loop input (both modes) | 3A |
 | `TargetPicker.jsx` | Frames grouped by Surface, with health (both modes). Groups are named "Frames on <surface>" and "Frames not on any wall", never "Surface <id>" (R4: no `Surface` label in Showrunner mode). A frame id outside the target rule (§1's legacy `:` id) is listed with that reason and cannot be ticked | 3A |
 | `SourcesRegion.jsx`, `ProgramsRegion.jsx`, `RunsRegion.jsx` | Moved out of `Showrunner.jsx` (902 lines), which becomes the layout shell | 3A |
-| `SceneList.jsx`, `mediaHealth.js`, `MediaPipeline.jsx` | Scene view and edit; the media classifier and panel | 3B |
+| `SceneList.jsx` | The stored Scenes, each a disclosure `Scene X` (§13); Edit, or the reason it is withheld | 3B |
+| `authoring.js` (3B additions) | `buildSave` (moved here from `SceneAuthoring.jsx`, because the pure lossless check needs it); the default tables `SCENE_DEFAULTS` / `CONTRIBUTION_DEFAULTS` (pinned to the models by pytest); `normalizeScene`, `decodeScene`, `editableDraft`, `UNAUTHORABLE_REASON` | 3B |
+| `TargetPicker.jsx` (3B addition) | **exports** `FrameChips` (frames with their tile health), shared by Run and Scene rows | 3B |
+| `candidatesApi.js` | `readCandidates(sourceRef, frameId) → {status, candidates}`: the one candidates read, shared by the authoring choosers and "Check this frame", so neither region imports the other | 3B |
+| `mediaHealth.js` (pure) | Worker and Source classifiers (`workerState`, `workerLoad`, `sourceState`, `sourceFilters`), the pinned thresholds, `candidateLabels`, `checkCounts`, `whyNothingNew`. It reads Central's served `standing`; it never restates the planner's variant rule | 3B |
+| `MediaPipeline.jsx` | The Media pipeline panel and the `WhyNothingNew` group | 3B |
 
 ## 4. Scene loop (3A)
 
@@ -113,8 +119,8 @@ Times are entered and shown in the browser's time zone, which is named: "Times i
 | Surface | Frozen shape |
 |---|---|
 | `RunView` | Gains **required** `program_id: str \| None` and `priority: int` (from `_Run`; both are constructed only in `_view`). |
-| `Runtime.operator_projection(now, *, max_events=10000) -> OperatorProjection` | One restore and advance (as `project`, with the same `max_events` transition budget). Frozen fields: `current: RuntimeView`; `protected_frames: Mapping[run_id, frozenset[str]]` (from `_Run.scene.protected_frames`, `runtime.py:105`; computed **only here**, never in `_view` on the scheduler's hot path; a served Run that protects no frame is omitted); and `program_outcomes: Mapping[program_id, Admission \| None]`, read from `admissions[activation_id]`. The same 24 h read filter applies to Runs and to outcomes (Question 2). **3B adds** `queue: tuple[QueuedView, ...]` (`activation_id`, `scene_id`, `priority`, `force`, `expires_at`). |
-| `GET /v1/operator/runtime` | Adds `protected_frames` and `program_outcomes` (and, in 3B, `queue`). Existing keys are unchanged. |
+| `Runtime.operator_projection(now, *, max_events=10000) -> OperatorProjection` | One restore and advance (as `project`, with the same `max_events` transition budget). Frozen fields: `current: RuntimeView`; `protected_frames: Mapping[run_id, frozenset[str]]` (from `_Run.scene.protected_frames`, `runtime.py:105`; computed **only here**, never in `_view` on the scheduler's hot path; a served Run that protects no frame is omitted); and `program_outcomes: Mapping[program_id, Admission \| None]`, read from `admissions[activation_id]`. The same 24 h read filter applies to Runs and to outcomes (Question 2). **3B-3 (deferred, Question 6) would add** `queue: tuple[QueuedView, ...]` (`activation_id`, `scene_id`, `priority`, `force`, `expires_at`). |
+| `GET /v1/operator/runtime` | Adds `protected_frames` and `program_outcomes` (and, with 3B-3, `queue`). Existing keys are unchanged. |
 | Rejected `Admission` (review fix cycle 1) | A `protected_frames` or `protection_not_visible` rejection carries `blocking_run_id: str | None` (optional, so stored admissions without it still restore): the root Run whose protection refused it, as Central decided it. The console names that Run from the Admission and no longer re-derives protection from `protected_frames` and participants. |
 
 | Also decided | |
@@ -153,7 +159,7 @@ stateDiagram-v2
   - "Running" / "Ending (outro)" / "Finishing: requested 20 s ago", with Finish disabled and that reason given;
   - "plays one 30 s cycle, then ends" when `loop` is false;
   - its priority, a "protects lobby-left" note, and its participants as frame chips carrying the `tileLabel`.
-- **Cancel** goes through `ConfirmAction`: "Stops now on …, skipping its outro; its child Scenes stop too." In 3B, when a queued activation of the same Scene exists, it adds "A queued activation of X starts as soon as this ends."
+- **Cancel** goes through `ConfirmAction`: "Stops now on …, skipping its outro; its child Scenes stop too." With 3B-3 (deferred, Question 6), when a queued activation of the same Scene exists, it adds "A queued activation of X starts as soon as this ends."
 - **Empty and ended runs:** "No live Runs." is kept. A closed "Recently ended" list separates completed from cancelled.
 
 ## 10. Who wins, in Central's plan (3A)
@@ -170,14 +176,14 @@ The Runtime keeps the highest `(priority, root_order, admission_order)` (`runtim
 - **Limit line, always shown:** "If evening has no usable media for this frame (none eligible, still preparing, or no compatible variant), Central plans the next layer down instead (`planner.py:297-316`). An unbound frame gets no layers at all (`planner.py:266-268`). A partly transparent or fading layer shows what is underneath."
 - **Where it appears:** the Now-showing facet (it keeps "Intended scene: X") and the Runs Why panel.
 
-## 11. Activation (3A: leave running or restart; 3B: queue and force)
+## 11. Activation (3A: leave running or restart; 3B-3, deferred: queue and force)
 
 | Choice | Wire | Stated consequence |
 |---|---|---|
 | Leave it running (default) | `repeat: ignore` | "Not started: evening is already running, left as is." |
 | Restart it | `repeat: restart` | Hint: "Ends the current Run and starts a new one now. A restarted Run has no Program end" (`runtime.py:417-419`), then, for a looping Scene, that it plays until you Finish or Cancel it, and for a one-cycle (`loop: false`) Scene, that it plays one cycle, then ends. (The first draft's unconditional "it plays until finished" was false for one-cycle Scenes.) |
-| Queue after it (3B) | `repeat: queue`, `expires_at = current.now + 60·N` | "Queued: starts when evening's Run ends **and** no protection blocks it (`runtime.py:658`); gives up at 18:05." The queue is listed under "Waiting to start", with **Withdraw** (Question 6). Queueing is refused with a reason while the last refresh failed, because `current.now` would be stale. |
-| Activate anyway (3B) | new key, `force: true` | Offered only after a `protected_frames` refusal, in `ConfirmAction`: "Overrides protection on lobby-left. At priority 0, below the protecting Run's 5, it is admitted but stays underneath." ([requirements](requirements.md#activation-and-visibility-protection): manual activation does not mean force.) |
+| Queue after it (3B-3, deferred) | `repeat: queue`, `expires_at = current.now + 60·N` | "Queued: starts when evening's Run ends **and** no protection blocks it (`runtime.py:658`); gives up at 18:05." The queue is listed under "Waiting to start", with **Withdraw** (Question 6). Queueing is refused with a reason while the last refresh failed, because `current.now` would be stale. |
+| Activate anyway (3B-3, deferred) | new key, `force: true` | Offered only after a `protected_frames` refusal, in `ConfirmAction`: "Overrides protection on lobby-left. At priority 0, below the protecting Run's 5, it is admitted but stays underneath." ([requirements](requirements.md#activation-and-visibility-protection): manual activation does not mean force.) |
 
 | Outcome (only served facts; bead 3A-5 follows the read in 3A-3) | Text |
 |---|---|
@@ -195,31 +201,43 @@ The Runtime keeps the highest `(priority, root_order, admission_order)` (`runtim
 
 ## 13. Scene view and lossless edit (3B)
 
-- **`SceneList`:** each row is a disclosure named `Scene X`, showing kind (live Sources, or "authored: N chosen items"), targets with health, cycle, loop wording, revision, "Used by Programs …" and "Running now".
-- **Lossless check.** Both sides are normalized by filling the model defaults (`runtime.py:43-55` Contribution, `:76-86` Scene; a pytest pins the console's default table to the models). The Scene must equal `buildSave(decode(Scene))`, apart from `revision`. Otherwise Edit is withheld with the reason: "Uses features the console can't author (child Scenes, outro, fades…)."
-- **Replace.** It goes through `ConfirmAction` and sends `revision + 1`. The dialog says "Runs already going keep the version they started with; Programs that start later use the new one" (Runs hold a copy, `runtime.py:205`). A revision changed in Plane A ends in the terminal "Changed since you opened this".
-- **Authored Scenes.** The operator picks the Source; each frame's stored `asset_refs` are pre-selected if they are still candidates. The authored `PUT` can answer 409:
+- **`SceneList`:** each row is a disclosure named `Scene X`, showing kind ("live from <Sources>", or "authored: N chosen items"), targets as `FrameChips` with health, cycle, loop wording (a looping Scene "keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it"), revision, "Used by Programs …" and "Running now".
+- **Lossless check.** Both sides are normalized by filling the model defaults (`SCENE_DEFAULTS` / `CONTRIBUTION_DEFAULTS` in `authoring.js`, from `runtime.py:43-55` Contribution and `:76-86` Scene; a pytest in `tests/test_operator_runtime.py` pins the tables to the models). The Scene must equal `buildSave(decodeScene(Scene))`, apart from `revision` (`editableDraft`). Otherwise Edit is withheld with the reason: "Uses features the console can't author (child Scenes, outro, fades…)."
+- **Edit** loads the Scene into the same form under its **stored id** (never re-derived): "Editing `evening` · revision 4. Its id stays; Replace saves revision 5."
+- **Replace.** It goes through `ConfirmAction` and sends `revision + 1`. The dialog says "Runs already going keep the version they started with; Programs that start later use the new one" (Runs hold a copy, `runtime.py:205`).
+- **Revision guard (review fix cycle 1; flips Question 4's default).** `Runtime.set_scene` (`runtime.py:339`), the one Scene write path behind both Scene `PUT`s, refuses with 409 `scene_revision_conflict` a save whose revision is at or below the stored one **unless it equals the stored Scene exactly**, so an identical retry stays 200. It refuses only conflicting writes; no expected-revision field is added (`RuntimeConflict`, mapped to 409 in `app.py`). The console reads the outcome from the answer, not from a pre-read:
+  - A Replace whose Scene moved on since Edit ends in the terminal "Changed since you opened this. Reopen to review." Nothing was replaced.
+  - A **new** Scene whose id another operator saved meanwhile is refused: "A Scene with this id was saved meanwhile; nothing was replaced."
+  - Program `PUT`s are unchanged: a racing Program id still replaces silently (§16).
+- **Authored Scenes.** The operator picks the Source; each frame's stored `asset_refs` are pre-selected while they are still candidates. The authored `PUT` can answer 409:
   - `source_not_fresh`: "The Source's last refresh failed; authored choices can be saved once it succeeds" (`media_repository.py:320`).
-  - `authored_asset_not_member`: "That item is no longer in the Source; choose again" (`:331`).
+  - `authored_asset_not_member`: "That item is no longer in the Source; choose again" (`:331`); the choosers read their candidates again.
+  - `scene_revision_conflict`, as above.
 - **Delete:** not offered (Question 3).
 
 ## 14. Media pipeline and "why nothing new?" (3B)
 
 | Domain | State (first match) | Label | Severity |
 |---|---|---|---|
-| Worker | `never` / `error` / `quiet` / `ok` | "never checked in" / "reported: storage is full" / "quiet for 14 min" (older than `2 × 300 s + 60 s`; maintenance runs every 5 min, `media/task_queue.py:17`) / "checked in 40 s ago · preparing 3 · waiting 12 · failed 2 · cache 4.1 of 8 GB" | alarm ×3 / ok |
-| Source | `never-refreshed` / `failing` / `overdue` / `empty` / `ok` | "Awaiting refresh" (`next_refresh = 0`, `005_media_jobs.sql:12`) / "Library unreachable, refused, or unsupported · last good 2 h ago" / "Refresh overdue by 6 min" (`2 × 30 s + 65 s`; `task_queue.py:16`, `worker.py:109`) / "no usable media" / "refreshed 1 min ago · 790 usable · only favourites · taken 2024" | to-do / alarm / alarm / to-do / ok |
+| Worker | `never` / `error` / `quiet` / `ok` | "never checked in" / "reported: storage is full" / "quiet for 14 min" (older than `2 × 300 s + 60 s`; maintenance runs every 5 min, `media/task_queue.py:17`) / "checked in 40 s ago · preparing 3 · waiting 12 · failed 2 · failed, retry pending 1 · cache 4.1 of 8 GB" | alarm ×3 / ok |
+| Source | `never-refreshed` / `failing` / `overdue` / `empty` / `ok` | "Awaiting refresh" (`next_refresh = 0`, `005_media_jobs.sql:12`) / per served status, "Library unreachable", "Library refused access" or "Library unsupported", then "· last good 2 h ago" / "Refresh overdue by 6 min" (`2 × 30 s + 65 s`; `task_queue.py:16`, `worker.py:109`) / "nothing valid in the last refresh" / "refreshed 1 min ago · 790 valid in the last refresh · only favourites · taken 2024" | to-do / alarm / alarm / to-do / ok |
 
-**`whyNothingNew`** is its own group, "Why nothing new on lobby-left?", a sibling of the ranked Why list. Its steps, with the first one that is not ok highlighted:
-1. **Intended?** Is any Scene intended here?
-2. **Run ended?** For example, "evening's Run ended at 18:00:30 after one cycle." With `retain_on_expiry` on a photo, it adds "the frame keeps its last still" (`planner.py:318`).
-3. **Authored?** "Fixed, hand-picked media; new photos never appear by design."
-4. **The Source.** Its state and its filters, favourites and capture window: "only photos taken in 2024".
-5. **On demand: "Check this frame".** It reads the existing candidates `GET ?frame_id=`, which is profile-filtered, and splits the result into usable, still preparing (`variant` null), failed (`preparation_failure`) and no compatible variant. These are the planner's exclusions (`planner.py:233,305-316`).
+- **Jobs are the current recipe's.** `MediaRepository.health()` counts jobs by state only for the current `recipe_id`; a recipe change fails the old recipe's queued jobs as `recipe_changed`, and planning requests the asset again. Preparing is running or publishing; waiting is queued. A `retry` job reads "failed, retry pending N", shown only when N > 0, because the catalog hydrates a not-yet-due retry as a preparation failure (`media_repository.py:252`). When the worker is not ok, a separate "Jobs and cache" line carries the same counts.
+- **"Valid" is the refresh's own count** (`counts.valid`: items it found and accepted), not items ready for any frame. Each Source row also shows "Last refresh: found N · valid N · pending N · rejected N", its reported diagnostic codes in words, and its next refresh.
+- **Capture window wording.** "Taken until" is exclusive, so the last day named is `day(until − 1)`, the day holding the last included second; a DST day of 23 or 25 h stays whole.
+
+**Standing is served, not restated.** `planner.candidate_standing(candidate, profile)` (`planner.py:141`) is the planner's one per-candidate verdict: `usable`, `preparing` (no variant yet), `failed_to_prepare` (a failed preparation, **including a retry not yet due**) or `no_compatible_variant`. `_pool` and `add` decide through it (`planner.py:252,324`). The candidates route serves it as `standing` on each candidate when `frame_id` is given (`MediaRepository.source_candidates`). The console no longer restates the variant rule; chooser labels and "Check this frame" read the served standing.
+
+**`whyNothingNew`** is its own group, "Why nothing new on lobby-left?", a sibling of the ranked Why list. Its steps, with the first one that is not ok marked "Stops here":
+1. **Intended?** Is any Scene intended here? When nothing is, but a served Run on the frame ended, this step is informational and the chain stops at step 2; otherwise it stops here.
+2. **Run ended?** For example, "evening's Run ended at 18:00:30 after one cycle", or "…was cancelled at 19:10". When the contribution has `retain_on_expiry`, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)": the served facts do not say which item was last (`planner.py:338`).
+3. **Authored?** "Fixed, hand-picked media; new photos never appear by design." A black contribution: "It shows black here by design."
+4. **The Source.** Each Source's state and filters, as in the panel, for example "family:1: refreshed 1 min ago · 790 valid in the last refresh · only photos · taken 2024".
+5. **On demand: "Check this frame".** It reads `GET …/candidates?frame_id=` (profile-filtered) for each of the winner's Sources and tallies the served `standing`: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version." A Source whose served status is not ok is left out, as planning leaves it out, and an item several Sources share counts once (its standing is per item). With nothing usable it stops: "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." The tally is of per-candidate standings, not of what planning concluded for the frame (residual in §18).
 6. **The worker.**
-7. **`frameHealth`** (status only, R4).
+7. **Frame health** (status only, R4).
 
-Chooser labels read "Photo 108×192 · taken 3 Mar 2025 14:02 · ready", with "(2)" added only for a remaining duplicate.
+Chooser labels read "Photo 108×192 · taken 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version", from the served standing), with "(2)" added only for a remaining duplicate. While the lists load, the chooser reads "Loading compatible media…", never "No compatible media".
 
 ## 15. Tracer bullet (3A-1)
 
@@ -232,13 +250,15 @@ The operator types "Family Evening" and sees "Saved as `family-evening`". "Keep 
 | Failure | What the operator sees | Guarantee |
 |---|---|---|
 | `loop` off in a Program | "plays one 30 s cycle, then ends" on the Scene and the Run | Test |
-| A name collides with another operator's save in the last 5 s | Silent replace | **None** (Question 4) |
+| A new Scene's id collides with another operator's save in the last 5 s | "A Scene with this id was saved meanwhile; nothing was replaced." | Structural (`Runtime.set_scene`, the one Scene write path) + pytest (`tests/test_runtime.py`, `tests/test_operator_runtime.py`) |
+| Lost update: two editors open the same Scene revision and both Replace | The second dialog ends "Changed since you opened this. Reopen to review."; the first editor's Scene is kept | Structural (`set_scene` refuses a revision at or below the stored one unless identical) + pytest + browser (two-editors test) |
+| A new Program's id collides with another operator's save in the last 5 s | Silent replace | **None** (Program `PUT`s have no guard) |
 | Central is down across a window | "Ran 18:00–20:00" (logical catch-up); the wall showed nothing | **None**; stated in the row hint |
 | Activation retried after a timeout | Same key, same Admission, one Run | Structural (`runtime.py:381`) + test |
-| Winner has no usable media for a frame | Precedence limit line; 3B's check names the exclusion | Test |
+| Winner has no usable media for a frame | Precedence limit line; "Check this frame" tallies the served standings | pytest on the served `standing` (`tests/test_authored_compatibility.py`; the planner decides through the same `candidate_standing`) + browser |
 | A restarted Run outlives its Program window | Stated in the Restart hint | Test |
-| Queue while refreshes fail (3B) | Queueing refused, with the reason | Test |
-| Force below the protecting priority (3B) | Confirm says it stays underneath | Test |
+| Queue while refreshes fail (3B-3, deferred) | Queueing refused, with the reason | Test |
+| Force below the protecting priority (3B-3, deferred) | Confirm says it stays underneath | Test |
 | A target frame deleted mid-draft | Dropped and announced | Test |
 | A Scene the console cannot author (3B) | Edit withheld, with the reason | Construction-time (normalized round trip) + test |
 | `/runtime` payload growth | Bounded to 24 h of ended Runs (Question 2 default) | pytest |
@@ -265,10 +285,10 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 
 | Bead | Files | Tests |
 |---|---|---|
-| **3B-1 Scene view + edit** | new `SceneList.jsx`; `SceneAuthoring.jsx` | `:387,:458,:550` hold. **New:** edit bumps the revision; the children Scene is withheld; authored pre-select; both 409s; a stale edit is terminal. **pytest:** default-table pin. |
-| **3B-2 Media pipeline + why** | new `mediaHealth.js`, `MediaPipeline.jsx`; `RunsRegion.jsx`, `SceneAuthoring.jsx` (labels, loading) | `:883-884` scoped to the "Contribution precedence" list; `:486,:487,:489,:516` become a `^Photo 108×192` regex. **New:** each worker and Source state; the chain stops at "Run ended", "authored" and "still preparing". **pytest:** thresholds. |
-| **3B-3 Queue + force** | `runtime.py` (`queue` view; `withdraw` command), `app.py` (withdraw route), `RunsRegion.jsx` | **pytest:** the queue is served; withdraw records an expiry and is idempotent. **Browser:** queue listed and withdrawn; Cancel warns; force below priority is admitted and hidden. |
-| **3B-4 Docs** | runbook (queue, force, pipeline), J4 note, history here | `check_docs.py` |
+| **3B-1 Scene view + edit** (`27e1cce`) | new `SceneList.jsx`; `SceneAuthoring.jsx`; `authoring.js` (`buildSave` moved in, default tables); `TargetPicker.jsx` (`FrameChips`); `RunsRegion.jsx`. Review fix cycle 1: `runtime.py` (`set_scene` guard, `RuntimeConflict`), `app.py` (409) | `:387,:458,:550` hold. **New:** edit bumps the revision; the children Scene is withheld; authored pre-select; both 409s; two editors, the second ends "changed". **pytest:** default-table pin; stale Scene save refused, identical retry accepted (`tests/test_runtime.py`, `tests/test_operator_runtime.py`). |
+| **3B-2 Media pipeline + why** (`55824af`) | new `mediaHealth.js`, `MediaPipeline.jsx`; `RunsRegion.jsx`, `SceneAuthoring.jsx` (labels, loading). Review fix cycle 1: new `candidatesApi.js`; `planner.py` (`candidate_standing`), `media_repository.py` (served `standing`, recipe-scoped `health`) | The three Why count assertions are scoped to the "Contribution precedence" list; the chooser names at `:499,:500,:502,:529` become a `^Photo 108×192` regex. **New:** each worker and Source state; the chain stops at "Run ended", "authored" and "still preparing"; the check skips a failing Source and counts a shared item once; a DST capture window. **pytest:** thresholds (`tests/test_media_queue.py`); served standing (`tests/test_authored_compatibility.py`); recipe-scoped jobs (`tests/test_media_repository.py`). |
+| **3B-3 Queue + force** (**deferred** until the owner answers Question 6) | `runtime.py` (`queue` view; `withdraw` command), `app.py` (withdraw route), `RunsRegion.jsx` | **pytest:** the queue is served; withdraw records an expiry and is idempotent. **Browser:** queue listed and withdrawn; Cancel warns; force below priority is admitted and hidden. |
+| **3B-4 Docs** | runbook (Scene view and edit, pipeline, why; queue and force with 3B-3), `module-runtime.md`, `module-authored-media.md`, README, ledger, history here | `check_docs.py` |
 
 **Mutation probes (each must turn the named test red).**
 
@@ -286,18 +306,21 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 | Treat a 5xx as a definite refusal (mint a new key) | 500-retry test (two Runs) |
 | Put the protector name in without a served Run | No-name fallback test |
 | Compare edit without filling defaults (3B) | A Scene saved through the API with default fields must stay editable |
-| Queue with a stale `now` (3B) | Queue-refused test |
+| Drop the guard in `Runtime.set_scene` (3B) | Two-editors browser test; stale-save pytests |
+| Serve `standing: usable` for every candidate (3B) | Served-standing pytest |
+| Queue with a stale `now` (3B-3, deferred) | Queue-refused test |
 
 ## 18. Costs, deferrals and questions
 
-- **Costs:** names are not kept; confirm clicks for Cancel, Replace and removing a running Program; forms always visible; media alarms stay out of the strip; thresholds are console constants pinned by pytest; **albums are not supported** (`SourceSpec` has no album field); Programs and admissions are never pruned in stored state; the planner's "no usable media" is inferred, not served per frame. A stored protection refusal pins the rollback floor at this build unless its `blocking_run_id` is stripped first (runbook SQL).
-- **Deferred:** thumbnails, Scene delete, display names, media alarms in the strip.
+- **Costs:** names are not kept; confirm clicks for Cancel, Replace and removing a running Program; forms always visible; media alarms stay out of the strip; thresholds are console constants pinned by pytest; **albums are not supported** (`SourceSpec` has no album field); Programs and admissions are never pruned in stored state; the planner's per-candidate standing is served, but what planning concluded for a frame is not ("Check this frame" is a tally of standings, not the pool order or cycle pick). A stored protection refusal pins the rollback floor at this build unless its `blocking_run_id` is stripped first (runbook SQL).
+- **Deferred:** thumbnails, Scene delete, display names, media alarms in the strip; queue and force (3B-3, pending Question 6).
+- **Residual (not built):** serve the planner's own per-frame `projection.diagnostics` (`coordination.py:403`), so "Check this frame" reports what planning actually concluded (pool order, cycle pick, `no_eligible_candidates`) instead of a tally of per-candidate standings.
 - **Question 1:** new Scenes default "Keep playing until the Program ends" to on? Build proceeds on the default: on.
 - **Question 2:** should `operator_projection` serve only live Runs plus Runs ended in the last 24 h (read-only), bounding the 5 s payload? Build proceeds on the default: yes (3A-3).
 - **Question 3:** should Scenes get a delete route (it must refuse while a Program or a live Run names the Scene, `runtime.py:630`)? Build proceeds on the default: deferred.
-- **Question 4:** should the Scene and Program `PUT`s gain a create-only or expected-revision precondition, so a racing collision is refused? Build proceeds on the default: no; a console check plus the stated race.
+- **Question 4:** should the Scene `PUT`s refuse a save that would silently replace a newer Scene? Build proceeds on the default: **guard** (refuses only conflicting writes). `Runtime.set_scene` refuses a revision at or below the stored one unless the body is identical (§13); no expected-revision field is added, and Program `PUT`s are unchanged. *Evidence:* review fix cycle 1 found two editors of one Scene both stored revision 4, the second silently replacing the first; the console's pre-read of the stored revision could not close that race. *Cost:* a state holding a Scene can no longer be re-sent with a lower revision, and the owner may still prefer the earlier default (no precondition).
 - **Question 5:** should `/runtime` serve `program_outcomes` and `protected_frames`, and `RunView` carry `program_id` and `priority`, reversing J4's no-missed-row stance? Build proceeds on the default: yes (3A-3).
-- **Question 6:** should queued activations be withdrawable through a new write (`POST /v1/operator/activations/{id}/withdraw`, recorded as `expired`, reason `withdrawn`)? Build proceeds on the default: yes (3B-3); without it, 3B ships the queue read-only.
+- **Question 6:** should queued activations be withdrawable through a new write (`POST /v1/operator/activations/{id}/withdraw`, recorded as `expired`, reason `withdrawn`)? **3B-3 (queue, force and withdraw) is deferred until the owner answers**; 3B ships without queue and force.
 
 ## History
 
@@ -305,3 +328,4 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 - 2026-09-28, review round 1: two adversarial reviews failed the draft; the design was changed: split into 3A/3B; loop control fixes Programs ending after one cycle; precedence worded as Central's plan with "priority N" and its limits; missed-window copy corrected (outages are warm restarts); `protected_frames` served and refusals use served facts; activation copy fixed (restart outlives window, queue waits for protection, force below priority stays hidden, "at least 5"); non-Latin and stored ids; edit compares after defaults and handles authored 409s; why chain uses the planner's exclusions; shared pickers and exported helpers; frozen problem summary and announced vanished targets; silent states removed; payload bound stated.
 - 2026-09-28, review round 2 (final): `program_outcomes` shares the 24 h read filter (`programs` stays unbounded, as a cost); window-overlap and id-length reasons; refused-Program protector lookup with a fallback and a `protection_not_visible` label; loop overrun by up to one cycle and unbound frames getting no layers stated; a `_schedule_program` test helper and pinned picker names; `protected_frames` computed only in `operator_projection`, with `program_id`/`priority` required; an activation 5xx is outcome unknown and keeps the key.
 - 2026-09-28, slice 3A build (docs bead 3A-7): implementer errata (a)–(i) applied in place (`Field.jsx` and `PrecedenceExplanation` homes; `IDENTIFIER_PATTERN` in contracts and the new `tests/test_operator_runtime.py`; "Frames on <surface>" groups and the untickable legacy frame; `protected_frames` omits Runs protecting nothing; `:760` set up through the Runtime; exclusive "Taken until"; the admitted and 4xx texts; "Loading compatible media…" moved to 3B-2). Review fix cycle 1 decisions recorded: a rejected Admission carries the blocking Run id, so the console no longer re-derives protection; a windows-helper partial failure reads "not confirmed" and retries only missing ids; the "Changing the form makes this a new activation" line; `operator_projection` takes `max_events`. Defect corrected: the Restart hint's "plays until finished" was false for one-cycle Scenes.
+- 2026-09-28, slice 3B build (docs bead 3B-4): implementer errata (a)–(f) and review fix cycle 1 applied in place. Question 4's default flipped to a revision guard in `Runtime.set_scene` (409 `scene_revision_conflict`; an identical retry is accepted), replacing the console's pre-read; the planner's `candidate_standing` is served as `standing`, so the console no longer restates the variant rule; `readCandidates` moved to `candidatesApi.js`; `buildSave` moved to `authoring.js` and `FrameChips` exported from `TargetPicker.jsx`; health counts only the current recipe's jobs and shows "failed, retry pending"; "valid in the last refresh" wording; the check skips failing Sources and counts shared items once; per-status Source failure labels; step 1 informational when a Run ended; the retained-still line made conditional (§14 step 2 corrected); the DST last day. 3B-3 deferred pending Question 6; the per-frame diagnostics residual recorded.
