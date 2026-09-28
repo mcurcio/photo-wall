@@ -20,6 +20,7 @@ import os
 import re
 
 import pytest
+from console_tasks import open_frame
 from operator_harness import RequestGate, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
@@ -44,14 +45,6 @@ def _placed_frame(registry, frame_id):
     registry.create_frame(FrameCreate(
         id=frame_id, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=400, height_mm=300, profile=LANDSCAPE))
-
-
-def _binding_facet(page, frame_id):
-    """Select a frame on the plan and open its Binding facet; returns the Inspector."""
-    page.get_by_role("button", name=f"Frame {frame_id}", exact=True).click()
-    inspector = page.get_by_role("region", name=f"Frame {frame_id} inspector", exact=True)
-    inspector.get_by_role("tab", name="Binding", exact=True).click()
-    return inspector
 
 
 def _option(scope, player_id, output_id="HDMI-A-1"):
@@ -86,7 +79,7 @@ def _bound(registry, frame_id="bound-1", count=1):
 
 
 def _open_unbind(page, frame_id="bound-1"):
-    inspector = _binding_facet(page, frame_id)
+    inspector = open_frame(page, frame_id, "binding")
     inspector.get_by_role("button", name="Unbind", exact=True).click()
     dialog = _dialog(page)
     expect(dialog).to_be_visible()
@@ -133,7 +126,7 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
 
         # Select the Frame on the plan, open the Binding facet, choose the pending
         # Output and bind it.
-        inspector = _binding_facet(page, "wall-1")
+        inspector = open_frame(page, "wall-1", "binding")
         _option(inspector, identity["player_id"]).check()
         inspector.get_by_role("button", name="Bind to wall-1", exact=True).click()
 
@@ -174,7 +167,7 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
 
         # Precondition: the Player's Output IS a bind candidate — the Binding
         # facet's chooser offers it.
-        inspector = _binding_facet(page, "wall-r")
+        inspector = open_frame(page, "wall-r", "binding")
         expect(_option(inspector, player_id)).to_be_visible()
 
         # Retire the pending Player from the rail (a deliberate, labelled action),
@@ -237,7 +230,7 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
 
         # The operator chooses the Output while the console holds the Frame at
         # generation 0: the choice captures that generation.
-        inspector = _binding_facet(page, "stale-1")
+        inspector = open_frame(page, "stale-1", "binding")
         _option(inspector, identity["player_id"]).check()
 
         # Server-side, advance the Frame's generation (bind then unbind each bump it),
@@ -280,7 +273,7 @@ def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, regist
     registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _binding_facet(page, "right")
+        inspector = open_frame(page, "right", "binding")
 
         # The bound HDMI-A-1 is not offered; HDMI-A-2 is, and nothing is selected.
         expect(inspector.get_by_role("radio")).to_have_count(1)
@@ -300,7 +293,7 @@ def test_bind_is_disabled_until_the_operator_chooses(page, registry):
     _placed_frame(registry, "choose-1")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _binding_facet(page, "choose-1")
+        inspector = open_frame(page, "choose-1", "binding")
         # One option, and still nothing is chosen for the operator.
         option = _option(inspector, identity["player_id"])
         expect(option).not_to_be_checked()
@@ -320,7 +313,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
-        inspector = _binding_facet(page, "mine")
+        inspector = open_frame(page, "mine", "binding")
         _option(inspector, player_id).check()
 
         # Another operator binds that Output elsewhere; the next poll removes it.
@@ -341,7 +334,7 @@ def test_no_display_and_retired_outputs_are_never_offered(page, registry):
     _placed_frame(registry, "only")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _binding_facet(page, "only")
+        inspector = open_frame(page, "only", "binding")
         # Exactly the one free Output: the no-display HDMI-A-2 and the retired Player's
         # HDMI-A-1 are excluded.
         expect(inspector.get_by_role("radio")).to_have_count(1)
@@ -573,7 +566,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
     _placed_frame(registry, "boot-1")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _binding_facet(page, "boot-1")
+        inspector = open_frame(page, "boot-1", "binding")
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
         pending = page.get_by_role("group", name="Pending players", exact=True)
@@ -588,7 +581,8 @@ def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(pending).to_contain_text("No netboot record")
         # Without a serial the handle is the Player id's hash suffix.
-        expect(_option(_binding_facet(page, "boot-2"), identity["player_id"])).to_be_visible()
+        inspector = open_frame(page, "boot-2", "binding")
+        expect(_option(inspector, identity["player_id"])).to_be_visible()
 
 
 OLD, NEW = "v1.4.2", "v1.5.0"
@@ -631,7 +625,7 @@ def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
-        inspector = _binding_facet(page, "boot-3")
+        inspector = open_frame(page, "boot-3", "binding")
         expect(_serial_option(inspector)).to_be_visible()
 
         # 30 s later the next snapshot re-reads the boot facts, and Central answers 503.

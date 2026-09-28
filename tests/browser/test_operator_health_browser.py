@@ -14,10 +14,10 @@ import re
 import time
 
 import pytest
+from console_tasks import connect, go, open_frame
 from operator_harness import (
     RequestGate,
     operator_server,
-    pause_page_clock,
     report_readiness,
     sign_in,
     tile_health,
@@ -173,11 +173,6 @@ def test_the_threshold_is_centrals_not_a_constant_in_the_console(page, registry)
 # fires only when the test runs the clock; slow responses are held with RequestGate.
 
 
-def _paused_connect(page, registry, origin):
-    pause_page_clock(page, registry.clock.utc())
-    sign_in(page, origin)
-
-
 def _set_visibility(page, state):
     page.evaluate("""(state) => {
         Object.defineProperty(document, "visibilityState", {configurable: true, get: () => state});
@@ -193,7 +188,7 @@ def _settle(page):
 def test_a_backend_change_shows_after_one_poll(page, registry):
     player_id = _bound_frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _paused_connect(page, registry, origin)
+        connect(page, origin, paused_at=registry.clock.utc())
         expect(_health(page)).to_have_accessible_name("Enrolled 0 s ago, no report yet")
         report_readiness(registry, player_id)
         page.clock.run_for(5000)
@@ -203,7 +198,7 @@ def test_a_backend_change_shows_after_one_poll(page, registry):
 def test_a_hidden_tab_does_not_poll_and_refreshes_on_return(page, registry):
     _bound_frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _paused_connect(page, registry, origin)
+        connect(page, origin, paused_at=registry.clock.utc())
         expect(_tile(page)).to_be_visible()
         gate = RequestGate(page, INVENTORY)
         _set_visibility(page, "hidden")
@@ -220,7 +215,7 @@ def test_a_hidden_tab_does_not_poll_and_refreshes_on_return(page, registry):
 def test_a_stale_poll_is_dropped_after_a_newer_refresh(page, registry):
     player_id = _bound_frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _paused_connect(page, registry, origin)
+        connect(page, origin, paused_at=registry.clock.utc())
         expect(_health(page)).to_have_accessible_name("Enrolled 0 s ago, no report yet")
         stale = page.request.get(origin + "/v1/operator/inventory",
                                  headers={"Authorization": "Bearer " + ADMIN}).text()
@@ -243,7 +238,7 @@ def test_a_stale_poll_is_dropped_after_a_newer_refresh(page, registry):
 def test_a_stale_401_does_not_log_the_operator_out(page, registry):
     player_id = _bound_frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _paused_connect(page, registry, origin)
+        connect(page, origin, paused_at=registry.clock.utc())
         expect(_tile(page)).to_be_visible()
         gate = RequestGate(page, INVENTORY)
         gate.holding = True
@@ -272,11 +267,9 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         width_mm=300, height_mm=500, profile=PORTRAIT))
     identity, _key, _request = enroll(registry, count=1)
     with operator_server(registry.db, registry.clock) as origin:
-        _paused_connect(page, registry, origin)
+        connect(page, origin, paused_at=registry.clock.utc())
         expect(_health(page)).to_have_accessible_name("Needs a Player")
-        page.get_by_role("button", name=f"Frame {FRAME}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {FRAME} inspector", exact=True)
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
+        inspector = open_frame(page, FRAME, "binding")
 
         writes = RequestGate(page, "**/v1/operator/frames/*/binding")
         reads = RequestGate(page, INVENTORY)
@@ -317,7 +310,7 @@ def _strip(page):
 
 
 def _open_list(page):
-    _strip(page).get_by_role("button", name="Show frames", exact=True).click()
+    go(page, "attention")
     return _strip(page).get_by_role("list", name="Frames needing attention", exact=True)
 
 
@@ -431,8 +424,7 @@ def test_a_player_just_enrolled_is_not_yet_counted_as_a_todo(page, registry):
 def test_showrunner_strip_entries_are_text_not_navigation(page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        page.get_by_role("button", name="Showrunner", exact=True).click()
+        connect(page, origin, "now")
         entries = _open_list(page)
         expect(entries).to_contain_text("silent-a — Player silent · last heard 4 min ago")
         expect(entries.get_by_role("button")).to_have_count(0)
@@ -522,7 +514,7 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
             page.get_by_role("tab", name=facet, exact=True).click()
             fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
             assert fits, f"{facet}: overflows at 390 px: {page.evaluate(_OFFENDERS)}"
-        page.get_by_role("button", name="Showrunner", exact=True).click()
+        go(page, "sources")
         expect(page.get_by_role("region", name="Sources", exact=True)).to_be_visible()
         fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
         assert fits, f"Showrunner: overflows at 390 px: {page.evaluate(_OFFENDERS)}"

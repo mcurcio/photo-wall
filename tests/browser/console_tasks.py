@@ -1,0 +1,195 @@
+"""Task-level browser helpers: what an operator does, named by the section it happens in.
+
+Bead 0 of the console passes C+D (docs/operator-console-ux-pass2-flow.md §9). The tests
+state *what* they do (go to Scenes, author a Scene, schedule it, show it now, open a frame's
+facet); these helpers own *how* today's layout does it. When the layout moves (bead 1b: the
+sidebar and hash routes; beads 2-5: step flows), the helpers change and the call sites do
+not. Labels and accessible names never change when a control moves (§3 rule 3), so the
+helpers use the same names the tests always have.
+
+Tests that are *about* a form (its validation, focus, descriptions or chooser contents) keep
+their direct locators; these helpers are for tests that only need the task done.
+"""
+
+import re
+from collections.abc import Mapping
+from urllib.parse import quote
+
+from operator_harness import pause_page_clock, sign_in
+from playwright.sync_api import expect
+
+# The sections of §6, grouped as its route tables group them.
+SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
+WALL_SECTIONS = frozenset({"wall", "equipment"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | {"attention"}
+
+# The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
+FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": "Now-showing"}
+
+
+def go(page, section):
+    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "equipment"
+    or "attention". Name the section the test is about (a Run test goes to "now", a
+    Program test to "schedule"), because bead 1b makes each its own page.
+
+    Today: a Show section presses the "Showrunner" mode button and a Wall section the
+    "Wall" button (both idempotent); "attention" expands the attention strip's list if
+    it is collapsed. Bead 1b: a sidebar link or `#/<section>` route.
+    """
+    if section in SHOW_SECTIONS:
+        page.get_by_role("button", name="Showrunner", exact=True).click()
+    elif section in WALL_SECTIONS:
+        page.get_by_role("button", name="Wall", exact=True).click()
+    elif section == "attention":
+        toggle = page.get_by_role("region", name="Wall attention", exact=True).get_by_role(
+            "button", name=re.compile(r"^(Show|Hide) frames$"))
+        if toggle.get_attribute("aria-expanded") != "true":
+            toggle.click()
+    else:
+        raise ValueError(f"unknown console section {section!r}; expected one of {sorted(SECTIONS)}")
+
+
+def visible_page(page):
+    """The currently visible page content, to scope negative checks to what is on screen.
+
+    Today the console renders only the current mode, so this is `<main>`. Bead 1b keeps
+    Show sections mounted but `hidden`, and changes this to `main section:not([hidden])`:
+    `get_by_text(...).to_have_count(0)` would otherwise also count hidden pages' DOM.
+    """
+    return page.locator("main")
+
+
+def connect(page, origin, section=None, *, paused_at=None):
+    """Sign in (operator_harness.sign_in, owned by pass A), then `go` to `section` if given.
+
+    With `paused_at` (Unix seconds), Playwright's clock is installed and paused there first
+    (operator_harness.pause_page_clock), so the console's timers run only when the test
+    runs the clock.
+    """
+    if paused_at is not None:
+        pause_page_clock(page, paused_at)
+    sign_in(page, origin)
+    if section is not None:
+        go(page, section)
+
+
+def author_scene(page, scene_id, source, frames, *, seconds=None, submit=True):
+    """Author a Scene from Photo source `source` on `frames` and, with `submit`, save it.
+
+    `frames` is the target frame ids for a Scene live from the source, or a
+    {frame_id: asset_id} mapping for one hand-picked per frame ("Authored per-frame")
+    with that item chosen on each frame. `scene_id` is typed as the Scene name, so it must
+    be an id the name rule keeps as is (lowercase words joined by hyphens). `seconds`
+    fills "Seconds per cycle"; None keeps the form's default.
+
+    With `submit`, saves, waits for the saved Scene to be listed and returns the save's
+    PUT response. Without it, returns the filled, unsaved form.
+    """
+    go(page, "scenes")
+    scenes = page.get_by_role("region", name="Scenes", exact=True)
+    form = scenes.get_by_role("form", name="Author a Scene", exact=True)
+    picks = frames if isinstance(frames, Mapping) else None
+    form.get_by_label("Scene name", exact=True).fill(scene_id)
+    if picks is not None:
+        form.get_by_label("Authored per-frame", exact=True).check()
+    form.get_by_label("Source", exact=True).select_option(source)
+    for frame_id in frames:
+        form.get_by_label(f"Target frame {frame_id}", exact=True).check()
+    for frame_id, asset_id in (picks or {}).items():
+        form.get_by_label(f"Media for frame {frame_id}", exact=True).select_option(asset_id)
+    if seconds is not None:
+        form.get_by_label("Seconds per cycle", exact=True).fill(str(seconds))
+    if not submit:
+        return form
+    route = f"/v1/operator/scenes/{scene_id}" + ("/authored" if picks is not None else "")
+    with page.expect_response(
+        lambda r: r.url.endswith(route) and r.request.method == "PUT"
+    ) as info:
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+    # Listed before anything can use it (proves the refresh after the save landed).
+    expect(scenes.get_by_label(f"Scene {scene_id}", exact=True)).to_be_visible()
+    return info.value
+
+
+def add_source(page, source_ref, connection, *, media_type=None, submit=True):
+    """Configure a Photo source named `source_ref` (`name:rev`) on library `connection`.
+
+    `media_type` picks "Media type" ("image", "video"); None keeps the form's default.
+    With `submit`, saves and returns the PUT response; without it, returns the filled form.
+    """
+    go(page, "sources")
+    form = page.get_by_role("region", name="Sources", exact=True).get_by_role(
+        "form", name="Configure a Source", exact=True)
+    form.get_by_label("Source name and revision", exact=True).fill(source_ref)
+    form.get_by_label("Connection name", exact=True).fill(connection)
+    if media_type is not None:
+        form.get_by_label("Media type", exact=True).select_option(media_type)
+    if not submit:
+        return form
+    with page.expect_response(
+        lambda r: r.url.endswith("/v1/operator/sources/" + quote(source_ref, safe=""))
+        and r.request.method == "PUT"
+    ) as info:
+        form.get_by_role("button", name="Save source", exact=True).click()
+    return info.value
+
+
+def schedule_program(page, program, scene_id, start, end, priority, *, submit=True):
+    """Schedule Program `program` of Scene `scene_id` over one window, at `priority`.
+
+    `start` and `end` are `datetime-local` values in the browser's time zone. With
+    `submit`, schedules it and returns the PUT response; without it, returns the filled
+    form (the "separate windows" helper then reads these fields).
+    """
+    go(page, "schedule")
+    form = page.get_by_role("region", name="Programs", exact=True).get_by_role(
+        "form", name="Schedule a Program", exact=True)
+    form.get_by_label("Program name", exact=True).fill(program)
+    form.get_by_label("Scene", exact=True).select_option(scene_id)
+    form.get_by_label("Window start", exact=True).fill(start)
+    form.get_by_label("Window end", exact=True).fill(end)
+    form.get_by_label("Priority", exact=True).fill(str(priority))
+    if not submit:
+        return form
+    with page.expect_response(
+        lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
+    ) as info:
+        form.get_by_role("button", name="Schedule Program", exact=True).click()
+    return info.value
+
+
+def show_now(page, scene_id, priority, repeat="Leave it running"):
+    """Show Scene `scene_id` now at `priority` and return the activation's POST response.
+
+    `repeat` is the label of the "if it is already running" choice. Central answers
+    synchronously with an Admission ({status, reason}); the console mints the activation
+    id, so the operator never types one.
+    """
+    go(page, "now")
+    form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+        "form", name="Activate a Scene", exact=True)
+    form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
+    form.get_by_label("Activation priority", exact=True).fill(str(priority))
+    form.get_by_label(repeat, exact=True).check()
+    with page.expect_response(
+        lambda r: r.url.endswith("/v1/operator/activations") and r.request.method == "POST"
+    ) as info:
+        form.get_by_role("button", name="Activate now", exact=True).click()
+    return info.value
+
+
+def open_frame(page, frame_id, facet):
+    """Open frame `frame_id` on the Wall at `facet` ("binding", "commissioning" or
+    "nowshowing", the Inspector.jsx keys); returns its Inspector.
+
+    Today: go to the Wall, select the frame on the plan by identity (never coordinates)
+    and choose the facet's tab. Bead 1b: the `#/wall/frames/<id>/<facet>` route.
+    """
+    if facet not in FACETS:
+        raise ValueError(f"unknown Inspector facet {facet!r}; expected one of {sorted(FACETS)}")
+    go(page, "wall")
+    page.get_by_role("button", name=f"Frame {frame_id}", exact=True).click()
+    inspector = page.get_by_role("region", name=f"Frame {frame_id} inspector", exact=True)
+    expect(inspector).to_be_visible()
+    inspector.get_by_role("tab", name=FACETS[facet], exact=True).click()
+    return inspector
