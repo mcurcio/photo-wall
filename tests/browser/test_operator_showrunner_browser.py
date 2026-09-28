@@ -1633,3 +1633,220 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
         dialog.get_by_role("button", name="Cancel", exact=True).click()
         expect(dialog).to_have_count(0)
         expect(runs).to_be_focused()
+
+
+# Pass 2 slice 3B (docs/operator-console-ux-pass2-showrunner.md §13): Scene view and lossless edit.
+
+# A stored id the name rule would rewrite ("lobby-loop-v2"): Edit must keep it.
+STORED_ID = "Lobby_Loop.v2"
+
+
+def _console_scene(scene_id, frame=VALID_FRAME, **fields):
+    """A live Scene in exactly the shape the console saves: only the fields it sends
+    are set, so every other field is stored at its model default."""
+    return Scene(scene_id=scene_id, loop=True, **fields, contributions=(Contribution(
+        target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), retain_on_expiry=True),))
+
+
+def _scene_row(page, scene_id):
+    """A Scene's row, its disclosure opened."""
+    row = page.get_by_role("region", name="Scenes", exact=True).get_by_label(
+        f"Scene {scene_id}", exact=True)
+    row.get_by_text(f"Scene {scene_id}", exact=True).click()
+    return row
+
+
+def _scene_puts(page):
+    urls = []
+    page.on("request", lambda request: urls.append(request.url)
+            if request.method == "PUT" and "/v1/operator/scenes/" in request.url else None)
+    return urls
+
+
+def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):
+    """§13: a Scene saved with its other fields at their defaults stays editable
+    (mutation probe: compare without filling defaults); Edit shows the stored id and
+    never re-derives it (mutation probe: the name rule would send lobby-loop-v2); Replace
+    is confirmed and sends revision + 1."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene(STORED_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        row = _scene_row(page, STORED_ID)
+        expect(row).to_contain_text("live from " + SOURCE)
+        expect(row).to_contain_text("revision 1")
+        expect(row).to_contain_text("no Program")
+        row.get_by_role("button", name=f"Edit Scene {STORED_ID}", exact=True).click()
+
+        form = _scenes_form(page)
+        expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
+        expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
+        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+
+        dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
+        expect(dialog).to_contain_text(
+            "Runs already going keep the version they started with; Programs that start later "
+            "use the new one.")
+        with page.expect_response(
+            lambda r: "/v1/operator/scenes/" in r.url and r.request.method == "PUT"
+        ) as info:
+            dialog.get_by_role("button", name="Confirm replace", exact=True).click()
+        assert info.value.url.endswith("/v1/operator/scenes/" + quote(STORED_ID, safe=""))
+        assert info.value.status == 200
+        body = info.value.request.post_data_json
+        assert (body["scene_id"], body["revision"], body["cycle_seconds"]) == (STORED_ID, 2, 45)
+        expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+            "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
+        expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
+        expect(form.get_by_label("Scene name", exact=True)).to_be_visible()
+
+
+def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, registry):
+    _seed(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene("plain"))
+    runtime.command("set_scene", Scene(
+        scene_id="evening", loop=True,
+        contributions=_console_scene("x").contributions,
+        children=(Child(scene=_console_scene("intro")),)))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        # Not vacuous: a Scene the console can author offers Edit.
+        expect(_scene_row(page, "plain").get_by_role("button", name="Edit Scene plain")).to_be_visible()
+        evening = _scene_row(page, "evening")
+        expect(evening).to_contain_text(
+            "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
+        expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
+
+
+def _put_authored(page, origin, scene_id, choices):
+    """Store an authored Scene through the public route, as the console saves one."""
+    scene = {"scene_id": scene_id, "revision": 1, "cycle_seconds": 30, "loop": True,
+             "contributions": [{"target": f"frame:{frame}", "role": frame, "kind": "media",
+                                "asset_refs": [asset], "retain_on_expiry": True}
+                               for frame, asset in choices.items()]}
+    response = page.request.put(
+        origin + f"/v1/operator/scenes/{scene_id}/authored",
+        headers={"Authorization": "Bearer " + ADMIN},
+        data={"scene": scene, "source_ref": SOURCE, "asset_ids": sorted(set(choices.values()))})
+    assert response.status == 200, response.text()
+
+
+def _drop_member(registry, asset_id):
+    """The upstream library no longer holds this item (a later refresh dropped it)."""
+    with registry.db.transaction() as conn:
+        conn.execute("DELETE FROM source_members WHERE source_ref=%s AND asset_id=%s",
+                     (SOURCE, asset_id))
+
+
+def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidates(page, registry):
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _put_authored(page, origin, AUTHORED_SCENE_ID, {VALID_FRAME: a, INVALID_FRAME: b})
+        _drop_member(registry, b)
+        _connect(page, origin)
+        _to_showrunner(page)
+        row = _scene_row(page, AUTHORED_SCENE_ID)
+        expect(row).to_contain_text("authored: 2 chosen items")
+        row.get_by_role("button", name=f"Edit Scene {AUTHORED_SCENE_ID}", exact=True).click()
+
+        form = _scenes_form(page)
+        expect(form.get_by_label("Authored per-frame", exact=True)).to_be_checked()
+        # An authored Scene does not store its Source: the operator picks it.
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        expect(form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)).to_have_value(a)
+        # b left the Source, so it is no longer a candidate and is not kept.
+        invalid_choice = form.get_by_label(f"Media for frame {INVALID_FRAME}", exact=True)
+        expect(invalid_choice.get_by_role("option")).to_have_count(2)
+        expect(invalid_choice).to_have_value("")
+        invalid_choice.select_option(a)
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/scenes/{AUTHORED_SCENE_ID}/authored")
+            and r.request.method == "PUT"
+        ) as info:
+            page.get_by_role("dialog").get_by_role("button", name="Confirm replace").click()
+        assert info.value.status == 200
+        body = info.value.request.post_data_json
+        assert (body["scene"]["revision"], body["asset_ids"]) == (2, [a])
+
+
+def _author_authored(form, asset_id):
+    form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
+    form.get_by_label("Authored per-frame", exact=True).check()
+    form.get_by_label("Source", exact=True).select_option(SOURCE)
+    form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+    form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(asset_id)
+
+
+def test_authored_save_refusals_are_said_in_plain_words(page, registry):
+    """§13: the authored PUT's two 409s, each as its sentence."""
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        form = _scenes_form(page)
+
+        with registry.db.transaction() as conn:  # the last refresh failed
+            conn.execute("UPDATE media_sources SET status='unavailable' WHERE source_ref=%s",
+                         (SOURCE,))
+        _author_authored(form, a)
+        with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert (info.value.status, info.value.json()["error"]) == (409, "source_not_fresh")
+        expect(scenes).to_contain_text(
+            "Could not save Scene. The Source's last refresh failed; authored choices can be "
+            "saved once it succeeds.")
+
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE media_sources SET status='ok' WHERE source_ref=%s", (SOURCE,))
+        form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(b)
+        _drop_member(registry, b)
+        with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert (info.value.status, info.value.json()["error"]) == (409, "authored_asset_not_member")
+        expect(scenes).to_contain_text(
+            "Could not save Scene. That item is no longer in the Source; choose again.")
+        # The choosers read their candidates again: b is no longer offered.
+        choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(choice.get_by_role("option")).to_have_count(2)
+        expect(choice).to_have_value("")
+
+
+def test_a_scene_changed_since_edit_opened_ends_changed_and_sends_nothing(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        _scene_row(page, SCENE_ID).get_by_role("button", name=f"Edit Scene {SCENE_ID}").click()
+        form = _scenes_form(page)
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+
+        # Another operator replaces it meanwhile; no poll has shown it yet.
+        runtime.command("set_scene", _console_scene(SCENE_ID, revision=2))
+        puts = _scene_puts(page)
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        dialog = page.get_by_role("dialog", name=f"Replace Scene {SCENE_ID}?")
+        dialog.get_by_role("button", name="Confirm replace", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Changed since you opened this. Reopen to review.")
+        expect(dialog.get_by_role("button", name="Confirm replace")).to_have_count(0)
+        assert puts == []

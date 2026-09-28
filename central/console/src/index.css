@@ -1212,3 +1212,23 @@ label {
 .program-scheduling__status-line:empty {
   display: none;
 }
+
+/* Scene rows (slice 3 §13): a disclosure per Scene; edit mode names the stored id. */
+.scene-list__summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.scene-list__details[open] > .record {
+  margin-top: 6px;
+}
+
+.scene-authoring__editing {
+  margin: 8px 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scene-authoring__status-line:empty {
+  display: none;
+}

@@ -5,11 +5,11 @@ import { activationProblems, newActivationKey } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
-import { frameHealth } from "./health.js";
 import { explainPrecedence } from "./join.js";
 import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import { cycleWording, protectorOf, runRows } from "./showState.js";
+import { FrameChips } from "./TargetPicker.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -154,16 +154,7 @@ function RunRow({ row, snapshot, actions = null }) {
         )}
         <dt>Frames</dt>
         <dd>
-          <span className="run-control__frames">
-            {row.frames.map((frameId) => {
-              const health = frameHealth(snapshot, frameId);
-              return (
-                <span key={frameId} className={`run-control__frame health--${health?.severity ?? "todo"}`}>
-                  {health === null ? `${frameId}: not in the inventory` : `${frameId}: ${health.tileLabel}`}
-                </span>
-              );
-            })}
-          </span>
+          <FrameChips snapshot={snapshot} frameIds={row.frames} />
         </dd>
       </dl>
       {actions !== null && (

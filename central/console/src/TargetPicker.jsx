@@ -73,3 +73,25 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle })
     </fieldset>
   );
 }
+
+/**
+ * Frames as chips, each with the plan tile's health label (health.js
+ * `tileLabel`): the one rendering of "which frames, and are they alright" in
+ * Run rows (§9) and Scene rows (§13).
+ *
+ * @param {{snapshot: object|null, frameIds: string[]}} props
+ */
+export function FrameChips({ snapshot, frameIds }) {
+  return (
+    <span className="run-control__frames">
+      {frameIds.map((frameId) => {
+        const health = frameHealth(snapshot, frameId);
+        return (
+          <span key={frameId} className={`run-control__frame health--${health?.severity ?? "todo"}`}>
+            {health === null ? `${frameId}: not in the inventory` : `${frameId}: ${health.tileLabel}`}
+          </span>
+        );
+      })}
+    </span>
+  );
+}

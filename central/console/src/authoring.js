@@ -11,6 +11,7 @@
  */
 
 import { formatAge } from "./health.js";
+import { frameOf, toTarget } from "./join.js";
 
 /**
  * The API identifier rule: contracts/models.py `IDENTIFIER_PATTERN` (Scene,
@@ -95,16 +96,18 @@ export function identityProblems(kind, draft, existingIds) {
 }
 
 /**
- * A Scene draft's problems (§6 Scene), in form order.
+ * A Scene draft's problems (§6 Scene), in form order. Editing a stored Scene
+ * (§13) keeps its stored id, so there is no name, id or collision to check.
  *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
  *          sourceRef: string, targets: string[], cycleSeconds: string|number,
  *          selections: Record<string, string>}} draft
  * @param {Set<string>} existingIds the stored Scene ids
+ * @param {{editing?: boolean}} [options]
  * @returns {Problem[]}
  */
-export function sceneProblems(draft, existingIds) {
-  const problems = identityProblems("Scene", draft, existingIds);
+export function sceneProblems(draft, existingIds, { editing = false } = {}) {
+  const problems = editing ? [] : identityProblems("Scene", draft, existingIds);
   if (draft.sourceRef === "") {
     problems.push({ field: "source", message: "Choose a Source." });
   }
@@ -122,6 +125,159 @@ export function sceneProblems(draft, existingIds) {
     }
   }
   return problems;
+}
+
+/**
+ * Build the save {path, body} for the given authoring mode (the 14a/14b seam).
+ * "live": the plain scene route with the Scene as the body. "authored": the
+ * authored route with a {scene, source_ref, asset_ids} body — one media
+ * Contribution per target Frame carrying that Frame's chosen asset ref.
+ * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
+ *
+ * @param {"live"|"authored"} mode
+ * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number,
+ *          loop: boolean, selections?: Record<string,string>, revision?: number}} draft
+ * @returns {{path: string, body: object}}
+ */
+export function buildSave(
+  mode,
+  { sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {}, revision = 1 },
+) {
+  if (mode === "authored") {
+    // An authored Scene: one media Contribution per target Frame, each carrying
+    // the operator's chosen asset ref (never a live source_ref). The asset_ids
+    // list is the de-duplicated set of chosen refs the authored route persists.
+    const contributions = targetIds.map((frameId) => ({
+      target: toTarget(frameId),
+      role: frameId,
+      kind: "media",
+      asset_refs: [selections[frameId]],
+      retain_on_expiry: true,
+    }));
+    const assetIds = [...new Set(targetIds.map((frameId) => selections[frameId]))];
+    const scene = { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions };
+    return {
+      path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}/authored`,
+      body: { scene, source_ref: sourceRef, asset_ids: assetIds },
+    };
+  }
+  if (mode !== "live") {
+    throw new Error(`unsupported scene authoring mode: ${mode}`);
+  }
+  // A live-source Scene: one media Contribution per target Frame, all driven by
+  // the chosen Source. `target` is the verified string "frame:<id>" (design
+  // §1b); role carries the frame id; retain_on_expiry keeps the last still.
+  const contributions = targetIds.map((frameId) => ({
+    target: toTarget(frameId),
+    role: frameId,
+    kind: "media",
+    source_refs: [sourceRef],
+    retain_on_expiry: true,
+  }));
+  return {
+    path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`,
+    body: { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions },
+  };
+}
+
+// --- Editing a stored Scene (§13): only when the round trip is lossless.
+
+// central/runtime.py model defaults (`Scene`, `Contribution`): a stored Scene
+// is compared with the console's rebuild of it after both are filled with
+// these, so a field left at its default never withholds Edit. A pytest pins
+// both literals to the models (tests/test_operator_runtime.py).
+export const SCENE_DEFAULTS = {
+  "revision": 1,
+  "contributions": [],
+  "children": [],
+  "cycle_seconds": 30,
+  "loop": false,
+  "duration_seconds": null,
+  "outro_seconds": 0,
+  "outro_contributions": [],
+  "protect_frames": false
+};
+
+export const CONTRIBUTION_DEFAULTS = {
+  "kind": "media",
+  "role": null,
+  "source_refs": [],
+  "asset_refs": [],
+  "opacity": 1,
+  "fade_in_seconds": 0,
+  "fade_out_seconds": 0,
+  "retain_on_expiry": false,
+  "ramp_from": 0,
+  "ramp_to": 0
+};
+
+export const UNAUTHORABLE_REASON =
+  "Uses features the console can't author (child Scenes, outro, fades…).";
+
+/** A Scene with every omitted Scene and Contribution field at its model default. */
+export function normalizeScene(scene) {
+  const contribution = (entry) => ({ ...CONTRIBUTION_DEFAULTS, ...entry });
+  const filled = { ...SCENE_DEFAULTS, ...scene };
+  return {
+    ...filled,
+    contributions: filled.contributions.map(contribution),
+    outro_contributions: filled.outro_contributions.map(contribution),
+  };
+}
+
+/** One JSON text per value, whatever the key order. */
+function canonical(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonical).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A stored Scene as the authoring form's draft: authored when its first
+ * Contribution names assets, otherwise live from its first Source. An authored
+ * Scene does not store its Source, so the operator picks it again.
+ *
+ * @param {object} scene a served Scene definition
+ * @returns {{mode: "live"|"authored", sourceRef: string, targetIds: string[],
+ *            cycleSeconds: number, loop: boolean, selections: Record<string, string>}}
+ */
+export function decodeScene(scene) {
+  const { contributions, cycle_seconds: cycleSeconds, loop } = normalizeScene(scene);
+  const authored = contributions.length > 0 && contributions[0].asset_refs.length > 0;
+  const frameIdOf = (entry) => frameOf(entry.target) ?? entry.target;
+  return {
+    mode: authored ? "authored" : "live",
+    sourceRef: authored ? "" : (contributions[0]?.source_refs[0] ?? ""),
+    targetIds: contributions.map(frameIdOf),
+    cycleSeconds,
+    loop,
+    selections: authored
+      ? Object.fromEntries(contributions.map((entry) => [frameIdOf(entry), entry.asset_refs[0]]))
+      : {},
+  };
+}
+
+/**
+ * The draft to edit a stored Scene with, or null when the console cannot
+ * author it losslessly (§13): the Scene must equal `buildSave(decodeScene(it))`
+ * apart from `revision`, both sides filled with the model defaults. Anything
+ * else — child Scenes, an outro, fades, opacity, several Sources — would be
+ * dropped by a save, so Edit is withheld with {@link UNAUTHORABLE_REASON}.
+ *
+ * @param {object} scene a served Scene definition
+ * @returns {ReturnType<typeof decodeScene>|null}
+ */
+export function editableDraft(scene) {
+  const draft = decodeScene(scene);
+  const { body } = buildSave(draft.mode, { ...draft, sceneId: scene.scene_id });
+  const rebuilt = draft.mode === "authored" ? body.scene : body;
+  const comparable = (value) => canonical({ ...normalizeScene(value), revision: 0 });
+  return comparable(rebuilt) === comparable(scene) ? draft : null;
 }
 
 /** Whether a field value is a whole number (a priority). */

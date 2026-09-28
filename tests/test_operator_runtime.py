@@ -1,5 +1,9 @@
 """GET /v1/operator/runtime serves the operator projection (pass 2 slice 3 §8)."""
 
+import json
+import re
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from test_operator_frames import ADMIN, AUTH, _portrait
 
@@ -32,3 +36,22 @@ def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
     assert (outcome["status"], outcome["reason"]) == ("rejected", "protected_frames")
     assert outcome["blocking_run_id"] == guard["run_id"]
     assert (refused["reason"], refused["blocking_run_id"]) == ("protected_frames", guard["run_id"])
+
+
+def _console_literal(name):
+    source = (Path(__file__).parents[1] / "central/console/src/authoring.js").read_text()
+    pinned = re.search(rf"^export const {name} = (\{{.*?^\}});$", source, re.MULTILINE | re.DOTALL)
+    assert pinned is not None, f"authoring.js no longer exports {name} as a JSON literal"
+    return json.loads(pinned.group(1))
+
+
+def _model_defaults(model):
+    return {name: json.loads(json.dumps(field.default))
+            for name, field in model.model_fields.items() if not field.is_required()}
+
+
+def test_the_console_scene_default_tables_are_the_runtime_model_defaults():
+    # Slice 3 §13: Edit compares a stored Scene with the console's rebuild of it
+    # after filling these defaults, so they must be the models' own.
+    assert _console_literal("SCENE_DEFAULTS") == _model_defaults(Scene)
+    assert _console_literal("CONTRIBUTION_DEFAULTS") == _model_defaults(Contribution)
