@@ -137,6 +137,9 @@ class Admission(FrozenModel):
     status: Literal["admitted", "ignored", "queued", "rejected", "expired"]
     run_id: str | None = None
     reason: str | None = None
+    # The root Run whose protection refused it (a protected refusal only).
+    # Optional so admissions stored before it existed still restore.
+    blocking_run_id: str | None = None
 
 
 class Intent(FrozenModel):
@@ -295,6 +298,14 @@ def _run_id(identity: str) -> str:
     return "run-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 
+def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
+    reason, blocking_run_id = denial
+    return Admission(
+        activation_id=activation_id, status="rejected", reason=reason,
+        blocking_run_id=blocking_run_id,
+    )
+
+
 class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
@@ -367,12 +378,16 @@ class Runtime:
                 root.descendant_sequence = max(root.descendant_sequence, root_orders[root.run_id])
         return runtime
 
+    def _copy(self) -> Runtime:
+        """A detached copy, so a projection never touches the owned state."""
+        return self.restore(self.export_state())
+
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
-        return self.restore(self.export_state()).advance(now, max_events=max_events)
+        return self._copy().advance(now, max_events=max_events)
 
     def operator_projection(self, now: float, *, max_events: int = 10000) -> OperatorProjection:
         """One restore and advance, as `project`, read for the operator console."""
-        projected = self.restore(self.export_state())
+        projected = self._copy()
         view = projected.advance(now, max_events=max_events)
         state = projected._state
         since = view.now - OPERATOR_HISTORY_SECONDS
@@ -397,7 +412,7 @@ class Runtime:
         if end <= start:
             raise ValueError("timeline end must follow start")
         budget = _TransitionBudget(max_events)
-        projected = self.restore(self.export_state())
+        projected = self._copy()
         views = [projected._advance(start, budget)]
         budget.consume()
         while (boundary := projected._next_event()) is not None and boundary < end:
@@ -455,9 +470,7 @@ class Runtime:
             excluded = {r.run_id for r in matches} if repeat == "restart" else set()
             denial = self._protected_conflict(scene, priority, force, excluded)
             if denial:
-                result = Admission(
-                    activation_id=activation_id, status="rejected", reason=denial
-                )
+                result = _refusal(activation_id, denial)
             else:
                 for run in matches if repeat == "restart" else ():
                     self._cancel(run, now)
@@ -514,7 +527,8 @@ class Runtime:
 
     def _protected_conflict(
         self, scene: Scene, priority: int, force: bool, excluded: set[str] | None = None
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
+        """The refusal reason and the root Run that refuses `scene`, if any."""
         frames = {target for target in scene.participants if target.startswith("frame:")}
         for run in self._state.runs.values():
             if run.parent_id is not None or not run.active or run.run_id in (excluded or set()):
@@ -522,9 +536,9 @@ class Runtime:
             if not frames.intersection(run.scene.participants):
                 continue
             if frames.intersection(run.scene.protected_frames) and not force:
-                return "protected_frames"
+                return "protected_frames", run.run_id
             if scene.protected_frames.intersection(run.scene.participants) and run.priority > priority:
-                return "protection_not_visible"
+                return "protection_not_visible", run.run_id
         return None
 
     def _admit(
@@ -675,7 +689,7 @@ class Runtime:
             scene = self._state.scenes[program.scene_id]
             denial = self._protected_conflict(scene, program.priority, False)
             result = (
-                Admission(activation_id=program.activation_id, status="rejected", reason=denial)
+                _refusal(program.activation_id, denial)
                 if denial else self._admit(
                     scene, program.activation_id, program.starts_at, program.priority,
                     program_id=program.program_id, program_end=program.ends_at,

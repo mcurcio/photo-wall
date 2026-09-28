@@ -1,5 +1,5 @@
 import { ageAt, formatAge } from "./health.js";
-import { LIVE_PHASES } from "./join.js";
+import { frameOf, LIVE_PHASES } from "./join.js";
 
 /**
  * Program and Run display states (pass 2 slice 3 §9). Pure reads of the served
@@ -11,30 +11,6 @@ import { LIVE_PHASES } from "./join.js";
  * @typedef {"ok"|"todo"|"alarm"} Severity
  * @typedef {{state: string, label: string, severity: Severity, hint: string|null}} ProgramState
  */
-
-const FRAME = "frame:";
-
-/** The frame id of a `frame:<id>` target. */
-export function frameOf(target) {
-  return target.slice(FRAME.length);
-}
-
-/** Every target a stored Scene reaches (central/runtime.py `Scene.participants`). */
-export function sceneParticipants(scene) {
-  const own = [...(scene?.contributions ?? []), ...(scene?.outro_contributions ?? [])].map(
-    (contribution) => contribution.target,
-  );
-  const children = (scene?.children ?? []).flatMap((child) => sceneParticipants(child.scene));
-  return [...new Set([...own, ...children])];
-}
-
-/** The targets a stored Scene protects (central/runtime.py `Scene.protected_frames`). */
-export function sceneProtectedFrames(scene) {
-  if (scene?.protect_frames) {
-    return sceneParticipants(scene).filter((target) => target.startsWith(FRAME));
-  }
-  return [...new Set((scene?.children ?? []).flatMap((child) => sceneProtectedFrames(child.scene)))];
-}
 
 /** The stored Scene a Run started from, while the definition keeps that revision. */
 function runScene(snapshot, run) {
@@ -73,45 +49,23 @@ export function windowLabel(program) {
     : `${start} ${clockTime(program.starts_at)} – ${end} ${clockTime(program.ends_at)}`;
 }
 
-const list = (targets) => targets.map(frameOf).join(", ");
-
 /**
- * The served root Run that refused a Scene, live at `at` (started at or before
- * it, not ended before it): for `protected_frames`, one whose served
- * `protected_frames` cover the Scene's frames; for `protection_not_visible`, a
- * higher-priority one covering the frames the Scene protects. `frames` is what
- * was covered — the Scene's own frames when no protector is served.
+ * The served Run that refused an Admission — Central names it in
+ * `blocking_run_id` with the refusal, so the console never re-derives the
+ * rule — and the frames that Run protects. `run` is null when the Admission
+ * names none or that Run is no longer served (ended over a day ago).
  *
  * @param {object|null} snapshot
- * @param {object|undefined} scene the stored Scene that was refused
- * @param {number} priority its priority
- * @param {"protected_frames"|"protection_not_visible"} reason
- * @param {number} at
- * @returns {{run: object|null, frames: string[]}}
+ * @param {{blocking_run_id?: string|null}|null} admission
+ * @returns {{run: object|null, frames: string}}
  */
-export function protectorOf(snapshot, scene, priority, reason, at) {
+export function protectorOf(snapshot, admission) {
   const runtime = snapshot?.runtime;
-  const protectedBy = runtime?.protected_frames ?? {};
-  const frames =
-    reason === "protected_frames"
-      ? sceneParticipants(scene).filter((target) => target.startsWith(FRAME))
-      : sceneProtectedFrames(scene);
-  for (const run of runtime?.current?.runs ?? []) {
-    if (run.parent_id !== null || run.started_at > at || (run.ended_at != null && run.ended_at < at)) {
-      continue;
-    }
-    const cover =
-      reason === "protected_frames"
-        ? protectedBy[run.run_id] ?? []
-        : run.priority > priority
-          ? run.participants
-          : [];
-    const covered = frames.filter((target) => cover.includes(target));
-    if (covered.length > 0) {
-      return { run, frames: covered };
-    }
-  }
-  return { run: null, frames };
+  const run =
+    (runtime?.current?.runs ?? []).find((candidate) => candidate.run_id === admission?.blocking_run_id) ??
+    null;
+  const frames = run === null ? [] : (runtime.protected_frames?.[run.run_id] ?? []).map(frameOf);
+  return { run, frames: frames.join(", ") };
 }
 
 const RAN_HINT =
@@ -164,9 +118,7 @@ export function programState(snapshot, programId) {
     );
   }
   if (outcome.status === "rejected" && outcome.reason in REFUSALS) {
-    const scene = runtime.definitions?.[program.scene_id];
-    const found = protectorOf(snapshot, scene, program.priority, outcome.reason, program.starts_at);
-    return state("refused", REFUSALS[outcome.reason](list(found.frames), found.run), "alarm");
+    return state("refused", REFUSALS[outcome.reason](protectorOf(snapshot, outcome)), "alarm");
   }
   if (outcome.status === "expired" && outcome.reason === "missed_window") {
     return state(
@@ -179,19 +131,19 @@ export function programState(snapshot, programId) {
 }
 
 const REFUSALS = {
-  protected_frames: (frames, run) =>
+  protected_frames: ({ run, frames }) =>
     run !== null
       ? `Did not start: ${frames} was protected by the Run of ${run.scene_id}.`
-      : `Did not start: ${frames} was protected by another Run, no longer listed.`,
-  protection_not_visible: (frames, run) =>
+      : "Did not start: its frames were protected by another Run, no longer listed.",
+  protection_not_visible: ({ run }) =>
     run !== null
-      ? `Did not start: it protects ${frames}, but a higher-priority Run of ${run.scene_id} covered it.`
-      : `Did not start: it protects ${frames}, but a higher-priority Run covered it, no longer listed.`,
+      ? `Did not start: it protects frames that a higher-priority Run of ${run.scene_id} covered.`
+      : "Did not start: it protects frames that a higher-priority Run covered, no longer listed.",
 };
 
 /**
  * @typedef {{run: object, origin: string, started: string, status: string,
- *            finishing: boolean, cycle: string|null, protects: string[],
+ *            finishing: boolean, cycle: string|null, protection: string|null,
  *            frames: string[], children: RunRow[]}} RunRow
  */
 
@@ -223,6 +175,13 @@ export function runRows(snapshot) {
     }
     return `${run.phase === "cancelled" ? "Cancelled" : "Completed"} at ${clockTime(run.ended_at)}`;
   };
+  const protection = (run) => {
+    const frames = (protectedBy[run.run_id] ?? []).map(frameOf);
+    if (frames.length === 0) {
+      return null;
+    }
+    return `${LIVE_PHASES.has(run.phase) ? "protects" : "protected"} ${frames.join(", ")}`;
+  };
   const row = (run) => ({
     run,
     origin:
@@ -235,8 +194,8 @@ export function runRows(snapshot) {
     status: status(run),
     finishing: run.phase !== "body" || run.finish_requested_at != null,
     cycle: cycleWording(runScene(snapshot, run)),
-    protects: (protectedBy[run.run_id] ?? []).map(frameOf),
-    frames: run.participants.filter((target) => target.startsWith(FRAME)).map(frameOf).sort(),
+    protection: protection(run),
+    frames: run.participants.map(frameOf).filter((frameId) => frameId !== null).sort(),
     children: run.children.map((id) => byId.get(id)).filter(Boolean).map(row),
   });
   const roots = runs.filter((run) => run.parent_id === null);

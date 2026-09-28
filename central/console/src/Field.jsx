@@ -108,6 +108,29 @@ export function Field({ id, label, hint = null, reason = null, className = "", c
 }
 
 /**
+ * A whole-number priority, the `priority` field of a form read through
+ * {@link useProblems}: the Program and activation forms both use it.
+ *
+ * @param {{label: string, problems: ReturnType<typeof useProblems>,
+ *          value: string|number, onChange: (value: string) => void}} props
+ */
+export function PriorityField({ label, problems, value, onChange }) {
+  return (
+    <Field id={problems.idFor("priority")} label={label} reason={problems.reasonFor("priority")}>
+      {(props) => (
+        <input
+          {...props}
+          type="number"
+          step="1"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+    </Field>
+  );
+}
+
+/**
  * The name and the id it saves under (§5): "Saved as `family-evening` ·
  * Change". Change — or a name with no usable id — reveals the Id field, which
  * then decides the id. Scenes and Programs both name themselves through here.

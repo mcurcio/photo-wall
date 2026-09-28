@@ -12,7 +12,7 @@ import {
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { Field, IdentityFields, PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import { programState, windowLabel } from "./showState.js";
 import { useMutate } from "./useMutate.js";
@@ -122,10 +122,23 @@ function ProgramScheduling({ snapshot, confirm }) {
   const [action, setAction] = useState(/** @type {"single"|"windows"} */ ("single"));
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [saving, setSaving] = useState(false);
+  // A helper action that did not confirm every window: the draft it was sent
+  // from, its window ids and those confirmed. Adding the same draft again sends
+  // only the rest (a PUT of the same body is idempotent), so its own windows
+  // never read as collisions.
+  const [batch, setBatch] = useState(
+    /** @type {{draft: string, ids: string[], confirmed: string[]}|null} */ (null),
+  );
 
   const draft = { name, idOverride, sceneId, start, end, priority, weekdays, count: windowCount };
+  const signature = JSON.stringify(draft);
+  const pending = batch !== null && batch.draft === signature ? batch : null;
   const single = programProblems(draft, programIds, now);
-  const windows = windowProblems(draft, programIds, now);
+  const windows = windowProblems(
+    draft,
+    pending === null ? programIds : new Set([...programIds].filter((id) => !pending.ids.includes(id))),
+    now,
+  );
   const problems = useProblems(
     action === "windows"
       ? windows
@@ -151,6 +164,7 @@ function ProgramScheduling({ snapshot, confirm }) {
     setWindowCount(3);
     setWeekdays(EVERY_DAY);
     setAction("single");
+    setBatch(null);
     problems.reset();
   };
 
@@ -184,37 +198,51 @@ function ProgramScheduling({ snapshot, confirm }) {
   };
 
   // The helper: `count` SEPARATE Programs in one action, each a real stored
-  // single-window Program `<id>-<n>`. A partial failure names the ids that
-  // were not created.
+  // single-window Program `<id>-<n>`. A partial failure names the ids refused
+  // (4xx) and those not confirmed (5xx or no answer: they may be saved), and
+  // adding again sends only the windows not yet confirmed.
   const addSeparateWindows = async () => {
     setAction("windows");
     if (saving || !problems.check(windows)) {
       return;
     }
     const id = draftId(draft);
-    const planned = planWindows({ start, end, weekdays, count });
+    const planned = planWindows({ start, end, weekdays, count }).map((window, index) => ({
+      ...window,
+      programId: `${id}-${index + 1}`,
+    }));
+    const confirmed = new Set(pending?.confirmed ?? []);
+    const sending = planned.filter((window) => !confirmed.has(window.programId));
     setSaving(true);
     setStatus(null);
     const results = await mutate(() =>
       Promise.all(
-        planned.map(({ startsAt, endsAt }, index) =>
-          put(`${id}-${index + 1}`, startsAt, endsAt).then(
-            (result) => result.ok,
-            () => false,
+        sending.map(({ programId, startsAt, endsAt }) =>
+          put(programId, startsAt, endsAt).then(
+            (result) => (result.ok ? "created" : result.status >= 500 ? "unknown" : "refused"),
+            () => "unknown",
           ),
         ),
       ),
     );
-    const failed = planned
-      .map((_window, index) => `${id}-${index + 1}`)
-      .filter((_windowId, index) => !results[index]);
-    if (failed.length === 0) {
+    const outcome = (kind) =>
+      sending.filter((_window, index) => results[index] === kind).map((window) => window.programId);
+    outcome("created").forEach((programId) => confirmed.add(programId));
+    if (confirmed.size === planned.length) {
       clear();
       setStatus(`Created ${planned.length} separate Programs.`);
     } else {
+      const [refused, unknown] = [outcome("refused"), outcome("unknown")];
+      setBatch({ draft: signature, ids: planned.map((window) => window.programId), confirmed: [...confirmed] });
       setStatus(
-        `Created ${planned.length - failed.length} of ${planned.length} separate Programs. ` +
-          `Not created: ${failed.join(", ")}.`,
+        [
+          `Created ${confirmed.size} of ${planned.length} separate Programs.`,
+          refused.length > 0 ? `Not created: ${refused.join(", ")}.` : null,
+          unknown.length > 0 ? `Not confirmed: ${unknown.join(", ")}; Central did not answer.` : null,
+          "Add separate windows again to send only these.",
+        ]
+          .filter((part) => part !== null)
+          .join(" "),
       );
     }
     setSaving(false);
@@ -231,10 +259,13 @@ function ProgramScheduling({ snapshot, confirm }) {
     [mutate],
   );
 
-  // Removing a RUNNING Program ends its Run, so it is confirmed (§9).
+  // Removing a RUNNING Program ends its Run, and removing a DUE one starts
+  // its Run and asks it to finish (central/runtime.py `remove_program`), so
+  // both are confirmed (§9).
   const onRemove = (event, program) => {
-    if (programState(snapshot, program.program_id)?.state === "running") {
-      confirm.open(event, removeRunningRequest(program));
+    const state = programState(snapshot, program.program_id)?.state;
+    if (state === "running" || state === "due") {
+      confirm.open(event, removeRunningRequest(program, state));
     } else {
       removeProgram(program.program_id);
     }
@@ -288,17 +319,12 @@ function ProgramScheduling({ snapshot, confirm }) {
         <p className="program-scheduling__zone">{`Times in ${timeZoneName()}`}</p>
         {dateField("start", "Window start", start, setStart)}
         {dateField("end", "Window end", end, setEnd)}
-        <Field id={problems.idFor("priority")} label="Priority" reason={problems.reasonFor("priority")}>
-          {(props) => (
-            <input
-              {...props}
-              type="number"
-              step="1"
-              value={priority}
-              onChange={(event) => field(setPriority, "priority")(event.target.value)}
-            />
-          )}
-        </Field>
+        <PriorityField
+          label="Priority"
+          problems={problems}
+          value={priority}
+          onChange={field(setPriority, "priority")}
+        />
 
         <button type="submit" className="program-scheduling__save" disabled={saving}>
           Schedule Program
@@ -449,16 +475,23 @@ function ProgramList({ programs, snapshot, onRemove }) {
   );
 }
 
-/** Remove a running Program: its Run is asked to finish now (central/runtime.py `remove_program`). */
-function removeRunningRequest(program) {
+/**
+ * Remove a running or due Program: its Run — for a due one, started first — is
+ * asked to finish now (central/runtime.py `remove_program`).
+ */
+function removeRunningRequest(program, state) {
+  const lead =
+    state === "due"
+      ? `Its window has started, so Central starts its Run of ${program.scene_id} and asks it to finish`
+      : `It is running now. Its Run of ${program.scene_id} is asked to finish`;
   return {
     key: `remove-program:${program.program_id}`,
     title: `Remove program ${program.program_id}?`,
     confirmLabel: "Confirm remove",
     body: (
       <p>
-        {`It is running now. Its Run of ${program.scene_id} is asked to finish: it ends at the ` +
-          "end of its current cycle, after any outro. Later windows are separate Programs and stay."}
+        {`${lead}: it ends at the end of its current cycle, after any outro. Later windows are ` +
+          "separate Programs and stay."}
       </p>
     ),
     run: async () => {

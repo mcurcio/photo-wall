@@ -4,12 +4,12 @@ import { apiWrite } from "./apiWrite.js";
 import { activationProblems, newActivationKey } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { Field, ProblemSummary, useProblems } from "./Field.jsx";
+import { PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
 import { frameHealth } from "./health.js";
 import { explainPrecedence } from "./join.js";
 import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
 import { ScenePicker } from "./ScenePicker.jsx";
-import { frameOf, protectorOf, runRows } from "./showState.js";
+import { cycleWording, protectorOf, runRows } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -146,10 +146,10 @@ function RunRow({ row, snapshot, actions = null }) {
         )}
         <dt>Priority</dt>
         <dd>{`priority ${run.priority}`}</dd>
-        {row.protects.length > 0 && (
+        {row.protection !== null && (
           <>
             <dt>Protection</dt>
-            <dd>{`protects ${row.protects.join(", ")}`}</dd>
+            <dd>{row.protection}</dd>
           </>
         )}
         <dt>Frames</dt>
@@ -250,6 +250,11 @@ function WhyPanel({ snapshot }) {
   );
 }
 
+// Said while the last activation's outcome is unknown (its key is kept).
+const UNKNOWN_ACTIVATION =
+  "Outcome unknown. Try again; it will not start twice. " +
+  "Changing the form makes this a new activation.";
+
 /**
  * Activate a Scene now (§11): POST `/v1/operator/activations` and state the
  * synchronous Admission at the moment, from served facts only. The activation
@@ -269,8 +274,11 @@ function ActivateForm({ snapshot }) {
   const [priority, setPriority] = useState(/** @type {string|number} */ (0));
   const [repeat, setRepeat] = useState(/** @type {"ignore"|"restart"} */ ("ignore"));
   const [key, setKey] = useState(newActivationKey);
-  // The last outcome, shown at the moment and held here only; null on load.
-  const [outcome, setOutcome] = useState(/** @type {string|null} */ (null));
+  // The last outcome, held here only; null on load. An Admission is put in
+  // words on each render, so the Run that refused it is named once served.
+  const [outcome, setOutcome] = useState(
+    /** @type {string|{asked: object, admission: object}|null} */ (null),
+  );
   const [activating, setActivating] = useState(false);
   const problems = useProblems(activationProblems({ sceneId, priority }));
 
@@ -300,16 +308,17 @@ function ActivateForm({ snapshot }) {
     }
     setActivating(false);
     if (result === null || result.status >= 500) {
-      setOutcome("Outcome unknown. Try again; it will not start twice.");
+      setOutcome(UNKNOWN_ACTIVATION);
       return;
     }
     setKey(newActivationKey());
     setOutcome(
       result.ok
-        ? admissionSentence(snapshot, asked, result.data)
+        ? { asked, admission: result.data }
         : `Not started: ${result.error ?? `HTTP ${result.status}`}.`,
     );
   };
+  const restartsFor = cycleWording(definitions[sceneId]) ?? "plays until finished";
 
   return (
     <>
@@ -334,21 +343,12 @@ function ActivateForm({ snapshot }) {
           value={sceneId}
           onChange={edit(setSceneId, "scene")}
         />
-        <Field
-          id={problems.idFor("priority")}
+        <PriorityField
           label="Activation priority"
-          reason={problems.reasonFor("priority")}
-        >
-          {(props) => (
-            <input
-              {...props}
-              type="number"
-              step="1"
-              value={priority}
-              onChange={(event) => edit(setPriority, "priority")(event.target.value)}
-            />
-          )}
-        </Field>
+          problems={problems}
+          value={priority}
+          onChange={edit(setPriority, "priority")}
+        />
         <fieldset className="run-control__repeat" aria-label="If it is already running">
           <legend>If it is already running</legend>
           <label className="run-control__repeat-option">
@@ -372,8 +372,8 @@ function ActivateForm({ snapshot }) {
           </label>
           {repeat === "restart" && (
             <p id={hintId} className="field__hint">
-              Ends the current Run and starts a new one now. A restarted Run has no Program
-              end; it plays until finished.
+              {"Ends the current Run and starts a new one now. A restarted Run has no Program " +
+                `end; it ${restartsFor}.`}
             </p>
           )}
         </fieldset>
@@ -386,7 +386,9 @@ function ActivateForm({ snapshot }) {
           an activation (null until then). */}
       {outcome !== null && (
         <p className="run-control__outcome" role="status" aria-label="Activation outcome">
-          {outcome}
+          {typeof outcome === "string"
+            ? outcome
+            : admissionSentence(snapshot, outcome.asked, outcome.admission)}
         </p>
       )}
     </>
@@ -395,16 +397,14 @@ function ActivateForm({ snapshot }) {
 
 /**
  * An Admission in words (§11), from served facts only: a refusal names the
- * protecting Run only when the snapshot serves it live now.
+ * Run Central says refused it (`blocking_run_id`) once the snapshot serves it.
  *
- * @param {object|null} snapshot the snapshot the operator activated from
+ * @param {object|null} snapshot the current snapshot
  * @param {{sceneId: string, priority: number}} asked
- * @param {{status: string, reason: string|null}} admission
+ * @param {{status: string, reason: string|null, blocking_run_id?: string|null}} admission
  * @returns {string}
  */
 function admissionSentence(snapshot, asked, admission) {
-  const scene = snapshot?.runtime?.definitions?.[asked.sceneId];
-  const now = snapshot?.runtime?.current?.now;
   switch (admission?.status) {
     case "admitted":
       return `Started: Central admitted a Run of ${asked.sceneId}.`;
@@ -417,22 +417,19 @@ function admissionSentence(snapshot, asked, admission) {
     case "rejected":
       break;
     default:
-      return "Outcome unknown. Try again; it will not start twice.";
+      return UNKNOWN_ACTIVATION;
   }
+  const { run, frames } = protectorOf(snapshot, admission);
   if (admission.reason === "protected_frames") {
-    const { run, frames } = protectorOf(snapshot, scene, asked.priority, admission.reason, now);
-    const list = frames.map(frameOf).join(", ");
     return run !== null
-      ? `Not started: ${list} is protected by the Run of ${run.scene_id}.`
-      : `Not started: ${list} is protected by another Run.`;
+      ? `Not started: ${frames} is protected by the Run of ${run.scene_id}.`
+      : "Not started: its frames are protected by another Run.";
   }
   if (admission.reason === "protection_not_visible") {
-    const { run, frames } = protectorOf(snapshot, scene, asked.priority, admission.reason, now);
-    const list = frames.map(frameOf).join(", ");
     return run !== null
-      ? `Not started: this Scene protects ${list}, but ${run.scene_id}'s Run ` +
-          `(priority ${run.priority}) covers it; use priority at least ${run.priority}.`
-      : `Not started: this Scene protects ${list}, but a higher-priority Run covers it.`;
+      ? `Not started: this Scene protects frames that ${run.scene_id}'s Run ` +
+          `(priority ${run.priority}) covers; use priority at least ${run.priority}.`
+      : "Not started: this Scene protects frames that a higher-priority Run covers.";
   }
   if (admission.reason === "queue_full") {
     return "Not started: 16 activations are already waiting.";

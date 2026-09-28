@@ -22,6 +22,18 @@
  * word "LIVE" must never appear (design §6a).
  */
 
+const FRAME = "frame:";
+
+/** The target string of a Frame, `"frame:<id>"`: the one home of the prefix. */
+export function toTarget(frameId) {
+  return FRAME + frameId;
+}
+
+/** The frame id of a `"frame:<id>"` target; null for any other target. */
+export function frameOf(target) {
+  return target.startsWith(FRAME) ? target.slice(FRAME.length) : null;
+}
+
 /**
  * Intended now-showing for a frame: the winning visible Intent whose target is the
  * string `"frame:<id>"`. Returns the winner's `scene_id` + `phase`, or null when no
@@ -34,7 +46,7 @@
  */
 export function nowShowing(runtime, frameId) {
   const visible = runtime?.current?.visible ?? [];
-  const target = "frame:" + frameId;
+  const target = toTarget(frameId);
   const entry = visible.find((intent) => intent.target === target);
   if (!entry) {
     return null;
@@ -65,7 +77,7 @@ export function nowShowing(runtime, frameId) {
  * @returns {Array<object>} contributions for the frame, highest precedence first
  */
 export function rankedContributions(runtime, frameId) {
-  const target = "frame:" + frameId;
+  const target = toTarget(frameId);
   const contributions = runtime?.current?.contributions ?? [];
   return contributions
     .filter((intent) => intent.target === target)
@@ -204,7 +216,7 @@ export const LIVE_PHASES = new Set(["body", "outro"]);
  * @returns {Array<object>}
  */
 export function liveRunsFor(runtime, frameId) {
-  const target = "frame:" + frameId;
+  const target = toTarget(frameId);
   return (runtime?.current?.runs ?? []).filter(
     (run) => LIVE_PHASES.has(run.phase) && (run.participants ?? []).includes(target),
   );

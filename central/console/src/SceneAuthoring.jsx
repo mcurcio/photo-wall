@@ -4,6 +4,7 @@ import { apiWrite } from "./apiWrite.js";
 import { draftId, sceneProblems } from "./authoring.js";
 import { CycleInput } from "./CycleInput.jsx";
 import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { toTarget } from "./join.js";
 import { cycleWording } from "./showState.js";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { TargetPicker } from "./TargetPicker.jsx";
@@ -433,7 +434,7 @@ export function buildSave(
     // the operator's chosen asset ref (never a live source_ref). The asset_ids
     // list is the de-duplicated set of chosen refs the authored route persists.
     const contributions = targetIds.map((frameId) => ({
-      target: `frame:${frameId}`,
+      target: toTarget(frameId),
       role: frameId,
       kind: "media",
       asset_refs: [selections[frameId]],
@@ -459,7 +460,7 @@ export function buildSave(
   // the chosen Source. `target` is the verified string "frame:<id>" (design
   // §1b); role carries the frame id; retain_on_expiry keeps the last still.
   const contributions = targetIds.map((frameId) => ({
-    target: `frame:${frameId}`,
+    target: toTarget(frameId),
     role: frameId,
     kind: "media",
     source_refs: [sourceRef],

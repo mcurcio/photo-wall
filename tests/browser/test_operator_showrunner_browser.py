@@ -1127,10 +1127,15 @@ def _refused_by_guard(registry):
 
 
 def test_a_refused_program_names_its_protector(page, registry):
+    """Central names the refusing Run with the refusal; the console never
+    re-derives it, so a Scene edited afterwards cannot change who is named
+    (mutation-probe target: the Scene now reaches only INVALID_FRAME)."""
     _seed(registry)
     queue = _seed_source(registry)
-    _refused_by_guard(registry)
+    runtime, _now = _refused_by_guard(registry)
     registry.clock.advance(120)
+    runtime.command("advance", registry.clock.utc())  # Central refuses "blocked" at +60
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _connect(page, origin)
         _to_showrunner(page)
@@ -1160,7 +1165,7 @@ def test_a_refused_program_whose_protector_is_no_longer_served_names_none(page, 
         row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
             "Program blocked", exact=True)
         expect(row).to_contain_text(
-            f"Did not start: {VALID_FRAME} was protected by another Run, no longer listed.")
+            "Did not start: its frames were protected by another Run, no longer listed.")
         expect(row).not_to_contain_text("guard")
 
 
@@ -1340,7 +1345,9 @@ def _retry_after_unknown(page, registry, answer):
         form.get_by_label("Restart it", exact=True).check()
         form.get_by_role("button", name="Activate now", exact=True).click()
         outcome = runs.get_by_label("Activation outcome", exact=True)
-        expect(outcome).to_have_text("Outcome unknown. Try again; it will not start twice.")
+        expect(outcome).to_have_text(
+            "Outcome unknown. Try again; it will not start twice. "
+            "Changing the form makes this a new activation.")
 
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
             form.get_by_role("button", name="Activate now", exact=True).click()
@@ -1371,6 +1378,40 @@ def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
         expect(restart).to_have_accessible_description(
             "Ends the current Run and starts a new one now. A restarted Run has no Program "
             "end; it plays until finished.")
+
+
+def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
+    _seed(registry)
+    _runtime(registry).command("set_scene", _scene("once", loop=False, cycle_seconds=20))
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+            "form", name="Activate a Scene", exact=True)
+        form.get_by_label("Scene to activate", exact=True).select_option("once")
+        restart = form.get_by_label("Restart it", exact=True)
+        restart.check()
+        expect(restart).to_have_accessible_description(
+            "Ends the current Run and starts a new one now. A restarted Run has no Program "
+            "end; it plays one 20 s cycle, then ends.")
+
+
+def test_an_ended_protecting_run_says_protected_in_the_past(page, registry):
+    _seed(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("guard", protect_frames=True))
+    now = registry.clock.utc()
+    guard = runtime.command("activate", "guard", "guard-act", now).run_id
+    registry.clock.advance(60)
+    runtime.command("cancel", guard, registry.clock.utc())
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        runs.get_by_text("Recently ended (1)", exact=True).click()
+        row = runs.get_by_label("Cancelled Runs", exact=True).get_by_role("listitem")
+        expect(row).to_contain_text(f"protected {VALID_FRAME}")
+        expect(row).not_to_contain_text(f"protects {VALID_FRAME}")
 
 
 def test_a_protected_refusal_names_the_protecting_run(page, registry):
@@ -1480,6 +1521,37 @@ def test_the_windows_helper_refuses_overlap_and_overlong_ids(page, registry):
         expect(form.get_by_role("alert")).to_contain_text(
             f"Name too long: {'x' * 127}-3 must be at most 128 characters.")
         assert bodies == []
+
+
+def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry):
+    """One window's PUT answers 500 without reaching Central: it is "not
+    confirmed", never "not created", and adding again sends only that window —
+    the confirmed ones are neither resent nor read as collisions."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
+        multi = _windows(page)
+        multi.get_by_label("Number of windows", exact=True).fill("3")
+        page.route(f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
+            status=500, content_type="application/json", body='{"error": "internal"}'), times=1)
+        bodies = _program_puts(page)
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(programs.get_by_role("status")).to_have_text(
+            f"Created 2 of 3 separate Programs. Not confirmed: {PROGRAM_ID}-2; Central did "
+            "not answer. Add separate windows again to send only these.")
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-2", exact=True)).to_have_count(0)
+
+        bodies.clear()
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(programs.get_by_role("status")).to_have_text("Created 3 separate Programs.")
+        assert [body["program_id"] for body in bodies] == [f"{PROGRAM_ID}-2"]
+        for index in (1, 2, 3):
+            expect(programs.get_by_label(f"Program {PROGRAM_ID}-{index}", exact=True)).to_be_visible()
 
 
 def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registry):

@@ -636,7 +636,43 @@ def test_a_protected_refusal_is_a_served_program_outcome():
     projection = runtime.operator_projection(20)
     refused = projection.program_outcomes["evening"]
     assert (refused.status, refused.reason) == ("rejected", "protected_frames")
+    assert refused.blocking_run_id == guard
     assert projection.protected_frames[guard] == frozenset({"frame:left"})
+
+
+def test_a_refused_activation_names_the_run_that_refused_it():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="shy", protect_frames=True, loop=True,
+                            contributions=(media("frame:right"),)))
+    runtime.set_scene(Scene(scene_id="cover", loop=True, contributions=(media("frame:right"),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    cover = runtime.activate("cover", "cover-act", 0, priority=5).run_id
+    refused = runtime.activate("open", "open-act", 1)
+    assert (refused.reason, refused.blocking_run_id) == ("protected_frames", guard)
+    hidden = runtime.activate("shy", "shy-act", 1)
+    assert (hidden.reason, hidden.blocking_run_id) == ("protection_not_visible", cover)
+    # Every other outcome names no blocker.
+    assert runtime.activate("guard", "again", 1).blocking_run_id is None
+
+
+def test_an_admission_stored_before_the_blocking_run_existed_restores():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    runtime.activate("guard", "guard-act", 0)
+    runtime.activate("open", "open-act", 1)
+    old = json.loads(json.dumps(runtime.export_state()))
+    for admission in old["admissions"].values():
+        del admission["blocking_run_id"]
+    restored = Runtime.restore(old)
+    assert restored.activate("open", "open-act", 2).blocking_run_id is None
+    exported = restored.export_state()
+    assert exported["admissions"]["open-act"]["blocking_run_id"] is None
+    assert Runtime.restore(exported).export_state() == exported
 
 
 def test_the_operator_read_serves_a_day_of_history_and_stores_everything():

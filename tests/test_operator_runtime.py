@@ -22,9 +22,13 @@ def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
     registry.clock.advance(20)
     with TestClient(app) as client:
         body = client.get("/v1/operator/runtime", headers=AUTH).json()
+        refused = client.post("/v1/operator/activations", headers=AUTH, json={
+            "scene_id": "evening", "activation_id": "evening-act"}).json()
     assert {"definitions", "programs", "current"} <= set(body)
     guard = next(run for run in body["current"]["runs"] if run["scene_id"] == "guard")
     assert (guard["program_id"], guard["priority"]) == (None, 5)
     assert body["protected_frames"] == {guard["run_id"]: ["frame:portrait"]}
     outcome = body["program_outcomes"]["evening"]
     assert (outcome["status"], outcome["reason"]) == ("rejected", "protected_frames")
+    assert outcome["blocking_run_id"] == guard["run_id"]
+    assert (refused["reason"], refused["blocking_run_id"]) == ("protected_frames", guard["run_id"])
