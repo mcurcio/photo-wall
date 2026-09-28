@@ -37,8 +37,9 @@ THE CMDLINE TEMPLATE (`BASE_BOOT`/`CMDLINE`). The Pi firmware hands cmdline.txt 
 verbatim and has no comment syntax, so the file is exactly ONE line (a trailing newline allowed)
 holding `CMDLINE_PLACEHOLDER` exactly once, as `photowall.central=<placeholder>`. A consumer
 stages it by replacing the placeholder with Central's origin URL (for example
-`http://photo-wall.localdomain/`) and nothing else: never adding a line, since a second line is
-not part of the command line the kernel receives. The builder writes it so
+`http://photo-wall.localdomain/`). It may append further kernel parameters to the SAME line,
+space-separated (for example `photowall.debug=1`), but never adds a line, since a second line
+is not part of the command line the kernel receives. The builder writes it so
 (scripts/build_netboot_bundle.sh) and the seal's verify refuses any other shape.
 
 Nothing here is signed (home LAN, no threat model): every sha256 is a corruption check only.
