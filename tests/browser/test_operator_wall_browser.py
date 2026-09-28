@@ -15,7 +15,7 @@ import re
 import time
 
 import pytest
-from operator_harness import operator_server
+from operator_harness import operator_server, report_readiness
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -76,8 +76,8 @@ def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, regi
         expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_have_count(0)
 
 
-# Bead 2 -- now-showing join + connectivity + honesty. A frame that a live Run
-# targets vs a frame whose bound output reports disconnected.
+# Bead 2 -- now-showing join + frame health + honesty. A frame that a live Run
+# targets vs a frame whose bound output reported no display at Player start.
 SHOWING = "showing-frame"
 OFFLINE = "offline-frame"
 SCENE = "lobby-scene"
@@ -101,7 +101,7 @@ def _seed_now_showing(registry):
     registry.create_frame(FrameCreate(
         id=OFFLINE, surface_id="wall", x_mm=600, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
-    # Compound-key bindings: same player, different outputs. connectivity() must
+    # Compound-key bindings: same player, different outputs. frameHealth() must
     # resolve each frame to its OWN (player_id, output_id) port.
     registry.bind(SHOWING, player_id, "HDMI-A-1", expected_generation=0)
     registry.bind(OFFLINE, player_id, "HDMI-A-2", expected_generation=0)
@@ -120,8 +120,10 @@ def _seed_now_showing(registry):
     return player_id
 
 
-def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, registry):
-    _seed_now_showing(registry)
+def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, registry):
+    player_id = _seed_now_showing(registry)
+    # The Player is heard, so each tile's health reaches its display/commissioning rows.
+    report_readiness(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         _connect(page, origin)
 
@@ -131,14 +133,15 @@ def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, re
         showing = page.get_by_role("group", name=f"Frame {SHOWING} status", exact=True)
         expect(showing).to_contain_text(f"Scheduled: {SCENE}")
         expect(showing).to_contain_text("Phase: body")
-        # Its bound output is connected.
-        expect(showing.get_by_role("img", name="Player connected")).to_be_visible()
+        # Its bound output had a display at Player start; it was never commissioned.
+        expect(showing).to_contain_text("Needs commissioning")
 
-        # The second frame's bound output reports disconnected: its connectivity
-        # dot says so, scoped to that frame's identity (compound-key join -- the
-        # two frames share a player but resolve to different ports).
+        # The second frame's bound output reported no display: its health says so,
+        # scoped to that frame's identity (compound-key join -- the two frames
+        # share a player but resolve to different ports).
         offline = page.get_by_role("group", name=f"Frame {OFFLINE} status", exact=True)
-        expect(offline.get_by_role("img", name="Player disconnected")).to_be_visible()
+        expect(offline).to_contain_text("No display detected when the Player started")
+        expect(showing).not_to_contain_text("No display detected")
 
         # Honesty (design §6a): the surface asserts intent, never confirmed
         # playback -- the literal "LIVE" appears nowhere on the console.

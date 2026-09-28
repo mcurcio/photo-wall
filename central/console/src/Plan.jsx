@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { createFrame, deleteFrame, dropFromTray, moveFrame } from "./framesApi.js";
-import { connectivity, nowShowing } from "./join.js";
+import { frameHealth } from "./health.js";
+import { nowShowing } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
 import { useMutate } from "./useMutate.js";
 
@@ -18,10 +19,10 @@ import { useMutate } from "./useMutate.js";
  * never by coordinates (design §1c, tracer testing philosophy).
  *
  * Alongside each drawn frame the plan renders a status readout (Bead 2): the
- * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`),
- * a connectivity dot (from `connectivity`), and a `calibration_valid` badge. The
- * chip asserts operator INTENT, never confirmed playback — the word "LIVE" is
- * deliberately absent (design §6a).
+ * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`)
+ * and the frame's health — a severity dot plus its label — from the one
+ * classifier, `frameHealth` (health.js). The chip asserts operator INTENT, never
+ * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
  * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
  * an in-progress rectangle (Plane B, held as component-local drag state) and, on
@@ -43,12 +44,6 @@ const VIEWPORT = { width: 960, height: 600 };
 // Movement (viewBox px) a press must exceed before it counts as a drag rather
 // than a click. Below this, a press-release on a frame selects it.
 const DRAG_THRESHOLD = 6;
-
-const CONNECTIVITY_LABEL = {
-  connected: "Player connected",
-  disconnected: "Player disconnected",
-  unbound: "Player unbound",
-};
 
 /**
  * Normalize the two drag endpoints (viewBox px) into a top-left rect `{x,y,w,h}`.
@@ -314,9 +309,7 @@ export function Plan({
         {placed.map(({ id, rect }) => {
           const selected = selection === id;
           const now = nowShowing(snapshot?.runtime, id);
-          const connected = connectivity(snapshot, id);
-          const frame = framesById.get(id);
-          const calibrationValid = frame?.calibration_valid === true;
+          const health = frameHealth(snapshot, id);
           return (
             <React.Fragment key={id}>
               <g
@@ -355,9 +348,8 @@ export function Plan({
                   cx={rect.x + 10}
                   cy={rect.y + 12}
                   r={5}
-                  className={`plan__dot plan__dot--${connected}`}
-                  role="img"
-                  aria-label={CONNECTIVITY_LABEL[connected]}
+                  className={`plan__dot health--${health.severity}`}
+                  aria-hidden="true"
                 />
                 {now === null ? (
                   <text x={rect.x + 22} y={rect.y + 16} className="plan__chip plan__chip--idle">
@@ -376,9 +368,9 @@ export function Plan({
                 <text
                   x={rect.x + 22}
                   y={rect.y + 44}
-                  className={`plan__badge plan__badge--${calibrationValid ? "valid" : "invalid"}`}
+                  className={`plan__health health--${health.severity}`}
                 >
-                  {calibrationValid ? "Calibration valid" : "Calibration invalid"}
+                  {health.label}
                 </text>
               </g>
             </React.Fragment>

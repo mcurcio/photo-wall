@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 
-import { boundOutput, connectivity } from "./join.js";
+import { isBound } from "./health.js";
+import { boundOutput } from "./join.js";
 import { derive } from "./capability.js";
 import { GatedArea } from "./GatedArea.jsx";
 import { useCalibration } from "./useCalibration.js";
@@ -73,8 +74,8 @@ function matchesCommitted(trying, calibration) {
  * (Bead 7, design §J2/§4a/§6b).
  *
  * The Display↔Frame hardware relationship. The upper sections show four honest
- * READ-ONLY things (committed calibration, Frame facts, live Display readback,
- * bound equipment) and gate the hardware areas off; see the section comments
+ * READ-ONLY things (committed calibration, Frame facts, the Display as detected
+ * at the last Player start, bound equipment) and gate the hardware areas off; see the section comments
  * below and design §7.
  *
  * The lower **Adjust calibration** section is Plane B (design §4a): the operator
@@ -119,8 +120,7 @@ export function Commissioning({ snapshot, frameId }) {
   const profile = frame.profile ?? {};
   const output = boundOutput(snapshot, frameId);
   const observation = output?.observation ?? null;
-  const status = connectivity(snapshot, frameId);
-  const bound = frame.player_id != null && frame.output_id != null;
+  const bound = isBound(frame);
 
   const cornerText = Array.isArray(calibration.corners)
     ? calibration.corners.map((point) => `(${point[0]}, ${point[1]})`).join(" ")
@@ -468,13 +468,16 @@ export function Commissioning({ snapshot, frameId }) {
         </dl>
       </section>
 
-      <section className="facet__section" role="group" aria-label="Live Display readback">
-        <h4 className="facet__subtitle">Live Display readback</h4>
+      <section className="facet__section" role="group" aria-label="Display at last Player start">
+        <h4 className="facet__subtitle">Display at last Player start</h4>
+        <p className="facet__note">
+          Reported by the Player when it started; a display change after that is not seen.
+        </p>
         {observation ? (
           <dl className="facet__fields">
             <div className="facet__field">
-              <dt>Connected</dt>
-              <dd>{observation.connected ? "Connected" : "Disconnected"}</dd>
+              <dt>Display</dt>
+              <dd>{observation.connected ? "Detected" : "Not detected"}</dd>
             </div>
             <div className="facet__field">
               <dt>Output resolution</dt>
@@ -483,9 +486,9 @@ export function Commissioning({ snapshot, frameId }) {
           </dl>
         ) : (
           <p className="facet__empty">
-            {status === "unbound"
-              ? "No Display bound — bind a Player output first."
-              : "No live readback from the bound output."}
+            {bound
+              ? "No report from the bound output."
+              : "No Display bound — bind a Player output first."}
           </p>
         )}
       </section>

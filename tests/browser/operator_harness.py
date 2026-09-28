@@ -6,6 +6,7 @@ real FastAPI app over real HTTP, and read the public Installation contract — s
 they outlive the flat page and are imported by the `/console` browser tests.
 """
 
+import itertools
 import socket
 import threading
 import time
@@ -15,7 +16,12 @@ import uvicorn
 from test_registry import ADMIN
 
 from central.app import create_app
+from central.coordination import Coordinator
 from central.installation_models import InstallationInventory
+from contracts.models import Readiness
+
+# Readiness sequences only ever rise, as a live Player's do (player/executor.py).
+_SEQUENCE = itertools.count(1)
 
 
 @contextmanager
@@ -50,3 +56,17 @@ def inventory(page, origin, token=ADMIN):
     })
     assert response.status == 200
     return InstallationInventory.model_validate_json(response.body())
+
+
+def report_readiness(registry, player_id):
+    """Have Central accept one readiness report from a Player at the current (controlled)
+    clock, as a live Player's control loop does: advance() offers the Player a plan (an empty
+    one when it is unbound or idle) and the Player reports on it. Liveness is exactly this."""
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.advance()
+    epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player_id)
+    plan = coordinator.delivery(player_id, epoch)["plan"]
+    assert coordinator.readiness(player_id, Readiness(
+        plan_id=plan.plan_id, revision=plan.revision, authority_epoch=epoch,
+        sequence=next(_SEQUENCE), clock_uncertainty=.01, capacity_ok=True,
+        observed_at=registry.clock.utc()))

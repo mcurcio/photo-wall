@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # A portrait Frame profile: distinct from the OutputReport (1920x1080) so the
-# provenance assertions can tell a Frame fact from a live Display readback.
+# provenance assertions can tell a Frame fact from the Display report.
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 FRAME = "commission-frame"
@@ -39,7 +39,7 @@ GAIN = 1.5
 def _seed(registry):
     """Bind a frame to a connected output and commit a distinctive SDR gain.
 
-    enroll(count=1) reports HDMI-A-1 connected=True, giving a live readback to
+    enroll(count=1) reports HDMI-A-1 connected=True, giving a Display report to
     show. bind bumps generation 0->1 and sets calibration_valid=false; the commit
     then writes the committed calibration (gain=1.5, revision 2) the facet reads.
     Returns the bound player id for the binding assertions.
@@ -129,15 +129,15 @@ def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry)
         expect(inspector.get_by_role("button", name="Set display power")).to_have_count(0)
 
 
-def test_commissioning_provenance_frame_facts_vs_live_readback(page, registry):
-    """Provenance probe (c): FrameProfile fields are Frame facts; the ONLY live
-    Display readback is OutputReport.
+def test_commissioning_provenance_frame_facts_vs_display_at_player_start(page, registry):
+    """Provenance probe (c): FrameProfile fields are Frame facts; the ONLY Display
+    report is OutputReport, sent when the Player started (not a live readback).
 
     The frame's diagonal (24 in) is a FrameProfile fact and appears under
-    "Frame facts", NOT under "Live Display readback" (OutputReport carries no
-    diagonal). Mutation: render a FrameProfile field inside the Live Display
-    readback region (mislabel it as live readback) -> the not_to_contain_text
-    assertion goes RED. Restore -> GREEN.
+    "Frame facts", NOT under "Display at last Player start" (OutputReport carries
+    no diagonal). Mutation: render a FrameProfile field inside the Display region
+    (mislabel it as a Display report) -> the not_to_contain_text assertion goes
+    RED. Restore -> GREEN.
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -149,12 +149,13 @@ def test_commissioning_provenance_frame_facts_vs_live_readback(page, registry):
         # shown as a Frame fact.
         expect(frame_facts).to_contain_text("24")
 
-        live = inspector.get_by_role("group", name="Live Display readback")
-        # The one live Display readback is OutputReport.connected.
-        expect(live).to_contain_text("Connected")
+        display = inspector.get_by_role("group", name="Display at last Player start")
+        # The one Display report is OutputReport.connected, from Player start.
+        expect(display).to_contain_text("Detected")
+        expect(display).not_to_contain_text("Not detected")
         # Provenance: a FrameProfile-only fact (diagonal) must NOT appear as a
-        # live Display readback — OutputReport has no diagonal.
-        expect(live).not_to_contain_text("24")
+        # Display report — OutputReport has no diagonal.
+        expect(display).not_to_contain_text("24")
 
 
 # --- Bead 7: calibration direct-manipulation + client convex guard (Plane B) ---

@@ -1,6 +1,7 @@
 import React from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { playerLiveness } from "./health.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -34,6 +35,9 @@ export async function retirePlayer(playerId) {
  *
  * Each entry is a selectable button keyed by the Player's identity (never an
  * invented label). Selection is reported to the caller via `onSelect(playerId)`.
+ * A Pending entry also states when Central last heard from that Player
+ * (health.js `playerLiveness`), so a Pi that enrolled and then went quiet is
+ * visible before it is bound.
  *
  * Each Pending entry also carries a deliberate **Retire player** action (bead
  * G1): the legacy operator page had an explicit "Retire a Player" control, and
@@ -74,6 +78,9 @@ export function EquipmentRail({ snapshot, onSelect }) {
                 >
                   {player.id}
                 </button>
+                <span className="rail__liveness">
+                  {playerLiveness(snapshot, player.id)?.label}
+                </span>
                 <button
                   type="button"
                   className="rail__retire"

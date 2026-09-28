@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { frameHealth } from "./health.js";
 import { rankedContributions } from "./join.js";
 import { SceneAuthoring } from "./SceneAuthoring.jsx";
 import { useMutate } from "./useMutate.js";
@@ -11,10 +12,11 @@ import { useMutate } from "./useMutate.js";
  *
  * It lays out the four show-programming REGIONS — Sources, Scenes, Programs,
  * Runs — as empty shells this bead; Beads 13-16 fill them. The only hardware
- * fact the show layer is allowed to see is per-Frame `calibration_valid`,
- * rendered here as a Frame-health BADGE (a STATUS, never a control): an invalid
- * Frame cannot present, so the showrunner needs the validity flag, but every
- * Display CONTROL stays behind the Wall-mode Commissioning facet (R4, J4).
+ * fact the show layer is allowed to see is each Frame's health, from the one
+ * classifier (health.js) with the same label the wall shows, rendered as a
+ * BADGE (a STATUS, never a control): a Frame that cannot present matters to the
+ * showrunner, but every Display CONTROL stays behind the Wall-mode
+ * Commissioning facet (R4, J4).
  *
  * R4 is enforced STRUCTURALLY by composition, not by a runtime `if (mode)`
  * guard: this component simply never imports or renders the Commissioning facet
@@ -49,22 +51,22 @@ export function Showrunner({ snapshot }) {
 
   return (
     <div className="showrunner" role="region" aria-label="Showrunner">
-      {/* Frame-health badges: calibration_valid is STATUS, not a control (R4).
-          One badge per Frame; an invalid Frame cannot present the show. */}
+      {/* Frame-health badges: STATUS, not a control (R4). One badge per Frame,
+          labelled by the one classifier, exactly as the wall labels it. */}
       <section
         className="showrunner__health"
         role="group"
         aria-label="Frame health"
       >
         {frames.map((frame) => {
-          const valid = frame.calibration_valid === true;
+          const health = frameHealth(snapshot, frame.id);
           return (
             <span
               key={frame.id}
-              className={`showrunner__badge showrunner__badge--${valid ? "valid" : "invalid"}`}
-              aria-label={`Frame ${frame.id} calibration ${valid ? "valid" : "invalid"}`}
+              className={`showrunner__badge health--${health.severity}`}
+              aria-label={`Frame ${frame.id}: ${health.label}`}
             >
-              {`${frame.id}: ${valid ? "Calibration valid" : "Calibration invalid"}`}
+              {`${frame.id}: ${health.label}`}
             </span>
           );
         })}

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { isBound, playerLiveness } from "./health.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -62,7 +63,8 @@ const CONFLICT_MESSAGE = "This Frame changed — reload and review its binding."
  *
  * Read state comes straight from the Frame's FrameInventory row
  * (`player_id`/`output_id`); the console never invents a Player or Output that
- * the inventory does not carry (design R1). Writes go through the shared
+ * the inventory does not carry (design R1). A bound Frame also shows when Central
+ * last heard from its Player (health.js `playerLiveness`). Writes go through the shared
  * `useMutate()` hook (primitive #7) so the Pending rail and the whole surface
  * refresh from one new Plane A snapshot after each write.
  *
@@ -83,7 +85,8 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
 
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
-  const bound = frame != null && frame.player_id != null && frame.output_id != null;
+  const bound = isBound(frame);
+  const liveness = bound ? playerLiveness(snapshot, frame.player_id) : null;
 
   // A pending Output is one owned by a pending Player (is_bound=false, live).
   const players = snapshot?.inventory?.players ?? [];
@@ -141,6 +144,10 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
             <div className="facet__field">
               <dt>Output</dt>
               <dd>{frame.output_id}</dd>
+            </div>
+            <div className="facet__field">
+              <dt>Player reports</dt>
+              <dd>{liveness?.label ?? "Player not in the inventory"}</dd>
             </div>
           </dl>
           {reviewRequired && (

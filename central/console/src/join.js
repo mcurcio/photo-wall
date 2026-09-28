@@ -1,8 +1,8 @@
 /**
- * Now-showing + connectivity joins (shared primitive #4).
+ * Now-showing + bound-output joins (shared primitive #4).
  *
- * A pure module imported by Plan.jsx (tile chips) and, later, the Now-showing
- * facet and the precedence "why" panel. It carries the TWO load-bearing joins the
+ * A pure module imported by Plan.jsx (tile chips), the Now-showing facet, the
+ * precedence "why" panel and health.js. It carries the TWO load-bearing joins the
  * design pins down (design §1b, §6a):
  *
  *  1. The now-showing join is a VERIFIED STRING compare. `visible[].target` is the
@@ -11,7 +11,7 @@
  *     player protocol (contracts/models.py:19). A predecessor review asserted the
  *     object shape; that premise was checked and refuted — the object join returns
  *     empty on every tile. The correct join is `entry.target === "frame:" + frameId`.
- *  2. The connectivity join is on the COMPOUND key (player_id AND output_id).
+ *  2. The bound-output join is on the COMPOUND key (player_id AND output_id).
  *     The outputs primary key is `(player_id, output_id)` (001_registry.sql:20) and
  *     `output_id` (e.g. "hdmi0") repeats across players, so joining on output_id
  *     alone resolves the wrong player's port.
@@ -82,7 +82,7 @@ export function rankedContributions(runtime, frameId) {
  * (player_id AND output_id). This is the ONE copy of the compound-key join rule
  * (outputs PK is `(player_id, output_id)`, 001_registry.sql:20; `output_id`
  * repeats across players so output_id alone resolves the wrong player's port).
- * Both `connectivity` (the tile dot) and the Commissioning facet's Display facts
+ * Both health.js (display detection) and the Commissioning facet's Display facts
  * read the bound output through here, so the rule lives in exactly one place.
  *
  * Returns null when the frame is unknown, unbound (either id null), or has no
@@ -106,31 +106,4 @@ export function boundOutput(snapshot, frameId) {
         candidate.output_id === frame.output_id,
     ) ?? null
   );
-}
-
-/**
- * Connectivity fact for a frame, from its bound output's observation.
- *
- * "unbound" when the frame has no binding (player_id/output_id null). Otherwise the
- * frame's OutputInventory is found on the COMPOUND key (player_id AND output_id) via
- * `boundOutput` and its `observation.connected` decides "connected" vs
- * "disconnected". A bound frame whose output report is missing is reported
- * "disconnected" — there is no connected observation to trust (a conservative,
- * honesty-preserving default).
- *
- * @param {{inventory?: {frames?: Array<object>, outputs?: Array<object>}}} snapshot
- * @param {string} frameId
- * @returns {"connected"|"disconnected"|"unbound"}
- */
-export function connectivity(snapshot, frameId) {
-  const frames = snapshot?.inventory?.frames ?? [];
-  const frame = frames.find((candidate) => candidate.id === frameId);
-  if (!frame || frame.player_id == null || frame.output_id == null) {
-    return "unbound";
-  }
-  const output = boundOutput(snapshot, frameId);
-  if (!output) {
-    return "disconnected";
-  }
-  return output.observation?.connected ? "connected" : "disconnected";
 }

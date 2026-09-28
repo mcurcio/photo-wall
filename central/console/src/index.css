@@ -255,6 +255,42 @@ body {
   fill: #d6a55a;
 }
 
+/* Health severity (health.js): one modifier per severity, shared by every
+   surface. Only an alarm uses the alarm colour; a to-do is not an alarm. */
+.health--ok {
+  color: #4caf7d;
+  fill: #4caf7d;
+}
+
+.health--todo {
+  color: #8fb3d9;
+  fill: #8fb3d9;
+}
+
+.health--alarm {
+  color: #e0685a;
+  fill: #e0685a;
+}
+
+.plan__health {
+  font-size: 10px;
+}
+
+.inspector__health {
+  margin: 0;
+  padding: 10px 16px 0;
+  font-size: 13px;
+}
+
+.tray__health {
+  font-size: 12px;
+}
+
+.rail__liveness {
+  font-size: 12px;
+  color: #9dabb5;
+}
+
 .tray__list {
   list-style: none;
   padding: 0;

@@ -2,6 +2,7 @@ import React from "react";
 
 import { BindingFacet } from "./BindingFacet.jsx";
 import { Commissioning } from "./Commissioning.jsx";
+import { frameHealth } from "./health.js";
 import { NowShowingFacet } from "./NowShowingFacet.jsx";
 
 /**
@@ -16,9 +17,12 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * registered through any imperative API.
  *
  * The Commissioning tab hosts the read-only Commissioning facet (Bead 4):
- * committed geometry + SDR gain, Frame facts, live Display readback, the bound
- * Player/Output, and the capability-gated hardware areas rendered "not yet
- * available".
+ * committed geometry + SDR gain, Frame facts, the Display as detected at the
+ * last Player start, the bound Player/Output, and the capability-gated hardware
+ * areas rendered "not yet available".
+ *
+ * Above the tabs, a health header states the frame's health from the one
+ * classifier (health.js) — the same label its plan tile shows.
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * @param {{snapshot: object|null, frameId: string, facet: Facet,
@@ -33,6 +37,7 @@ const FACETS = [
 export function Inspector({ snapshot, frameId, facet, onFacet }) {
   const active = facet ?? "commissioning";
   const activeLabel = FACETS.find((entry) => entry.key === active)?.label ?? active;
+  const health = frameHealth(snapshot, frameId);
 
   return (
     <section
@@ -40,6 +45,9 @@ export function Inspector({ snapshot, frameId, facet, onFacet }) {
       role="region"
       aria-label={`Frame ${frameId} inspector`}
     >
+      {health !== null && (
+        <p className={`inspector__health health--${health.severity}`}>{health.label}</p>
+      )}
       <div className="inspector__tabs" role="tablist" aria-label="Inspector facets">
         {FACETS.map(({ key, label }) => {
           const selected = key === active;

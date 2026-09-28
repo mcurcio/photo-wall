@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 
 import { deleteFrame } from "./framesApi.js";
+import { frameHealth } from "./health.js";
 import { project } from "./projection.js";
 import { useMutate } from "./useMutate.js";
 
@@ -26,6 +27,9 @@ import { useMutate } from "./useMutate.js";
  *
  * DELETE (Bead 11): each entry carries a Delete control that removes the frame
  * (DELETE); a 409 guard message (bound / live Run) is surfaced verbatim.
+ *
+ * Each entry also states the frame's health from the one classifier
+ * (health.js), the same label its plan tile would show once placed.
  *
  * @param {{snapshot: object|null, onSelect: (frameId: string) => void,
  *          onDragStart?: (frameId: string) => void}} props
@@ -61,25 +65,31 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart }) {
         <p className="tray__empty">No unplaced frames.</p>
       ) : (
         <ul className="tray__list">
-          {unplacedIds.map((id) => (
-            <li key={id}>
-              <button
-                type="button"
-                className="tray__item"
-                onPointerDown={() => onDragStart?.(id)}
-                onClick={() => onSelect(id)}
-              >
-                {id}
-              </button>
-              <button
-                type="button"
-                className="tray__delete"
-                onClick={() => onDelete(id)}
-              >
-                {`Delete frame ${id}`}
-              </button>
-            </li>
-          ))}
+          {unplacedIds.map((id) => {
+            const health = frameHealth(snapshot, id);
+            return (
+              <li key={id}>
+                <button
+                  type="button"
+                  className="tray__item"
+                  onPointerDown={() => onDragStart?.(id)}
+                  onClick={() => onSelect(id)}
+                >
+                  {id}
+                </button>
+                <span className={`tray__health health--${health.severity}`}>
+                  {health.label}
+                </span>
+                <button
+                  type="button"
+                  className="tray__delete"
+                  onClick={() => onDelete(id)}
+                >
+                  {`Delete frame ${id}`}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       {deleteError != null && (

@@ -43,7 +43,9 @@ CHECKS = {
     "test_calibration_stale_commit_conflicts_on_revision": ("stale_calibration_conflict",),
     "test_calibration_overtaken_detected_by_inventory_poll": ("inventory_refresh_recovery",),
     "test_calibration_lease_expiry_reverts_to_committed_no_auto_renew": ("preview_expiry",),
-    "test_commissioning_provenance_frame_facts_vs_live_readback": ("fresh_server_persistence",),
+    "test_commissioning_provenance_frame_facts_vs_display_at_player_start": (
+        "fresh_server_persistence",
+    ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).
     "test_sources_render_name_rev_with_refresh": ("current_generation_content_refresh",),
     "test_source_configuration_creates_source_awaiting_refresh": ("source_configuration_refresh",),

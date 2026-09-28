@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import pytest
 from media_queue import RecordingMediaQueue
-from operator_harness import operator_server
+from operator_harness import operator_server, report_readiness
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -129,6 +129,7 @@ def _seed(registry):
 
     # INVALID_FRAME: bind only -> calibration_valid stays false.
     registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
+    return id_a["player_id"], id_b["player_id"]
 
 
 def _connect(page, origin):
@@ -163,24 +164,34 @@ def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
         expect(page.get_by_label("Surface")).to_have_count(0)
 
 
-def test_showrunner_renders_calibration_valid_badge(page, registry):
-    _seed(registry)
+def test_showrunner_frame_health_badges_match_the_wall(page, registry):
+    for player_id in _seed(registry):
+        report_readiness(registry, player_id)
+    registry.clock.advance(3)
     with operator_server(registry.db, registry.clock) as origin:
         _connect(page, origin)
+        # The wall's labels, read first so the show layer can be held to them.
+        valid_label = "Last heard 3 s ago"
+        invalid_label = "Needs commissioning"
+        expect(page.get_by_role("group", name=f"Frame {VALID_FRAME} status", exact=True)
+               ).to_contain_text(valid_label)
+        expect(page.get_by_role("group", name=f"Frame {INVALID_FRAME} status", exact=True)
+               ).to_contain_text(invalid_label)
         _to_showrunner(page)
 
         health = page.get_by_role("group", name="Frame health", exact=True)
         expect(health).to_be_visible()
 
-        # Each Frame's calibration_valid renders as a STATUS badge, located by its
-        # accessible identity label — a committed frame is valid, a bound-only
-        # frame is invalid.
+        # Each Frame's health renders as a STATUS badge, located by its accessible
+        # identity label, with exactly the label the wall shows — a committed,
+        # heard frame reads as heard; a bound-only frame needs commissioning (a
+        # to-do, never the alarm colour).
         expect(
-            health.get_by_label(f"Frame {VALID_FRAME} calibration valid", exact=True)
+            health.get_by_label(f"Frame {VALID_FRAME}: {valid_label}", exact=True)
         ).to_be_visible()
-        expect(
-            health.get_by_label(f"Frame {INVALID_FRAME} calibration invalid", exact=True)
-        ).to_be_visible()
+        invalid = health.get_by_label(f"Frame {INVALID_FRAME}: {invalid_label}", exact=True)
+        expect(invalid).to_be_visible()
+        expect(invalid).to_have_class(re.compile(r"\bhealth--todo\b"))
 
 
 def test_r4_commissioning_unreachable_in_showrunner(page, registry):
