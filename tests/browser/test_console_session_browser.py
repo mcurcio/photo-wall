@@ -14,7 +14,7 @@ from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
-from central.operator_session import SESSION_SECONDS
+from central.operator_session import SESSION_SECONDS, SessionCodec
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 
@@ -112,6 +112,83 @@ def test_a_browser_that_drops_the_cookie_is_told_so(page, registry):
         sign_in(page, origin)
         expect(page.get_by_role("alert")).to_contain_text(
             "Your browser did not keep the sign-in; allow cookies for this site.")
+        _expect_signed_out(page)
+
+
+def test_a_sign_in_whose_first_read_fails_keeps_checking_until_a_poll_recovers(page, registry):
+    # SigningIn -> Checking on 204: a 500 on the first read must not strand the tab on the form.
+    _seed(registry)
+    failed = []
+    with operator_server(registry.db, registry.clock) as origin:
+        page.context.clear_cookies()
+        page.goto(origin + "/console")
+        expect(_sign_in_button(page)).to_be_visible()
+        page.route("**/v1/operator/inventory",
+                   lambda route: (failed.append(route.request.url), route.fulfill(status=500)),
+                   times=1)
+        page.get_by_label("Operator token").fill(ADMIN)
+        _sign_in_button(page).click()
+        expect(_sign_in_button(page)).to_have_count(0)
+        assert len(failed) == 1
+        expect(_frame(page)).to_be_visible(timeout=15000)  # the next 5 s poll
+        expect(page.get_by_role("alert")).to_have_count(0)
+
+
+def test_the_session_cookie_is_scoped_to_the_operator_api(page, registry):
+    # Cookies ignore the port: a Path=/ cookie would reach every server on this host.
+    _seed(registry)
+    sent = []
+    page.on("request", lambda request: sent.append(
+        (request.url, request.all_headers().get("cookie"))))
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        expect(_frame(page)).to_be_visible()
+        [cookie] = page.context.cookies()
+        assert (cookie["name"], cookie["path"], cookie["httpOnly"], cookie["sameSite"]) == (
+            "photo_wall_session", "/v1/operator/", True, "Strict")
+        sent.clear()
+        page.reload()
+        expect(_frame(page)).to_be_visible()
+        page.evaluate("fetch('/healthz')")
+        page.wait_for_timeout(200)
+    operator = [cookie for url, cookie in sent if "/v1/operator/" in url]
+    others = [(url, cookie) for url, cookie in sent if "/v1/operator/" not in url]
+    assert operator and all(cookie for cookie in operator)
+    assert any(url.endswith("/console") for url, _ in others)
+    assert any(url.endswith("/healthz") for url, _ in others)
+    assert all(cookie is None for _, cookie in others), others
+
+
+def _legacy_cookie(registry, origin):
+    """A pre-scoping session cookie, as a browser signed in before the upgrade holds it."""
+    value = SessionCodec(ADMIN, registry.clock).mint(origin)
+    return {"name": "photo_wall_session", "value": value, "url": origin + "/",
+            "httpOnly": True, "sameSite": "Strict"}
+
+
+def test_a_legacy_path_root_cookie_stays_signed_in_and_sign_in_or_log_out_clears_it(
+        page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        page.context.clear_cookies()
+        page.context.add_cookies([_legacy_cookie(registry, origin)])
+        assert [c["path"] for c in page.context.cookies()] == ["/"]
+        page.goto(origin + "/console")
+        expect(_frame(page)).to_be_visible()  # accepted until it expires
+        # Signing in again replaces it with the scoped cookie.
+        response = page.request.post(origin + "/v1/operator/session", data={"token": ADMIN},
+                                     headers={"X-Photo-Wall-Console": "1", "Origin": origin})
+        assert response.status == 204
+        assert [(c["name"], c["path"]) for c in page.context.cookies()] == [
+            ("photo_wall_session", "/v1/operator/")]
+        # Log out clears a legacy cookie too.
+        page.context.add_cookies([_legacy_cookie(registry, origin)])
+        assert len(page.context.cookies()) == 2
+        page.reload()
+        page.get_by_role("button", name="Log out", exact=True).click()
+        _expect_signed_out(page)
+        assert page.context.cookies() == []
+        page.reload()
         _expect_signed_out(page)
 
 

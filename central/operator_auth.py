@@ -5,8 +5,13 @@ One principal (the admin token), two ways to present it:
 1. **Bearer decides alone.** A non-empty `Bearer` credential is compared with the token as bytes;
    the result is final (a mismatch is 401 even beside a valid cookie). Other schemes and an empty
    `Bearer` are ignored.
-2. **Otherwise the session cookie** (`__Host-` name if present, else the plain one), verified by
-   the total codec in `central.operator_session`. A write it authorizes must be marked
+2. **Otherwise the session cookie**, verified by the total codec in `central.operator_session`.
+   It is scoped to `Path=/v1/operator/` so other servers on the same host (cookies ignore the
+   port) never receive it: `__Secure-photo_wall_session` over https, `photo_wall_session` over
+   http. The first present name decides: `__Secure-`, then the legacy `__Host-`, then the plain
+   one. Legacy `Path=/` cookies issued before the scoping are still ACCEPTED until they expire
+   (at most `SESSION_SECONDS` after the scoped release), so nobody is signed out by the upgrade;
+   every sign-in and log out clears them. A write it authorizes must be marked
    (`X-Photo-Wall-Console`), carry the exact Origin that signed in (a missing Origin is refused),
    and, when `Sec-Fetch-Site` is sent, say `same-origin`.
 
@@ -30,8 +35,14 @@ from contracts.time import Clock
 
 OPERATOR_PREFIX = "/v1/operator/"
 SESSION_PATH = "/v1/operator/session"
-COOKIE = "photo_wall_session"
-HOST_COOKIE = "__Host-" + COOKIE
+COOKIE = "photo_wall_session"  # over http
+SECURE_COOKIE = "__Secure-" + COOKIE  # over https (`__Host-` would force Path=/)
+COOKIE_PATH = OPERATOR_PREFIX
+# Issued with Path=/ before the scoping; accepted until they expire, cleared at sign-in and log out.
+LEGACY_HOST_COOKIE = "__Host-" + COOKIE
+LEGACY_PATH = "/"
+# The first name present decides: prefix-protected names before the plain one.
+COOKIE_PRECEDENCE = (SECURE_COOKIE, LEGACY_HOST_COOKIE, COOKIE)
 MARKER = "x-photo-wall-console"
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 NO_STORE = "no-store"
@@ -43,21 +54,40 @@ class SignIn(Model):
     token: str
 
 
+def _set_cookie(name: str, value: str, path: str, max_age: int, secure: bool) -> str:
+    secure_attr = " Secure;" if secure else ""
+    return (f"{name}={value}; Path={path}; Max-Age={max_age};{secure_attr} HttpOnly; "
+            "SameSite=Strict")
+
+
 def issued_cookie(scheme: str, value: str) -> str:
     """The sign-in `Set-Cookie`: the name and `Secure` follow the sign-in Origin's scheme."""
     if scheme == "https":
-        return (f"{HOST_COOKIE}={value}; Path=/; Max-Age={SESSION_SECONDS}; Secure; HttpOnly; "
-                "SameSite=Strict")
-    return f"{COOKIE}={value}; Path=/; Max-Age={SESSION_SECONDS}; HttpOnly; SameSite=Strict"
+        return _set_cookie(SECURE_COOKIE, value, COOKIE_PATH, SESSION_SECONDS, True)
+    return _set_cookie(COOKIE, value, COOKIE_PATH, SESSION_SECONDS, False)
 
 
-def clearing_cookies(secure_plain: bool) -> tuple[str, str]:
-    """Log out's two clearing `Set-Cookie`s; the plain one is `Secure` when logging out over https."""
-    plain_secure = " Secure;" if secure_plain else ""
+def legacy_clearing_cookies(secure_plain: bool) -> tuple[str, str]:
+    """Clear the pre-scoping `Path=/` cookies (sent at sign-in and log out)."""
     return (
-        f"{HOST_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-        f"{COOKIE}=; Path=/; Max-Age=0;{plain_secure} HttpOnly; SameSite=Strict",
+        _set_cookie(LEGACY_HOST_COOKIE, "", LEGACY_PATH, 0, True),
+        _set_cookie(COOKIE, "", LEGACY_PATH, 0, secure_plain),
     )
+
+
+def clearing_cookies(secure_plain: bool) -> tuple[str, ...]:
+    """Log out's clearing `Set-Cookie`s: both scoped names, then both legacy ones. A plain one is
+    `Secure` when logging out over https."""
+    return (
+        _set_cookie(SECURE_COOKIE, "", COOKIE_PATH, 0, True),
+        _set_cookie(COOKIE, "", COOKIE_PATH, 0, secure_plain),
+        *legacy_clearing_cookies(secure_plain),
+    )
+
+
+def _session_cookie(request: Request) -> str | None:
+    cookies = request.cookies
+    return next((cookies[name] for name in COOKIE_PRECEDENCE if name in cookies), None)
 
 
 def _utf8(text: str) -> bytes | None:
@@ -132,9 +162,8 @@ class OperatorAuth:
             if candidate is None or not self.codec.token_matches(candidate):
                 raise RegistryError("unauthorized", 401)
             return
-        # 2. The cookie: the __Host- name when present, else the plain one.
-        cookies = request.cookies
-        session = self.codec.verify(cookies.get(HOST_COOKIE, cookies.get(COOKIE)))
+        # 2. The cookie: the first present name in COOKIE_PRECEDENCE decides.
+        session = self.codec.verify(_session_cookie(request))
         if session is None:
             raise RegistryError("unauthorized", 401)
         # 3. A write must come from the page that signed in.
@@ -156,8 +185,11 @@ class OperatorAuth:
             value = codec.mint(origin)
             if value is None:
                 raise RegistryError("origin_mismatch", 403)
+            scheme = origin_scheme(origin)
             response = Response(status_code=204)
-            response.headers.append("set-cookie", issued_cookie(origin_scheme(origin), value))
+            for header in (issued_cookie(scheme, value),
+                           *legacy_clearing_cookies(scheme == "https")):
+                response.headers.append("set-cookie", header)
             return response
 
         @app.delete(SESSION_PATH, status_code=204, dependencies=[Depends(_marked)])

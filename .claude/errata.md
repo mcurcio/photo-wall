@@ -1899,3 +1899,22 @@ doc softenings.
   would already be sent (reads OK, writes 403). `operator_server` takes `admin_token=` for the
   rotation test. Tests that clicked "Connect" as a refresh now click the status bar's "Refresh".
   The evidence-mapped test name `test_connect_with_a_rejected_token_…` is kept (conftest CHECKS).
+- 2026-09-28, pass A fix cycle (security diff review residuals), SPEC CHANGES for the pass A doc
+  (§5/§6/§7) to adopt: (a) P2 — the session cookie is scoped to `Path=/v1/operator/` so other
+  servers on the same host (cookies ignore the port) never receive it. `__Host-` forces `Path=/`,
+  so https now issues `__Secure-photo_wall_session` (Secure, HttpOnly, SameSite=Strict, no
+  Domain); http issues `photo_wall_session` (HttpOnly, SameSite=Strict). Every console fetch
+  already lives under `/v1/operator/`; the page, assets and `/healthz` need no cookie. (b) Name
+  precedence, first present decides (present-but-invalid is 401): `__Secure-`, legacy `__Host-`,
+  plain. (c) Legacy `Path=/` cookies (`__Host-photo_wall_session`, `photo_wall_session`) are
+  still ACCEPTED until they expire (<= 30 days after this release; removable after that), never
+  issued, and cleared on every sign-in (after the issued cookie) and log out (after the two scoped
+  clears); a plain clear is `Secure` when the request Origin is https. Cost: `__Secure-` gives up
+  `__Host-`'s host-only/Path=/ guarantee, so a sibling https subdomain can toss a
+  `__Secure-photo_wall_session` (Domain=parent) that shadows a valid one (denial, not forgery:
+  the MAC still decides); a same-host server that itself serves `/v1/operator/` still receives it;
+  and a same-named plain cookie at `Path=/` sent beside the scoped one wins in Starlette's parser
+  (last duplicate wins), which sign-in's legacy clear prevents for cookies Central set.
+  (d) P3 — `signIn` sets `auth` to "checking" on the 204 before its first refresh (the design's
+  SigningIn -> Checking), so a 5xx/network failure on that read is retried by the next poll
+  instead of stranding the tab on the sign-in form.

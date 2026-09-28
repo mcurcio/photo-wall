@@ -11,12 +11,21 @@ cache (keyed by token) is what keeps this module fast.
 
 import hashlib
 import re
+import urllib.request
+from email.message import Message
+from http.cookiejar import CookieJar
 
 import pytest
 from fastapi.testclient import TestClient
 
 from central.app import create_app
-from central.operator_auth import COOKIE, HOST_COOKIE, OPERATOR_PREFIX, SESSION_PATH
+from central.operator_auth import (
+    COOKIE,
+    LEGACY_HOST_COOKIE,
+    OPERATOR_PREFIX,
+    SECURE_COOKIE,
+    SESSION_PATH,
+)
 from central.operator_session import SESSION_SECONDS, SessionCodec, session_key
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
@@ -28,6 +37,15 @@ ORIGIN = "http://testserver"
 MARK = {"X-Photo-Wall-Console": "1"}
 READ = "/v1/operator/inventory"
 WRITE = "/v1/operator/frames/portrait"
+SCOPED = "Path=/v1/operator/"
+HTTP_LEGACY_CLEARS = [
+    "__Host-photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+    "photo_wall_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+]
+HTTPS_LEGACY_CLEARS = [
+    "__Host-photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+    "photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+]
 VALUE = re.compile(r"v1\.[0-9]{10}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{1,344}\.[A-Za-z0-9_-]{43}")
 
 
@@ -52,8 +70,8 @@ def sign_in(client, origin=ORIGIN, token=ADMIN, **headers):
 
 
 def cookie_of(response):
-    """(name, value) of the one issued Set-Cookie."""
-    [header] = response.headers.get_list("set-cookie")
+    """(name, value) of the issued Set-Cookie (the first; the rest clear legacy cookies)."""
+    header = response.headers.get_list("set-cookie")[0]
     name, _, rest = header.partition("=")
     return name, rest.split(";", 1)[0]
 
@@ -90,45 +108,88 @@ def test_tracer_cookie_reads_writes_from_its_origin_and_dies_on_rotation(registr
 # --- Issued and clearing headers.
 
 
-def test_https_sign_in_issues_the_host_prefixed_secure_cookie(client):
+def test_https_sign_in_issues_the_secure_prefixed_scoped_cookie(client):
     response = sign_in(client, "https://wall.example")
     assert response.status_code == 204
     assert response.headers["cache-control"] == "no-store"
-    [header] = response.headers.get_list("set-cookie")
+    [header, *legacy] = response.headers.get_list("set-cookie")
     name, value = cookie_of(response)
-    assert name == HOST_COOKIE and VALUE.fullmatch(value)
-    assert header == (f"__Host-photo_wall_session={value}; Path=/; Max-Age=2592000; Secure; "
-                      "HttpOnly; SameSite=Strict")
+    assert name == SECURE_COOKIE and VALUE.fullmatch(value)
+    assert header == (f"__Secure-photo_wall_session={value}; Path=/v1/operator/; "
+                      "Max-Age=2592000; Secure; HttpOnly; SameSite=Strict")
     assert "domain" not in header.lower()
+    assert legacy == HTTPS_LEGACY_CLEARS
 
 
-def test_http_sign_in_issues_the_plain_cookie_without_secure(client):
+def test_http_sign_in_issues_the_plain_scoped_cookie_without_secure(client):
     response = sign_in(client)
-    [header] = response.headers.get_list("set-cookie")
+    [header, *legacy] = response.headers.get_list("set-cookie")
     name, value = cookie_of(response)
     assert name == COOKIE
-    assert header == (f"photo_wall_session={value}; Path=/; Max-Age=2592000; HttpOnly; "
-                      "SameSite=Strict")
+    assert header == (f"photo_wall_session={value}; Path=/v1/operator/; Max-Age=2592000; "
+                      "HttpOnly; SameSite=Strict")
+    assert legacy == HTTP_LEGACY_CLEARS
 
 
-def test_log_out_clears_both_names_with_exact_attributes(client):
+def test_log_out_clears_both_scoped_and_both_legacy_names_with_exact_attributes(client):
     response = client.delete(SESSION_PATH, headers={**MARK, "Origin": ORIGIN})
     assert response.status_code == 204
     assert response.headers["cache-control"] == "no-store"
     assert response.headers.get_list("set-cookie") == [
-        "__Host-photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-        "photo_wall_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+        "__Secure-photo_wall_session=; Path=/v1/operator/; Max-Age=0; Secure; HttpOnly; "
+        "SameSite=Strict",
+        "photo_wall_session=; Path=/v1/operator/; Max-Age=0; HttpOnly; SameSite=Strict",
+        *HTTP_LEGACY_CLEARS,
     ]
     again = client.delete(SESSION_PATH, headers=MARK)  # idempotent, no Origin needed
     assert again.status_code == 204
 
 
-def test_log_out_over_https_marks_the_plain_clearing_cookie_secure(client):
+def test_log_out_over_https_marks_the_plain_clearing_cookies_secure(client):
     response = client.delete(SESSION_PATH, headers={**MARK, "Origin": "https://wall.example"})
     assert response.headers.get_list("set-cookie") == [
-        "__Host-photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-        "photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+        "__Secure-photo_wall_session=; Path=/v1/operator/; Max-Age=0; Secure; HttpOnly; "
+        "SameSite=Strict",
+        "photo_wall_session=; Path=/v1/operator/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+        *HTTPS_LEGACY_CLEARS,
     ]
+
+
+class _AsUrllib:
+    """An httpx response as the `http.cookiejar` response protocol (`info()` headers)."""
+
+    def __init__(self, response):
+        self.headers = Message()
+        for header in response.headers.get_list("set-cookie"):
+            self.headers["Set-Cookie"] = header
+
+    def info(self):
+        return self.headers
+
+
+@pytest.mark.parametrize("origin", [ORIGIN, "https://testserver"])
+def test_the_session_cookie_is_sent_only_under_the_operator_prefix(client, origin):
+    # A standard cookie jar (RFC 6265 path-match) decides what a browser would send: the
+    # console page, Player/media routes and any other server on this host never get it.
+    response = client.post(SESSION_PATH, json={"token": ADMIN},
+                           headers={**MARK, "Origin": origin})
+    assert response.status_code == 204
+    cookie_jar = CookieJar()
+    cookie_jar.extract_cookies(_AsUrllib(response), urllib.request.Request(origin + SESSION_PATH))
+    client.cookies.clear()
+    [issued] = [c for c in cookie_jar if c.value]  # the legacy clears leave nothing behind
+    assert issued.path == "/v1/operator/"
+
+    def sent(path):
+        request = urllib.request.Request(origin + path)
+        cookie_jar.add_cookie_header(request)
+        return request.get_header("Cookie")
+
+    assert sent(READ) == f"{issued.name}={issued.value}"
+    assert sent(SESSION_PATH) is not None
+    for path in ("/", "/console", "/healthz", "/v1/media/abc", "/v1/player/config",
+                 "/v1/operator", "/v1/operatorx/inventory", "/photos/api/assets"):
+        assert sent(path) is None, path
 
 
 def test_log_out_must_be_marked(client):
@@ -222,15 +283,32 @@ def test_http_sign_in_then_https_same_host_reads_but_cannot_write(client):
     assert move(client, {**again, **MARK, "Origin": "https://wall.local"}).status_code == 200
 
 
-def test_the_host_cookie_is_preferred_over_the_plain_one(client):
-    host = cookie_of(sign_in(client, "https://wall.local"))
-    assert host[0] == HOST_COOKIE
-    both = {"Cookie": f"{COOKIE}=forged; {HOST_COOKIE}={host[1]}"}
+def test_the_secure_cookie_is_preferred_over_the_plain_one(client):
+    secure = cookie_of(sign_in(client, "https://wall.local"))
+    assert secure[0] == SECURE_COOKIE
+    both = {"Cookie": f"{COOKIE}=forged; {SECURE_COOKIE}={secure[1]}"}
     assert client.get(READ, headers=both).status_code == 200
-    # Present but invalid, the __Host- cookie decides: the plain one is not consulted.
+    # Present but invalid, the __Secure- cookie decides: no other name is consulted.
     plain = cookie_of(sign_in(client))
-    shadowed = {"Cookie": f"{COOKIE}={plain[1]}; {HOST_COOKIE}=forged"}
+    for other in (COOKIE, LEGACY_HOST_COOKIE):
+        shadowed = {"Cookie": f"{other}={plain[1]}; {SECURE_COOKIE}=forged"}
+        assert client.get(READ, headers=shadowed).status_code == 401, other
+
+
+def test_legacy_path_root_cookies_are_accepted_until_they_expire(registry, client):
+    # Cookies minted before the Path scoping (same value format, Path=/) keep a signed-in
+    # browser signed in across the upgrade; they are only ever cleared, never issued.
+    value = cookie_of(sign_in(client))[1]
+    for name in (LEGACY_HOST_COOKIE, COOKIE):
+        legacy = {"Cookie": f"{name}={value}"}
+        assert client.get(READ, headers=legacy).status_code == 200, name
+        assert move(client, {**legacy, **MARK, "Origin": ORIGIN}).status_code == 200, name
+    # The legacy __Host- name outranks the plain one, present but invalid.
+    shadowed = {"Cookie": f"{COOKIE}={value}; {LEGACY_HOST_COOKIE}=forged"}
     assert client.get(READ, headers=shadowed).status_code == 401
+    registry.clock.advance(SESSION_SECONDS)
+    for name in (LEGACY_HOST_COOKIE, COOKIE):
+        assert client.get(READ, headers={"Cookie": f"{name}={value}"}).status_code == 401
 
 
 # --- Bearer decides alone.

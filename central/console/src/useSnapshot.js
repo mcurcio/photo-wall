@@ -163,6 +163,9 @@ export function SnapshotProvider({ children }) {
         return;
       }
       setAuthNotice(null);
+      // SigningIn -> Checking on 204 (pass A §7): the cookie is set, so the poller resumes
+      // and a first read that fails (network/5xx) is retried, not left on the sign-in form.
+      setAuth("checking");
       try {
         await refresh();
       } catch (error) {
@@ -172,7 +175,7 @@ export function SnapshotProvider({ children }) {
         }
       }
     },
-    [refresh],
+    [refresh, setAuth],
   );
 
   const signOut = useCallback(async () => {
