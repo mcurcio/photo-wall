@@ -15,7 +15,7 @@ import { wallRoutes } from "./wallRoutes.jsx";
  * @typedef {{snapshot: object|null, bootFacts: object|null,
  *            central: import("./useSnapshot.js").CentralHealth,
  *            route: import("./routes.js").Route,
- *            navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
+ *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
  *            wall: import("./WallPage.jsx").WallMemory,
  *            recovery: {recovered: string[], dismiss: () => void}}} RouteContext
  * @typedef {{section: import("./routes.js").Section, label: string,
@@ -135,8 +135,10 @@ export function Shell({ hidden = false }) {
   const frameCount = snapshot?.inventory?.frames?.length ?? 0;
 
   useEffect(() => {
+    // `ifUnknown`: the hash may already name a section this render has not seen yet (a
+    // link clicked between the first snapshot's render and this effect); it wins.
     if (route === null && hasSnapshot) {
-      navigate(landingRoute(frameCount), { replace: true });
+      navigate(landingRoute(frameCount), { replace: true, ifUnknown: true });
     }
   }, [route, hasSnapshot, frameCount, navigate]);
 

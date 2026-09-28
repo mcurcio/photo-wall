@@ -133,7 +133,7 @@ flowchart LR
 | Surface | Signature | Owner |
 |---|---|---|
 | `parseRoute(hash) → Route \| null`, `formatRoute(route) → string` | `Route = {section, id?, flow?: "new"\|"edit"\|"show", step?, facet?}`; pure, with no React | `routes.js` |
-| `useRoute() → {route, navigate(route, {replace?})}` | The only writer of `location.hash`; listens to `hashchange` | `useRoute.js` |
+| `useRoute() → {route, navigate(route, {replace?, ifUnknown?})}` | The only writer of `location.hash`; listens to `hashchange`. `ifUnknown` (the landing route) navigates only if the hash names no route when it runs, so a section chosen before the rendered route caught up is never overwritten | `useRoute.js` |
 | `showRoutes`, `wallRoutes`, `neutralRoutes` | `ReadonlyArray<{section, label, render(ctx), samplePaths: string[]}>` | `showRoutes.jsx`, `wallRoutes.jsx`, `neutralRoutes.jsx` |
 | `useFlowDraft(seed) → {key, value, open(key), patch(partial), reseed(), discard(), dirty, baseRevision}` | `seed(key)` returns the initial value: defaults for `new`, the stored record for an edit. `reseed()` re-runs `seed(key)` from the current snapshot and resets `baseRevision` (Reload). **Invariant: one draft per flow.** `open(otherKey)` while `dirty` is refused and returns the open key, so the caller asks first. | `flow/useFlowDraft.js` |
 | `Stepper({steps, current, onStep})`, `Advanced({summary, open, onToggle})`, `SummaryCard({title, chip, lines, actions})` | Presentational | `flow/*` |

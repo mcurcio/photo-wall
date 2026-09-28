@@ -14,8 +14,15 @@ import { formatRoute, parseRoute } from "./routes.js";
  * announces the change with a `hashchange` event, since `history.replaceState` sends none.
  * Navigating to the route already shown does nothing.
  *
+ * `navigate(route, {replace: true, ifUnknown: true})` (the landing route) goes only if
+ * the hash names no route WHEN IT RUNS. The caller decides from a rendered `route`, which
+ * lags the hash: a link or typed URL sets the hash at once but its `hashchange` arrives
+ * later, so a landing decided from the stale `null` would otherwise overwrite a section
+ * the operator had just chosen.
+ *
+ * @typedef {{replace?: boolean, ifUnknown?: boolean}} NavigateOptions
  * @returns {{route: import("./routes.js").Route|null,
- *            navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void}}
+ *            navigate: (route: import("./routes.js").Route, options?: NavigateOptions) => void}}
  */
 export function useRoute() {
   const [hash, setHash] = useState(() => window.location.hash);
@@ -29,7 +36,10 @@ export function useRoute() {
 
   const route = useMemo(() => parseRoute(hash), [hash]);
 
-  const navigate = useCallback((next, { replace = false } = {}) => {
+  const navigate = useCallback((next, { replace = false, ifUnknown = false } = {}) => {
+    if (ifUnknown && parseRoute(window.location.hash) !== null) {
+      return;
+    }
     const target = formatRoute(next);
     if (target === window.location.hash) {
       return;
