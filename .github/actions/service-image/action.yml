@@ -1,0 +1,80 @@
+name: Service image
+description: >-
+  Build one root-Dockerfile service target under the repository's one BuildKit cache policy
+  (docs/module-appliance-ci.md, "Service image builds"). Each target reads and writes one GHA
+  cache scope per architecture, its own, so no build replaces another's cache index. Needs a
+  docker-container builder (docker/setup-buildx-action) earlier in the job; builds in one job
+  share that builder's state, and so its layers.
+
+inputs:
+  target:
+    description: The Dockerfile stage to build (central, media-worker or media-test)
+    required: true
+  architecture:
+    description: amd64 or arm64; selects the platform and the cache scope
+    required: true
+  build-args:
+    description: Build arguments, one KEY=value per line
+    required: false
+    default: ''
+  tags:
+    description: Image tags
+    required: true
+  load:
+    description: Load the image into the runner's Docker
+    required: false
+    default: 'false'
+  push:
+    description: Push the image to its registry
+    required: false
+    default: 'false'
+
+outputs:
+  digest:
+    description: The built image's manifest digest
+    value: ${{ steps.build.outputs.digest }}
+  imageid:
+    description: The built image's ID (its config digest), as loaded into the runner's Docker
+    value: ${{ steps.build.outputs.imageid }}
+  metadata:
+    description: The build result metadata
+    value: ${{ steps.build.outputs.metadata }}
+
+runs:
+  using: composite
+  steps:
+    # Bump the epoch to discard every service cache at once (a suspected poisoned or corrupt
+    # entry); keys are content-addressed, so a layout change never needs it.
+    - name: Resolve the service cache scopes
+      id: cache
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        CACHE_EPOCH: '1'
+      run: |
+        set -eu
+        case "$ARCHITECTURE" in
+          amd64|arm64) ;;
+          *) echo "::error::unsupported architecture '$ARCHITECTURE'"; exit 1 ;;
+        esac
+        # Only its own scope: importing a sibling's too made BuildKit match a shared parent in
+        # the sibling's index and miss this target's COPY --link layers (docs/module-appliance-ci.md).
+        scope="type=gha,scope=photo-wall-$TARGET-$ARCHITECTURE-v$CACHE_EPOCH"
+        {
+          echo "from=$scope"
+          echo "to=$scope,mode=max,ignore-error=true"
+        } >> "$GITHUB_OUTPUT"
+    - name: Build the ${{ inputs.target }} image
+      id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+      with:
+        context: .
+        target: ${{ inputs.target }}
+        build-args: ${{ inputs.build-args }}
+        platforms: linux/${{ inputs.architecture }}
+        load: ${{ inputs.load }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        cache-from: ${{ steps.cache.outputs.from }}
+        cache-to: ${{ steps.cache.outputs.to }}

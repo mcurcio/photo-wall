@@ -1,5 +1,10 @@
 # Acceptance evidence
 
+- [2026-09-28 service image cache](2026-09-28-service-image-cache.md): cause of
+  the low BuildKit cache use in hosted run 36463535409, and a local, CI-shaped
+  comparison of the per-target layer and cache policy: about 10 % less image
+  build time per code change and smaller per-change layers. Hosted measurements
+  are pending.
 - [2026-09-08 CI source export](2026-09-08-ci-source-export.md): missing verified
   helper in the committed source export and root-owned diagnostic collection,
   with local regression and Linux ownership reproduction.
