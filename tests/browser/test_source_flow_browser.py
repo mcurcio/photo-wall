@@ -23,7 +23,7 @@ from console_tasks import (
     start_source,
     visit,
 )
-from operator_harness import operator_server
+from operator_harness import operator_server, submit_sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     SOURCE,
@@ -306,3 +306,79 @@ def test_back_or_discard_in_the_inline_flow_returns_to_the_scene_unchanged(page,
         expect(picker).to_have_value(SOURCE)
         expect(picker).to_be_focused()
         expect(_link(page, "Photo sources")).to_have_accessible_description("")
+
+
+def _discard_scene_draft(page):
+    """On Scenes: "Discard draft", confirmed."""
+    go(page, "scenes")
+    page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+        "button", name="Discard draft", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Discard your unsaved draft?")
+    dialog.get_by_role("button", name="Discard draft", exact=True).click()
+    expect(dialog).to_have_count(0)
+
+
+def test_a_hand_off_ends_with_the_scene_draft_it_was_begun_for(page, registry):
+    """The hand-off belongs to the draft it was begun for (its identity), not to its key:
+    Scene A hands off, is discarded, and a new Scene B (keyed "new" too) is started. The
+    Source flow no longer says it is for a Scene, and a Source saved there stays on
+    Photo sources and never replaces B's Source. Mutation probe: settle the hand-off only
+    on its own write (no settle when its Scene draft closes)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        scene = start_scene(page)
+        scene.get_by_label("Source", exact=True).select_option(SOURCE)  # draft A, dirty
+        scene.get_by_role("button", name=NEW_SELECTION, exact=True).click()
+        assert _hash(page) == "#/sources/new/include"
+        expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_be_visible()
+
+        _discard_scene_draft(page)
+        scene = start_scene(page)  # draft B
+        picker = scene.get_by_label("Source", exact=True)
+        picker.select_option(SOURCE)
+
+        go(page, "sources")
+        expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_have_count(0)
+        expect(_sources(page).get_by_role(
+            "button", name="Discard and return to your Scene", exact=True)).to_have_count(0)
+        response = add_source(page, "stale:1", "fixture-library")
+        assert response.status == 200
+        assert _hash(page) == "#/sources"
+        expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)
+               ).to_be_visible()
+        expect(_sources(page).get_by_role("article", name="stale:1", exact=True)).to_be_visible()
+
+        # B is as the operator left it.
+        go(page, "scenes")
+        page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+            "button", name="Resume draft (Draft)", exact=True).click()
+        assert _hash(page) == "#/scenes/new/photos"
+        expect(picker).to_have_value(SOURCE)
+
+
+def test_log_out_mid_hand_off_drops_it(page, registry):
+    """Log out remounts the shell: the Scene draft, the Source draft and the hand-off
+    between them are gone, so after signing in again the Source flow runs on its own."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        scene = start_scene(page)
+        scene.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene.get_by_role("button", name=NEW_SELECTION, exact=True).click()
+        source_form(page).get_by_label("Media type", exact=True).select_option("video")
+        expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_be_visible()
+
+        page.get_by_role("button", name="Log out", exact=True).click()
+        submit_sign_in(page)  # on the screen Log out left, without a reload
+        go(page, "sources")
+        expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_have_count(0)
+        expect(_sources(page).get_by_role("button", name="New source", exact=True)).to_be_visible()
+        response = add_source(page, NEW_SOURCE, "fixture-library")
+        assert response.status == 200
+        assert _hash(page) == "#/sources"
+        go(page, "scenes")
+        expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+            "button", name="New Scene", exact=True)).to_be_visible()

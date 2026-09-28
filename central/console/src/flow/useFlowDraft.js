@@ -4,7 +4,7 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
 
 /**
  * One flow's draft (flow design §6 frozen surface): the Plane B values of ONE flow
- * instance, keyed `new` or by the stored record it edits.
+ * instance, keyed `new` or by the stored record it edits, and identified by `id`.
  *
  * The flow container that calls this never unmounts (rule 2), so only Save, Discard,
  * Log out (which remounts the shell) or a reload end a draft. The rules are the pure
@@ -19,12 +19,17 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
  *    `baseRevision` (Reload); `discard()` closes the draft.
  *  - `baseRevision` is the stored revision the draft was seeded from (null for new);
  *    `seeded` is the value it was seeded with (Reload compares it with storage).
+ *  - `id` is this opened draft's identity (draftState.js IDENTITY): a new one each time
+ *    a draft is opened, kept by patches and reseeds, null while none is open. Anything
+ *    begun for one draft (an inline hand-off) captures it, so a later draft of the same
+ *    key is never mistaken for it.
  *
  * `seed` is read when it is called, so it may close over the latest snapshot.
  *
  * @template T
  * @param {(key: string) => T} seed
- * @returns {{key: string|null, value: T|null, open: (key: string) => string|null,
+ * @returns {{key: string|null, id: number|null, value: T|null,
+ *            open: (key: string) => string|null,
  *            patch: (partial: Partial<T>|((value: T) => Partial<T>|null)) => void,
  *            reseed: () => void, discard: () => void, dirty: boolean,
  *            baseRevision: number|null, seeded: T|null}}
@@ -35,6 +40,7 @@ export function useFlowDraft(seed) {
   // The state lives in a ref so `open` can answer synchronously and functional
   // patches from several effects compose; the counter re-renders after a change.
   const stateRef = useRef(CLOSED);
+  const lastIdRef = useRef(0);
   const [, setVersion] = useState(0);
 
   const commit = useCallback((next) => {
@@ -46,7 +52,13 @@ export function useFlowDraft(seed) {
 
   const open = useCallback(
     (key) => {
-      const { state, opened } = openDraft(stateRef.current, key, (k) => seedRef.current(k));
+      lastIdRef.current += 1; // unused when nothing is seeded; ids need only be new
+      const { state, opened } = openDraft(
+        stateRef.current,
+        key,
+        (k) => seedRef.current(k),
+        lastIdRef.current,
+      );
       commit(state);
       return opened;
     },
@@ -62,6 +74,7 @@ export function useFlowDraft(seed) {
   const state = stateRef.current;
   return {
     key: state.key,
+    id: state.id,
     value: state.value,
     open,
     patch,

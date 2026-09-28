@@ -40,24 +40,29 @@ const out = {};
 // --- One draft per flow.
 const seed = (key) => (key === "new" ? { name: "", revision: null } : { name: key, revision: 4 });
 let state = draft.CLOSED;
-let result = draft.openDraft(state, "new", seed);
+let result = draft.openDraft(state, "new", seed, 1);
 out.openNew = { opened: result.opened, dirty: draft.isDirty(result.state),
-                base: result.state.baseRevision };
+                base: result.state.baseRevision, id: result.state.id };
 state = draft.patchDraft(result.state, { name: "Evening" });
 out.dirtyAfterPatch = draft.isDirty(state);
-result = draft.openDraft(state, "edit/a", seed);
+result = draft.openDraft(state, "edit/a", seed, 2);
 out.refused = { opened: result.opened, same: result.state === state };
-out.sameKeyKeeps = draft.openDraft(state, "new", seed).state === state;
+out.sameKeyKeeps = draft.openDraft(state, "new", seed, 3).state === state;
+out.patchKeepsId = state.id;
+out.closedId = draft.CLOSED.id;
+// Discarded, then opened again under the same key: another draft, another id.
+out.reopenedId = draft.openDraft(draft.CLOSED, "new", seed, 4).state.id;
 out.backToSeed = draft.isDirty(draft.patchDraft(state, { name: "" }));
 out.noopPatch = draft.patchDraft(state, { name: "Evening" }) === state;
 out.fnPatch = draft.patchDraft(state, (value) => ({ name: value.name + "!" })).value.name;
 out.nullPatch = draft.patchDraft(state, () => null) === state;
-const clean = draft.openDraft(draft.CLOSED, "new", seed).state;
-result = draft.openDraft(clean, "edit/a", seed);
-out.cleanReplaced = { opened: result.opened, base: result.state.baseRevision };
+const clean = draft.openDraft(draft.CLOSED, "new", seed, 5).state;
+result = draft.openDraft(clean, "edit/a", seed, 6);
+out.cleanReplaced = { opened: result.opened, base: result.state.baseRevision, id: result.state.id };
 let edited = draft.patchDraft(result.state, { name: "x" });
 edited = draft.reseedDraft(edited, () => ({ name: "fresh", revision: 7 }));
-out.reseeded = { base: edited.baseRevision, dirty: draft.isDirty(edited), name: edited.value.name };
+out.reseeded = { base: edited.baseRevision, dirty: draft.isDirty(edited), name: edited.value.name,
+                 id: edited.id };
 out.sameValue = [
   draft.sameValue({ a: [1, { b: 2 }], c: "x" }, { c: "x", a: [1, { b: 2 }] }),
   draft.sameValue([1, 2], [2, 1]),
@@ -190,16 +195,23 @@ def test_flow_kit_and_scene_flow_shape():
     out = json.loads(result.stdout)
 
     # One draft per flow: a dirty draft refuses another key and the open key is returned.
-    assert out["openNew"] == {"opened": "new", "dirty": False, "base": None}
+    assert out["openNew"] == {"opened": "new", "dirty": False, "base": None, "id": 1}
     assert out["dirtyAfterPatch"] is True
     assert out["refused"] == {"opened": "new", "same": True}
     assert out["sameKeyKeeps"] is True
+    # Identity: a patch keeps the draft's id, a closed draft has none, and the same key
+    # opened again after a discard is another draft (a new id), so anything begun for
+    # the first (an inline hand-off) is never taken for the second.
+    assert out["patchKeepsId"] == 1
+    assert out["closedId"] is None
+    assert out["reopenedId"] == 4
     assert out["backToSeed"] is False  # dirty is structural, not "was ever patched"
     assert out["noopPatch"] is True and out["nullPatch"] is True
     assert out["fnPatch"] == "Evening!"
-    assert out["cleanReplaced"] == {"opened": "edit/a", "base": 4}
-    # Reload: a reseed takes the stored revision as the new base and is clean again.
-    assert out["reseeded"] == {"base": 7, "dirty": False, "name": "fresh"}
+    assert out["cleanReplaced"] == {"opened": "edit/a", "base": 4, "id": 6}
+    # Reload: a reseed takes the stored revision as the new base and is clean again; it
+    # is the same draft.
+    assert out["reseeded"] == {"base": 7, "dirty": False, "name": "fresh", "id": 6}
     assert out["sameValue"] == [True, False, False]
 
     assert out["stepOfField"] == ["b", "c", None]
@@ -271,8 +283,15 @@ const authoring = await import(process.argv[4]);
 const out = {};
 
 // --- Inline hand-offs (flow/handOff.js).
-const first = hand.beginHandOff({ from: "scenes", to: "sources", label: "your Scene" }, 1);
+const first = hand.beginHandOff({ from: "scenes", to: "sources", label: "your Scene", owner: 7 }, 1);
 out.begun = first;
+out.orphaned = [
+  hand.orphanedHandOff(first, "scenes", 7),     // its draft is still open
+  hand.orphanedHandOff(first, "scenes", null),  // closed
+  hand.orphanedHandOff(first, "scenes", 8),     // replaced, even under the same key
+  hand.orphanedHandOff(first, "schedule", null), // another origin's
+  hand.orphanedHandOff(null, "scenes", null),
+];
 out.to = [hand.handOffTo(first, "sources")?.id ?? null, hand.handOffTo(first, "schedule"),
           hand.handOffTo(null, "sources")];
 const stale = hand.settleHandOff(first, 2);
@@ -320,7 +339,10 @@ def test_hand_offs_and_source_flow_shape():
     out = json.loads(result.stdout)
 
     # A hand-off is addressed to one section and settles once, by its own id only.
-    assert out["begun"] == {"id": 1, "from": "scenes", "to": "sources", "label": "your Scene"}
+    assert out["begun"] == {
+        "id": 1, "from": "scenes", "to": "sources", "label": "your Scene", "owner": 7}
+    # The origin settles it with null once the draft it was begun for is no longer open.
+    assert out["orphaned"] == [False, True, True, False, False]
     assert out["to"] == [1, None, None]
     assert out["stale"] == {"same": True, "settled": False}
     assert out["settled"] == {"next": None, "settled": True}

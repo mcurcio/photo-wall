@@ -17,6 +17,7 @@ import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { editedId, editKey } from "./flow/instance.js";
 import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
+import { useHandOffFrom } from "./flow/useHandOff.js";
 import { useFlowInstance } from "./flow/useFlowInstance.js";
 import {
   changedSceneFields,
@@ -71,10 +72,12 @@ const HEADINGS = {
  * (slice 3 §13).
  *
  * NEW SOURCE. The Photos step's "New selection from your photo library" runs the Source
- * flow inline (flow/handOff.js): it begins a hand-off to "sources" for this draft; the
- * Source flow's Save returns here with the new Source chosen, and its Back or Discard
- * returns here with the draft unchanged. Either way Photos shows again with focus on
- * "Source"; a hand-off that returns after this draft closed changes nothing.
+ * flow inline (flow/handOff.js): it begins a hand-off to "sources" for this draft (its
+ * `id`); the Source flow's Save returns here with the new Source chosen, and its Back or
+ * Discard returns here with the draft unchanged. Either way Photos shows again with
+ * focus on "Source". Once this draft closes or another replaces it, the hand-off is
+ * settled with nothing (`useHandOffFrom`), so a Source saved later stays a Source and
+ * never lands in another draft.
  *
  * SAVE writes ONE request (authoring.js `buildSave`) inside `useMutate()`, ends the flow
  * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
@@ -227,9 +230,10 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
 
   // --- A new Source, made inline (NEW SOURCE above). The return reads this render's
   // draft and focus, whenever it comes back.
+  const beginHandOff = useHandOffFrom(handOffs, "scenes", draft.id);
   const returnRef = useRef(null);
-  returnRef.current = (key, result, { show }) => {
-    if (draft.key !== key) {
+  returnRef.current = (owner, result, { show }) => {
+    if (draft.id !== owner) {
       return false; // the draft it was begun for is gone
     }
     if (result !== null) {
@@ -241,12 +245,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     return true;
   };
   const newSource = () => {
-    const key = draft.key;
-    handOffs.begin({
-      from: "scenes",
+    const owner = draft.id;
+    beginHandOff({
       to: "sources",
       label: "your Scene",
-      onReturn: (result, options) => returnRef.current(key, result, options),
+      onReturn: (result, options) => returnRef.current(owner, result, options),
     });
   };
 

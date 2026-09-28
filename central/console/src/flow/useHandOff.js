@@ -1,19 +1,20 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { beginHandOff, handOffTo, settleHandOff } from "./handOff.js";
+import { beginHandOff, handOffTo, orphanedHandOff, settleHandOff } from "./handOff.js";
 
 /**
  * The shell's one pending inline hand-off between flows (flow/handOff.js has the
  * contract). The shell calls this once and passes the result to the Show sections'
- * flows through the route context (`handOffs`): the origin calls `begin`, the target
- * reads its hand-off with {@link useHandOffTo}. Log out remounts the shell and drops it.
+ * flows through the route context (`handOffs`): the origin begins one through
+ * {@link useHandOffFrom}, the target reads its hand-off with {@link useHandOffTo}. Log
+ * out remounts the shell and drops it.
  *
- * `begin({from, to, label, onReturn})` replaces any pending one;
+ * `begin({from, to, label, owner, onReturn})` replaces any pending one;
  * `settle(id, result, {show})` clears hand-off `id` and returns what its `onReturn`
  * answered (false when `id` is no longer the pending one).
  *
  * @returns {{current: import("./handOff.js").HandOff|null,
- *            begin: (request: {from: string, to: string, label: string,
+ *            begin: (request: {from: string, to: string, label: string, owner: number|null,
  *                    onReturn: (result: object|null, options: import("./handOff.js").ReturnOptions) => boolean}) => void,
  *            settle: (id: number, result: object|null, options: import("./handOff.js").ReturnOptions) => boolean}}
  */
@@ -45,6 +46,29 @@ export function useHandOff() {
   }, []);
 
   return useMemo(() => ({ current, begin, settle }), [current, begin, settle]);
+}
+
+/**
+ * The origin's side of a hand-off (flow/handOff.js): `begin({to, label, onReturn})`
+ * begins one from `from` for the draft open now (`owner`, useFlowDraft's `id`). While
+ * it is pending, that draft closing or being replaced (`owner` changing: discarded,
+ * saved, another instance opened) settles it with null, `{show: false}`, so the target
+ * runs on its own and never returns into a later draft.
+ *
+ * @param {ReturnType<typeof useHandOff>} handOffs
+ * @param {string} from the origin's section
+ * @param {number|null} owner the origin's open draft's id (null when none is open)
+ * @returns {(request: {to: string, label: string,
+ *            onReturn: (result: object|null, options: import("./handOff.js").ReturnOptions) => boolean}) => void}
+ */
+export function useHandOffFrom(handOffs, from, owner) {
+  const { current, begin, settle } = handOffs;
+  useEffect(() => {
+    if (orphanedHandOff(current, from, owner)) {
+      settle(current.id, null, { show: false });
+    }
+  }, [current, from, owner, settle]);
+  return useCallback((request) => begin({ ...request, from, owner }), [begin, from, owner]);
 }
 
 /**

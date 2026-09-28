@@ -13,12 +13,18 @@
  * dirty is refused: the state is unchanged and the OPEN key is returned, so the
  * caller asks the operator (Resume or Discard) before anything is lost.
  *
- * @typedef {{key: string|null, value: object|null, seeded: object|null,
+ * IDENTITY. Every draft `openDraft` seeds carries the `id` its caller mints (a number
+ * never used before in that flow); keeping the same instance (the same key, a refused
+ * key, a patch, a reseed) keeps it, and a closed draft has none. So the id tells one
+ * opened draft from a later one of the same key: a new Scene begun after another was
+ * discarded is keyed `new` too, but it is another draft.
+ *
+ * @typedef {{key: string|null, id: number|null, value: object|null, seeded: object|null,
  *            baseRevision: number|null}} DraftState
  */
 
 /** @type {DraftState} */
-export const CLOSED = Object.freeze({ key: null, value: null, seeded: null, baseRevision: null });
+export const CLOSED = Object.freeze({ key: null, id: null, value: null, seeded: null, baseRevision: null });
 
 /**
  * Structural equality of two draft values (plain data: objects, arrays, primitives).
@@ -56,30 +62,38 @@ export function isDirty(state) {
   return state.key !== null && !sameValue(state.value, state.seeded);
 }
 
-function seeded(key, seed) {
+function seeded(key, id, seed) {
   const value = seed(key);
   const revision = value?.revision;
-  return { key, value, seeded: value, baseRevision: typeof revision === "number" ? revision : null };
+  return {
+    key,
+    id,
+    value,
+    seeded: value,
+    baseRevision: typeof revision === "number" ? revision : null,
+  };
 }
 
 /**
  * Open instance `key`. The same key keeps its draft; another key replaces a clean
- * draft (or none) with `seed(key)`, and is refused while the open draft is dirty.
+ * draft (or none) with `seed(key)`, identified by `id`, and is refused while the open
+ * draft is dirty.
  *
  * @param {DraftState} state
  * @param {string} key
  * @param {(key: string) => object} seed
+ * @param {number} id the new draft's identity, if one is seeded: never used before
  * @returns {{state: DraftState, opened: string|null}} `opened` is `key` when it is
  *   now open, otherwise the key still open
  */
-export function openDraft(state, key, seed) {
+export function openDraft(state, key, seed, id) {
   if (state.key === key) {
     return { state, opened: key };
   }
   if (isDirty(state)) {
     return { state, opened: state.key };
   }
-  return { state: seeded(key, seed), opened: key };
+  return { state: seeded(key, id, seed), opened: key };
 }
 
 /**
@@ -103,12 +117,12 @@ export function patchDraft(state, partial) {
 
 /**
  * Seed the open instance again from `seed` (Reload): its value, and its
- * `baseRevision`, become the current stored record's.
+ * `baseRevision`, become the current stored record's. It is the same draft (its `id`).
  *
  * @param {DraftState} state
  * @param {(key: string) => object} seed
  * @returns {DraftState}
  */
 export function reseedDraft(state, seed) {
-  return state.key === null ? state : seeded(state.key, seed);
+  return state.key === null ? state : seeded(state.key, state.id, seed);
 }
