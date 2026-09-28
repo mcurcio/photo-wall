@@ -37,7 +37,6 @@ from operator_harness import (
     RequestGate,
     operator_server,
     report_readiness,
-    sign_in,
     tile_health,
 )
 from playwright.sync_api import expect
@@ -167,23 +166,23 @@ def _seed(registry):
 def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
-        # Wall mode is the default: the wall plan and equipment rail are present.
+        # The Wall side: the plan on the Wall page, the equipment on Equipment.
         expect(page.get_by_role("group", name="Wall plan for surface wall")).to_be_visible()
+        go(page, "equipment")
         expect(page.get_by_role("group", name="Pending players")).to_be_visible()
 
-        go(page, "now")
-
-        # The four Showrunner regions appear.
-        for region in ("Sources", "Scenes", "Programs", "Runs"):
+        # Each Show region has its own page, and none of them holds a Wall-only surface
+        # (not even hidden: get_by_label counts hidden DOM too).
+        for section, region in (("now", "Runs"), ("scenes", "Scenes"),
+                                ("schedule", "Programs"), ("sources", "Sources")):
+            go(page, section)
             expect(page.get_by_role("region", name=region, exact=True)).to_be_visible()
-
-        # The Wall-only surfaces are gone (not rendered in Showrunner mode).
-        expect(page.get_by_role("group", name="Wall plan for surface wall")).to_have_count(0)
-        expect(page.get_by_role("group", name="Pending players")).to_have_count(0)
-        expect(page.get_by_role("group", name="Unplaced frames")).to_have_count(0)
-        expect(page.get_by_label("Surface")).to_have_count(0)
+            expect(page.get_by_role("group", name="Wall plan for surface wall")).to_have_count(0)
+            expect(page.get_by_role("group", name="Pending players")).to_have_count(0)
+            expect(page.get_by_role("group", name="Unplaced frames")).to_have_count(0)
+            expect(page.get_by_label("Surface")).to_have_count(0)
 
 
 def test_showrunner_frame_health_badges_match_the_wall(page, registry):
@@ -191,7 +190,7 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
         report_readiness(registry, player_id)
     registry.clock.advance(3)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
         # The wall's labels, read first so the show layer can be held to them.
         valid_label = "Last heard 3 s ago"
         invalid_label = "Needs commissioning"
@@ -222,20 +221,25 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
-        # Sanity: in Wall mode the Commissioning facet IS reachable (proves the
+        # Sanity: on the Wall the Commissioning facet IS reachable (proves the
         # assertion below is meaningful, not vacuously true).
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
         expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_be_visible()
 
-        go(page, "now")
-
-        # No Commissioning tab, no committed-calibration control, no editor — the
-        # facet is composed out of the show layer entirely.
-        expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_have_count(0)
-        expect(page.get_by_role("group", name="Committed calibration")).to_have_count(0)
-        expect(page.get_by_role("group", name="Adjust calibration")).to_have_count(0)
+        # On every Show page: no Commissioning tab, no committed-calibration control,
+        # no editor, not even in hidden DOM — the facet is composed out of the show
+        # layer entirely (tests/browser/test_console_shell_browser.py visits every
+        # Show route; this visits each Show page from an open Commissioning facet).
+        for section in ("now", "scenes", "schedule", "sources"):
+            go(page, section)
+            expect(page.get_by_role("tab", name="Commissioning", exact=True,
+                                    include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Committed calibration",
+                                    include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Adjust calibration",
+                                    include_hidden=True)).to_have_count(0)
 
 
 def test_sources_render_name_rev_with_refresh(page, registry):
@@ -970,24 +974,30 @@ def _box(page, region):
     return page.get_by_role("region", name=region, exact=True).bounding_box()
 
 
-def test_the_showrunner_is_two_columns_wide_and_runs_first_narrow(page, registry):
+def test_each_show_region_is_a_page_beside_the_sidebar_wide_and_full_width_narrow(
+        page, registry):
+    # Bead 1b replaced the two-column Showrunner with one page per section: wide, the
+    # sidebar sits beside the page and every Show region starts at the same place;
+    # narrow, the sidebar becomes a drawer and each region spans the page.
     _seed(registry)
     queue = _seed_source(registry)
     page.set_viewport_size({"width": 1440, "height": 900})
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
-        expect(page.get_by_role("region", name="Runs", exact=True)).to_be_visible()
-        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
-        programs, sources = _box(page, "Programs"), _box(page, "Sources")
-        # Now (Runs) beside the Library (Scenes, Programs, Sources), at the same top.
-        assert runs["x"] + runs["width"] <= scenes["x"]
-        assert abs(runs["y"] - scenes["y"]) < 1
-        assert scenes["x"] == programs["x"] == sources["x"]
-        assert scenes["y"] < programs["y"] < sources["y"]
+        nav = page.get_by_role("navigation", name="Sections", exact=True).bounding_box()
+        boxes = {}
+        for section, region in (("now", "Runs"), ("scenes", "Scenes"),
+                                ("schedule", "Programs"), ("sources", "Sources")):
+            go(page, section)
+            boxes[region] = _box(page, region)
+            assert nav["x"] + nav["width"] <= boxes[region]["x"], region
+        assert len({round(box["x"]) for box in boxes.values()}) == 1, boxes
 
         page.set_viewport_size({"width": 390, "height": 844})
-        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
-        assert abs(runs["x"] - scenes["x"]) < 1 and runs["y"] < scenes["y"]
+        for section, region in (("now", "Runs"), ("scenes", "Scenes")):
+            go(page, section)
+            box = _box(page, region)
+            assert box["x"] <= 16.5 and box["x"] + box["width"] >= 390 - 16.5, (region, box)
 
 
 def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, registry):

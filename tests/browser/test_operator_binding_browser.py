@@ -20,7 +20,7 @@ import os
 import re
 
 import pytest
-from console_tasks import open_frame
+from console_tasks import connect, go, open_frame
 from operator_harness import RequestGate, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
@@ -105,7 +105,7 @@ def test_pending_player_appears_in_the_pending_rail(page, registry):
     # A freshly enrolled Player is unbound and not retired -> Pending rail.
     identity, _, _ = enroll(registry, count=2)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
 
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(
@@ -117,7 +117,7 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
     identity, _, _ = enroll(registry, count=1)  # a pending Player with HDMI-A-1
     _placed_frame(registry, "wall-1")
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
 
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(
@@ -130,12 +130,6 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
         _option(inspector, identity["player_id"]).check()
         inspector.get_by_role("button", name="Bind to wall-1", exact=True).click()
 
-        # The now-bound Player leaves the Pending rail (Plane A refreshed via
-        # useMutate).
-        expect(
-            pending.get_by_role("button", name=identity["player_id"], exact=True)
-        ).to_have_count(0)
-
         # The facet shows the amber "Review required" state and the CTA...
         expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
         cta = inspector.get_by_role("button", name="Commission the display", exact=True)
@@ -147,6 +141,17 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
             inspector.get_by_role("tabpanel", name="Commissioning facet")
         ).to_be_visible()
 
+        # On Equipment, the now-bound Player has left the Pending group for the Bound one
+        # (Plane A refreshed via useMutate).
+        go(page, "equipment")
+        expect(
+            page.get_by_role("group", name="Bound players", exact=True).get_by_role(
+                "button", name=identity["player_id"], exact=True)
+        ).to_be_visible()
+        expect(
+            pending.get_by_role("button", name=identity["player_id"], exact=True)
+        ).to_have_count(0)
+
 
 def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page, registry):
     # Bead G1 (SR-retire): the console must re-host the legacy "Retire a Player"
@@ -157,7 +162,7 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
     _placed_frame(registry, "wall-r")
     player_id = identity["player_id"]
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
 
         pending = page.get_by_role("group", name="Pending players", exact=True)
         retired = page.get_by_role("group", name="Retired players", exact=True)
@@ -172,6 +177,7 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
 
         # Retire the pending Player from the rail (a deliberate, labelled action),
         # typing its handle to confirm (slice 2 §7).
+        go(page, "equipment")
         pending.get_by_role(
             "button", name=f"Retire player {player_id}", exact=True
         ).click()
@@ -184,7 +190,9 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
         ).to_have_count(0)
 
         # The retired Player's Output is not an option: no radio names it, and the
-        # chooser says there is nothing free to bind.
+        # chooser says there is nothing free to bind (the Wall link returns to the frame).
+        go(page, "wall")
+        expect(inspector).to_be_visible()
         expect(inspector.get_by_role("radio")).to_have_count(0)
         expect(inspector.get_by_text("No free outputs with a detected display",
                                      exact=False)).to_be_visible()
@@ -216,6 +224,7 @@ def test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login(p
         # and the rejection message is gone.
         page.get_by_label("Operator token").fill(ADMIN)
         page.get_by_role("button", name="Sign in", exact=True).click()
+        go(page, "wall")
         expect(page.get_by_role("button", name="Frame auth-1", exact=True)).to_be_visible()
         expect(page.get_by_role("alert")).to_have_count(0)
         expect(page.get_by_role("button", name="Sign in", exact=True)).to_have_count(0)
@@ -350,7 +359,7 @@ def test_recovery_banner_is_suppressed_on_the_true_first_run(page, registry):
     _placed_frame(registry, "rec-1")
     registry.bind("rec-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
         # Force a wait for the first snapshot to load.
         expect(
@@ -368,7 +377,7 @@ def test_recovery_banner_appears_for_a_returning_bound_player(page, registry):
     _placed_frame(registry, "rec-2")
     registry.bind("rec-2", identity["player_id"], "HDMI-A-1", expected_generation=0)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
         # First snapshot: known bound Pi at authority_epoch 1, no banner yet.
         expect(
@@ -399,7 +408,7 @@ def test_retire_is_enabled_only_by_typing_the_handle(page, registry):
     player_id = identity["player_id"]
     handle = player_id[-6:]
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
         opener = pending.get_by_role("button", name=f"Retire player {player_id}", exact=True)
         opener.click()
@@ -569,6 +578,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         inspector = open_frame(page, "boot-1", "binding")
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
+        go(page, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
 
@@ -577,7 +587,7 @@ def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(pending).to_contain_text("No netboot record")
         # Without a serial the handle is the Player id's hash suffix.
@@ -612,7 +622,7 @@ def test_the_boot_outcome_names_each_tag_by_what_central_recorded(
         status=200, content_type="application/json",
         body=json.dumps({"frontier": NEW, "devices": [row]})))
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         pending = _group(page, "Pending players")
         expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         expect(pending.get_by_text(f"Reported serial {SERIAL} · {label}", exact=True)
@@ -646,6 +656,7 @@ def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, regi
     with operator_server(registry.db, registry.clock) as origin:
         with page.expect_response(NETBOOT):
             sign_in(page, origin)
+        go(page, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(pending).to_contain_text("Boot records unavailable")
         # The session is untouched: a refresh still authenticates and applies.
@@ -709,7 +720,7 @@ def test_a_card_lists_each_output_with_its_state_and_offers_no_retire_in_service
     registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0)
     _disconnect_output(registry, player_id, "HDMI-A-2")
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         bound = _group(page, "Bound players")
         card = bound.get_by_role("button", name=player_id, exact=True)
         expect(card).to_have_accessible_description(
@@ -730,7 +741,7 @@ def test_output_first_bind_opens_the_frame(page, registry):
     player_id = identity["player_id"]
     _placed_frame(registry, "lobby-left")
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         _frame_select(page, player_id).select_option("lobby-left")
         _card_outputs(page, player_id).get_by_role("button", name="Bind HDMI-A-1", exact=True
                                                    ).click()
@@ -750,7 +761,7 @@ def test_a_roster_bind_carries_the_generation_captured_on_selection(page, regist
     _placed_frame(registry, "lobby-left")
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         _frame_select(page, player_id).select_option("lobby-left")  # captures generation 0
         # The Frame changes (bound elsewhere, then unbound: generation 2), and a poll
         # delivers that; it is still unbound, so the choice stands.
@@ -771,7 +782,7 @@ def test_a_roster_pick_whose_frame_is_bound_elsewhere_is_dropped_and_announced(p
     _placed_frame(registry, "lobby-left")
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         _frame_select(page, player_id).select_option("lobby-left")
         registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0)
         _poll(page)
@@ -783,7 +794,7 @@ def test_a_roster_pick_whose_frame_is_bound_elsewhere_is_dropped_and_announced(p
 def test_unbind_all_lists_each_frame_and_its_live_runs(page, registry):
     player_id = _two_bound(registry, live_run_on="left")
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         dialog = _open_unbind_all(page, player_id)
         frames = dialog.get_by_role("list", name="Frames to unbind").get_by_role("listitem")
         expect(frames).to_have_text([
@@ -796,7 +807,7 @@ def test_unbind_all_reports_each_frame_and_never_resends_a_conflict(page, regist
     player_id = _two_bound(registry)
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         sent = _binding_requests(page)
         dialog = _open_unbind_all(page, player_id)  # captures left@1, right@1
         # `right` changes under the open dialog (generation 3), and a poll delivers it.
@@ -817,7 +828,7 @@ def test_unbind_all_reports_each_frame_and_never_resends_a_conflict(page, regist
 def test_unbind_all_stops_at_an_unknown_outcome(page, registry):
     player_id = _two_bound(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         dialog = _open_unbind_all(page, player_id)
         page.route("**/v1/operator/frames/*/binding", lambda route: route.abort()
                    if route.request.method == "DELETE" else route.continue_())
@@ -834,7 +845,7 @@ def test_a_dialog_survives_a_poll_that_regroups_its_player(page, registry):
     _placed_frame(registry, "lobby-left")
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         _group(page, "Pending players").get_by_role(
             "button", name=f"Retire player {player_id}", exact=True).click()
         dialog = _dialog(page)
@@ -855,7 +866,7 @@ def test_a_dialog_survives_a_poll_that_regroups_its_player(page, registry):
 
 def test_the_roster_says_when_there_are_no_players(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         expect(_group(page, "Pending players")).to_contain_text(
             "No Players yet. Power on one Pi on this network; it appears under Pending.")
 
@@ -863,7 +874,7 @@ def test_the_roster_says_when_there_are_no_players(page, registry):
 def test_a_free_output_says_when_there_are_no_unbound_frames(page, registry):
     enroll(registry, count=1)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         expect(_group(page, "Pending players")).to_contain_text(
             "No unbound frames. Draw one on the plan first.")
 
@@ -877,7 +888,7 @@ def test_the_roster_never_scrolls_sideways_at_390_px(page, registry):
         width_mm=400, height_mm=300, profile=LANDSCAPE))
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "equipment")
         expect(_group(page, "Pending players").get_by_role("combobox").first).to_be_visible()
         fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
         assert fits, page.evaluate("""() => [...document.querySelectorAll("body *")]

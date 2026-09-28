@@ -11,8 +11,8 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * A tabbed, read-only view of the selected Frame with three facets:
  * **Commissioning | Binding | Now-showing** (design §5 J3/J4). `facet` selects
  * the visible tab and defaults to "commissioning"; `onFacet(next)` is called
- * when the operator switches tabs (the tab state itself lives in the caller's
- * Plane B, App.jsx). The facets are composed here as declarative JSX CHILDREN —
+ * when the operator switches tabs (the open facet lives in the route,
+ * `#/wall/frames/<id>/<facet>`, owned by WallPage.jsx). The facets are composed here as declarative JSX CHILDREN —
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
@@ -23,11 +23,13 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  *
  * Above the tabs, a heading names the frame and a health header states its
  * health from the one classifier (health.js) — the same label its plan tile
- * shows. When attention-strip navigation issues a new `focusRequest`, the
+ * shows. When a visit from outside the plan (the attention strip, the Needs
+ * attention page, the Equipment roster) issues a new `focusRequest`, the
  * heading takes focus, and the Inspector scrolls into view only if it is off
  * screen; plain selection passes no request and never moves focus. A request
- * is consumed once — `onFocusDone` clears it — so remounting the Inspector
- * (Wall → Showrunner → Wall) never moves focus again.
+ * issued before its frame is shown (the route changes a moment later) waits
+ * for that frame's heading. A request is consumed once — `onFocusDone` clears it — so remounting the Inspector
+ * (Wall → another section → Wall) never moves focus again.
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * With no frame selected (`frameId` null) it renders its empty state, "Select
@@ -69,7 +71,7 @@ export function Inspector({
       sectionRef.current.scrollIntoView({ block: "start" });
     }
     onFocusDone();
-  }, [focusRequest]);
+  }, [focusRequest, frameId]);
   const activeLabel = FACETS.find((entry) => entry.key === active)?.label ?? active;
 
   if (frameId === null) {

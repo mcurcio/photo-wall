@@ -75,8 +75,15 @@ export function SceneAuthoring({ snapshot }) {
   // A targeted frame that a poll no longer lists is dropped and announced (§6).
   const [vanished, setVanished] = useState(/** @type {string|null} */ (null));
 
+  // Without a snapshot (none loaded yet, or Log out cleared it) there is no frame
+  // list, and a missing list must never read as "every frame was deleted": the
+  // prune effects below are no-ops then (flow design §6 (c)).
+  const loaded = snapshot != null;
   const frameKey = frames.map((frame) => frame.id).join(" ");
   useEffect(() => {
+    if (!loaded) {
+      return;
+    }
     const listed = new Set(frameKey === "" ? [] : frameKey.split(" "));
     const gone = [...targets].filter((frameId) => !listed.has(frameId));
     if (gone.length === 0) {
@@ -89,7 +96,7 @@ export function SceneAuthoring({ snapshot }) {
     setVanished(
       `${gone.join(", ")} ${gone.length === 1 ? "was" : "were"} deleted and removed from this Scene.`,
     );
-  }, [frameKey, targets]);
+  }, [loaded, frameKey, targets]);
 
   const targetIds = useMemo(() => [...targets], [targets]);
   const candidates = useCandidates(mode === "authored" ? sourceRef : "", targetIds);
@@ -98,7 +105,7 @@ export function SceneAuthoring({ snapshot }) {
   // candidates are read, a choice that is not among them is dropped. An edited
   // authored Scene keeps its stored items only while they are still candidates.
   useEffect(() => {
-    if (!candidates.ready) {
+    if (!loaded || !candidates.ready) {
       return;
     }
     setSelections((prev) => {
@@ -107,7 +114,7 @@ export function SceneAuthoring({ snapshot }) {
       );
       return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept);
     });
-  }, [candidates.ready, candidates.byFrame]);
+  }, [loaded, candidates.ready, candidates.byFrame]);
 
   const draft = {
     name,

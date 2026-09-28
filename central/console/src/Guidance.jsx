@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 
 /**
  * Non-blocking, dismissible first-run guidance banner (Bead 18, design Q8:
@@ -10,20 +10,18 @@ import React, { useState } from "react";
  * Frame, power on one Pi, bind the Frame to one of its Outputs, commission the
  * display — slice 2 §5). Once any Frame exists the banner never shows.
  *
- * The dismissed flag lives in PLANE B — ordinary component-local state, never in
- * the snapshot — so a Plane A refresh (focus/visibility, after-mutate, explicit
- * Refresh) replaces the fetched inventory alone and CANNOT resurrect a banner the
+ * The dismissed flag lives in PLANE B — the navigation shell's state, never in
+ * the snapshot — so a Plane A refresh (poll, after-mutate, explicit Refresh)
+ * replaces the fetched inventory alone and CANNOT resurrect a banner the
  * operator has dismissed (the two-plane rule, design §4a: a refresh merges
- * nothing into Plane B). The component stays mounted while it returns null, so
- * the dismissed state persists across refreshes.
+ * nothing into Plane B). The shell holds it, not this component, because the
+ * Wall page mounts only while it is current (flow design §6): leaving the Wall
+ * must not undo a dismissal either.
  *
- * @param {{snapshot: object|null}} props
+ * @param {{snapshot: object|null, dismissed: boolean, onDismiss: () => void}} props
  * @returns {JSX.Element|null}
  */
-export function Guidance({ snapshot }) {
-  // Plane B: component-local, seeded false, untouched by any snapshot refresh.
-  const [dismissed, setDismissed] = useState(false);
-
+export function Guidance({ snapshot, dismissed, onDismiss }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const firstRun = frames.length === 0;
   if (!firstRun || dismissed) {
@@ -43,7 +41,7 @@ export function Guidance({ snapshot }) {
       <button
         type="button"
         className="console__guidance-dismiss"
-        onClick={() => setDismissed(true)}
+        onClick={onDismiss}
       >
         Dismiss guidance
       </button>

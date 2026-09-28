@@ -55,9 +55,12 @@ const POLL_MS = 5000;
  * SIGN-IN (pass A §7). `auth` starts "checking": the first Plane A read decides
  * it (2xx signed in, 401 signed out; a network error or 5xx keeps checking and
  * the next poll retries). `signIn(token)` posts the token once — it is never
- * stored — and re-reads Plane A; `signOut()` deletes the session cookie and
- * clears Plane A. A Plane A 401 while signed in signs the tab out. Drafts live in
- * the regions Plane A mounts, so they are lost with it (pass A Question 4).
+ * stored — and re-reads Plane A; `signOut()` deletes the session cookie,
+ * clears Plane A and bumps `sessionEpoch`, on which the shell is keyed, so Log
+ * out discards every draft. A Plane A 401 while signed in signs the tab out but
+ * KEEPS the last snapshot: the sign-in screen overlays the still-mounted shell
+ * and drafts survive signing in again (flow design §6 (a), overturning pass A
+ * Question 4).
  *
  * POLLING (pass 2 §7). The provider is the ONE poller: every 5 s while the tab
  * is visible and not signed out it refreshes Plane A. A hidden
@@ -90,6 +93,8 @@ export function SnapshotProvider({ children }) {
   const [originRefused, setOriginRefused] = useState(false);
   // Whether the newest applied refresh failed (never inferred from age).
   const [refreshFailed, setRefreshFailed] = useState(false);
+  // Bumped by each Log out; the shell is keyed on it (flow design §6 (b)).
+  const [sessionEpoch, setSessionEpoch] = useState(0);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
   const pollingRef = useRef(false);
@@ -129,12 +134,14 @@ export function SnapshotProvider({ children }) {
     if (failure !== null) {
       setRefreshFailed(true);
       // No session (401 on the first read OR mid-session: expired, token
-      // rotated, cookie refused) drops the tab to the sign-in screen and clears
-      // the stale snapshot; a tab that was signed in says why. Any other failure
-      // (network/5xx) leaves the prior snapshot and state for the next poll.
+      // rotated, cookie refused) signs the tab out, which pauses the poll and
+      // shows the sign-in screen; a tab that was signed in says why. The last
+      // snapshot is KEPT (flow design §6 (a)): the shell stays mounted under the
+      // sign-in overlay, so no draft is lost and nothing reads as deleted. Only
+      // Log out clears it. Any other failure (network/5xx) leaves the prior
+      // snapshot and state for the next poll.
       if (failure?.status === 401) {
         const wasSignedIn = authRef.current === "signedIn";
-        setSnapshot(null);
         setAuth("signedOut");
         setAuthNotice(wasSignedIn ? "expired" : null);
       }
@@ -194,6 +201,9 @@ export function SnapshotProvider({ children }) {
     setAuth("signedOut");
     setAuthNotice(null);
     setRefreshFailed(false);
+    // A new session epoch: the shell is keyed on it, so it remounts and every
+    // draft is discarded (flow design §6 (b)).
+    setSessionEpoch((epoch) => epoch + 1);
   }, [setAuth]);
 
   const dismissOriginRefused = useCallback(() => setOriginRefused(false), []);
@@ -258,6 +268,7 @@ export function SnapshotProvider({ children }) {
       refreshFailed,
       originRefused,
       dismissOriginRefused,
+      sessionEpoch,
     }),
     [
       snapshot,
@@ -269,6 +280,7 @@ export function SnapshotProvider({ children }) {
       refreshFailed,
       originRefused,
       dismissOriginRefused,
+      sessionEpoch,
     ],
   );
   return React.createElement(SnapshotContext.Provider, { value }, children);
@@ -282,14 +294,15 @@ export function SnapshotProvider({ children }) {
  * superseded or fenced off by a write), the sign-in state `auth` with its
  * `authNotice`, `signIn(token)` and `signOut()`, `refreshFailed` (true while the
  * newest applied refresh failed) and `originRefused` (Central refused a write
- * for its origin; `dismissOriginRefused` clears it). Must be used within a
+ * for its origin; `dismissOriginRefused` clears it) and `sessionEpoch` (bumped
+ * by each Log out; the shell is keyed on it). Must be used within a
  * SnapshotProvider so every region and useMutate share one Plane A.
  *
  * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot|null>,
  *            auth: Auth, authNotice: AuthNotice,
  *            signIn: (token: string) => Promise<void>, signOut: () => Promise<void>,
  *            refreshFailed: boolean, originRefused: boolean,
- *            dismissOriginRefused: () => void}}
+ *            dismissOriginRefused: () => void, sessionEpoch: number}}
  */
 export function useSnapshot() {
   const value = useContext(SnapshotContext);

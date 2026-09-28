@@ -59,6 +59,12 @@ def sign_in(page, origin, token=ADMIN):
     """
     page.context.clear_cookies()
     page.goto(origin + "/console")
+    submit_sign_in(page, token)
+
+
+def submit_sign_in(page, token=ADMIN):
+    """Sign in through the sign-in screen already on the page, without loading it again:
+    after a session ends mid-use the screen overlays the console, which keeps its state."""
     page.get_by_label("Operator token").fill(token)
     page.get_by_role("button", name="Sign in", exact=True).click()
 

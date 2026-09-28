@@ -1,6 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 
-import { wallAttention } from "./health.js";
+import { AttentionList, attentionView } from "./AttentionList.jsx";
+import { formatRoute } from "./routes.js";
 
 // At most this many rows in the detail list; the rest are counted.
 const LIST_CAP = 8;
@@ -20,19 +21,18 @@ function frames(count) {
  * attention · 3 to set up"); ages live in the list, outside it, so a screen
  * reader is not re-announced on every poll.
  *
- * When Central's scheduler is neither "ok" nor "disabled", the liveness alarms
- * (health `cause` "liveness") collapse into ONE causal line: Players may be
- * unable to report while it is not ok, so listing each silent frame would blame
- * the equipment. The line says "may": a stopped scheduler that holds no lock
- * still accepts reports until the last offers expire (design §8). This is the
- * only place the strip mentions Central; the pill owns Central's health.
+ * The rows, including the one causal line that replaces the liveness alarms
+ * while Central's scheduler is not ok, come from AttentionList.jsx
+ * (`attentionView`), which the Needs attention page (#/attention) shares. This
+ * is the only place the strip mentions Central; the pill owns Central's health.
  *
- * The disclosure closes on Escape and returns focus to its toggle.
+ * The disclosure closes on Escape and returns focus to its toggle. Below the
+ * list, "Show all" opens the Needs attention page.
  *
- * In Wall mode each entry is a button calling `onNavigate(frameId)`; in
- * Showrunner mode `onNavigate` is null and entries are plain text, so the show
- * layer is never abandoned (R4). With no frames the strip renders nothing and
- * defers to the Guidance banner.
+ * On the Wall side (Wall, Equipment) and the Needs attention page each entry is
+ * a button calling `onNavigate(frameId)`; on a Show page `onNavigate` is null
+ * and entries are plain text, so the show layer is never abandoned (R4). With
+ * no frames the strip renders nothing and defers to the Guidance banner.
  *
  * @param {{snapshot: object, central: {scheduler: string|null},
  *          onNavigate: ((frameId: string) => void)|null}} props
@@ -41,7 +41,7 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const toggleRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const { frameCount, alarms, todos } = wallAttention(snapshot);
+  const { frameCount, alarms, todos, rows } = attentionView(snapshot, central);
   if (frameCount === 0) {
     return null;
   }
@@ -56,32 +56,6 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
         ]
           .filter(Boolean)
           .join(" · ");
-
-  const stalled = central?.scheduler ?? null;
-  const silenced =
-    stalled === null ? [] : alarms.filter((entry) => entry.health.cause === "liveness");
-  const rows = [
-    ...(silenced.length > 0
-      ? [
-          {
-            key: "scheduler",
-            text:
-              `${frames(silenced.length)} silent — Central's scheduler is ` +
-              `${stalled.replaceAll("_", " ")}; Players may be unable to report until it recovers.`,
-          },
-        ]
-      : []),
-    ...[...alarms.filter((entry) => !silenced.includes(entry)), ...todos].map(
-      ({ frame, health }) => ({
-        key: frame.id,
-        frameId: frame.id,
-        severity: health.severity,
-        text: `${frame.id} — ${health.label}`,
-      }),
-    ),
-  ];
-  const shown = rows.slice(0, LIST_CAP);
-  const more = rows.length - shown.length;
   const severity = alarms.length > 0 ? "alarm" : todos.length > 0 ? "todo" : "ok";
 
   return (
@@ -114,27 +88,37 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
         )}
       </div>
       {open && rows.length > 0 && (
-        <ul id={listId} className="attention__list" aria-label="Frames needing attention">
-          {shown.map((row) => (
-            <li key={row.key} className={`attention__item health--${row.severity ?? "alarm"}`}>
-              {row.frameId !== undefined && onNavigate !== null ? (
-                <button
-                  type="button"
-                  className="attention__entry"
-                  onClick={() => {
-                    setOpen(false);
-                    onNavigate(row.frameId);
-                  }}
-                >
-                  {row.text}
-                </button>
-              ) : (
-                row.text
-              )}
-            </li>
-          ))}
-          {more > 0 && <li className="attention__more">{`and ${more} more`}</li>}
-        </ul>
+        <div className="attention__panel">
+          <AttentionList
+            id={listId}
+            className="attention__list"
+            rows={rows}
+            cap={LIST_CAP}
+            entry={
+              onNavigate === null
+                ? null
+                : (row) => (
+                    <button
+                      type="button"
+                      className="attention__entry"
+                      onClick={() => {
+                        setOpen(false);
+                        onNavigate(row.frameId);
+                      }}
+                    >
+                      {row.text}
+                    </button>
+                  )
+            }
+          />
+          <a
+            className="attention__all"
+            href={formatRoute({ section: "attention" })}
+            onClick={() => setOpen(false)}
+          >
+            Show all
+          </a>
+        </div>
       )}
     </section>
   );

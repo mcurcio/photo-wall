@@ -9,19 +9,28 @@ helpers use the same names the tests always have.
 
 Tests that are *about* a form (its validation, focus, descriptions or chooser contents) keep
 their direct locators; these helpers are for tests that only need the task done.
+
+As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
+#/sources, #/wall, #/equipment, #/attention), reached from the sidebar (a drawer under
+850 px). Signing in lands on #/wall while no frame exists and on #/now once one does, so a
+test that needs a page goes to it.
 """
 
-import re
 from collections.abc import Mapping
 from urllib.parse import quote
 
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
 
-# The sections of §6, grouped as its route tables group them.
+# The sections of §6, grouped as its route tables group them, and their sidebar labels
+# (each page's <h1> reads the same).
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall", "equipment"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | {"attention"}
+LABELS = {
+    "now": "Now showing", "scenes": "Scenes", "schedule": "Schedule", "sources": "Photo sources",
+    "wall": "Wall", "equipment": "Equipment", "attention": "Needs attention",
+}
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
 FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": "Now-showing"}
@@ -30,33 +39,39 @@ FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": 
 def go(page, section):
     """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "equipment"
     or "attention". Name the section the test is about (a Run test goes to "now", a
-    Program test to "schedule"), because bead 1b makes each its own page.
+    Program test to "schedule").
 
-    Today: a Show section presses the "Showrunner" mode button and a Wall section the
-    "Wall" button (both idempotent); "attention" expands the attention strip's list if
-    it is collapsed. Bead 1b: a sidebar link or `#/<section>` route.
+    Clicks the section's sidebar link by its accessible name; on a narrow screen, where
+    the sidebar is a drawer, opens the drawer with "Menu" first. Waits for the page's
+    heading. The Wall link returns to the Wall as it was last shown (its frame and facet).
     """
-    if section in SHOW_SECTIONS:
-        page.get_by_role("button", name="Showrunner", exact=True).click()
-    elif section in WALL_SECTIONS:
-        page.get_by_role("button", name="Wall", exact=True).click()
-    elif section == "attention":
-        toggle = page.get_by_role("region", name="Wall attention", exact=True).get_by_role(
-            "button", name=re.compile(r"^(Show|Hide) frames$"))
-        if toggle.get_attribute("aria-expanded") != "true":
-            toggle.click()
-    else:
+    if section not in SECTIONS:
         raise ValueError(f"unknown console section {section!r}; expected one of {sorted(SECTIONS)}")
+    sidebar = page.get_by_role("navigation", name="Sections", exact=True)
+    menu = page.get_by_role("button", name="Menu", exact=True)
+    expect(sidebar.or_(menu)).to_be_visible()  # the shell is shown (signed in)
+    if menu.is_visible():
+        menu.click()
+        sidebar = page.get_by_role("dialog", name="Menu", exact=True).get_by_role(
+            "navigation", name="Sections", exact=True)
+    sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
+    expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
+
+
+def visit(page, route):
+    """Follow hash `route` ("#/…") in the loaded console, as a typed URL or a bookmark
+    does: a new history entry, and no page load."""
+    page.evaluate("(route) => { window.location.hash = route; }", route)
 
 
 def visible_page(page):
-    """The currently visible page content, to scope negative checks to what is on screen.
+    """The page on screen, to scope negative checks to what is on screen.
 
-    Today the console renders only the current mode, so this is `<main>`. Bead 1b keeps
-    Show sections mounted but `hidden`, and changes this to `main section:not([hidden])`:
-    `get_by_text(...).to_have_count(0)` would otherwise also count hidden pages' DOM.
+    Show pages stay mounted and `hidden` when not current (§3 rule 2), and
+    `get_by_text(...).to_have_count(0)` counts hidden DOM too (`get_by_role` does not), so a
+    negative text check is scoped through this: `main`'s one page without `hidden`.
     """
-    return page.locator("main")
+    return page.locator("main > section:not([hidden])")
 
 
 def connect(page, origin, section=None, *, paused_at=None):
@@ -182,14 +197,16 @@ def open_frame(page, frame_id, facet):
     """Open frame `frame_id` on the Wall at `facet` ("binding", "commissioning" or
     "nowshowing", the Inspector.jsx keys); returns its Inspector.
 
-    Today: go to the Wall, select the frame on the plan by identity (never coordinates)
-    and choose the facet's tab. Bead 1b: the `#/wall/frames/<id>/<facet>` route.
+    Follows the frame's route, `#/wall/frames/<id>/<facet>`, as a typed URL would: the
+    frame is selected on the plan and its Inspector opens at that facet, without moving
+    focus.
     """
     if facet not in FACETS:
         raise ValueError(f"unknown Inspector facet {facet!r}; expected one of {sorted(FACETS)}")
-    go(page, "wall")
-    page.get_by_role("button", name=f"Frame {frame_id}", exact=True).click()
+    expect(page.get_by_role("banner")).to_be_visible()  # the shell is shown (signed in)
+    visit(page, f"#/wall/frames/{quote(frame_id, safe='')}/{facet}")
     inspector = page.get_by_role("region", name=f"Frame {frame_id} inspector", exact=True)
     expect(inspector).to_be_visible()
-    inspector.get_by_role("tab", name=FACETS[facet], exact=True).click()
+    expect(inspector.get_by_role("tab", name=FACETS[facet], exact=True)).to_have_attribute(
+        "aria-selected", "true")
     return inspector
