@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
@@ -17,7 +17,13 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            route: import("./routes.js").Route,
  *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
  *            wall: import("./WallPage.jsx").WallMemory,
- *            recovery: {recovered: string[], dismiss: () => void}}} RouteContext
+ *            recovery: {recovered: string[], dismiss: () => void},
+ *            recentSceneId: string|null, rememberScene: (sceneId: string) => void,
+ *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void}} RouteContext
+ *   `recentSceneId` is the Scene the operator last saved or picked on a Scene card
+ *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
+ *   prefill their Scene step from it. `markDraft` is how a Show section's flow says
+ *   it holds an unsaved draft; the sidebar then marks that section "Draft".
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
  *            samplePaths: string[]}} RouteEntry
@@ -38,8 +44,11 @@ const SHOW = new Set(showRoutes.map((entry) => entry.section));
  * The sidebar's links, one group per route table. The current section's link is
  * marked `aria-current="page"` (and, visibly, by weight and a leading bar as well as
  * the tint). `onChoose(section)` runs on a click, before the link changes the hash.
+ * A section in `drafts` carries the word "Draft" (never a dot alone), as the link's
+ * description, so its name stays the section's label.
  */
-function SectionNav({ current, hrefFor, onChoose }) {
+function SectionNav({ current, hrefFor, onChoose, drafts }) {
+  const markerId = useId();
   return (
     <nav className="nav" aria-label="Sections">
       {TABLES.map((table) => (
@@ -50,9 +59,16 @@ function SectionNav({ current, hrefFor, onChoose }) {
                 className="nav__link"
                 href={hrefFor(section)}
                 aria-current={section === current ? "page" : undefined}
+                aria-label={label}
+                aria-describedby={drafts.has(section) ? `${markerId}-${section}` : undefined}
                 onClick={() => onChoose?.(section)}
               >
                 {label}
+                {drafts.has(section) && (
+                  <span id={`${markerId}-${section}`} className="nav__draft">
+                    Draft
+                  </span>
+                )}
               </a>
             </li>
           ))}
@@ -121,6 +137,24 @@ export function Shell({ hidden = false }) {
     health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
   const wall = useWallMemory(route, snapshot, navigate);
   const recovery = useRecovery(snapshot);
+  // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
+  // sections holding an unsaved draft. Log out remounts the shell and clears both.
+  const [recentSceneId, rememberScene] = useState(/** @type {string|null} */ (null));
+  const [drafts, setDrafts] = useState(() => new Set());
+  const markDraft = useCallback((section, dirty) => {
+    setDrafts((previous) => {
+      if (previous.has(section) === dirty) {
+        return previous;
+      }
+      const next = new Set(previous);
+      if (dirty) {
+        next.add(section);
+      } else {
+        next.delete(section);
+      }
+      return next;
+    });
+  }, []);
 
   // Pages mount their content at the first snapshot and keep it for this session
   // epoch (App keys the shell on it), so a draft outlives any later snapshot state.
@@ -200,7 +234,18 @@ export function Shell({ hidden = false }) {
     setHeadingFor(section);
   };
 
-  const ctx = { snapshot, bootFacts, central: health, route, navigate, wall, recovery };
+  const ctx = {
+    snapshot,
+    bootFacts,
+    central: health,
+    route,
+    navigate,
+    wall,
+    recovery,
+    recentSceneId,
+    rememberScene,
+    markDraft,
+  };
 
   return (
     <div className="shell" hidden={hidden} inert={hidden ? "" : undefined}>
@@ -266,7 +311,7 @@ export function Shell({ hidden = false }) {
 
       <div className="shell__body">
         <div className="shell__sidebar">
-          <SectionNav current={current} hrefFor={hrefFor} />
+          <SectionNav current={current} hrefFor={hrefFor} drafts={drafts} />
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
           {current === null && <p className="page__loading">Loading…</p>}
@@ -297,7 +342,7 @@ export function Shell({ hidden = false }) {
             <CloseIcon />
           </button>
         </div>
-        <SectionNav current={current} hrefFor={hrefFor} onChoose={chooseFromDrawer} />
+        <SectionNav current={current} hrefFor={hrefFor} onChoose={chooseFromDrawer} drafts={drafts} />
       </dialog>
     </div>
   );

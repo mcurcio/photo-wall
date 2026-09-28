@@ -14,6 +14,11 @@ As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #
 #/sources, #/wall, #/equipment, #/attention), reached from the sidebar (a drawer under
 850 px). Signing in lands on #/wall while no frame exists and on #/now once one does, so a
 test that needs a page goes to it.
+
+As of bead 2 a Scene is made in the Scene flow (#/scenes/new/<step>): "New Scene" on the
+Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback → Review, one step
+at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_continue` and
+`scene_form` are its parts, for tests about the flow's own steps.
 """
 
 from collections.abc import Mapping
@@ -88,32 +93,73 @@ def connect(page, origin, section=None, *, paused_at=None):
         go(page, section)
 
 
-def author_scene(page, scene_id, source, frames, *, seconds=None, submit=True):
-    """Author a Scene from Photo source `source` on `frames` and, with `submit`, save it.
+# The Scene flow's kinds (flow design §7 J4, step 1), by their labels.
+LIVE = "Live from a photo source"
+HAND_PICKED = "Hand-picked per frame"
+
+
+def scene_form(page):
+    """The Scene flow's current step: the form "Author a Scene" in the Scenes region. Every
+    step renders it, with the step's fields and its Back and Continue (Review: Save Scene or
+    Replace Scene)."""
+    return page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+        "form", name="Author a Scene", exact=True)
+
+
+def scene_continue(page, step=None):
+    """Press the current step's Continue; with `step` (a stepper label such as "Frames"),
+    wait until that step shows."""
+    scene_form(page).get_by_role("button", name="Continue", exact=True).click()
+    if step is not None:
+        expect(page.get_by_role("navigation", name="Steps", exact=True).locator(
+            "[aria-current=step]")).to_contain_text(step)
+
+
+def start_scene(page, *, hand_picked=False):
+    """Go to Scenes, press "New Scene", answer Kind (live, or hand-picked per frame) and
+    Continue; returns the flow's form, now on the Photos step."""
+    go(page, "scenes")
+    page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+        "button", name="New Scene", exact=True).click()
+    form = scene_form(page)
+    form.get_by_label(HAND_PICKED if hand_picked else LIVE, exact=True).check()
+    scene_continue(page, "Photos")
+    return form
+
+
+def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, submit=True):
+    """Author a Scene from Photo source `source` on `frames` through the Scene flow and,
+    with `submit`, save it.
 
     `frames` is the target frame ids for a Scene live from the source, or a
-    {frame_id: asset_id} mapping for one hand-picked per frame ("Authored per-frame")
-    with that item chosen on each frame. `scene_id` is typed as the Scene name, so it must
-    be an id the name rule keeps as is (lowercase words joined by hyphens). `seconds`
-    fills "Seconds per cycle"; None keeps the form's default.
+    {frame_id: asset_id} mapping for one hand-picked per frame with that item chosen on
+    each frame. The flow runs Kind → Photos → Frames → [Media per frame] → Playback →
+    Review. `seconds` fills "Seconds per cycle" and `loop` sets "Keep playing until the
+    Program ends" (under Playback's Advanced); None keeps each default. `scene_id` is typed
+    as the Scene name on Review, so it must be an id the name rule keeps as is (lowercase
+    words joined by hyphens), unless the test is about the name rule.
 
-    With `submit`, saves, waits for the saved Scene to be listed and returns the save's
-    PUT response. Without it, returns the filled, unsaved form.
+    With `submit`, saves, waits for the saved Scene's card and returns the save's PUT
+    response. Without it, returns the flow's form on Review, filled and unsaved.
     """
-    go(page, "scenes")
-    scenes = page.get_by_role("region", name="Scenes", exact=True)
-    form = scenes.get_by_role("form", name="Author a Scene", exact=True)
     picks = frames if isinstance(frames, Mapping) else None
-    form.get_by_label("Scene name", exact=True).fill(scene_id)
-    if picks is not None:
-        form.get_by_label("Authored per-frame", exact=True).check()
+    form = start_scene(page, hand_picked=picks is not None)
     form.get_by_label("Source", exact=True).select_option(source)
+    scene_continue(page, "Frames")
     for frame_id in frames:
         form.get_by_label(f"Target frame {frame_id}", exact=True).check()
-    for frame_id, asset_id in (picks or {}).items():
-        form.get_by_label(f"Media for frame {frame_id}", exact=True).select_option(asset_id)
+    if picks is not None:
+        scene_continue(page, "Media per frame")
+        for frame_id, asset_id in picks.items():
+            form.get_by_label(f"Media for frame {frame_id}", exact=True).select_option(asset_id)
+    scene_continue(page, "Playback")
     if seconds is not None:
         form.get_by_label("Seconds per cycle", exact=True).fill(str(seconds))
+    if loop is not None:
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        form.get_by_label("Keep playing until the Program ends", exact=True).set_checked(loop)
+    scene_continue(page, "Review")
+    form.get_by_label("Scene name", exact=True).fill(scene_id)
     if not submit:
         return form
     route = f"/v1/operator/scenes/{scene_id}" + ("/authored" if picks is not None else "")
@@ -122,7 +168,8 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, submit=True):
     ) as info:
         form.get_by_role("button", name="Save Scene", exact=True).click()
     # Listed before anything can use it (proves the refresh after the save landed).
-    expect(scenes.get_by_label(f"Scene {scene_id}", exact=True)).to_be_visible()
+    expect(page.get_by_role("region", name="Scenes", exact=True).get_by_label(
+        f"Scene {scene_id}", exact=True)).to_be_visible()
     return info.value
 
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useId, useState } from "react";
+import React, { forwardRef, useCallback, useId, useState } from "react";
 
 import { idFromName } from "./authoring.js";
 
@@ -52,11 +52,7 @@ export function useProblems(problems) {
     }
     setSummary(list);
     setSubmitted(true);
-    const first = document.getElementById(idFor(list[0].field));
-    const target = first?.matches("input, select, textarea, button")
-      ? first
-      : first?.querySelector("input, select, textarea, button");
-    target?.focus();
+    fieldControl(idFor(list[0].field))?.focus();
     return false;
   };
 
@@ -68,6 +64,23 @@ export function useProblems(problems) {
   }, []);
 
   return { idFor, touch, reasonFor, check, reset, summary };
+}
+
+/**
+ * The control of the field with element id `id`: the element itself when it is a
+ * control, otherwise its first control (a fieldset of checkboxes); null when absent.
+ *
+ * @param {string} id
+ * @returns {HTMLElement|null}
+ */
+export function fieldControl(id) {
+  const element = document.getElementById(id);
+  if (element === null) {
+    return null;
+  }
+  return element.matches("input, select, textarea, button")
+    ? element
+    : element.querySelector("input, select, textarea, button");
 }
 
 /**
@@ -133,7 +146,8 @@ export function PriorityField({ label, problems, value, onChange }) {
 /**
  * The name and the id it saves under (§5): "Saved as `family-evening` ·
  * Change". Change — or a name with no usable id — reveals the Id field, which
- * then decides the id. Scenes and Programs both name themselves through here.
+ * then decides the id. Programs name themselves through here; the Scene flow places
+ * the two parts itself ({@link NameField} on Review, {@link IdField} in its Advanced).
  *
  * @param {{kind: string, name: string, idOverride: string|null,
  *          onName: (name: string) => void,
@@ -141,86 +155,145 @@ export function PriorityField({ label, problems, value, onChange }) {
  *          problems: ReturnType<typeof useProblems>}} props
  */
 export function IdentityFields({ kind, name, idOverride, onName, onIdOverride, problems }) {
-  const derived = idFromName(name);
-  const idShown = idOverride !== null || (name.trim() !== "" && derived === null);
-  const nameField = problems.idFor("name");
+  const idShown = idOverride !== null || idNeeded(name);
   return (
     <>
-      <Field
-        id={nameField}
-        label={`${kind} name`}
-        reason={problems.reasonFor("name")}
-        hint={
-          !idShown && derived !== null ? (
-            <>
-              {"Saved as "}
-              <code>{derived}</code>
-              {" · "}
-              <button
-                type="button"
-                className="field__inline-action"
-                onClick={() => {
-                  onIdOverride(derived);
-                  problems.touch("id");
-                }}
-              >
-                Change
-              </button>
-            </>
-          ) : null
-        }
-      >
-        {(props) => (
-          <input
-            {...props}
-            type="text"
-            value={name}
-            onChange={(event) => {
-              onName(event.target.value);
-              problems.touch("name");
-            }}
-          />
-        )}
-      </Field>
+      <NameField
+        kind={kind}
+        name={name}
+        idShown={idShown}
+        onName={onName}
+        onChangeId={() => onIdOverride(idFromName(name))}
+        problems={problems}
+      />
       {idShown && (
-        <Field id={problems.idFor("id")} label="Id" reason={problems.reasonFor("id")}>
-          {(props) => (
-            <input
-              {...props}
-              type="text"
-              value={idOverride ?? ""}
-              autoCapitalize="off"
-              autoCorrect="off"
-              spellCheck={false}
-              onChange={(event) => {
-                onIdOverride(event.target.value);
-                problems.touch("id");
-              }}
-            />
-          )}
-        </Field>
+        <IdField value={idOverride ?? ""} onIdOverride={onIdOverride} problems={problems} />
       )}
     </>
   );
 }
 
 /**
+ * Whether a name leaves no usable id, so the operator must type one (§5: 「夕方」).
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function idNeeded(name) {
+  return name.trim() !== "" && idFromName(name) === null;
+}
+
+/**
+ * "<Kind> name" (field `name`). While the id is derived (`idShown` false), its hint
+ * names the id it saves under, "Saved as `family-evening` · Change"; Change calls
+ * `onChangeId`, which reveals the Id field.
+ *
+ * @param {{kind: string, name: string, idShown: boolean,
+ *          onName: (name: string) => void, onChangeId: () => void,
+ *          problems: ReturnType<typeof useProblems>}} props
+ */
+export function NameField({ kind, name, idShown, onName, onChangeId, problems }) {
+  const derived = idFromName(name);
+  return (
+    <Field
+      id={problems.idFor("name")}
+      label={`${kind} name`}
+      reason={problems.reasonFor("name")}
+      hint={
+        !idShown && derived !== null ? (
+          <>
+            {"Saved as "}
+            <code>{derived}</code>
+            {" · "}
+            <button
+              type="button"
+              className="field__inline-action"
+              onClick={() => {
+                onChangeId();
+                problems.touch("id");
+              }}
+            >
+              Change
+            </button>
+          </>
+        ) : null
+      }
+    >
+      {(props) => (
+        <input
+          {...props}
+          type="text"
+          value={name}
+          onChange={(event) => {
+            onName(event.target.value);
+            problems.touch("name");
+          }}
+        />
+      )}
+    </Field>
+  );
+}
+
+/**
+ * "Id" (field `id`): the id the operator types, under the one id rule.
+ *
+ * @param {{value: string, onIdOverride: (id: string) => void,
+ *          problems: ReturnType<typeof useProblems>}} props
+ */
+export function IdField({ value, onIdOverride, problems }) {
+  return (
+    <Field id={problems.idFor("id")} label="Id" reason={problems.reasonFor("id")}>
+      {(props) => (
+        <input
+          {...props}
+          type="text"
+          value={value}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onChange={(event) => {
+            onIdOverride(event.target.value);
+            problems.touch("id");
+          }}
+        />
+      )}
+    </Field>
+  );
+}
+
+/**
  * The submit summary: the problems as they were when the operator submitted.
  *
- * @param {{summary: import("./authoring.js").Problem[]|null, label: string}} props
+ * With `onOpen`, each problem is a button that routes to its field: a flow passes one
+ * that opens the field's step (flow design §6 `FIELD_STEP`) and focuses the field.
+ * The summary itself can take focus (`tabIndex=-1`) through the forwarded ref.
+ *
+ * @param {{summary: import("./authoring.js").Problem[]|null, label: string,
+ *          onOpen?: ((field: string) => void)|null}} props
  */
-export function ProblemSummary({ summary, label }) {
+export const ProblemSummary = forwardRef(function ProblemSummary(
+  { summary, label, onOpen = null },
+  ref,
+) {
   if (summary === null) {
     return null;
   }
   return (
-    <div className="problems" role="alert" aria-label={label}>
+    <div ref={ref} className="problems" role="alert" aria-label={label} tabIndex={-1}>
       <p className="problems__title">Nothing was sent. Fix these first:</p>
       <ul className="problems__list">
         {summary.map((problem) => (
-          <li key={`${problem.field}:${problem.message}`}>{problem.message}</li>
+          <li key={`${problem.field}:${problem.message}`}>
+            {onOpen === null ? (
+              problem.message
+            ) : (
+              <button type="button" className="problems__link" onClick={() => onOpen(problem.field)}>
+                {problem.message}
+              </button>
+            )}
+          </li>
         ))}
       </ul>
     </div>
   );
-}
+});

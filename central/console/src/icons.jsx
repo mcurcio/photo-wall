@@ -43,3 +43,21 @@ export function CloseIcon() {
     </Icon>
   );
 }
+
+/** A chevron pointing right; turned down (CSS) while the disclosure it heads is open. */
+export function ChevronIcon() {
+  return (
+    <Icon>
+      <path d="M9 6l6 6-6 6" />
+    </Icon>
+  );
+}
+
+/** A check mark: a flow step before the current one. */
+export function CheckIcon() {
+  return (
+    <Icon>
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Icon>
+  );
+}

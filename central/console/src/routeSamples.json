@@ -1,7 +1,15 @@
 {
   "show": {
     "now": ["#/now", "#/now/show/scene", "#/now/show/review"],
-    "scenes": ["#/scenes", "#/scenes/new/kind", "#/scenes/new/review", "#/scenes/sample-scene/edit/review"],
+    "scenes": [
+      "#/scenes",
+      "#/scenes/new/kind",
+      "#/scenes/new/photos",
+      "#/scenes/new/frames",
+      "#/scenes/new/playback",
+      "#/scenes/new/review",
+      "#/scenes/sample-scene/edit/review"
+    ],
     "schedule": ["#/schedule", "#/schedule/new/scene", "#/schedule/new/review"],
     "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name"]
   },

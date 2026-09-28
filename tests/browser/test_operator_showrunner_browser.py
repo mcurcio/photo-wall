@@ -29,8 +29,12 @@ from console_tasks import (
     author_scene,
     connect,
     go,
+    scene_continue,
+    scene_form,
     schedule_program,
     show_now,
+    start_scene,
+    visit,
 )
 from media_queue import RecordingMediaQueue
 from operator_harness import (
@@ -399,15 +403,17 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         connect(page, origin, "scenes")
 
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
         # Not vacuously true: the scene must not already exist.
         expect(scenes.get_by_label(f"Scene {AUTHORED_SCENE_ID}", exact=True)).to_have_count(0)
 
-        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        # The flow: Kind (hand-picked) → Photos → Frames → Media per frame → Playback →
+        # Review, with the same field labels the single form had.
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
 
         # Each Frame's chooser loads its (profile-filtered) candidates: two
         # portrait candidates each, plus the placeholder option.
@@ -419,7 +425,10 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         # A DISTINCT asset per Frame — the essence of per-frame authoring.
         valid_choice.select_option(portrait_a.asset.asset_id)
         invalid_choice.select_option(portrait_b.asset.asset_id)
+        scene_continue(page, "Playback")
         form.get_by_label("Seconds per cycle", exact=True).fill("20")
+        scene_continue(page, "Review")
+        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
 
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{AUTHORED_SCENE_ID}/authored")
@@ -465,11 +474,11 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
 
-        scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
 
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         # Both portrait candidates are eligible and offered.
@@ -486,10 +495,9 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
     queue = _seed_source(registry, _authored_photos(registry))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
-        form = page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-            "form", name="Author a Scene", exact=True)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
 
         reads = RequestGate(page, "**/v1/operator/inventory")
         reads.holding = True
@@ -498,8 +506,10 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         reads.holding = False
         expect(page.get_by_text(re.compile(r"updated 5 s ago"))).to_be_visible()
 
-        # The candidates GET, through apiWrite, while the poll is in flight.
+        # The candidates GET, through apiWrite, while the poll is in flight: the flow
+        # reads them as soon as a frame is targeted, whichever step shows.
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option", name=re.compile(r"^Photo 108×192"))).to_have_count(1)
 
@@ -822,8 +832,7 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
 
 
 def _scenes_form(page):
-    return page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-        "form", name="Author a Scene", exact=True)
+    return scene_form(page)
 
 
 def _epoch(page, local):
@@ -835,22 +844,30 @@ def _epoch(page, local):
 
 def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
     """§15 tracer: the operator names a Scene, sees the id it saves under, keeps
-    "Keep playing" on and saves; the form clears and the list shows the id. A
-    Program 18:00–20:00 with Central 5 min past 18:00 still holds its Run live —
-    a Scene no longer plays one cycle and stops (the P1)."""
+    "Keep playing" on and saves; the flow's draft is discarded and the list shows the id.
+    A Program 18:00–20:00 with Central 5 min past 18:00 still holds its Run live — a
+    Scene no longer plays one cycle and stops (the P1).
+
+    Bead 2: the Scene form is a flow. "Keep playing" is on by default under Playback's
+    Advanced, the name is asked on Review, and "the form clears" is now "the draft is
+    discarded": the flow returns to the cards, which offer a fresh "New Scene" and no
+    "Resume draft"."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = _scenes_form(page)
-
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
+        scene_continue(page, "Review")
         name = form.get_by_label("Scene name", exact=True)
         name.fill("Family Evening")
         expect(name).to_have_accessible_description(re.compile("Saved as family-evening"))
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/family-evening")
             and r.request.method == "PUT"
@@ -860,10 +877,11 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
         assert info.value.status == 200
         assert body["scene_id"] == "family-evening" and body["loop"] is True
 
-        # The form clears, so the saved Scene never reads as a collision.
+        # The draft is discarded, so the saved Scene never reads as a collision.
         expect(scenes.get_by_label("Scene family-evening", exact=True)).to_be_visible()
-        expect(name).to_have_value("")
-        expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
+        expect(scenes.get_by_role("button", name="New Scene", exact=True)).to_be_visible()
+        expect(scenes.get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
+        expect(scenes.get_by_text(re.compile("already exists"))).to_have_count(0)
 
         start = _epoch(page, "2027-03-01T18:00")
         registry.clock.advance(start + 300 - registry.clock.utc())
@@ -877,21 +895,46 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
 
 
 def test_a_name_without_a_latin_letter_asks_for_an_id(page, registry):
+    """Bead 2: the Id sits under Review's Advanced; a name with no usable id opens it at
+    once with the reason (it used to appear beside the name in the single form)."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill("夕方")
+        form = author_scene(page, "夕方", SOURCE, (VALID_FRAME,), submit=False)
         identifier = form.get_by_label("Id", exact=True)
         expect(identifier).to_be_visible()
+        expect(form.get_by_role("button", name="Advanced", exact=True)).to_have_attribute(
+            "aria-expanded", "true")
         expect(identifier).to_have_accessible_description(
             "This name needs a Latin letter or digit for its id; type an id.")
         identifier.fill("yugata")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/yugata") and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+
+
+def test_the_id_is_derived_from_the_name_under_advanced_and_can_be_changed(page, registry):
+    """Bead 2, slice 3 §5: Review's Advanced says the id the name saves under; "Change"
+    in the name's hint opens it at the Id field, and a typed id is what is saved."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "Family Evening", SOURCE, (VALID_FRAME,), submit=False)
+        advanced = form.get_by_role("button", name="Advanced", exact=True)
+        expect(advanced).to_have_attribute("aria-expanded", "false")
+        expect(advanced).to_have_accessible_description("Id: family-evening")
+        form.get_by_role("button", name="Change", exact=True).click()
+        identifier = form.get_by_label("Id", exact=True)
+        expect(identifier).to_be_focused()
+        expect(identifier).to_have_value("family-evening")
+        identifier.fill("evening-2")
+        expect(advanced).to_have_accessible_description("Id: evening-2")
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/scenes/evening-2") and r.request.method == "PUT"
         ) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert info.value.status == 200
@@ -903,16 +946,13 @@ def test_a_colliding_name_is_refused_before_any_request(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin)
         author_scene(page, "family-evening", SOURCE, (VALID_FRAME,))
-        form = _scenes_form(page)
         puts = []
         page.on("request", lambda request: puts.append(request.url)
                 if request.method == "PUT" else None)
+        form = author_scene(page, "Family Evening", SOURCE, (VALID_FRAME,), submit=False)
         name = form.get_by_label("Scene name", exact=True)
-        name.fill("Family Evening")
         collision = "A Scene called family-evening already exists; choose another name."
         expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_role("button", name="Save Scene", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(collision)
         expect(name).to_be_focused()
@@ -922,11 +962,16 @@ def test_a_colliding_name_is_refused_before_any_request(page, registry):
 def test_the_problem_summary_is_frozen_at_submit(page, registry):
     """§6: submitting with problems sends nothing and freezes a summary; a poll
     that changes the live problems (another operator saves "evening") updates
-    the field's reason but never rewrites the summary under the reader."""
+    the field's reason but never rewrites the summary under the reader.
+
+    Bead 2: Review is reached by a typed URL with the Source and frames unanswered, so
+    Save lists problems that live on earlier steps; focus goes to the summary (its first
+    entry opens the Photos step), not to a Source field that Review does not show."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        visit(page, "#/scenes/new/review")
         form = _scenes_form(page)
         name = form.get_by_label("Scene name", exact=True)
         name.fill("Evening")
@@ -934,7 +979,7 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
         summary = form.get_by_role("alert")
         expect(summary).to_contain_text("Choose a Source.")
         expect(summary).to_contain_text("Choose at least one frame.")
-        expect(form.get_by_label("Source", exact=True)).to_be_focused()
+        expect(summary).to_be_focused()
 
         _runtime(registry).command("set_scene", Scene(
             scene_id="evening",
@@ -1088,11 +1133,9 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        form.get_by_label("Keep playing until the Program ends", exact=True).uncheck()
+        form = author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,), loop=False, submit=False)
+        # Review lists the advanced value too.
+        expect(form.get_by_text("No, it plays one cycle", exact=True)).to_be_visible()
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
@@ -1180,7 +1223,9 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = _scenes_form(page)
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         lobby = form.get_by_role("group", name="Frames on lobby", exact=True)
         wall = form.get_by_role("group", name="Frames on wall", exact=True)
         picked = lobby.get_by_role("checkbox", name=f"Target frame {LOBBY_FRAME}", exact=True)
@@ -1198,9 +1243,9 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
+        form = start_scene(page)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
 
@@ -1209,6 +1254,9 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
         expect(form.get_by_role("status")).to_have_text(
             f"{LOBBY_FRAME} was deleted and removed from this Scene.")
         expect(form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)).to_have_count(0)
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
@@ -1546,18 +1594,25 @@ def _console_scene(scene_id, frame=VALID_FRAME, **fields):
 
 
 def _scene_row(page, scene_id):
-    """A Scene's row, its disclosure opened."""
-    row = page.get_by_role("region", name="Scenes", exact=True).get_by_label(
+    """A Scene's card (bead 2: a summary card, no longer a disclosure to open)."""
+    return page.get_by_role("region", name="Scenes", exact=True).get_by_label(
         f"Scene {scene_id}", exact=True)
-    row.get_by_text(f"Scene {scene_id}", exact=True).click()
-    return row
+
+
+def _hash(page):
+    return page.evaluate("window.location.hash")
 
 
 def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):
     """§13: a Scene saved with its other fields at their defaults stays editable
     (mutation probe: compare without filling defaults); Edit shows the stored id and
     never re-derives it (mutation probe: the name rule would send lobby-loop-v2); Replace
-    is confirmed and sends revision + 1."""
+    is confirmed and sends revision + 1.
+
+    Bead 2: Edit opens the flow at Review, which lists the stored values (they used to be
+    the filled form's fields); "Change" opens the value's step and focuses it, and
+    Continue returns to Review. After Replace the flow returns to the cards (#/scenes)
+    instead of an emptied form."""
     _seed(registry)
     queue = _seed_source(registry)
     _runtime(registry).command("set_scene", _console_scene(STORED_ID))
@@ -1571,11 +1626,17 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 
         form = _scenes_form(page)
         expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
+        assert _hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
-        expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
-        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text(SOURCE)
+        expect(answers).to_contain_text(VALID_FRAME)
+        expect(answers.get_by_text("Yes", exact=True)).to_be_visible()  # keep playing
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        seconds = form.get_by_label("Seconds per cycle", exact=True)
+        expect(seconds).to_be_focused()
+        seconds.fill("45")
+        scene_continue(page, "Review")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
 
         dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
@@ -1593,7 +1654,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
             "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
         expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
-        expect(form.get_by_label("Scene name", exact=True)).to_be_visible()
+        assert _hash(page) == "#/scenes"
 
 
 def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, registry):
@@ -1647,16 +1708,26 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
         expect(row).to_contain_text("authored: 2 chosen items")
         row.get_by_role("button", name=f"Edit Scene {AUTHORED_SCENE_ID}", exact=True).click()
 
+        # Bead 2: the Kind is on Review ("Hand-picked per frame", the old "Authored
+        # per-frame"), and the choosers are on the Media per frame step.
         form = _scenes_form(page)
-        expect(form.get_by_label("Authored per-frame", exact=True)).to_be_checked()
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text("Hand-picked per frame")
         # An authored Scene does not store its Source: the operator picks it.
+        expect(answers).to_contain_text("Not chosen")
+        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
+            "button", name="Photos", exact=True).click()
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        scene_continue(page, "Media per frame")
         expect(form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)).to_have_value(a)
         # b left the Source, so it is no longer a candidate and is not kept.
         invalid_choice = form.get_by_label(f"Media for frame {INVALID_FRAME}", exact=True)
         expect(invalid_choice.get_by_role("option")).to_have_count(2)
         expect(invalid_choice).to_have_value("")
         invalid_choice.select_option(a)
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
         with page.expect_response(
             lambda r: r.url.endswith(f"/scenes/{AUTHORED_SCENE_ID}/authored")
@@ -1691,7 +1762,10 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
 
         with registry.db.transaction() as conn:
             conn.execute("UPDATE media_sources SET status='ok' WHERE source_ref=%s", (SOURCE,))
+        # Bead 2: the chooser is on the Media per frame step; Continue returns to Review.
+        form.get_by_role("button", name="Change Media per frame", exact=True).click()
         form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(b)
+        scene_continue(page, "Review")
         _drop_member(registry, b)
         with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
@@ -1699,6 +1773,7 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
         expect(scenes).to_contain_text(
             "Could not save Scene. That item is no longer in the Source; choose again.")
         # The choosers read their candidates again: b is no longer offered.
+        form.get_by_role("button", name="Change Media per frame", exact=True).click()
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option")).to_have_count(2)
         expect(choice).to_have_value("")
@@ -1717,7 +1792,9 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scene_row(page, SCENE_ID).get_by_role("button", name=f"Edit Scene {SCENE_ID}").click()
         form = _scenes_form(page)
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
         form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        scene_continue(page, "Review")
 
         # The other editor replaces it meanwhile, as the console saves; no poll has
         # shown it here yet.
@@ -1984,17 +2061,19 @@ def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, regi
     queue = _seed_source(registry, photos)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        # Bead 2: the chooser is on the Media per frame step, whose Continue (the old
+        # Save) reports the loading state.
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         reads = RequestGate(page, "**/candidates*")
         reads.holding = True
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         reads.wait_held()
+        scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option")).to_have_text(["Loading compatible media…"])
-        form.get_by_role("button", name="Save Scene", exact=True).click()
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text("Loading compatible media…")
 
         reads.holding = False

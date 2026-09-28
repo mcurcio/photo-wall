@@ -522,7 +522,8 @@ label {
    has no ::before; a plan tile says its state in its label.) */
 .console__health,
 .showrunner__badge,
-.run-control__frame {
+.run-control__frame,
+.card__chip {
   color: var(--fg);
   background: color-mix(in srgb, var(--status, var(--border)) 12%, var(--bg-raised));
   border: 1px solid var(--status, var(--border));
@@ -956,8 +957,7 @@ label {
 
 .showrunner__sources,
 .run-control__runs,
-.program-scheduling__programs,
-.scene-authoring__scenes {
+.program-scheduling__programs {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -968,8 +968,7 @@ label {
 
 .showrunner__source,
 .run-control__run,
-.program-scheduling__program,
-.scene-authoring__scene {
+.program-scheduling__program {
   min-width: 0;
   padding: 8px 0 0;
   border-top: 1px solid var(--border);
@@ -1271,24 +1270,431 @@ label {
   display: none;
 }
 
-/* Scene rows (slice 3 §13): a disclosure per Scene; edit mode names the stored id. */
-.scene-list__summary {
-  cursor: pointer;
-  overflow-wrap: anywhere;
+/* The Scenes section (flow design §7 J4): cards, then the Scene flow. */
+.scene-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
 }
 
-.scene-list__details[open] > .record {
-  margin-top: 6px;
+.scene-list__item {
+  display: flex;
+  min-width: 0;
 }
 
-.scene-authoring__editing {
-  margin: 8px 0;
+.scene-list__item > .card {
+  flex: 1;
+}
+
+.scene-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.scene-flow__saved:focus {
+  outline: none;
+}
+
+.scene-flow__status-line:empty {
+  display: none;
+}
+
+.scene-flow__saved > .record__actions {
+  margin-top: 8px;
+}
+
+.scene-flow__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.scene-flow__draft-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.scene-flow__title {
+  margin: 0;
+  font-size: 20px;
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 
-.scene-authoring__status-line:empty {
+.scene-flow__editing {
+  margin: 0 0 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scene-flow__chosen {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin: 8px 0 0;
+}
+
+.scene-flow__chosen-label {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+/* A notice: a sentence and its actions in a tinted, bordered box; the warn tone for
+   something the operator must decide (a changed Scene, a draft in the way). */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  overflow-wrap: anywhere;
+}
+
+.notice > p {
+  margin: 0;
+}
+
+.notice--warn {
+  border-color: var(--warn);
+}
+
+/* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
+:where(.button--primary) {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+.flow__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.flow__step-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.flow__step-title:focus {
+  outline: none;
+}
+
+.flow__body {
+  min-width: 0;
+}
+
+.flow__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.flow__back {
+  margin-right: auto;
+}
+
+.stepper__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stepper__link,
+.stepper__text {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px 6px 6px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-pill);
+}
+
+.stepper__link {
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.stepper__link:hover {
+  background: var(--accent-tint);
+}
+
+.stepper__text {
+  color: var(--fg-muted);
+}
+
+.stepper__item--current .stepper__text {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-tint);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.stepper__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.stepper__mark .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.stepper__item--done .stepper__mark {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.stepper__compact {
   display: none;
+  margin: 0;
+  font-weight: 600;
+  color: var(--fg-label);
+}
+
+.advanced {
+  margin: 8px 0;
+}
+
+.advanced__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+}
+
+.advanced__toggle {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 12px 6px 6px;
+  color: var(--accent);
+  background: transparent;
+  border-color: transparent;
+}
+
+.advanced__toggle:hover {
+  background: var(--accent-tint);
+}
+
+.advanced__toggle .icon {
+  width: 20px;
+  height: 20px;
+  transition: transform 120ms ease-out;
+}
+
+.advanced__toggle[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.advanced__summary {
+  font-size: 13px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.advanced__panel {
+  margin: 4px 0 0;
+  padding: 4px 0 0 16px;
+  border-left: 2px solid var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .advanced__toggle .icon {
+    transition: none;
+  }
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 3px var(--shadow);
+  overflow-wrap: anywhere;
+}
+
+.card__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.card__chip {
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.card__actions {
+  margin-top: auto;
+}
+
+/* Review, a check-answers list: each value with a Change button. */
+.review {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  margin: 0 0 8px;
+}
+
+.review__row {
+  display: contents;
+}
+
+.review__key,
+.review__value,
+.review__change {
+  margin: 0;
+  padding: 10px 12px 10px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.review__key {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.review__change {
+  padding-right: 0;
+  text-align: right;
+}
+
+.review__change-button {
+  padding: 2px 8px;
+  background: transparent;
+  border-color: transparent;
+}
+
+.review__change-button:hover {
+  background: var(--accent-tint);
+}
+
+.review__missing {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.review__media {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The Kind step's choices: each a radio with its hint beneath. */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.choices__legend {
+  padding: 0 4px;
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.choices__label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-weight: 500;
+}
+
+.choices__hint {
+  margin-left: 24px;
+}
+
+.problems__link {
+  padding: 0;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  text-decoration: underline;
+  background: transparent;
+  border: 0;
+}
+
+/* The sidebar's draft marker: a word, never a dot alone. */
+.nav__draft {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-raised));
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-pill);
+}
+
+@media (max-width: 849.98px) {
+  .stepper__list {
+    display: none;
+  }
+
+  .stepper__compact {
+    display: block;
+  }
+
+  /* Back and Continue stay in reach at the bottom of the screen. */
+  .flow__footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    margin: 0 -16px;
+    padding: 12px 16px;
+    background: var(--bg-raised);
+    box-shadow: 0 -2px 8px var(--shadow);
+  }
+
+  .review {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .review__key {
+    grid-column: 1 / -1;
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
 }
 
 /* The media pipeline and "why nothing new?" (slice 3 §14). */

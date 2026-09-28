@@ -282,6 +282,51 @@ export function editableDraft(scene) {
   return comparable(rebuilt) === comparable(scene) ? draft : null;
 }
 
+/**
+ * A Scene draft (flow design §7 J4): its kind (`mode`), name and id, Source, target
+ * frames, per-frame choices, cycle and loop, and the stored `revision` it was seeded
+ * from (null for a new Scene; the flow's `baseRevision`).
+ *
+ * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
+ *            sourceRef: string, targets: string[], selections: Record<string, string>,
+ *            cycleSeconds: string|number, loop: boolean, revision: number|null}} SceneDraft
+ */
+
+/**
+ * A new Scene's defaults, each with its source: live from a photo source; 30 s per
+ * cycle; loop on, so a Scene keeps playing until its Program ends (slice 3 Question 1).
+ *
+ * @type {Readonly<SceneDraft>}
+ */
+export const NEW_SCENE_DRAFT = Object.freeze({
+  mode: "live",
+  name: "",
+  idOverride: null,
+  sourceRef: "",
+  targets: Object.freeze([]),
+  selections: Object.freeze({}),
+  cycleSeconds: 30,
+  loop: true,
+  revision: null,
+});
+
+/**
+ * The draft to edit a stored Scene with, under its stored revision, or null when the
+ * console cannot author it losslessly ({@link editableDraft}). The name is not
+ * stored, so it stays empty: an edit keeps the stored id.
+ *
+ * @param {object} scene a served Scene definition
+ * @returns {SceneDraft|null}
+ */
+export function sceneEditDraft(scene) {
+  const draft = editableDraft(scene);
+  if (draft === null) {
+    return null;
+  }
+  const { targetIds, ...rest } = draft;
+  return { ...NEW_SCENE_DRAFT, ...rest, targets: targetIds, revision: normalizeScene(scene).revision };
+}
+
 /** Whether a field value is a whole number (a priority). */
 function isWhole(value) {
   return String(value).trim() !== "" && Number.isInteger(Number(value));

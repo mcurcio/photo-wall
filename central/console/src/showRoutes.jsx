@@ -5,7 +5,7 @@ import { MediaPipeline } from "./MediaPipeline.jsx";
 import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import SAMPLES from "./routeSamples.json";
 import { RunsRegion } from "./RunsRegion.jsx";
-import { SceneAuthoring } from "./SceneAuthoring.jsx";
+import { SceneFlow } from "./SceneFlow.jsx";
 import { SourcesRegion } from "./SourcesRegion.jsx";
 
 /**
@@ -39,10 +39,16 @@ export const showRoutes = Object.freeze(
     {
       section: "scenes",
       label: "Scenes",
-      render: ({ snapshot }) => (
+      render: ({ snapshot, route, navigate, rememberScene, markDraft }) => (
         <section className="showrunner__region" role="region" aria-label="Scenes">
           <h2 className="showrunner__region-title">Scenes</h2>
-          <SceneAuthoring snapshot={snapshot} />
+          <SceneFlow
+            snapshot={snapshot}
+            route={route}
+            navigate={navigate}
+            rememberScene={rememberScene}
+            markDraft={markDraft}
+          />
         </section>
       ),
       samplePaths: SAMPLES.show.scenes,
