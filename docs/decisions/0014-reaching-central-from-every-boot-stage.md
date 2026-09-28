@@ -122,8 +122,9 @@ Known defects against these rules, fixed in PR #28:
 - **Stage-2 kernel modules travel with the kernel** (owner ruling, 2026-09-27). The base carries
   no modules and can be a different release from the staged kernel. The initrd carries the
   kernel's modules, including the Player's display drivers (`vc4`, `v3d`), and stage 1 copies
-  its module tree onto the new root, where the base's udev loads them. The base carries udev
-  for this, a Player Depends. See the
+  its module tree onto the new root, where the base's udev can load them. The base carries udev
+  for this, a Player Depends. The display drivers find devices only because the bundle's
+  `config.txt` loads `dtoverlay=vc4-kms-v3d-pi5`, and they load in stage 1. See the
   [execution contract](../execution-contract.md#netboot-stage-1-boot-data-the-clock-record-and-liveness).
 - **The Player's link.** httpx and websockets are built from the one Trust. Neither follows
   redirects: the websocket's own redirect following is refused, so the bearer never leaves the

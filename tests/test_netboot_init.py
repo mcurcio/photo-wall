@@ -672,7 +672,7 @@ def test_the_modules_are_copied_to_the_new_root_petting_per_file(tmp_path):
     source, rootmnt, pets = initrd_modules(tmp_path / "initrd"), tmp_path / "root", []
     summary = netboot_module.hand_over_modules(rootmnt, pet=lambda: pets.append(1),
                                                release=RELEASE, source=source)
-    copied = rootmnt / netboot_module.STAGE2_MODULES / RELEASE
+    copied = rootmnt / netboot_module.STAGE2_MODULE_DIR / RELEASE
     assert (copied / "kernel/drivers/gpu/drm/vc4/vc4.ko.xz").read_bytes() == b"vc4"
     assert (copied / "modules.dep").read_text().startswith("kernel/drivers/gpu/drm/vc4/")
     assert os.readlink(copied / "build") == "/usr/src/linux-headers"   # kept, never followed

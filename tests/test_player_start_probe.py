@@ -14,9 +14,12 @@ import pytest
 
 from appliance.provision import DEFAULT_UNIT
 from player import service as player_service
+from scripts import player_start_probe as probe_module
 from scripts.player_start_probe import (
     DEB_IN_CONTAINER,
+    DISPLAY_ALIASES,
     HANDOFF_IN_CONTAINER,
+    HOST_ACTING_UNITS,
     PROBE_SERIAL,
     PROVISION_UNIT,
     SYSTEMD,
@@ -25,11 +28,13 @@ from scripts.player_start_probe import (
     docker_run_argv,
     group_violations,
     import_squashfs,
+    kmod_violations,
     membership_violations,
     probe,
     start_violations,
     udev_violations,
 )
+from scripts.verify_netboot_initrd import DISPLAY_MODULES
 
 ACTIVE = {"ActiveState": "active", "SubState": "running", "Result": "success",
           "ExecMainCode": "0", "ExecMainStatus": "0"}
@@ -106,7 +111,16 @@ def test_the_container_boots_systemd_with_the_provisioner_masked(tmp_path):
     argv = docker_run_argv("base:probe", "probe-1", tmp_path / "cpuinfo")
     assert argv[:2] == ["docker", "run"] and "--privileged" in argv
     assert f"{tmp_path / 'cpuinfo'}:/proc/cpuinfo:ro" in argv
-    assert argv[-3:] == ["base:probe", SYSTEMD, f"systemd.mask={PROVISION_UNIT}"]
+    assert argv[-5:] == ["base:probe", SYSTEMD, f"systemd.mask={PROVISION_UNIT}",
+                         "systemd.mask=systemd-udev-trigger.service",
+                         "systemd.mask=systemd-modules-load.service"]
+
+
+def test_the_units_that_act_on_the_runner_are_masked():
+    """Privileged: the container's udev trigger would replay every runner device, and
+    systemd-modules-load would load into the runner's kernel."""
+    assert set(HOST_ACTING_UNITS) == {"systemd-udev-trigger.service",
+                                      "systemd-modules-load.service"}
 
 
 def test_the_cpuinfo_fixture_is_the_identity_the_player_reads(tmp_path, monkeypatch):
@@ -213,6 +227,19 @@ def test_a_base_that_never_boots_fails_and_is_removed(tmp_path, monkeypatch):
     assert docker.calls[-1][:3] == ["docker", "rm", "--force"]
 
 
+def test_a_failed_docker_run_still_removes_the_container(tmp_path):
+    """`docker run --detach` can create the container and then fail to start it."""
+    def reply(argv):
+        if argv[1] == "run":
+            return "cannot start", 125
+        return "", 0
+    docker = FakeDocker(reply)
+    with pytest.raises(subprocess.CalledProcessError):
+        probe("base:probe", tmp_path / "player.deb", tmp_path, run=docker)
+    name = docker.calls[0][docker.calls[0].index("--name") + 1]
+    assert docker.calls[-1] == ["docker", "rm", "--force", name]
+
+
 def test_a_failing_step_still_removes_the_container(tmp_path):
     def reply(argv):
         if argv[1] == "cp":
@@ -249,3 +276,80 @@ def test_import_squashfs_extracts_tars_imports_and_cleans_up(tmp_path):
         ["tar", "--numeric-owner", "-C", root, "-cf", archive, "."],
         ["docker", "import", archive, "base:probe"]]
     assert not (tmp_path / "rootfs").exists() and not (tmp_path / "rootfs.tar").exists()
+
+
+# --- step 7: the base's own libkmod reads the kernel's display drivers -----------------------
+
+RELEASE = "6.18.50+rpt-rpi-2712"
+KMOD_OK = ("kmod vc4 code=0 found=vc4 dependencies=15 unreadable=0 path=/m/vc4.ko.xz\n"
+           "kmod v3d code=0 found=v3d dependencies=6 unreadable=0 path=/m/v3d.ko.xz\n")
+
+
+def test_every_display_driver_has_its_devices_alias():
+    assert tuple(DISPLAY_ALIASES) == DISPLAY_MODULES
+
+
+def test_the_base_reading_every_display_driver_passes():
+    assert kmod_violations(KMOD_OK) == []
+
+
+def test_a_base_without_libkmod_is_named():
+    """v0.9.1's base: no udev, so no libkmod."""
+    assert kmod_violations("nokmod libkmod.so.2: cannot open shared object file\n") == [
+        "the base has no libkmod, so its udev can load no module "
+        "(nokmod libkmod.so.2: cannot open shared object file)"]
+
+
+@pytest.mark.parametrize("line,problem", [
+    ("kmod vc4 code=0 found=none dependencies=0 unreadable=0 path=none", "found=none"),
+    ("kmod vc4 code=0 found=vc4 dependencies=15 unreadable=16 path=/m/vc4.ko.xz", "unreadable=16"),
+    ("kmod vc4 code=-2 found=none dependencies=0 unreadable=0 path=none", "code=-2"),
+    ("kmod vc4 code=0 found=vc4 dependencies=0 unreadable=0 path=/m/vc4.ko.xz", "dependencies=0"),
+])
+def test_a_driver_the_base_cannot_find_resolve_or_read_is_named(line, problem):
+    [violation] = kmod_violations(line + "\n" + KMOD_OK.splitlines()[1])
+    assert violation.startswith("vc4: the base's libkmod cannot load it by its alias ")
+    assert problem in violation
+
+
+def test_a_driver_with_no_result_is_named():
+    assert kmod_violations(KMOD_OK.splitlines()[0]) == ["v3d: the base's libkmod gave no result"]
+
+
+def test_the_modules_are_handed_over_from_the_initrd_and_read_by_the_base(tmp_path, monkeypatch):
+    """The unpacked initrd's tree goes through stage 1's own hand_over_modules into the
+    container, then KMOD_PROGRAM runs under the BASE's python3 with each driver's alias."""
+    unpacked = []
+
+    def fake_unpack(initrd, root, *, run):
+        unpacked.append(initrd)
+        tree = root / "usr/lib/modules" / RELEASE / "kernel"
+        tree.mkdir(parents=True)
+        (tree / "vc4.ko.xz").write_bytes(b"vc4")
+        return []
+
+    monkeypatch.setattr(probe_module, "unpack", fake_unpack)
+
+    def reply(argv):
+        if argv[1] == "exec" and "-c" in argv:
+            return KMOD_OK, 0
+        return base_replies()(argv)
+
+    docker = FakeDocker(reply)
+    assert probe("base:probe", tmp_path / "player.deb", tmp_path, initrd=tmp_path / "initrd.img",
+                 run=docker) == []
+    assert unpacked == [tmp_path / "initrd.img"]
+    name = docker.calls[0][docker.calls[0].index("--name") + 1]
+    assert ["docker", "cp", str(tmp_path / "stage2/usr/lib/modules" / RELEASE),
+            f"{name}:/usr/lib/modules/{RELEASE}"] in docker.calls
+    [kmod] = [call for call in docker.calls if "-c" in call]
+    assert kmod[kmod.index("-c") - 2:kmod.index("-c") + 1] == ["python3", "-I", "-c"]
+    assert kmod[kmod.index("-c") + 2:] == [RELEASE, f"vc4={DISPLAY_ALIASES['vc4']}",
+                                          f"v3d={DISPLAY_ALIASES['v3d']}"]
+    assert (tmp_path / "stage2/usr/lib/modules" / RELEASE / "kernel/vc4.ko.xz").exists()
+
+
+def test_no_initrd_no_module_check(tmp_path):
+    docker = FakeDocker(base_replies())
+    assert probe("base:probe", tmp_path / "player.deb", tmp_path, run=docker) == []
+    assert not any("-c" in call for call in docker.calls)

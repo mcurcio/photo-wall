@@ -14,7 +14,7 @@ the initrd's own userland. This does, with no fakes:
      mount/umount/modprobe: loop attach, squashfs, tmpfs, overlay; then
      `NetbootOps().hand_over_modules`, stage 1's copy of its module tree onto the new root;
   4. pass only if the marker reads back through the merged overlay root, and the initrd's own
-     modprobe resolves every stage-2 module (verify_netboot_initrd.STAGE2_MODULES: vc4, v3d)
+     modprobe resolves every display module (verify_netboot_initrd.DISPLAY_MODULES: vc4, v3d)
      against the NEW root for the initrd's kernel version, each file it names present there.
 
 Step 4 asserts resolvability only (`modprobe --show-depends`): this runner boots its own
@@ -49,8 +49,9 @@ REPO: Final = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from appliance.netboot_init import INITRD_MODULES as STAGE1_MODULES  # noqa: E402
 from scripts.build_boot_data import read_archive  # noqa: E402
-from scripts.verify_netboot_initrd import STAGE2_MODULES  # noqa: E402
+from scripts.verify_netboot_initrd import DISPLAY_MODULES  # noqa: E402
 
 # initramfs-tools' init: `export PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
 INITRAMFS_PATH: Final = "/sbin:/usr/sbin:/bin:/usr/bin"
@@ -59,8 +60,9 @@ PROBE_DIR: Final = "probe"
 PROBE_IMAGE: Final = "stage1-mount-probe.squashfs"
 MARKER: Final = "stage1-mount-probe"
 PROBE_SECONDS: Final = 120
-# Where mkinitramfs puts the kernel's modules in the initrd (merged /usr).
-INITRD_MODULES: Final = Path("usr/lib/modules")
+# Where mkinitramfs puts the kernel's modules, relative to the unpacked initrd: stage 1's own
+# INITRD_MODULES, the tree it hands over.
+INITRD_MODULES: Final = STAGE1_MODULES.relative_to("/")
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
 SYS_BLOCK: Final = Path("/sys/block")
 
@@ -139,7 +141,7 @@ def unpack(initrd: Path, root: Path, *, run: Run = subprocess.run) -> list[str]:
 
 
 def chroot_argv(root: Path, image: str, rootmnt: str, release: str,
-                modules: Sequence[str] = STAGE2_MODULES) -> list[str]:
+                modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
     """PURE. Stage 1's mount_root and module hand-over under the initrd's python3, with init's
     PATH and nothing else from the host environment."""
     return ["env", "-i", f"PATH={INITRAMFS_PATH}", "chroot", str(root), INITRD_PYTHON, "-I",
@@ -156,7 +158,7 @@ def kernel_release(root: Path) -> str | list[str]:
     return releases[0]
 
 
-def resolution_violations(output: str, modules: Sequence[str] = STAGE2_MODULES) -> list[str]:
+def resolution_violations(output: str, modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
     """PURE. The chroot program's `resolve` lines -> the modules that did not resolve on the
     new root: modprobe failed, named no file, named a file the root lacks, or did not end at
     the module itself."""
@@ -305,7 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"initrd ({len(violations)} violation(s))")
         return 1
     print("OK: stage 1 mounted a squashfs through the built initrd's own userland, and "
-          f"{', '.join(STAGE2_MODULES)} resolve on the new root from the modules it handed over")
+          f"{', '.join(DISPLAY_MODULES)} resolve on the new root from the modules it handed over")
     return 0
 
 

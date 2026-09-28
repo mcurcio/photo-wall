@@ -12,7 +12,15 @@ because none ran systemd. This does, with no fake of the base or the package:
      `wall` in each of those groups;
   5. write provisioning's own handoff (appliance.provision.write_handoff) naming a Central that
      never resolves, and run `systemctl start photo-wall-player.service`;
-  6. pass only if that start returns 0 and the unit is active/running.
+  6. pass only if that start returns 0 and the unit is active/running;
+  7. with --initrd: stage 1's module hand-over (appliance.netboot_init.hand_over_modules) from
+     the BUILT initrd into the container, then the BASE's own libkmod -- the library its udev
+     loads drivers through -- must find each display driver by its device's alias, list its
+     dependencies, and read (decompress) every one of those .ko.xz files.
+
+Step 7 loads nothing: the runner boots its own kernel. It proves the base can resolve and read
+the kernel's modules, which the base's udev needs if it loads one; kmod's `modprobe` is not in
+the base and is not needed for that.
 
 The pass condition is provisioning's own: its `systemctl start` returns 0 only once the Player
 has sent READY=1 (Type=notify), which the Player does after its own start-up code has run. That
@@ -27,6 +35,13 @@ Two things are given to the container that a Pi has and a CI runner does not. It
 namespaces that docker's default profile refuses (226/NAMESPACE: the container, not the base).
 And it gets an equipment identity: a Pi serial as the `Serial` line of a bind-mounted
 /proc/cpuinfo, the fallback player.service.read_pi_serial reads when there is no devicetree.
+
+A privileged container sees the runner's own /sys and may load modules into the runner's kernel,
+so the two boot units that act on the host's devices are masked in it: systemd-udev-trigger
+(writes `add` into every device's uevent file under /sys, replaying every host device to the
+runner's udev) and systemd-modules-load (loads modules into the running kernel). udevd itself
+still runs, in the container's own network namespace, where no kernel uevent reaches it. /sys
+is not made read-only instead: systemd as PID 1 needs a writable cgroup tree under it.
 
 Needs root (unsquashfs keeps ownership) and docker on a host that runs the base's binaries
 (base-image.yml: an arm64 runner). `--image` probes an already imported image instead.
@@ -50,6 +65,7 @@ REPO: Final = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from appliance.netboot_init import hand_over_modules  # noqa: E402
 from appliance.provision import (  # noqa: E402
     DEFAULT_UNIT,
     START_UNIT_SECONDS,
@@ -60,11 +76,68 @@ from appliance.provision import (  # noqa: E402
     unit_ending,
     write_handoff,
 )
+from scripts.initrd_mount_probe import INITRD_MODULES, kernel_release, unpack  # noqa: E402
+from scripts.verify_netboot_initrd import DISPLAY_MODULES  # noqa: E402
 from uplink.origin import Origin  # noqa: E402
 
 DEVICE_GROUPS: Final = ("render", "video", "input")
 PLAYER_USER: Final = "wall"
 PROVISION_UNIT: Final = "photo-wall-provision.service"
+# Masked in the container: they act on the runner's devices and kernel (module docstring).
+HOST_ACTING_UNITS: Final = ("systemd-udev-trigger.service", "systemd-modules-load.service")
+# The OF modalias of the device each display driver binds, as the kernel reports it (node name,
+# no device_type, compatible) for the Pi 5 DTB with vc4-kms-v3d-pi5 applied: /axi/gpu and
+# /axi/v3d@2000000. What udev hands libkmod at coldplug.
+DISPLAY_ALIASES: Final = {"vc4": "of:NgpuT<NULL>Cbrcm,bcm2712-vc6",
+                          "v3d": "of:Nv3dT<NULL>Cbrcm,2712-v3d"}
+# Run by the BASE's python3 inside the container, against the base's libkmod.so.2 (ctypes: the
+# base has no kmod tools). argv: the kernel release, then module=alias pairs. One `kmod` line per
+# module (kmod_violations).
+KMOD_PROGRAM: Final = """\
+import ctypes
+import sys
+from ctypes import POINTER, byref, c_char_p, c_int, c_void_p
+try:
+    kmod = ctypes.CDLL("libkmod.so.2")
+except OSError as error:
+    print(f"nokmod {error}")
+    sys.exit(0)
+for name, restype, argtypes in (
+        ("kmod_new", c_void_p, [c_char_p, c_void_p]),
+        ("kmod_module_new_from_lookup", c_int, [c_void_p, c_char_p, POINTER(c_void_p)]),
+        ("kmod_list_next", c_void_p, [c_void_p, c_void_p]),
+        ("kmod_module_get_module", c_void_p, [c_void_p]),
+        ("kmod_module_get_name", c_char_p, [c_void_p]),
+        ("kmod_module_get_path", c_char_p, [c_void_p]),
+        ("kmod_module_get_dependencies", c_void_p, [c_void_p]),
+        ("kmod_module_get_info", c_int, [c_void_p, POINTER(c_void_p)])):
+    function = getattr(kmod, name)
+    function.restype, function.argtypes = restype, argtypes
+release = sys.argv[1]
+context = kmod.kmod_new(f"/usr/lib/modules/{release}".encode(), None)
+
+def members(head):
+    entry = head
+    while entry:
+        yield kmod.kmod_module_get_module(entry)
+        entry = kmod.kmod_list_next(head, entry)
+
+for pair in sys.argv[2:]:
+    module, alias = pair.split("=", 1)
+    found = c_void_p()
+    code = kmod.kmod_module_new_from_lookup(context, alias.encode(), byref(found))
+    matches = {kmod.kmod_module_get_name(m).decode(): m for m in members(found.value)}
+    target = matches.get(module)
+    dependencies = list(members(kmod.kmod_module_get_dependencies(target))) if target else []
+    unreadable = 0
+    for each in ([target] if target else []) + dependencies:
+        info = c_void_p()
+        if kmod.kmod_module_get_info(each, byref(info)) < 0:
+            unreadable += 1
+    path = (kmod.kmod_module_get_path(target) or b"none").decode() if target else "none"
+    print(f"kmod {module} code={code} found={','.join(sorted(matches)) or 'none'} "
+          f"dependencies={len(dependencies)} unreadable={unreadable} path={path}")
+"""
 # RFC 6761: .invalid never resolves, so the started Player only ever retries its first request.
 PROBE_CENTRAL: Final = "http://central.invalid"
 PROBE_SERIAL: Final = "10000000c0ffee00"
@@ -90,11 +163,33 @@ def cpuinfo_text(serial: str = PROBE_SERIAL) -> str:
 
 def docker_run_argv(image: str, name: str, cpuinfo: Path) -> list[str]:
     """PURE. Boot `image` with systemd as PID 1. Arguments after SYSTEMD are its command line in
-    a container (systemd.mask= keeps the provisioner from running)."""
+    a container: systemd.mask= keeps the provisioner (this probe plays its part) and the units
+    that act on the runner's devices and kernel (HOST_ACTING_UNITS) from running."""
     return ["docker", "run", "--detach", "--name", name, "--privileged",
             "--env", "container=docker", "--tmpfs", "/run", "--tmpfs", "/run/lock",
             "--volume", f"{cpuinfo}:/proc/cpuinfo:ro",
-            image, SYSTEMD, f"systemd.mask={PROVISION_UNIT}"]
+            image, SYSTEMD, *(f"systemd.mask={unit}"
+                              for unit in (PROVISION_UNIT, *HOST_ACTING_UNITS))]
+
+
+def kmod_violations(output: str, modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
+    """PURE. KMOD_PROGRAM's output -> the display drivers the base's libkmod cannot find by
+    their device's alias, resolve or read."""
+    if output.startswith("nokmod"):
+        return [f"the base has no libkmod, so its udev can load no module ({output.strip()})"]
+    results = {fields[1]: dict(field.split("=", 1) for field in fields[2:] if "=" in field)
+               for fields in (line.split() for line in output.splitlines())
+               if len(fields) > 1 and fields[0] == "kmod"}
+    violations = []
+    for module in modules:
+        result = results.get(module)
+        if result is None:
+            violations.append(f"{module}: the base's libkmod gave no result")
+        elif (result.get("code") != "0" or module not in result.get("found", "").split(",")
+              or result.get("dependencies", "0") == "0" or result.get("unreadable") != "0"):
+            violations.append(f"{module}: the base's libkmod cannot load it by its alias "
+                              + " ".join(f"{key}={value}" for key, value in result.items()))
+    return violations
 
 
 def group_violations(getent: str) -> list[str]:
@@ -224,15 +319,38 @@ def start_player(container: Container, work: Path) -> list[str]:
     return start_violations(started, properties)
 
 
-def probe(image: str, deb: Path, work: Path, *, run: Run = subprocess.run) -> list[str]:
-    """Boot, check the base, install, start, always remove the container. The violations
-    (empty = pass)."""
+def check_modules(container: Container, initrd: Path, work: Path, *,
+                  run: Run = subprocess.run) -> list[str]:
+    """Step 7: stage 1's hand-over from the built initrd, then the base's own libkmod."""
+    root = work / "initrd"
+    root.mkdir()
+    violations = unpack(initrd, root, run=run)
+    if violations:
+        return violations
+    release = kernel_release(root)
+    if isinstance(release, list):
+        return release
+    staged = work / "stage2"
+    print("modules: " + hand_over_modules(staged, pet=lambda: None, release=release,
+                                          source=root / INITRD_MODULES))
+    container.exec("mkdir", "-p", "/usr/lib/modules")
+    container.copy_in(staged / INITRD_MODULES / release, f"/usr/lib/modules/{release}")
+    shown = container.exec("python3", "-I", "-c", KMOD_PROGRAM, release,
+                           *(f"{module}={DISPLAY_ALIASES[module]}" for module in DISPLAY_MODULES))
+    print(shown.stdout, end="")
+    return kmod_violations(shown.stdout)
+
+
+def probe(image: str, deb: Path, work: Path, *, initrd: Path | None = None,
+          run: Run = subprocess.run) -> list[str]:
+    """Boot, check the base, install, start, check the modules; the container is always removed,
+    even when `docker run` itself fails. The violations (empty = pass)."""
     cpuinfo = work / "cpuinfo"
     cpuinfo.write_text(cpuinfo_text())
     container = Container(f"photo-wall-player-start-probe-{secrets.token_hex(4)}", run=run)
-    run(docker_run_argv(image, container.name, cpuinfo), check=True, capture_output=True)
     violations: list[str] = []
     try:
+        run(docker_run_argv(image, container.name, cpuinfo), check=True, capture_output=True)
         state = container.wait_booted()
         if state not in BOOTED:
             return [f"the base did not boot under systemd (is-system-running: {state or 'none'})"]
@@ -245,6 +363,8 @@ def probe(image: str, deb: Path, work: Path, *, run: Run = subprocess.run) -> li
         violations += found
         if installed:
             violations += start_player(container, work)
+        if initrd is not None:
+            violations += check_modules(container, initrd, work, run=run)
         if violations:
             journal = container.exec("journalctl", "--no-pager", "-n", str(JOURNAL_LINES),
                                      "-u", DEFAULT_UNIT)
@@ -260,6 +380,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     base.add_argument("--squashfs", type=Path, help="the built base squashfs (needs root)")
     base.add_argument("--image", help="an already imported base image")
     parser.add_argument("--deb", type=Path, required=True, help="the built Player .deb")
+    parser.add_argument("--initrd", type=Path,
+                        help="the built initrd.img: its modules must load on the base (needs "
+                             "root, cpio and the initrd's decompressor)")
     parser.add_argument("--work", type=Path,
                         help="an empty or absent directory to work in (default: a temp dir)")
     args = parser.parse_args(argv)
@@ -271,7 +394,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.squashfs:
             import_squashfs(args.squashfs, image, work)
-        violations = probe(image, args.deb.resolve(), work.resolve())
+        violations = probe(image, args.deb.resolve(), work.resolve(),
+                           initrd=args.initrd.resolve() if args.initrd else None)
     except subprocess.CalledProcessError as error:
         stderr = error.stderr or b""
         detail = (stderr.decode("utf-8", "replace") if isinstance(stderr, bytes)

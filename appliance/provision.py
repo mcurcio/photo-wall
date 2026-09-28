@@ -192,15 +192,30 @@ def unit_ending(properties: Mapping[str, str]) -> str:
 
 
 class UnitStartError(RuntimeError):
-    """The Player unit did not start (R9). str() is one line in provisioning's shape,
-    `cause=unit reason=<systemd's Result> detail=<unit>/<unit_ending>`, e.g. `cause=unit
-    reason=exit-code detail=photo-wall-player.service/status=216/GROUP`."""
+    """The Player unit did not start (R9). str() is one line in provisioning's shape:
+      a recorded failure   `cause=unit reason=<systemd's Result> detail=<unit>/<unit_ending>`,
+                           e.g. `reason=exit-code
+                           detail=photo-wall-player.service/status=216/GROUP`;
+      a start that outlived START_UNIT_SECONDS
+                           `cause=unit reason=timeout detail=<unit>/state=<ActiveState>/<SubState>`;
+      any other start that did not finish (systemd recorded no failure: Result=success)
+                           `cause=unit reason=unfinished detail=<unit>/state=<...>/<...>`.
+    The unit still starting has no exit status to name, so its state is the detail."""
 
-    def __init__(self, unit: str, properties: Mapping[str, str]) -> None:
-        result = properties.get("Result", "")
-        reason = result if _UNIT_TOKEN.fullmatch(result) else "unknown"
+    def __init__(self, unit: str, properties: Mapping[str, str], *,
+                 timed_out: bool = False) -> None:
+        def token(key: str) -> str:
+            value = properties.get(key, "")
+            return value if _UNIT_TOKEN.fullmatch(value) else "unknown"
+
         name = unit if _UNIT_TOKEN.fullmatch(unit) else "unit"
-        super().__init__(f"cause=unit reason={reason} detail={name}/{unit_ending(properties)}")
+        result = token("Result")
+        if timed_out or result == "success":
+            reason = "timeout" if timed_out else "unfinished"
+            detail = f"{name}/state={token('ActiveState')}/{token('SubState')}"
+        else:
+            reason, detail = result, f"{name}/{unit_ending(properties)}"
+        super().__init__(f"cause=unit reason={reason} detail={detail}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +331,8 @@ def start_player_unit(*, unit: str = DEFAULT_UNIT) -> None:
                 capture_output=True, text=True, timeout=UNIT_STATUS_SECONDS, check=False).stdout
         except (OSError, subprocess.SubprocessError):
             shown = ""
-        raise UnitStartError(unit, parse_unit_properties(shown or "")) from error
+        raise UnitStartError(unit, parse_unit_properties(shown or ""),
+                             timed_out=isinstance(error, subprocess.TimeoutExpired)) from error
 
 
 def _default_backoff(attempt: int) -> float:

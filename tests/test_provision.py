@@ -598,10 +598,14 @@ class Systemctl:
         return subprocess.CompletedProcess(argv, 0, self.shown, "")
 
 
-@pytest.mark.parametrize("start_error", [
-    subprocess.CalledProcessError(1, ["systemctl"]),
-    subprocess.TimeoutExpired(["systemctl"], provision.START_UNIT_SECONDS)])
-def test_a_failed_start_is_named_from_the_units_own_status(monkeypatch, start_error):
+# systemctl show, as systemd 257 printed it for the Player still in ExecStartPre (waiting for
+# the compositor's socket), three seconds into `systemctl start --no-block` on the fixed base.
+ACTIVATING = ("Result=success\nExecMainCode=0\nExecMainStatus=0\nActiveState=activating\n"
+              "SubState=start-pre\n")
+
+
+def test_a_failed_start_is_named_from_the_units_own_status(monkeypatch):
+    start_error = subprocess.CalledProcessError(1, ["systemctl"])
     systemctl = Systemctl(GROUP_FAILURE, start_error=start_error)
     monkeypatch.setattr("appliance.provision.subprocess.run", systemctl)
     with pytest.raises(provision.UnitStartError) as raised:
@@ -614,6 +618,37 @@ def test_a_failed_start_is_named_from_the_units_own_status(monkeypatch, start_er
                     "--property=Result", "--property=ExecMainCode", "--property=ExecMainStatus",
                     "photo-wall-player.service"]
     assert kwargs["timeout"] == provision.UNIT_STATUS_SECONDS and kwargs["check"] is False
+
+
+def test_a_start_that_outlives_its_bound_is_named_a_timeout_with_the_units_state(monkeypatch):
+    """systemctl's own wait ran out while the unit was still activating: systemd has recorded no
+    failure (Result=success, status 0), so naming its Result would read `reason=success`."""
+    start_error = subprocess.TimeoutExpired(["systemctl"], provision.START_UNIT_SECONDS)
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        Systemctl(ACTIVATING, start_error=start_error))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=timeout "
+                                 "detail=photo-wall-player.service/state=activating/start-pre")
+    assert raised.value.__cause__ is start_error
+
+
+def test_a_failed_start_with_no_recorded_failure_is_unfinished_not_success(monkeypatch):
+    monkeypatch.setattr("appliance.provision.subprocess.run", Systemctl(ACTIVATING))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=unfinished "
+                                 "detail=photo-wall-player.service/state=activating/start-pre")
+
+
+def test_a_timeout_after_systemd_recorded_a_failure_still_names_the_state(monkeypatch):
+    start_error = subprocess.TimeoutExpired(["systemctl"], provision.START_UNIT_SECONDS)
+    monkeypatch.setattr("appliance.provision.subprocess.run",
+                        Systemctl(GROUP_FAILURE, start_error=start_error))
+    with pytest.raises(provision.UnitStartError) as raised:
+        start_player_unit()
+    assert str(raised.value) == ("cause=unit reason=timeout "
+                                 "detail=photo-wall-player.service/state=activating/auto-restart")
 
 
 @pytest.mark.parametrize("show_error", [OSError("no systemctl"),

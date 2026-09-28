@@ -145,9 +145,9 @@ MAX_RESOLVER_BYTES: Final = 4096
 # depmod's indexes), and where stage 2's udev looks for them, relative to the new root. The base
 # carries no kernel and no modules: they come from the same TFTP staging as the kernel, so the
 # two always match, whichever base Central serves. The initramfs hook adds the display drivers
-# the Player needs (vc4, v3d) beside what stage 1 itself needs.
+# the Player needs (vc4, v3d). scripts/initrd_mount_probe.py imports INITRD_MODULES.
 INITRD_MODULES: Final = Path("/usr/lib/modules")
-STAGE2_MODULES: Final = Path("usr/lib/modules")
+STAGE2_MODULE_DIR: Final = Path("usr/lib/modules")
 # The copy lands in the RAM overlay's upper layer: bounded, so a malformed initrd cannot fill
 # RAM before stage 2 starts.
 MAX_MODULE_TREE_BYTES: Final = 256 * 1024 * 1024
@@ -391,7 +391,7 @@ def hand_over_resolver(rootmnt: Path, *, source: Path = _STAGE1_RESOLVER) -> str
 def hand_over_modules(rootmnt: Path, *, pet: Callable[[], None], release: str | None = None,
                       source: Path = INITRD_MODULES) -> str:
     """Copy source/<release> (default: the running kernel's, `uname -r`) to
-    rootmnt/STAGE2_MODULES/<release>, symlinks kept, calling `pet` after every file, so stage
+    rootmnt/STAGE2_MODULE_DIR/<release>, symlinks kept, calling `pet` after every file, so stage
     2's udev can load a driver by its alias at coldplug. Returns the phase-7 console summary
     'modules=<release> files=<n> bytes=<b>'. No tree for the running kernel (a kernel staged
     with another build's initrd) or a tree over MAX_MODULE_TREE_BYTES raises
@@ -413,7 +413,7 @@ def hand_over_modules(rootmnt: Path, *, pet: Callable[[], None], release: str | 
         return result
 
     try:
-        shutil.copytree(tree, rootmnt / STAGE2_MODULES / release, symlinks=True,
+        shutil.copytree(tree, rootmnt / STAGE2_MODULE_DIR / release, symlinks=True,
                         copy_function=copy, dirs_exist_ok=True)
     except shutil.Error as error:
         # copytree collects per-file failures and raises them together: name the first.

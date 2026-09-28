@@ -227,6 +227,17 @@ initramfs initrd.img followkernel
 # for a single-board fleet.
 device_tree=bcm2712-rpi-5-b.dtb
 disable_overscan=1
+# Full KMS: enables the display pipeline (HDMI, HVS, pixel valves, the vc4
+# gpu node) and the v3d GPU in the device tree, all disabled in the bare
+# bcm2712-rpi-5-b.dtb, so the kernel's vc4 and v3d drivers find devices and
+# /dev/dri exists. Named as the Pi 5 variant directly: the generic
+# vc4-kms-v3d reaches it only through overlays/overlay_map.dtb, which this
+# bundle does not ship (it stages *.dtbo only), and applied to this DTB the
+# generic overlay fails. It also disables the legacy firmware framebuffer
+# (brcm,bcm2708-fb); vc4's own framebuffer takes over the console.
+# scripts/verify_boot_display.py checks this line, the overlay file, and the
+# nodes it turns on.
+dtoverlay=vc4-kms-v3d-pi5
 EOF
 
 # pieeprom.upd/.sig: the bootloader self-update carrying BOOT_ORDER=0xf21 and

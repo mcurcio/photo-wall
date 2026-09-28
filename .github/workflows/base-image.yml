@@ -458,24 +458,6 @@ jobs:
           fi
           echo "PASS: built base image content matches 0009's minimal-base-plus-bootstrapper contract"
 
-      # The base must START the Player, not only carry its Depends. v0.9.1's base had no udev,
-      # so no render group, and player.service failed at spawn (216/GROUP) on every Pi while
-      # every content check above passed. This boots the built squashfs under real systemd (a
-      # --privileged container, systemd as PID 1), requires udev and the render, video and
-      # input groups, installs the Player .deb built above with dpkg alone, and starts the unit
-      # as provisioning does: it passes only when the unit is active/running
-      # (scripts/player_start_probe.py). Not gated by a cache hit: it reads the squashfs, and a
-      # Player-only change still has to start on the cached base.
-      - name: Start the Player unit on the built base under systemd
-        env:
-          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
-          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
-        run: |
-          set -eu
-          sudo .venv/bin/python scripts/player_start_probe.py \
-            --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
-            --deb "$PLAYER_DEB" --work "$RUNNER_TEMP/player-start-probe"
-
       # --- p4-boot-chain s2b: netboot base bundle (kernel + initrd + DTBs +
       # the base squashfs) -------------------------------------------------
       # rpi-image-gen's squashfs is metadata-only (no kernel, no /lib/modules).
@@ -852,6 +834,14 @@ jobs:
               || violation "pieeprom.upd missing required setting $setting"
           done
 
+          # The display is on in the device tree the Pi boots: config.txt loads
+          # the Pi 5 KMS overlay, the overlay file is staged, and applied to the
+          # staged DTB it turns vc4's and v3d's nodes okay. v0.9.1 loaded no
+          # overlay, so vc4/v3d found no device and /dev/dri never appeared.
+          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          python3 scripts/verify_boot_display.py "$BUNDLE/boot" --apply \
+            || violation "the bundle does not turn the display on (lines above)"
+
           # cmdline.txt template contract (central-discovery model,
           # build_netboot_bundle.sh): exactly ONE non-comment kernel command
           # line, carrying the static tokens + the central ROOT placeholder, and
@@ -897,6 +887,30 @@ jobs:
           set -eu
           sudo .venv/bin/python scripts/initrd_mount_probe.py "$BUNDLE/boot/initrd.img" \
             --work "$RUNNER_TEMP/initrd-mount-probe"
+
+      # The base must START the Player, not only carry its Depends. v0.9.1's base had no udev,
+      # so no render group, and player.service failed at spawn (216/GROUP) on every Pi while
+      # every content check passed. This boots the built squashfs under real systemd (a
+      # --privileged container, systemd as PID 1, the units that would act on this runner's
+      # devices and kernel masked), requires udev and the render, video and input groups,
+      # installs the Player .deb built above with dpkg alone, and starts the unit as
+      # provisioning does: it passes only when the unit is active/running. It then hands the
+      # built initrd's modules over as stage 1 does and requires the base's own libkmod to find
+      # vc4 and v3d by their devices' aliases and read every file they need
+      # (scripts/player_start_probe.py). After the bundle, so it reads the initrd the release
+      # ships; not gated by a cache hit, so a Player-only change still has to start on the
+      # cached base.
+      - name: Start the Player unit on the built base under systemd
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+        run: |
+          set -eu
+          sudo .venv/bin/python scripts/player_start_probe.py \
+            --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
+            --deb "$PLAYER_DEB" --initrd "$BUNDLE/boot/initrd.img" \
+            --work "$RUNNER_TEMP/player-start-probe"
 
       - name: Show what was produced
         if: always()

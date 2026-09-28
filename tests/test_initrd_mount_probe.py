@@ -1,7 +1,7 @@
 """scripts/initrd_mount_probe.py, the CI guard that runs stage 1's real mount path out of the
 built initrd. Its real run needs root, loop devices and an arm64 kernel (base-image.yml); here
 every host command is faked, so these pin the probe's own logic: kernel-order unpacking, the
-chroot command, the in-initrd program, the stage-2 module resolution, deepest-first teardown,
+chroot command, the in-initrd program, the display modules' resolution, deepest-first teardown,
 the AUTOCLEAR check, and that a tree with anything still mounted under it is never deleted."""
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ BOOT_DATA = newc_archive({"usr/lib/python3.13/appliance/bootstrap.py": b"code"})
 EARLY = newc_archive({"kernel/x86/microcode/fake.bin": b"ucode"})
 CACHED = newc_archive({"usr/bin/mount": b"klibc"})
 RELEASE = "6.18.50+rpt-rpi-2712"
-# What the in-initrd program prints for a stage-2 module that resolves on the new root.
+# What the in-initrd program prints for a display module that resolves on the new root.
 RESOLVED = ("resolve vc4 exit=0 files=16 missing=0 last=vc4.ko.xz\n"
             "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n")
 
