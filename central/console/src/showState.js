@@ -13,7 +13,7 @@ import { frameOf, LIVE_PHASES } from "./join.js";
  */
 
 /** The stored Scene a Run started from, while the definition keeps that revision. */
-function runScene(snapshot, run) {
+export function runScene(snapshot, run) {
   const scene = snapshot?.runtime?.definitions?.[run.scene_id];
   return scene !== undefined && scene.revision === run.scene_revision ? scene : null;
 }

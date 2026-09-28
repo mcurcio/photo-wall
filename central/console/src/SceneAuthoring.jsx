@@ -9,6 +9,8 @@ import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx"
 import { SceneList } from "./SceneList.jsx";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { TargetPicker } from "./TargetPicker.jsx";
+import { candidateLabels } from "./mediaHealth.js";
+import { readCandidates } from "./MediaPipeline.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -107,7 +109,16 @@ export function SceneAuthoring({ snapshot }) {
     });
   }, [candidates.ready, candidates.byFrame]);
 
-  const draft = { name, idOverride, mode, sourceRef, targets: targetIds, cycleSeconds, selections };
+  const draft = {
+    name,
+    idOverride,
+    mode,
+    sourceRef,
+    targets: targetIds,
+    cycleSeconds,
+    selections,
+    loadingMedia: candidates.loading,
+  };
   const problems = useProblems(sceneProblems(draft, existingIds, { editing: editing !== null }));
 
   const toggleTarget = useCallback((frameId) => {
@@ -300,6 +311,7 @@ export function SceneAuthoring({ snapshot }) {
 
         {mode === "authored" && (
           <MediaChoosers
+            frames={frames}
             candidates={candidates}
             targetIds={targetIds}
             selections={selections}
@@ -406,10 +418,10 @@ function replaceRequest({ sceneId, revision }, { path, body }, reload) {
 }
 
 /**
- * Each target Frame's candidates from one Source (Bead 14b), read from
- * `GET /v1/operator/sources/{ref}/candidates?frame_id=<frame>`, which central
- * HARD-FILTERS by the Frame's profile server-side — an asset ineligible for a
- * Frame's profile is never returned, so it can never be offered here. `ready`
+ * Each target Frame's candidates from one Source (Bead 14b), read through
+ * MediaPipeline.jsx `readCandidates`, which Central HARD-FILTERS by the Frame's
+ * profile — an asset ineligible for a Frame's profile is never returned, so it
+ * can never be offered here. `loading` until they are read (§6); `ready`
  * once the lists for exactly this Source and these Frames are read; `reload`
  * reads them again.
  *
@@ -437,20 +449,7 @@ function useCandidates(sourceRef, targetIds) {
     (async () => {
       try {
         const entries = await Promise.all(
-          frameIds.map(async (frameId) => {
-            // frame_id makes central drop every asset ineligible for THIS Frame's
-            // profile — the profile hard-filter (design J4). Dropping it would
-            // offer incompatible assets, which is exactly what the mutation probe
-            // attacks.
-            const result = await apiWrite(
-              `/v1/operator/sources/${encodeURIComponent(sourceRef)}/candidates?frame_id=${encodeURIComponent(frameId)}`,
-              { method: "GET" },
-            );
-            if (!result.ok) {
-              throw new Error(result.error ?? String(result.status));
-            }
-            return [frameId, result.data?.candidates ?? []];
-          }),
+          frameIds.map(async (frameId) => [frameId, await readCandidates(sourceRef, frameId)]),
         );
         if (!ignore) {
           setLoaded({ key, byFrame: Object.fromEntries(entries), error: null });
@@ -480,21 +479,12 @@ function useCandidates(sourceRef, targetIds) {
 const EMPTY = {};
 
 /**
- * A human label for one candidate option — kind and original geometry, so the
- * operator can tell photos/videos apart. The option VALUE is the asset id.
- */
-function candidateLabel(candidate) {
-  const kind = candidate.kind === "video" ? "Video" : "Photo";
-  return `${kind} ${candidate.original_width}×${candidate.original_height}`;
-}
-
-/**
  * The authored-mode choosers (Bead 14b): ONE asset per target Frame from that
  * Frame's candidate list (`useCandidates`, profile-filtered by Central). The
  * whole selection is later saved in ONE `PUT …/scenes/{id}/authored`.
  */
-function MediaChoosers({ candidates, targetIds, selections, onSelect, problems }) {
-  const { byFrame, error: loadError } = candidates;
+function MediaChoosers({ frames, candidates, targetIds, selections, onSelect, problems }) {
+  const { byFrame, loading, error: loadError } = candidates;
   return (
     <fieldset
       className="scene-authoring__choosers"
@@ -508,6 +498,8 @@ function MediaChoosers({ candidates, targetIds, selections, onSelect, problems }
       ) : (
         targetIds.map((frameId) => {
           const list = byFrame[frameId] ?? [];
+          const profile = frames.find((frame) => frame.id === frameId)?.profile ?? null;
+          const labels = candidateLabels(list, profile);
           const field = `media:${frameId}`;
           return (
             <Field
@@ -527,13 +519,15 @@ function MediaChoosers({ candidates, targetIds, selections, onSelect, problems }
                   }}
                 >
                   <option value="">
-                    {list.length === 0
-                      ? "No compatible media"
-                      : "Choose compatible media"}
+                    {loading
+                      ? "Loading compatible media…"
+                      : list.length === 0
+                        ? "No compatible media"
+                        : "Choose compatible media"}
                   </option>
-                  {list.map((candidate) => (
+                  {list.map((candidate, index) => (
                     <option key={candidate.asset_id} value={candidate.asset_id}>
-                      {candidateLabel(candidate)}
+                      {labels[index]}
                     </option>
                   ))}
                 </select>

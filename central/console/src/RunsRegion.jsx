@@ -6,6 +6,7 @@ import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
 import { explainPrecedence } from "./join.js";
+import { WhyNothingNew } from "./MediaPipeline.jsx";
 import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import { cycleWording, protectorOf, runRows } from "./showState.js";
@@ -206,7 +207,7 @@ function EndedRuns({ title, rows, snapshot }) {
   );
 }
 
-/** Central's plan for a chosen frame (§10). */
+/** Central's plan for a chosen frame (§10), and why nothing new shows there (§14). */
 function WhyPanel({ snapshot }) {
   const frames = snapshot?.inventory?.frames ?? [];
   // The Frame whose "why" is shown; none until the operator picks.
@@ -230,12 +231,16 @@ function WhyPanel({ snapshot }) {
         </select>
       </label>
       {whyFrame !== "" && (
-        <PrecedenceExplanation
-          explanation={explainPrecedence(snapshot?.runtime, whyFrame)}
-          listLabel="Contribution precedence"
-          listClass="run-control__why-list"
-          emptyClass="run-control__empty"
-        />
+        <>
+          <PrecedenceExplanation
+            explanation={explainPrecedence(snapshot?.runtime, whyFrame)}
+            listLabel="Contribution precedence"
+            listClass="run-control__why-list"
+            emptyClass="run-control__empty"
+          />
+          {/* Its own group beside the ranked list, never inside it (§14). */}
+          <WhyNothingNew key={whyFrame} snapshot={snapshot} frameId={whyFrame} />
+        </>
       )}
     </div>
   );

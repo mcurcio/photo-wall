@@ -19,6 +19,7 @@ assertion.
 
 import os
 import re
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import pytest
@@ -31,16 +32,19 @@ from operator_harness import (
     tile_health,
 )
 from playwright.sync_api import expect
+from psycopg.types.json import Jsonb
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository
+from central.media_store import MediaStore
+from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
-from tests.public_media import public_photo
+from tests.public_media import public_photo, publish_photo
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -496,10 +500,10 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
 
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         # Both portrait candidates are eligible and offered.
-        expect(choice.get_by_role("option", name="Photo 108×192", exact=True)).to_have_count(1)
-        expect(choice.get_by_role("option", name="Photo 120×200", exact=True)).to_have_count(1)
+        expect(choice.get_by_role("option", name=re.compile(r"^Photo 108×192"))).to_have_count(1)
+        expect(choice.get_by_role("option", name=re.compile(r"^Photo 120×200"))).to_have_count(1)
         # The landscape candidate is hard-filtered out for a portrait Frame.
-        expect(choice.get_by_role("option", name="Photo 192×108", exact=True)).to_have_count(0)
+        expect(choice.get_by_role("option", name=re.compile(r"^Photo 192×108"))).to_have_count(0)
 
 
 def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
@@ -526,7 +530,7 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         # The candidates GET, through apiWrite, while the poll is in flight.
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
-        expect(choice.get_by_role("option", name="Photo 108×192", exact=True)).to_have_count(1)
+        expect(choice.get_by_role("option", name=re.compile(r"^Photo 108×192"))).to_have_count(1)
 
         reads.release()
         expect(page.get_by_text(re.compile(r"updated 0 s ago"))).to_be_visible()
@@ -898,7 +902,7 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
         why = runs.get_by_role("group", name="Why", exact=True)
         why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
 
-        rows = why.get_by_role("listitem")
+        rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)
         # Deterministic precedence: higher priority (why-high, 5) ranks first.
         expect(rows.nth(0)).to_contain_text(WHY_HIGH)
@@ -1211,7 +1215,7 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
         why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: intro (priority 0, activated directly) on top.")
-        rows = why.get_by_role("listitem")
+        rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)
         expect(rows.nth(1)).to_have_text(
             "evening (priority 0) is underneath: same Run of evening; "
@@ -1244,7 +1248,7 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
-        expect(why.get_by_role("listitem").nth(1)).to_have_text(
+        expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
             "morning (priority 1) is underneath: evening has priority 5.")
         expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
             "Program weekday-evenings")
@@ -1644,7 +1648,7 @@ STORED_ID = "Lobby_Loop.v2"
 def _console_scene(scene_id, frame=VALID_FRAME, **fields):
     """A live Scene in exactly the shape the console saves: only the fields it sends
     are set, so every other field is stored at its model default."""
-    return Scene(scene_id=scene_id, loop=True, **fields, contributions=(Contribution(
+    return Scene(scene_id=scene_id, **{"loop": True, **fields}, contributions=(Contribution(
         target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), retain_on_expiry=True),))
 
 
@@ -1850,3 +1854,231 @@ def test_a_scene_changed_since_edit_opened_ends_changed_and_sends_nothing(page, 
             "Changed since you opened this. Reopen to review.")
         expect(dialog.get_by_role("button", name="Confirm replace")).to_have_count(0)
         assert puts == []
+
+
+# Pass 2 slice 3B (§14): the media pipeline and "why nothing new?".
+
+
+def _set_source(registry, ref, **columns):
+    """A configured Source whose served refresh columns are set directly: the facts a
+    worker's refreshes would have left (no worker runs in these checks)."""
+    spec = columns.pop("spec", {})
+    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue()).configure_source(
+        SourceSpec(source_ref=ref, connection_ref="fixture-library", **spec))
+    if columns:
+        assignments = ",".join(f"{name}=%s" for name in columns)
+        values = [Jsonb(v) if isinstance(v, (dict, list)) else v for v in columns.values()]
+        with registry.db.transaction() as conn:
+            conn.execute(f"UPDATE media_sources SET {assignments} WHERE source_ref=%s",
+                         (*values, ref))
+
+
+def _utc(year):
+    return datetime(year, 1, 1, tzinfo=UTC).timestamp()
+
+
+def _pipeline(page):
+    return page.get_by_role("region", name="Media pipeline", exact=True)
+
+
+@pytest.mark.browser_context_args(timezone_id="UTC")
+def test_the_media_pipeline_states_each_source(page, registry):
+    _seed(registry)
+    now = registry.clock.utc()
+    good = {"valid": 790, "discovered": 800, "pending": 4, "rejected": 6}
+    _set_source(registry, "awaiting:1")
+    _set_source(registry, "fresh:1", next_refresh=now + 30, last_success=now - 60, status="ok",
+                counts=good, spec={"favorites": True, "media_types": ("image",),
+                                   "captured_from": _utc(2024), "captured_until": _utc(2025)})
+    _set_source(registry, "failing:1", next_refresh=now + 30, last_success=now - 7200,
+                status="unavailable", diagnostics=[{"code": "source_unavailable"}])
+    _set_source(registry, "empty:1", next_refresh=now + 30, last_success=now, status="ok",
+                counts={"valid": 0})
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, now)
+        _connect(page, origin)
+        _to_showrunner(page)
+        pipeline = _pipeline(page)
+
+        def state(ref):
+            return pipeline.get_by_label(f"Refresh of {ref}", exact=True)
+        expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
+        expect(state("fresh:1")).to_contain_text(
+            "refreshed 1 min ago · 790 usable · photos only · only favourites · taken 2024")
+        expect(state("fresh:1")).to_contain_text("found 800 · usable 790 · pending 4 · rejected 6")
+        expect(state("failing:1")).to_contain_text("Library unreachable · last good 2 h ago")
+        expect(state("failing:1")).to_contain_text("source unavailable")
+        expect(state("empty:1")).to_contain_text("no usable media")
+
+        registry.clock.advance(30 + 125 + 240)  # every refresh is 6 min past due
+        page.clock.run_for(5000)
+        expect(state("fresh:1")).to_contain_text("Refresh overdue by 6 min")
+        expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
+        expect(state("failing:1")).to_contain_text("Library unreachable")
+        copy = pipeline.inner_text()
+        for claim in ("LIVE", "online", "connected", "Immich"):
+            assert claim not in copy
+
+
+def test_the_media_pipeline_states_each_worker_state(page, registry):
+    _seed(registry)
+    repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue())
+    repository.health()  # the settings row, as Central's first media read makes it
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        worker = _pipeline(page).get_by_label("Media worker", exact=True)
+        expect(worker).to_have_text("never checked in")
+        expect(worker).to_have_class(re.compile(r"\bhealth--alarm\b"))
+
+        repository.worker_status("storage_pressure")
+        page.clock.run_for(5000)
+        expect(worker).to_have_text("reported: storage is full")
+        expect(_pipeline(page)).to_contain_text("preparing 0 · waiting 0 · failed 0 · cache 0 of")
+
+        repository.worker_status(None)
+        registry.clock.advance(20)
+        page.clock.run_for(5000)
+        expect(worker).to_have_text(re.compile(
+            r"^checked in 20 s ago · preparing 0 · waiting 0 · failed 0 · cache 0 of 4\.3 GB$"))
+        expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
+
+        registry.clock.advance(2 * 300 + 60 - 20 + 1)
+        page.clock.run_for(5000)
+        expect(worker).to_have_text("quiet for 11 min")
+
+
+def _why_chain(page, frame_id=VALID_FRAME):
+    why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+        "group", name="Why", exact=True)
+    why.get_by_label("Frame for why", exact=True).select_option(frame_id)
+    return why.get_by_role("group", name=f"Why nothing new on {frame_id}?", exact=True)
+
+
+def _stop(chain):
+    return chain.get_by_role("listitem").filter(has_text="Stops here.")
+
+
+def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page, registry):
+    """§14 step 2: nothing is intended any more because the one-cycle Run ended; the
+    frame keeps its last still if it was a photo (retain_on_expiry). Mutation probes:
+    drop the retained-still words; render the chain inside the ranked list."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene(SCENE_ID, loop=False))
+    runtime.command("activate", SCENE_ID, "once-act", registry.clock.utc())
+    registry.clock.advance(45)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        chain = _why_chain(page)
+        expect(_stop(chain)).to_have_count(1)
+        expect(_stop(chain)).to_contain_text(re.compile(
+            rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? after one cycle; if its "
+            r"last item was a photo, the frame keeps that still \(a video is not kept\)\."))
+        expect(chain.get_by_role("listitem").first).to_contain_text(
+            f"No Scene is intended for {VALID_FRAME} now.")
+        # The chain is its own group: the ranked list is not in it.
+        expect(chain.get_by_role("list", name="Contribution precedence")).to_have_count(0)
+
+
+def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _put_authored(page, origin, AUTHORED_SCENE_ID, {VALID_FRAME: portrait_a.asset.asset_id})
+        _runtime(registry).command("activate", AUTHORED_SCENE_ID, "fixed-act", registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        chain = _why_chain(page)
+        expect(_stop(chain)).to_contain_text(
+            "Authored? Fixed, hand-picked media; new photos never appear by design.")
+        expect(chain.get_by_role("button", name="Check this frame")).to_have_count(0)
+        # Ranked beside it, unchanged: one layer.
+        why = page.get_by_role("region", name="Runs", exact=True).get_by_role("group", name="Why")
+        expect(why.get_by_role("list", name="Contribution precedence").get_by_role(
+            "listitem")).to_have_count(1)
+
+
+def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
+    """§14 step 5: the frame's candidates split into usable, still preparing and failed
+    to prepare — the planner's exclusions. The candidates route's count includes a
+    failed preparation (mutation probe: count it as usable)."""
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    now = registry.clock.utc()
+    with registry.db.transaction() as conn:  # the refresh found them usable
+        conn.execute("UPDATE media_sources SET counts=%s WHERE source_ref=%s",
+                     (Jsonb({"valid": 3, "discovered": 3}), SOURCE))
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene(SCENE_ID))
+    runtime.command("activate", SCENE_ID, "live-act", now)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, now)
+        _connect(page, origin)
+        _to_showrunner(page)
+        chain = _why_chain(page)
+        expect(chain).to_contain_text(f"The Source {SOURCE}: refreshed 0 s ago · 3 usable.")
+        chain.get_by_role("button", name="Check this frame", exact=True).click()
+        expect(_stop(chain)).to_contain_text(
+            "Check this frame Nothing usable yet: 2 still preparing.")
+
+        repository = MediaRepository(registry.db, registry.clock, queue=queue)
+        repository.set_recipe("a" * 64)  # the worker checks in with its recipe
+        repository.request_acquisitions((AcquisitionRequest(
+            asset_id=portrait_a.asset.asset_id, assignment_ids=("a",), earliest_start=now),))
+        publish_photo(MediaStore(repository, tmp_path / "media"), portrait_a)
+        repository.request_acquisitions((AcquisitionRequest(
+            asset_id=portrait_b.asset.asset_id, assignment_ids=("b",), earliest_start=now),))
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE media_jobs SET state='failed',failure_code='asset_missing' "
+                         "WHERE asset_id=%s", (portrait_b.asset.asset_id,))
+        response = page.request.get(
+            origin + f"/v1/operator/sources/{quote(SOURCE, safe='')}/candidates"
+            f"?frame_id={VALID_FRAME}", headers={"Authorization": "Bearer " + ADMIN})
+        assert response.json()["count"] == 2  # the route counts the failed one too
+        page.clock.run_for(5000)  # the next poll serves the worker's check-in
+        chain.get_by_role("button", name="Check again", exact=True).click()
+        check = chain.get_by_role("listitem").filter(has_text="Check this frame")
+        expect(check).to_contain_text("1 usable · 1 failed to prepare.")
+        expect(check).not_to_contain_text("Stops here.")
+        expect(_stop(chain)).to_contain_text("Frame health")
+
+
+def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, registry):
+    """§14 labels and §6 "Loading compatible media…" (a state, never "No compatible
+    media" while the read is in flight); "(2)" only for a remaining duplicate."""
+    _seed(registry)
+    now = registry.clock.utc()
+    photos = (*_authored_photos(registry), public_photo(number=4, width=108, height=192,
+                                                        captured_at=now))
+    queue = _seed_source(registry, photos)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
+        form.get_by_label("Authored per-frame", exact=True).check()
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        reads = RequestGate(page, "**/candidates*")
+        reads.holding = True
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        reads.wait_held()
+        choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(choice.get_by_role("option")).to_have_text(["Loading compatible media…"])
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text("Loading compatible media…")
+
+        reads.holding = False
+        reads.release()
+        expect(choice.get_by_role("option").first).to_have_text("Choose compatible media")
+        labels = sorted(choice.get_by_role("option").all_inner_texts()[1:])
+        taken = r" · taken .+ \d\d:\d\d(:\d\d)? · preparing"
+        assert len(labels) == 3, labels
+        assert re.fullmatch(r"Photo 108×192" + taken, labels[0]), labels
+        assert re.fullmatch(r"Photo 108×192" + taken + r" \(2\)", labels[1]), labels
+        assert re.fullmatch(r"Photo 120×200" + taken, labels[2]), labels

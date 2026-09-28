@@ -1,6 +1,7 @@
 import React from "react";
 
 import { frameHealth } from "./health.js";
+import { MediaPipeline } from "./MediaPipeline.jsx";
 import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import { RunsRegion } from "./RunsRegion.jsx";
 import { SceneAuthoring } from "./SceneAuthoring.jsx";
@@ -9,8 +10,8 @@ import { SourcesRegion } from "./SourcesRegion.jsx";
 /**
  * The Showrunner — the "run the show" layer of the one console (design §2,
  * J4) — and its layout (pass 2 slice 3 §12). Two columns from 1024 px: **Now**
- * holds the Runs region with its Why panel; **Library** holds Scenes, Programs
- * and Sources. Narrower, one column with the Runs first. Each region lives in
+ * holds the Runs region with its Why panel and the Media pipeline; **Library**
+ * holds Scenes, Programs and Sources. Narrower, one column with the Runs first. Each region lives in
  * its own module; this file only lays them out.
  *
  * The only hardware fact the show layer is allowed to see is each Frame's
@@ -54,6 +55,7 @@ export function Showrunner({ snapshot }) {
       <div className="showrunner__columns">
         <div className="showrunner__column showrunner__column--now">
           <RunsRegion snapshot={snapshot} />
+          <MediaPipeline snapshot={snapshot} />
         </div>
         <div className="showrunner__column showrunner__column--library">
           <section className="showrunner__region" role="region" aria-label="Scenes">

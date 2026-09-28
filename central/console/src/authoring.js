@@ -101,7 +101,7 @@ export function identityProblems(kind, draft, existingIds) {
  *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
  *          sourceRef: string, targets: string[], cycleSeconds: string|number,
- *          selections: Record<string, string>}} draft
+ *          selections: Record<string, string>, loadingMedia?: boolean}} draft
  * @param {Set<string>} existingIds the stored Scene ids
  * @param {{editing?: boolean}} [options]
  * @returns {Problem[]}
@@ -120,7 +120,9 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   if (draft.mode === "authored") {
     for (const frameId of draft.targets) {
       if (!draft.selections[frameId]) {
-        problems.push({ field: `media:${frameId}`, message: `Choose media for ${frameId}.` });
+        // While a frame's candidates are read, that is the state to say (§6).
+        const message = draft.loadingMedia ? "Loading compatible media…" : `Choose media for ${frameId}.`;
+        problems.push({ field: `media:${frameId}`, message });
       }
     }
   }
