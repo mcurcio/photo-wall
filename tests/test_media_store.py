@@ -324,6 +324,8 @@ def test_new_request_requires_current_exact_authority(storage, registry, fault):
             other, _, _ = enroll(registry)
             registry.bind("portrait", other["player_id"], "HDMI-A-1", expected_generation=1)
         elif fault == "retire":
+            # A bound Player cannot be retired: unbind, then retire.
+            registry.unbind("portrait", expected_generation=1)
             registry.retire(player["player_id"])
         else:
             enroll(registry, key)
@@ -390,6 +392,7 @@ def test_retired_player_existing_read_finishes_but_new_read_is_refused(storage, 
         _, _, prepared = ready(storage)
         player, _, _ = grant(storage, registry, prepared.variant)
         with storage.open_read(player["token"], prepared.variant.sha256) as reader:
+            registry.unbind("portrait", expected_generation=1)
             registry.retire(player["player_id"])
             with pytest.raises(RegistryError):
                 storage.open_read(player["token"], prepared.variant.sha256)

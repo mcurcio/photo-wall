@@ -12,10 +12,12 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from contracts.models import TARGET_ID_PATTERN
+
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
 
-Target = Annotated[str, Field(pattern=r"^(frame|actuator):[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")]
+Target = Annotated[str, Field(pattern=rf"^(frame|actuator):{TARGET_ID_PATTERN}$")]
 Seconds = Annotated[FiniteFloat, Field(ge=0)]
 PositiveSeconds = Annotated[FiniteFloat, Field(gt=0)]
 Identifier = Annotated[str, Field(min_length=1, max_length=160)]

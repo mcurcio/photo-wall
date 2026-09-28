@@ -2,13 +2,14 @@
 
 import base64
 import hashlib
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from central.app import create_app
 from central.coordination import Coordinator
@@ -23,6 +24,7 @@ from central.registry import (
     RegistryError,
     enrollment_message,
 )
+from central.runtime import Target
 from contracts.models import Calibration, FrameProfile
 
 ADMIN = "test-operator-" + "x" * 40
@@ -221,6 +223,8 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert first["generation"] == 1
     registry.calibrate("portrait", "commit", 1, Calibration(gain=.8), expected_generation=1)
     assert len(registry.bindings_for(old["player_id"], 1)) == 1
+    # Replacement is unbind, then retire: a Player with a bound Output cannot be retired.
+    registry.unbind("portrait", expected_generation=1)
     registry.retire(old["player_id"])
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(old["token"])
@@ -271,11 +275,80 @@ def test_unbind_stays_reversible_while_retire_stays_permanent(registry):
     # Reversible: the player record survives and re-binds; nothing is retired.
     assert registry.inventory().players[0].retired_at is None
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+    registry.unbind("portrait", expected_generation=3)
     registry.retire(identity["player_id"])
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(identity["token"])
     with pytest.raises(RegistryError, match="retired"):
         enroll(registry, device_id=enrollment.device_id)
+
+
+def test_retire_refuses_a_player_with_a_bound_output_and_leaves_it_unretired(registry):
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    with pytest.raises(RegistryError, match="player_bound") as refused:
+        registry.retire(identity["player_id"])
+    assert refused.value.status == 409
+    player = registry.inventory().players[0]
+    assert player.retired_at is None and player.authority_epoch == identity["authority_epoch"]
+    assert registry.inventory().frames[0].player_id == identity["player_id"]
+    assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
+
+
+def test_retire_route_answers_409_player_bound_for_a_bound_player(registry):
+    identity, _, _ = enroll(registry)
+    pending, _, _ = enroll(registry)
+    frame(registry)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    operator = {"Authorization": "Bearer " + ADMIN}
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        refused = client.post(f"/v1/operator/players/{identity['player_id']}/retire", headers=operator)
+        assert refused.status_code == 409 and refused.json() == {"error": "player_bound"}
+        # A pending Player (no bound Output) still retires; retiring it again is a no-op.
+        for _ in range(2):
+            retired = client.post(f"/v1/operator/players/{pending['player_id']}/retire",
+                                  headers=operator)
+            assert retired.status_code == 200 and retired.json() == {"status": "retired"}
+    by_id = {player.id: player for player in registry.inventory().players}
+    assert by_id[identity["player_id"]].retired_at is None
+    assert by_id[pending["player_id"]].retired_at is not None
+
+
+def test_retire_waiting_on_a_bind_in_flight_sees_it_and_refuses(registry):
+    """The retire race is closed by the Player row lock both verbs take first, under READ
+    COMMITTED (central/db.py sets no isolation): the bindings check is a new statement after
+    the lock wait, so it sees the bind that committed during it. Under REPEATABLE READ the
+    check's snapshot would predate the wait and this test fails."""
+    identity, _, _ = enroll(registry)
+    frame(registry)
+    player_id = identity["player_id"]
+    pool = ThreadPoolExecutor(1)
+    try:
+        with registry.db.transaction() as holder:
+            # A bind in flight: the Player row lock first (as Registry.bind), then its row.
+            holder.execute("SELECT 1 FROM players WHERE id=%s FOR UPDATE", (player_id,))
+            holder.execute("INSERT INTO bindings VALUES(%s,%s,%s)",
+                           ("portrait", player_id, "HDMI-A-1"))
+            retiring = pool.submit(registry.retire, player_id)
+            blocker = holder.info.backend_pid
+            deadline = time.monotonic() + 5
+            while True:
+                with registry.db.transaction() as probe:
+                    waiting = probe.execute(
+                        "SELECT count(*) AS n FROM pg_stat_activity "
+                        "WHERE %s = ANY(pg_blocking_pids(pid))", (blocker,)).fetchone()["n"]
+                if waiting:
+                    break
+                assert not retiring.done(), retiring.exception()
+                assert time.monotonic() < deadline, "retire never waited on the Player lock"
+                time.sleep(.02)
+        # The bind committed while retire waited: retire must see it.
+        with pytest.raises(RegistryError, match="player_bound"):
+            retiring.result(timeout=10)
+    finally:
+        pool.shutdown(wait=True)
+    assert registry.inventory().players[0].retired_at is None
 
 
 def test_unbind_leaves_session_token_and_epoch_valid_unlike_retire(registry):
@@ -437,6 +510,19 @@ def test_place_frame_never_touches_generation_revision_or_calibration(registry):
     assert after.generation == before.generation
     assert after.configuration_revision == before.configuration_revision
     assert after.calibration == before.calibration
+
+
+def test_frame_create_ids_follow_the_one_target_id_rule():
+    profile = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
+    targets = TypeAdapter(Target)
+    for usable in ("lobby-left", "a", "A.b_c-9", "x" * 96):
+        FrameCreate(id=usable, width_mm=400, height_mm=300, profile=profile)
+        assert targets.validate_python("frame:" + usable) == "frame:" + usable
+    for unusable in ("a:b", "lobby:left", "x" * 97, "-lead", "", "sp ace"):
+        with pytest.raises(ValidationError):
+            FrameCreate(id=unusable, width_mm=400, height_mm=300, profile=profile)
+        with pytest.raises(ValidationError):
+            targets.validate_python("frame:" + unusable)
 
 
 def test_frame_create_still_rejects_an_incoherent_profile(registry):

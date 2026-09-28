@@ -7,6 +7,12 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]
+# The one usable Frame/Actuator id rule: a Scene reaches a target only as
+# "<kind>:<id>" (central/runtime.py `Target`), so an id has no ':' and at most 96
+# characters. New Frames are created under it (central/registry.py `FrameCreate`);
+# the console's FRAME_ID_PATTERN is pinned equal to it by a test.
+TARGET_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+TargetIdentifier = Annotated[str, Field(pattern=rf"^{TARGET_ID_PATTERN}$")]
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Instant = Annotated[float, Field(allow_inf_nan=False)]
 Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -14,15 +20,6 @@ Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
-
-
-class Target(Model):
-    kind: Literal["frame", "actuator"]
-    id: Identifier
-
-    @property
-    def key(self) -> str:
-        return f"{self.kind}:{self.id}"
 
 
 class FrameProfile(Model):
