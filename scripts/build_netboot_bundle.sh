@@ -258,17 +258,20 @@ for f in pieeprom.upd pieeprom.sig; do
     fi
 done
 
-# cmdline.txt is a TEMPLATE, not a bootable command line: the operator sets the
-# ONE @@PHOTOWALL_CENTRAL@@ placeholder to Central's ROOT URL before serving it
-# over TFTP, once per site. This line is then STATIC and fleet-wide immortal:
+# cmdline.txt is a TEMPLATE, not a bootable command line: the operator (or the
+# deployment staging it) replaces the ONE @@PHOTOWALL_CENTRAL@@ placeholder with
+# Central's ROOT URL, e.g. http://photo-wall/ or http://10.0.20.5/ (required),
+# before serving it over TFTP, once per site, and changes nothing else. This
+# line is then STATIC and fleet-wide immortal:
 # everything after the root -- the netboot request path (/v1/netboot/base), the
 # Pi's identity (its serial, self-supplied in the X-PhotoWall-Serial header),
 # and the expected corruption digest (the HTTP Digest response header) -- is
 # auto-discovered by the initrd, so the base image never changes as the served
 # squashfs is revised. NOTE: the Pi firmware passes cmdline.txt verbatim to the
-# kernel and does NOT support comments, so the leading comment lines MUST be
-# deleted; cmdline.txt must end up a single line. The @@ placeholder also
-# guarantees this file cannot be booted unedited.
+# kernel and does NOT support comments, so the file is written as exactly ONE
+# line and must stay one line: the placeholder is the only thing to change
+# (contracts/release.py CMDLINE_PLACEHOLDER; the release seal refuses any other
+# shape). The @@ placeholder also guarantees this file cannot be booted unedited.
 #
 # Optional: append `photowall.debug=1` to raise console verbosity and lengthen
 # the pre-reboot pause on failure (field debugging on an HDMI/serial console).
@@ -280,8 +283,6 @@ done
 # running kernel does not show, so a template regression here is loud, not
 # silent.
 cat > "$boot_dir/cmdline.txt" <<'EOF'
-# TEMPLATE -- delete these comment lines, keep ONE command line. Substitute:
-#   @@PHOTOWALL_CENTRAL@@ -> Central's ROOT URL, e.g. http://photo-wall/ or http://10.0.20.5/ (required)
 console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@
 EOF
 

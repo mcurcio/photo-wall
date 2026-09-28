@@ -6,13 +6,13 @@ and `test_netboot_init.py` covers `netboot()`'s wiring of a `Keeper`."""
 
 import ast
 import os
-import re
 import shutil
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
+from support.release_build import cmdline_template
 
 from appliance.bootstrap import (
     KERNEL_LIVENESS,
@@ -230,14 +230,9 @@ def _cmdline_template_command_line(text: str) -> str:
     (S0-AC11: "reads the cmdline template out of build_netboot_bundle.sh"),
     not the whole script -- an adjacent explanatory comment must not be able
     to keep this test green after a regression in the template line itself."""
-    match = re.search(
-        r'cat > "\$boot_dir/cmdline\.txt" <<\'EOF\'\n(.*?)\nEOF\n',
-        text,
-        re.DOTALL,
-    )
-    assert match, "cmdline.txt heredoc not found in build_netboot_bundle.sh"
-    body_lines = [line for line in match.group(1).splitlines() if not line.startswith("#")]
-    assert len(body_lines) == 1, f"cmdline.txt template must reduce to one command line, got: {body_lines}"
+    body_lines = cmdline_template(text).splitlines()
+    assert len(body_lines) == 1, f"cmdline.txt template must be one command line, got: {body_lines}"
+    assert not body_lines[0].startswith("#"), "the firmware has no comment syntax"
     return body_lines[0]
 
 

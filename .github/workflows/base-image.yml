@@ -859,15 +859,16 @@ jobs:
           fi
 
           # cmdline.txt template contract (central-discovery model,
-          # build_netboot_bundle.sh): exactly ONE non-comment kernel command
-          # line, carrying the static tokens + the central ROOT placeholder, and
-          # NONE of the retired base_url/base_sha256 params. The operator deletes
-          # the leading comment lines and substitutes @@PHOTOWALL_CENTRAL@@. This
-          # catches a template regression in build_netboot_bundle.sh.
-          cmd=$(grep -v '^#' "$BUNDLE/boot/cmdline.txt" | grep -v '^[[:space:]]*$' || true)
-          cmd_lines=$(printf '%s\n' "$cmd" | grep -c . || true)
-          [ "$cmd_lines" = "1" ] \
-            || violation "cmdline.txt has $cmd_lines command lines, expected exactly 1"
+          # build_netboot_bundle.sh; contracts/release.py): the whole file is
+          # exactly ONE kernel command line (no comment lines: the firmware
+          # passes the file verbatim), carrying the static tokens + the central
+          # ROOT placeholder, and NONE of the retired base_url/base_sha256
+          # params. The operator substitutes @@PHOTOWALL_CENTRAL@@ and nothing
+          # else. This catches a template regression in build_netboot_bundle.sh.
+          cmd=$(cat "$BUNDLE/boot/cmdline.txt")
+          cmd_lines=$(wc -l < "$BUNDLE/boot/cmdline.txt")
+          [ "$cmd_lines" -eq 1 ] && ! printf '%s' "$cmd" | grep -q '^#' \
+            || violation "cmdline.txt is not exactly one command line ($cmd_lines lines)"
           printf '%s' "$cmd" | grep -q 'photowall.central=@@PHOTOWALL_CENTRAL@@' \
             || violation "cmdline.txt missing photowall.central=@@PHOTOWALL_CENTRAL@@"
           for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' \
