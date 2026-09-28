@@ -1529,3 +1529,35 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
         assert body["favorites"] is True
         assert body["captured_from"] == _epoch(page, "2024-01-01T00:00")
         assert body["captured_until"] == _epoch(page, "2025-01-01T00:00")
+
+
+def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(page, registry):
+    """useConfirm (ConfirmAction.jsx): a dialog closed with no result goes back to its
+    opener — or, when a poll removed the opener, to the owner's declared successor
+    (the Runs region), never to the page body."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID))
+    runtime.command("activate", SCENE_ID, "gone-act", registry.clock.utc())
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        opener = runs.get_by_role("button", name=re.compile(r"^Cancel run "))
+        opener.click()
+        dialog = page.get_by_role("dialog", name=f"Cancel the Run of {SCENE_ID}?")
+        expect(dialog).to_be_visible()
+
+        # Another operator cancels it; the next poll drops the live row and its opener.
+        run_id = next(run.run_id for run in runtime.read().project(registry.clock.utc()).runs
+                      if run.scene_id == SCENE_ID)
+        runtime.command("cancel", run_id, registry.clock.utc())
+        page.clock.run_for(5000)
+        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(opener).to_have_count(0)
+
+        dialog.get_by_role("button", name="Cancel", exact=True).click()
+        expect(dialog).to_have_count(0)
+        expect(runs).to_be_focused()
