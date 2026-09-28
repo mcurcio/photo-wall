@@ -360,7 +360,17 @@ class Runtime:
         return view
 
     def export_state(self) -> dict:
-        return self._state.model_dump(mode="json")
+        """The persisted form; the only path by which runtime state is stored.
+
+        Rollback compatibility: builds before `Admission.blocking_run_id` forbid
+        the key, so it is written only when set. A state holding no protection
+        refusal therefore still restores on the previous Central build.
+        """
+        state = self._state.model_dump(mode="json")
+        for admission in state["admissions"].values():
+            if admission["blocking_run_id"] is None:
+                del admission["blocking_run_id"]
+        return state
 
     @classmethod
     def restore(cls, state: dict) -> Runtime:

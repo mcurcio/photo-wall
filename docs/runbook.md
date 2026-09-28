@@ -337,6 +337,24 @@ DELETE FROM schema_migrations WHERE name = '028_os_image_content_key.sql';
 and deploy the new code: 028 runs again and re-keys every OS image from `app_releases`. It is
 safe to run twice.
 
+**Rolling Central back past stored protection refusals.** Runtime state (`runtime_state.snapshot`)
+records the Run that refused a protected activation or Program as `blocking_run_id` on that
+Admission, and only there. Builds before that field forbid the key, so once a protection refusal
+has been stored a previous Central build cannot restore runtime state: `/healthz` reports the
+scheduler as `coordination_unavailable` on every tick, and operator runtime reads and writes
+return 422 `invalid_command`. A state with no stored refusal is unaffected. Prefer rolling
+forward. Otherwise stop Central, then run this once before starting the previous build (it only
+removes the key, so the refusal keeps its reason; running it again changes nothing):
+
+```sql
+UPDATE runtime_state
+SET snapshot = jsonb_set(snapshot, '{admissions}', (
+    SELECT jsonb_object_agg(key, value - 'blocking_run_id')
+    FROM jsonb_each(snapshot->'admissions')))
+WHERE EXISTS (
+    SELECT 1 FROM jsonb_each(snapshot->'admissions') WHERE value ? 'blocking_run_id');
+```
+
 ## Operator API: reposition and remove Frames
 
 The operator console edits the wall plan through two admin-authenticated routes on central (both `Depends(admin)`, like every `/v1/operator/*` route). They change no schema and add no migration — the placement columns (`surface_id`, `x_mm`, `y_mm`, `width_mm`, `height_mm`) already exist on the `frames` row.

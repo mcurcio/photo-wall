@@ -667,12 +667,60 @@ def test_an_admission_stored_before_the_blocking_run_existed_restores():
     runtime.activate("open", "open-act", 1)
     old = json.loads(json.dumps(runtime.export_state()))
     for admission in old["admissions"].values():
-        del admission["blocking_run_id"]
+        admission.pop("blocking_run_id", None)
     restored = Runtime.restore(old)
     assert restored.activate("open", "open-act", 2).blocking_run_id is None
     exported = restored.export_state()
-    assert exported["admissions"]["open-act"]["blocking_run_id"] is None
+    assert "blocking_run_id" not in exported["admissions"]["open-act"]
     assert Runtime.restore(exported).export_state() == exported
+
+
+# Rollback compatibility: the Admission fields the Central build before
+# `blocking_run_id` accepts (its models forbid extra keys). A stored state
+# must stay inside this set unless a protection refusal has been recorded.
+PREVIOUS_ADMISSION_FIELDS = frozenset({"activation_id", "status", "run_id", "reason"})
+
+
+def _keys_named(value, key):
+    if isinstance(value, dict):
+        return (key in value) + sum(_keys_named(v, key) for v in value.values())
+    if isinstance(value, list):
+        return sum(_keys_named(v, key) for v in value)
+    return 0
+
+
+def test_a_state_without_a_protection_refusal_restores_on_the_previous_build():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
+    runtime.activate("guard", "guard-act", 0)
+    runtime.activate("guard", "guard-again", 1)
+    runtime.set_program(Program(program_id="gone", scene_id="open", starts_at=0, ends_at=1))
+    runtime.set_program(Program(program_id="later", scene_id="open", starts_at=5, ends_at=50))
+    runtime.advance(10)
+    exported = json.loads(json.dumps(runtime.export_state()))
+    statuses = {a["status"] for a in exported["admissions"].values()}
+    assert {"admitted", "ignored"} <= statuses
+    assert _keys_named(exported, "blocking_run_id") == 0
+    for admission in exported["admissions"].values():
+        assert set(admission) <= PREVIOUS_ADMISSION_FIELDS
+    assert Runtime.restore(exported).export_state() == exported
+
+
+def test_a_protection_refusal_is_stored_and_restores_on_this_build():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    runtime.activate("open", "open-act", 1)
+    exported = json.loads(json.dumps(runtime.export_state()))
+    assert exported["admissions"]["open-act"]["blocking_run_id"] == guard
+    assert "blocking_run_id" not in exported["admissions"]["guard-act"]
+    restored = Runtime.restore(exported)
+    assert restored.activate("open", "open-act", 2).blocking_run_id == guard
+    assert restored.export_state()["admissions"] == exported["admissions"]
 
 
 def test_the_operator_read_serves_a_day_of_history_and_stores_everything():

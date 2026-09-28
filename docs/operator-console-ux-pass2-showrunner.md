@@ -243,6 +243,7 @@ The operator types "Family Evening" and sees "Saved as `family-evening`". "Keep 
 | A Scene the console cannot author (3B) | Edit withheld, with the reason | Construction-time (normalized round trip) + test |
 | `/runtime` payload growth | Bounded to 24 h of ended Runs (Question 2 default) | pytest |
 | Browser and wall in different time zones | The zone is named | **None** |
+| Central rolled back to a build before `blocking_run_id` after a protection refusal was stored | Scheduler `coordination_unavailable`; operator runtime calls 422 | Structural for states with no refusal (`export_state`, the one persisted path, omits the unset key) + pytest; otherwise **None**: roll forward, or run the [runbook](runbook.md#upgrading-to-content-keyed-os-images-migration-028) SQL first |
 
 ## 17. Beads
 
@@ -289,7 +290,7 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 
 ## 18. Costs, deferrals and questions
 
-- **Costs:** names are not kept; confirm clicks for Cancel, Replace and removing a running Program; forms always visible; media alarms stay out of the strip; thresholds are console constants pinned by pytest; **albums are not supported** (`SourceSpec` has no album field); Programs and admissions are never pruned in stored state; the planner's "no usable media" is inferred, not served per frame.
+- **Costs:** names are not kept; confirm clicks for Cancel, Replace and removing a running Program; forms always visible; media alarms stay out of the strip; thresholds are console constants pinned by pytest; **albums are not supported** (`SourceSpec` has no album field); Programs and admissions are never pruned in stored state; the planner's "no usable media" is inferred, not served per frame. A stored protection refusal pins the rollback floor at this build unless its `blocking_run_id` is stripped first (runbook SQL).
 - **Deferred:** thumbnails, Scene delete, display names, media alarms in the strip.
 - **Question 1:** new Scenes default "Keep playing until the Program ends" to on? Build proceeds on the default: on.
 - **Question 2:** should `operator_projection` serve only live Runs plus Runs ended in the last 24 h (read-only), bounding the 5 s payload? Build proceeds on the default: yes (3A-3).
