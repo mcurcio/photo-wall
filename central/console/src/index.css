@@ -912,3 +912,19 @@ label {
   margin: 8px 0 0;
   color: var(--fg-muted);
 }
+
+/* Boot facts (slice 2 §5): serial and netboot outcome beside a Player. */
+.rail__boot,
+.chooser__note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.rail__boot:empty {
+  display: none;
+}
+
+.chooser__note {
+  margin: 0;
+}

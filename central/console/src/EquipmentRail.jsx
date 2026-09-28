@@ -1,7 +1,12 @@
 import React, { useRef, useState } from "react";
 
 import { ConfirmAction, retireRequest } from "./ConfirmAction.jsx";
-import { playerLiveness, playerStanding } from "./health.js";
+import {
+  bootOutcomeLabel,
+  playerLiveness,
+  playerSerial,
+  playerStanding,
+} from "./health.js";
 
 /**
  * Equipment rails (Bead 9) — the onboarding surface for new and retired Players.
@@ -29,9 +34,13 @@ import { playerLiveness, playerStanding } from "./health.js";
  * refreshes the rails AND the bindable-output set together; once done, focus
  * moves to the Retired rail's heading.
  *
- * @param {{snapshot: object|null, onSelect: (playerId: string) => void}} props
+ * A Pending entry also names the device's serial and netboot outcome from the
+ * App-level boot facts (bootFacts.js), joined on `device_id`.
+ *
+ * @param {{snapshot: object|null, bootFacts?: object|null,
+ *          onSelect: (playerId: string) => void}} props
  */
-export function EquipmentRail({ snapshot, onSelect }) {
+export function EquipmentRail({ snapshot, bootFacts = null, onSelect }) {
   const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
@@ -39,7 +48,7 @@ export function EquipmentRail({ snapshot, onSelect }) {
   const retire = (event, playerId) => {
     openerRef.current = event.currentTarget;
     setStatus(null);
-    setConfirm(retireRequest(snapshot, null, playerId));
+    setConfirm(retireRequest(snapshot, bootFacts, playerId));
   };
   const onConfirmClosed = (result) => {
     setConfirm(null);
@@ -79,6 +88,14 @@ export function EquipmentRail({ snapshot, onSelect }) {
                 </button>
                 <span className="rail__liveness">
                   {playerLiveness(snapshot, player.id)?.label}
+                </span>
+                <span className="rail__boot">
+                  {[
+                    playerSerial(snapshot, bootFacts, player.id),
+                    bootOutcomeLabel(bootFacts, player.device_id),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </span>
                 <button
                   type="button"

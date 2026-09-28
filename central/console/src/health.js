@@ -368,9 +368,54 @@ const HANDLE_LENGTH = 6;
  * @returns {string}
  */
 export function playerHandle(snapshot, bootFacts, playerId) {
+  return (playerSerial(snapshot, bootFacts, playerId) ?? playerId).slice(-HANDLE_LENGTH);
+}
+
+/**
+ * The last known serial for a Player, joined on `device_id` (never on the
+ * Player id): null without a netboot record.
+ *
+ * @param {object|null} snapshot
+ * @param {{devices?: Map<string, object>}|null} bootFacts
+ * @param {string} playerId
+ * @returns {string|null}
+ */
+export function playerSerial(snapshot, bootFacts, playerId) {
   const player = findPlayer(snapshot, playerId);
-  const serial = player === null ? null : bootFacts?.devices?.get(player.device_id)?.serial;
-  return (serial || playerId).slice(-HANDLE_LENGTH);
+  return (player && bootFacts?.devices?.get(player.device_id)?.serial) || null;
+}
+
+export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
+
+/**
+ * A device's netboot outcome in plain words, from the boot facts (bootFacts.js):
+ * rolled back (a sticky `failed_tag`), last healthy on a tag, served but not yet
+ * healthy, or no netboot record at all. Null while the first read is pending;
+ * "Boot records unavailable" when no read has succeeded.
+ *
+ * @param {{devices: Map<string, object>, loaded: boolean, unavailable: boolean}|null} bootFacts
+ * @param {string} deviceId the Player's `device_id`
+ * @returns {string|null}
+ */
+export function bootOutcomeLabel(bootFacts, deviceId) {
+  if (!bootFacts?.loaded) {
+    return bootFacts?.unavailable ? BOOT_FACTS_UNAVAILABLE : null;
+  }
+  const row = bootFacts.devices.get(deviceId);
+  if (row === undefined) {
+    return "No netboot record";
+  }
+  const healthy = row.known_good_tag ? `last netboot healthy on ${row.known_good_tag}` : null;
+  if (row.failed_tag) {
+    return `Rolled back from ${row.failed_tag}${healthy ? ` · ${healthy}` : ""}`;
+  }
+  if (healthy) {
+    return healthy.charAt(0).toUpperCase() + healthy.slice(1);
+  }
+  if (row.last_served_tag) {
+    return `Last netboot served ${row.last_served_tag}, not yet healthy`;
+  }
+  return "Netboot seen, no image served yet";
 }
 
 /**

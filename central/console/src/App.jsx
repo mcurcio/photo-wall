@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import "./index.css";
 import { AttentionStrip } from "./AttentionStrip.jsx";
+import { useBootFacts } from "./bootFacts.js";
 import { EquipmentRail } from "./EquipmentRail.jsx";
 import { Guidance } from "./Guidance.jsx";
 import { facetFor, frameHealth } from "./health.js";
@@ -33,6 +34,9 @@ export default function App() {
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
+  // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
+  // the Equipment rail and the output chooser.
+  const bootFacts = useBootFacts(snapshot);
   // Bead 18: the global snapshot-age clock (advances each second, resets on
   // refresh) and the ~10s /healthz pill. Both are global, so they read one
   // age/one health regardless of Wall/Showrunner mode. The pill is the ONE place
@@ -265,7 +269,11 @@ export default function App() {
                   </button>
                 </div>
               )}
-              <EquipmentRail snapshot={snapshot} onSelect={setSelectedPlayer} />
+              <EquipmentRail
+                snapshot={snapshot}
+                bootFacts={bootFacts}
+                onSelect={setSelectedPlayer}
+              />
               {selectedPlayer !== null && (
                 <p className="console__selected-player">
                   Pending player selected: {selectedPlayer}
@@ -318,6 +326,7 @@ export default function App() {
               <aside className="console__side">
                 <Inspector
                   snapshot={snapshot}
+                  bootFacts={bootFacts}
                   frameId={selection}
                   facet={facet}
                   onFacet={setFacet}

@@ -33,7 +33,9 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * With no frame selected (`frameId` null) it renders its empty state, "Select
  * a frame", so the Inspector column keeps its place in the layout.
  *
- * @param {{snapshot: object|null, frameId: string|null, facet: Facet,
+ * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet.
+ *
+ * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string|null, facet: Facet,
  *          onFacet: (facet: Facet) => void, focusRequest?: number|null,
  *          onFocusDone?: () => void}} props
  */
@@ -45,6 +47,7 @@ const FACETS = [
 
 export function Inspector({
   snapshot,
+  bootFacts = null,
   frameId,
   facet,
   onFacet,
@@ -123,6 +126,7 @@ export function Inspector({
           <BindingFacet
             key={frameId}
             snapshot={snapshot}
+            bootFacts={bootFacts}
             frameId={frameId}
             onFacet={onFacet}
           />

@@ -2,7 +2,13 @@ import React, { useEffect, useId, useRef, useState } from "react";
 
 import { ConfirmAction, unbindRequest } from "./ConfirmAction.jsx";
 import { bind } from "./equipmentApi.js";
-import { bindableOutputs, isBound, outputLabel, playerLiveness } from "./health.js";
+import {
+  BOOT_FACTS_UNAVAILABLE,
+  bindableOutputs,
+  isBound,
+  outputLabel,
+  playerLiveness,
+} from "./health.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -33,10 +39,13 @@ import { useMutate } from "./useMutate.js";
  * After it is done, focus moves to the output chooser — or to the facet heading
  * when the refresh failed and the Frame still reads bound.
  *
- * @param {{snapshot: object|null, frameId: string,
+ * Options are worded by health.js `outputLabel`, whose handle is the device's
+ * serial suffix when the App-level boot facts know it (bootFacts.js).
+ *
+ * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string,
  *          onFacet?: (facet: string) => void}} props
  */
-export function BindingFacet({ snapshot, frameId, onFacet }) {
+export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
   const mutate = useMutate();
   const ids = useId();
   const [message, setMessage] = useState(/** @type {string|null} */ (null));
@@ -98,7 +107,7 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
     setChoice({
       playerId: option.playerId,
       outputId: option.outputId,
-      label: outputLabel(snapshot, null, option.playerId, option.outputId),
+      label: outputLabel(snapshot, bootFacts, option.playerId, option.outputId),
       generation: frame.generation,
     });
   };
@@ -130,7 +139,7 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
     }
     setMessage(null);
     setAnnouncement(null);
-    setConfirm(unbindRequest(snapshot, null, frameId));
+    setConfirm(unbindRequest(snapshot, bootFacts, frameId));
   };
 
   const onConfirmClosed = (result) => {
@@ -208,6 +217,11 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
             <p className="chooser__title" aria-hidden="true">
               Choose an output
             </p>
+            {bootFacts?.unavailable && (
+              <p className="chooser__note">
+                {`${BOOT_FACTS_UNAVAILABLE}; serials may be out of date.`}
+              </p>
+            )}
             {options.length === 0 ? (
               <p className="chooser__empty">
                 No free outputs with a detected display. Power on a Pi with its panel
@@ -230,7 +244,7 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
                         onChange={() => choose(option)}
                         aria-describedby={livenessId}
                       />
-                      {outputLabel(snapshot, null, option.playerId, option.outputId)}
+                      {outputLabel(snapshot, bootFacts, option.playerId, option.outputId)}
                     </label>
                     <span id={livenessId} className="chooser__liveness">
                       {playerLiveness(snapshot, option.playerId)?.label}

@@ -16,12 +16,14 @@ Frames by identity/label, never by SVG coordinates or DOM structure (design §1c
 """
 
 import os
+import re
 
 import pytest
 from operator_harness import RequestGate, operator_server, pause_page_clock
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
+from central.content_catalog.catalog import device_id_for_serial
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 
@@ -523,3 +525,85 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
         # facet heading.
         expect(inspector.get_by_role("heading", name="Binding", exact=True)).to_be_focused()
         assert registry.inventory().frames[0].player_id is None
+
+
+# --- Boot facts (slice 2 §5): one optional read of the netboot records.
+
+SERIAL = "10000000c0ffee42"
+NETBOOT = "**/v1/operator/netboot"
+
+
+def _netbooted_player(registry, serial=SERIAL):
+    """A Player whose Pi netbooted: a `devices` row (seeded by SQL, as the netboot seam
+    writes it) shares the Player's device_id, both derived from the serial."""
+    device_id = device_id_for_serial(serial)
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
+                     "VALUES(%s,%s,%s,%s)",
+                     (device_id, serial, registry.clock.utc(), registry.clock.utc()))
+    identity, _, _ = enroll(registry, count=1, device_id=device_id)
+    return identity["player_id"]
+
+
+def _serial_option(scope, serial=SERIAL, output_id="HDMI-A-1"):
+    return scope.get_by_role("radio", name=f"{serial[-6:]} · {output_id} · Free", exact=True)
+
+
+def test_the_devices_serial_shows_in_the_chooser_and_the_rail(page, registry):
+    _netbooted_player(registry)
+    _placed_frame(registry, "boot-1")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector = _binding_facet(page, "boot-1")
+        # The handle is the serial's suffix (joined on device_id, not the Player id).
+        expect(_serial_option(inspector)).to_be_visible()
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        expect(pending).to_contain_text(f"{SERIAL} · Netboot seen, no image served yet")
+
+
+def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    _placed_frame(registry, "boot-2")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        expect(pending).to_contain_text("No netboot record")
+        # Without a serial the handle is the Player id's hash suffix.
+        expect(_option(_binding_facet(page, "boot-2"), identity["player_id"])).to_be_visible()
+
+
+def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
+    _netbooted_player(registry)
+    _placed_frame(registry, "boot-3")
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        inspector = _binding_facet(page, "boot-3")
+        expect(_serial_option(inspector)).to_be_visible()
+
+        # 30 s later the next snapshot re-reads the boot facts, and Central answers 503.
+        page.route(NETBOOT, lambda route: route.fulfill(
+            status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
+        with page.expect_response(NETBOOT):
+            page.clock.run_for(35000)
+        expect(inspector.get_by_text("Boot records unavailable", exact=False)).to_be_visible()
+        # The last known serial is kept.
+        expect(_serial_option(inspector)).to_be_visible()
+
+
+def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    _placed_frame(registry, "boot-4")
+    page.route(NETBOOT, lambda route: route.fulfill(
+        status=401, content_type="application/json", body='{"error": "unauthorized"}'))
+    with operator_server(registry.db, registry.clock) as origin:
+        with page.expect_response(NETBOOT):
+            _connect(page, origin)
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        expect(pending).to_contain_text("Boot records unavailable")
+        # The session is untouched: a refresh still authenticates and applies.
+        page.get_by_role("button", name="Refresh", exact=True).click()
+        expect(page.get_by_text(re.compile(r"updated [01] s ago"))).to_be_visible()
+        expect(page.get_by_text("not accepted", exact=False)).to_have_count(0)
+        expect(pending.get_by_role("button", name=identity["player_id"], exact=True)
+               ).to_be_visible()
