@@ -2,7 +2,8 @@ import React from "react";
 
 import { wallAttention } from "./health.js";
 
-function frames(count) {
+/** "1 frame", "3 frames": the attention strip and list count frames the same way. */
+export function frames(count) {
   return `${count} ${count === 1 ? "frame" : "frames"}`;
 }
 

@@ -151,7 +151,7 @@ flowchart TB
 
 **R4, with its guarantee stated honestly.**
 - Commissioning is reachable only through `wallRoutes`.
-- **What enforces it (a CI test, not a boot check):** a pytest walks the imports reachable from `showRoutes.jsx` and `neutralRoutes.jsx` and fails if `Commissioning.jsx` or `Inspector.jsx` is among them. A browser test visits every `samplePaths` entry of `showRoutes` and `neutralRoutes` and finds no Commissioning landmark.
+- **What enforces it (a CI test, not a boot check):** a pytest walks the imports reachable from `showRoutes.jsx` and `neutralRoutes.jsx` and fails if `Commissioning.jsx` or `Inspector.jsx` is among them. It also walks the shell's own graph from `main.jsx`, stopping at `wallRoutes.jsx`, so the shell reaches them only through the Wall table (the Wall state the shell holds lives in `wallState.js`, which imports no component). The scan fails closed: an `import`, `export … from`, `import(…)` or `import.meta` it cannot read or resolve is an error. A browser test visits every `samplePaths` entry of `showRoutes` and `neutralRoutes` and finds no Commissioning landmark.
 - **Hiding uses the HTML `hidden` attribute, not CSS classes,** so hidden sections leave the accessibility tree and their `role="status"` and `alert` regions are not announced.
 - **Why hidden Show pages do not weaken it:** Wall sections unmount when they are not current. The always-mounted Show sections, hidden when not current, therefore contain no Commissioning DOM.
 - `useMode` and the mode toggle are deleted.
@@ -159,6 +159,8 @@ flowchart TB
 **Hash routing details.**
 - **Skip link:** "Skip to content" is a button that focuses `<main>`. An `href="#main"` link would change the route.
 - **Leaving a draft:** `hashchange` cannot be cancelled, so there is no leave prompt. The draft persists instead, and the section shows "Resume draft (Draft)".
+- **Leaving a confirmation:** `hidden` does not remove a modal `<dialog>` from the top layer, so a Show page left with a confirmation open would leave the next page inert. Each page tells its subtree whether it is hidden (`pageVisibility.js`), and `ConfirmAction`, the one owner of every `useConfirm` dialog, puts its dialog away: an idle one is cancelled, as Esc would; one in flight or showing its outcome comes back, focused, with its page, and a write that finishes "done" meanwhile ends it as usual.
+- **The Wall's Surface follows the route:** a frame route reached by anything but plain selection (a typed URL, Back, a link) shows that frame's Surface; plain selection keeps the Surface in view.
 - **Opening another instance:** an in-app action that opens a different instance (Edit on another card) asks through `useConfirm`. A typed or Back-button URL naming another instance shows "Unsaved draft for X: Resume or Discard" and never replaces the draft silently.
 - **Deep links before the first snapshot:** the route parses at once. Sections show "Loading…", and id routes resolve only after the first snapshot, so there is no premature "no longer exists". Before sign-in, the hash is preserved under pass A's screen.
 - **History:** steps move with `replace`, so each flow is one history entry. The in-flow Back button changes step, and browser Back leaves the flow with the draft kept. Save `replace`s the flow entry with its section, so Back after Save never re-enters a finished flow. *Cost:* browser Back does not step backwards inside a flow.
@@ -172,7 +174,7 @@ flowchart TB
 
 **Cross-pass: session expiry and Log out (changes pass A's code and its Question 4 default; owner Question 6).**
 - **(a) A 401 while signed in keeps the last snapshot.** Pass A's code clears it today (`useSnapshot.js:135-139`). Only Log out clears the snapshot.
-- **The overlay:** pass A's sign-in screen appears as an **overlay**. The shell gets `hidden` and `inert` but stays mounted, and the poll pauses until sign-in. A first load with no session shows the full screen.
+- **The overlay:** pass A's sign-in screen appears as an **overlay**. The shell gets `hidden` and `inert` but stays mounted, and the poll pauses until sign-in. A first load with no session shows the full screen. Both are one modal `<dialog>` in the top layer, so a confirmation the shell still holds open cannot make the sign-in form inert; it focuses "Operator token", and signing in returns focus to where it was.
 - **(b) Log out:** the snapshot provider exposes `sessionEpoch`, bumped in `signOut()`. The shell is keyed on it, so Log out remounts the shell and discards every draft.
 - **(c) Prune effects:** flow prune effects are no-ops while the snapshot is `null`, so a missing snapshot never reads as "every frame was deleted".
 - **(d) Ownership:** bead 1b owns the `useSnapshot.js` and `App.jsx` edits, and a browser test forces a 401 mid-flow, signs in again and asserts the Scene draft's targets and per-frame selections survive.

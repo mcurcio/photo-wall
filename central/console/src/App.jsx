@@ -27,15 +27,17 @@ const ORIGIN_REFUSED_MESSAGE =
  * The shell is keyed on `sessionEpoch`, which Log out bumps, so Log out remounts it
  * and discards every draft. Signed out, the shell is hidden and inert but stays
  * mounted: a session that expires under a draft keeps it (and the last snapshot)
- * behind the sign-in overlay until the operator signs in again. The notices sit
- * outside both, so a sign-in refused for its origin shows the same alert as a write.
+ * behind the sign-in overlay until the operator signs in again. The notices are the
+ * same either way, so a sign-in refused for its origin shows the same alert as a
+ * write; while signed out they sit inside the sign-in screen, a modal dialog that
+ * leaves everything outside it inert.
  */
 export default function App() {
   const { auth, authNotice, originRefused, dismissOriginRefused, sessionEpoch } = useSnapshot();
   const signedOut = auth === "signedOut";
 
-  return (
-    <div className="console">
+  const notices = (
+    <>
       {authNotice !== null && (
         <p className="console__auth-error" role="alert">
           {AUTH_NOTICES[authNotice]}
@@ -49,8 +51,14 @@ export default function App() {
           </button>
         </div>
       )}
+    </>
+  );
+
+  return (
+    <div className="console">
+      {!signedOut && notices}
       <Shell key={sessionEpoch} hidden={signedOut} />
-      {signedOut && <SignInScreen />}
+      <SignInScreen open={signedOut}>{signedOut && notices}</SignInScreen>
     </div>
   );
 }

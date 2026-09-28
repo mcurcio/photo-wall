@@ -143,3 +143,17 @@ export function sameRoute(a, b) {
   const extra = Object.keys(b).filter((key) => !KEYS.includes(key) && b[key] !== undefined);
   return extra.length === 0 && KEYS.every((key) => a[key] === b[key]);
 }
+
+/**
+ * A primary click with no modifier: a link followed in this tab, not opened in another.
+ * Only such a click should move this tab's focus or prepare its next page.
+ *
+ * @param {{button: number, metaKey: boolean, ctrlKey: boolean, shiftKey: boolean,
+ *          altKey: boolean}} event
+ * @returns {boolean}
+ */
+export function isPlainClick(event) {
+  return (
+    event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+  );
+}

@@ -402,6 +402,16 @@ export function useHealth(intervalMs = 10000) {
   );
   useEffect(() => {
     let live = true;
+    // The same health keeps the same object, so a poll that reads no change re-renders
+    // nothing that depends on it.
+    const update = (next) =>
+      setHealth((previous) =>
+        previous.status === next.status &&
+        previous.reason === next.reason &&
+        previous.scheduler === next.scheduler
+          ? previous
+          : next,
+      );
     const poll = async () => {
       try {
         const response = await fetch("/healthz", {
@@ -414,12 +424,12 @@ export function useHealth(intervalMs = 10000) {
           // A non-JSON body: fall back to the HTTP status alone.
         }
         if (live) {
-          setHealth(readHealth(response.ok, body));
+          update(readHealth(response.ok, body));
         }
       } catch {
         // No response at all (network error / timeout) — central is unreachable.
         if (live) {
-          setHealth({ status: "unreachable", reason: null, scheduler: null });
+          update({ status: "unreachable", reason: null, scheduler: null });
         }
       }
     };

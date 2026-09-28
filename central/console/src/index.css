@@ -2033,8 +2033,27 @@ label {
 }
 
 /* The sign-in screen (pass A §7): the whole page on a first load, an overlay over
-   the hidden shell when a session ends. */
+   the hidden shell when a session ends. A modal <dialog> covering the viewport, so
+   it sits in the top layer above anything the shell had open. */
 .signin {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--fg);
+  background: var(--bg);
+  border: 0;
+}
+
+.signin > .console__auth-error {
+  margin: 12px 16px 0;
+}
+
+.signin__center {
   display: grid;
   place-items: center;
   min-height: 70vh;

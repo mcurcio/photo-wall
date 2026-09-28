@@ -1,122 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 
 import { Guidance } from "./Guidance.jsx";
-import { facetFor, frameHealth } from "./health.js";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
-import { detectRecovery } from "./recovery.js";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 
 /**
  * @typedef {import("./routes.js").Route} Route
- * @typedef {import("./routes.js").Facet} Facet
- * @typedef {{surfaceId: string|null, setSurfaceId: (surfaceId: string|null) => void,
- *            focusRequest: number|null, clearFocus: () => void,
- *            guidanceDismissed: boolean, dismissGuidance: () => void,
- *            lastFacet: Facet, lastWall: Route,
- *            frameRoute: (frameId: string) => Route,
- *            prepareVisit: (frameId: string) => void,
- *            visitFrame: (frameId: string) => void}} WallMemory
+ * @typedef {import("./wallState.js").WallMemory} WallMemory
  */
-
-/**
- * What the Wall remembers while it is not mounted (the shell calls this; flow design
- * §6). The Wall page mounts only while it is current, but leaving it must not lose the
- * chosen Surface, the facet last open, the Guidance dismissal or a pending focus
- * request, so they live here, above the page. The selected frame and its facet live in
- * the route (`#/wall/frames/<id>/<facet>`).
- *
- * Visiting a frame from outside the plan (the attention strip, the Needs attention
- * page, the Equipment roster) shows its Surface, opens the facet that shows its cause
- * (health.js `facetFor`; an ok frame keeps the facet last open) and asks the Inspector
- * to take focus ONCE: `focusRequest` is a fresh number each time, and the Inspector
- * clears it when spent, so a later remount does not refocus. Plain selection on the
- * plan or tray clears it and never moves focus.
- *
- * @param {Route|null} route
- * @param {object|null} snapshot
- * @param {(route: Route, options?: {replace?: boolean}) => void} navigate
- * @returns {WallMemory}
- */
-export function useWallMemory(route, snapshot, navigate) {
-  const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
-  const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
-  const [guidanceDismissed, setGuidanceDismissed] = useState(false);
-  const focusSeqRef = useRef(0);
-  const lastFacetRef = useRef(/** @type {Facet} */ ("commissioning"));
-  const lastWallRef = useRef(/** @type {Route} */ ({ section: "wall" }));
-  if (route?.section === "wall") {
-    // Idempotent, so safe during render: the Wall as last shown, for the sidebar link.
-    lastWallRef.current = route;
-    if (route.facet !== undefined) {
-      lastFacetRef.current = route.facet;
-    }
-  }
-
-  const findFrame = (frameId) =>
-    (snapshot?.inventory?.frames ?? []).find((frame) => frame.id === frameId);
-
-  const frameRoute = (frameId) => ({
-    section: "wall",
-    id: frameId,
-    facet: facetFor(frameHealth(snapshot, frameId), lastFacetRef.current),
-  });
-
-  const prepareVisit = (frameId) => {
-    const frame = findFrame(frameId);
-    if (frame !== undefined) {
-      setSurfaceId(frame.surface_id);
-    }
-    focusSeqRef.current += 1;
-    setFocusRequest(focusSeqRef.current);
-  };
-
-  return {
-    surfaceId,
-    setSurfaceId,
-    focusRequest,
-    clearFocus: () => setFocusRequest(null),
-    guidanceDismissed,
-    dismissGuidance: () => setGuidanceDismissed(true),
-    lastFacet: lastFacetRef.current,
-    lastWall: lastWallRef.current,
-    frameRoute,
-    prepareVisit,
-    visitFrame: (frameId) => {
-      if (findFrame(frameId) === undefined) {
-        return;
-      }
-      prepareVisit(frameId);
-      navigate(frameRoute(frameId));
-    },
-  };
-}
-
-/**
- * Auto-recovery banner state (design J1, §1a D-a). Recovery is INFERRED by diffing
- * the CURRENT Plane A snapshot against the PRIOR one, so the prior snapshot is kept
- * here. The shell calls this, so every snapshot is seen even while the Wall is not
- * mounted; the banner shows on the Wall. It surfaces "a known Pi returned already
- * bound" and is suppressed on the true first run (no prior snapshot) by detectRecovery.
- *
- * @param {object|null} snapshot
- * @returns {{recovered: string[], dismiss: () => void}}
- */
-export function useRecovery(snapshot) {
-  const prevSnapshotRef = useRef(/** @type {object|null} */ (null));
-  const [recovered, setRecovered] = useState(/** @type {string[]} */ ([]));
-  useEffect(() => {
-    if (snapshot == null) {
-      return;
-    }
-    const returned = detectRecovery(prevSnapshotRef.current, snapshot);
-    if (returned.length > 0) {
-      setRecovered(returned);
-    }
-    prevSnapshotRef.current = snapshot;
-  }, [snapshot]);
-  return { recovered, dismiss: () => setRecovered([]) };
-}
 
 /**
  * The Wall page (#/wall, #/wall/frames/<id>/<facet>): the recovery banner, the
@@ -176,8 +68,7 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
   // Plain selection (plan or tray): keeps the Surface in view and the open facet, and
   // never moves focus.
   const selectFrame = (frameId) => {
-    memory.clearFocus();
-    memory.setSurfaceId(activeSurface);
+    memory.selectPlainly(frameId, activeSurface);
     navigate({ section: "wall", id: frameId, facet }, { replace: true });
   };
 

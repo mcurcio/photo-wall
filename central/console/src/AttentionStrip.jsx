@@ -1,14 +1,10 @@
 import React, { useId, useRef, useState } from "react";
 
-import { AttentionList, attentionView } from "./AttentionList.jsx";
-import { formatRoute } from "./routes.js";
+import { AttentionList, attentionView, frames } from "./AttentionList.jsx";
+import { formatRoute, isPlainClick } from "./routes.js";
 
 // At most this many rows in the detail list; the rest are counted.
 const LIST_CAP = 8;
-
-function frames(count) {
-  return `${count} ${count === 1 ? "frame" : "frames"}`;
-}
 
 /**
  * The attention strip (console pass 2, slice 1 — design §5), directly under the
@@ -27,7 +23,9 @@ function frames(count) {
  * is the only place the strip mentions Central; the pill owns Central's health.
  *
  * The disclosure closes on Escape and returns focus to its toggle. Below the
- * list, "Show all" opens the Needs attention page.
+ * list, "Show all" opens the Needs attention page; a plain click on it calls
+ * `onShowAll()`, with which the shell focuses that page's heading (the link itself
+ * leaves with the closing list).
  *
  * On the Wall side (Wall, Equipment) and the Needs attention page each entry is
  * a button calling `onNavigate(frameId)`; on a Show page `onNavigate` is null
@@ -35,9 +33,10 @@ function frames(count) {
  * no frames the strip renders nothing and defers to the Guidance banner.
  *
  * @param {{snapshot: object, central: {scheduler: string|null},
- *          onNavigate: ((frameId: string) => void)|null}} props
+ *          onNavigate: ((frameId: string) => void)|null,
+ *          onShowAll?: () => void}} props
  */
-export function AttentionStrip({ snapshot, central, onNavigate }) {
+export function AttentionStrip({ snapshot, central, onNavigate, onShowAll }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const toggleRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
@@ -114,7 +113,12 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
           <a
             className="attention__all"
             href={formatRoute({ section: "attention" })}
-            onClick={() => setOpen(false)}
+            onClick={(event) => {
+              if (isPlainClick(event)) {
+                setOpen(false);
+                onShowAll?.();
+              }
+            }}
           >
             Show all
           </a>

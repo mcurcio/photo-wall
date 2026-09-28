@@ -2,14 +2,7 @@ import React from "react";
 
 import { AttentionList, attentionView } from "./AttentionList.jsx";
 import SAMPLES from "./routeSamples.json";
-import { formatRoute } from "./routes.js";
-
-/** A primary click with no modifier: the link opens here, not in another tab. */
-function isPlainClick(event) {
-  return (
-    event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
-  );
-}
+import { formatRoute, isPlainClick } from "./routes.js";
 
 /**
  * The Needs attention page (#/attention): the attention strip's list at full width,
@@ -18,7 +11,7 @@ function isPlainClick(event) {
  * take focus once, as the strip's own navigation does.
  *
  * @param {{snapshot: object, central: {scheduler: string|null},
- *          wall: import("./WallPage.jsx").WallMemory}} props
+ *          wall: import("./wallState.js").WallMemory}} props
  */
 function AttentionPage({ snapshot, central, wall }) {
   const { frameCount, rows } = attentionView(snapshot, central);

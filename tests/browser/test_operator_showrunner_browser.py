@@ -178,14 +178,14 @@ def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
         expect(page.get_by_role("group", name="Pending players")).to_be_visible()
 
         # Each Show region has its own page, and none of them holds a Wall-only surface
-        # (not even hidden: get_by_label counts hidden DOM too).
+        # (not even hidden: include_hidden and get_by_label count hidden DOM too).
         for section, region in (("now", "Runs"), ("scenes", "Scenes"),
                                 ("schedule", "Programs"), ("sources", "Sources")):
             go(page, section)
             expect(page.get_by_role("region", name=region, exact=True)).to_be_visible()
-            expect(page.get_by_role("group", name="Wall plan for surface wall")).to_have_count(0)
-            expect(page.get_by_role("group", name="Pending players")).to_have_count(0)
-            expect(page.get_by_role("group", name="Unplaced frames")).to_have_count(0)
+            expect(page.get_by_role("group", name="Wall plan for surface wall", include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Pending players", include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Unplaced frames", include_hidden=True)).to_have_count(0)
             expect(page.get_by_label("Surface")).to_have_count(0)
 
 

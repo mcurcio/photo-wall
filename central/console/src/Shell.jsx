@@ -1,14 +1,15 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
-import { formatRoute, landingRoute } from "./routes.js";
+import { PageHiddenContext } from "./pageVisibility.js";
+import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
 import { useRoute } from "./useRoute.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
-import { useRecovery, useWallMemory } from "./WallPage.jsx";
+import { useRecovery, useWallMemory } from "./wallState.js";
 import { wallRoutes } from "./wallRoutes.jsx";
 
 /**
@@ -16,7 +17,7 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            central: import("./useSnapshot.js").CentralHealth,
  *            route: import("./routes.js").Route,
  *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
- *            wall: import("./WallPage.jsx").WallMemory,
+ *            wall: import("./wallState.js").WallMemory,
  *            recovery: {recovered: string[], dismiss: () => void},
  *            recentSceneId: string|null, rememberScene: (sceneId: string) => void,
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void}} RouteContext
@@ -43,9 +44,9 @@ const SHOW = new Set(showRoutes.map((entry) => entry.section));
 /**
  * The sidebar's links, one group per route table. The current section's link is
  * marked `aria-current="page"` (and, visibly, by weight and a leading bar as well as
- * the tint). `onChoose(section)` runs on a click, before the link changes the hash.
- * A section in `drafts` carries the word "Draft" (never a dot alone), as the link's
- * description, so its name stays the section's label.
+ * the tint). `onChoose(section)` runs on a plain click (not one opening another tab),
+ * before the link changes the hash. A section in `drafts` carries the word "Draft"
+ * (never a dot alone), as the link's description, so its name stays the section's label.
  */
 function SectionNav({ current, hrefFor, onChoose, drafts }) {
   const markerId = useId();
@@ -61,7 +62,11 @@ function SectionNav({ current, hrefFor, onChoose, drafts }) {
                 aria-current={section === current ? "page" : undefined}
                 aria-label={label}
                 aria-describedby={drafts.has(section) ? `${markerId}-${section}` : undefined}
-                onClick={() => onChoose?.(section)}
+                onClick={(event) => {
+                  if (isPlainClick(event)) {
+                    onChoose?.(section);
+                  }
+                }}
               >
                 {label}
                 {drafts.has(section) && (
@@ -78,21 +83,61 @@ function SectionNav({ current, hrefFor, onChoose, drafts }) {
   );
 }
 
-/** One section's page: its heading, then its content once the first snapshot is in. */
-function Page({ entry, ctx, ready, hidden = false }) {
+/**
+ * Central's health pill: the ONE place Central's own health is shown (pass 2 §5).
+ *
+ * @param {{health: import("./useSnapshot.js").CentralHealth}} props
+ */
+function CentralPill({ health }) {
+  const text = health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
+  return (
+    <span
+      className={`console__health health--${PILL_SEVERITY[health.status] ?? "unknown"}`}
+      role="status"
+      aria-label={`Central health: ${text}`}
+    >
+      {`Central: ${text}`}
+    </span>
+  );
+}
+
+/**
+ * The snapshot's age, ticking each second, and whether the last refresh failed. A leaf,
+ * so the tick re-renders only this line, never the pages.
+ */
+function SnapshotAge({ refreshFailed }) {
+  const age = useSnapshotAge();
+  return (
+    <span className="console__age">
+      {age === null ? "never updated" : `updated ${age} s ago`}
+      {/* Only after a refresh actually failed — never inferred from age. */}
+      {refreshFailed && " — last refresh failed"}
+    </span>
+  );
+}
+
+/**
+ * One section's page: its heading, then its content once the first snapshot is in.
+ * Memoized: with the route context unchanged, a shell render (the drawer, a focus
+ * request) leaves the pages, the hidden Show pages included, alone.
+ */
+const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
   return (
     <section className={`page page--${entry.section}`} hidden={hidden}>
       <h1 className="page__title" tabIndex={-1}>
         {entry.label}
       </h1>
       {ready ? (
-        <div className="page__content">{entry.render(ctx)}</div>
+        <div className="page__content">
+          {/* A hidden page's confirmations put their dialogs away (pageVisibility.js). */}
+          <PageHiddenContext.Provider value={hidden}>{entry.render(ctx)}</PageHiddenContext.Provider>
+        </div>
       ) : (
         <p className="page__loading">Loading…</p>
       )}
     </section>
   );
-}
+});
 
 /**
  * The navigation shell (flow design §3, §6): header, sidebar (a modal drawer under
@@ -115,8 +160,10 @@ function Page({ entry, ctx, ready, hidden = false }) {
  * `<main>`. Each page has an `<h1 tabIndex=-1>`. The drawer is a native `<dialog>`
  * opened with `showModal()`, so the page behind is inert and focus stays inside;
  * Escape closes it and returns focus to the menu button, and choosing a link closes
- * it and focuses the new page's heading. A sidebar link on a wide screen leaves focus
- * on the link.
+ * it and focuses the new page's heading, as "Show all" in the attention strip does for
+ * Needs attention; a click that opens the link in another tab asks for nothing, and a
+ * route that goes elsewhere first drops the request. A sidebar link on a wide screen
+ * leaves focus on the link.
  *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
@@ -129,12 +176,8 @@ export function Shell({ hidden = false }) {
   // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
   // the Equipment roster and the output chooser.
   const bootFacts = useBootFacts(snapshot);
-  // The snapshot-age clock and the ~10 s /healthz pill, the ONE place Central's own
-  // health is shown (pass 2 §5).
-  const age = useSnapshotAge();
+  // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
-  const centralHealth =
-    health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
   const wall = useWallMemory(route, snapshot, navigate);
   const recovery = useRecovery(snapshot);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
@@ -185,8 +228,12 @@ export function Shell({ hidden = false }) {
   const drawerRef = useRef(/** @type {HTMLDialogElement|null} */ (null));
   const choosingRef = useRef(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // The section whose heading takes focus once it is the page shown (a drawer link).
-  const [headingFor, setHeadingFor] = useState(/** @type {string|null} */ (null));
+  // The section whose heading takes focus once it is the page shown (a drawer link or
+  // "Show all"), and the section shown when it was asked: a route that goes anywhere
+  // else first drops the request.
+  const [headingFor, setHeadingFor] = useState(
+    /** @type {{section: string, from: string|null}|null} */ (null),
+  );
 
   useEffect(() => {
     const dialog = drawerRef.current;
@@ -219,33 +266,42 @@ export function Shell({ hidden = false }) {
   }, [hidden]);
 
   useEffect(() => {
-    if (headingFor === null || headingFor !== current) {
+    if (headingFor === null) {
       return;
     }
-    mainRef.current?.querySelector(":scope > section:not([hidden]) > h1")?.focus();
-    setHeadingFor(null);
+    if (headingFor.section === current) {
+      mainRef.current?.querySelector(":scope > section:not([hidden]) > h1")?.focus();
+      setHeadingFor(null);
+    } else if (headingFor.from !== current) {
+      setHeadingFor(null);
+    }
   }, [headingFor, current]);
+
+  const focusHeadingOf = (section) => setHeadingFor({ section, from: current });
 
   const hrefFor = (section) => formatRoute(section === "wall" ? wall.lastWall : { section });
 
   const chooseFromDrawer = (section) => {
     choosingRef.current = true;
     drawerRef.current?.close();
-    setHeadingFor(section);
+    focusHeadingOf(section);
   };
 
-  const ctx = {
-    snapshot,
-    bootFacts,
-    central: health,
-    route,
-    navigate,
-    wall,
-    recovery,
-    recentSceneId,
-    rememberScene,
-    markDraft,
-  };
+  const ctx = useMemo(
+    () => ({
+      snapshot,
+      bootFacts,
+      central: health,
+      route,
+      navigate,
+      wall,
+      recovery,
+      recentSceneId,
+      rememberScene,
+      markDraft,
+    }),
+    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentSceneId, rememberScene, markDraft],
+  );
 
   return (
     <div className="shell" hidden={hidden} inert={hidden ? "" : undefined}>
@@ -270,20 +326,10 @@ export function Shell({ hidden = false }) {
           </button>
           <span className="shell__wordmark">Photo Wall</span>
           <div className="shell__status">
-            <span
-              className={`console__health health--${PILL_SEVERITY[health.status] ?? "unknown"}`}
-              role="status"
-              aria-label={`Central health: ${centralHealth}`}
-            >
-              {`Central: ${centralHealth}`}
-            </span>
+            <CentralPill health={health} />
             {snapshot !== null && (
               <div className="console__statusbar" role="group" aria-label="Snapshot status">
-                <span className="console__age">
-                  {age === null ? "never updated" : `updated ${age} s ago`}
-                  {/* Only after a refresh actually failed — never inferred from age. */}
-                  {refreshFailed && " — last refresh failed"}
-                </span>
+                <SnapshotAge refreshFailed={refreshFailed} />
                 <button
                   type="button"
                   className="console__button"
@@ -305,6 +351,7 @@ export function Shell({ hidden = false }) {
             snapshot={snapshot}
             central={health}
             onNavigate={current === null || SHOW.has(current) ? null : wall.visitFrame}
+            onShowAll={() => focusHeadingOf("attention")}
           />
         )}
       </header>

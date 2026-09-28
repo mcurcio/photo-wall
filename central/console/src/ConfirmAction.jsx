@@ -11,6 +11,7 @@ import {
 import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
+import { usePageHidden } from "./pageVisibility.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -34,6 +35,16 @@ import { useMutate } from "./useMutate.js";
  * under Chromium's close-watcher rule a repeated Esc without user activation
  * closes the dialog anyway — so the dialog also carries `closedby="none"` while
  * in flight, and a `close` that still arrives re-opens it with its state kept.
+ * Its buttons are disabled then, so focus moves to the dialog itself (tabIndex -1)
+ * rather than falling out of it; a refusal, or a sign-in overlay that opened over
+ * it (SignInScreen.jsx), then finds focus still inside.
+ *
+ * WHILE ITS PAGE IS HIDDEN (pageVisibility.js; a Show page left by a link or browser
+ * Back) the dialog is put away, since `hidden` on the page does not hide a modal
+ * `<dialog>` from the top layer and the page shown would stay inert. An idle dialog is
+ * cancelled, as Esc would; one in flight or showing its outcome is closed without ending
+ * and shown again, focused, when its page is; a write that finishes "done" meanwhile
+ * ends it as usual. This owner covers every surface that uses {@link useConfirm}.
  *
  * Each surface owns ONE of these at its top level through {@link useConfirm},
  * keyed by target and never inside a list row, so a poll that regroups a
@@ -52,6 +63,11 @@ import { useMutate } from "./useMutate.js";
  */
 export function ConfirmAction({ request, onClose }) {
   const mutate = useMutate();
+  const pageHidden = usePageHidden();
+  const pageHiddenRef = useRef(pageHidden);
+  pageHiddenRef.current = pageHidden;
+  // Closed, not ended, while its page is hidden.
+  const suspendedRef = useRef(false);
   const titleId = useId();
   const dialogRef = useRef(/** @type {HTMLDialogElement|null} */ (null));
   const inputRef = useRef(/** @type {HTMLInputElement|null} */ (null));
@@ -80,17 +96,26 @@ export function ConfirmAction({ request, onClose }) {
       }
     };
     const onCloseEvent = () => {
+      if (suspendedRef.current) {
+        return; // put away while its page is hidden
+      }
       if (phaseRef.current === "in-flight") {
         // A close request got past the guard: re-open, keeping the state.
-        dialog.showModal();
+        if (!dialog.open) {
+          dialog.showModal();
+        }
         return;
       }
       onCloseRef.current(resultRef.current);
     };
     dialog.addEventListener("cancel", onCancel);
     dialog.addEventListener("close", onCloseEvent);
-    dialog.showModal();
-    (inputRef.current ?? cancelRef.current)?.focus();
+    if (pageHiddenRef.current) {
+      suspendedRef.current = true;
+    } else {
+      dialog.showModal();
+      (inputRef.current ?? cancelRef.current)?.focus();
+    }
     return () => {
       dialog.removeEventListener("cancel", onCancel);
       dialog.removeEventListener("close", onCloseEvent);
@@ -98,13 +123,38 @@ export function ConfirmAction({ request, onClose }) {
   }, []);
 
   useEffect(() => {
-    dialogRef.current?.setAttribute("closedby", phase === "in-flight" ? "none" : "closerequest");
+    const dialog = dialogRef.current;
+    if (pageHidden && dialog.open) {
+      if (phaseRef.current === "idle") {
+        dialog.close(); // cancelled, as Esc would
+      } else {
+        suspendedRef.current = true;
+        dialog.close();
+      }
+    } else if (!pageHidden && suspendedRef.current) {
+      suspendedRef.current = false;
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+      (phaseRef.current === "terminal" ? closeRef.current : dialog)?.focus();
+    }
+  }, [pageHidden]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog.setAttribute("closedby", phase === "in-flight" ? "none" : "closerequest");
     if (phase === "terminal") {
       closeRef.current?.focus();
     } else if (phase === "closing") {
       // Closed only once the render carrying the post-write snapshot has
       // committed, so the owner's focus successor sees the fresh surface.
-      dialogRef.current?.close();
+      if (suspendedRef.current) {
+        // Put away while its page is hidden: nothing to close, so it ends here.
+        suspendedRef.current = false;
+        onCloseRef.current(resultRef.current);
+      } else {
+        dialog.close();
+      }
     }
   }, [phase]);
 
@@ -116,6 +166,7 @@ export function ConfirmAction({ request, onClose }) {
       return;
     }
     setAlert(null);
+    dialogRef.current?.focus();
     setPhase("in-flight");
     let result;
     try {
@@ -144,7 +195,7 @@ export function ConfirmAction({ request, onClose }) {
   };
 
   return (
-    <dialog ref={dialogRef} className="confirm" aria-labelledby={titleId}>
+    <dialog ref={dialogRef} className="confirm" aria-labelledby={titleId} tabIndex={-1}>
       <h2 id={titleId} className="confirm__title">
         {request.title}
       </h2>
