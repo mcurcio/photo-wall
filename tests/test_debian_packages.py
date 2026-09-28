@@ -153,7 +153,8 @@ def test_each_consumer_gets_its_list():
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
         {*packages("bootstrapper"), *packages("player")}))
     assert packages("initrd-build") == (
-        "ca-certificates", "gnupg", "initramfs-tools", "kmod", "python3", "zstd")
+        "ca-certificates", "device-tree-compiler", "gnupg", "initramfs-tools", "kmod", "python3",
+        "zstd")
     assert packages("initrd-build", archive="raspberrypi") == (
         "linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom")
     assert packages("player", archive="raspberrypi") == ()

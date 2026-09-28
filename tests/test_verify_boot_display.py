@@ -15,7 +15,9 @@ from scripts.verify_boot_display import (
     DISPLAY_NODES,
     DISPLAY_OVERLAY,
     DTB_NAME,
+    Tools,
     applied_violations,
+    apply_in,
     config_violations,
     main,
     overlays,
@@ -98,6 +100,10 @@ class FakeFdt:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[0] == "chroot":
+            argv = argv[2:]
+        if argv[0] == "fdtoverlay" and argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, "Version: DTC 1.7.2\n", "")
         if argv[0] == "fdtoverlay":
             code = 1 if self.overlay_fails else 0
             return subprocess.CompletedProcess(argv, code, "",
@@ -119,7 +125,7 @@ def nodes(status="okay"):
 def test_every_display_node_okay_passes(tmp_path):
     boot = boot_dir(tmp_path, bundle_config())
     fdt = FakeFdt(nodes())
-    assert applied_violations(boot, [DISPLAY_OVERLAY], tmp_path, run=fdt) == []
+    assert applied_violations(boot, [DISPLAY_OVERLAY], tmp_path, tools=Tools(run=fdt)) == []
     assert fdt.calls[0] == ["fdtoverlay", "-i", str(boot / DTB_NAME), "-o",
                             str(tmp_path / "applied.dtb"),
                             str(boot / "overlays" / f"{DISPLAY_OVERLAY}.dtbo")]
@@ -127,27 +133,45 @@ def test_every_display_node_okay_passes(tmp_path):
 
 def test_a_node_without_a_status_is_enabled(tmp_path):
     assert applied_violations(boot_dir(tmp_path, ""), [], tmp_path,
-                              run=FakeFdt(nodes(status=None))) == []
+                              tools=Tools(run=FakeFdt(nodes(status=None)))) == []
 
 
 def test_the_bare_dtb_leaves_the_display_disabled(tmp_path):
     violations = applied_violations(boot_dir(tmp_path, ""), [], tmp_path,
-                                    run=FakeFdt(nodes(status="disabled")))
+                                    tools=Tools(run=FakeFdt(nodes(status="disabled"))))
     assert violations == [f"{label} (/soc/{label}) is disabled after the overlays"
                           for label in DISPLAY_NODES]
 
 
 def test_an_overlay_that_does_not_apply_is_named(tmp_path):
     assert applied_violations(boot_dir(tmp_path, ""), ["vc4-kms-v3d"], tmp_path,
-                              run=FakeFdt(nodes(), overlay_fails=True)) == [
+                              tools=Tools(run=FakeFdt(nodes(), overlay_fails=True))) == [
         f"fdtoverlay could not apply vc4-kms-v3d to {DTB_NAME}: "
         "Failed to apply: FDT_ERR_NOTFOUND"]
 
 
 def test_a_dtb_without_a_display_label_is_named(tmp_path):
     partial = {label: value for label, value in nodes().items() if label != "v3d"}
-    assert applied_violations(boot_dir(tmp_path, ""), [], tmp_path, run=FakeFdt(partial)) == [
+    assert applied_violations(boot_dir(tmp_path, ""), [], tmp_path,
+                              tools=Tools(run=FakeFdt(partial))) == [
         f"{DTB_NAME} has no node labelled v3d"]
+
+
+def test_the_pinned_tools_run_chrooted_on_copies_named_from_inside_the_root(tmp_path, capsys):
+    """Ubuntu 24.04's fdtoverlay 1.7.0 cannot apply vc4-kms-v3d-pi5 to the Pi 5 DTB; the check
+    runs the pinned root's own tools, on copies under its /tmp, removed afterwards."""
+    boot = boot_dir(tmp_path, bundle_config())
+    root = tmp_path / "scratch-root"
+    (root / "tmp").mkdir(parents=True)
+    fdt = FakeFdt(nodes())
+    assert apply_in(boot, [DISPLAY_OVERLAY], root, run=fdt) == []
+    assert all(call[:2] == ["chroot", str(root)] for call in fdt.calls)
+    overlay = fdt.calls[1]
+    inside = overlay[overlay.index("-i") + 1]
+    assert inside.startswith("/tmp/boot-display-") and inside.endswith(f"/boot/{DTB_NAME}")
+    assert overlay[-1].endswith(f"/boot/overlays/{DISPLAY_OVERLAY}.dtbo")
+    assert list((root / "tmp").iterdir()) == []                 # the copies are gone
+    assert "tools: chroot" in capsys.readouterr().out
 
 
 def test_main_without_apply_checks_the_config_only(tmp_path, capsys):

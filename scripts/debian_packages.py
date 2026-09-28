@@ -165,6 +165,9 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("gnupg", _INITRD_BUILD, why="apt key handling"),
     DebianPackage("kmod", _INITRD_BUILD, why="depmod"),
     DebianPackage("zstd", _INITRD_BUILD, why="initrd compression"),
+    DebianPackage("device-tree-compiler", _INITRD_BUILD,
+                  why="fdtoverlay and fdtget at the pin for scripts/verify_boot_display.py: "
+                      "Ubuntu 24.04's 1.7.0 cannot apply vc4-kms-v3d-pi5 to the Pi 5 DTB"),
     DebianPackage("linux-image-rpi-2712", _INITRD_BUILD, why=_PI_BOOT, archive="raspberrypi"),
     DebianPackage("raspi-firmware", _INITRD_BUILD, why=_PI_BOOT, archive="raspberrypi"),
     DebianPackage("rpi-eeprom", _INITRD_BUILD, why=_PI_BOOT, archive="raspberrypi"),
