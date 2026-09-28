@@ -409,9 +409,17 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         sent = _keys(page)
         answer_first(page, ACTIVATIONS, lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "internal"}'))
-        form = show_now(page, SCENE_ID, submit=False)
+        # A card's "Show now" seeds the draft with its Scene: the operator changes nothing,
+        # so the draft is clean (the sidebar does not say "Draft").
+        _show_scene_card(page, SCENE_ID)
+        form = show_form(page)
+        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        form.get_by_role("button", name="Continue", exact=True).click()
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(UNKNOWN)
+        now_link = page.get_by_role("navigation", name="Sections", exact=True).get_by_role(
+            "link", name="Now showing", exact=True)
+        expect(now_link).to_have_accessible_description("")
 
         _show_scene_card(page, "elsewhere")
         assert _hash(page) == "#/now/show/scene"
