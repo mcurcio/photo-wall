@@ -1,31 +1,32 @@
 import React from "react";
 
 /**
- * Review's check-answers list (flow design §7 "Check answers", after the GOV.UK
- * pattern; presentational): each answer's label and value, with a "Change" button
- * (named "Change <label>") that calls `onChange(field)`, which a flow routes to the
- * field's step (`useFlowInstance().openField`). Every value is listed, the advanced
- * ones included.
+ * A flow's Review as a check-answers list (flow design §7 "Check answers";
+ * presentational): each answer by its label, with a "Change" button (named "Change
+ * <label>") that routes to the field asking it (`onChange(field)`, the kit's
+ * `openField`). A row without `field` is a fact of the answers, with no Change.
  *
- * @param {{rows: ReadonlyArray<{label: string, field: string, value: React.ReactNode}>,
- *          onChange: (field: string) => void}} props
+ * @param {{rows: ReadonlyArray<{label: string, value: React.ReactNode, field?: string}>,
+ *          onChange: (field: string) => void, label?: string}} props
  */
-export function CheckAnswers({ rows, onChange }) {
+export function CheckAnswers({ rows, onChange, label = "Your answers" }) {
   return (
-    <dl className="review" aria-label="Your answers">
+    <dl className="review" aria-label={label}>
       {rows.map((row) => (
         <div key={row.label} className="review__row">
           <dt className="review__key">{row.label}</dt>
           <dd className="review__value">{row.value}</dd>
           <dd className="review__change">
-            <button
-              type="button"
-              className="review__change-button"
-              aria-label={`Change ${row.label}`}
-              onClick={() => onChange(row.field)}
-            >
-              Change
-            </button>
+            {row.field !== undefined && (
+              <button
+                type="button"
+                className="review__change-button"
+                aria-label={`Change ${row.label}`}
+                onClick={() => onChange(row.field)}
+              >
+                Change
+              </button>
+            )}
           </dd>
         </div>
       ))}

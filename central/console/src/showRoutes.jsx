@@ -6,6 +6,7 @@ import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import SAMPLES from "./routeSamples.json";
 import { RunsRegion } from "./RunsRegion.jsx";
 import { SceneFlow } from "./SceneFlow.jsx";
+import { SHOW_KEYS } from "./showNowModel.js";
 import { SourcesRegion } from "./SourcesRegion.jsx";
 
 /**
@@ -27,11 +28,19 @@ export const showRoutes = Object.freeze(
     {
       section: "now",
       label: "Now showing",
-      render: ({ snapshot }) => (
+      // The Show-now flow (#/now/show/<step>) lives in the Runs region; while it shows a
+      // step, the media pipeline is left out (rule 1: one question on screen).
+      render: ({ snapshot, route, navigate, recentSceneId, markDraft }) => (
         <>
           <FrameHealthBadges snapshot={snapshot} />
-          <RunsRegion snapshot={snapshot} />
-          <MediaPipeline snapshot={snapshot} />
+          <RunsRegion
+            snapshot={snapshot}
+            route={route}
+            navigate={navigate}
+            recentSceneId={recentSceneId}
+            markDraft={markDraft}
+          />
+          {SHOW_KEYS.fromRoute(route) === null && <MediaPipeline snapshot={snapshot} />}
         </>
       ),
       samplePaths: SAMPLES.show.now,

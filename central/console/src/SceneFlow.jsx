@@ -220,7 +220,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
-    navigate({ section: "now" });
+    navigate({ section: "now", flow: "show", step: "scene" }); // the Show-now flow, prefilled
   };
   const schedule = (sceneId) => {
     rememberScene(sceneId);

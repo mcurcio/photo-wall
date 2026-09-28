@@ -1,5 +1,5 @@
 import { ageAt, formatAge } from "./health.js";
-import { frameOf, LIVE_PHASES } from "./join.js";
+import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
 
 /**
  * Program and Run display states (pass 2 slice 3 §9). Pure reads of the served
@@ -209,4 +209,94 @@ export function runRows(snapshot) {
     completed: ended("completed"),
     cancelled: ended("cancelled"),
   };
+}
+
+/**
+ * The frames a stored Scene reaches: its own and its outro's Contributions and, through
+ * its child Scenes, theirs (central/runtime.py `Scene.participants`), sorted.
+ *
+ * @param {object|null|undefined} scene a served Scene definition
+ * @returns {string[]}
+ */
+export function sceneFrames(scene) {
+  const frames = new Set();
+  const visit = (node) => {
+    for (const entry of [...(node?.contributions ?? []), ...(node?.outro_contributions ?? [])]) {
+      const frameId = frameOf(entry.target);
+      if (frameId !== null) {
+        frames.add(frameId);
+      }
+    }
+    for (const child of node?.children ?? []) {
+      visit(child.scene);
+    }
+  };
+  visit(scene);
+  return [...frames].sort();
+}
+
+/**
+ * The live root Runs covering any of `frameIds`, each with the frames of `frameIds` it
+ * covers, highest priority first (at equal priority the later admission first: the
+ * served order is admission order). Only roots: a child Run carries its root's
+ * priority and root order, and a root's `participants` include its children's targets
+ * (central/runtime.py `_admit`, `Scene.participants`), so roots decide who is on top.
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {{run: object, frames: string[]}[]}
+ */
+export function coveringRuns(snapshot, frameIds) {
+  const runs = snapshot?.runtime?.current?.runs ?? [];
+  return runs
+    .map((run, order) => ({
+      run,
+      order,
+      frames: frameIds.filter((frameId) => run.participants.includes(toTarget(frameId))),
+    }))
+    .filter(({ run, frames }) => run.parent_id === null && LIVE_PHASES.has(run.phase) && frames.length > 0)
+    .sort((a, b) => b.run.priority - a.run.priority || b.order - a.order)
+    .map(({ run, frames }) => ({ run, frames }));
+}
+
+/**
+ * The priority a new activation on `frameIds` needs to show on top (flow design §6
+ * frozen surface, §7 J7): the highest priority among the live root Runs covering any
+ * of the frames; 0 when none does.
+ *
+ * Max, not max + 1: precedence is `(priority, root_order, admission_order)`
+ * (central/runtime.py `Intent.precedence`), the visible winner needs a strictly
+ * greater tuple (`_view`), and a new root's `root_order` is the admission sequence,
+ * which rises with every admission (`_admit`). At equal priority the later admission
+ * wins, so the highest covering priority already puts the new Run on top.
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {number}
+ */
+export function coveringPriority(snapshot, frameIds) {
+  const [top] = coveringRuns(snapshot, frameIds);
+  return top === undefined ? 0 : top.run.priority;
+}
+
+/**
+ * Where an activation on `frameIds` at `priority` stays underneath (§7 J7): each live
+ * root Run of a strictly higher priority covering its frames, highest first, as "At
+ * priority P this stays underneath the Run of X (priority Q) on a, b." Null when no
+ * covering Run is higher.
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @param {number} priority
+ * @returns {string|null}
+ */
+export function underneathSentence(snapshot, frameIds, priority) {
+  const above = coveringRuns(snapshot, frameIds).filter(({ run }) => run.priority > priority);
+  if (above.length === 0) {
+    return null;
+  }
+  const parts = above.map(
+    ({ run, frames }) => `the Run of ${run.scene_id} (priority ${run.priority}) on ${frames.join(", ")}`,
+  );
+  return `At priority ${priority} this stays underneath ${parts.join("; and ")}.`;
 }

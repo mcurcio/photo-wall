@@ -216,16 +216,18 @@ export function useFlowInstance({
   /**
    * The in-app way into instance `key` (New, Edit): its dirty draft resumes; otherwise
    * it opens at its first step, after asking to discard another instance's dirty draft.
+   * `options.replace` enters in place of the section's own history entry (Show now, whose
+   * finish replaces the flow's entry with the section again, so Back leaves the section).
    */
-  const start = (key, event) => {
+  const start = (key, event, options) => {
     finishedRef.current = null;
     confirm.setStatus(null);
     if (draft.key === key && draft.dirty) {
-      enter(resumeRoute());
+      enter(resumeRoute(), options);
     } else if (open(key)) {
-      enter(firstRoute(key));
+      enter(firstRoute(key), options);
     } else {
-      confirm.open(event ?? null, discardRequest(() => enter(firstRoute(key))));
+      confirm.open(event ?? null, discardRequest(() => enter(firstRoute(key), options)));
     }
   };
 

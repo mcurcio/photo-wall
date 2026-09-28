@@ -1,0 +1,135 @@
+"""The Show-now flow's pure parts (flow design §6 frozen surface, §7 J7; bead 5):
+`coveringPriority` and its helpers in showState.js, and showNowModel.js (steps, keys,
+seed and the activation key's rules), run under Node as tests/test_console_flow.py runs
+the flow kit. Without Node it skips on a developer machine, but FAILS where the checks
+are meant to run in full (`CI` or `PHOTO_WALL_BROWSER_TESTS` set).
+"""
+
+import json
+import subprocess
+from pathlib import Path
+
+from tests.test_console_flow import _require_node
+
+SRC = Path(__file__).parents[1] / "central/console/src"
+
+SCRIPT = r"""
+const show = await import(process.argv[1]);
+const model = await import(process.argv[2]);
+const out = {};
+
+// Served Runs in admission order (central/runtime.py `_view`: sorted by `order`).
+const run = (run_id, scene_id, priority, frames, extra = {}) => ({
+  run_id, scene_id, priority, root_id: run_id, parent_id: null, phase: "body",
+  participants: frames.map((frame) => `frame:${frame}`), children: [], ...extra });
+const snapshot = { runtime: { current: { runs: [
+  run("r-low", "low", 1, ["lobby"]),
+  run("r-high", "high", 5, ["hall"]),
+  run("r-later", "later", 5, ["lobby", "hall"]),
+  run("r-ended", "ended", 9, ["lobby"], { phase: "completed" }),
+  run("r-child", "child", 8, ["lobby"], { parent_id: "r-low", root_id: "r-low" }),
+  run("r-outro", "outro", 3, ["den"], { phase: "outro" }),
+  run("r-negative", "negative", -2, ["attic"]),
+] } } };
+
+out.covering = [
+  show.coveringPriority(snapshot, ["lobby"]),
+  show.coveringPriority(snapshot, ["hall", "lobby"]),
+  show.coveringPriority(snapshot, ["den"]),
+  show.coveringPriority(snapshot, ["attic"]),
+  show.coveringPriority(snapshot, ["garage"]),
+  show.coveringPriority(snapshot, []),
+  show.coveringPriority(null, ["lobby"]),
+];
+out.runs = show.coveringRuns(snapshot, ["lobby", "hall"]).map(({ run, frames }) => [run.run_id, frames]);
+out.underneath = [
+  show.underneathSentence(snapshot, ["lobby", "hall"], 5),
+  show.underneathSentence(snapshot, ["lobby", "hall"], 2),
+  show.underneathSentence(snapshot, ["lobby"], 0),
+];
+out.sceneFrames = [
+  show.sceneFrames({ contributions: [{ target: "frame:b" }, { target: "actuator:x" }],
+                     outro_contributions: [{ target: "frame:a" }],
+                     children: [{ scene: { contributions: [{ target: "frame:c" }, { target: "frame:b" }] } }] }),
+  show.sceneFrames(undefined),
+];
+
+// The flow's shape.
+out.steps = model.SHOW_STEPS.map((step) => step.id);
+out.fieldSteps = ["scene", "priority", "repeat"].map((field) => model.SHOW_FIELD_STEP[field]);
+out.advanced = [...model.SHOW_ADVANCED_FIELDS].sort();
+const K = model.SHOW_KEYS;
+out.keys = [
+  K.fromRoute({ section: "now", flow: "show", step: "review" }),
+  K.fromRoute({ section: "now" }),
+  K.fromRoute({ section: "scenes", flow: "new", step: "kind" }),
+];
+out.route = K.toRoute("new", "scene");
+out.first = K.firstStep("new");
+
+// The seed and the activation key.
+let minted = 0;
+const mint = () => `key-${++minted}`;
+const definitions = { evening: { scene_id: "evening" } };
+out.seedRecent = model.seedShowNow("evening", definitions, mint)();
+out.seedGone = model.seedShowNow("ghost", definitions, mint)();
+out.seedNone = model.seedShowNow(null, definitions, mint)();
+const value = { sceneId: "evening", priority: 3, repeat: "ignore", activationKey: "kept" };
+out.same = model.editActivation({ repeat: "ignore" }, mint)(value);
+out.repeat = model.editActivation({ repeat: "restart" }, mint)(value);
+out.scene = model.editActivation({ sceneId: "morning" }, mint)(value);
+out.priority = model.editActivation({ priority: "4" }, mint)(value);
+out.shown = [
+  model.shownPriority({ ...value, priority: null }, 5),
+  model.shownPriority(value, 5),
+  model.shownPriority({ ...value, priority: "" }, 5),
+];
+console.log(JSON.stringify(out));
+"""
+
+
+def test_covering_priority_and_the_show_now_model():
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", SCRIPT, "--",
+         (SRC / "showState.js").as_uri(), (SRC / "showNowModel.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+
+    # The highest priority among the LIVE ROOT Runs covering any of the frames; 0 when
+    # none does. An ended Run (9) and a child Run (8) never count; an outro still does;
+    # a lone negative priority is the highest there is. Max, not max + 1: at equal
+    # priority the later admission is on top (central/runtime.py:174,576,587,794).
+    assert out["covering"] == [5, 5, 3, -2, 0, 0, 0]
+    # Highest first; at equal priority the later admission first. Each with its frames.
+    assert out["runs"] == [
+        ["r-later", ["lobby", "hall"]], ["r-high", ["hall"]], ["r-low", ["lobby"]]]
+    assert out["underneath"] == [
+        None,
+        "At priority 2 this stays underneath the Run of later (priority 5) on lobby, hall; "
+        "and the Run of high (priority 5) on hall.",
+        "At priority 0 this stays underneath the Run of later (priority 5) on lobby; "
+        "and the Run of low (priority 1) on lobby.",
+    ]
+    # A Scene reaches its own, its outro's and its children's frames.
+    assert out["sceneFrames"] == [["a", "b", "c"], []]
+
+    assert out["steps"] == ["scene", "review"]
+    assert out["fieldSteps"] == ["scene", "review", "review"]
+    assert out["advanced"] == ["priority", "repeat"]
+    assert out["keys"] == ["new", None, None]
+    assert out["route"] == {"section": "now", "flow": "show", "step": "scene"}
+    assert out["first"] == "scene"
+
+    # The seed: the recent Scene while it is stored, the priority on its default, "Leave
+    # it running" and a fresh key.
+    assert out["seedRecent"] == {
+        "sceneId": "evening", "priority": None, "repeat": "ignore", "activationKey": "key-1"}
+    assert out["seedGone"]["sceneId"] == "" and out["seedNone"]["sceneId"] == ""
+    # A change to the form mints a new key; the value it already has changes nothing.
+    # A new Scene puts the priority back on its default.
+    assert out["same"] is None
+    assert out["repeat"] == {"repeat": "restart", "activationKey": "key-4"}
+    assert out["scene"] == {"priority": None, "sceneId": "morning", "activationKey": "key-5"}
+    assert out["priority"] == {"priority": "4", "activationKey": "key-6"}
+    assert out["shown"] == [5, 3, ""]

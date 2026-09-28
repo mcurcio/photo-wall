@@ -271,19 +271,56 @@ def schedule_program(page, program, scene_id, start, end, priority, *, submit=Tr
     return info.value
 
 
-def show_now(page, scene_id, priority, repeat="Leave it running"):
-    """Show Scene `scene_id` now at `priority` and return the activation's POST response.
-
-    `repeat` is the label of the "if it is already running" choice. Central answers
-    synchronously with an Admission ({status, reason}); the console mints the activation
-    id, so the operator never types one.
-    """
-    go(page, "now")
-    form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+def show_form(page):
+    """The Show-now flow's current step: the form "Activate a Scene" in the Runs region.
+    Both steps render it (Scene, then Review, whose forward action is "Activate now")."""
+    return page.get_by_role("region", name="Runs", exact=True).get_by_role(
         "form", name="Activate a Scene", exact=True)
-    form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
-    form.get_by_label("Activation priority", exact=True).fill(str(priority))
-    form.get_by_label(repeat, exact=True).check()
+
+
+def start_show_now(page, scene_id=None):
+    """Go to Now showing, press "Show now" and, with `scene_id`, choose it as "Scene to
+    activate"; returns the flow's form, on its Scene step."""
+    go(page, "now")
+    page.get_by_role("region", name="Runs", exact=True).get_by_role(
+        "button", name="Show now", exact=True).click()
+    form = show_form(page)
+    if scene_id is not None:
+        form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
+    return form
+
+
+def show_advanced(form):
+    """Open Review's Advanced ("Activation priority", "If it is already running") unless
+    it is open already (a priority below its default holds it open)."""
+    toggle = form.get_by_role("button", name="Advanced", exact=True)
+    if toggle.get_attribute("aria-expanded") != "true":
+        toggle.click()
+    expect(toggle).to_have_attribute("aria-expanded", "true")
+
+
+def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit=True):
+    """Show Scene `scene_id` now and return the activation's POST response.
+
+    Bead 5: the Show-now flow (#/now/show/<step>): "Show now" on Now showing, Scene →
+    Review, then "Activate now". `priority` fills "Activation priority" under Review's
+    Advanced; None keeps its default (the highest priority among the live Runs covering
+    the Scene's frames, or 0). `repeat` is the label of the "if it is already running"
+    choice; its default ("Leave it running") is left as it is. Central answers
+    synchronously with an Admission ({status, reason}); the console mints the activation
+    id, so the operator never types one. Without `submit`, returns the form on Review.
+    """
+    form = start_show_now(page, scene_id)
+    form.get_by_role("button", name="Continue", exact=True).click()
+    expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_visible()
+    if priority is not None or repeat != "Leave it running":
+        show_advanced(form)
+    if priority is not None:
+        form.get_by_label("Activation priority", exact=True).fill(str(priority))
+    if repeat != "Leave it running":
+        form.get_by_label(repeat, exact=True).check()
+    if not submit:
+        return form
     with page.expect_response(
         lambda r: r.url.endswith("/v1/operator/activations") and r.request.method == "POST"
     ) as info:

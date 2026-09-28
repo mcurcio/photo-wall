@@ -32,6 +32,7 @@ from console_tasks import (
     scene_continue,
     scene_form,
     schedule_program,
+    show_advanced,
     show_now,
     source_continue,
     start_scene,
@@ -769,7 +770,7 @@ def test_cancel_removes_live_run(page, registry):
         go(page, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         # Not vacuous: no live Runs before activation.
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
 
         show_now(page, SCENE_ID, 0)
 
@@ -789,7 +790,7 @@ def test_cancel_removes_live_run(page, registry):
         assert info.value.status == 200
 
         # After the useMutate() refresh the cancelled Run is gone.
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
 
 
 def test_finish_live_run_posts(page, registry):
@@ -839,7 +840,7 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
 
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
 
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)
@@ -1187,7 +1188,7 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
         connect(page, origin, "now")
         why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
             "group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: intro (priority 0, activated directly) on top.")
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
@@ -1219,7 +1220,7 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         connect(page, origin, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
@@ -1320,9 +1321,9 @@ def _retry_after_unknown(page, registry, answer):
         answer_first(page, "**/v1/operator/activations", first_attempt)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
-        form = runs.get_by_role("form", name="Activate a Scene", exact=True)
-        form.get_by_label("Scene to activate", exact=True).select_option(SCENE_ID)
-        form.get_by_label("Restart it", exact=True).check()
+        # Bead 5: the activation is the Show-now flow; "Restart it" sits under Review's
+        # Advanced.
+        form = show_now(page, SCENE_ID, repeat="Restart it", submit=False)
         form.get_by_role("button", name="Activate now", exact=True).click()
         outcome = runs.get_by_label("Activation outcome", exact=True)
         expect(outcome).to_have_text(
@@ -1347,10 +1348,12 @@ def test_an_activation_retried_after_a_500_reuses_its_key(page, registry):
 
 def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
     _seed(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
-        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
-            "form", name="Activate a Scene", exact=True)
+        # Bead 5: the choice is on the Show-now flow's Review, under Advanced.
+        form = show_now(page, SCENE_ID, submit=False)
+        show_advanced(form)
         expect(form.get_by_label("Leave it running", exact=True)).to_be_checked()
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
@@ -1364,9 +1367,8 @@ def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
     _runtime(registry).command("set_scene", _scene("once", loop=False, cycle_seconds=20))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
-        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
-            "form", name="Activate a Scene", exact=True)
-        form.get_by_label("Scene to activate", exact=True).select_option("once")
+        form = show_now(page, "once", submit=False)
+        show_advanced(form)
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
         expect(restart).to_have_accessible_description(
@@ -1598,7 +1600,7 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
                       if run.scene_id == SCENE_ID)
         runtime.command("cancel", run_id, registry.clock.utc())
         page.clock.run_for(5000)
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
         expect(opener).to_have_count(0)
 
         dialog.get_by_role("button", name="Cancel", exact=True).click()
@@ -1949,9 +1951,11 @@ def test_the_media_pipeline_states_each_worker_state(page, registry):
 
 
 def _why_chain(page, frame_id=VALID_FRAME):
+    """Open "Why nothing new?" on `frame_id`'s row of the Why group (bead 5: a disclosure
+    per frame, where a "Frame for why" chooser used to show both explanations at once)."""
     why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
         "group", name="Why", exact=True)
-    why.get_by_label("Frame for why", exact=True).select_option(frame_id)
+    why.get_by_role("button", name=f"Why nothing new? {frame_id}", exact=True).click()
     return why.get_by_role("group", name=f"Why nothing new on {frame_id}?", exact=True)
 
 
@@ -2003,6 +2007,7 @@ def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
         expect(chain.get_by_role("button", name="Check this frame")).to_have_count(0)
         # Ranked beside it, unchanged: one layer.
         why = page.get_by_role("region", name="Runs", exact=True).get_by_role("group", name="Why")
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role(
             "listitem")).to_have_count(1)
 

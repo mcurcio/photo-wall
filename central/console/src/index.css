@@ -2140,3 +2140,110 @@ label {
 .source-flow__slot:empty {
   display: none;
 }
+
+
+/* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
+   per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
+.show-now {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  margin-top: 12px;
+}
+
+.show-now__outcome:focus {
+  outline: none;
+}
+
+.show-now__outcome:not(:has(.run-control__outcome, .show-now__status-line:not(:empty))) {
+  margin-bottom: -16px;
+}
+
+.show-now__status-line:empty {
+  display: none;
+}
+
+.show-now__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.show-now__underneath {
+  margin: 8px 0;
+}
+
+.run-cards {
+  margin-top: 16px;
+}
+
+.run-cards__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-cards__item {
+  display: flex;
+  min-width: 0;
+}
+
+.run-cards__item > .card {
+  flex: 1;
+}
+
+.run-cards__children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.why-frames {
+  margin-top: 24px;
+}
+
+.why-frames__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.why-frames__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.why-frames__item {
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.why-frames__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+}
+
+.why-frames__frame {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.why-frames__panel {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  border-left: 2px solid var(--border);
+}

@@ -623,7 +623,7 @@ The **Media pipeline** panel sits in the Now column. Central fetches media from 
 
 ### Why nothing new on a frame?
 
-In the Runs region's **Why** panel, choose a **Frame for why**. Below Central's plan for that frame is a separate group, **"Why nothing new on lobby-left?"**. It walks from intent to equipment; each step restates a served fact, and the first step that is not ok is marked **Stops here**. Fix that one first.
+In the Runs region's **Why** group, open **Why nothing new?** on the frame's row. It opens a separate group beside Central's plan (**Why?**), **"Why nothing new on lobby-left?"**. It walks from intent to equipment; each step restates a served fact, and the first step that is not ok is marked **Stops here**. Fix that one first.
 
 | Step | Stops when | What to do at that stop |
 |---|---|---|
@@ -667,9 +667,9 @@ Each Program row shows one state, read from what Central served. Times are the R
 
 ### Runs and Central's plan
 
-Live Runs are listed with their child Scenes nested beneath. Each row shows `Scene X` and its revision, where it came from ("Program Y", "activated directly" or "part of Z"), when it started, whether it is Running, "Ending (outro)" or "Finishing", its priority, the frames it protects, and its frames with their health. **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Ended Runs from the last day are under a closed "Recently ended (N)" list.
+Live Runs are listed as cards, with their child Scenes nested inside. Each card shows `Scene X` and its revision, where it came from ("Program Y", "activated directly" or "part of Z"), when it started, whether it is Running, "Ending (outro)" or "Finishing", its priority, the frames it protects, and its frames with their health. **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Ended Runs from the last day are under a closed "Recently ended (N)" list.
 
-The **why** panel (and the Frame Inspector's Now-showing facet) states **Central's plan** for one frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
+**Why?** on a frame's row in the **Why** group (and the Frame Inspector's Now-showing facet) states **Central's plan** for one frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
 - a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
 - the same priority: the Run Central **admitted later** is on top. This is admission order, not the Program's start time; Programs starting at the same instant are admitted in Program-id order;
 - the same Run: the later child Scene is on top.
@@ -678,7 +678,7 @@ The **why** panel (and the Frame Inspector's Now-showing facet) states **Central
 
 ### Activating a Scene now
 
-Choose the **Scene to activate** and an **Activation priority**, then choose what happens **If it is already running**:
+Press **Show now** on Now showing (or on a Scene's card), choose the **Scene to activate** and Continue. Review lists every answer. Under its **Advanced** are the **Activation priority** and what happens **If it is already running**. The priority defaults to the highest priority among the Runs covering the Scene's frames (0 when none does): at equal priority the Run admitted later is on top, so the new Run shows. A lower priority opens Advanced with the Run it would stay underneath, for example "At priority 3 this stays underneath the Run of evening (priority 5) on lobby-left."
 - **Leave it running** (default): nothing changes; the outcome reads "Not started: evening is already running, left as is."
 - **Restart it:** ends the current Run and starts a new one now. A restarted Run has **no Program end**. A Scene with Keep playing on plays until you Finish or Cancel it; one with Keep playing off plays one cycle, then ends.
 
