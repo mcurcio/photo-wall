@@ -23,15 +23,18 @@ import { setToken, useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.
  *  - the read-only per-Surface SVG Plan and the Unplaced tray.
  */
 export default function App() {
-  const { snapshot, refresh, authRejected } = useSnapshot();
+  const { snapshot, refresh, authRejected, refreshFailed } = useSnapshot();
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
   // Bead 18: the global snapshot-age clock (advances each second, resets on
-  // refresh) and the ~10s /healthz reachability pill. Both are global, so they
-  // read one age/one health regardless of Wall/Showrunner mode.
+  // refresh) and the ~10s /healthz pill. Both are global, so they read one
+  // age/one health regardless of Wall/Showrunner mode. The pill is the ONE place
+  // Central's own health is shown (pass 2 §5).
   const age = useSnapshotAge();
   const health = useHealth();
+  const centralHealth =
+    health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
   const [tokenInput, setTokenInput] = useState("");
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
@@ -168,6 +171,8 @@ export default function App() {
         >
           <span className="console__age">
             {age === null ? "never updated" : `updated ${age} s ago`}
+            {/* Only after a refresh actually failed — never inferred from age. */}
+            {refreshFailed && " — last refresh failed"}
           </span>
           <span aria-hidden="true">·</span>
           <button
@@ -178,11 +183,11 @@ export default function App() {
             Refresh
           </button>
           <span
-            className="console__health"
+            className={`console__health console__health--${health.status}`}
             role="status"
-            aria-label={`Central health: ${health}`}
+            aria-label={`Central health: ${centralHealth}`}
           >
-            {health}
+            {`Central: ${centralHealth}`}
           </span>
         </div>
       )}

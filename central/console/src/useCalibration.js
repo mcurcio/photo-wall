@@ -9,12 +9,6 @@ import { useMutate } from "./useMutate.js";
  * @typedef {"revision"|"generation"|"unbound"|"error"} CalibrationConflict
  */
 
-// Cadence of the overtake poll while the facet is mounted (design §6b: poll
-// /inventory ~5s so a committed-elsewhere change or an expired lease surfaces
-// without operator action). The poll refreshes Plane A wholesale; useDraft
-// (Plane B) is refresh-proof, so an in-progress edit is never clobbered.
-const POLL_MS = 5000;
-
 /**
  * POST one calibration op against the EXISTING route. On a non-2xx the server
  * body is `{"error": "<code>"}` (central/app.py:288); the code is re-thrown so
@@ -59,7 +53,8 @@ async function postCalibration(frameId, body) {
  *     silent re-preview. The countdown reaching zero does NOT flip the panel to
  *     "expired" — expiry is authoritative SERVER state, detected by the poll (see
  *     3), so a skewed or slow client clock can never fake or hide expiry.
- *  3. A ~5s poll of /inventory (Plane A refresh) detects, against the baseline:
+ *  3. The console's one ~5s Plane A poll (SnapshotProvider, useSnapshot.js)
+ *     drives the detection effect, which compares against the baseline:
  *     a committed-elsewhere `revision` advance or a `generation` change →
  *     "overtaken"; and, while previewing, the frame's `preview` reverting to null
  *     (the lease lapsed server-side) → "expired". The trying values stay in Plane
@@ -83,7 +78,7 @@ async function postCalibration(frameId, body) {
  * }}
  */
 export function useCalibration(frameId, trying) {
-  const { snapshot, refresh } = useSnapshot();
+  const { snapshot } = useSnapshot();
   const mutate = useMutate();
 
   const [status, setStatus] = useState(/** @type {CalibrationStatus} */ ("committed"));
@@ -126,8 +121,9 @@ export function useCalibration(frameId, trying) {
     setCountdown(null);
   }
 
-  // Overtake / expiry detection: runs whenever Plane A changes (the ~5s poll, an
-  // after-commit refresh, or a manual Connect). Compares the live frame to the
+  // Overtake / expiry detection: runs whenever Plane A changes (the provider's
+  // ~5s poll, an after-commit refresh, or a manual Connect). There is no timer
+  // here — and no lease-renew timer, by design. Compares the live frame to the
   // captured baseline. A "conflict" is sticky (an op already refused the write)
   // until the frame is reselected.
   useEffect(() => {
@@ -198,15 +194,6 @@ export function useCalibration(frameId, trying) {
       }
     }
   }, [snapshot, frameId]);
-
-  // The ~5s overtake poll. Refreshing Plane A drives the detection effect above;
-  // it is the ONLY timer here — there is no lease-renew timer, by design.
-  useEffect(() => {
-    const id = setInterval(() => {
-      refresh().catch(() => {});
-    }, POLL_MS);
-    return () => clearInterval(id);
-  }, [refresh]);
 
   // Countdown ticker (display only). Recomputes remaining seconds from the
   // server's expires_at each tick; clamped at 0. Reaching 0 does NOT expire the

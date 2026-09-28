@@ -4,6 +4,18 @@ import { getToken } from "./useSnapshot.js";
 // not resolve inside this window is aborted rather than left hanging.
 const TIMEOUT_MS = 15000;
 
+// The write fence (design pass 2 §7): bumped at the START and again at the
+// COMPLETION of every non-GET call. A Plane A refresh records it when it starts
+// and drops its result if it moved, so a read that overlapped a write — in
+// flight, or finished while the read ran — never lands over the write's effect.
+// A GET routed through here is a read and does not move it.
+let writes = 0;
+
+/** The write-fence counter; a change means a write started or completed. */
+export function writeCount() {
+  return writes;
+}
+
 /**
  * Low-level operator-write helper (bead R-apiwrite). Every operator mutation —
  * bind/unbind, calibration, and the frame writes (create/move/delete/drop) —
@@ -31,15 +43,26 @@ export async function apiWrite(path, { method, body } = {}) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  const response = await fetch(path, init);
+  const isWrite = (method ?? "GET").toUpperCase() !== "GET";
+  if (isWrite) {
+    writes += 1;
+  }
+  let response;
   let data = null;
   try {
-    data = await response.json();
-  } catch {
-    // A non-JSON / empty body (e.g. a 204 or a network-level error page) leaves
-    // data null; callers treat that as "no code" exactly as the hand-rolled
-    // per-endpoint parsers did.
-    data = null;
+    response = await fetch(path, init);
+    try {
+      data = await response.json();
+    } catch {
+      // A non-JSON / empty body (e.g. a 204 or a network-level error page) leaves
+      // data null; callers treat that as "no code" exactly as the hand-rolled
+      // per-endpoint parsers did.
+      data = null;
+    }
+  } finally {
+    if (isWrite) {
+      writes += 1;
+    }
   }
   return {
     ok: response.ok,

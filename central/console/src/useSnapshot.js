@@ -4,8 +4,11 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
+
+import { writeCount } from "./apiWrite.js";
 
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number}} Snapshot
@@ -47,12 +50,34 @@ async function fetchJson(path) {
 
 const SnapshotContext = createContext(null);
 
+// Plane A is re-read on this cadence while the tab is visible (design pass 2 §7).
+// It matches the calibration overtake poll it replaces.
+const POLL_MS = 5000;
+
 /**
  * Holds Plane A near the top of the tree and provides {snapshot, refresh} to
  * the whole subtree. `refresh` performs ONE atomic, timestamped fetch of
  * inventory + runtime (+ media) and replaces Plane A wholesale — inventory and
  * runtime are swapped together so a frame's binding row and its now-showing chip
  * always share one age (design §4a). It never merges into Plane B (useDraft).
+ *
+ * POLLING (pass 2 §7). The provider is the ONE poller: every 5 s while the tab
+ * is visible it refreshes Plane A, reading the token fresh on each tick. A hidden
+ * tab clears the interval; becoming visible refreshes at once and restarts it.
+ * Polls are single-flight (the 15 s fetch timeout outlasts the interval); a
+ * dropped or failed poll releases the slot, so the next tick still runs.
+ *
+ * NEWEST READ WINS. Every refresh — poll, mutation or manual — takes an
+ * increasing ticket, and its outcome (success, 401 or any other failure) is
+ * applied only if the ticket is newer than the last one applied. So a slow,
+ * stale read can neither overwrite a newer snapshot nor, by failing late, log
+ * the operator out or flag a failure the newer read disproved.
+ *
+ * WRITE FENCE. A refresh records apiWrite's write counter when it starts and is
+ * dropped if the counter moved before it returned: a write that was in flight,
+ * or completed, while the read ran may not be reflected in it. useMutate's own
+ * refresh starts after the write's completion, so it is kept. The cost is bounded
+ * starvation — back-to-back writes drop every overlapping poll.
  */
 export function SnapshotProvider({ children }) {
   const [snapshot, setSnapshot] = useState(/** @type {Snapshot|null} */ (null));
@@ -60,89 +85,116 @@ export function SnapshotProvider({ children }) {
   // 401 from any plane fetch). App renders the token form + a "not accepted"
   // message when this is set, instead of silently blanking (design R3).
   const [authRejected, setAuthRejected] = useState(false);
+  // Whether the newest applied refresh failed (never inferred from age).
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const issuedRef = useRef(0);
+  const appliedRef = useRef(0);
+  const pollingRef = useRef(false);
 
   const refresh = useCallback(async () => {
+    const ticket = ++issuedRef.current;
+    const writesAtStart = writeCount();
     // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
     // partial failure rejects and leaves the prior snapshot untouched. Media is
     // part of Plane A (design §4a) — inventory, runtime and the Source catalog
     // are swapped together so the Showrunner's Sources region and the wall's
     // now-showing chip always share one age.
+    let next = null;
+    let failure = null;
     try {
       const [inventory, runtime, media] = await Promise.all([
         fetchJson("/v1/operator/inventory"),
         fetchJson("/v1/operator/runtime"),
         fetchJson("/v1/operator/media"),
       ]);
-      const next = { inventory, runtime, media, at: Date.now() };
-      setSnapshot(next);
-      // A successful load clears any prior token-rejection message.
-      setAuthRejected(false);
-      return next;
+      next = { inventory, runtime, media, at: Date.now() };
     } catch (error) {
+      failure = error;
+    }
+    if (ticket <= appliedRef.current || writeCount() !== writesAtStart) {
+      // Superseded by a newer read, or overlapped by a write: dropped whole.
+      return null;
+    }
+    appliedRef.current = ticket;
+    if (failure !== null) {
+      setRefreshFailed(true);
       // A rejected operator token (401 on connect OR mid-session) drops the tab
       // back to the token-entry state: clear the IN-MEMORY token and the stale
       // snapshot, and flag the rejection so App re-renders the token form with a
       // "not accepted" message. Any other failure (network/5xx) leaves the prior
-      // snapshot and token untouched for a later retry (Bead 18 richer surfacing).
-      if (error?.status === 401) {
+      // snapshot and token untouched for the next poll.
+      if (failure?.status === 401) {
         setToken("");
         setSnapshot(null);
         setAuthRejected(true);
       }
-      throw error;
+      throw failure;
     }
+    setSnapshot(next);
+    // A successful load clears any prior token-rejection or failure notice.
+    setAuthRejected(false);
+    setRefreshFailed(false);
+    return next;
   }, []);
 
   useEffect(() => {
     // Load the first snapshot on mount once a token is present. With no token
-    // (Bead 0 has no login) the shell stays in its empty state rather than
-    // firing a doomed unauthenticated request.
-    if (!adminToken) {
+    // the shell stays in its empty state rather than firing a doomed
+    // unauthenticated request.
+    if (!getToken()) {
       return;
     }
-    let live = true;
-    refresh().catch(() => {
-      // A failed initial load leaves Plane A null; the shell renders empty and
-      // a later refresh (focus/after-mutate, Bead 18) retries.
-      if (!live) {
-        return;
-      }
-    });
-    return () => {
-      live = false;
-    };
+    // A failed initial load leaves Plane A null; the next poll retries.
+    refresh().catch(() => {});
   }, [refresh]);
 
   useEffect(() => {
-    // Bead 18: refresh Plane A when the operator returns to the tab. There is no
-    // operator push channel (WS is player-only, design §9), so the console can
-    // only be as fresh as its last read; refreshing on focus/visibility-change
-    // narrows the staleness window whenever attention returns to the console. A
-    // refresh with no token in hand is doomed, so it is skipped until Connect.
-    const refreshOnReturn = () => {
-      if (!adminToken) {
+    let id = null;
+    const tick = () => {
+      // The token is read fresh on every tick; with none in hand a read is
+      // doomed, so it is skipped until Connect.
+      if (!getToken() || pollingRef.current) {
         return;
       }
-      // A failed refresh leaves the prior snapshot untouched (refresh's own
-      // catch); swallow here so an inactive-tab reject is never uncaught.
-      refresh().catch(() => {});
+      pollingRef.current = true;
+      refresh()
+        .catch(() => {})
+        .finally(() => {
+          pollingRef.current = false;
+        });
+    };
+    const start = () => {
+      if (id === null) {
+        id = setInterval(tick, POLL_MS);
+      }
+    };
+    const stop = () => {
+      if (id !== null) {
+        clearInterval(id);
+        id = null;
+      }
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        refreshOnReturn();
+        tick();
+        start();
+      } else {
+        stop();
       }
     };
-    window.addEventListener("focus", refreshOnReturn);
+    if (document.visibilityState === "visible") {
+      start();
+    }
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("focus", refreshOnReturn);
+      stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [refresh]);
 
   const value = useMemo(
-    () => ({ snapshot, refresh, authRejected }),
-    [snapshot, refresh, authRejected],
+    () => ({ snapshot, refresh, authRejected, refreshFailed }),
+    [snapshot, refresh, authRejected, refreshFailed],
   );
   return React.createElement(SnapshotContext.Provider, { value }, children);
 }
@@ -151,11 +203,14 @@ export function SnapshotProvider({ children }) {
  * Plane A read-snapshot hook (shared primitive #1).
  *
  * Returns the current atomic snapshot, a refresh fn that replaces Plane A
- * wholesale and NEVER merges into Plane B, and `authRejected` (true once a fetch
- * was refused for a bad operator token). Must be used within a SnapshotProvider
- * so every region and useMutate share one Plane A.
+ * wholesale and NEVER merges into Plane B (it resolves null when its read was
+ * superseded or fenced off by a write), `authRejected` (true once a fetch was
+ * refused for a bad operator token) and `refreshFailed` (true while the newest
+ * applied refresh failed). Must be used within a SnapshotProvider so every
+ * region and useMutate share one Plane A.
  *
- * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot>, authRejected: boolean}}
+ * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot|null>,
+ *            authRejected: boolean, refreshFailed: boolean}}
  */
 export function useSnapshot() {
   const value = useContext(SnapshotContext);
@@ -203,23 +258,56 @@ export function useSnapshotAge() {
 
 /**
  * @typedef {"unknown"|"ok"|"unavailable"|"unreachable"} HealthState
+ * @typedef {{status: HealthState, reason: string|null, scheduler: string|null}} CentralHealth
  */
 
 /**
- * Health-pill poll (Bead 18). Polls the public, unauthenticated `GET /healthz`
- * every ~10s (design §9 cadence — matches the legacy health pill) and reports a
- * coarse reachability state, independent of Plane A and of the operator token.
- *  - "ok"          — 200 with body status "ok"
- *  - "unavailable" — a response that is not a healthy 200 (e.g. 503)
- *  - "unreachable" — the request failed / timed out (no response)
- *  - "unknown"     — before the first poll returns
- * The pill lags reachability by at most one interval (the stated cost, design §9).
+ * Read Central's `/healthz` body (central/app.py `health`) into the pill's facts:
+ * the coarse state, the reason it is not ok ("database unavailable" or
+ * "scheduler <status>"), and the scheduler status when it is neither "ok" nor
+ * "disabled" (the attention strip's causal line reads it).
+ *
+ * @param {boolean} httpOk
+ * @param {any} body the parsed JSON body, or null
+ * @returns {CentralHealth}
+ */
+function readHealth(httpOk, body) {
+  const schedulerStatus = body?.scheduler?.status ?? null;
+  const scheduler =
+    schedulerStatus === null || schedulerStatus === "ok" || schedulerStatus === "disabled"
+      ? null
+      : String(schedulerStatus);
+  const healthy = body == null ? httpOk : body.status === "ok";
+  const status = healthy ? "ok" : "unavailable";
+  let reason = null;
+  if (status !== "ok") {
+    if (body?.database === false) {
+      reason = "database unavailable";
+    } else if (scheduler !== null) {
+      reason = `scheduler ${scheduler.replaceAll("_", " ")}`;
+    }
+  }
+  return { status, reason, scheduler };
+}
+
+/**
+ * Health-pill poll (Bead 18; pass 2 §5). Polls the public, unauthenticated
+ * `GET /healthz` every ~10s (design §9 cadence — matches the legacy health pill)
+ * and reports Central's health, independent of Plane A and of the operator token:
+ *  - status "ok"          — 200 with body status "ok"
+ *  - status "unavailable" — a response that is not healthy (e.g. 503); `reason`
+ *                           names the cause the body reports, when it does
+ *  - status "unreachable" — the request failed / timed out (no response)
+ *  - status "unknown"     — before the first poll returns
+ * The pill lags by at most one interval (the stated cost, design §9).
  *
  * @param {number} [intervalMs]
- * @returns {HealthState}
+ * @returns {CentralHealth}
  */
 export function useHealth(intervalMs = 10000) {
-  const [health, setHealth] = useState(/** @type {HealthState} */ ("unknown"));
+  const [health, setHealth] = useState(
+    /** @type {CentralHealth} */ ({ status: "unknown", reason: null, scheduler: null }),
+  );
   useEffect(() => {
     let live = true;
     const poll = async () => {
@@ -227,20 +315,19 @@ export function useHealth(intervalMs = 10000) {
         const response = await fetch("/healthz", {
           signal: AbortSignal.timeout(5000),
         });
-        let state = response.ok ? "ok" : "unavailable";
+        let body = null;
         try {
-          const body = await response.json();
-          state = body?.status === "ok" ? "ok" : "unavailable";
+          body = await response.json();
         } catch {
           // A non-JSON body: fall back to the HTTP status alone.
         }
         if (live) {
-          setHealth(state);
+          setHealth(readHealth(response.ok, body));
         }
       } catch {
         // No response at all (network error / timeout) — central is unreachable.
         if (live) {
-          setHealth("unreachable");
+          setHealth({ status: "unreachable", reason: null, scheduler: null });
         }
       }
     };

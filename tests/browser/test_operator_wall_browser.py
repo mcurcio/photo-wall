@@ -15,7 +15,7 @@ import re
 import time
 
 import pytest
-from operator_harness import operator_server, report_readiness
+from operator_harness import operator_server, pause_page_clock, report_readiness
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -356,6 +356,38 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
         assert frame.height_mm == 500
         # It still renders on the plan by identity.
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
+
+
+def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
+    """Pass 2 §7: the 5 s poll replaces Plane A mid-drag, and the drag (a ref plus local
+    state in Plan) survives it -- the release lands where the operator dragged to."""
+    registry.create_frame(FrameCreate(
+        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
+        box = _plan_box(page)
+
+        page.mouse.move(box["x"] + 180 / 960 * box["width"], box["y"] + 300 / 600 * box["height"])
+        page.mouse.down()
+        page.mouse.move(box["x"] + 360 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
+                        steps=4)
+        # A poll lands mid-drag.
+        with page.expect_response("**/v1/operator/inventory"):
+            page.clock.run_for(5000)
+        page.wait_for_timeout(200)
+        page.mouse.move(box["x"] + 540 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
+                        steps=4)
+        page.mouse.up()
+
+        def _moved():
+            frame = next(f for f in registry.inventory().frames if f.id == PLACED)
+            return frame if frame.x_mm != 100 else None
+
+        frame = _wait_for(_moved)
+        assert abs(frame.x_mm - 360 * SCALE) <= TOL
 
 
 # Bead 11 -- S-remove: DELETE (guarded 409 -> distinctive operator guidance) + drag

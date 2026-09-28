@@ -70,3 +70,45 @@ def report_readiness(registry, player_id):
         plan_id=plan.plan_id, revision=plan.revision, authority_epoch=epoch,
         sequence=next(_SEQUENCE), clock_uncertainty=.01, capacity_ok=True,
         observed_at=registry.clock.utc()))
+
+
+def pause_page_clock(page, at):
+    """Install Playwright's fake clock at `at` (Unix seconds) and pause it, before navigation:
+    the console's timers (the 5 s poll, the age ticker, the lease countdown) then fire only
+    when the test runs the clock (page.clock.run_for)."""
+    page.clock.install(time=at)
+    page.clock.pause_at(at + 1)
+
+
+class RequestGate:
+    """Holds requests matching `pattern` while `holding` is set, until the test releases them
+    -- a slow network response the test controls. Unheld requests pass straight through."""
+
+    def __init__(self, page, pattern):
+        self.page = page
+        self.holding = False
+        self.held = []
+        self.seen = 0
+        page.route(pattern, self._handle)
+
+    def _handle(self, route):
+        self.seen += 1
+        if self.holding:
+            self.held.append(route)
+        else:
+            route.continue_()
+
+    def wait_held(self, count=1, timeout=5.0):
+        """Wait until `count` requests are held (their fetches have been issued)."""
+        deadline = time.monotonic() + timeout
+        while len(self.held) < count:
+            assert time.monotonic() < deadline, f"{count} request(s) were not held in time"
+            self.page.wait_for_timeout(20)
+
+    def release(self, index=0, **fulfill):
+        """Let a held request through (to the server now), or answer it with `fulfill`."""
+        route = self.held.pop(index)
+        if fulfill:
+            route.fulfill(**fulfill)
+        else:
+            route.continue_()

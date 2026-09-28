@@ -15,7 +15,7 @@ import os
 import time
 
 import pytest
-from operator_harness import inventory, operator_server
+from operator_harness import inventory, operator_server, pause_page_clock
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -334,6 +334,30 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
         expect(timer).to_be_visible()
         expect(timer).to_contain_text("lease expires in")
         # The panel is genuinely previewing on the server (preview slot set).
+        assert inventory(page, origin).frames[0].preview is not None
+
+
+def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, registry):
+    """Pass 2 §7: the console's one 5 s poll replaces Plane A while a preview is held; the
+    draft (Plane B) and the server-driven countdown survive, and the panel stays previewing.
+    The page clock is paused at the server's clock, so the countdown is exact."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        inspector = _open_commissioning(page)
+        gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
+        gain.fill("1.9")
+        _lease(inspector).get_by_role("button", name="Preview", exact=True).click()
+        timer = inspector.get_by_role("timer", name="Preview lease countdown")
+        expect(timer).to_contain_text("lease expires in 29s")
+
+        for _ in range(2):
+            with page.expect_response("**/v1/operator/inventory"):
+                page.clock.run_for(5000)
+        expect(timer).to_contain_text("lease expires in 19s")
+        expect(gain).to_have_value("1.9")
+        expect(inspector.get_by_role("alert")).to_have_count(0)
         assert inventory(page, origin).frames[0].preview is not None
 
 

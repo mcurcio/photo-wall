@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import pytest
 from media_queue import RecordingMediaQueue
-from operator_harness import operator_server, report_readiness
+from operator_harness import RequestGate, operator_server, pause_page_clock, report_readiness
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -483,6 +483,36 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
         expect(choice.get_by_role("option", name="Photo 120×200", exact=True)).to_have_count(1)
         # The landscape candidate is hard-filtered out for a portrait Frame.
         expect(choice.get_by_role("option", name="Photo 192×108", exact=True)).to_have_count(0)
+
+
+def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
+    """Pass 2 §7: only non-GET calls move the write fence. The candidates read goes through
+    apiWrite as a GET while a poll is in flight; the poll still lands (the age resets)."""
+    _seed(registry)
+    queue = _seed_source(registry, _authored_photos(registry))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+            "form", name="Author a Scene", exact=True)
+        form.get_by_label("Authored per-frame", exact=True).check()
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+
+        reads = RequestGate(page, "**/v1/operator/inventory")
+        reads.holding = True
+        page.clock.run_for(5000)
+        reads.wait_held()
+        reads.holding = False
+        expect(page.get_by_text(re.compile(r"updated 5 s ago"))).to_be_visible()
+
+        # The candidates GET, through apiWrite, while the poll is in flight.
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(choice.get_by_role("option", name="Photo 108×192", exact=True)).to_have_count(1)
+
+        reads.release()
+        expect(page.get_by_text(re.compile(r"updated 0 s ago"))).to_be_visible()
 
 
 # Bead 15 — Programs (single window + priority) + optional N-window helper.
