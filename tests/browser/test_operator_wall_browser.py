@@ -405,6 +405,11 @@ def _plan(page):
     return page.get_by_role("group", name="Wall plan for surface wall", exact=True)
 
 
+def _confirm_delete(page):
+    """The delete confirmation (slice 2 §7): a plain Confirm naming the frame."""
+    page.get_by_role("dialog").get_by_role("button", name="Confirm delete", exact=True).click()
+
+
 def _seed_bound(registry):
     """A placed frame bound to a connected output, with NO live Run -- so DELETE
     passes the runtime guard and is refused by the binding guard (frame_bound)."""
@@ -426,10 +431,17 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         # Select the clear frame on the plan, then delete it via its control.
         page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
 
         # Gone by identity from the plan AND from server inventory (real removal).
         expect(page.get_by_role("button", name=f"Frame {CLEAR}", exact=True)).to_have_count(0)
         _wait_for(lambda: all(f.id != CLEAR for f in registry.inventory().frames))
+        # The dialog closed, the plan region holds focus, and a status line says so. (The
+        # wall's last frame is gone, so the region now names no surface.)
+        plan = page.get_by_role("group", name=re.compile(r"^Wall plan for surface"))
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        expect(plan).to_be_focused()
+        expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
 
 
 def test_delete_bound_frame_shows_unbind_guidance(page, registry):
@@ -438,6 +450,7 @@ def test_delete_bound_frame_shows_unbind_guidance(page, registry):
         _connect(page, origin)
         page.get_by_role("button", name=f"Frame {BOUND}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {BOUND}", exact=True).click()
+        _confirm_delete(page)
 
         # 409 frame_bound -> the DISTINCTIVE unbind guidance (design §9a). Asserting
         # the specific remedy wording, not a generic substring, so a mapping that
@@ -456,6 +469,9 @@ def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
         _connect(page, origin)
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {SHOWING}", exact=True).click()
+        # The dialog lists the live Run it captured when it opened.
+        expect(page.get_by_role("dialog")).to_contain_text("Live Runs on it")
+        _confirm_delete(page)
 
         # 409 frame_in_use -> the DISTINCTIVE finish/cancel-the-Run guidance.
         expect(_plan(page).get_by_role("alert")).to_contain_text("finish or cancel")

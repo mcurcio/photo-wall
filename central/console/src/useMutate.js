@@ -11,9 +11,13 @@ import { useSnapshot } from "./useSnapshot.js";
  * 14, 15, 16) uses this instead of hand-rolling a post-write refresh; Bead 18
  * only adds focus/visibility + a clock and does NOT retrofit prior beads.
  *
- * The write runs first; on success Plane A is refreshed once and the write's
- * result is returned. If the write rejects, the error propagates and Plane A is
- * left untouched (the caller owns conflict/error handling).
+ * The write runs first; then Plane A is refreshed once and the write's result is
+ * returned. If the write rejects, the error propagates and Plane A is left
+ * untouched (the caller owns conflict/error handling).
+ *
+ * The write's result is independent of the refresh (slice 2 §7): a refresh that
+ * fails after a successful write is NOT the write's failure. It shows only as
+ * the provider's "last refresh failed", and the next poll catches up.
  *
  * @returns {<T>(op: () => Promise<T>) => Promise<T>}
  */
@@ -22,7 +26,11 @@ export function useMutate() {
   return useCallback(
     async (op) => {
       const result = await op();
-      await refresh();
+      try {
+        await refresh();
+      } catch {
+        // Surfaced by the provider's refreshFailed flag; never the write's outcome.
+      }
       return result;
     },
     [refresh],

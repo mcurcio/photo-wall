@@ -1,6 +1,7 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 
-import { bind, unbind } from "./equipmentApi.js";
+import { ConfirmAction, unbindRequest } from "./ConfirmAction.jsx";
+import { bind } from "./equipmentApi.js";
 import { bindableOutputs, isBound, outputLabel, playerLiveness } from "./health.js";
 import { useMutate } from "./useMutate.js";
 
@@ -27,6 +28,11 @@ import { useMutate } from "./useMutate.js";
  * "Commission the display" CTA that switches the Inspector to the
  * Commissioning facet (design J1: pending -> bind -> commission).
  *
+ * UNBIND opens the one confirmation dialog (ConfirmAction, slice 2 §7), which
+ * captures the Frame's generation, live Runs and sibling Frame when it opens.
+ * After it is done, focus moves to the output chooser — or to the facet heading
+ * when the refresh failed and the Frame still reads bound.
+ *
  * @param {{snapshot: object|null, frameId: string,
  *          onFacet?: (facet: string) => void}} props
  */
@@ -44,6 +50,11 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
   );
   const [announcement, setAnnouncement] = useState(/** @type {string|null} */ (null));
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
+  const [focusSuccessor, setFocusSuccessor] = useState(false);
+  const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
+  const chooserRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const unbindRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
 
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
@@ -69,6 +80,14 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
       setAnnouncement(`${choice.label} is no longer available. Choose another output.`);
     }
   }, [snapshot]);
+
+  // After an unbind: the chooser when it rendered, else the facet heading.
+  useEffect(() => {
+    if (focusSuccessor) {
+      (chooserRef.current ?? headingRef.current)?.focus();
+      setFocusSuccessor(false);
+    }
+  }, [focusSuccessor]);
 
   const choose = (option) => {
     if (frame == null) {
@@ -105,21 +124,33 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
     setMessage(result.message);
   };
 
-  const doUnbind = async () => {
-    if (frame == null) {
+  const openUnbind = () => {
+    if (!bound) {
       return;
     }
     setMessage(null);
-    setReviewRequired(false);
-    const result = await mutate(() => unbind(frameId, frame.generation));
-    if (result.outcome !== "done") {
-      setMessage(result.message);
+    setAnnouncement(null);
+    setConfirm(unbindRequest(snapshot, null, frameId));
+  };
+
+  const onConfirmClosed = (result) => {
+    setConfirm(null);
+    if (result?.state === "done") {
+      setReviewRequired(false);
+      setAnnouncement(result.message);
+      setFocusSuccessor(true);
+    } else if (unbindRef.current?.isConnected) {
+      unbindRef.current.focus();
+    } else {
+      setFocusSuccessor(true);
     }
   };
 
   return (
     <div className="facet facet--binding">
-      <h3 className="facet__title">Binding</h3>
+      <h3 ref={headingRef} className="facet__title" tabIndex={-1}>
+        Binding
+      </h3>
 
       {bound ? (
         <>
@@ -152,14 +183,23 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
               </button>
             </div>
           )}
-          <button type="button" className="facet__unbind" onClick={doUnbind}>
+          <button
+            ref={unbindRef}
+            type="button"
+            className="facet__unbind"
+            onClick={openUnbind}
+          >
             Unbind
           </button>
+          <p className="chooser__status" role="status">
+            {announcement}
+          </p>
         </>
       ) : (
         <>
           <p className="facet__empty">Unbound</p>
           <div
+            ref={chooserRef}
             className="chooser"
             role="radiogroup"
             aria-label="Choose an output"
@@ -218,6 +258,9 @@ export function BindingFacet({ snapshot, frameId, onFacet }) {
         <p className="facet__conflict" role="alert">
           {message}
         </p>
+      )}
+      {confirm !== null && (
+        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
       )}
     </div>
   );

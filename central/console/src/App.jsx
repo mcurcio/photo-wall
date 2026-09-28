@@ -66,6 +66,8 @@ export default function App() {
   // handler runs first (React binds at the root, below window in the bubble
   // path), so a genuine drop is read and cleared before this reset sees it.
   const trayDragRef = useRef(/** @type {string|null} */ (null));
+  // The plan region: the focus successor of a delete from the plan or the tray.
+  const planRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
   useEffect(() => {
     const clear = () => {
       trayDragRef.current = null;
@@ -294,6 +296,7 @@ export default function App() {
                 selection={selection}
                 onSelect={selectFrame}
                 onDeleted={() => setSelection(null)}
+                regionRef={planRegionRef}
                 trayDragRef={trayDragRef}
                 onTrayDrop={() => {
                   trayDragRef.current = null;
@@ -304,6 +307,10 @@ export default function App() {
                 onSelect={selectFrame}
                 onDragStart={(id) => {
                   trayDragRef.current = id;
+                }}
+                onDeleted={(id) => {
+                  setSelection((current) => (current === id ? null : current));
+                  planRegionRef.current?.focus();
                 }}
               />
             </div>

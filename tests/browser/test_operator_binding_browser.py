@@ -18,7 +18,7 @@ Frames by identity/label, never by SVG coordinates or DOM structure (design §1c
 import os
 
 import pytest
-from operator_harness import operator_server, pause_page_clock
+from operator_harness import RequestGate, operator_server, pause_page_clock
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -66,6 +66,40 @@ def _poll(page):
     with page.expect_response("**/v1/operator/inventory"):
         page.clock.run_for(5000)
     page.wait_for_timeout(300)
+
+
+def _dialog(page):
+    return page.get_by_role("dialog")
+
+
+def _type_handle_and_retire(page, player_id):
+    dialog = _dialog(page)
+    dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
+    dialog.get_by_role("button", name="Confirm retire", exact=True).click()
+
+
+def _bound(registry, frame_id="bound-1", count=1):
+    """A placed frame bound to a fresh Player's HDMI-A-1 (generation 1); the Player id."""
+    identity, _, _ = enroll(registry, count=count)
+    _placed_frame(registry, frame_id)
+    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+    return identity["player_id"]
+
+
+def _open_unbind(page, frame_id="bound-1"):
+    inspector = _binding_facet(page, frame_id)
+    inspector.get_by_role("button", name="Unbind", exact=True).click()
+    dialog = _dialog(page)
+    expect(dialog).to_be_visible()
+    return inspector, dialog
+
+
+def _binding_requests(page):
+    """Every unbind request the page sends, in order."""
+    sent = []
+    page.on("request", lambda request: sent.append(request.url)
+            if request.method == "DELETE" and request.url.endswith("/binding") else None)
+    return sent
 
 
 def _disconnect_output(registry, player_id, output_id):
@@ -144,10 +178,12 @@ def test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output(page
         inspector = _binding_facet(page, "wall-r")
         expect(_option(inspector, player_id)).to_be_visible()
 
-        # Retire the pending Player from the rail (a deliberate, labelled action).
+        # Retire the pending Player from the rail (a deliberate, labelled action),
+        # typing its handle to confirm (slice 2 §7).
         pending.get_by_role(
             "button", name=f"Retire player {player_id}", exact=True
         ).click()
+        _type_handle_and_retire(page, player_id)
 
         # It moves to the Retired rail (by identity) and leaves the Pending rail.
         expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
@@ -355,3 +391,135 @@ def test_recovery_banner_appears_for_a_returning_bound_player(page, registry):
         banner = page.get_by_text("Recovered — already bound", exact=False)
         expect(banner).to_be_visible()
         expect(banner).to_contain_text(identity["player_id"])
+
+
+# --- One confirmation pattern (slice 2 §7).
+
+
+def test_retire_is_enabled_only_by_typing_the_handle(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    handle = player_id[-6:]
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        opener = pending.get_by_role("button", name=f"Retire player {player_id}", exact=True)
+        opener.click()
+        dialog = _dialog(page)
+        expect(dialog).to_contain_text("No undo, even after re-imaging")
+        confirm = dialog.get_by_role("button", name="Confirm retire", exact=True)
+        typed = dialog.get_by_label(f"Type {handle} to confirm", exact=True)
+        expect(confirm).to_be_disabled()
+        typed.fill("x" + handle[1:])
+        expect(confirm).to_be_disabled()
+        typed.fill(handle.upper())  # case-insensitive
+        expect(confirm).to_be_enabled()
+
+        # Esc cancels while idle: nothing is sent and focus returns to the opener.
+        page.keyboard.press("Escape")
+        expect(dialog).to_have_count(0)
+        expect(opener).to_be_focused()
+        assert registry.inventory().players[0].retired_at is None
+
+        opener.click()
+        _type_handle_and_retire(page, player_id)
+        retired = page.get_by_role("group", name="Retired players", exact=True)
+        expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        # Focus successor: the Retired heading; a status line says what happened.
+        expect(retired.get_by_role("heading", name="Retired", exact=True)).to_be_focused()
+        expect(page.get_by_text(f"Player {player_id} retired.", exact=True)).to_be_visible()
+
+
+def test_esc_is_blocked_while_an_unbind_is_in_flight_even_when_repeated(page, registry):
+    _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector, dialog = _open_unbind(page)
+        gate = RequestGate(page, "**/v1/operator/frames/*/binding")
+        gate.holding = True
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        gate.wait_held()
+
+        page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        expect(dialog).to_be_visible()
+        expect(dialog.get_by_role("button", name="Cancel", exact=True)).to_be_disabled()
+
+        gate.holding = False
+        gate.release()
+        expect(dialog).to_have_count(0)
+        # Focus successor: the Frame's output chooser, now that it is unbound.
+        expect(inspector.get_by_role("radiogroup", name="Choose an output")).to_be_focused()
+        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 unbound.")
+        assert registry.inventory().frames[0].player_id is None
+
+
+def test_an_unbind_with_a_stale_generation_is_changed_terminal_and_never_resent(page, registry):
+    player_id = _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        sent = _binding_requests(page)
+        _inspector, dialog = _open_unbind(page)  # captures generation 1
+
+        # The Frame changes under the open dialog (unbound, then bound again: generation
+        # 3), and a poll delivers that to the console.
+        registry.unbind("bound-1", expected_generation=1)
+        registry.bind("bound-1", player_id, "HDMI-A-1", expected_generation=2)
+        _poll(page)
+
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Changed since you opened this. Reopen to review.")
+        # Terminal: no Confirm remains, and exactly one request was ever sent.
+        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+        page.wait_for_timeout(300)
+        assert len(sent) == 1
+        assert registry.inventory().frames[0].player_id == player_id
+
+
+def test_an_unbind_that_already_happened_reads_already_done(page, registry):
+    _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _inspector, dialog = _open_unbind(page)
+        registry.unbind("bound-1", expected_generation=1)
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("Already done.")
+        expect(dialog.get_by_role("alert")).to_have_count(0)
+
+
+def test_an_unbind_that_gets_no_answer_reads_outcome_unknown(page, registry):
+    _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _inspector, dialog = _open_unbind(page)
+        page.route("**/v1/operator/frames/*/binding", lambda route: route.abort()
+                   if route.request.method == "DELETE" else route.continue_())
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Central did not answer. Check this after the next refresh.")
+        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+
+
+def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
+    _bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        inspector, dialog = _open_unbind(page)
+        page.route("**/v1/operator/inventory", lambda route: route.fulfill(
+            status=500, content_type="application/json", body='{"error": "boom"}'))
+        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+
+        # The write is done: the dialog closes with the status line, and the failed
+        # refresh shows only as "last refresh failed" -- never as a refusal.
+        expect(dialog).to_have_count(0)
+        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 unbound.")
+        expect(page.get_by_text("last refresh failed", exact=False)).to_be_visible()
+        expect(page.get_by_role("alert")).to_have_count(0)
+        # The stale snapshot still reads bound, so no chooser: focus falls back to the
+        # facet heading.
+        expect(inspector.get_by_role("heading", name="Binding", exact=True)).to_be_focused()
+        assert registry.inventory().frames[0].player_id is None

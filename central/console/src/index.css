@@ -812,3 +812,103 @@ label {
   font-size: 16px;
   color: var(--fg);
 }
+
+/* The output chooser (slice 2 §6): one radio per free Output, liveness beneath. */
+.chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.chooser__title {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.chooser__label {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chooser__liveness {
+  display: block;
+  padding-left: 22px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.chooser__empty {
+  margin: 0;
+  color: var(--fg-subtle);
+}
+
+.chooser__status:empty,
+.plan__status-line:empty,
+.tray__status-line:empty,
+.rail__status-line:empty {
+  display: none;
+}
+
+/* The one confirmation dialog (slice 2 §7). */
+.confirm {
+  box-sizing: border-box;
+  width: min(32rem, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  padding: 16px 20px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.confirm__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.confirm__title,
+.confirm__body,
+.confirm__outcome,
+.confirm__results {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.confirm__typed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 0;
+}
+
+.confirm__alert {
+  margin: 12px 0 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+
+.confirm__outcome {
+  margin: 12px 0 0;
+  font-weight: 600;
+}
+
+.confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.confirm__progress {
+  margin: 8px 0 0;
+  color: var(--fg-muted);
+}

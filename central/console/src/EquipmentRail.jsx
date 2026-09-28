@@ -1,8 +1,7 @@
-import React from "react";
+import React, { useRef, useState } from "react";
 
-import { retirePlayer } from "./equipmentApi.js";
+import { ConfirmAction, retireRequest } from "./ConfirmAction.jsx";
 import { playerLiveness, playerStanding } from "./health.js";
-import { useMutate } from "./useMutate.js";
 
 /**
  * Equipment rails (Bead 9) — the onboarding surface for new and retired Players.
@@ -24,14 +23,33 @@ import { useMutate } from "./useMutate.js";
  * G1): the legacy operator page had an explicit "Retire a Player" control, and
  * the Bead 17 cutover precondition requires content parity, so the console must
  * re-host it (design R1 note: retire is a legitimate Player lifecycle action).
- * It writes through the shared `useMutate()` hook (primitive #7) so one new
- * Plane A snapshot refreshes the rails AND the bindable-output set together.
+ * Retire is permanent, so it opens the one confirmation dialog (ConfirmAction,
+ * slice 2 §7) with the typed handle; the dialog lives at the rail's top level,
+ * keyed by Player. It writes through `useMutate()` so one new Plane A snapshot
+ * refreshes the rails AND the bindable-output set together; once done, focus
+ * moves to the Retired rail's heading.
  *
  * @param {{snapshot: object|null, onSelect: (playerId: string) => void}} props
  */
 export function EquipmentRail({ snapshot, onSelect }) {
-  const mutate = useMutate();
-  const retire = (playerId) => mutate(() => retirePlayer(playerId));
+  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
+  const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const retiredHeadingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
+  const retire = (event, playerId) => {
+    openerRef.current = event.currentTarget;
+    setStatus(null);
+    setConfirm(retireRequest(snapshot, null, playerId));
+  };
+  const onConfirmClosed = (result) => {
+    setConfirm(null);
+    if (result?.state === "done") {
+      setStatus(result.message);
+      retiredHeadingRef.current?.focus();
+    } else if (openerRef.current?.isConnected) {
+      openerRef.current.focus();
+    }
+  };
   const players = snapshot?.inventory?.players ?? [];
   const inState = (state) =>
     players.filter((player) => playerStanding(snapshot, player.id)?.state === state);
@@ -65,7 +83,7 @@ export function EquipmentRail({ snapshot, onSelect }) {
                 <button
                   type="button"
                   className="rail__retire"
-                  onClick={() => retire(player.id)}
+                  onClick={(event) => retire(event, player.id)}
                 >
                   Retire player {player.id}
                 </button>
@@ -80,7 +98,9 @@ export function EquipmentRail({ snapshot, onSelect }) {
         role="group"
         aria-label="Retired players"
       >
-        <h2 className="rail__title">Retired</h2>
+        <h2 ref={retiredHeadingRef} className="rail__title" tabIndex={-1}>
+          Retired
+        </h2>
         {retired.length === 0 ? (
           <p className="rail__empty">No retired players.</p>
         ) : (
@@ -99,6 +119,12 @@ export function EquipmentRail({ snapshot, onSelect }) {
           </ul>
         )}
       </div>
+      <p className="rail__status-line" role="status">
+        {status}
+      </p>
+      {confirm !== null && (
+        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
+      )}
     </div>
   );
 }

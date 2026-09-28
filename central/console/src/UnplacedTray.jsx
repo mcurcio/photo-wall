@@ -1,9 +1,8 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 
-import { deleteFrame } from "./framesApi.js";
+import { ConfirmAction, deleteFrameRequest } from "./ConfirmAction.jsx";
 import { frameHealth } from "./health.js";
 import { project } from "./projection.js";
-import { useMutate } from "./useMutate.js";
 
 /**
  * Unplaced tray (Bead 1 read-only tracer; Bead 11 drag-out + delete).
@@ -25,18 +24,22 @@ import { useMutate } from "./useMutate.js";
  * position. A press-release ON the entry (no drag onto the plan) stays a plain
  * click and selects the frame.
  *
- * DELETE (Bead 11): each entry carries a Delete control that removes the frame
- * (DELETE); a 409 guard message (bound / live Run) is surfaced verbatim.
+ * DELETE (Bead 11; slice 2 §7): each entry carries a Delete control that opens
+ * the one confirmation dialog (ConfirmAction), owned here at the tray's top
+ * level; a 409 guard message (bound / live Run) is shown inside it. After a
+ * delete, `onDeleted` moves focus to the plan region.
  *
  * Each entry also states the frame's health from the one classifier
  * (health.js), the same label its plan tile would show once placed.
  *
  * @param {{snapshot: object|null, onSelect: (frameId: string) => void,
- *          onDragStart?: (frameId: string) => void}} props
+ *          onDragStart?: (frameId: string) => void,
+ *          onDeleted?: (frameId: string) => void}} props
  */
-export function UnplacedTray({ snapshot, onSelect, onDragStart }) {
-  const mutate = useMutate();
-  const [deleteError, setDeleteError] = useState(/** @type {string|null} */ (null));
+export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
+  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
+  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const [status, setStatus] = useState(/** @type {string|null} */ (null));
 
   const frames = snapshot?.inventory?.frames ?? [];
   const surfaces = [...new Set(frames.map((frame) => frame.surface_id))];
@@ -46,16 +49,21 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart }) {
     (surfaceId) => project(frames, surfaceId, { width: 1, height: 1 }).unplaced,
   );
 
-  const onDelete = (frameId) => {
-    setDeleteError(null);
-    mutate(() => deleteFrame(frameId))
-      .then((result) => {
-        if (!result.ok) {
-          // Surface the design §9a guard wording verbatim.
-          setDeleteError(result.message);
-        }
-      })
-      .catch(() => setDeleteError("Could not delete the frame."));
+  const onDelete = (event, frameId) => {
+    openerRef.current = event.currentTarget;
+    setStatus(null);
+    setConfirm({ ...deleteFrameRequest(snapshot, frameId), frameId });
+  };
+
+  const onConfirmClosed = (result) => {
+    const frameId = confirm?.frameId;
+    setConfirm(null);
+    if (result?.state === "done") {
+      setStatus(result.message);
+      onDeleted?.(frameId);
+    } else {
+      openerRef.current?.focus();
+    }
   };
 
   return (
@@ -83,7 +91,7 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart }) {
                 <button
                   type="button"
                   className="tray__delete"
-                  onClick={() => onDelete(id)}
+                  onClick={(event) => onDelete(event, id)}
                 >
                   {`Delete frame ${id}`}
                 </button>
@@ -92,10 +100,11 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart }) {
           })}
         </ul>
       )}
-      {deleteError != null && (
-        <p className="tray__delete-error" role="alert">
-          {deleteError}
-        </p>
+      <p className="tray__status-line" role="status">
+        {status}
+      </p>
+      {confirm !== null && (
+        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
       )}
     </section>
   );

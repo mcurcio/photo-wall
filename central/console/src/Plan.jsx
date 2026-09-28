@@ -1,6 +1,7 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 
-import { createFrame, deleteFrame, dropFromTray, moveFrame } from "./framesApi.js";
+import { ConfirmAction, deleteFrameRequest } from "./ConfirmAction.jsx";
+import { createFrame, dropFromTray, moveFrame } from "./framesApi.js";
 import { frameHealth } from "./health.js";
 import { nowShowing } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
@@ -37,6 +38,12 @@ import { useMutate } from "./useMutate.js";
  *
  * Origin-stacked / geometry-less frames are NOT drawn here; they belong to the
  * Unplaced tray (see UnplacedTray.jsx).
+ *
+ * DELETE (slice 2 §7) opens the one confirmation dialog (ConfirmAction), which
+ * captures the frame's binding and live Runs when it opens and shows a refusal
+ * inside itself. After a delete the plan region takes focus and a status line
+ * says what happened. `regionRef` (optional) is attached to the plan region so
+ * the Unplaced tray can move focus here after its own delete.
  *
  * @param {{snapshot: object|null, surfaceId: string|null,
  *          selection: string|null, onSelect: (frameId: string) => void}} props
@@ -79,9 +86,17 @@ export function Plan({
   onDeleted,
   trayDragRef,
   onTrayDrop,
+  regionRef,
 }) {
   const mutate = useMutate();
   const svgRef = useRef(null);
+  const ownRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const planRef = regionRef ?? ownRegionRef;
+  // The open delete confirmation (captured at open), its opener, and the last
+  // done status line.
+  const [confirm, setConfirm] = useState(/** @type {object|null} */ (null));
+  const openerRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const [status, setStatus] = useState(/** @type {string|null} */ (null));
   // Each tile's status readout is clipped to its rect, so no text leaves the tile.
   const clipPrefix = "plan-clip" + useId().replace(/[^A-Za-z0-9_-]/g, "");
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
@@ -94,17 +109,9 @@ export function Plan({
   const [newFrame, setNewFrame] = useState(/** @type {{pxRect: object}|null} */ (null));
   const [profile, setProfile] = useState(PROFILE_DEFAULTS);
   const [formError, setFormError] = useState(/** @type {string|null} */ (null));
-  // The guard message from a refused DELETE (design §9a), cleared on the next attempt.
-  const [deleteError, setDeleteError] = useState(/** @type {string|null} */ (null));
   // True once the current press has moved past the threshold — read by a frame's
   // onClick so a drag-move is not also treated as a selection.
   const didDragRef = useRef(false);
-
-  // A guard message is about the frame it was raised for; drop it when the
-  // selection moves so one frame's refusal never lingers over another.
-  useEffect(() => {
-    setDeleteError(null);
-  }, [selection]);
 
   const frames = snapshot?.inventory?.frames ?? [];
   const framesById = new Map(frames.map((frame) => [frame.id, frame]));
@@ -274,30 +281,37 @@ export function Plan({
       .catch(() => setFormError("Could not create the frame."));
   };
 
-  const onDelete = () => {
+  const onDelete = (event) => {
     if (selection == null) {
       return;
     }
-    setDeleteError(null);
-    mutate(() => deleteFrame(selection))
-      .then((result) => {
-        if (result.ok) {
-          onDeleted?.();
-        } else {
-          // Surface the design §9a guard wording verbatim (unbind / finish the Run).
-          setDeleteError(result.message);
-        }
-      })
-      .catch(() => setDeleteError("Could not delete the frame."));
+    openerRef.current = event.currentTarget;
+    setStatus(null);
+    setConfirm(deleteFrameRequest(snapshot, selection));
+  };
+
+  const onConfirmClosed = (result) => {
+    setConfirm(null);
+    if (result?.state === "done") {
+      setStatus(result.message);
+      onDeleted?.();
+      planRef.current?.focus();
+    } else if (openerRef.current?.isConnected) {
+      openerRef.current.focus();
+    } else {
+      planRef.current?.focus();
+    }
   };
 
   const draftRect = draft;
 
   return (
     <section
+      ref={planRef}
       className="plan"
       role="group"
       aria-label={`Wall plan for surface ${surfaceId}`}
+      tabIndex={-1}
     >
       <svg
         ref={svgRef}
@@ -463,12 +477,13 @@ export function Plan({
           <button type="button" className="plan__delete" onClick={onDelete}>
             {`Delete frame ${selection}`}
           </button>
-          {deleteError != null && (
-            <p className="plan__delete-error" role="alert">
-              {deleteError}
-            </p>
-          )}
         </div>
+      )}
+      <p className="plan__status-line" role="status">
+        {status}
+      </p>
+      {confirm !== null && (
+        <ConfirmAction key={confirm.key} request={confirm} onClose={onConfirmClosed} />
       )}
     </section>
   );

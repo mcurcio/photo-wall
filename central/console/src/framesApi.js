@@ -86,7 +86,7 @@ const DELETE_MESSAGES = {
  * the call site so the plan refreshes once the delete lands.
  *
  * @param {string} frameId
- * @returns {Promise<{ok:true}|{ok:false, message:string}>}
+ * @returns {Promise<{ok:true}|{ok:false, code:string, message:string}>}
  */
 export async function deleteFrame(frameId) {
   const result = await apiWrite(`/v1/operator/frames/${frameId}`, {
@@ -95,7 +95,8 @@ export async function deleteFrame(frameId) {
   if (result.ok) {
     return { ok: true };
   }
-  return { ok: false, message: DELETE_MESSAGES[result.error] ?? "Could not delete the frame." };
+  const code = result.error ?? String(result.status);
+  return { ok: false, code, message: DELETE_MESSAGES[code] ?? "Could not delete the frame." };
 }
 
 /**
