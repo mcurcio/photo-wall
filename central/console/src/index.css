@@ -991,3 +991,59 @@ label {
   color: var(--fg-muted);
   overflow-wrap: anywhere;
 }
+
+/* Authoring fields (pass 2 slice 3 §6, §12): the label above the control, then
+   the hint, then the reason. Reasons are --warn; only alarms are --alarm. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 8px 0;
+}
+
+.field--check .field__label {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.field__hint,
+.field__reason {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.field__hint {
+  color: var(--fg-muted);
+}
+
+.field__reason {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.field__inline-action {
+  padding: 0 4px;
+  font: inherit;
+}
+
+.problems {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.problems__title {
+  margin: 0 0 4px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.problems__list {
+  margin: 0;
+  padding-left: 20px;
+}

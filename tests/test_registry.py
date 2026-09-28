@@ -27,7 +27,7 @@ from central.registry import (
     enrollment_message,
 )
 from central.runtime import Target
-from contracts.models import TARGET_ID_PATTERN, Calibration, FrameProfile
+from contracts.models import IDENTIFIER_PATTERN, TARGET_ID_PATTERN, Calibration, FrameProfile
 
 ADMIN = "test-operator-" + "x" * 40
 
@@ -532,6 +532,14 @@ def test_the_console_frame_id_pattern_is_the_contracts_target_id_rule():
     pinned = re.search(r"^export const FRAME_ID_PATTERN = /(.+)/;$", source, re.MULTILINE)
     assert pinned is not None, "framesApi.js no longer exports FRAME_ID_PATTERN as a literal"
     assert pinned.group(1) == "^" + TARGET_ID_PATTERN + "$"
+
+
+def test_the_console_identifier_pattern_is_the_contracts_identifier_rule():
+    # Slice 3 §5: Scene, Program and Source ids are path parameters under Identifier.
+    source = (Path(__file__).parents[1] / "central/console/src/authoring.js").read_text()
+    pinned = re.search(r"^export const IDENTIFIER_PATTERN = /(.+)/;$", source, re.MULTILINE)
+    assert pinned is not None, "authoring.js no longer exports IDENTIFIER_PATTERN as a literal"
+    assert pinned.group(1) == "^" + IDENTIFIER_PATTERN + "$"
 
 
 def test_frame_create_still_rejects_an_incoherent_profile(registry):

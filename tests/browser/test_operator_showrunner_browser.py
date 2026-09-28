@@ -36,6 +36,8 @@ from test_registry import ADMIN, enroll
 from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository
 from central.registry import FrameCreate
+from central.runtime import Contribution, Scene
+from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
 from tests.public_media import public_photo
@@ -357,7 +359,7 @@ def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
         expect(scenes.get_by_label(f"Scene {SCENE_ID}", exact=True)).to_have_count(0)
 
         form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-        form.get_by_label("Scene ID", exact=True).fill(SCENE_ID)
+        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         # Target one or more EXPLICIT Frames.
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
@@ -412,7 +414,7 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         # Not vacuously true: the scene must not already exist.
         expect(scenes.get_by_label(f"Scene {AUTHORED_SCENE_ID}", exact=True)).to_have_count(0)
 
-        form.get_by_label("Scene ID", exact=True).fill(AUTHORED_SCENE_ID)
+        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
         form.get_by_label("Authored per-frame", exact=True).check()
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
@@ -537,7 +539,7 @@ def _author_live_scene(page, scene_id):
     """
     scenes = page.get_by_role("region", name="Scenes", exact=True)
     form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-    form.get_by_label("Scene ID", exact=True).fill(scene_id)
+    form.get_by_label("Scene name", exact=True).fill(scene_id)
     form.get_by_label("Source", exact=True).select_option(SOURCE)
     form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
     form.get_by_label("Seconds per cycle", exact=True).fill("30")
@@ -548,6 +550,26 @@ def _author_live_scene(page, scene_id):
         form.get_by_role("button", name="Save Scene", exact=True).click()
     # The Scene must be listed before it can be bound (proves the refresh landed).
     expect(scenes.get_by_label(f"Scene {scene_id}", exact=True)).to_be_visible()
+
+
+def _schedule_program(page, program, scene_id, start=WINDOW_START, end=WINDOW_END,
+                      priority=PROGRAM_PRIORITY, *, submit=True):
+    """Fill the Programs region's Schedule form (the one place its field names live) and,
+    with `submit`, schedule it and return the PUT response."""
+    programs = page.get_by_role("region", name="Programs", exact=True)
+    form = programs.get_by_role("form", name="Schedule a Program", exact=True)
+    form.get_by_label("Program ID", exact=True).fill(program)
+    form.get_by_label("Scene", exact=True).select_option(scene_id)
+    form.get_by_label("Window start", exact=True).fill(start)
+    form.get_by_label("Window end", exact=True).fill(end)
+    form.get_by_label("Priority", exact=True).fill(str(priority))
+    if not submit:
+        return None
+    with page.expect_response(
+        lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
+    ) as info:
+        form.get_by_role("button", name="Schedule Program", exact=True).click()
+    return info.value
 
 
 def test_program_schedules_single_window_and_lists(page, registry):
@@ -567,20 +589,8 @@ def test_program_schedules_single_window_and_lists(page, registry):
         # Not vacuously true: no Program exists yet.
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
-        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
-        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
-        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
-        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
-        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
-        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
-
-        with page.expect_response(
-            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
-            and r.request.method == "PUT"
-        ) as info:
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
-
-        response = info.value
+        response = _schedule_program(page, PROGRAM_ID, SCENE_ID)
+        assert response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
         assert response.status == 200
         # A single-window Program: the body is exactly one Scene bound to ONE
         # [starts_at, ends_at) window with a priority — no recurrence field.
@@ -610,17 +620,7 @@ def test_program_remove_deletes_it(page, registry):
         _author_live_scene(page, SCENE_ID)
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
-        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
-        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
-        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
-        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
-        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
-        with page.expect_response(
-            lambda r: r.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
-            and r.request.method == "PUT"
-        ):
-            form.get_by_role("button", name="Schedule Program", exact=True).click()
+        _schedule_program(page, PROGRAM_ID, SCENE_ID)
 
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(row).to_be_visible()
@@ -650,12 +650,7 @@ def test_n_window_helper_creates_separate_programs(page, registry):
         _author_live_scene(page, SCENE_ID)
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        form = programs.get_by_role("form", name="Schedule a Program", exact=True)
-        form.get_by_label("Program ID", exact=True).fill(PROGRAM_ID)
-        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
-        form.get_by_label("Window start", exact=True).fill(WINDOW_START)
-        form.get_by_label("Window end", exact=True).fill(WINDOW_END)
-        form.get_by_label("Priority", exact=True).fill(str(PROGRAM_PRIORITY))
+        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
 
         multi = programs.get_by_role("group", name="Create separate windows", exact=True)
         multi.get_by_label("Number of windows", exact=True).fill("3")
@@ -887,3 +882,136 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
         expect(rows.nth(0)).to_contain_text("priority 5")
         expect(rows.nth(1)).to_contain_text(WHY_LOW)
         expect(rows.nth(1)).to_contain_text("priority 1")
+
+
+# Pass 2 slice 3A (docs/operator-console-ux-pass2-showrunner.md).
+
+
+def _scenes_form(page):
+    return page.get_by_role("region", name="Scenes", exact=True).get_by_role(
+        "form", name="Author a Scene", exact=True)
+
+
+def _epoch(page, local):
+    """The POSIX seconds of a `datetime-local` value in the browser's time zone."""
+    return page.evaluate("(value) => new Date(value).getTime() / 1000", local)
+
+
+def _runtime(registry):
+    """Central's Runtime, commanded directly: setup the console cannot author."""
+    return RuntimeStore(registry.db, registry.clock)
+
+
+def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
+    """§15 tracer: the operator names a Scene, sees the id it saves under, keeps
+    "Keep playing" on and saves; the form clears and the list shows the id. A
+    Program 18:00–20:00 with Central 5 min past 18:00 still holds its Run live —
+    a Scene no longer plays one cycle and stops (the P1)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        form = _scenes_form(page)
+
+        name = form.get_by_label("Scene name", exact=True)
+        name.fill("Family Evening")
+        expect(name).to_have_accessible_description(re.compile("Saved as family-evening"))
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/scenes/family-evening")
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        body = info.value.request.post_data_json
+        assert info.value.status == 200
+        assert body["scene_id"] == "family-evening" and body["loop"] is True
+
+        # The form clears, so the saved Scene never reads as a collision.
+        expect(scenes.get_by_label("Scene family-evening", exact=True)).to_be_visible()
+        expect(name).to_have_value("")
+        expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
+
+        start = _epoch(page, "2027-03-01T18:00")
+        registry.clock.advance(start + 300 - registry.clock.utc())
+        _schedule_program(page, "evening-show", "family-evening",
+                          "2027-03-01T18:00", "2027-03-01T20:00", 0)
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        expect(runs.get_by_text("Scene family-evening", exact=True)).to_be_visible()
+
+
+def test_a_name_without_a_latin_letter_asks_for_an_id(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        form.get_by_label("Scene name", exact=True).fill("夕方")
+        identifier = form.get_by_label("Id", exact=True)
+        expect(identifier).to_be_visible()
+        expect(identifier).to_have_accessible_description(
+            "This name needs a Latin letter or digit for its id; type an id.")
+        identifier.fill("yugata")
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/scenes/yugata") and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+
+
+def test_a_colliding_name_is_refused_before_any_request(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, "family-evening")
+        form = _scenes_form(page)
+        puts = []
+        page.on("request", lambda request: puts.append(request.url)
+                if request.method == "PUT" else None)
+        name = form.get_by_label("Scene name", exact=True)
+        name.fill("Family Evening")
+        collision = "A Scene called family-evening already exists; choose another name."
+        expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text(collision)
+        expect(name).to_be_focused()
+        assert puts == []
+
+
+def test_the_problem_summary_is_frozen_at_submit(page, registry):
+    """§6: submitting with problems sends nothing and freezes a summary; a poll
+    that changes the live problems (another operator saves "evening") updates
+    the field's reason but never rewrites the summary under the reader."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        name = form.get_by_label("Scene name", exact=True)
+        name.fill("Evening")
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        summary = form.get_by_role("alert")
+        expect(summary).to_contain_text("Choose a Source.")
+        expect(summary).to_contain_text("Choose at least one frame.")
+        expect(form.get_by_label("Source", exact=True)).to_be_focused()
+
+        _runtime(registry).command("set_scene", Scene(
+            scene_id="evening",
+            contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)))
+        page.clock.run_for(5000)
+        collision = "A Scene called evening already exists; choose another name."
+        expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
+        expect(summary).not_to_contain_text("already exists")
+        expect(summary).to_contain_text("Choose a Source.")

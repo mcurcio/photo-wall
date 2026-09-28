@@ -1,35 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { draftId, sceneProblems } from "./authoring.js";
+import { CycleInput } from "./CycleInput.jsx";
+import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { SourcePicker } from "./SourcePicker.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
- * Scene authoring shell (Bead 14a — SR-scenes-live).
+ * Scene authoring (Beads 14a/14b; pass 2 slice 3 §4–§6).
  *
- * A Scene is a per-target COMPOSITION of contributions (design J4). This shell
- * authors and saves a LIVE-SOURCE scene: a Scene whose media for each target
- * Frame is driven by a live Source, targeting one or more EXPLICIT Frames, on a
- * fixed seconds-per-cycle interval. The saved Scene then appears in the Scenes
- * list by its `scene_id` (tiles carry the id, never a name — design J4).
+ * A Scene is a per-target COMPOSITION of contributions (design J4): media for
+ * one or more EXPLICIT Frames on a seconds-per-cycle interval, from a live
+ * Source ("live") or one hand-picked asset per Frame ("authored"). The operator
+ * names the Scene; the id is derived from the name (authoring.js) and shown
+ * before saving. Problems are reasons beside the fields and a summary frozen at
+ * submit (Field.jsx); only the in-flight save disables the button. A successful
+ * save clears the form.
  *
- * A live-source scene saves in ONE request to the plain scene route
- * `PUT /v1/operator/scenes/{scene_id}` with the Scene as the body: each target
- * Frame becomes a media Contribution `{target:"frame:<id>", role:"<id>",
- * source_refs:[<sourceRef>], kind:"media", retain_on_expiry:true}` (mirroring
- * the legacy operator.js live branch, ~operator.js:416). The write goes through
- * the shared `apiWrite` helper wrapped in `useMutate()` (primitive #7), so Plane
- * A — and therefore the Scenes list below — refreshes exactly once after the
- * save.
- *
- * SEAM for Bead 14b (SR-scenes-authored): the authoring MODE is the split
- * boundary. This component drives its payload+route through `buildSave(mode,…)`,
- * dispatched on `mode`; Bead 14a registers only the "live" branch. Bead 14b adds
- * an "authored" mode — its per-frame candidate choosers (a clearly-separable
- * subtree rendered where {@link ModeControls} branches) and its single-request
- * `PUT …/scenes/{id}/authored` payload (scene + source_ref + asset_ids) — WITHOUT
- * reshaping this component: it adds a mode option, a chooser subtree, and an
- * "authored" case to `buildSave`. The profile hard-filter on candidates is 14b,
- * NOT here. This bead deliberately builds ONLY the live branch.
+ * Each mode saves in ONE request, built by `buildSave(mode, …)`: "live" to
+ * `PUT /v1/operator/scenes/{scene_id}` with the Scene as the body, "authored" to
+ * `PUT …/scenes/{id}/authored` (scene + source_ref + asset_ids). The write goes
+ * through `apiWrite` inside `useMutate()` (primitive #7), so Plane A — and the
+ * Scenes list below — refreshes exactly once after the save.
  *
  * @param {{snapshot: object|null}} props
  */
@@ -40,23 +33,31 @@ export function SceneAuthoring({ snapshot }) {
   // (central/app.py:669 -> runtime.export_state()["scenes"]). Tiles show the id.
   const definitions = snapshot?.runtime?.definitions ?? {};
   const scenes = useMemo(() => Object.values(definitions), [definitions]);
+  const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
 
   const mutate = useMutate();
 
   // Plane B: component-local authoring draft. `mode` is the 14a/14b split seam;
-  // both modes now exist, so a user-facing toggle (live <-> authored) selects
+  // both modes exist, so a user-facing toggle (live <-> authored) selects
   // between a live-source Scene and a per-Frame authored Scene.
   const [mode, setMode] = useState("live");
-  const [sceneId, setSceneId] = useState("");
+  const [name, setName] = useState("");
+  const [idOverride, setIdOverride] = useState(/** @type {string|null} */ (null));
   const [sourceRef, setSourceRef] = useState("");
   const [targets, setTargets] = useState(/** @type {Set<string>} */ (new Set()));
-  const [cycleSeconds, setCycleSeconds] = useState(30);
+  const [cycleSeconds, setCycleSeconds] = useState(/** @type {string|number} */ (30));
+  // New Scenes keep playing until their Program ends (slice 3 Question 1).
+  const [loop, setLoop] = useState(true);
   // Authored mode only: the chosen asset per target Frame, keyed by frame id.
   const [selections, setSelections] = useState(
     /** @type {Record<string, string>} */ ({}),
   );
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [saving, setSaving] = useState(false);
+
+  const targetIds = useMemo(() => [...targets], [targets]);
+  const draft = { name, idOverride, mode, sourceRef, targets: targetIds, cycleSeconds, selections };
+  const problems = useProblems(sceneProblems(draft, existingIds));
 
   const toggleTarget = useCallback((frameId) => {
     setTargets((prev) => {
@@ -93,55 +94,51 @@ export function SceneAuthoring({ snapshot }) {
     });
   }, []);
 
-  // Per-Frame choices are only valid within one Source's catalog, so clear them
-  // whenever the Source changes.
-  const clearSelections = useCallback(() => setSelections({}), []);
+  // A successful save clears the form, so the saved Scene never reads as a
+  // collision with itself (§5).
+  const clear = () => {
+    setName("");
+    setIdOverride(null);
+    setSourceRef("");
+    setTargets(new Set());
+    setCycleSeconds(30);
+    setLoop(true);
+    setSelections({});
+    problems.reset();
+  };
 
-  const targetIds = useMemo(() => [...targets], [targets]);
-  const canSave =
-    !saving &&
-    sceneId.trim() !== "" &&
-    sourceRef !== "" &&
-    targetIds.length > 0 &&
-    Number(cycleSeconds) > 0 &&
-    // Authored mode additionally requires a chosen asset for every target Frame.
-    (mode !== "authored" || targetIds.every((frameId) => selections[frameId]));
-
-  const onSave = useCallback(
-    async (event) => {
-      event.preventDefault();
-      if (!canSave) {
-        return;
+  const onSave = async (event) => {
+    event.preventDefault();
+    if (saving || !problems.check()) {
+      return;
+    }
+    const sceneId = draftId(draft);
+    const { path, body } = buildSave(mode, {
+      sceneId,
+      sourceRef,
+      targetIds,
+      cycleSeconds: Number(cycleSeconds),
+      loop,
+      selections,
+    });
+    setSaving(true);
+    setStatus(null);
+    try {
+      // ONE request: the scene is saved in a single PUT; useMutate() then does
+      // its one Plane A refresh so the Scenes list reflects the new scene.
+      const result = await mutate(() => apiWrite(path, { method: "PUT", body }));
+      if (result.ok) {
+        clear();
+        setStatus(`Saved Scene ${sceneId}.`);
+      } else {
+        setStatus(`Could not save Scene: ${result.error ?? result.status}.`);
       }
-      const trimmedId = sceneId.trim();
-      const { path, body } = buildSave(mode, {
-        sceneId: trimmedId,
-        sourceRef,
-        targetIds,
-        cycleSeconds: Number(cycleSeconds),
-        selections,
-      });
-      setSaving(true);
-      setStatus(null);
-      try {
-        // ONE request: the scene is saved in a single PUT; useMutate() then does
-        // its one Plane A refresh so the Scenes list reflects the new scene.
-        const result = await mutate(() =>
-          apiWrite(path, { method: "PUT", body }),
-        );
-        setStatus(
-          result.ok
-            ? `Saved Scene ${trimmedId}.`
-            : `Could not save Scene: ${result.error ?? result.status}.`,
-        );
-      } catch {
-        setStatus("Could not save Scene: the request did not complete.");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [canSave, mode, sceneId, sourceRef, targetIds, cycleSeconds, selections, mutate],
-  );
+    } catch {
+      setStatus("Could not save Scene: the request did not complete.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="scene-authoring">
@@ -149,18 +146,18 @@ export function SceneAuthoring({ snapshot }) {
         className="scene-authoring__form"
         role="form"
         aria-label="Author a Scene"
+        noValidate
         onSubmit={onSave}
       >
-        <label className="scene-authoring__field">
-          Scene ID
-          <input
-            type="text"
-            className="scene-authoring__scene-id"
-            aria-label="Scene ID"
-            value={sceneId}
-            onChange={(event) => setSceneId(event.target.value)}
-          />
-        </label>
+        <ProblemSummary summary={problems.summary} label="Scene problems" />
+        <IdentityFields
+          kind="Scene"
+          name={name}
+          idOverride={idOverride}
+          onName={setName}
+          onIdOverride={setIdOverride}
+          problems={problems}
+        />
 
         <fieldset
           className="scene-authoring__mode"
@@ -189,27 +186,49 @@ export function SceneAuthoring({ snapshot }) {
           </label>
         </fieldset>
 
-        <ModeControls
-          mode={mode}
+        <SourcePicker
+          id={problems.idFor("source")}
+          reason={problems.reasonFor("source")}
           sources={sources}
-          sourceRef={sourceRef}
-          onSource={setSourceRef}
-          frames={frames}
-          targets={targets}
-          onToggleTarget={toggleTarget}
-          cycleSeconds={cycleSeconds}
-          onCycleSeconds={setCycleSeconds}
-          targetIds={targetIds}
-          selections={selections}
-          onSelect={onSelect}
-          onClearSelections={clearSelections}
+          value={sourceRef}
+          onChange={(next) => {
+            setSourceRef(next);
+            // A per-Frame choice belongs to one Source's catalog.
+            setSelections({});
+            problems.touch("source");
+          }}
         />
 
-        <button
-          type="submit"
-          className="scene-authoring__save"
-          disabled={!canSave}
-        >
+        <TargetFrames
+          id={problems.idFor("targets")}
+          reason={problems.reasonFor("targets")}
+          frames={frames}
+          targets={targets}
+          onToggle={(frameId) => {
+            toggleTarget(frameId);
+            problems.touch("targets");
+          }}
+        />
+
+        {mode === "authored" && (
+          <MediaChoosers
+            sourceRef={sourceRef}
+            targetIds={targetIds}
+            selections={selections}
+            onSelect={onSelect}
+            problems={problems}
+          />
+        )}
+
+        <CycleInput
+          problems={problems}
+          seconds={cycleSeconds}
+          onSeconds={setCycleSeconds}
+          loop={loop}
+          onLoop={setLoop}
+        />
+
+        <button type="submit" className="scene-authoring__save" disabled={saving}>
           Save Scene
         </button>
       </form>
@@ -242,97 +261,36 @@ export function SceneAuthoring({ snapshot }) {
   );
 }
 
-/**
- * The per-mode authoring controls. 14a renders the LIVE-source controls (pick a
- * Source, pick target Frames, set seconds-per-cycle). 14b adds the
- * `mode === "authored"` branch: a per-frame candidate-chooser subtree
- * ({@link AuthoredControls}), rendered without touching the live branch.
- */
-function ModeControls({
-  mode,
-  sources,
-  sourceRef,
-  onSource,
-  frames,
-  targets,
-  onToggleTarget,
-  cycleSeconds,
-  onCycleSeconds,
-  targetIds,
-  selections,
-  onSelect,
-  onClearSelections,
-}) {
-  if (mode === "authored") {
-    return (
-      <AuthoredControls
-        sources={sources}
-        sourceRef={sourceRef}
-        onSource={onSource}
-        frames={frames}
-        targets={targets}
-        onToggleTarget={onToggleTarget}
-        cycleSeconds={cycleSeconds}
-        onCycleSeconds={onCycleSeconds}
-        targetIds={targetIds}
-        selections={selections}
-        onSelect={onSelect}
-        onClearSelections={onClearSelections}
-      />
-    );
-  }
-  if (mode !== "live") {
-    return null;
-  }
+/** The explicit target Frames (both modes): one checkbox per Frame. */
+function TargetFrames({ id, reason, frames, targets, onToggle }) {
   return (
-    <fieldset className="scene-authoring__live" aria-label="Live source">
-      <label className="scene-authoring__field">
-        Source
-        <select
-          className="scene-authoring__source"
-          aria-label="Source"
-          value={sourceRef}
-          onChange={(event) => onSource(event.target.value)}
-        >
-          <option value="">Choose a Source</option>
-          {sources.map((source) => (
-            <option key={source.source_ref} value={source.source_ref}>
-              {source.source_ref}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <fieldset className="scene-authoring__targets" aria-label="Target frames">
-        <legend>Target frames</legend>
-        {frames.length === 0 ? (
-          <p className="scene-authoring__empty">No Frames to target.</p>
-        ) : (
-          frames.map((frame) => (
-            <label key={frame.id} className="scene-authoring__target">
-              <input
-                type="checkbox"
-                aria-label={`Target frame ${frame.id}`}
-                checked={targets.has(frame.id)}
-                onChange={() => onToggleTarget(frame.id)}
-              />
-              {frame.id}
-            </label>
-          ))
-        )}
-      </fieldset>
-
-      <label className="scene-authoring__field">
-        Seconds per cycle
-        <input
-          type="number"
-          min="1"
-          className="scene-authoring__cycle"
-          aria-label="Seconds per cycle"
-          value={cycleSeconds}
-          onChange={(event) => onCycleSeconds(event.target.value)}
-        />
-      </label>
+    <fieldset
+      id={id}
+      className="scene-authoring__targets"
+      aria-label="Target frames"
+      aria-describedby={reason !== null ? `${id}-reason` : undefined}
+    >
+      <legend>Target frames</legend>
+      {frames.length === 0 ? (
+        <p className="scene-authoring__empty">No Frames to target.</p>
+      ) : (
+        frames.map((frame) => (
+          <label key={frame.id} className="scene-authoring__target">
+            <input
+              type="checkbox"
+              aria-label={`Target frame ${frame.id}`}
+              checked={targets.has(frame.id)}
+              onChange={() => onToggle(frame.id)}
+            />
+            {frame.id}
+          </label>
+        ))
+      )}
+      {reason !== null && (
+        <p id={`${id}-reason`} className="field__reason">
+          {reason}
+        </p>
+      )}
     </fieldset>
   );
 }
@@ -347,27 +305,14 @@ function candidateLabel(candidate) {
 }
 
 /**
- * The authored-mode controls (Bead 14b): pick a Source and target Frames, then
- * choose ONE asset per Frame from that Frame's candidate list. The candidates
- * come from `GET /v1/operator/sources/{ref}/candidates?frame_id=<frame>`, which
- * central HARD-FILTERS by the Frame's profile server-side — an asset ineligible
- * for a Frame's profile is never returned, so it can never be offered here. The
- * whole selection is later saved in ONE `PUT …/scenes/{id}/authored`.
+ * The authored-mode choosers (Bead 14b): ONE asset per target Frame from that
+ * Frame's candidate list. The candidates come from
+ * `GET /v1/operator/sources/{ref}/candidates?frame_id=<frame>`, which central
+ * HARD-FILTERS by the Frame's profile server-side — an asset ineligible for a
+ * Frame's profile is never returned, so it can never be offered here. The whole
+ * selection is later saved in ONE `PUT …/scenes/{id}/authored`.
  */
-function AuthoredControls({
-  sources,
-  sourceRef,
-  onSource,
-  frames,
-  targets,
-  onToggleTarget,
-  cycleSeconds,
-  onCycleSeconds,
-  targetIds,
-  selections,
-  onSelect,
-  onClearSelections,
-}) {
+function MediaChoosers({ sourceRef, targetIds, selections, onSelect, problems }) {
   // Candidate lists keyed by frame id, each already hard-filtered by that
   // Frame's profile on the server.
   const [byFrame, setByFrame] = useState(
@@ -375,12 +320,6 @@ function AuthoredControls({
   );
   const [loadError, setLoadError] = useState(/** @type {string|null} */ (null));
   const targetKey = targetIds.join(" ");
-
-  // A per-Frame choice belongs to one Source's catalog; changing the Source
-  // invalidates every prior choice.
-  useEffect(() => {
-    onClearSelections();
-  }, [sourceRef, onClearSelections]);
 
   useEffect(() => {
     if (sourceRef === "" || targetKey === "") {
@@ -425,63 +364,35 @@ function AuthoredControls({
   }, [sourceRef, targetKey]);
 
   return (
-    <fieldset className="scene-authoring__authored" aria-label="Authored controls">
-      <label className="scene-authoring__field">
-        Source
-        <select
-          className="scene-authoring__source"
-          aria-label="Source"
-          value={sourceRef}
-          onChange={(event) => onSource(event.target.value)}
-        >
-          <option value="">Choose a Source</option>
-          {sources.map((source) => (
-            <option key={source.source_ref} value={source.source_ref}>
-              {source.source_ref}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <fieldset className="scene-authoring__targets" aria-label="Target frames">
-        <legend>Target frames</legend>
-        {frames.length === 0 ? (
-          <p className="scene-authoring__empty">No Frames to target.</p>
-        ) : (
-          frames.map((frame) => (
-            <label key={frame.id} className="scene-authoring__target">
-              <input
-                type="checkbox"
-                aria-label={`Target frame ${frame.id}`}
-                checked={targets.has(frame.id)}
-                onChange={() => onToggleTarget(frame.id)}
-              />
-              {frame.id}
-            </label>
-          ))
-        )}
-      </fieldset>
-
-      <fieldset
-        className="scene-authoring__choosers"
-        aria-label="Per-frame media choices"
-      >
-        <legend>Per-frame media choices</legend>
-        {targetIds.length === 0 ? (
-          <p className="scene-authoring__empty">
-            Choose a Source and target Frames to pick media.
-          </p>
-        ) : (
-          targetIds.map((frameId) => {
-            const candidates = byFrame[frameId] ?? [];
-            return (
-              <label key={frameId} className="scene-authoring__chooser">
-                {`Media for frame ${frameId}`}
+    <fieldset
+      className="scene-authoring__choosers"
+      aria-label="Per-frame media choices"
+    >
+      <legend>Per-frame media choices</legend>
+      {targetIds.length === 0 ? (
+        <p className="scene-authoring__empty">
+          Choose a Source and target Frames to pick media.
+        </p>
+      ) : (
+        targetIds.map((frameId) => {
+          const candidates = byFrame[frameId] ?? [];
+          const field = `media:${frameId}`;
+          return (
+            <Field
+              key={frameId}
+              id={problems.idFor(field)}
+              label={`Media for frame ${frameId}`}
+              reason={problems.reasonFor(field)}
+            >
+              {(props) => (
                 <select
+                  {...props}
                   className="scene-authoring__choice"
-                  aria-label={`Media for frame ${frameId}`}
                   value={selections[frameId] ?? ""}
-                  onChange={(event) => onSelect(frameId, event.target.value)}
+                  onChange={(event) => {
+                    onSelect(frameId, event.target.value);
+                    problems.touch(field);
+                  }}
                 >
                   <option value="">
                     {candidates.length === 0
@@ -494,24 +405,11 @@ function AuthoredControls({
                     </option>
                   ))}
                 </select>
-              </label>
-            );
-          })
-        )}
-      </fieldset>
-
-      <label className="scene-authoring__field">
-        Seconds per cycle
-        <input
-          type="number"
-          min="1"
-          className="scene-authoring__cycle"
-          aria-label="Seconds per cycle"
-          value={cycleSeconds}
-          onChange={(event) => onCycleSeconds(event.target.value)}
-        />
-      </label>
-
+              )}
+            </Field>
+          );
+        })
+      )}
       {loadError !== null ? (
         <p className="scene-authoring__status" role="status">
           {loadError}
@@ -528,12 +426,12 @@ function AuthoredControls({
  * Contribution per target Frame carrying that Frame's chosen asset ref.
  *
  * @param {"live"|"authored"} mode
- * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number, selections?: Record<string,string>}} draft
+ * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number, loop: boolean, selections?: Record<string,string>}} draft
  * @returns {{path: string, body: object}}
  */
 export function buildSave(
   mode,
-  { sceneId, sourceRef, targetIds, cycleSeconds, selections = {} },
+  { sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {} },
 ) {
   if (mode === "authored") {
     // An authored Scene: one media Contribution per target Frame, each carrying
@@ -551,7 +449,7 @@ export function buildSave(
       scene_id: sceneId,
       revision: 1,
       cycle_seconds: cycleSeconds,
-      loop: false,
+      loop,
       contributions,
     };
     return {
@@ -576,7 +474,7 @@ export function buildSave(
     scene_id: sceneId,
     revision: 1,
     cycle_seconds: cycleSeconds,
-    loop: false,
+    loop,
     contributions,
   };
   return {
