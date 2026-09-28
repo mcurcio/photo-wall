@@ -1,8 +1,8 @@
 """scripts/initrd_mount_probe.py, the CI guard that runs stage 1's real mount path out of the
 built initrd. Its real run needs root, loop devices and an arm64 kernel (base-image.yml); here
 every host command is faked, so these pin the probe's own logic: kernel-order unpacking, the
-chroot command, the in-initrd program, deepest-first teardown, the AUTOCLEAR check, and that a
-tree with anything still mounted under it is never deleted."""
+chroot command, the in-initrd program, the stage-2 module resolution, deepest-first teardown,
+the AUTOCLEAR check, and that a tree with anything still mounted under it is never deleted."""
 
 from __future__ import annotations
 
@@ -24,8 +24,10 @@ from scripts.initrd_mount_probe import (
     bound_loops,
     chroot_argv,
     decompressor,
+    kernel_release,
     mounts_under,
     probe,
+    resolution_violations,
     teardown,
     unpack,
 )
@@ -33,6 +35,10 @@ from scripts.initrd_mount_probe import (
 BOOT_DATA = newc_archive({"usr/lib/python3.13/appliance/bootstrap.py": b"code"})
 EARLY = newc_archive({"kernel/x86/microcode/fake.bin": b"ucode"})
 CACHED = newc_archive({"usr/bin/mount": b"klibc"})
+RELEASE = "6.18.50+rpt-rpi-2712"
+# What the in-initrd program prints for a stage-2 module that resolves on the new root.
+RESOLVED = ("resolve vc4 exit=0 files=16 missing=0 last=vc4.ko.xz\n"
+            "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n")
 
 
 def completed(argv, stdout=b"", returncode=0):
@@ -90,17 +96,43 @@ def test_unpack_names_an_unknown_compression(tmp_path):
 # --- the command and the program run inside the initrd -----------------------------------------
 
 def test_the_chroot_runs_the_initrds_own_python_with_inits_path_only(tmp_path):
-    argv = chroot_argv(tmp_path, "/probe/i.squashfs", "/probe/root")
+    argv = chroot_argv(tmp_path, "/probe/i.squashfs", "/probe/root", RELEASE)
     assert argv[:5] == ["env", "-i", f"PATH={INITRAMFS_PATH}", "chroot", str(tmp_path)]
     assert argv[5:9] == ["/usr/bin/python3", "-I", "-c", PROBE_PROGRAM]
-    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER]
+    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER, RELEASE, "vc4", "v3d"]
 
 
-def run_program(monkeypatch, capsys, mount_root, tmp_path):
+def modprobe_shows(rootmnt, *, missing_file=False, unknown=()):
+    """`modprobe --show-depends` as kmod answers it, over a real tree under `rootmnt`."""
+    def run(argv, **kwargs):
+        module = argv[-1]
+        assert argv[:6] == ["modprobe", "--dirname", str(rootmnt), "--set-version", RELEASE,
+                            "--show-depends"]
+        if module in unknown:
+            return subprocess.CompletedProcess(argv, 1, "", f"modprobe: FATAL: {module}\n")
+        tree = rootmnt / "lib/modules" / RELEASE / "kernel"
+        tree.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for name in ("drm.ko.xz", f"{module}.ko.xz"):
+            (tree / name).write_bytes(b"")
+            if missing_file and name == f"{module}.ko.xz":
+                (tree / name).unlink()
+            lines.append(f"insmod {tree / name} \n")
+        return subprocess.CompletedProcess(argv, 0, "".join(lines), "")
+    return run
+
+
+def run_program(monkeypatch, capsys, mount_root, tmp_path, *, shows=None):
     rootmnt = tmp_path / "root"
+    handed = []
     monkeypatch.setattr(netboot_module.NetbootOps, "__init__", lambda self: None)
     monkeypatch.setattr(netboot_module.NetbootOps, "mount_root", mount_root)
-    monkeypatch.setattr("sys.argv", ["-c", str(tmp_path / "i.squashfs"), str(rootmnt), MARKER])
+    monkeypatch.setattr(netboot_module.NetbootOps, "hand_over_modules",
+                        lambda self, rootmnt, *, pet, release=None: handed.append(release)
+                        or f"modules={release} files=1 bytes=1")
+    monkeypatch.setattr("subprocess.run", shows or modprobe_shows(rootmnt))
+    monkeypatch.setattr("sys.argv", ["-c", str(tmp_path / "i.squashfs"), str(rootmnt), MARKER,
+                                     RELEASE, "vc4", "v3d"])
     code = 0
     try:
         exec(compile(PROBE_PROGRAM, "<probe>", "exec"), {"__name__": "__main__"})
@@ -115,7 +147,46 @@ def test_the_program_reads_the_marker_back_through_the_mounted_root(tmp_path, mo
         rootmnt.mkdir()
         (rootmnt / MARKER).write_text("0123abcd\n")
 
-    assert run_program(monkeypatch, capsys, mount_root, tmp_path) == (0, "marker=0123abcd\n")
+    assert run_program(monkeypatch, capsys, mount_root, tmp_path) == (
+        0, f"modules={RELEASE} files=1 bytes=1\nmarker=0123abcd\n"
+           "resolve vc4 exit=0 files=2 missing=0 last=vc4.ko.xz\n"
+           "resolve v3d exit=0 files=2 missing=0 last=v3d.ko.xz\n")
+
+
+def test_the_program_reports_a_module_the_new_root_lacks(tmp_path, monkeypatch, capsys):
+    def mount_root(self, image, rootmnt):
+        rootmnt.mkdir()
+        (rootmnt / MARKER).write_text("0123abcd\n")
+
+    rootmnt = tmp_path / "root"
+    code, out = run_program(monkeypatch, capsys, mount_root, tmp_path,
+                            shows=modprobe_shows(rootmnt, missing_file=True, unknown=("v3d",)))
+    assert code == 0
+    assert out.splitlines()[-2:] == ["resolve vc4 exit=0 files=2 missing=1 last=vc4.ko.xz",
+                                     "resolve v3d exit=1 files=0 missing=0 last=none"]
+    assert resolution_violations(out) == [
+        "vc4: does not resolve on the new root (exit=0 files=2 missing=1 last=vc4.ko.xz)",
+        "v3d: does not resolve on the new root (exit=1 files=0 missing=0 last=none)"]
+
+
+def test_a_program_that_never_resolved_a_module_is_a_violation():
+    assert resolution_violations(RESOLVED) == []
+    assert resolution_violations(RESOLVED.splitlines()[0]) == [
+        "v3d: not resolved on the new root (no result)"]
+    assert resolution_violations("resolve vc4 exit=0 files=3 missing=0 last=drm.ko.xz\n"
+                                 + RESOLVED.splitlines()[1]) == [
+        "vc4: does not resolve on the new root (exit=0 files=3 missing=0 last=drm.ko.xz)"]
+
+
+def test_the_kernel_release_is_the_initrds_only_module_tree(tmp_path):
+    assert kernel_release(tmp_path) == [
+        "the initrd carries modules for 0 kernel releases (none), not exactly one"]
+    (tmp_path / "usr/lib/modules" / RELEASE).mkdir(parents=True)
+    assert kernel_release(tmp_path) == RELEASE
+    (tmp_path / "usr/lib/modules/6.1.0-other").mkdir()
+    assert kernel_release(tmp_path) == [
+        f"the initrd carries modules for 2 kernel releases (6.1.0-other, {RELEASE}), "
+        "not exactly one"]
 
 
 def test_the_program_prints_stage_1s_own_failed_line(tmp_path, monkeypatch, capsys):
@@ -159,6 +230,9 @@ class FakeHost:
     def __call__(self, argv, **kwargs):
         argv = [str(part) for part in argv]
         self.calls.append(argv)
+        if argv[0] == "cpio":
+            (Path(kwargs["cwd"]) / "usr/lib/modules" / RELEASE).mkdir(parents=True,
+                                                                      exist_ok=True)
         if argv[0] == "gzip":
             return completed(argv, gzip.decompress(kwargs["input"]))
         if argv[0] == "mount":
@@ -173,7 +247,8 @@ class FakeHost:
             for point in ("probe/root", "run/photo-wall/lower", "run/photo-wall/overlay"):
                 self(["mount", "-t", "x", "x", str(root / point)])
             token = (self.work / "source" / MARKER).read_text().strip()
-            output = self.chroot_output if self.chroot_output is not None else f"marker={token}\n"
+            output = (self.chroot_output if self.chroot_output is not None
+                      else f"marker={token}\n{RESOLVED}")
             return subprocess.CompletedProcess(argv, self.chroot_code, output, "")
         return completed(argv)
 
@@ -206,6 +281,27 @@ def test_a_failing_mount_root_fails_the_probe_with_stage_1s_line(tmp_path, initr
     assert host.probe(initrd) == [
         "stage-1 mount_root failed in the initrd (exit 1): FAILED phase=7 code=boot_command "
         "detail=mount: Invalid argument"]
+
+
+def test_the_chroot_is_given_the_initrds_kernel_release(tmp_path, initrd):
+    host = FakeHost(tmp_path)
+    host.probe(initrd)
+    [chroot] = [call for call in host.calls if call[0] == "env"]
+    assert chroot[-3:] == [RELEASE, "vc4", "v3d"]
+    assert (host.work / "source/lib").readlink() == Path("usr/lib")   # the base is merged-/usr
+
+
+def test_a_stage_2_module_that_does_not_resolve_fails_the_probe(tmp_path, initrd):
+    class Unresolved(FakeHost):
+        def __call__(self, argv, **kwargs):
+            result = super().__call__(argv, **kwargs)
+            if str(argv[0]) == "env":
+                result.stdout = result.stdout.replace("resolve v3d exit=0",
+                                                      "resolve v3d exit=1")
+            return result
+
+    assert Unresolved(tmp_path).probe(initrd) == [
+        "v3d: does not resolve on the new root (exit=1 files=7 missing=0 last=v3d.ko.xz)"]
 
 
 def test_a_wrong_marker_fails_the_probe(tmp_path, initrd):

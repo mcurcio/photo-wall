@@ -37,8 +37,9 @@ every network send and read in them pets it too, each one bounded call (`_PacedT
 7. mount and hand off: `LinuxOps.mount_root` (the base's loop device attached by stage 1
    itself, every mount given kernel options only), a note if the base's CA bundle differs
    from this initrd's (R5, Q3 = A), stage 1's working resolver copied onto the new root
-   (`hand_over_resolver`: stage 2 has no DHCP client of its own), then the watchdog hand-over
-   to systemd, last.
+   (`hand_over_resolver`: stage 2 has no DHCP client of its own), this initrd's kernel modules
+   copied onto the new root (`hand_over_modules`: the base carries none, and the modules travel
+   with the kernel they were built for), then the watchdog hand-over to systemd, last.
 
 Every failure prints one `FAILED phase=<n> ...` line and exits non-zero into the boot script's
 `photowall_restart`, the one way out. No boot-context file is written: the Player enrolls
@@ -54,6 +55,7 @@ import binascii
 import hashlib
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -68,6 +70,7 @@ from appliance.bootstrap import (
     Keeper,
     LinuxOps,
     arm_watchdog,
+    errno_name,
     missing_kernel_liveness,
     open_watchdog,
     read_pi_serial,
@@ -138,6 +141,16 @@ INITRD_CA_BUNDLE = DEBIAN_CA_BUNDLE
 _STAGE1_RESOLVER: Final = Path("/etc/resolv.conf")
 STAGE2_RESOLVER: Final = Path("etc/resolv.conf")
 MAX_RESOLVER_BYTES: Final = 4096
+# The running kernel's modules, as mkinitramfs staged them into this initrd (the modules and
+# depmod's indexes), and where stage 2's udev looks for them, relative to the new root. The base
+# carries no kernel and no modules: they come from the same TFTP staging as the kernel, so the
+# two always match, whichever base Central serves. The initramfs hook adds the display drivers
+# the Player needs (vc4, v3d) beside what stage 1 itself needs.
+INITRD_MODULES: Final = Path("/usr/lib/modules")
+STAGE2_MODULES: Final = Path("usr/lib/modules")
+# The copy lands in the RAM overlay's upper layer: bounded, so a malformed initrd cannot fill
+# RAM before stage 2 starts.
+MAX_MODULE_TREE_BYTES: Final = 256 * 1024 * 1024
 
 
 class NetbootError(ValueError):
@@ -224,6 +237,10 @@ class NetbootOps(LinuxOps):
     `_prepare_root`, `ram`, `mount`, `loop_device` and `command` are inherited
     from `LinuxOps` unchanged.
     """
+
+    def hand_over_modules(self, rootmnt: Path, *, pet: Callable[[], None],
+                          release: str | None = None) -> str:
+        return hand_over_modules(rootmnt, pet=pet, release=release)
 
     def configure_networking(self) -> None:
         # Shells out to the initramfs-tools helper rather than reimplementing DHCP/`ip=`
@@ -369,6 +386,43 @@ def hand_over_resolver(rootmnt: Path, *, source: Path = _STAGE1_RESOLVER) -> str
         return "dns=none"
     nameservers, search = _resolver_entries(data.decode("ascii", "replace"))
     return f"dns={','.join(nameservers) or 'none'} search={','.join(search) or 'none'}"
+
+
+def hand_over_modules(rootmnt: Path, *, pet: Callable[[], None], release: str | None = None,
+                      source: Path = INITRD_MODULES) -> str:
+    """Copy source/<release> (default: the running kernel's, `uname -r`) to
+    rootmnt/STAGE2_MODULES/<release>, symlinks kept, calling `pet` after every file, so stage
+    2's udev can load a driver by its alias at coldplug. Returns the phase-7 console summary
+    'modules=<release> files=<n> bytes=<b>'. No tree for the running kernel (a kernel staged
+    with another build's initrd) or a tree over MAX_MODULE_TREE_BYTES raises
+    BootstrapError('boot_modules', ...) naming it; a failed copy names its errno."""
+    release = release or os.uname().release
+    tree = source / release
+    if not tree.is_dir():
+        raise BootstrapError("boot_modules", f"no {tree} in this initrd (kernel and initrd "
+                                             "from different builds)")
+    copied = {"files": 0, "bytes": 0}
+
+    def copy(src: str, dst: str) -> str:
+        copied["bytes"] += os.lstat(src).st_size
+        if copied["bytes"] > MAX_MODULE_TREE_BYTES:
+            raise BootstrapError("boot_modules", f"tree over {MAX_MODULE_TREE_BYTES} bytes")
+        copied["files"] += 1
+        result = shutil.copy2(src, dst)
+        pet()
+        return result
+
+    try:
+        shutil.copytree(tree, rootmnt / STAGE2_MODULES / release, symlinks=True,
+                        copy_function=copy, dirs_exist_ok=True)
+    except shutil.Error as error:
+        # copytree collects per-file failures and raises them together: name the first.
+        failures = error.args[0] if error.args and isinstance(error.args[0], list) else []
+        raise BootstrapError("boot_modules",
+                             str(failures[0][2]) if failures else str(error)) from None
+    except OSError as error:
+        raise BootstrapError("boot_modules", errno_name(error)) from None
+    return f"modules={release} files={copied['files']} bytes={copied['bytes']}"
 
 
 def _sha256_of(path: Path) -> str | None:
@@ -606,6 +660,8 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
             console.log.info(f"note: CA bundle differs from the base's: initrd=sha256:"
                              f"{differs[0]} base=sha256:{differs[1]}")
         resolver = hand_over_resolver(rootmnt)
+        console.line(7, "mount + handoff: "
+                        + ops.hand_over_modules(rootmnt, pet=console.keeper.pet))
         console.line(7, f"mount + handoff: success {resolver}")
         console.keeper.hand_over()
     except BaseException:

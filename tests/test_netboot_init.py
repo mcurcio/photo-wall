@@ -84,6 +84,9 @@ class Events(list):
     """One ordered record of what every fake was asked to do."""
 
 
+MODULE_FILES = 2   # what the fake module hand-over copies, petting after each
+
+
 class Ops:
     """Records every call; any ticket/identity call fails the test outright,
     proving the ticketless path never reaches for them."""
@@ -114,6 +117,12 @@ class Ops:
     def mount_root(self, image, rootmnt):
         self.calls.append("mount_root")
         self.mounted.append((image.read_bytes(), rootmnt))
+
+    def hand_over_modules(self, rootmnt, *, pet, release=None):
+        self.calls.append("hand_over_modules")
+        for _ in range(MODULE_FILES):
+            pet()
+        return f"modules=6.12.0-rpi files={MODULE_FILES} bytes=3"
 
     def device_id(self):
         pytest.fail("ticketless netboot must never read equipment identity")
@@ -228,7 +237,8 @@ def test_the_pi_real_case_locates_through_the_301_and_mounts_the_verified_base(t
     log = run(cmdline(), tmp_path, ops=ops, keeper=keeper, transport=transport)
     assert [sent[0] for sent in transport.sent] == [FIRST, LOCATED, BASE]
     assert transport.sent[2][1] == {"Accept-Encoding": "identity", SERIAL_HEADER: SERIAL}
-    assert ops.calls == ["configure_networking", "network_info", "ram", "mount_root"]
+    assert ops.calls == ["configure_networking", "network_info", "ram", "mount_root",
+                         "hand_over_modules"]
     assert ops.mounted == [(BODY, tmp_path / "root")]
     assert not (ops.run_root / "boot.json").exists()
     assert keeper.handed_over
@@ -328,7 +338,8 @@ def test_a_pet_for_every_phase_line_block_send_and_read_and_hand_over_last(tmp_p
     blocks = -(-len(BODY) // 8)
     reads = sum(len(reply.reads) for reply in answers.values())
     assert reads > blocks
-    assert keeper.pets == len(phase_lines) + blocks + len(transport.sent) + reads
+    assert keeper.pets == (len(phase_lines) + blocks + len(transport.sent) + reads
+                           + MODULE_FILES)
     assert keeper.handed_over and keeper.pets_before_hand_over == keeper.pets
 
 
@@ -639,6 +650,105 @@ def test_a_resolver_write_failure_is_the_failed_line_and_no_hand_over(tmp_path):
     assert failed(cmdline(), tmp_path, OSError, ops=FileForEtc(tmp_path), keeper=keeper) == (
         "FAILED phase=7 error=NotADirectoryError")
     assert not keeper.handed_over
+
+
+# --- phase 7: the kernel modules travel to stage 2 ------------------------------------------
+
+RELEASE = "6.18.50+rpt-rpi-2712"
+
+
+def initrd_modules(root: Path) -> Path:
+    """A module tree as mkinitramfs stages it: modules, depmod's indexes, one symlink."""
+    tree = root / RELEASE
+    (tree / "kernel/drivers/gpu/drm/vc4").mkdir(parents=True)
+    (tree / "kernel/drivers/gpu/drm/vc4/vc4.ko.xz").write_bytes(b"vc4")
+    (tree / "modules.dep").write_text("kernel/drivers/gpu/drm/vc4/vc4.ko.xz: drm.ko.xz\n")
+    (tree / "modules.alias.bin").write_bytes(b"\x00\x01")
+    (tree / "build").symlink_to("/usr/src/linux-headers")
+    return root
+
+
+def test_the_modules_are_copied_to_the_new_root_petting_per_file(tmp_path):
+    source, rootmnt, pets = initrd_modules(tmp_path / "initrd"), tmp_path / "root", []
+    summary = netboot_module.hand_over_modules(rootmnt, pet=lambda: pets.append(1),
+                                               release=RELEASE, source=source)
+    copied = rootmnt / netboot_module.STAGE2_MODULES / RELEASE
+    assert (copied / "kernel/drivers/gpu/drm/vc4/vc4.ko.xz").read_bytes() == b"vc4"
+    assert (copied / "modules.dep").read_text().startswith("kernel/drivers/gpu/drm/vc4/")
+    assert os.readlink(copied / "build") == "/usr/src/linux-headers"   # kept, never followed
+    sizes = sum(len(path.read_bytes()) for path in (copied / "kernel/drivers/gpu/drm/vc4/vc4.ko.xz",
+                                                    copied / "modules.dep",
+                                                    copied / "modules.alias.bin"))
+    assert summary == f"modules={RELEASE} files=3 bytes={sizes}"
+    assert len(pets) == 3
+
+
+def test_the_running_kernels_tree_is_the_default(tmp_path):
+    source = tmp_path / "initrd"
+    (source / os.uname().release).mkdir(parents=True)
+    assert netboot_module.hand_over_modules(tmp_path / "root", pet=lambda: None,
+                                            source=source).startswith(
+        f"modules={os.uname().release} ")
+
+
+def test_a_kernel_without_its_modules_in_this_initrd_is_named(tmp_path):
+    """A kernel staged with another build's initrd: the display would never come up."""
+    with pytest.raises(BootstrapError) as raised:
+        netboot_module.hand_over_modules(tmp_path / "root", pet=lambda: None,
+                                         release="6.99.0-other",
+                                         source=initrd_modules(tmp_path / "initrd"))
+    assert str(raised.value) == "boot_modules"
+    assert raised.value.detail == (f"no {tmp_path / 'initrd' / '6.99.0-other'} in this initrd "
+                                   "(kernel and initrd from different builds)")
+
+
+def test_a_tree_over_the_bound_stops_before_filling_ram(tmp_path, monkeypatch):
+    monkeypatch.setattr(netboot_module, "MAX_MODULE_TREE_BYTES", 10)
+    with pytest.raises(BootstrapError) as raised:
+        netboot_module.hand_over_modules(tmp_path / "root", pet=lambda: None, release=RELEASE,
+                                         source=initrd_modules(tmp_path / "initrd"))
+    assert (str(raised.value), raised.value.detail) == ("boot_modules", "tree over 10 bytes")
+
+
+def test_a_failed_module_copy_names_its_errno(tmp_path):
+    rootmnt = tmp_path / "root"
+    rootmnt.mkdir()
+    (rootmnt / "usr").write_bytes(b"")          # usr/lib/modules cannot be created
+    with pytest.raises(BootstrapError) as raised:
+        netboot_module.hand_over_modules(rootmnt, pet=lambda: None, release=RELEASE,
+                                         source=initrd_modules(tmp_path / "initrd"))
+    assert (str(raised.value), raised.value.detail) == ("boot_modules", "ENOTDIR")
+
+
+def test_the_modules_are_handed_over_after_the_resolver_and_before_the_watchdog(tmp_path):
+    events = Events()
+    log = run(cmdline(), tmp_path, ops=Ops(tmp_path, events), keeper=FakeKeeper(events))
+    order = [event for event in events if event in ("mount_root", "hand_over_modules",
+                                                    "hand_over")]
+    assert order == ["mount_root", "hand_over_modules", "hand_over"]
+    assert (f"phase 7/7 mount + handoff: modules=6.12.0-rpi files={MODULE_FILES} bytes=3"
+            in log.lines)
+
+
+def test_a_module_hand_over_failure_is_the_failed_line_and_no_hand_over(tmp_path):
+    class NoModules(Ops):
+        def hand_over_modules(self, rootmnt, *, pet, release=None):
+            raise BootstrapError("boot_modules", "no /usr/lib/modules/6.99 in this initrd")
+
+    keeper = FakeKeeper()
+    assert failed(cmdline(), tmp_path, BootstrapError, ops=NoModules(tmp_path),
+                  keeper=keeper) == ("FAILED phase=7 code=boot_modules "
+                                     "detail=no /usr/lib/modules/6.99 in this initrd")
+    assert not keeper.handed_over
+
+
+def test_netboot_ops_hands_over_the_initrds_own_tree(tmp_path, monkeypatch):
+    source = initrd_modules(tmp_path / "initrd")
+    monkeypatch.setattr(netboot_module, "hand_over_modules",
+                        functools.partial(netboot_module.hand_over_modules, source=source))
+    assert NetbootOps(tmp_path / "run").hand_over_modules(tmp_path / "root", pet=lambda: None,
+                                          release=RELEASE).startswith(f"modules={RELEASE} ")
+    assert netboot_module.INITRD_MODULES == Path("/usr/lib/modules")
 
 
 # --- setup (phase 0, in main) ---------------------------------------------------------------

@@ -59,6 +59,16 @@ DEFAULT_BOOT_SCRIPT = REPO / "appliance" / "netboot_initramfs" / "scripts" / "ph
 _PANIC_DEFINITION = re.compile(r"(?m)^\s*panic\s*\(\s*\)\s*\{")
 _REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
 
+# The modules stage 2 needs and stage 1 does not: the Player's display drivers (vc4: KMS and
+# HDMI, for weston's DRM backend; v3d: Mesa's GL). The base has no kernel and no modules, so they
+# travel in this initrd with the kernel they were built for, and stage 1 copies its module tree
+# onto the new root (appliance.netboot_init.hand_over_modules). v0.9.1's initrd had neither, and
+# /dev/dri never appeared. The hook's own list (appliance/netboot_initramfs/hooks/
+# photo-wall-netboot) is bound to this one by tests/test_verify_netboot_initrd.py; that they
+# RESOLVE on the new root is scripts/initrd_mount_probe.py's job.
+STAGE2_MODULES: tuple[str, ...] = ("vc4", "v3d")
+STAGE2_ONLY_CONF = "etc/modprobe.d/photo-wall-stage2-only.conf"
+
 # Present-or-fail globs for the CACHED archive, matched against normalised member paths.
 REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("python3 interpreter", "usr/bin/python3*"),
@@ -76,6 +86,12 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("mount helper", "*bin/mount"),
     ("umount helper", "*bin/umount"),
     ("modprobe helper", "*bin/modprobe"),
+    ("the modules' depmod index", "*lib/modules/*/modules.dep"),
+    *((f"stage-2 module {name}", f"*lib/modules/*/kernel/*/{name}.ko*")
+      for name in STAGE2_MODULES),
+    # Keeps initramfs-tools' own udev from loading them in stage 1 (the hook writes one
+    # `blacklist` line per stage-2 module).
+    ("stage-1 blacklist of the stage-2 modules", STAGE2_ONLY_CONF),
 )
 
 # What the boot data must carry besides the closure.
