@@ -54,7 +54,7 @@ What each step does:
 2. **`docker compose up`** builds and starts the central service, PostgreSQL, and the Procrastinate media worker. The web listener and database bind to loopback only.
 3. **`curl .../healthz`** should return success. A green `/healthz` means the database is reachable and the scheduler ticked recently — it reports liveness, not that anything is on screen. While starting up it returns `503`; give it a few seconds.
 
-Then open **`http://127.0.0.1:8000`**, read the `PHOTO_WALL_ADMIN_TOKEN` value from `.env`, and paste it to sign in.
+Then open **`http://127.0.0.1:8000`**, read the `PHOTO_WALL_ADMIN_TOKEN` value from `.env`, and paste it to sign in. You sign in once per browser: the sign-in lasts 30 days, **Log out** in the header ends it, and changing the token signs every browser out (see [signing in and Log out](docs/runbook.md#operator-console-signing-in-and-log-out)).
 
 From the operator interface you can list Players and Outputs, create persistent Frames, bind equipment to them, calibrate (preview / commit / revert), define immutable Sources and Scenes, schedule Programs, and drive Runs. Program times are shown in your browser's local time zone.
 

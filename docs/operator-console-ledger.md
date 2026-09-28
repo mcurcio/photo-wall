@@ -78,3 +78,11 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | P2-S3B-F1 | Review fix cycle 1: planner `candidate_standing` served as `standing`; Scene revision guard (409 `scene_revision_conflict`, flips Question 4's default, owner to confirm); `candidatesApi.js`; recipe-scoped job counts; wording | in_progress | — (working tree) | Under verification. Residual, not built: serve per-frame `projection.diagnostics` to "Check this frame". |
 | P2-S3B-3 | Queue, force and withdraw route (3B-3) | blocked | — | Deferred until the owner answers slice 3 Question 6. |
 | P2-S3B-D | Docs — slice 3B (bead 3B-4: spec errata and fix-cycle decisions, runbook Scene edit / media pipeline / why nothing new, `module-runtime.md` guard, `candidate_standing` in `module-planner.md` and `module-authored-media.md`, README) | in_progress | — | Owner questions 1–6 pending; Question 4 now builds on the guard default. |
+
+### Pass 2, pass A — stay signed in
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| A-1 | Backend: scrypt-keyed total session codec, `admin` dependency (Bearer decides alone, byte compare), sign-in/out routes, no-store middleware and 500 handler | in_progress | a4919db | Verifier PASS (pytest 3059 passed; browser 164 passed; 6 mutation probes red; live curl checks). Security diff review PASS; its P2 (cookie path: now `Path=/v1/operator/`, `__Secure-` over https) fixed in a follow-up (working tree). |
+| A-2 | Console: sign-in screen, Log out, marker header on every operator fetch, 403 alert, harness `sign_in` | in_progress | c97dc58 | Same verifier and review; its P3 (a sign-in 204 now leads to Checking before the first refresh) fixed in the same follow-up (working tree). |
+| A-3 | Docs — pass A (spec errata and fix-cycle changes, runbook signing in and Log out, README sign-in line, ledger) | in_progress | — (working tree) | Owner questions 1–4 pending; builds on their defaults. |

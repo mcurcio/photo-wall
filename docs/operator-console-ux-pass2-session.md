@@ -42,9 +42,9 @@ sequenceDiagram
 | Term | Means | Is not |
 |---|---|---|
 | **Admin token** | `PHOTO_WALL_ADMIN_TOKEN` (at least 32 characters, `app.py:127-129`; `scripts/configure.py:17` generates 64 hex characters) | Stored in any browser |
-| **Session key** | 32 bytes derived **once, at app construction** with `hashlib.scrypt(token UTF-8, salt=b"photo-wall/operator-session/v1", n=2**15, r=8, p=1, maxmem=64 MiB, dklen=32)`: 32 MiB of memory and about 60 ms, measured on the development Mac | Stored anywhere; per request |
+| **Session key** | 32 bytes derived **once, at app construction** with `hashlib.scrypt(token UTF-8, salt=b"photo-wall/operator-session/v1", n=2**15, r=8, p=1, maxmem=64 MiB, dklen=32)`: 32 MiB of memory and about 60 ms, measured on the development Mac. The parameters are module constants in `central/operator_session.py`; tests never lower them, and a pytest pins the key equal to `hashlib.scrypt` with exactly these parameters | Stored anywhere; per request |
 | **Session value** | The cookie's content (§4) | A token, or a database row |
-| **Bound Origin** | The sign-in request's `Origin` (`scheme://host[:port]`), carried inside the MAC | Compared with `Host`; proxies rewrite `Host`, not `Origin` |
+| **Bound Origin** | The sign-in request's `Origin`, carried inside the MAC. It must be `http://` or `https://` followed by an ASCII authority with no path, at most 258 characters (its base64url fits the 344-character `origin` part) | Compared with `Host`; proxies rewrite `Host`, not `Origin`. `null`, `file://`, a path or a longer value is not bindable: sign-in answers 403 `origin_mismatch` |
 | **Marked request** | A request carrying `X-Photo-Wall-Console`, with any value | Proof of identity |
 
 ## 4. Decision table: what the cookie holds
@@ -56,20 +56,20 @@ sequenceDiagram
 | Server-side session row | yes, if rows are tied to the token's hash | one table | yes | the same, revocable per session |
 
 **Format:** `v1.<expires_at>.<nonce>.<origin>.<mac>`, total at most 512 bytes. The parts are:
-- `expires_at`: 10 ASCII digits of unix seconds.
+- `expires_at`: 10 ASCII digits of unix seconds, zero-padded (`%010d`). The test clocks run near unix 1000, where an unpadded value would be shorter.
 - `nonce`: 16 random bytes, base64url (22 characters).
 - `origin`: the bound Origin as base64url, 1 to 344 characters.
 - `mac`: HMAC-SHA256 under the session key over every byte before the last `.`, base64url (43 characters).
 
 **The codec is total: verification returns the session or nothing, and never raises.** The steps, in order:
-1. Match the whole value against one ASCII-only regex (`re.ASCII`, explicit `[0-9]` and `[A-Za-z0-9_-]` classes; no `\d`, so Unicode digits fail).
+1. Match the whole value against one ASCII-only regex (`re.ASCII`, explicit `[0-9]` and `[A-Za-z0-9_-]` classes; no `\d`, so Unicode digits fail). A `\d` without `re.ASCII` would admit Unicode digits and then raise on `.encode("ascii")`; a codec unit test pins this.
 2. Recompute the MAC over the raw prefix bytes and compare it in constant time **before parsing anything**.
 3. Parse `expires_at` and decode `origin`.
 4. Accept only if `now < expires_at ≤ now + 30 days`, using the injected `Clock` (`contracts/time.py:9-11`).
 
 A value that is malformed, oversized, wrongly signed, expired or too far in the future gets **401 `unauthorized`, never 422 or 500**.
 
-**The key:** it is memoized per process by token, so the test suite's many apps (37 `create_app(` sites) pay for it once per distinct token. Every Central process derives the same key, so any process accepts a value minted by another, with no shared state.
+**The key:** it is memoized per process (an `lru_cache` keyed by the token's bytes), so the test suite's many apps (37 `create_app(` sites) pay for it once per distinct token. Every Central process derives the same key, so any process accepts a value minted by another, with no shared state.
 
 **What this gives up:** Log out cannot end a copied cookie before it expires. The only way to end every session is to rotate the token (§9).
 
@@ -77,16 +77,19 @@ A value that is malformed, oversized, wrongly signed, expired or too far in the 
 
 | Route | Auth | Request | Responses (all `Cache-Control: no-store`) |
 |---|---|---|---|
-| `POST /v1/operator/session` | none; must be marked; `Origin` required; `Sec-Fetch-Site`, when sent, must be `same-origin` | JSON `{"token": str}` | **204** plus `Set-Cookie`; **401 `unauthorized`** for a wrong token; **403 `request_unmarked`** or **`origin_mismatch`** (also sent when `Origin` is missing); **422 `invalid_request`**, which never echoes the body (`app.py:302-305`) |
-| `DELETE /v1/operator/session` | none; must be marked | none | **204** plus two clearing `Set-Cookie` headers (below), idempotent; **403 `request_unmarked`** |
+| `POST /v1/operator/session` | none; must be marked; a bindable `Origin` (§3) required; `Sec-Fetch-Site`, when sent, must be `same-origin` | JSON `{"token": str}` | **204** plus `Set-Cookie`; **401 `unauthorized`** for a wrong token; **403 `request_unmarked`** or **`origin_mismatch`** (also sent when `Origin` is missing or not bindable); **422 `invalid_request`**, which never echoes the body (`app.py:302-305`) |
+| `DELETE /v1/operator/session` | none; must be marked | none | **204** plus the clearing `Set-Cookie` headers (below), idempotent; **403 `request_unmarked`** |
 | every other `/v1/operator/*` | `admin` (below) | unchanged | unchanged, plus **403 `request_unmarked` / `origin_mismatch`**; all now `no-store` |
 
+- **The sign-in gate runs first.** The marker, `Origin` and `Sec-Fetch-Site` checks are a dependency, so they run before body validation. The one exception is a body that is not JSON at all, which FastAPI rejects (422 `invalid_request`) before any dependency. Either way no state changes and no cookie is issued.
+- **Log out needs only the marker.** Its `Origin` is read only to decide whether the plain clearing header carries `Secure`.
+
 **The `admin` dependency, in order:**
-1. **Bearer.** If `Authorization` uses the `Bearer` scheme with a non-empty credential, compare it with the token as UTF-8 **bytes** using `secrets.compare_digest`. The result is final.
-2. **Cookie.** Otherwise verify the `__Host-` cookie if it is present, or else the plain one. No usable cookie gets 401.
+1. **Bearer.** If `Authorization` uses the `Bearer` scheme with a non-empty credential, compare the bytes the client **sent** with the token's UTF-8 bytes using `secrets.compare_digest`. The result is final. Starlette decodes headers as latin-1, so `.encode("latin-1")` recovers the sent bytes. The sign-in JSON token is UTF-8 encoded, and a lone surrogate gets 401, never 500. One `SessionCodec.token_matches(bytes)` serves both.
+2. **Cookie.** Otherwise the first name present decides: `__Secure-`, then a legacy `__Host-` cookie from the first build, then the plain one. Only that cookie is verified: an invalid `__Secure-` cookie gets 401 even beside a valid plain one. No usable cookie gets 401.
 3. **Writes.** For any method other than GET, HEAD or OPTIONS:
    - no marker gets 403 `request_unmarked`;
-   - an `Origin` that differs from the bound Origin gets 403 `origin_mismatch`;
+   - an `Origin` that is missing or differs from the bound Origin gets 403 `origin_mismatch` (pytest pins the missing case);
    - a `Sec-Fetch-Site` that is sent and is not `same-origin` gets 403 `origin_mismatch`.
 
 `fastapi.security.HTTPBearer(auto_error=False)` already returns nothing for other schemes and for an empty `Bearer` (probe: `get_authorization_scheme_param("Bearer ")` gives `("Bearer", "")`). A-1 pins both cases with tests.
@@ -95,16 +98,21 @@ A value that is malformed, oversized, wrongly signed, expired or too far in the 
 
 **Players never see cookies.** The `player` dependency and the WebSocket and media bearer checks (`app.py:285-288,425-428,471-479`) never read a cookie. A test sends a valid operator cookie to `/v1/player/config` and asserts 401.
 
-**No-store.** A path-prefix response hook sets `Cache-Control: no-store` on every `/v1/operator/*` response, including error responses from the exception handlers (`app.py:290-309`).
+**No-store.** `Cache-Control: no-store` is on every `/v1/operator/*` response, delivered in two parts:
+- A pure-ASGI path-prefix middleware covers the routes and every `app.exception_handler` response (`app.py:290-309`), including 404 and 405.
+- An `Exception` handler covers unhandled errors. Starlette answers those from its outermost `ServerErrorMiddleware`, outside all user middleware. The handler keeps the old body ("Internal Server Error", 500) and adds `no-store` only under `/v1/operator/`. A pytest forces a 500 on inventory.
 
 **Cookie attributes (no `Domain` on either name).** The name and `Secure` follow the scheme of the sign-in `Origin`.
 
 | Scheme | Issued `Set-Cookie` | Clearing `Set-Cookie` (Log out sends both) |
 |---|---|---|
-| https | `__Host-photo_wall_session=<value>; Path=/; Max-Age=2592000; Secure; HttpOnly; SameSite=Strict` | `__Host-photo_wall_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict` |
-| http | `photo_wall_session=<value>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict` | `photo_wall_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`, plus `Secure` when the logout request's `Origin` is https |
+| https | `__Secure-photo_wall_session=<value>; Path=/v1/operator/; Max-Age=2592000; Secure; HttpOnly; SameSite=Strict` | `__Secure-photo_wall_session=; Path=/v1/operator/; Max-Age=0; Secure; HttpOnly; SameSite=Strict` |
+| http | `photo_wall_session=<value>; Path=/v1/operator/; Max-Age=2592000; HttpOnly; SameSite=Strict` | `photo_wall_session=; Path=/v1/operator/; Max-Age=0; HttpOnly; SameSite=Strict`, plus `Secure` when the logout request's `Origin` is https |
 
-- **`__Host-`** makes the browser accept the cookie only with `Secure`, `Path=/` and no `Domain`, so no sibling host or http page can plant or shadow it.
+Legacy cookies from the first build are cleared on sign-in and on sign-out; until then they are accepted until they expire.
+
+- **Why `Path=/v1/operator/`.** Cookies are scoped by host, not by port ([RFC 6265 §8.5](https://www.rfc-editor.org/rfc/rfc6265#section-8.5)). A `Path=/` cookie would be sent to every service on the same host, such as a photo library on another port of the same NAS, and that service would receive the session value on every request. With `Path=/v1/operator/` the browser sends it only with operator API requests. The console page itself does not need it. The path limits needless exposure; it is not an isolation boundary, because a service on that host that serves `/v1/operator/` would still receive the cookie.
+- **Why `__Secure-`, not `__Host-`.** `__Host-` requires `Path=/`, so it cannot carry the narrower path. `__Secure-` makes the browser accept the cookie only with `Secure` from an https page, so no http page and no on-path http attacker can plant or overwrite it. It does not stop a same-site https host, or another https port on the same host, from planting one (the cookie-tossing row in §8).
 - **Distinct names** mean an http sign-in never collides with an https one; browsers refuse to let an http page overwrite a `Secure` cookie of the same name.
 - **`Max-Age`** is relative, so the browser's clock does not matter; the server's `expires_at` is the authority.
 - **The page load and `SameSite=Strict`:** the console page does not depend on the cookie; the page's own fetches send it.
@@ -140,10 +148,16 @@ stateDiagram-v2
 ```
 
 - **`session.js`** stops holding the token: `setToken` and `getToken` are removed, and the write fence (`noteWrite`, `writeCount`) is unchanged. It exports the marker header, which `useSnapshot.fetchJson` and `apiWrite` send in place of `Authorization`. These are the only two operator fetch sites (`useSnapshot.js:18`, `apiWrite.js:43`). The browser adds `Origin` to same-origin writes by itself.
-- **Sign-in screen:** the "Operator token" field and a **Sign in** button replace the header form. The field is cleared on submit. If a 204 is followed by a 401, the screen says "Your browser did not keep the sign-in; allow cookies for this site."
-- **Signed-in state** comes from Plane A: `authRejected` becomes `signedIn`/`signedOut`, and the mount effect and poll gate become "not signed out". `bootFacts.js` never signs anyone out (`bootFacts.js:13`). A write that gets 401 shows its own error, and the next poll (within 5 s) shows the sign-in screen.
-- **Log out:** a header button sends `DELETE /v1/operator/session`, clears Plane A and shows the sign-in screen.
-- **403 `request_unmarked` / `origin_mismatch`:** "Central refused this write because it did not come from the page you signed in on. Reload the console from the address you signed in at, or sign in again." A proxy that strips headers produces the same message.
+- **Sign in and Log out go through `apiWrite`** (`POST`/`DELETE /v1/operator/session`). The marker header is therefore added in exactly two places (`apiWrite`, `useSnapshot.fetchJson`), and both calls move the write fence like any write.
+- **Sign-in screen:** the "Operator token" field and a **Sign in** button replace the header form. The field is cleared on submit. A 204 moves the console to Checking; only a successful first refresh reaches Signed in. The notices are:
+  - wrong token: "Operator token was not accepted. Re-enter the token to sign in.";
+  - a 204 followed by a 401: "Your browser did not keep the sign-in; allow cookies for this site.";
+  - no answer: "Sign-in failed: Central did not answer. Try again.";
+  - a Plane A 401 while signed in: "Signed out: the session expired or the token changed. Sign in again."
+- **Signed-in state** comes from Plane A: `authRejected` becomes `signedIn`/`signedOut`, and the mount effect and poll gate become "not signed out". `bootFacts.js` never signs anyone out (`bootFacts.js:13`). A write that gets 401 shows its own error, and the next poll (within 5 s) shows the sign-in screen. While checking or signed out, the empty body still reads "Console ready."
+- **Log out:** a header button sends `DELETE /v1/operator/session`, clears Plane A and shows the sign-in screen. If the DELETE fails (network or 5xx), the tab stays signed in and says "Log out failed: Central did not answer. Try again.", because the cookie may still be set.
+- **403 `request_unmarked` / `origin_mismatch`:** one dismissible alert in the shell, raised by `apiWrite` through a `session.js` listener (`onOriginRefused`) rather than added to each caller's message table: "Central refused this write because it did not come from the page you signed in on. Reload the console from the address you signed in at, or sign in again." The caller still shows its own generic failure, and a sign-in refused with 403 shows the same alert. A proxy that strips headers produces the same message.
+- **Browser harness:** `operator_harness.sign_in(page, origin, token=ADMIN)` is the suite's one sign-in step. It clears the browser context's cookies first, because cookies ignore the port and a cookie from an earlier loopback server would otherwise be sent (reads succeed, writes get 403). `operator_server` takes `admin_token=` for the rotation test.
 - **Unchanged:** the write fence, the 5 s cadence, the pause while the tab is hidden, and the dropping of superseded reads.
 
 ## 8. Failure table
@@ -158,8 +172,10 @@ stateDiagram-v2
 | Script injected into the console | Can act as the operator, cannot read the cookie or the token | Fix the injection; CSP `script-src 'self'` stays (`app.py:375`) | `HttpOnly` (browser) |
 | Invalid Bearer sent with a valid cookie | 401 | Fix the script | dependency order (test) |
 | Cross-origin page, including through a CORS-reflecting proxy | 403 `origin_mismatch` or `request_unmarked` | none | bound Origin and marker (tests) |
-| **Cookie tossing over http:** a same-site host or on-path attacker plants `photo_wall_session` | Without the token it can only plant an invalid value (401, so a forced sign-out) or its own valid one | Sign in again; prefer https | **stated cost**; `__Host-` removes this over https |
+| **Cookie tossing:** over http, a same-site host, another port on the same host or an on-path attacker plants `photo_wall_session`; over https, a same-site https host or another https port on the same host plants `__Secure-photo_wall_session` | Without the token it can plant only an invalid value, which gets 401: **a forced sign-out, not a break-in** | Sign in again; prefer https | **stated cost**; `__Secure-` stops http pages and on-path attackers over https, not same-site https hosts |
+| Another service on the same host (a photo library on another port of the NAS) | Receives no session cookie on its own paths | none | `Path=/v1/operator/` (browser); not an isolation boundary (§5) |
 | Operator opens the console at another address (IP instead of name) | Reads work; writes get 403 `origin_mismatch` | Sign in at that address | stated cost of the Origin binding |
+| Operator signed in over http, then opens the same host over https | The plain cookie is still sent over https, so reads work; every write gets 403 `origin_mismatch`, because the bound Origin is `http://…` | Sign in again at the https address | Origin binding (pytest) |
 | Browser blocks cookies | The sign-in 204 is followed by 401; the screen says so | Allow cookies | console copy (browser test) |
 | Central's wall clock jumps | Sessions end early (forward jump), or a backward jump can push `expires_at` beyond `now + 30 days`, which then gets 401 | Sign in again | stated cost |
 | Rolling restart while the token changes | Brief 401s until every process runs the new token | Sign in again | stated cost |
@@ -179,19 +195,20 @@ To rotate, change `PHOTO_WALL_ADMIN_TOKEN` in `.env` (or the deployment secret) 
 
 | Bead | Scope | Estimate |
 |---|---|---|
-| **A-1 backend** | total codec with the scrypt key; the `admin` dependency (§5) with the byte compare, which fixes the non-ASCII 500; the two session routes; the no-store hook; a route-table test that every `/v1/operator/*` route except the two session routes depends on `admin` | ≈180 production, ≈370 test |
+| **A-1 backend** | total codec with the scrypt key; the `admin` dependency (§5) with the byte compare, which fixes the non-ASCII 500; the two session routes; the no-store hook; a route-table test that every `/v1/operator/*` route except the two session routes depends on `admin`. As built: `central/operator_session.py` holds the stdlib codec, the key and the token compare; `central/operator_auth.py` holds `OperatorAuth.admin`, the session routes, the no-store middleware and the 500 handler, mounted from `create_app` (`app.state.operator_auth` is how the route-table test identifies the dependency) | ≈180 production, ≈370 test |
 | **A-2 console** | `session.js`, `useSnapshot`, `apiWrite`, sign-in screen, Log out, 403 copy; the five browser files' repeated sign-in steps (`test_operator_binding_browser.py:51-52` and 4 others) collapse into one harness helper | ≈150 production, ≈150 test |
 | **A-3 docs** | runbook sign-in, rotation and its script breakage, CSRF layers and the `origin_mismatch` remedy; README line 57; errata; ledger rows | ≈60 doc |
 
 **pytest (A-1):**
-- **Issued headers:** the exact attributes for https (`__Host-`, `Secure`, `Path=/`, no `Domain`) and for http.
+- **Issued headers:** the exact attributes for https (`__Secure-`, `Secure`, `Path=/v1/operator/`, no `Domain`) and for http.
 - **Clearing headers:** the exact attributes of both clearing headers, including `Max-Age=0`.
-- **Sign-in refusals:** a wrong token gets 401 with no cookie; a missing Origin or a cross-site `Sec-Fetch-Site` gets 403.
-- **Cookie writes:** a cookie read works; a write gets 403 without the marker, 403 with another Origin, 403 with `Sec-Fetch-Site: same-site`, and 2xx when all checks pass.
+- **Sign-in refusals:** a wrong token gets 401 with no cookie; a missing or unbindable Origin or a cross-site `Sec-Fetch-Site` gets 403.
+- **Cookie writes:** a cookie read works; a write gets 403 without the marker, 403 with a missing or different Origin, 403 with `Sec-Fetch-Site: same-site`, and 2xx when all checks pass; a plain cookie bound to `http://…` sent over https reads but cannot write.
 - **Bearer:** reads and writes work with no marker; an invalid Bearer with a valid cookie gets 401; a `Basic` header or an empty `Bearer` falls through to the cookie; a non-ASCII Bearer gets 401.
 - **Codec:** it rejects values that are malformed, oversized (over 512 bytes), non-ASCII, have Unicode-digit expiries, are tampered, are expired, or have `expires_at > now + 30 days`. Each gets 401.
 - **Rotation:** a cookie from before the rotation gets 401.
-- **Caching:** `no-store` is on 200, 401, 403 and 422 responses and on sign-in and sign-out.
+- **Caching:** `no-store` is on 200, 401, 403, 422 and forced 500 responses and on sign-in and sign-out.
+- **Key:** `session_key` equals `hashlib.scrypt` with §3's exact parameters.
 - **CORS:** a preflight `OPTIONS` returns no `Access-Control-Allow-*` headers.
 - **Players:** a cookie on `/v1/player/config` gets 401.
 
@@ -219,3 +236,4 @@ A is chosen because the owner prefers no migration and there is one principal, s
 ## History
 
 - 2026-09-28, revision 1 (the security review failed revision 0): tokens compared as bytes, fixing the non-ASCII 500; scrypt key derived once per process; total codec with the MAC checked before parsing and a future-expiry cap; writes bound to the sign-in Origin and to `Sec-Fetch-Site` when sent; `__Host-` name over https with `Path=/` and exact clearing headers; the Authorization rule stated precisely; every operator response no-store; costs stated (no rate limit, scripts break on rotation, no HSTS).
+- 2026-09-28, revision 2 (as built, beads A-1 and A-2 and a review fix cycle): the security review's amendments folded in (a missing `Origin` is 403, no-store covers the 500 handler, the scrypt constants are pinned, the http-to-https same-host case is a failure row) with the implementers' choices (zero-padded `expires_at`, the Bearer compared as the bytes sent, the bindable Origin shape, Log out needing only the marker, the shell's 403 alert, a failed Log out keeping the tab signed in, the harness clearing cookies); the cookie moved from `__Host-…; Path=/` to `Path=/v1/operator/` with `__Secure-` over https, because browsers send a host's cookies to every port on it, and legacy cookies are cleared; a sign-in 204 now leads to Checking before the first refresh; cookie tossing stated as a forced sign-out, not a break-in.

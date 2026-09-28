@@ -15,7 +15,7 @@ docker compose up -d --build --wait
 curl --fail http://127.0.0.1:8000/healthz
 ```
 
-Open `http://127.0.0.1:8000`. Read the operator token from the private `.env` file and enter it in the operator interface. The script creates `.env` with mode 0600 and never overwrites it. No credentials are committed. The development listener and database port bind only to loopback. Appliance deployment requires the separately configured HTTPS/PXE trust boundary; this local listener is not that deployment.
+Open `http://127.0.0.1:8000`. Read the operator token from the private `.env` file and enter it once to sign in; the browser stays signed in for 30 days ([signing in and Log out](#operator-console-signing-in-and-log-out)). The script creates `.env` with mode 0600 and never overwrites it. No credentials are committed. The development listener and database port bind only to loopback. Appliance deployment requires the separately configured HTTPS/PXE trust boundary; this local listener is not that deployment.
 
 The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and previews/commits/reverts calibration. It also creates immutable Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Configure the private upstream connection on the worker before creating a Source with its connection ID. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
 
@@ -362,6 +362,37 @@ The operator console edits the wall plan through two admin-authenticated routes 
 `PATCH /v1/operator/frames/{frame_id}` applies a **partial** placement. The body accepts `surface_id`, `x_mm`, `y_mm`, `width_mm` (> 0), and `height_mm` (> 0); any omitted field keeps its stored value — this is a merge, not a replace. Central re-runs the same orientation-coherence guard as Frame creation against the merged dimensions and the stored profile, returning **422** when the resulting aperture orientation would disagree with the display profile. An id that no longer exists returns **404 `unknown_frame`**; on success the response echoes the merged placement. Placement is **last-write-wins with no concurrency token** — two operators dragging the same Frame silently overwrite each other and the plan corrects on the next snapshot — because geometry is operator-only metadata: it never reaches a Player, it is independent of calibration (whose corners and crop are normalized to `[0,1]`), and a move is trivially re-dragged. The route therefore **does not bump `generation` or `configuration_revision` and never invalidates calibration**.
 
 `DELETE /v1/operator/frames/{frame_id}` removes a Frame, but only a clear one. It refuses with **409 `frame_in_use`** when a live Run (phase body or outro) targets the Frame — finish or cancel that Run first — and with **409 `frame_bound`** when an Output is still bound to it — unbind first (`DELETE /v1/operator/frames/{frame_id}/binding`). An unknown id returns **404**. On success it deletes the Frame and returns **200 `{"status": "deleted"}`**. The guards protect one invariant: you cannot delete a Frame a Player is currently bound to serve.
+
+## Operator console: signing in and Log out
+
+The design, its protocol and its failure table are owned by [pass A](operator-console-ux-pass2-session.md).
+
+**Sign in once per browser.** The console opens on a sign-in screen. Paste `PHOTO_WALL_ADMIN_TOKEN` and press **Sign in**. Central sets an `HttpOnly` session cookie that lasts 30 days from sign-in; reloads and new tabs in that browser stay signed in. The token is never stored in the browser. The cookie holds only an expiry, the address you signed in at and a signature. When the 30 days end, the next refresh (within 5 s) shows the sign-in screen again.
+
+**Log out** (in the header) ends the sign-in in this browser only. A cookie copied from this browser keeps working until it expires. To sign out every browser, change the token (below).
+
+**Changing the admin token.** Change `PHOTO_WALL_ADMIN_TOKEN` in `.env` (or the deployment secret) and restart every Central process.
+- Every browser is signed out within 5 s and must sign in with the new token. This is the only "log out everywhere".
+- Every script still using the old token gets 401 until it is given the new one: the `curl` examples in this runbook, `scripts/demo_wall.py` (`DEMO_ADMIN_TOKEN`) and the netboot end-to-end harness (`scripts/test_netboot_e2e.py`).
+- Players are not affected; they authenticate with their own enrollment credentials.
+
+**Scripts keep using the bearer header.** `curl`, the demo and the test harnesses send `Authorization: Bearer <admin-token>` and need no cookie, marker header or `Origin`. A Bearer header decides alone: a wrong one gets 401 even if the request also carries a valid cookie.
+
+**403 on a write.** The console shows one alert: "Central refused this write because it did not come from the page you signed in on." Reads still work. The response's `error` says why:
+
+| `error` | Means | Do |
+|---|---|---|
+| `request_unmarked` | The write lacked the console's `X-Photo-Wall-Console` header. The console always sends it, so a proxy in between is stripping it, or the request did not come from the console. | Check the proxy; scripts should use the bearer header. |
+| `origin_mismatch` | The write came from a different address than the one you signed in at (for example the IP instead of the name, or https after signing in over http), or had no `Origin`. | Reload the console from the address you signed in at, or sign in again at the address you are using. |
+
+**Cookie names.** Over https the cookie is `__Secure-photo_wall_session`, marked `Secure`, so an http page cannot plant or overwrite it. Over http it is `photo_wall_session`. Both are `SameSite=Strict` and have no `Domain`. Legacy cookies from the first build are cleared on sign-in and Log out.
+
+**Why the cookie is scoped to `/v1/operator/`.** Browsers send a host's cookies to every port on that host. If the NAS also runs, for example, a photo library on another port, a cookie scoped to `/` would be sent to that library with every request. Scoping the cookie to `/v1/operator/` means the browser sends it only with the console's API requests. This limits exposure; it is not an isolation boundary.
+
+**Costs you should know.**
+- **No rate limit on sign-in**, as for the bearer header. A token generated by `scripts/configure.py` is 256 bits.
+- **No HSTS.** Central does not pin the host to https, so a first visit over http can be downgraded. Prefer https; over http the cookie also crosses the LAN in clear text.
+- **A forced sign-out is possible.** Another site under the same domain, or another port on the same host, can plant a cookie of the same name. Without the token it can only make you sign in again; it cannot sign in as you.
 
 ## Operator console: refresh, the snapshot-age clock, and the guidance banner
 
