@@ -3,14 +3,11 @@ import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { apiWrite } from "./apiWrite.js";
 import { activationProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
+import { PriorityField, useProblems } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
-import { CheckAnswers } from "./flow/CheckAnswers.jsx";
-import { NEW_KEY } from "./flow/instance.js";
-import { DraftBar } from "./flow/InstanceNotice.jsx";
-import { StepForm } from "./flow/StepForm.jsx";
-import { Stepper } from "./flow/Stepper.jsx";
-import { inStepOrder, stepOfField } from "./flow/steps.js";
+import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
+import { FlowFrame } from "./flow/FlowFrame.jsx";
+import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance } from "./flow/useFlowInstance.js";
 import { ScenePicker } from "./ScenePicker.jsx";
@@ -121,7 +118,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     confirm,
     onOpened: () => setOutcome(null),
   });
-  const { place, step, focus } = flow;
+  const { step, focus } = flow;
 
   // A clean draft follows the Scene the operator last saved or picked; a dirty one, or
   // one whose outcome is unknown (its key must be kept for the retry), is never replaced.
@@ -147,16 +144,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   };
 
   const activate = async () => {
-    if (activating) {
-      return;
-    }
-    if (!problems.check(problemList)) {
-      const first = problemList[0];
-      if (stepOfField(SHOW_FIELD_STEP, first.field) === "review") {
-        focus.openField(first.field);
-      } else {
-        focus.focusWhenShown(() => summaryRef.current);
-      }
+    if (activating || !flow.checkAll(() => summaryRef.current)) {
       return;
     }
     const asked = { sceneId: value.sceneId, priority: Number(priority) };
@@ -215,64 +203,44 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   };
 
   return (
-    <div className="show-now" ref={focus.rootRef}>
-      <div className="show-now__outcome" ref={outcomeRef} tabIndex={-1}>
-        {/* The SYNCHRONOUS activation outcome — shown at the moment, only after an
-            activation (null until then). */}
-        {outcome !== null && (
-          <p className="run-control__outcome" role="status" aria-label="Activation outcome">
+    <FlowFrame
+      className="show-now"
+      flow={flow}
+      draft={draft}
+      keys={SHOW_KEYS}
+      noun="activation"
+      sectionLabel="Now showing"
+      confirm={confirm}
+      problems={problems}
+      savedRef={outcomeRef}
+      newRef={newRef}
+      summaryRef={summaryRef}
+      said={
+        // The SYNCHRONOUS activation outcome — shown at the moment, only after an
+        // activation (null until then).
+        outcome !== null && (
+          <p className="run-control__outcome flow__said" role="status" aria-label="Activation outcome">
             {unknown
               ? UNKNOWN_ACTIVATION
               : "text" in outcome
                 ? outcome.text
                 : admissionSentence(snapshot, outcome.asked, outcome.admission)}
           </p>
-        )}
-        {confirm.confirmation("show-now__status-line")}
-      </div>
-
-      {place === "list" && (
-        <DraftBar
-          dirty={draft.dirty}
-          draftName={SHOW_KEYS.describe(NEW_KEY)}
-          newLabel="Show now"
-          newRef={newRef}
-          onNew={() => flow.start(NEW_KEY, null, { replace: true })}
-          onResume={() => flow.resume({ replace: true })}
-          onDiscard={(event) =>
-            confirm.open(event, flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)))
-          }
-        />
-      )}
-
-      {step !== null && (
-        <>
-          <h2 className="show-now__title">Show a Scene now</h2>
-          <Stepper
-            steps={SHOW_STEPS}
-            current={step}
-            onStep={activating ? undefined : flow.showStep}
-            answered={flow.answered}
-          />
-          <StepForm
-            label="Activate a Scene"
-            heading={HEADINGS[step]}
-            onSubmit={step === "review" ? activate : flow.onContinue}
-            onBack={flow.onBack}
-            submitLabel={step === "review" ? "Activate now" : "Continue"}
-            busy={activating}
-          >
-            <ProblemSummary
-              ref={summaryRef}
-              summary={problems.summary}
-              label="Activation problems"
-              onOpen={flow.openField}
-            />
-            {views[step]()}
-          </StepForm>
-        </>
-      )}
-    </div>
+        )
+      }
+      newLabel="Show now"
+      replace
+      title="Show a Scene now"
+      steps={SHOW_STEPS}
+      formLabel="Activate a Scene"
+      heading={HEADINGS[step]}
+      busy={activating}
+      onWrite={activate}
+      writeLabel="Activate now"
+      problemsLabel="Activation problems"
+    >
+      {step !== null && views[step]()}
+    </FlowFrame>
   );
 }
 
@@ -340,13 +308,12 @@ function ReviewStep({
   const hintId = useId();
   const underneath = priorityValid ? underneathSentence(snapshot, frames, Number(priority)) : null;
   const restartsFor = cycleWording(definitions[value.sceneId]) ?? "plays until finished";
-  const missing = <span className="review__missing">Not chosen</span>;
   return (
     <>
       <CheckAnswers
         onChange={onChange}
         rows={[
-          { label: "Scene", field: "scene", value: value.sceneId === "" ? missing : value.sceneId },
+          { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : value.sceneId },
           { label: "Frames", value: <SceneFramesValue snapshot={snapshot} frames={frames} /> },
           { label: "Priority", field: "priority", value: priorityWords(value, priority, covering) },
           { label: "If it is already running", field: "repeat", value: REPEAT_LABELS[value.repeat] },

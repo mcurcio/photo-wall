@@ -2,7 +2,7 @@ import React from "react";
 
 import { Field } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
-import { CheckAnswers } from "./flow/CheckAnswers.jsx";
+import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import {
   FAVOURITES_CHOICES,
   MEDIA_TYPE_CHOICES,
@@ -202,7 +202,7 @@ export function NameStep({ value, patch, problems, rule, advanced }) {
 export function SourceReview({ value, onChange }) {
   const rows = sourceAnswers(value).map((answer) => ({
     ...answer,
-    value: answer.value ?? <span className="review__missing">Not given</span>,
+    value: answer.value ?? <NotChosen />,
   }));
   return <CheckAnswers rows={rows} onChange={onChange} />;
 }

@@ -87,7 +87,7 @@ export function RunsRegion({ snapshot, route, navigate, recentSceneId, markDraft
         {rows.live.length === 0 ? (
           <p className="run-control__empty">No Run is running.</p>
         ) : (
-          <ul className="run-cards__list" role="list" aria-label="Running Runs">
+          <ul className="card-grid run-cards__list" role="list" aria-label="Running Runs">
             {rows.live.map((row) => (
               <RunCard key={row.run.run_id} row={row} snapshot={snapshot} actions={actions} />
             ))}
@@ -176,7 +176,7 @@ function RunCard({ row, snapshot, actions = null }) {
     });
   }
   return (
-    <li className="run-cards__item" aria-label={`Run ${run.run_id}`}>
+    <li className="card-grid__item" aria-label={`Run ${run.run_id}`}>
       <SummaryCard
         title={`Scene ${run.scene_id}`}
         chip={runChip(row)}
@@ -217,7 +217,7 @@ function EndedRuns({ title, rows, snapshot }) {
   return (
     <>
       <h3 className="run-control__ended-title">{title}</h3>
-      <ul className="run-cards__list" aria-label={`${title} Runs`}>
+      <ul className="card-grid run-cards__list" aria-label={`${title} Runs`}>
         {rows.map((row) => (
           <RunCard key={row.run.run_id} row={row} snapshot={snapshot} />
         ))}

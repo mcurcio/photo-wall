@@ -12,12 +12,10 @@ import {
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { ProblemSummary, useProblems } from "./Field.jsx";
-import { editedId, editKey, NEW_KEY } from "./flow/instance.js";
-import { DraftBar, InstanceNotice } from "./flow/InstanceNotice.jsx";
-import { StepForm } from "./flow/StepForm.jsx";
-import { Stepper } from "./flow/Stepper.jsx";
-import { inStepOrder, stepOfField } from "./flow/steps.js";
+import { useProblems } from "./Field.jsx";
+import { FlowFrame } from "./flow/FlowFrame.jsx";
+import { editedId, editKey } from "./flow/instance.js";
+import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance } from "./flow/useFlowInstance.js";
 import {
@@ -313,16 +311,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   };
 
   const onSave = async () => {
-    if (saving || stale) {
-      return;
-    }
-    if (!problems.check(problemList)) {
-      const first = problemList[0];
-      if (stepOfField(SCENE_FIELD_STEP, first.field) === "review") {
-        focus.openField(first.field);
-      } else {
-        focus.focusWhenShown(() => summaryRef.current);
-      }
+    if (saving || stale || !flow.checkAll(() => summaryRef.current)) {
       return;
     }
     const sceneId = editingId ?? draftId(value);
@@ -404,14 +393,26 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   };
 
   const stepLabel = steps.find((candidate) => candidate.id === step)?.label ?? "";
-  const draftName = SCENE_KEYS.describe(draft.key);
 
   return (
-    <div className="scene-flow" ref={focus.rootRef}>
-      <div className="scene-flow__saved" ref={savedRef} tabIndex={-1}>
-        {confirm.confirmation("scene-flow__status-line")}
-        {place === "list" && saved !== null && !draft.dirty && (
-          <div className="record__actions" role="group" aria-label={`Next for Scene ${saved}`}>
+    <FlowFrame
+      flow={flow}
+      draft={draft}
+      keys={SCENE_KEYS}
+      noun="Scene"
+      sectionLabel="Scenes"
+      unavailableReason={UNAUTHORABLE_REASON}
+      confirm={confirm}
+      problems={problems}
+      savedRef={savedRef}
+      newRef={newRef}
+      summaryRef={summaryRef}
+      writeRef={saveRef}
+      next={
+        place === "list" &&
+        saved !== null &&
+        !draft.dirty && (
+          <div className="record__actions flow__said" role="group" aria-label={`Next for Scene ${saved}`}>
             <button type="button" onClick={() => showNow(saved)}>
               Show now
             </button>
@@ -419,85 +420,36 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
               Schedule it
             </button>
           </div>
-        )}
-      </div>
-
-      {place === "list" && (
-        <>
-          <DraftBar
-            dirty={draft.dirty}
-            draftName={draftName}
-            newLabel="New Scene"
-            newRef={newRef}
-            onNew={() => flow.start(NEW_KEY)}
-            onResume={() => flow.resume()}
-            onDiscard={(event) =>
-              confirm.open(
-                event,
-                flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)),
-              )
-            }
-          />
-          <SceneList
-            snapshot={snapshot}
-            onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
-            onShowNow={showNow}
-            onSchedule={schedule}
-          />
-        </>
-      )}
-
-      <InstanceNotice
-        place={place}
-        draftName={draftName}
-        targetName={flow.routeKey === null ? "" : SCENE_KEYS.describe(flow.routeKey)}
-        noun="Scene"
-        unavailableReason={UNAUTHORABLE_REASON}
-        sectionHref="#/scenes"
-        sectionLabel="Scenes"
-        onResume={() => flow.resume({ replace: true })}
-        onDiscard={flow.discardForRoute}
-      />
-
-      {step !== null && (
-        <>
-          <h2 className="scene-flow__title">
-            {editingId === null ? "New Scene" : `Edit Scene ${editingId}`}
-          </h2>
-          <Stepper
-            steps={steps}
-            current={step}
-            onStep={saving ? undefined : flow.showStep}
-            answered={flow.answered}
-          />
-          <StepForm
-            label="Author a Scene"
-            heading={HEADINGS[step] ?? stepLabel}
-            onSubmit={step === "review" ? onSave : flow.onContinue}
-            onBack={flow.onBack}
-            submitLabel={
-              step !== "review" ? "Continue" : editingId === null ? "Save Scene" : "Replace Scene"
-            }
-            submitDisabled={step === "review" && (saving || stale)}
-            busy={saving}
-            submitRef={saveRef}
-          >
-            {vanished !== null && (
-              <p className="scene-flow__vanished notice notice--warn" role="status">
-                {vanished}
-              </p>
-            )}
-            <ProblemSummary
-              ref={summaryRef}
-              summary={problems.summary}
-              label="Scene problems"
-              onOpen={flow.openField}
-            />
-            {views[step]()}
-          </StepForm>
-        </>
-      )}
-    </div>
+        )
+      }
+      newLabel="New Scene"
+      cards={
+        <SceneList
+          snapshot={snapshot}
+          onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
+          onShowNow={showNow}
+          onSchedule={schedule}
+        />
+      }
+      title={editingId === null ? "New Scene" : `Edit Scene ${editingId}`}
+      steps={steps}
+      formLabel="Author a Scene"
+      heading={HEADINGS[step] ?? stepLabel}
+      busy={saving}
+      onWrite={onSave}
+      writeLabel={editingId === null ? "Save Scene" : "Replace Scene"}
+      writeDisabled={saving || stale}
+      problemsLabel="Scene problems"
+      notice={
+        vanished !== null && (
+          <p className="scene-flow__vanished notice notice--warn" role="status">
+            {vanished}
+          </p>
+        )
+      }
+    >
+      {step !== null && views[step]()}
+    </FlowFrame>
   );
 }
 

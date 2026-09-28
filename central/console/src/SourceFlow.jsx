@@ -3,11 +3,8 @@ import React, { useCallback, useMemo, useRef, useState } from "react";
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { ProblemSummary, useProblems } from "./Field.jsx";
-import { NEW_KEY } from "./flow/instance.js";
-import { DraftBar, HandOffNotice } from "./flow/InstanceNotice.jsx";
-import { StepForm } from "./flow/StepForm.jsx";
-import { Stepper } from "./flow/Stepper.jsx";
+import { useProblems } from "./Field.jsx";
+import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
@@ -111,7 +108,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     confirm,
     handOff,
   });
-  const { place, step, focus } = flow;
+  const { step, focus } = flow;
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
   // the cards refresh exactly once after the write.
@@ -123,21 +120,8 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     [mutate],
   );
 
-  /** "Discard and return": close the draft (asking first when it holds changes), then leave. */
-  const discardAndReturn = (event) => {
-    if (draft.dirty) {
-      confirm.open(event, flow.discardRequest(flow.leave));
-    } else {
-      flow.discard(flow.leave);
-    }
-  };
-
   const onSave = async () => {
-    if (saving) {
-      return;
-    }
-    if (!problems.check(problemList)) {
-      focus.focusWhenShown(() => summaryRef.current);
+    if (saving || !flow.checkAll(() => summaryRef.current)) {
       return;
     }
     const ref = value.sourceRef.trim();
@@ -177,62 +161,32 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   };
 
   return (
-    <div className="source-flow" ref={focus.rootRef}>
-      <div className="source-flow__saved" ref={savedRef} tabIndex={-1}>
-        {confirm.confirmation("source-flow__status-line")}
-      </div>
-
-      <HandOffNotice handOff={handOff} noun="photo source" onDiscard={discardAndReturn} />
-
-      {place === "list" && (
-        <>
-          <DraftBar
-            dirty={draft.dirty}
-            draftName={SOURCE_KEYS.describe(NEW_KEY)}
-            newLabel="New source"
-            newRef={newRef}
-            onNew={() => flow.start(NEW_KEY)}
-            onResume={() => flow.resume()}
-            onDiscard={(event) =>
-              confirm.open(
-                event,
-                flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)),
-              )
-            }
-          />
-          <SourceCards sources={sources} onRefresh={refreshSource} />
-        </>
-      )}
-
-      {step !== null && (
-        <>
-          <h2 className="source-flow__title">New photo source</h2>
-          <Stepper
-            steps={SOURCE_STEPS}
-            current={step}
-            onStep={saving ? undefined : flow.showStep}
-            answered={flow.answered}
-          />
-          <StepForm
-            label="Configure a Source"
-            heading={HEADINGS[step]}
-            onSubmit={step === "review" ? onSave : flow.onContinue}
-            onBack={flow.onBack}
-            submitLabel={step === "review" ? "Save source" : "Continue"}
-            submitDisabled={step === "review" && saving}
-            busy={saving}
-          >
-            <ProblemSummary
-              ref={summaryRef}
-              summary={problems.summary}
-              label="Source problems"
-              onOpen={flow.openField}
-            />
-            {views[step]()}
-          </StepForm>
-        </>
-      )}
-    </div>
+    <FlowFrame
+      flow={flow}
+      draft={draft}
+      keys={SOURCE_KEYS}
+      noun="photo source"
+      sectionLabel="Photo sources"
+      confirm={confirm}
+      problems={problems}
+      savedRef={savedRef}
+      newRef={newRef}
+      summaryRef={summaryRef}
+      handOff={handOff}
+      newLabel="New source"
+      cards={<SourceCards sources={sources} onRefresh={refreshSource} />}
+      title="New photo source"
+      steps={SOURCE_STEPS}
+      formLabel="Configure a Source"
+      heading={HEADINGS[step]}
+      busy={saving}
+      onWrite={onSave}
+      writeLabel="Save source"
+      writeDisabled={saving}
+      problemsLabel="Source problems"
+    >
+      {step !== null && views[step]()}
+    </FlowFrame>
   );
 }
 
@@ -248,9 +202,9 @@ function SourceCards({ sources, onRefresh }) {
     return <p className="showrunner__empty">No Sources yet.</p>;
   }
   return (
-    <ul className="source-list" role="list">
+    <ul className="card-grid" role="list">
       {sources.map((source) => (
-        <li key={source.source_ref} className="source-list__item">
+        <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={source.source_ref}
             lines={[

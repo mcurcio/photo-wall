@@ -4,12 +4,9 @@ import { apiWrite } from "./apiWrite.js";
 import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { ProblemSummary, useProblems } from "./Field.jsx";
+import { useProblems } from "./Field.jsx";
 import { sameValue } from "./flow/draftState.js";
-import { NEW_KEY } from "./flow/instance.js";
-import { DraftBar } from "./flow/InstanceNotice.jsx";
-import { StepForm } from "./flow/StepForm.jsx";
-import { Stepper } from "./flow/Stepper.jsx";
+import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
@@ -329,27 +326,21 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
       aria-label="Programs"
     >
       <h2 className="showrunner__region-title">Programs</h2>
-      <div className="program-flow" ref={focus.rootRef}>
-        <div className="program-flow__saved" ref={savedRef} tabIndex={-1}>
-          {confirm.confirmation("program-flow__status-line")}
-        </div>
-
-        {flow.place === "list" && (
+      <FlowFrame
+        flow={flow}
+        draft={draft}
+        keys={SCHEDULE_KEYS}
+        noun="Program"
+        sectionLabel="Schedule"
+        confirm={confirm}
+        problems={problems}
+        savedRef={savedRef}
+        newRef={newRef}
+        summaryRef={summaryRef}
+        writeRef={saveRef}
+        newLabel="Schedule a Program"
+        cards={
           <>
-            <DraftBar
-              dirty={draft.dirty}
-              draftName={SCHEDULE_KEYS.describe(draft.key)}
-              newLabel="Schedule a Program"
-              newRef={newRef}
-              onNew={() => flow.start(NEW_KEY)}
-              onResume={() => flow.resume()}
-              onDiscard={(event) =>
-                confirm.open(
-                  event,
-                  flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)),
-                )
-              }
-            />
             <p className="field__hint program-flow__intro">
               Each Program shows one Scene during one window. Several separate windows —
               individual Programs, each stored and removed on its own — can be added at once
@@ -373,44 +364,19 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
               </>
             )}
           </>
-        )}
-
-        {step !== null && (
-          <>
-            <h2 className="program-flow__title">New Program</h2>
-            <Stepper
-              steps={SCHEDULE_STEPS}
-              current={step}
-              onStep={saving ? undefined : flow.showStep}
-              answered={flow.answered}
-            />
-            <StepForm
-              label="Schedule a Program"
-              heading={HEADINGS[step]}
-              onSubmit={step === "review" ? onSave : flow.onContinue}
-              onBack={flow.onBack}
-              submitLabel={
-                step !== "review"
-                  ? "Continue"
-                  : separateWindows(value)
-                    ? "Add separate windows"
-                    : "Schedule Program"
-              }
-              submitDisabled={step === "review" && saving}
-              busy={saving}
-              submitRef={saveRef}
-            >
-              <ProblemSummary
-                ref={summaryRef}
-                summary={problems.summary}
-                label="Program problems"
-                onOpen={flow.openField}
-              />
-              {views[step]()}
-            </StepForm>
-          </>
-        )}
-      </div>
+        }
+        title="New Program"
+        steps={SCHEDULE_STEPS}
+        formLabel="Schedule a Program"
+        heading={HEADINGS[step]}
+        busy={saving}
+        onWrite={onSave}
+        writeLabel={separateWindows(value) ? "Add separate windows" : "Schedule Program"}
+        writeDisabled={saving}
+        problemsLabel="Program problems"
+      >
+        {step !== null && views[step]()}
+      </FlowFrame>
     </section>
   );
 }
@@ -429,12 +395,12 @@ const STATE_CHIPS = {
  */
 function ProgramCards({ programs, snapshot, onRemove }) {
   return (
-    <ul className="program-cards" role="list">
+    <ul className="card-grid" role="list">
       {programs.map((program) => {
         const id = program.program_id;
         const state = programState(snapshot, id);
         return (
-          <li key={id} className="program-cards__item">
+          <li key={id} className="card-grid__item">
             <SummaryCard
               title={`Program ${id}`}
               chip={STATE_CHIPS[state.state] ?? null}

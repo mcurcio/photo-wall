@@ -32,9 +32,9 @@ export function SceneList({ snapshot, onEdit, onShowNow, onSchedule }) {
   const programs = Object.values(runtime?.programs ?? {});
   const live = (runtime?.current?.runs ?? []).filter((run) => LIVE_PHASES.has(run.phase));
   return (
-    <ul className="scene-list" role="list">
+    <ul className="card-grid scene-list" role="list">
       {scenes.map((scene) => (
-        <li key={scene.scene_id} className="scene-list__item">
+        <li key={scene.scene_id} className="card-grid__item">
           <SceneCard
             scene={scene}
             snapshot={snapshot}

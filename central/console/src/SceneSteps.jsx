@@ -4,7 +4,7 @@ import { draftId, idFromName } from "./authoring.js";
 import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
-import { CheckAnswers } from "./flow/CheckAnswers.jsx";
+import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
@@ -246,7 +246,7 @@ export function ReviewStep({
   onChange,
 }) {
   const authored = value.mode === "authored";
-  const missing = <span className="review__missing">Not chosen</span>;
+  const missing = <NotChosen />;
   const rows = [
     { label: SCENE_ANSWER_LABELS.mode, field: "mode", value: KIND_LABELS[value.mode] },
     {
