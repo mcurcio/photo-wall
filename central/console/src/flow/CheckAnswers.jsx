@@ -33,3 +33,8 @@ export function CheckAnswers({ rows, onChange, label = "Your answers" }) {
     </dl>
   );
 }
+
+/** How a check-answers value not yet given reads. */
+export function NotChosen() {
+  return <span className="review__missing">Not chosen</span>;
+}

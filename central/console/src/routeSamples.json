@@ -10,7 +10,12 @@
       "#/scenes/new/review",
       "#/scenes/sample-scene/edit/review"
     ],
-    "schedule": ["#/schedule", "#/schedule/new/scene", "#/schedule/new/review"],
+    "schedule": [
+      "#/schedule",
+      "#/schedule/new/scene",
+      "#/schedule/new/when",
+      "#/schedule/new/review"
+    ],
     "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review"]
   },
   "wall": {

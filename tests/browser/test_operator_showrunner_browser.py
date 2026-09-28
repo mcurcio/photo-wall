@@ -31,11 +31,14 @@ from console_tasks import (
     go,
     scene_continue,
     scene_form,
+    schedule_continue,
+    schedule_form,
     schedule_program,
     show_advanced,
     show_now,
     source_continue,
     start_scene,
+    start_schedule,
     start_source,
     visit,
 )
@@ -627,10 +630,9 @@ def test_n_window_helper_creates_separate_programs(page, registry):
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
-
-        multi = programs.get_by_role("group", name="Create separate windows", exact=True)
-        multi.get_by_label("Number of windows", exact=True).fill("3")
+        # Bead 4: "Number of windows" sits under the When step's Advanced, and the write
+        # is Review's "Add separate windows".
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
 
         # The helper fans out into N discrete PUTs — one stored Program each.
         seen = []
@@ -638,7 +640,7 @@ def test_n_window_helper_creates_separate_programs(page, registry):
             seen.append(req.url)
             if req.method == "PUT" and "/v1/operator/programs/" in req.url
             else None))
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
 
         # Three separate Programs are now listed, by three distinct ids.
         for index in (1, 2, 3):
@@ -663,15 +665,25 @@ def test_programs_region_implies_no_recurrence_rule(page, registry):
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_be_visible()
 
-        # The honest N-window copy is present (so the negative assertions below
-        # are not vacuously true): separate windows / individual Programs.
-        copy = programs.inner_text().lower()
-        assert "separate windows" in copy
-        assert "individual programs" in copy
+        # Bead 4: the helper lives under the When step's Advanced; the Schedule page
+        # names it, and so does the helper itself. Both are held to the same honesty.
+        visit(page, "#/schedule/new/when")
+        schedule_form(page).get_by_role("button", name="Advanced", exact=True).click()
+        expect(programs.get_by_role("group", name="Create separate windows", exact=True)
+               ).to_be_visible()
+        helper_copy = programs.inner_text().lower()
+        go(page, "schedule")
+        page_copy = programs.inner_text().lower()
 
-        # No recurrence language anywhere in the region.
-        assert "recurring" not in copy
-        assert "recurrence" not in copy
+        for copy in (page_copy, helper_copy):
+            # The honest N-window copy is present (so the negative assertions below
+            # are not vacuously true): separate windows / individual Programs.
+            assert "separate windows" in copy
+            assert "individual programs" in copy
+
+            # No recurrence language anywhere in the region.
+            assert "recurring" not in copy
+            assert "recurrence" not in copy
 
 
 # Bead 16 — Run control + activation outcome + "why" panel (SR-runs).
@@ -741,6 +753,8 @@ def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, regi
 
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
+        # Past Programs are collapsed until asked for.
+        expect(programs.get_by_label("Program late", exact=True)).not_to_be_visible()
         programs.get_by_text("Past (2)", exact=True).click()
         missed = "Missed: its window had ended before Central first scheduled it."
         expect(programs.get_by_label("Program late", exact=True)).to_contain_text(missed)
@@ -1432,15 +1446,17 @@ def test_the_windows_helper_follows_the_weekday_mask(page, registry):
         connect(page, origin)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         # 1 March 2027 is a Monday.
-        schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
-                         "2027-03-01T20:00", 0, submit=False)
-        multi = _windows(page)
-        repeat = multi.get_by_role("group", name="Repeat on", exact=True)
+        form = schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
+                                "2027-03-01T20:00", 0, windows=6, submit=False)
+        # Review's Change opens When's Advanced at the mask (bead 4).
+        form.get_by_role("button", name="Change Repeat on", exact=True).click()
+        repeat = _windows(page).get_by_role("group", name="Repeat on", exact=True)
+        expect(repeat.get_by_label("Monday", exact=True)).to_be_focused()
         for day in ("Saturday", "Sunday"):
             repeat.get_by_label(day, exact=True).uncheck()
-        multi.get_by_label("Number of windows", exact=True).fill("6")
+        schedule_continue(page, "Review")
         bodies = _program_puts(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs.get_by_role("status")).to_have_text("Created 6 separate Programs.")
         days = ("01", "02", "03", "04", "05", "08")
@@ -1460,11 +1476,12 @@ def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry)
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_contain_text("Times in Europe/London")
         # British Summer Time starts at 01:00 UTC on Sunday 28 March 2027.
-        schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
-                         "2027-03-27T20:00", 0, submit=False)
-        _windows(page).get_by_label("Number of windows", exact=True).fill("2")
+        form = schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
+                                "2027-03-27T20:00", 0, windows=2, submit=False)
+        # Review names the zone too, beside the times it lists (bead 4).
+        expect(form).to_contain_text("Times in Europe/London")
         bodies = _program_puts(page)
-        _windows(page).get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(programs.get_by_label("Program evening-2", exact=True)).to_be_visible()
         first, second = sorted(bodies, key=lambda body: body["program_id"])
         # 18:00 GMT then 18:00 BST: 23 hours apart, not 24.
@@ -1479,21 +1496,27 @@ def test_the_windows_helper_refuses_overlap_and_overlong_ids(page, registry):
         connect(page, origin)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         bodies = _program_puts(page)
-        form = page.get_by_role("region", name="Programs", exact=True).get_by_role(
-            "form", name="Schedule a Program", exact=True)
+        # Bead 4: the overlap is the When step's (it asks the window and the helper), so
+        # its Continue refuses it before the name is asked.
+        form = start_schedule(page)
+        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
+        schedule_continue(page, "When")
         # A 25 h window repeated daily: each would overlap the next.
-        schedule_program(page, "Marathon", SCENE_ID, "2027-03-01T18:00",
-                         "2027-03-02T19:00", 0, submit=False)
-        multi = _windows(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_label("Window start", exact=True).fill("2027-03-01T18:00")
+        form.get_by_label("Window end", exact=True).fill("2027-03-02T19:00")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        _windows(page).get_by_label("Number of windows", exact=True).fill("3")
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(
             "Each window must end before the next starts.")
 
         # An id whose window ids pass 128 characters.
+        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
+        schedule_continue(page, "Review")
+        form.get_by_label("Program name", exact=True).fill("Marathon")
         form.get_by_role("button", name="Change", exact=True).click()
         form.get_by_label("Id", exact=True).fill("x" * 127)
-        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(
             f"Name too long: {'x' * 127}-3 must be at most 128 characters.")
         assert bodies == []
@@ -1509,20 +1532,22 @@ def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry)
         connect(page, origin)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         programs = page.get_by_role("region", name="Programs", exact=True)
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
-        multi = _windows(page)
-        multi.get_by_label("Number of windows", exact=True).fill("3")
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
         answer_first(page, f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "internal"}'))
         bodies = _program_puts(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        send = form.get_by_role("button", name="Add separate windows", exact=True)
+        send.click()
         expect(programs.get_by_role("status")).to_have_text(
             f"Created 2 of 3 separate Programs. Not confirmed: {PROGRAM_ID}-2; Central did "
             "not answer. Add separate windows again to send only these.")
-        expect(programs.get_by_label(f"Program {PROGRAM_ID}-2", exact=True)).to_have_count(0)
+        # Bead 4: the flow stays on Review with the draft, so it can be sent again (the
+        # cards, and so the missing window's absence, show once every window is stored).
+        expect(send).to_be_enabled()
+        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
 
         bodies.clear()
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        send.click()
         expect(programs.get_by_role("status")).to_have_text("Created 3 separate Programs.")
         assert [body["program_id"] for body in bodies] == [f"{PROGRAM_ID}-2"]
         for index in (1, 2, 3):
@@ -1536,12 +1561,14 @@ def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registr
         connect(page, origin)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         bodies = _program_puts(page)
-        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
-        multi = _windows(page)
-        count = multi.get_by_label("Number of windows", exact=True)
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
+        # Bead 4: the count is When's (under Advanced); its Continue refuses it.
+        form.get_by_role("button", name="Change Number of windows", exact=True).click()
+        count = _windows(page).get_by_label("Number of windows", exact=True)
+        expect(count).to_be_focused()
         count.fill("0")
         expect(count).to_have_accessible_description("Between 1 and 60 windows.")
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(count).to_have_value("0")
         expect(count).to_be_focused()
         count.fill("61")

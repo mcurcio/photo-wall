@@ -34,7 +34,7 @@ import { useFlowFocus } from "./useFlowFocus.js";
  * from the first step to the section. A step before the current one is `answered`
  * once it has been shown in this draft (an edit's stored values answer them all), so
  * a typed URL that skips steps ticks none of them. The container's final write checks
- * every problem itself (unscoped) and ends with `finish()`.
+ * every problem (unscoped, `checkAll`) and ends with `finish()`.
  *
  * FINISH. After the write, `finish(focusAfter?)` closes the draft. Only if the location
  * still names this instance (read at that moment: the operator may have left while
@@ -279,6 +279,27 @@ export function useFlowInstance({
     showStep(next);
   };
 
+  /**
+   * The final write's check (Review's Save): every problem, unscoped. True when there is
+   * nothing to fix; otherwise nothing is sent and focus goes to the first problem's
+   * field when the step shown asks it (opening its Advanced), else to the problem
+   * summary `summary()` returns, whose entries route to their steps.
+   *
+   * @param {() => HTMLElement|null} summary
+   */
+  const checkAll = (summary) => {
+    if (problems.check(problemList)) {
+      return true;
+    }
+    const first = problemList[0];
+    if (stepOfField(fieldStep, first.field) === step) {
+      focus.openField(first.field);
+    } else {
+      focus.focusWhenShown(summary);
+    }
+    return false;
+  };
+
   const onBack = () => {
     const previous = previousStep(steps, step);
     if (previous === null) {
@@ -334,6 +355,7 @@ export function useFlowInstance({
     openField,
     onContinue,
     onBack,
+    checkAll,
     finish,
   };
 }

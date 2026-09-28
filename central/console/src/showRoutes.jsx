@@ -66,7 +66,15 @@ export const showRoutes = Object.freeze(
     {
       section: "schedule",
       label: "Schedule",
-      render: ({ snapshot }) => <ProgramsRegion snapshot={snapshot} />,
+      render: ({ snapshot, route, navigate, recentSceneId, markDraft }) => (
+        <ProgramsRegion
+          snapshot={snapshot}
+          route={route}
+          navigate={navigate}
+          recentSceneId={recentSceneId}
+          markDraft={markDraft}
+        />
+      ),
       samplePaths: SAMPLES.show.schedule,
     },
     {

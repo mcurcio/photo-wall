@@ -421,7 +421,10 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         go(page, "scenes")
         next_actions.get_by_role("button", name="Schedule it", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()
-        assert _hash(page) == "#/schedule"
+        # Bead 4: "Schedule it" opens the Schedule flow at its Scene step, prefilled.
+        assert _hash(page) == "#/schedule/new/scene"
+        expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
+            "Scene", exact=True)).to_have_value("saved-scene")
 
 
 # --- Review fixes (bead 2 review).

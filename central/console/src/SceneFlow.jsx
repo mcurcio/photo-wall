@@ -224,7 +224,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   };
   const schedule = (sceneId) => {
     rememberScene(sceneId);
-    navigate({ section: "schedule" });
+    navigate({ section: "schedule", flow: "new", step: "scene" }); // prefilled with it
   };
 
   // --- A new Source, made inline (NEW SOURCE above). The return reads this render's

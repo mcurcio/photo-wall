@@ -23,6 +23,10 @@ at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_contin
 As of bead 3 a Photo source is added in the Source flow (#/sources/new/<step>): "New
 source", then What to include → Name → Review. `add_source` walks it; `start_source`,
 `source_continue`, `source_form` and `answer_connection` are its parts.
+
+As of bead 4 a Program is scheduled in the Schedule flow (#/schedule/new/<step>): "Schedule
+a Program" on the Schedule page, then Scene → When → Review. `schedule_program` walks it;
+`start_schedule`, `schedule_continue` and `schedule_form` are its parts.
 """
 
 from collections.abc import Mapping
@@ -247,27 +251,68 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
     return info.value
 
 
-def schedule_program(page, program, scene_id, start, end, priority, *, submit=True):
+def schedule_form(page):
+    """The Schedule flow's current step: the form "Schedule a Program" in the Programs region.
+    Every step renders it, with the step's fields and its Back and Continue (Review:
+    "Schedule Program", or "Add separate windows" for more than one window)."""
+    return page.get_by_role("region", name="Programs", exact=True).get_by_role(
+        "form", name="Schedule a Program", exact=True)
+
+
+def schedule_continue(page, step=None):
+    """Press the Schedule flow's Continue; with `step` (a stepper label: "When" or
+    "Review"), wait until that step shows."""
+    schedule_form(page).get_by_role("button", name="Continue", exact=True).click()
+    if step is not None:
+        expect(page.get_by_role("navigation", name="Steps", exact=True).locator(
+            "[aria-current=step]")).to_contain_text(step)
+
+
+def start_schedule(page):
+    """Go to Schedule and press "Schedule a Program"; returns the flow's form, on the Scene
+    step (prefilled with the Scene last saved or picked on a Scene card, if any)."""
+    go(page, "schedule")
+    page.get_by_role("region", name="Programs", exact=True).get_by_role(
+        "button", name="Schedule a Program", exact=True).click()
+    return schedule_form(page)
+
+
+def schedule_program(page, program, scene_id, start, end, priority=None, *, windows=None,
+                     submit=True):
     """Schedule Program `program` of Scene `scene_id` over one window, at `priority`.
 
-    `start` and `end` are `datetime-local` values in the browser's time zone. With
-    `submit`, schedules it and returns the PUT response; without it, returns the filled
-    form (the "separate windows" helper then reads these fields).
+    Walks the Schedule flow (flow design §7 J6): Scene → When → Review. `scene_id` None
+    keeps the Scene step's prefill. `start` and `end` are `datetime-local` values in the
+    browser's time zone. `windows` fills "Number of windows" under When's Advanced (the
+    separate-windows helper); None keeps the default, one window. The Program name is
+    typed on Review; `priority` fills "Priority" under Review's Advanced (None keeps the
+    default, 0).
+
+    With `submit`, sends it ("Schedule Program", or "Add separate windows" for more than
+    one window) and returns the first Program PUT response; without it, returns the flow's
+    form on Review, filled and unsent.
     """
-    go(page, "schedule")
-    form = page.get_by_role("region", name="Programs", exact=True).get_by_role(
-        "form", name="Schedule a Program", exact=True)
-    form.get_by_label("Program name", exact=True).fill(program)
-    form.get_by_label("Scene", exact=True).select_option(scene_id)
+    form = start_schedule(page)
+    if scene_id is not None:
+        form.get_by_label("Scene", exact=True).select_option(scene_id)
+    schedule_continue(page, "When")
     form.get_by_label("Window start", exact=True).fill(start)
     form.get_by_label("Window end", exact=True).fill(end)
-    form.get_by_label("Priority", exact=True).fill(str(priority))
+    if windows is not None:
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        form.get_by_label("Number of windows", exact=True).fill(str(windows))
+    schedule_continue(page, "Review")
+    form.get_by_label("Program name", exact=True).fill(program)
+    if priority is not None:
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        form.get_by_label("Priority", exact=True).fill(str(priority))
     if not submit:
         return form
+    action = "Schedule Program" if windows in (None, 1) else "Add separate windows"
     with page.expect_response(
         lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
     ) as info:
-        form.get_by_role("button", name="Schedule Program", exact=True).click()
+        form.get_by_role("button", name=action, exact=True).click()
     return info.value
 
 

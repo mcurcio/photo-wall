@@ -496,10 +496,16 @@ export function planWindows({ start, end, weekdays, count }) {
   return windows;
 }
 
+// The fields the helper's windows are planned from.
+const PLANNED_FROM = new Set(["start", "end", "weekdays", "count"]);
+
 /**
  * The helper's problems (§6 Windows): the Program problems without the base
- * id's collision (it is never stored), then the mask, the count, and — once
- * those are sound — each window id's length and collision, and no overlap.
+ * id's collision (it is never stored), then the mask, the count; once the
+ * windows can be planned (start, end, mask and count sound), no overlap; and
+ * once the name gives an id too, each window id's length and collision. The
+ * overlap does not wait for the name, so the step that asks the window (the
+ * Schedule flow's When) can say so before the name is asked.
  *
  * @param {{name: string, idOverride: string|null, sceneId: string, start: string,
  *          end: string, priority: string|number, weekdays: boolean[],
@@ -509,7 +515,8 @@ export function planWindows({ start, end, weekdays, count }) {
  * @returns {Problem[]}
  */
 export function windowProblems(draft, existingIds, now) {
-  const problems = [...identityProblems("Program", draft, new Set()), ...scheduleProblems(draft, now)];
+  const identity = identityProblems("Program", draft, new Set());
+  const problems = [...identity, ...scheduleProblems(draft, now)];
   if (!draft.weekdays.some(Boolean)) {
     problems.push({ field: "weekdays", message: "Tick at least one weekday." });
   }
@@ -517,7 +524,14 @@ export function windowProblems(draft, existingIds, now) {
   if (!(Number.isInteger(count) && count >= 1 && count <= MAX_WINDOWS)) {
     problems.push({ field: "count", message: `Between 1 and ${MAX_WINDOWS} windows.` });
   }
-  if (problems.length > 0) {
+  if (problems.some((problem) => PLANNED_FROM.has(problem.field))) {
+    return problems;
+  }
+  const windows = planWindows({ ...draft, count });
+  if (windows.some((window, index) => index > 0 && windows[index - 1].endsAt > window.startsAt)) {
+    problems.push({ field: "weekdays", message: "Each window must end before the next starts." });
+  }
+  if (identity.length > 0) {
     return problems;
   }
   const id = draftId(draft);
@@ -530,16 +544,12 @@ export function windowProblems(draft, existingIds, now) {
     });
     return problems;
   }
-  const windows = planWindows({ ...draft, count });
   windows.forEach((_window, index) => {
     const windowId = `${id}-${index + 1}`;
     if (existingIds.has(windowId)) {
       problems.push({ field: idField, message: `${windowId} already exists.` });
     }
   });
-  if (windows.some((window, index) => index > 0 && windows[index - 1].endsAt > window.startsAt)) {
-    problems.push({ field: "weekdays", message: "Each window must end before the next starts." });
-  }
   return problems;
 }
 

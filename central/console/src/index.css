@@ -1270,6 +1270,99 @@ label {
   display: none;
 }
 
+/* The Schedule section (flow design §7 J6, bead 4): Program cards, then the Schedule
+   flow (Scene → When → Review). */
+.program-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.program-flow__saved:focus {
+  outline: none;
+}
+
+/* Nothing to say yet: the empty live region stays rendered (so a later message is
+   announced) and takes back the gap it would add. */
+.program-flow__saved:not(:has(.program-flow__status-line:not(:empty))) {
+  margin-bottom: -16px;
+}
+
+.program-flow__status-line {
+  margin: 0;
+}
+
+.program-flow__status-line:empty {
+  display: none;
+}
+
+.program-flow__intro,
+.program-scheduling__zone {
+  margin: 0;
+}
+
+.program-scheduling__zone {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.program-flow__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.program-flow__windows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.program-scheduling__multi-note {
+  margin: 0 0 8px;
+  color: var(--fg-muted);
+}
+
+.program-scheduling__weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.program-scheduling__weekday {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.program-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.program-cards__item {
+  display: flex;
+  min-width: 0;
+}
+
+.program-cards__item > .card {
+  flex: 1;
+}
+
+.program-cards__past > summary {
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.program-cards__past > .program-cards {
+  margin-top: 12px;
+}
+
 /* The Scenes section (flow design §7 J4): cards, then the Scene flow. */
 .scene-list {
   display: grid;
