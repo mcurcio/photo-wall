@@ -10,7 +10,8 @@ import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
-import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
+import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import {
   NEW_PROGRAM_DRAFT,
@@ -108,7 +109,6 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
 
   const draft = useFlowDraft(seedSchedule(recentSceneId));
   const value = draft.value ?? NEW_PROGRAM_DRAFT;
-  const [saving, setSaving] = useState(false);
   // A separate-windows write that did not confirm every window: the draft it was sent
   // from, its window ids and those confirmed.
   const [batch, setBatch] = useState(
@@ -116,10 +116,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   );
 
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
-  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-  const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const refs = useFlowRefs();
 
   // PREFILL: a Scene handed over after the draft opened (a new draft is seeded with it).
   const handOver = useSceneHandOver({
@@ -156,7 +154,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     navigate,
     markDraft,
     keys: SCHEDULE_KEYS,
-    availability: () => "ok",
+    refs,
     steps: SCHEDULE_STEPS,
     fieldStep: SCHEDULE_FIELD_STEP,
     advancedFields: SCHEDULE_ADVANCED_FIELDS,
@@ -168,7 +166,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
       handOver.clear();
     },
   });
-  const { step, focus } = flow;
+  const { step } = flow;
+  const write = useFlowWrite({ flow, confirm, failure: "Could not schedule Program" });
 
   // --- The write.
   const put = (programId, startsAt, endsAt) =>
@@ -184,23 +183,25 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     });
 
   /** Everything is stored: say so on the cards and end the flow. */
-  const stored = (message) => {
-    confirm.setStatus(message);
+  const stored = (sent, message) => {
+    sent.say(message);
     setBatch(null);
     handOver.clear();
-    flow.finish(() => savedRef.current);
+    sent.finish();
   };
 
-  const scheduleOne = async (id) => {
-    const result = await mutate(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
-    if (result.ok) {
-      stored(`Scheduled Program ${id}.`);
+  const scheduleOne = async (sent, id) => {
+    const result = await sent.request(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
+    if (result === null) {
+      sent.incomplete();
+    } else if (result.ok) {
+      stored(sent, `Scheduled Program ${id}.`);
     } else {
-      confirm.setStatus(`Could not schedule Program: ${result.error ?? result.status}.`);
+      sent.refused(result);
     }
   };
 
-  const addSeparateWindows = async (id) => {
+  const addSeparateWindows = async (sent, id) => {
     const count = Number(value.count);
     const planned = planWindows({ ...value, count }).map((window, index) => ({
       ...window,
@@ -208,7 +209,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     }));
     const confirmed = new Set(pending?.confirmed ?? []);
     const sending = planned.filter((window) => !confirmed.has(window.programId));
-    const results = await mutate(() =>
+    // A write that did not complete leaves every window unconfirmed.
+    const results = (await sent.request(() =>
       Promise.all(
         sending.map(({ programId, startsAt, endsAt }) =>
           put(programId, startsAt, endsAt).then(
@@ -217,17 +219,17 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
           ),
         ),
       ),
-    );
+    )) ?? sending.map(() => "unknown");
     const outcome = (kind) =>
       sending.filter((_window, index) => results[index] === kind).map((window) => window.programId);
     outcome("created").forEach((programId) => confirmed.add(programId));
     if (confirmed.size === planned.length) {
-      stored(`Created ${planned.length} separate Programs.`);
+      stored(sent, `Created ${planned.length} separate Programs.`);
       return;
     }
     const [refused, unknown] = [outcome("refused"), outcome("unknown")];
     setBatch({ draft: value, ids: planned.map((window) => window.programId), confirmed: [...confirmed] });
-    confirm.setStatus(
+    sent.say(
       [
         `Created ${confirmed.size} of ${planned.length} separate Programs.`,
         refused.length > 0 ? `Not created: ${refused.join(", ")}.` : null,
@@ -239,21 +241,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     );
   };
 
-  const onSave = async () => {
-    if (saving || !flow.checkAll(() => summaryRef.current)) {
-      return;
-    }
-    const id = draftId(value);
-    setSaving(true);
-    confirm.setStatus(null);
-    try {
-      await (separateWindows(value) ? addSeparateWindows(id) : scheduleOne(id));
-    } catch {
-      confirm.setStatus("Could not schedule Program: the request did not complete.");
-    } finally {
-      setSaving(false);
-    }
-  };
+  const onSave = () =>
+    write.send((sent) =>
+      (separateWindows(value) ? addSeparateWindows : scheduleOne)(sent, draftId(value)),
+    );
 
   // --- Removing a Program.
   const removeProgram = useCallback(
@@ -285,10 +276,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
 
   // --- Views.
   const stepProps = { value, patch: draft.patch, problems };
-  const advanced = (stepId) => ({
-    open: focus.advancedOpen(stepId),
-    onToggle: () => focus.toggleAdvanced(stepId),
-  });
+  const { advanced } = flow;
   const views = {
     scene: () => (
       <SceneStep
@@ -319,9 +307,6 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
         sectionLabel="Schedule"
         confirm={confirm}
         problems={problems}
-        savedRef={savedRef}
-        newRef={newRef}
-        summaryRef={summaryRef}
         writeRef={saveRef}
         newLabel="Schedule a Program"
         cards={
@@ -354,10 +339,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
         steps={SCHEDULE_STEPS}
         formLabel="Schedule a Program"
         heading={HEADINGS[step]}
-        busy={saving}
+        busy={write.busy}
         onWrite={onSave}
         writeLabel={separateWindows(value) ? "Add separate windows" : "Schedule Program"}
-        writeDisabled={saving}
+        writeDisabled={write.busy}
         problemsLabel="Program problems"
       >
         {step !== null && views[step]()}

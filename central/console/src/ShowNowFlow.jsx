@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useRef, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { activationProblems } from "./authoring.js";
@@ -10,7 +10,8 @@ import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { OfferedScene } from "./flow/InstanceNotice.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
-import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
+import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
@@ -34,7 +35,6 @@ import {
   underneathSentence,
 } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
-import { useMutate } from "./useMutate.js";
 
 const EMPTY = {};
 
@@ -79,17 +79,13 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const draft = useFlowDraft(seedShowNow(recentSceneId, definitions));
   const value = draft.value ?? seedShowNow(null, EMPTY, () => "")();
-  const mutate = useMutate();
 
   // The last outcome, held here only; null until an activation. An Admission is put in
   // words on each render, so the Run that refused it is named once served.
   const [outcome, setOutcome] = useState(
     /** @type {null|{unknown: true}|{text: string}|{asked: object, admission: object}} */ (null),
   );
-  const [activating, setActivating] = useState(false);
-  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const outcomeRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const refs = useFlowRefs();
   const unknown = outcome !== null && "unknown" in outcome;
 
   const frames = useMemo(() => sceneFrames(definitions[value.sceneId]), [definitions, value.sceneId]);
@@ -110,7 +106,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   const problems = useProblems(problemList);
   // One confirmation for this flow: discarding its draft (its `after` runs once done).
   const confirm = useConfirm(
-    () => newRef.current?.focus(),
+    () => refs.newRef.current?.focus(),
     (_result, request) => request.after?.(),
   );
 
@@ -121,7 +117,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     navigate,
     markDraft,
     keys: SHOW_KEYS,
-    availability: () => "ok",
+    refs,
     steps: SHOW_STEPS,
     fieldStep: SHOW_FIELD_STEP,
     advancedFields: SHOW_ADVANCED_FIELDS,
@@ -133,7 +129,8 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
       handOver.clear();
     },
   });
-  const { step, focus } = flow;
+  const { step } = flow;
+  const write = useFlowWrite({ flow, confirm, failure: "Not started" });
 
   // A clean draft follows the Scene the operator last saved or picked, while it is
   // stored; a dirty one, or one whose outcome is unknown (its key must be kept for the
@@ -154,45 +151,37 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     }
   };
 
-  const activate = async () => {
-    if (activating || !flow.checkAll(() => summaryRef.current)) {
-      return;
-    }
-    const asked = { sceneId: value.sceneId, priority: Number(priority) };
-    const body = {
-      scene_id: asked.sceneId,
-      activation_id: value.activationKey,
-      priority: asked.priority,
-      repeat: value.repeat,
-    };
-    setActivating(true);
-    setOutcome(null);
-    let result = null;
-    try {
-      result = await mutate(() => apiWrite("/v1/operator/activations", { method: "POST", body }));
-    } catch {
-      result = null;
-    } finally {
-      setActivating(false);
-    }
-    const answer = activationAnswer(result);
-    if (answer.kind === "unknown") {
-      setOutcome({ unknown: true }); // the draft, and its key, stay for the retry
-      return;
-    }
-    if (answer.kind === "kept") {
-      // Refused before it reached the Runtime (the session, the page's origin, the
-      // request): nothing started, and the draft and its key stay for the retry.
-      setOutcome({ text: answer.text });
-      return;
-    }
-    setOutcome(
-      result.ok
-        ? { asked, admission: result.data }
-        : { text: `Not started: ${result.error ?? `HTTP ${result.status}`}.` },
-    );
-    flow.finish(() => outcomeRef.current);
-  };
+  const activate = () =>
+    write.send(async (sent) => {
+      const asked = { sceneId: value.sceneId, priority: Number(priority) };
+      const body = {
+        scene_id: asked.sceneId,
+        activation_id: value.activationKey,
+        priority: asked.priority,
+        repeat: value.repeat,
+      };
+      setOutcome(null);
+      const result = await sent.request(() =>
+        apiWrite("/v1/operator/activations", { method: "POST", body }),
+      );
+      const answer = activationAnswer(result);
+      if (answer.kind === "unknown") {
+        setOutcome({ unknown: true }); // the draft, and its key, stay for the retry
+        return;
+      }
+      if (answer.kind === "kept") {
+        // Refused before it reached the Runtime (the session, the page's origin, the
+        // request): nothing started, and the draft and its key stay for the retry.
+        setOutcome({ text: answer.text });
+        return;
+      }
+      setOutcome(
+        result.ok
+          ? { asked, admission: result.data }
+          : { text: `Not started: ${result.error ?? `HTTP ${result.status}`}.` },
+      );
+      sent.finish();
+    });
 
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
   const stepProps = { value, problems, edit, snapshot, frames };
@@ -213,10 +202,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
         covered={covered}
         priority={priority}
         priorityValid={priorityValid}
-        advanced={{
-          open: focus.advancedOpen("review"),
-          onToggle: () => focus.toggleAdvanced("review"),
-        }}
+        advanced={flow.advanced("review")}
         onChange={flow.openField}
       />
     ),
@@ -232,9 +218,6 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
       sectionLabel="Now showing"
       confirm={confirm}
       problems={problems}
-      savedRef={outcomeRef}
-      newRef={newRef}
-      summaryRef={summaryRef}
       said={
         // The SYNCHRONOUS activation outcome — shown at the moment, only after an
         // activation (null until then).
@@ -254,7 +237,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
       steps={SHOW_STEPS}
       formLabel="Activate a Scene"
       heading={HEADINGS[step]}
-      busy={activating}
+      busy={write.busy}
       onWrite={activate}
       writeLabel="Activate now"
       problemsLabel="Activation problems"

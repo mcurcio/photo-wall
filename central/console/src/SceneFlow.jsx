@@ -18,7 +18,8 @@ import { editedId, editKey } from "./flow/instance.js";
 import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useHandOffFrom } from "./flow/useHandOff.js";
-import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
+import { useFlowWrite } from "./flow/useFlowWrite.js";
 import {
   changedSceneFields,
   SCENE_ADVANCED_FIELDS,
@@ -30,7 +31,6 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
-import { useMutate } from "./useMutate.js";
 
 const EMPTY = {};
 
@@ -79,7 +79,8 @@ const HEADINGS = {
  * settled with nothing (`useHandOffFrom`), so a Source saved later stays a Source and
  * never lands in another draft.
  *
- * SAVE writes ONE request (authoring.js `buildSave`) inside `useMutate()`, ends the flow
+ * SAVE writes ONE request (authoring.js `buildSave`) through the kit's write
+ * (flow/useFlowWrite.js: one Plane A refresh, so the new card is listed), ends the flow
  * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
  * `recentSceneId`) and offers "Show now" and "Schedule it".
  *
@@ -100,18 +101,14 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const value = draft.value ?? NEW_SCENE_DRAFT;
   const editingId = editedId(draft.key);
   const steps = sceneSteps(value.mode);
-  const mutate = useMutate();
 
   const [vanished, setVanished] = useState(/** @type {string|null} */ (null));
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
-  const [saving, setSaving] = useState(false);
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-  const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const refs = useFlowRefs();
 
   // --- The draft effects: they run whichever step (or section) is showing.
   const frameKey = (snapshot?.inventory?.frames ?? []).map((frame) => frame.id).join(" ");
@@ -195,6 +192,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     navigate,
     markDraft,
     keys: SCENE_KEYS,
+    refs,
     availability: (key) => {
       const id = editedId(key);
       if (id === null) {
@@ -218,6 +216,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     },
   });
   const { place, step, focus } = flow;
+  const write = useFlowWrite({ flow, confirm, failure: "Could not save Scene" });
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
@@ -305,20 +304,16 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   };
 
   // --- Save.
-  const finish = (sceneId) => {
-    flow.finish(() => savedRef.current);
+  const finish = (sceneId, end = flow.finish) => {
+    end();
     setVanished(null);
     setReloaded(null);
     setSaved(sceneId);
     rememberScene(sceneId);
   };
 
-  const onSave = async () => {
-    if (saving || stale || !flow.checkAll(() => summaryRef.current)) {
-      return;
-    }
-    const sceneId = editingId ?? draftId(value);
-    const save = buildSave(value.mode, {
+  const buildSceneSave = (sceneId) =>
+    buildSave(value.mode, {
       sceneId,
       sourceRef: value.sourceRef,
       targetIds: value.targets,
@@ -327,38 +322,42 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       selections: value.selections,
       revision: editingId === null ? 1 : draft.baseRevision + 1,
     });
-    if (editingId !== null) {
-      confirm.open(
-        { currentTarget: saveRef.current },
-        replaceRequest(editingId, draft.baseRevision, save, candidates.reload, () => finish(sceneId)),
-      );
+
+  const onSave = () => {
+    if (stale) {
       return;
     }
-    setSaving(true);
-    confirm.setStatus(null);
-    try {
-      // ONE request; useMutate() then does its one Plane A refresh, so the new card is
-      // listed when the flow returns to the cards.
-      const result = await mutate(() => apiWrite(save.path, { method: "PUT", body: save.body }));
-      if (result.ok) {
-        confirm.setStatus(`Saved Scene ${sceneId}.`);
-        finish(sceneId);
-      } else {
-        confirm.setStatus(refusal("Could not save Scene", result, candidates.reload));
+    if (editingId !== null) {
+      if (flow.checkAll()) {
+        confirm.open(
+          { currentTarget: saveRef.current },
+          replaceRequest(editingId, draft.baseRevision, buildSceneSave(editingId), candidates.reload, () =>
+            finish(editingId),
+          ),
+        );
       }
-    } catch {
-      confirm.setStatus("Could not save Scene: the request did not complete.");
-    } finally {
-      setSaving(false);
+      return;
     }
+    write.send(async (sent) => {
+      const sceneId = draftId(value);
+      const save = buildSceneSave(sceneId);
+      // ONE request, then one Plane A refresh, so the new card is listed when the flow
+      // returns to the cards.
+      const result = await sent.request(() => apiWrite(save.path, { method: "PUT", body: save.body }));
+      if (result === null) {
+        sent.incomplete();
+      } else if (result.ok) {
+        sent.say(`Saved Scene ${sceneId}.`);
+        finish(sceneId, sent.finish);
+      } else {
+        sent.say(refusal("Could not save Scene", result, candidates.reload));
+      }
+    });
   };
 
   // --- Views.
   const stepProps = { value, patch: draft.patch, problems };
-  const advanced = (stepId) => ({
-    open: focus.advancedOpen(stepId),
-    onToggle: () => focus.toggleAdvanced(stepId),
-  });
+  const { advanced } = flow;
   const views = {
     kind: () => <KindStep {...stepProps} />,
     photos: () => (
@@ -407,9 +406,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       unavailableReason={UNAUTHORABLE_REASON}
       confirm={confirm}
       problems={problems}
-      savedRef={savedRef}
-      newRef={newRef}
-      summaryRef={summaryRef}
       writeRef={saveRef}
       next={
         place === "list" &&
@@ -438,10 +434,10 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       steps={steps}
       formLabel="Author a Scene"
       heading={HEADINGS[step] ?? stepLabel}
-      busy={saving}
+      busy={write.busy}
       onWrite={onSave}
       writeLabel={editingId === null ? "Save Scene" : "Replace Scene"}
-      writeDisabled={saving || stale}
+      writeDisabled={write.busy || stale}
       problemsLabel="Scene problems"
       notice={
         vanished !== null && (

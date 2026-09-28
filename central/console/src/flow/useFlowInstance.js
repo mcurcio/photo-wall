@@ -13,6 +13,20 @@ import {
 import { nextStep, previousStep, problemsOf, stepOfField } from "./steps.js";
 import { useFlowFocus } from "./useFlowFocus.js";
 
+/** Every instance can show: the default `availability` (a flow without edits). */
+const available = () => "ok";
+
+/**
+ * The refs a flow's section hands the kit (useFlowInstance REFS): its New button, its
+ * problem summary and its said region.
+ */
+export function useFlowRefs() {
+  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  return { newRef, summaryRef, savedRef };
+}
+
 /**
  * One flow's instance on its section (flow design §6, §7): which instance the route
  * names, what the section shows for it, and moving through its steps. Every flow
@@ -61,6 +75,11 @@ import { useFlowFocus } from "./useFlowFocus.js";
  * that step is on its way (flow/useFlowFocus.js LIFETIME); an instance that is missing
  * or unavailable asks for nothing.
  *
+ * REFS. `refs` (the kit's `useFlowRefs`) are the section's New button (`newRef`), its
+ * problem summary (`summaryRef`, where `checkAll` sends focus by default) and its said
+ * region (`savedRef`, where `finish` sends it by default); FlowFrame renders them.
+ * `advanced(stepId)` is a step's Advanced disclosure (its `open` and `onToggle`).
+ *
  * @template T
  * @param {{section: string,
  *          draft: ReturnType<typeof import("./useFlowDraft.js").useFlowDraft<T>>,
@@ -68,7 +87,8 @@ import { useFlowFocus } from "./useFlowFocus.js";
  *          navigate: (route: import("../routes.js").Route, options?: {replace?: boolean}) => void,
  *          markDraft: (section: string, dirty: boolean) => void,
  *          keys: import("./instance.js").FlowKeys,
- *          availability: (key: string) => import("./instance.js").Availability,
+ *          refs: ReturnType<typeof useFlowRefs>,
+ *          availability?: (key: string) => import("./instance.js").Availability,
  *          steps: ReadonlyArray<import("./steps.js").Step>,
  *          fieldStep: Readonly<Record<string, string>>,
  *          advancedFields: ReadonlySet<string>,
@@ -85,7 +105,8 @@ export function useFlowInstance({
   navigate,
   markDraft,
   keys,
-  availability,
+  refs,
+  availability = available,
   steps,
   fieldStep,
   advancedFields,
@@ -285,9 +306,9 @@ export function useFlowInstance({
    * field when the step shown asks it (opening its Advanced), else to the problem
    * summary `summary()` returns, whose entries route to their steps.
    *
-   * @param {() => HTMLElement|null} summary
+   * @param {() => HTMLElement|null} [summary]
    */
-  const checkAll = (summary) => {
+  const checkAll = (summary = () => refs.summaryRef.current) => {
     if (problems.check(problemList)) {
       return true;
     }
@@ -317,7 +338,7 @@ export function useFlowInstance({
    * @param {(() => HTMLElement|null)|null} [focusAfter]
    * @param {object|null} [result]
    */
-  const finish = (focusAfter = null, result = null) => {
+  const finish = (focusAfter = () => refs.savedRef.current, result = null) => {
     const key = draft.key;
     const here = hashNamesInstance(keys, window.location.hash, key);
     finishedRef.current = here ? null : { key, step: lastStepRef.current };
@@ -339,11 +360,19 @@ export function useFlowInstance({
     return here;
   };
 
+  /** Step `stepId`'s Advanced disclosure: whether it is open, and its toggle. */
+  const advanced = (stepId) => ({
+    open: focus.advancedOpen(stepId),
+    onToggle: () => focus.toggleAdvanced(stepId),
+  });
+
   return {
     place,
     step,
     routeKey,
     focus,
+    refs,
+    advanced,
     answered: (stepId) => editedId(draft.key) !== null || visited.has(stepId),
     start,
     resume: (options) => enter(resumeRoute(), options),

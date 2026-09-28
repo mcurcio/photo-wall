@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
@@ -9,7 +9,8 @@ import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useHandOffTo } from "./flow/useHandOff.js";
-import { useFlowInstance } from "./flow/useFlowInstance.js";
+import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
+import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { sourceFilters } from "./mediaHealth.js";
 import {
   buildSourceSpec,
@@ -58,9 +59,9 @@ const HEADINGS = {
  * `{sourceRef}`, on Back from its first step or "Discard and return" with nothing.
  *
  * SAVE writes ONE `PUT /v1/operator/sources/{ref}` (the ref is `name:rev` and may hold
- * a colon, so it is path-encoded) with the stored `SourceSpec` body inside `useMutate()`
- * (one Plane A refresh, so the new card, or the Scene's picker, lists it), says
- * "Saved Source <ref>." and ends the flow (`finish`).
+ * a colon, so it is path-encoded) with the stored `SourceSpec` body through the kit's
+ * write (flow/useFlowWrite.js: one Plane A refresh, so the new card, or the Scene's
+ * picker, lists it), says "Saved Source <ref>." and ends the flow (`finish`).
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
@@ -75,10 +76,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   const handOff = useHandOffTo(handOffs, "sources");
   const mutate = useMutate();
 
-  const [saving, setSaving] = useState(false);
-  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
-  const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
+  const refs = useFlowRefs();
 
   const problemList = useMemo(
     () => inStepOrder(sourceProblems(value), SOURCE_FIELD_STEP, SOURCE_STEPS),
@@ -88,7 +86,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
 
   // One confirmation for this section (discarding a draft); its `after` runs once done.
   const confirm = useConfirm(
-    () => newRef.current?.focus(),
+    () => refs.newRef.current?.focus(),
     (_result, request) => request.after?.(),
   );
 
@@ -99,7 +97,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     navigate,
     markDraft,
     keys: SOURCE_KEYS,
-    availability: () => "ok",
+    refs,
     steps: SOURCE_STEPS,
     fieldStep: SOURCE_FIELD_STEP,
     advancedFields: sourceAdvancedFields(rule),
@@ -108,7 +106,8 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     confirm,
     handOff,
   });
-  const { step, focus } = flow;
+  const { step } = flow;
+  const write = useFlowWrite({ flow, confirm, failure: "Could not save Source" });
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
   // the cards refresh exactly once after the write.
@@ -120,32 +119,24 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     [mutate],
   );
 
-  const onSave = async () => {
-    if (saving || !flow.checkAll(() => summaryRef.current)) {
-      return;
-    }
-    const ref = value.sourceRef.trim();
-    setSaving(true);
-    confirm.setStatus(null);
-    try {
-      const result = await mutate(() =>
+  const onSave = () =>
+    write.send(async (sent) => {
+      const ref = value.sourceRef.trim();
+      const result = await sent.request(() =>
         apiWrite(`/v1/operator/sources/${encodeURIComponent(ref)}`, {
           method: "PUT",
           body: buildSourceSpec({ ...value, sourceRef: ref, connectionRef: value.connectionRef.trim() }),
         }),
       );
-      if (result.ok) {
-        confirm.setStatus(`Saved Source ${ref}.`);
-        flow.finish(() => savedRef.current, { sourceRef: ref });
+      if (result === null) {
+        sent.incomplete();
+      } else if (result.ok) {
+        sent.say(`Saved Source ${ref}.`);
+        sent.finish(undefined, { sourceRef: ref });
       } else {
-        confirm.setStatus(`Could not save Source: ${result.error ?? result.status}.`);
+        sent.refused(result);
       }
-    } catch {
-      confirm.setStatus("Could not save Source: the request did not complete.");
-    } finally {
-      setSaving(false);
-    }
-  };
+    });
 
   const stepProps = { value, patch: draft.patch, problems };
   const views = {
@@ -154,7 +145,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       <NameStep
         {...stepProps}
         rule={rule}
-        advanced={{ open: focus.advancedOpen("name"), onToggle: () => focus.toggleAdvanced("name") }}
+        advanced={flow.advanced("name")}
       />
     ),
     review: () => <SourceReview value={value} onChange={flow.openField} />,
@@ -169,9 +160,6 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       sectionLabel="Photo sources"
       confirm={confirm}
       problems={problems}
-      savedRef={savedRef}
-      newRef={newRef}
-      summaryRef={summaryRef}
       handOff={handOff}
       newLabel="New source"
       cards={<SourceCards sources={sources} onRefresh={refreshSource} />}
@@ -179,10 +167,10 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       steps={SOURCE_STEPS}
       formLabel="Configure a Source"
       heading={HEADINGS[step]}
-      busy={saving}
+      busy={write.busy}
       onWrite={onSave}
       writeLabel="Save source"
-      writeDisabled={saving}
+      writeDisabled={write.busy}
       problemsLabel="Source problems"
     >
       {step !== null && views[step]()}

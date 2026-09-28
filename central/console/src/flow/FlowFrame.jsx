@@ -11,7 +11,7 @@ import { Stepper } from "./Stepper.jsx";
  * One flow's section, framed the same way for every flow (flow design §6, §7;
  * presentational over the flow container's state). Top to bottom:
  *
- *  - THE SAID REGION (`savedRef`, focused after a write): `said` (what the write
+ *  - THE SAID REGION (the kit's `savedRef`, focused after a write): `said` (what the write
  *    answered, e.g. Show now's outcome), the confirmation's role=status line, then
  *    `next` (e.g. the Scene flow's "Show now" and "Schedule it"). Mark `said` and `next`
  *    with the class `flow__said`, so the region keeps its gap only while it says
@@ -29,7 +29,8 @@ import { Stepper } from "./Stepper.jsx";
  *    write in flight) the stepper's steps are text and the form is disabled.
  *
  * `replace` enters the flow in place of the section's history entry (Show now; the
- * kit's `start`/`resume` option).
+ * kit's `start`/`resume` option). The section's refs are the kit's (`flow.refs`:
+ * useFlowInstance REFS).
  *
  * @param {{className?: string,
  *          flow: ReturnType<typeof import("./useFlowInstance.js").useFlowInstance>,
@@ -38,8 +39,7 @@ import { Stepper } from "./Stepper.jsx";
  *          unavailableReason?: string,
  *          confirm: ReturnType<typeof import("../ConfirmAction.jsx").useConfirm>,
  *          problems: ReturnType<typeof import("../Field.jsx").useProblems>,
- *          savedRef: React.Ref<HTMLDivElement>, newRef: React.RefObject<HTMLButtonElement>,
- *          summaryRef: React.Ref<HTMLDivElement>, writeRef?: React.Ref<HTMLButtonElement>,
+ *          writeRef?: React.Ref<HTMLButtonElement>,
  *          said?: React.ReactNode, next?: React.ReactNode,
  *          handOff?: {label: string}|null, newLabel: string, replace?: boolean,
  *          cards?: React.ReactNode, title: string,
@@ -58,9 +58,6 @@ export function FlowFrame({
   unavailableReason = "",
   confirm,
   problems,
-  savedRef,
-  newRef,
-  summaryRef,
   writeRef,
   said = null,
   next = null,
@@ -81,6 +78,7 @@ export function FlowFrame({
   children,
 }) {
   const { place, step, focus } = flow;
+  const { savedRef, newRef, summaryRef } = flow.refs;
   const entry = replace ? { replace: true } : undefined;
   const last = step === steps[steps.length - 1].id;
 
