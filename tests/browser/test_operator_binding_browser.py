@@ -25,6 +25,8 @@ from test_registry import ADMIN, enroll
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.registry import FrameCreate
+from central.runtime import Contribution, Scene
+from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
@@ -428,7 +430,7 @@ def test_retire_is_enabled_only_by_typing_the_handle(page, registry):
         retired = page.get_by_role("group", name="Retired players", exact=True)
         expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         # Focus successor: the Retired heading; a status line says what happened.
-        expect(retired.get_by_role("heading", name="Retired", exact=True)).to_be_focused()
+        expect(retired.get_by_role("heading", name=re.compile(r"^Retired players"))).to_be_focused()
         expect(page.get_by_text(f"Player {player_id} retired.", exact=True)).to_be_visible()
 
 
@@ -549,7 +551,7 @@ def _serial_option(scope, serial=SERIAL, output_id="HDMI-A-1"):
     return scope.get_by_role("radio", name=f"{serial[-6:]} · {output_id} · Free", exact=True)
 
 
-def test_the_devices_serial_shows_in_the_chooser_and_the_rail(page, registry):
+def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
     _netbooted_player(registry)
     _placed_frame(registry, "boot-1")
     with operator_server(registry.db, registry.clock) as origin:
@@ -558,7 +560,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_rail(page, registry):
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
         pending = page.get_by_role("group", name="Pending players", exact=True)
-        expect(pending).to_contain_text(f"{SERIAL} · Netboot seen, no image served yet")
+        expect(pending).to_contain_text(f"Serial {SERIAL} · Netboot seen, no image served yet")
 
 
 def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
@@ -607,3 +609,216 @@ def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, regi
         expect(page.get_by_text("not accepted", exact=False)).to_have_count(0)
         expect(pending.get_by_role("button", name=identity["player_id"], exact=True)
                ).to_be_visible()
+
+
+# --- The Equipment roster (slice 2 §5).
+
+
+def _group(page, title):
+    return page.get_by_role("group", name=title, exact=True)
+
+
+def _card_outputs(page, player_id):
+    return page.get_by_role("list", name=f"Outputs of {player_id}", exact=True)
+
+
+def _frame_select(page, player_id, output_id="HDMI-A-1"):
+    label = f"Frame for {player_id[-6:]} · {output_id} · Free"
+    return page.get_by_role("combobox", name=label, exact=True)
+
+
+def _two_bound(registry, *, live_run_on=None):
+    """A two-output Player with frames `left` (HDMI-A-1) and `right` (HDMI-A-2), each at
+    generation 1; optionally a live Run targeting one of them."""
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "left")
+    registry.create_frame(FrameCreate(
+        id="right", surface_id="wall", x_mm=600, y_mm=100,
+        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
+    registry.bind("right", player_id, "HDMI-A-2", expected_generation=0)
+    if live_run_on is not None:
+        store = RuntimeStore(registry.db, registry.clock)
+        store.command("set_scene", Scene(
+            scene_id="lobby-loop", loop=True, cycle_seconds=30,
+            contributions=(Contribution(target="frame:" + live_run_on,
+                                        source_refs=("lobby-photos:1",)),)))
+        store.command("activate", "lobby-loop", "lobby-activation", registry.clock.utc())
+    return player_id
+
+
+def _open_unbind_all(page, player_id):
+    _group(page, "Bound players").get_by_role(
+        "button", name=f"Unbind all outputs of {player_id}", exact=True).click()
+    dialog = _dialog(page)
+    expect(dialog).to_be_visible()
+    return dialog
+
+
+def test_a_card_lists_each_output_with_its_state_and_offers_no_retire_in_service(page, registry):
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    handle = player_id[-6:]
+    _placed_frame(registry, "lobby-left")
+    registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0)
+    _disconnect_output(registry, player_id, "HDMI-A-2")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        bound = _group(page, "Bound players")
+        card = bound.get_by_role("button", name=player_id, exact=True)
+        expect(card).to_have_accessible_description(
+            re.compile(r"^In service · 0 of 2 outputs free · Enrolled"))
+        outputs = _card_outputs(page, player_id).get_by_role("listitem")
+        expect(outputs).to_have_text([
+            f"{handle} · HDMI-A-1 · Shows frame lobby-left",
+            f"{handle} · HDMI-A-2 · No display detected at last Player start",
+        ])
+        expect(bound.get_by_role("button", name=f"Retire player {player_id}", exact=True)
+               ).to_have_count(0)
+        expect(bound.get_by_role("button", name=f"Unbind all outputs of {player_id}", exact=True)
+               ).to_be_visible()
+
+
+def test_output_first_bind_opens_the_frame(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "lobby-left")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _frame_select(page, player_id).select_option("lobby-left")
+        _card_outputs(page, player_id).get_by_role("button", name="Bind HDMI-A-1", exact=True
+                                                   ).click()
+        inspector = page.get_by_role("region", name="Frame lobby-left inspector", exact=True)
+        expect(inspector.get_by_role("heading", name="Frame lobby-left", exact=True)
+               ).to_be_focused()
+        expect(inspector.get_by_role("tab", name="Binding", exact=True)
+               ).to_have_attribute("aria-selected", "true")
+        frame = registry.inventory().frames[0]
+        assert (frame.player_id, frame.output_id) == (player_id, "HDMI-A-1")
+
+
+def test_a_roster_bind_carries_the_generation_captured_on_selection(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    other, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "lobby-left")
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _frame_select(page, player_id).select_option("lobby-left")  # captures generation 0
+        # The Frame changes (bound elsewhere, then unbound: generation 2), and a poll
+        # delivers that; it is still unbound, so the choice stands.
+        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.unbind("lobby-left", expected_generation=1)
+        _poll(page)
+        expect(_frame_select(page, player_id)).to_have_value("lobby-left")
+        outputs = _card_outputs(page, player_id)
+        outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
+        expect(outputs.get_by_role("alert")).to_contain_text("This Frame changed")
+        assert registry.inventory().frames[0].player_id is None
+
+
+def test_unbind_all_lists_each_frame_and_its_live_runs(page, registry):
+    player_id = _two_bound(registry, live_run_on="left")
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        dialog = _open_unbind_all(page, player_id)
+        frames = dialog.get_by_role("list", name="Frames to unbind").get_by_role("listitem")
+        expect(frames).to_have_text([
+            "Frame left (HDMI-A-1) — live Runs: lobby-loop",
+            "Frame right (HDMI-A-2)",
+        ])
+
+
+def test_unbind_all_reports_each_frame_and_never_resends_a_conflict(page, registry):
+    player_id = _two_bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        sent = _binding_requests(page)
+        dialog = _open_unbind_all(page, player_id)  # captures left@1, right@1
+        # `right` changes under the open dialog (generation 3), and a poll delivers it.
+        registry.unbind("right", expected_generation=1)
+        registry.bind("right", player_id, "HDMI-A-2", expected_generation=2)
+        _poll(page)
+
+        dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("1 of 2 unbound")
+        expect(dialog.get_by_role("list", name="Result for each frame").get_by_role("listitem")
+               ).to_have_text(["left: unbound", "right: changed since you opened this"])
+        page.wait_for_timeout(300)
+        assert len(sent) == 2
+        frames = {frame.id: frame for frame in registry.inventory().frames}
+        assert frames["left"].player_id is None and frames["right"].player_id == player_id
+
+
+def test_unbind_all_stops_at_an_unknown_outcome(page, registry):
+    player_id = _two_bound(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        dialog = _open_unbind_all(page, player_id)
+        page.route("**/v1/operator/frames/*/binding", lambda route: route.abort()
+                   if route.request.method == "DELETE" else route.continue_())
+        dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("0 of 2 unbound")
+        expect(dialog.get_by_role("list", name="Result for each frame").get_by_role("listitem")
+               ).to_have_text(["left: outcome unknown", "right: not attempted"])
+
+
+def test_a_dialog_survives_a_poll_that_regroups_its_player(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    handle = player_id[-6:]
+    _placed_frame(registry, "lobby-left")
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _group(page, "Pending players").get_by_role(
+            "button", name=f"Retire player {player_id}", exact=True).click()
+        dialog = _dialog(page)
+        dialog.get_by_label(f"Type {handle} to confirm", exact=True).fill(handle)
+
+        # Another operator binds the Player; the poll moves it to Bound players.
+        registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0)
+        _poll(page)
+        expect(_group(page, "Bound players").get_by_role("button", name=player_id, exact=True)
+               ).to_be_attached()
+
+        # The dialog is still open with what was typed; Central refuses the retire.
+        expect(dialog).to_be_visible()
+        dialog.get_by_role("button", name="Confirm retire", exact=True).click()
+        expect(dialog.get_by_role("alert")).to_contain_text("has a bound output")
+        assert registry.inventory().players[0].retired_at is None
+
+
+def test_the_roster_says_when_there_are_no_players(page, registry):
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_group(page, "Pending players")).to_contain_text(
+            "No Players yet. Power on one Pi on this network; it appears under Pending.")
+
+
+def test_a_free_output_says_when_there_are_no_unbound_frames(page, registry):
+    enroll(registry, count=1)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_group(page, "Pending players")).to_contain_text(
+            "No unbound frames. Draw one on the plan first.")
+
+
+def test_the_roster_never_scrolls_sideways_at_390_px(page, registry):
+    long_id = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
+    enroll(registry, count=2)
+    _two_bound(registry)
+    registry.create_frame(FrameCreate(
+        id=long_id, surface_id="wall", x_mm=100, y_mm=900,
+        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    page.set_viewport_size({"width": 390, "height": 844})
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_group(page, "Pending players").get_by_role("combobox").first).to_be_visible()
+        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+        assert fits, page.evaluate("""() => [...document.querySelectorAll("body *")]
+            .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
+            .map((el) => el.tagName + "." + [...el.classList].join(".")).slice(0, 12)""")

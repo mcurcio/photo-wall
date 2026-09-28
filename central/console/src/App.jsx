@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
-import { EquipmentRail } from "./EquipmentRail.jsx";
+import { EquipmentRoster } from "./EquipmentRoster.jsx";
 import { Guidance } from "./Guidance.jsx";
 import { facetFor, frameHealth } from "./health.js";
 import { Inspector } from "./Inspector.jsx";
@@ -35,7 +35,7 @@ export default function App() {
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
   // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the Equipment rail and the output chooser.
+  // the Equipment roster and the output chooser.
   const bootFacts = useBootFacts(snapshot);
   // Bead 18: the global snapshot-age clock (advances each second, resets on
   // refresh) and the ~10s /healthz pill. Both are global, so they read one
@@ -58,8 +58,6 @@ export default function App() {
   // (onFocusDone), so a later remount does not refocus.
   const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
   const focusSeqRef = useRef(0);
-  // The pending/retired Player last selected in the Equipment rail (Plane B).
-  const [selectedPlayer, setSelectedPlayer] = useState(/** @type {string|null} */ (null));
 
   // Unplaced-tray drag-out (Bead 11). The dragged frame id lives in a REF so the
   // plan's pointer-up reads it synchronously (a full press->move->release can
@@ -113,8 +111,8 @@ export default function App() {
     setFocusRequest(focusSeqRef.current);
   };
 
-  // Attention-strip navigation (Wall mode only): show the frame's Surface, select
-  // it, and open the facet for its health.
+  // Attention-strip and Equipment-roster navigation (Wall mode only): show the
+  // frame's Surface, select it, and open the facet for its health.
   const navigateToFrame = (frameId) => {
     const frame = (snapshot?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
     if (frame === undefined) {
@@ -252,7 +250,7 @@ export default function App() {
         ) : mode === "showrunner" ? (
           // The show layer. R4 is enforced by COMPOSITION: Showrunner never
           // imports the Commissioning facet, and the Wall-only surfaces below
-          // (Plan/Inspector/EquipmentRail/tray — the only mounts of
+          // (Plan/Inspector/EquipmentRoster/tray — the only mounts of
           // Commissioning) are simply not rendered in this mode.
           <Showrunner snapshot={snapshot} />
         ) : (
@@ -268,16 +266,6 @@ export default function App() {
                     Dismiss
                   </button>
                 </div>
-              )}
-              <EquipmentRail
-                snapshot={snapshot}
-                bootFacts={bootFacts}
-                onSelect={setSelectedPlayer}
-              />
-              {selectedPlayer !== null && (
-                <p className="console__selected-player">
-                  Pending player selected: {selectedPlayer}
-                </p>
               )}
               <div className="console__surface-filter">
                 <label className="console__surface-field">
@@ -320,6 +308,11 @@ export default function App() {
                   setSelection((current) => (current === id ? null : current));
                   planRegionRef.current?.focus();
                 }}
+              />
+              <EquipmentRoster
+                snapshot={snapshot}
+                bootFacts={bootFacts}
+                onNavigate={navigateToFrame}
               />
             </div>
             {split && (

@@ -134,3 +134,41 @@ export function retirePlayer(playerId) {
     "Retire failed — please retry.",
   );
 }
+
+// Each Frame's result in an "Unbind all" sequence, in plain words.
+const SEQUENCE_LABELS = {
+  done: "unbound",
+  changed: "changed since you opened this",
+  already: "already done",
+  unknown: "outcome unknown",
+  "not-attempted": "not attempted",
+};
+
+/**
+ * "Unbind all" (slice 2 §7) is a SEQUENCE, not a batch: one fenced unbind per
+ * Frame, in order, each carrying the generation captured when the dialog
+ * opened. A stale generation is never resent. A conflict or "already done"
+ * continues to the next Frame; an unknown outcome stops, and the rest are not
+ * attempted.
+ *
+ * @param {Array<{frameId: string, generation: number}>} targets
+ * @returns {Promise<Array<{frameId: string, outcome: string, label: string}>>}
+ */
+export async function unbindSequence(targets) {
+  const results = [];
+  let stopped = false;
+  for (const { frameId, generation } of targets) {
+    if (stopped) {
+      results.push({ frameId, outcome: "not-attempted", label: SEQUENCE_LABELS["not-attempted"] });
+      continue;
+    }
+    const result = await unbind(frameId, generation);
+    results.push({
+      frameId,
+      outcome: result.outcome,
+      label: SEQUENCE_LABELS[result.outcome] ?? result.message,
+    });
+    stopped = result.outcome === "unknown";
+  }
+  return results;
+}

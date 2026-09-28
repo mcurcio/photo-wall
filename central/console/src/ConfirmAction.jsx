@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { retirePlayer, unbind, UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { retirePlayer, unbind, unbindSequence, UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
@@ -369,5 +369,64 @@ export function retireRequest(snapshot, bootFacts, playerId) {
       </>
     ),
     run: async () => fromEquipment(await retirePlayer(playerId), `Player ${playerId} retired.`),
+  };
+}
+
+/**
+ * Unbind every Output of an in-service Player (the Equipment roster). Captures
+ * each bound Frame with its generation and live Runs; the write is the
+ * sequence in equipmentApi.js `unbindSequence`, and the dialog ends in a
+ * terminal "K of N unbound" summary with each Frame's result.
+ *
+ * @param {object} snapshot
+ * @param {object|null} bootFacts
+ * @param {string} playerId
+ * @returns {ConfirmRequest}
+ */
+export function unbindAllRequest(snapshot, bootFacts, playerId) {
+  const handle = playerHandle(snapshot, bootFacts, playerId);
+  const targets = outputStates(snapshot, playerId)
+    .filter((entry) => entry.state === "bound")
+    .map((entry) => {
+      const frame = snapshot.inventory.frames.find((candidate) => candidate.id === entry.frameId);
+      return {
+        frameId: frame.id,
+        generation: frame.generation,
+        outputId: entry.outputId,
+        runs: liveRunsFor(snapshot?.runtime, frame.id),
+      };
+    });
+  return {
+    key: `unbind-all:${playerId}`,
+    title: `Unbind all outputs of player ${handle}?`,
+    confirmLabel: "Confirm unbind all",
+    body: (
+      <>
+        <p className="confirm__id">{`Player ${playerId}.`}</p>
+        <p>
+          Each listed Frame stops being served. Its calibration is kept but marked invalid,
+          so it must be re-commissioned:
+        </p>
+        <ul className="confirm__frames" aria-label="Frames to unbind">
+          {targets.map((target) => (
+            <li key={target.frameId}>
+              {`Frame ${target.frameId} (${target.outputId})`}
+              {target.runs.length > 0 &&
+                ` — live Runs: ${target.runs.map((run) => run.scene_id).join(", ")}`}
+            </li>
+          ))}
+        </ul>
+        <p>Nothing is lost for good: you can bind them again, or bind a replacement Pi.</p>
+      </>
+    ),
+    run: async () => {
+      const results = await unbindSequence(targets);
+      const unbound = results.filter((entry) => entry.outcome === "done").length;
+      return {
+        state: "summary",
+        message: `${unbound} of ${results.length} unbound`,
+        results,
+      };
+    },
   };
 }

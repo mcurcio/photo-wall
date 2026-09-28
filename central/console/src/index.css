@@ -111,13 +111,13 @@ label {
 
 /* Identifiers (player, frame and scene ids) are long unbroken strings; let them
    wrap rather than widen the page. */
-.rail__entry,
-.rail__retire,
+.roster__player,
+.roster__output-label,
+.roster__boot,
 .tray__item,
 .tray__delete,
 .facet__field dd,
 .inspector__title,
-.console__selected-player,
 .console__recovery-text,
 .showrunner__badge {
   min-width: 0;
@@ -444,10 +444,6 @@ label {
   font-size: 12px;
 }
 
-.rail__liveness {
-  font-size: 12px;
-  color: var(--fg-muted);
-}
 
 .tray__list {
   list-style: none;
@@ -654,7 +650,7 @@ label {
   font-weight: 600;
 }
 
-/* Bead 9 — equipment rails, recovery banner, bind/unbind facet. */
+/* Bead 9 — recovery banner, bind/unbind facet. */
 .console__recovery {
   margin: 0 0 16px;
   padding: 12px 16px;
@@ -680,64 +676,131 @@ label {
   color: var(--fg);
 }
 
-.console__selected-player {
-  margin: 0 0 12px;
+/* Equipment roster (slice 2 §5): groups by standing, one card per Player. On a
+   narrow screen it sits below the plan and tray; ids wrap and actions wrap
+   under the facts. */
+.roster {
+  margin: 24px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.roster__title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.roster__note {
+  margin: 0;
+  font-size: 12px;
   color: var(--fg-muted);
 }
 
-.equipment-rail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 24px;
-  margin: 0 0 20px;
-}
-
-.rail {
-  flex: 1 1 16rem;
+.roster__group {
   min-width: 0;
   padding: 12px 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
 }
 
-.rail__title {
-  margin: 0 0 8px;
+.roster__group-title {
+  margin: 0;
   font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-muted);
 }
 
-.rail__list {
-  margin: 0;
+.roster__group-toggle {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.roster__cards,
+.roster__outputs {
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
-.rail__item {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: stretch;
+.roster__card {
+  min-width: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
 }
 
-.rail__entry {
-  flex: 1;
+.roster__player {
+  max-width: 100%;
   text-align: left;
 }
 
-.rail__retire {
-  flex: 0 0 auto;
+.roster__standing,
+.roster__boot {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.roster__boot:empty {
+  display: none;
+}
+
+.roster__output {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.roster__output--no-display .roster__output-label,
+.roster__output--retired .roster__output-label {
+  color: var(--fg-subtle);
+}
+
+.roster__bind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.roster__action {
+  margin-top: 8px;
   color: var(--warn);
   border-color: var(--warn);
 }
 
-.rail__empty {
+.roster__empty {
   margin: 0;
   color: var(--fg-subtle);
+}
+
+.roster__alert {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+
+/* Text for assistive technology only (e.g. the Player id in "Retire player"). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .facet__review {
@@ -849,7 +912,7 @@ label {
 .chooser__status:empty,
 .plan__status-line:empty,
 .tray__status-line:empty,
-.rail__status-line:empty {
+.roster__status-line:empty {
   display: none;
 }
 
@@ -914,17 +977,9 @@ label {
 }
 
 /* Boot facts (slice 2 §5): serial and netboot outcome beside a Player. */
-.rail__boot,
 .chooser__note {
+  margin: 0;
   font-size: 12px;
   color: var(--fg-muted);
   overflow-wrap: anywhere;
-}
-
-.rail__boot:empty {
-  display: none;
-}
-
-.chooser__note {
-  margin: 0;
 }
