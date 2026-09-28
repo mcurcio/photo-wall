@@ -34,6 +34,7 @@ from console_tasks import (
 )
 from operator_harness import (
     RequestGate,
+    drive_poll,
     operator_server,
     report_readiness,
     sign_in,
@@ -257,13 +258,11 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         for section in ("wall", "attention", "equipment", "schedule"):
             go(page, section)
             count = len(reads)
-            with page.expect_response(INVENTORY):
-                page.clock.run_for(5000)
+            drive_poll(page)
             assert len(reads) == count + 1, section
         # A poll applied while Now showing is hidden is there when it is shown again.
         report_readiness(registry, identity["player_id"])
-        with page.expect_response(INVENTORY):
-            page.clock.run_for(5000)
+        drive_poll(page)
         go(page, "now")
         expect(badge).to_have_accessible_name("Frame first: Needs commissioning")
 

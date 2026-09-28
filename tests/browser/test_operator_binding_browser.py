@@ -21,7 +21,7 @@ import re
 
 import pytest
 from console_tasks import connect, go, open_frame
-from operator_harness import RequestGate, operator_server, pause_page_clock, sign_in
+from operator_harness import RequestGate, drive_poll, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -54,10 +54,8 @@ def _option(scope, player_id, output_id="HDMI-A-1"):
 
 
 def _poll(page):
-    """Run the paused page clock one poll interval and wait for that read to answer."""
-    with page.expect_response("**/v1/operator/inventory"):
-        page.clock.run_for(5000)
-    page.wait_for_timeout(300)
+    """Run the paused page clock one poll interval and wait for that poll to finish."""
+    drive_poll(page)
 
 
 def _dialog(page):

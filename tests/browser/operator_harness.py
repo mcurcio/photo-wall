@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 
 import uvicorn
+from playwright.sync_api import expect
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -101,6 +102,25 @@ def tile_health(page, frame_id):
     """A plan tile's health: its visible text is the short tile label, and its accessible
     name is the full label with the age (health.js `tileLabel` / `label`)."""
     return tile_status(page, frame_id).get_by_role("img")
+
+
+INVENTORY = "**/v1/operator/inventory"
+
+
+def drive_poll(page):
+    """Run the paused page clock one poll interval and wait until that poll has finished.
+
+    The console's poller is single-flight: a tick that finds the previous poll still
+    settling (its runtime or media read in flight, or its result not yet applied) is
+    skipped. So waiting for the inventory response alone races the next tick. The
+    snapshot status is `aria-busy` while any Plane A read is in flight and clears only
+    once the read has been applied, which is when the poller's slot frees. Use this
+    wherever a test drives polls back to back.
+    """
+    status = page.get_by_role("group", name="Snapshot status", exact=True)
+    with page.expect_response(INVENTORY):
+        page.clock.run_for(5000)
+    expect(status).not_to_have_attribute("aria-busy", "true")
 
 
 def pause_page_clock(page, at):

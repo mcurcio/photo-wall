@@ -333,3 +333,23 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         page.wait_for_timeout(200)
         expect(_heading(page, "scenes")).not_to_be_focused()
         expect(menu).to_be_focused()
+
+
+def test_the_snapshot_status_is_busy_exactly_while_a_read_is_in_flight(page, registry):
+    """`aria-busy` on the snapshot status marks a Plane A read in flight and clears only once
+    it is applied: the signal drive_poll waits on so back-to-back polls never race the
+    poller's single-flight slot (a tick finding the previous poll unsettled is skipped)."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        status = page.get_by_role("group", name="Snapshot status", exact=True)
+        expect(status).not_to_have_attribute("aria-busy", "true")
+        gate = RequestGate(page, "**/v1/operator/media")
+        gate.holding = True
+        status.get_by_role("button", name="Refresh", exact=True).click()
+        gate.wait_held()
+        # The inventory read has answered, but the refresh is not settled until media has.
+        expect(status).to_have_attribute("aria-busy", "true")
+        gate.holding = False
+        gate.release()
+        expect(status).not_to_have_attribute("aria-busy", "true")

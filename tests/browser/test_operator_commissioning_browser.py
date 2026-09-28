@@ -16,7 +16,7 @@ import time
 
 import pytest
 from console_tasks import open_frame
-from operator_harness import inventory, operator_server, pause_page_clock, sign_in
+from operator_harness import drive_poll, inventory, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
 from test_registry import enroll
 
@@ -333,8 +333,7 @@ def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, re
         expect(timer).to_contain_text("lease expires in 29s")
 
         for _ in range(2):
-            with page.expect_response("**/v1/operator/inventory"):
-                page.clock.run_for(5000)
+            drive_poll(page)
         expect(timer).to_contain_text("lease expires in 19s")
         expect(gain).to_have_value("1.9")
         expect(inspector.get_by_role("alert")).to_have_count(0)

@@ -95,6 +95,11 @@ export function SnapshotProvider({ children }) {
   const [refreshFailed, setRefreshFailed] = useState(false);
   // Bumped by each Log out; the shell is keyed on it (flow design §6 (b)).
   const [sessionEpoch, setSessionEpoch] = useState(0);
+  // How many Plane A reads are in flight. `refreshing` (any in flight) is shown as
+  // `aria-busy` on the snapshot status, so a refresh in progress is announced as
+  // such and its end is observable: it clears only after the read has been applied
+  // (or dropped), which is also when the poller's single-flight slot frees.
+  const [inFlight, setInFlight] = useState(0);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
   const pollingRef = useRef(false);
@@ -106,7 +111,7 @@ export function SnapshotProvider({ children }) {
 
   useEffect(() => onOriginRefused(() => setOriginRefused(true)), []);
 
-  const refresh = useCallback(async () => {
+  const read = useCallback(async () => {
     const ticket = ++issuedRef.current;
     const writesAtStart = writeCount();
     // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
@@ -154,6 +159,15 @@ export function SnapshotProvider({ children }) {
     setRefreshFailed(false);
     return next;
   }, [setAuth]);
+
+  const refresh = useCallback(async () => {
+    setInFlight((count) => count + 1);
+    try {
+      return await read();
+    } finally {
+      setInFlight((count) => count - 1);
+    }
+  }, [read]);
 
   const signIn = useCallback(
     async (token) => {
@@ -266,6 +280,7 @@ export function SnapshotProvider({ children }) {
       signIn,
       signOut,
       refreshFailed,
+      refreshing: inFlight > 0,
       originRefused,
       dismissOriginRefused,
       sessionEpoch,
@@ -278,6 +293,7 @@ export function SnapshotProvider({ children }) {
       signIn,
       signOut,
       refreshFailed,
+      inFlight,
       originRefused,
       dismissOriginRefused,
       sessionEpoch,
@@ -293,8 +309,9 @@ export function SnapshotProvider({ children }) {
  * wholesale and NEVER merges into Plane B (it resolves null when its read was
  * superseded or fenced off by a write), the sign-in state `auth` with its
  * `authNotice`, `signIn(token)` and `signOut()`, `refreshFailed` (true while the
- * newest applied refresh failed) and `originRefused` (Central refused a write
- * for its origin; `dismissOriginRefused` clears it) and `sessionEpoch` (bumped
+ * newest applied refresh failed), `refreshing` (a Plane A read is in flight),
+ * `originRefused` (Central refused a write for its origin; `dismissOriginRefused`
+ * clears it) and `sessionEpoch` (bumped
  * by each Log out; the shell is keyed on it). Must be used within a
  * SnapshotProvider so every region and useMutate share one Plane A.
  *

@@ -171,7 +171,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * @param {{hidden?: boolean}} props
  */
 export function Shell({ hidden = false }) {
-  const { snapshot, refresh, auth, signOut, refreshFailed } = useSnapshot();
+  const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
   // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
   // the Equipment roster and the output chooser.
@@ -328,7 +328,12 @@ export function Shell({ hidden = false }) {
           <div className="shell__status">
             <CentralPill health={health} />
             {snapshot !== null && (
-              <div className="console__statusbar" role="group" aria-label="Snapshot status">
+              <div
+                className="console__statusbar"
+                role="group"
+                aria-label="Snapshot status"
+                aria-busy={refreshing ? "true" : undefined}
+              >
                 <SnapshotAge refreshFailed={refreshFailed} />
                 <button
                   type="button"
