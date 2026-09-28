@@ -260,7 +260,8 @@ PACKAGES: Final = (
     Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and boot data",
             (*_BOOTSTRAPPER_DEB, "appliance/**", "scripts/build_netboot_bundle.sh",
              "scripts/build_boot_data.py", "scripts/verify_netboot_initrd.py",
-             "scripts/kernel_config_check.py", "scripts/eeprom_update.py")),
+             "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
+             "scripts/eeprom_update.py")),
     # The published files beyond the .debs: the base bundle tarball, manifest.json and
     # SHA256SUMS, whose names, layout and contents this packager writes to the declaration.
     Package("release-assets", "the GitHub Release's operator asset set (base tarball, "

@@ -16,9 +16,12 @@ systemd at the end of a successful mount (`Keeper.hand_over`).
 from __future__ import annotations
 
 import array
+import contextlib
+import errno
 import fcntl
 import os
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -80,12 +83,138 @@ def read_pi_serial(path: str = PI_SERIAL_PATH) -> str | None:
     return serial
 
 
+# How much of a failing helper's stderr the FAILED line carries (R9: every failure names its
+# real cause): the TAIL, where mount(8)-style tools put the reason.
+STDERR_TAIL: Final = 200
+
+
+def one_line(raw: bytes, limit: int = STDERR_TAIL) -> str:
+    """PURE. The last `limit` bytes of `raw` as one printable-ASCII console line: any other
+    byte becomes '?', whitespace runs collapse to one space."""
+    text = raw[-limit:].decode("ascii", "replace")
+    printable = "".join(character if " " <= character <= "~" or character in "\t\n\r" else "?"
+                        for character in text)
+    return " ".join(printable.split())
+
+
 class BootstrapError(ValueError):
-    """A fixed diagnostic code; no untrusted command or HTTP output."""
+    """A fixed diagnostic code (`str(error)`), plus an optional one-line `detail` naming the
+    real cause: a failing helper's stderr tail or an errno name, made printable by `one_line`.
+    Never untrusted command-line or HTTP output."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.detail = one_line(detail.encode("ascii", "replace"))
 
 
 class BootstrapFatal(RuntimeError):
     """Mount cleanup failed, so another root must not be tried this boot."""
+
+
+def _errno_name(error: OSError) -> str:
+    return errno.errorcode.get(error.errno or 0, type(error).__name__)
+
+
+# --- Stage-1 mounts: kernel options only, the loop device attached here -----
+#
+# The initrd's mount(8)/umount(8) are klibc-utils', not util-linux's:
+# initramfs-tools stages klibc's over whatever a hook copies. klibc mount maps
+# the generic MS_* flags and hands every other option to the kernel as
+# filesystem data, so a util-linux-only option (`loop`, `offset=`, `nofail`,
+# `x-*`, ...) reaches the filesystem, which refuses it -- v0.9.1 on a Pi 5:
+# "squashfs: Unknown parameter 'loop'". Stage 1 therefore passes only options
+# the KERNEL takes (an allowlist: a new option fails a unit test, not a boot),
+# and attaches the squashfs's loop device itself through the loop driver's
+# ioctls (linux/loop.h), as util-linux's mount would have.
+
+KERNEL_MOUNT_OPTIONS: Final = frozenset({
+    "ro", "nodev", "nosuid",               # MS_* flags every mount(8) maps
+    "mode", "size",                        # tmpfs
+    "lowerdir", "upperdir", "workdir",     # overlay
+})
+
+LOOP_CONTROL: Final = Path("/dev/loop-control")
+LOOP_SET_FD: Final = 0x4C00
+LOOP_CLR_FD: Final = 0x4C01
+LOOP_SET_STATUS64: Final = 0x4C04
+LOOP_CONFIGURE: Final = 0x4C0A             # Linux 5.8+: SET_FD + SET_STATUS64 in one step
+LOOP_CTL_GET_FREE: Final = 0x4C82
+LO_FLAGS_READ_ONLY: Final = 1
+LO_FLAGS_AUTOCLEAR: Final = 4
+LOOP_ATTEMPTS: Final = 8                   # GET_FREE then configure can lose a race (EBUSY)
+# struct loop_info64 (232 bytes): lo_device, lo_inode, lo_rdevice, lo_offset, lo_sizelimit;
+# lo_number, lo_encrypt_type, lo_encrypt_key_size, lo_flags; lo_file_name[64],
+# lo_crypt_name[64], lo_encrypt_key[32]; lo_init[2].
+LOOP_INFO64: Final = struct.Struct("=5Q4I64s64s32s2Q")
+# struct loop_config (304 bytes): fd, block_size, info, __reserved[8].
+LOOP_CONFIG: Final = struct.Struct(f"=2I{LOOP_INFO64.size}s8Q")
+
+
+def loop_info(image: Path) -> bytes:
+    """PURE. A read-only, autoclear `struct loop_info64` naming `image` (truncated to fit)."""
+    name = os.fsencode(str(image))[:63]
+    return LOOP_INFO64.pack(0, 0, 0, 0, 0, 0, 0, 0, LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR,
+                            name, b"", b"", 0, 0)
+
+
+def _configure_loop(device: int, backing: int, image: Path) -> None:
+    info = loop_info(image)
+    try:
+        fcntl.ioctl(device, LOOP_CONFIGURE, LOOP_CONFIG.pack(backing, 0, info, *(0,) * 8))
+        return
+    except OSError as error:
+        if error.errno not in (errno.EINVAL, errno.ENOTTY):  # not "no LOOP_CONFIGURE here"
+            raise
+    fcntl.ioctl(device, LOOP_SET_FD, backing)
+    try:
+        fcntl.ioctl(device, LOOP_SET_STATUS64, info)
+    except OSError:
+        # Bound without AUTOCLEAR: detach (the kernel defers it to our close).
+        with contextlib.suppress(OSError):
+            fcntl.ioctl(device, LOOP_CLR_FD, 0)
+        raise
+
+
+def _attach_free_loop(backing: int, image: Path, control: Path) -> tuple[Path, int]:
+    """(the loop device node, an fd holding it open) with `backing` attached."""
+    ctl = os.open(control, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        for _ in range(LOOP_ATTEMPTS):
+            node = control.parent / f"loop{fcntl.ioctl(ctl, LOOP_CTL_GET_FREE)}"
+            device = os.open(node, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                _configure_loop(device, backing, image)
+            except OSError as error:
+                os.close(device)
+                if error.errno == errno.EBUSY:
+                    continue
+                raise
+            return node, device
+        raise OSError(errno.EBUSY, "no free loop device")
+    finally:
+        os.close(ctl)
+
+
+@contextlib.contextmanager
+def attached_loop(image: Path, *, control: Path = LOOP_CONTROL) -> Iterator[Path]:
+    """Attach `image` read-only to a free loop device and yield the device node, held open
+    until the block exits. The device is AUTOCLEAR: the kernel detaches it at its last close
+    -- ours on leaving the block if nothing mounted it, else the unmount of what did -- so no
+    exit (success, failure or crash) leaves a device for cleanup to undo. A failed attach is
+    `boot_loop` naming the errno."""
+    try:
+        backing = os.open(image, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            node, device = _attach_free_loop(backing, image, control)
+        finally:
+            os.close(backing)  # the loop device holds its own reference to the file
+    except OSError as error:
+        raise BootstrapError("boot_loop", _errno_name(error)) from None
+    try:
+        yield node
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(device)
 
 
 class LinuxOps:
@@ -102,19 +231,44 @@ class LinuxOps:
         self.run_root.mkdir(mode=0o755, parents=True, exist_ok=True)
 
     def command(self, *argv: str, timeout: int = 30) -> bytes:
-        with tempfile.TemporaryFile() as output:
+        """Run `argv`; its stdout (at most CHUNK bytes). A failure is `boot_command` whose
+        detail names the cause: the helper's stderr tail, a timeout, or the errno of a helper
+        that could not start."""
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             try:
-                result = subprocess.run(argv, stdout=output, stderr=subprocess.DEVNULL,
+                result = subprocess.run(argv, stdout=output, stderr=errors,
                                         timeout=timeout, check=False)
-                if result.returncode:
-                    raise BootstrapError("boot_command")
-                output.seek(0)
-                data = output.read(CHUNK + 1)
-                if len(data) > CHUNK:
-                    raise BootstrapError("boot_command_limit")
-                return data
-            except (OSError, subprocess.TimeoutExpired):
-                raise BootstrapError("boot_command") from None
+            except subprocess.TimeoutExpired:
+                raise BootstrapError("boot_command", f"{argv[0]}: timeout {timeout}s") from None
+            except OSError as error:
+                raise BootstrapError("boot_command", f"{argv[0]}: {_errno_name(error)}") from None
+            if result.returncode:
+                size = errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, size - STDERR_TAIL))
+                stderr = one_line(errors.read(STDERR_TAIL))
+                raise BootstrapError("boot_command",
+                                     stderr or f"{argv[0]}: exit {result.returncode}")
+            output.seek(0)
+            data = output.read(CHUNK + 1)
+            if len(data) > CHUNK:
+                raise BootstrapError("boot_command_limit")
+            return data
+
+    def mount(self, fstype: str, source: str, target: Path, options: str) -> None:
+        """Every stage-1 mount. `options` may name only KERNEL_MOUNT_OPTIONS, so the mount
+        means the same whichever mount(8) the initrd carries (see KERNEL_MOUNT_OPTIONS)."""
+        foreign = [option for option in options.split(",")
+                   if option.split("=", 1)[0] not in KERNEL_MOUNT_OPTIONS]
+        if foreign:
+            raise BootstrapError("boot_mount_option", ",".join(foreign))
+        self.command("mount", "-t", fstype, "-o", options, source, str(target))
+
+    def loop_device(self, image: Path) -> contextlib.AbstractContextManager[Path]:
+        """`attached_loop(image)`, loading the loop driver first when it is a module not yet
+        loaded (no /dev/loop-control)."""
+        if not LOOP_CONTROL.exists():
+            self.command("modprobe", "loop")
+        return attached_loop(image)
 
     def device_id(self) -> str:
         # Pi firmware serial; DMI UUID and the explicit QEMU fixture observation
@@ -135,7 +289,7 @@ class LinuxOps:
     def ram(self) -> Path:
         path = self.run_root / "ram"
         path.mkdir(mode=0o700)
-        self.command("mount", "-t", "tmpfs", "-o", "mode=0700,size=1100M,nodev,nosuid", "tmpfs", str(path))
+        self.mount("tmpfs", "tmpfs", path, "mode=0700,size=1100M,nodev,nosuid")
         return path
 
     def _prepare_root(self, rootmnt: Path) -> None:
@@ -153,9 +307,14 @@ class LinuxOps:
         rootmnt.mkdir(parents=True, exist_ok=True)
         mounted = []
         try:
-            self.command("mount", "-t", "squashfs", "-o", "loop,ro,nodev", str(image), str(lower))
+            # The loop device is attached here, not by `-o loop`: the initrd's mount(8) is
+            # klibc's, which hands `loop` to the kernel as squashfs data (see
+            # KERNEL_MOUNT_OPTIONS). Leaving the block releases our hold on it; the
+            # mount keeps it.
+            with self.loop_device(image) as device:
+                self.mount("squashfs", str(device), lower, "ro,nodev")
             mounted.append(lower)
-            self.command("mount", "-t", "tmpfs", "-o", "size=512M,mode=0700,nodev,nosuid", "tmpfs", str(writable))
+            self.mount("tmpfs", "tmpfs", writable, "size=512M,mode=0700,nodev,nosuid")
             mounted.append(writable)
             # OverlayFS exposes the upper root's traversal mode at the merged
             # root. Keep its contents private while leaving the root traversable
@@ -166,8 +325,8 @@ class LinuxOps:
             upper.chmod(0o755)
             work.mkdir(mode=0o700)
             work.chmod(0o700)
-            options = f"lowerdir={lower},upperdir={upper},workdir={work}"
-            self.command("mount", "-t", "overlay", "-o", options, "overlay", str(rootmnt))
+            self.mount("overlay", "overlay", rootmnt,
+                       f"lowerdir={lower},upperdir={upper},workdir={work}")
             mounted.append(rootmnt)
             self._prepare_root(rootmnt)
         except BaseException:

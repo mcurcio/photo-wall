@@ -34,7 +34,8 @@ every network send and read in them pets it too, each one bounded call (`_PacedT
 6. base: `DirectFetch` streams `/v1/netboot/base`; its sha256 must match the `Digest` header, a
    corruption check only (home LAN, no signature on this path). A mismatch, or no `Digest`,
    fails closed with no partial file and nothing mounted.
-7. mount and hand off: `LinuxOps.mount_root` unchanged, a note if the base's CA bundle differs
+7. mount and hand off: `LinuxOps.mount_root` (the base's loop device attached by stage 1
+   itself, every mount given kernel options only), a note if the base's CA bundle differs
    from this initrd's (R5, Q3 = A), stage 1's working resolver copied onto the new root
    (`hand_over_resolver`: stage 2 has no DHCP client of its own), then the watchdog hand-over
    to systemd, last.
@@ -220,8 +221,8 @@ class NetbootOps(LinuxOps):
     those steps are simply absent rather than stubbed. Name lookup is the
     transport's (`uplink.lookup`, bounded), not an ops step. The stage-1
     hardware watchdog is a `Keeper`, armed once in `main()`. `mount_root`,
-    `_prepare_root`, `ram`, and `command` are inherited from `LinuxOps`
-    unchanged.
+    `_prepare_root`, `ram`, `mount`, `loop_device` and `command` are inherited
+    from `LinuxOps` unchanged.
     """
 
     def configure_networking(self) -> None:
@@ -391,11 +392,14 @@ def failure_line(phase: str, error: BaseException, *, clock: ClockRecord | None 
     """The one FAILED line: `FAILED phase=<n> ` + uplink.diagnosis.failure_text for a named
     cause, so a `time` or `tls`/`untrusted` failure carries the clock record's summary and the
     trust provenance. Stage 1's own content codes and the mount's fixed codes print as
-    `code=<code>`; anything else only by its type."""
+    `code=<code>`, a mount-step failure followed by ` detail=<its cause>` (a helper's stderr
+    tail or an errno name; one line, the rest of the line); anything else only by its type."""
     if isinstance(error, UplinkError):
         text = failure_text(error, clock=clock, provenance=provenance)
     elif isinstance(error, (NetbootError, BootstrapError, BootstrapFatal)):
         text = f"code={error}"
+        if isinstance(error, BootstrapError) and error.detail:
+            text += f" detail={error.detail}"
     else:
         text = f"error={type(error).__name__}"
     return f"FAILED phase={phase} {text}"

@@ -38,15 +38,22 @@ for extension in "${libdir}"/lib-dynload/*.so; do
 done
 cp -a "${libdir}/." "${DESTDIR}${libdir}/"
 
-# Only what LinuxOps.mount_root / ram / command actually shell out to:
-#   mount/umount  -- squashfs(loop,ro), tmpfs, overlay mounts + cleanup
-#   modprobe      -- on-demand module load behind those mounts
+# Only what LinuxOps.mount_root / ram / loop_device / command shell out to:
+#   mount/umount  -- NOT staged here: initramfs-tools stages klibc-utils'
+#                    over any copy a hook makes (v0.9.1's initrd held klibc's
+#                    even though this hook copied util-linux's), so stage 1
+#                    uses kernel mount options only and attaches the base's
+#                    loop device itself (appliance/bootstrap.py
+#                    KERNEL_MOUNT_OPTIONS, attached_loop). Their presence is
+#                    checked by scripts/verify_netboot_initrd.py, and the real
+#                    mounts by scripts/initrd_mount_probe.py.
+#   modprobe      -- the loop driver, if it is a module not yet loaded
 # configure_networking comes from initramfs-tools' own /scripts/functions
 # (staged by initramfs-tools), so ip/ipconfig are not staged here. openssl/
 # chronyd/blkid are deliberately absent: no signature check, no time daemon
 # (stage 1's one SNTP step is uplink.clock), no block-device probe on this
 # RAM-overlay path.
-for program in mount umount modprobe; do
+for program in modprobe; do
     executable=$(command -v "$program")
     copy_exec "$executable" "$executable"
 done

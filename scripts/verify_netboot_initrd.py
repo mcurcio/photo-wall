@@ -17,7 +17,8 @@ POSITIVE -- every one of these must be present:
     ``_socket`` is built into libpython, so the stdlib tree plus ``_ssl.so`` is the honest
     file-level proxy for "the initrd can open TCP and TLS sockets"), the boot script
     ``scripts/photowall-netboot`` and initramfs-tools' ``scripts/functions`` (its
-    configure_networking helper, which appliance.netboot_init sources -- load-bearing);
+    configure_networking helper, which appliance.netboot_init sources -- load-bearing), and
+    the ``mount`` / ``umount`` / ``modprobe`` stage 1 execs;
   * in the boot data: the CA bundle, the clock floor, and every closure file under the cached
     interpreter's own stdlib dir, where ``python3 -I`` finds it.
 
@@ -69,6 +70,12 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("socket stdlib module", "*lib/python3*/socket.py"),
     ("netboot boot script", "scripts/photowall-netboot"),
     ("initramfs-tools configure_networking helper", "scripts/functions"),
+    # The helpers stage 1 execs (appliance/bootstrap.py LinuxOps): whichever build of them
+    # initramfs-tools stages -- klibc's mount/umount -- since stage 1 passes kernel options
+    # only. That they WORK is scripts/initrd_mount_probe.py's job, on a real kernel.
+    ("mount helper", "*bin/mount"),
+    ("umount helper", "*bin/umount"),
+    ("modprobe helper", "*bin/modprobe"),
 )
 
 # What the boot data must carry besides the closure.

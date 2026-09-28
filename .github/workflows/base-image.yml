@@ -863,6 +863,21 @@ jobs:
           echo "PASS: bundle content contract satisfied"
           find "$BUNDLE" -type f -printf '%10s %p\n'
 
+      # Stage 1's REAL mount path, out of the shipped initrd.img, on this
+      # runner's kernel: unpack it, chroot in, and run mount_root (loop attach,
+      # squashfs, tmpfs, overlay) with the initrd's own python3 and klibc
+      # mount/umount against a tiny probe squashfs. v0.9.1's `-o loop`, which
+      # klibc mount hands to the kernel, failed only on a Pi; this fails here.
+      # Not gated by a cache hit: it reads the assembled bundle. The runner is
+      # arm64, so the initrd's binaries run natively.
+      - name: Mount a probe squashfs through the built initrd's stage-1 path
+        env:
+          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+        run: |
+          set -eu
+          sudo .venv/bin/python scripts/initrd_mount_probe.py "$BUNDLE/boot/initrd.img" \
+            --work "$RUNNER_TEMP/initrd-mount-probe"
+
       - name: Show what was produced
         if: always()
         env:

@@ -7,6 +7,7 @@ lines."""
 
 import ast
 import base64
+import contextlib
 import functools
 import hashlib
 import os
@@ -504,6 +505,26 @@ def test_example_16_a_non_http_peer_is_a_protocol_failure(tmp_path):
         "FAILED phase=5 cause=connect reason=protocol host=host detail=BadStatusLine"
 
 
+def test_a_mount_helper_failure_names_its_cause_on_the_failed_line(tmp_path):
+    """R9: v0.9.1's `FAILED phase=7 code=boot_command` said nothing of why. The helper's
+    stderr tail now rides on the line."""
+    class FailingMount(Ops):
+        def mount_root(self, image, rootmnt):
+            raise BootstrapError("boot_command", "mount: Invalid argument")
+
+    assert failed(cmdline(), tmp_path, BootstrapError, ops=FailingMount(tmp_path)) == (
+        "FAILED phase=7 code=boot_command detail=mount: Invalid argument")
+
+
+def test_a_bootstrap_code_without_detail_keeps_the_bare_line(tmp_path):
+    class FailingMount(Ops):
+        def mount_root(self, image, rootmnt):
+            raise BootstrapError("root_permissions")
+
+    assert failed(cmdline(), tmp_path, BootstrapError, ops=FailingMount(tmp_path)) == (
+        "FAILED phase=7 code=root_permissions")
+
+
 def test_a_networking_command_failure_is_named(tmp_path):
     ops = Ops(tmp_path, networking_error=BootstrapError("boot_command"))
     assert failed(cmdline(), tmp_path, ops=ops) == (
@@ -692,6 +713,8 @@ def test_mount_root_is_reused_verbatim_not_reimplemented():
     assert NetbootOps._prepare_root is LinuxOps._prepare_root
     assert NetbootOps.ram is LinuxOps.ram
     assert NetbootOps.command is LinuxOps.command
+    assert NetbootOps.mount is LinuxOps.mount
+    assert NetbootOps.loop_device is LinuxOps.loop_device
     assert not hasattr(NetbootOps, "resolve")      # the transport's bounded lookup does it
 
 
@@ -704,6 +727,7 @@ def test_netboot_ops_mount_root_runs_the_same_mount_sequence_as_bootstrap(tmp_pa
         return b""
 
     ops.command = command
+    ops.loop_device = lambda image: contextlib.nullcontext(Path("/dev/loop0"))
     rootmnt = tmp_path / "root"
     ops.mount_root(tmp_path / "rootfs", rootmnt)
     assert stat.S_IMODE(rootmnt.stat().st_mode) == 0o755
