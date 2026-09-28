@@ -1,12 +1,15 @@
-import React, { useCallback, useId, useMemo, useRef, useState } from "react";
+import React, { useCallback, useId, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { activationProblems, newActivationKey } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { Field, ProblemSummary, useProblems } from "./Field.jsx";
 import { frameHealth } from "./health.js";
 import { explainPrecedence } from "./join.js";
 import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
-import { runRows } from "./showState.js";
+import { ScenePicker } from "./ScenePicker.jsx";
+import { frameOf, protectorOf, runRows } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -248,64 +251,65 @@ function WhyPanel({ snapshot }) {
 }
 
 /**
- * Activate a Scene now: POST `/v1/operator/activations`, and show the
- * synchronous Admission at the moment, exactly as returned.
+ * Activate a Scene now (§11): POST `/v1/operator/activations` and state the
+ * synchronous Admission at the moment, from served facts only. The activation
+ * id is never shown: it is minted when the draft changes or after a definite
+ * outcome, and REUSED on a retry after "outcome unknown" (a 5xx, a timeout or a
+ * thrown request — the write may have committed), so a retry cannot start the
+ * Scene twice. A 4xx is a definite refusal.
  */
 function ActivateForm({ snapshot }) {
   const definitions = snapshot?.runtime?.definitions ?? {};
-  const scenes = useMemo(() => Object.values(definitions), [definitions]);
   const mutate = useMutate();
+  const hintId = useId();
+  const repeatName = useId();
 
-  // Plane B: the activation draft + the SYNCHRONOUS outcome of the last activate.
+  // Plane B: the activation draft and its key.
   const [sceneId, setSceneId] = useState("");
-  const [activationId, setActivationId] = useState("");
-  const [priority, setPriority] = useState(0);
-  // The synchronous Admission of the last activation, shown at the moment and
-  // held in component state ONLY (never read back from a GET). Null until the
-  // operator activates something — so no activation outcome is shown on load.
-  const [outcome, setOutcome] = useState(
-    /** @type {{status: string, reason: string|null}|null} */ (null),
-  );
+  const [priority, setPriority] = useState(/** @type {string|number} */ (0));
+  const [repeat, setRepeat] = useState(/** @type {"ignore"|"restart"} */ ("ignore"));
+  const [key, setKey] = useState(newActivationKey);
+  // The last outcome, shown at the moment and held here only; null on load.
+  const [outcome, setOutcome] = useState(/** @type {string|null} */ (null));
   const [activating, setActivating] = useState(false);
+  const problems = useProblems(activationProblems({ sceneId, priority }));
 
-  const activateValid =
-    !activating && sceneId !== "" && activationId.trim() !== "";
+  // Any change to the draft is a new activation.
+  const edit = (setter, field) => (value) => {
+    setter(value);
+    setKey(newActivationKey());
+    if (field !== null) {
+      problems.touch(field);
+    }
+  };
 
-  const activate = useCallback(async () => {
-    const id = activationId.trim();
+  const activate = async () => {
+    const asked = { sceneId, priority: Number(priority) };
     setActivating(true);
     setOutcome(null);
+    let result = null;
     try {
-      const result = await mutate(() =>
+      result = await mutate(() =>
         apiWrite("/v1/operator/activations", {
           method: "POST",
-          body: {
-            scene_id: sceneId,
-            activation_id: id,
-            priority: Number(priority),
-          },
+          body: { scene_id: sceneId, activation_id: key, priority: asked.priority, repeat },
         }),
       );
-      // Show the SYNCHRONOUS server outcome truthfully. On a 2xx the body is the
-      // Admission {activation_id, status, run_id, reason}; on a non-2xx we report
-      // the transport failure honestly rather than claim an activation status.
-      if (result.ok && result.data && typeof result.data.status === "string") {
-        setOutcome({
-          status: result.data.status,
-          reason: result.data.reason ?? null,
-        });
-      } else {
-        setOutcome({
-          status: "not accepted",
-          reason: result.error ?? `HTTP ${result.status}`,
-        });
-      }
     } catch {
-      setOutcome({ status: "not accepted", reason: "the request did not complete" });
-    } finally {
-      setActivating(false);
+      result = null;
     }
-  }, [sceneId, activationId, priority, mutate]);
+    setActivating(false);
+    if (result === null || result.status >= 500) {
+      setOutcome("Outcome unknown. Try again; it will not start twice.");
+      return;
+    }
+    setKey(newActivationKey());
+    setOutcome(
+      result.ok
+        ? admissionSentence(snapshot, asked, result.data)
+        : `Not started: ${result.error ?? `HTTP ${result.status}`}.`,
+    );
+  };
 
   return (
     <>
@@ -313,72 +317,125 @@ function ActivateForm({ snapshot }) {
         className="run-control__activate"
         role="form"
         aria-label="Activate a Scene"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          if (activateValid) {
+          if (!activating && problems.check()) {
             activate();
           }
         }}
       >
-        <label className="run-control__field">
-          Scene to activate
-          <select
-            className="run-control__scene"
-            aria-label="Scene to activate"
-            value={sceneId}
-            onChange={(event) => setSceneId(event.target.value)}
-          >
-            <option value="">Choose a Scene</option>
-            {scenes.map((scene) => (
-              <option key={scene.scene_id} value={scene.scene_id}>
-                {scene.scene_id}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="run-control__field">
-          Activation ID
-          <input
-            type="text"
-            className="run-control__activation-id"
-            aria-label="Activation ID"
-            value={activationId}
-            onChange={(event) => setActivationId(event.target.value)}
-          />
-        </label>
-
-        <label className="run-control__field">
-          Priority
-          <input
-            type="number"
-            className="run-control__priority"
-            aria-label="Activation priority"
-            value={priority}
-            onChange={(event) => setPriority(event.target.value)}
-          />
-        </label>
-
-        <button
-          type="submit"
-          className="run-control__activate-button"
-          disabled={!activateValid}
+        <ProblemSummary summary={problems.summary} label="Activation problems" />
+        <ScenePicker
+          id={problems.idFor("scene")}
+          label="Scene to activate"
+          reason={problems.reasonFor("scene")}
+          definitions={definitions}
+          value={sceneId}
+          onChange={edit(setSceneId, "scene")}
+        />
+        <Field
+          id={problems.idFor("priority")}
+          label="Activation priority"
+          reason={problems.reasonFor("priority")}
         >
+          {(props) => (
+            <input
+              {...props}
+              type="number"
+              step="1"
+              value={priority}
+              onChange={(event) => edit(setPriority, "priority")(event.target.value)}
+            />
+          )}
+        </Field>
+        <fieldset className="run-control__repeat" aria-label="If it is already running">
+          <legend>If it is already running</legend>
+          <label className="run-control__repeat-option">
+            <input
+              type="radio"
+              name={repeatName}
+              checked={repeat === "ignore"}
+              onChange={() => edit(setRepeat, null)("ignore")}
+            />
+            Leave it running
+          </label>
+          <label className="run-control__repeat-option">
+            <input
+              type="radio"
+              name={repeatName}
+              aria-describedby={hintId}
+              checked={repeat === "restart"}
+              onChange={() => edit(setRepeat, null)("restart")}
+            />
+            Restart it
+          </label>
+          {repeat === "restart" && (
+            <p id={hintId} className="field__hint">
+              Ends the current Run and starts a new one now. A restarted Run has no Program
+              end; it plays until finished.
+            </p>
+          )}
+        </fieldset>
+        <button type="submit" className="run-control__activate-button" disabled={activating}>
           Activate now
         </button>
       </form>
 
-      {/* The SYNCHRONOUS activation outcome — shown at the moment, exactly as the
-          server returned it, and only after an activation (null until then). This
-          is the sole activation-outcome surface; the calendar/Runs area renders no
-          history and no missed_window row (design §5/§6). */}
-      {outcome !== null ? (
+      {/* The SYNCHRONOUS activation outcome — shown at the moment, only after
+          an activation (null until then). */}
+      {outcome !== null && (
         <p className="run-control__outcome" role="status" aria-label="Activation outcome">
-          {outcome.reason
-            ? `Activation ${outcome.status}: ${outcome.reason}`
-            : `Activation ${outcome.status}`}
+          {outcome}
         </p>
-      ) : null}
+      )}
     </>
   );
+}
+
+/**
+ * An Admission in words (§11), from served facts only: a refusal names the
+ * protecting Run only when the snapshot serves it live now.
+ *
+ * @param {object|null} snapshot the snapshot the operator activated from
+ * @param {{sceneId: string, priority: number}} asked
+ * @param {{status: string, reason: string|null}} admission
+ * @returns {string}
+ */
+function admissionSentence(snapshot, asked, admission) {
+  const scene = snapshot?.runtime?.definitions?.[asked.sceneId];
+  const now = snapshot?.runtime?.current?.now;
+  switch (admission?.status) {
+    case "admitted":
+      return `Started: Central admitted a Run of ${asked.sceneId}.`;
+    case "ignored":
+      return `Not started: ${asked.sceneId} is already running, left as is.`;
+    case "queued":
+      return `Queued: ${asked.sceneId} starts when its running Run ends.`;
+    case "expired":
+      return "Not started: it expired before it could start.";
+    case "rejected":
+      break;
+    default:
+      return "Outcome unknown. Try again; it will not start twice.";
+  }
+  if (admission.reason === "protected_frames") {
+    const { run, frames } = protectorOf(snapshot, scene, asked.priority, admission.reason, now);
+    const list = frames.map(frameOf).join(", ");
+    return run !== null
+      ? `Not started: ${list} is protected by the Run of ${run.scene_id}.`
+      : `Not started: ${list} is protected by another Run.`;
+  }
+  if (admission.reason === "protection_not_visible") {
+    const { run, frames } = protectorOf(snapshot, scene, asked.priority, admission.reason, now);
+    const list = frames.map(frameOf).join(", ");
+    return run !== null
+      ? `Not started: this Scene protects ${list}, but ${run.scene_id}'s Run ` +
+          `(priority ${run.priority}) covers it; use priority at least ${run.priority}.`
+      : `Not started: this Scene protects ${list}, but a higher-priority Run covers it.`;
+  }
+  if (admission.reason === "queue_full") {
+    return "Not started: 16 activations are already waiting.";
+  }
+  return `Not started: ${admission.reason ?? "refused"}.`;
 }

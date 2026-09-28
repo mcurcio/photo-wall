@@ -121,3 +121,38 @@ export function sceneProblems(draft, existingIds) {
   }
   return problems;
 }
+
+/** Whether a field value is a whole number (a priority). */
+function isWhole(value) {
+  return String(value).trim() !== "" && Number.isInteger(Number(value));
+}
+
+/**
+ * An activation draft's problems (§6, §11).
+ *
+ * @param {{sceneId: string, priority: string|number}} draft
+ * @returns {Problem[]}
+ */
+export function activationProblems({ sceneId, priority }) {
+  const problems = [];
+  if (sceneId === "") {
+    problems.push({ field: "scene", message: "Choose a Scene." });
+  }
+  if (!isWhole(priority)) {
+    problems.push({ field: "priority", message: "Priority must be a whole number." });
+  }
+  return problems;
+}
+
+/**
+ * A fresh activation id, never shown: `console-<base36 ms>-<8 hex>` (§5).
+ * Minted when the draft changes or after a definite outcome, and REUSED on a
+ * retry after "outcome unknown": Central answers a known id with its stored
+ * Admission (central/runtime.py `activate`), so a retry cannot start twice.
+ *
+ * @returns {string}
+ */
+export function newActivationKey() {
+  const random = crypto.getRandomValues(new Uint32Array(1))[0].toString(16).padStart(8, "0");
+  return `console-${Date.now().toString(36)}-${random}`;
+}

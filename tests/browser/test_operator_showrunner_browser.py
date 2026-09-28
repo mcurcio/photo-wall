@@ -715,16 +715,17 @@ WHY_HIGH = "why-high"
 WHY_LOW = "why-low"
 
 
-def _activate(page, scene_id, activation_id, priority):
+def _activate(page, scene_id, priority, repeat="Leave it running"):
     """Activate a Scene NOW through the Runs region's Activate form and return the
     synchronous POST /v1/operator/activations response. The server answers with an
-    Admission ({status, reason}) that the console shows AT THE MOMENT.
+    Admission ({status, reason}) that the console shows AT THE MOMENT. The console
+    mints the activation id; the operator never types one.
     """
     runs = page.get_by_role("region", name="Runs", exact=True)
     form = runs.get_by_role("form", name="Activate a Scene", exact=True)
     form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
-    form.get_by_label("Activation ID", exact=True).fill(activation_id)
     form.get_by_label("Activation priority", exact=True).fill(str(priority))
+    form.get_by_label(repeat, exact=True).check()
     with page.expect_response(
         lambda r: r.url.endswith("/v1/operator/activations")
         and r.request.method == "POST"
@@ -752,15 +753,17 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
         # No outcome is shown before an activation — it is synchronous only.
         expect(outcome).to_have_count(0)
 
-        response = _activate(page, SCENE_ID, "act-first", 0)
+        response = _activate(page, SCENE_ID, 0)
         assert response.status == 200
         # The server admitted it; the console says exactly that.
-        expect(runs.get_by_text("Activation admitted", exact=True)).to_be_visible()
+        expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
+            f"Started: Central admitted a Run of {SCENE_ID}.")
 
         # Activating the SAME running Scene again (new activation id,
         # repeat=ignore) is IGNORED — shown truthfully, not as a success.
-        _activate(page, SCENE_ID, "act-second", 0)
-        expect(runs.get_by_text("Activation ignored", exact=True)).to_be_visible()
+        _activate(page, SCENE_ID, 0)
+        expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
+            f"Not started: {SCENE_ID} is already running, left as is.")
 
 
 def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, registry):
@@ -801,10 +804,10 @@ def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, regi
         expect(slept).not_to_contain_text("Missed")
 
         # The outcome appears ONLY at the synchronous moment of activation.
-        response = _activate(page, SCENE_ID, "act-sync", 0)
+        response = _activate(page, SCENE_ID, 0)
         assert response.status == 200
-        expect(runs.get_by_label("Activation outcome", exact=True)).to_be_visible()
-        expect(runs.get_by_text("Activation admitted", exact=True)).to_be_visible()
+        expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
+            f"Started: Central admitted a Run of {SCENE_ID}.")
 
 
 def test_cancel_removes_live_run(page, registry):
@@ -823,7 +826,7 @@ def test_cancel_removes_live_run(page, registry):
         # Not vacuous: no live Runs before activation.
         expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
 
-        _activate(page, SCENE_ID, "cancel-act", 0)
+        _activate(page, SCENE_ID, 0)
 
         run_row = runs.get_by_role("listitem").first
         expect(run_row).to_be_visible()
@@ -855,7 +858,7 @@ def test_finish_live_run_posts(page, registry):
         _author_live_scene(page, SCENE_ID)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
-        _activate(page, SCENE_ID, "finish-act", 0)
+        _activate(page, SCENE_ID, 0)
 
         run_row = runs.get_by_role("listitem").first
         expect(run_row).to_be_visible()
@@ -888,8 +891,8 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
 
         # Activate the LOW priority first, the HIGH priority second — so ordering
         # cannot be an accident of activation order.
-        _activate(page, WHY_LOW, "why-low-act", 1)
-        _activate(page, WHY_HIGH, "why-high-act", 5)
+        _activate(page, WHY_LOW, 1)
+        _activate(page, WHY_HIGH, 5)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
@@ -1180,7 +1183,7 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
         once = "plays one 30 s cycle, then ends"
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_label(
             f"Scene {SCENE_ID}", exact=True)).to_contain_text(once)
-        _activate(page, SCENE_ID, "once-act", 0)
+        _activate(page, SCENE_ID, 0)
         run_row = page.get_by_role("region", name="Runs", exact=True).get_by_role("listitem").first
         expect(run_row).to_contain_text(once)
         expect(run_row).to_contain_text("activated directly")
@@ -1298,3 +1301,90 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
             form.get_by_role("button", name="Save Scene", exact=True).click()
         targets = [c["target"] for c in info.value.request.post_data_json["contributions"]]
         assert targets == [f"frame:{VALID_FRAME}"]
+
+
+# §11 activation.
+
+
+def _runs_of(page, origin, scene_id):
+    """Every served Run of a Scene (live or ended), read through the public contract."""
+    response = page.request.get(origin + "/v1/operator/runtime", headers={
+        "Authorization": "Bearer " + ADMIN})
+    return [run for run in response.json()["current"]["runs"] if run["scene_id"] == scene_id]
+
+
+def _retry_after_unknown(page, registry, answer):
+    """Restart SCENE_ID; the first POST reaches Central (and commits) but the
+    console gets `answer` instead. It says "Outcome unknown"; the retry must send
+    the SAME activation id, so Central returns the stored Admission and there is
+    one Run. A fresh id would restart again: two Runs (one cancelled)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        sent = []
+        page.on("request", lambda request: sent.append(request.post_data_json["activation_id"])
+                if request.url.endswith("/v1/operator/activations")
+                and request.method == "POST" else None)
+
+        def first_attempt(route):
+            route.fetch()  # the write reaches Central and commits
+            answer(route)
+        page.route("**/v1/operator/activations", first_attempt, times=1)
+
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        form = runs.get_by_role("form", name="Activate a Scene", exact=True)
+        form.get_by_label("Scene to activate", exact=True).select_option(SCENE_ID)
+        form.get_by_label("Restart it", exact=True).check()
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        outcome = runs.get_by_label("Activation outcome", exact=True)
+        expect(outcome).to_have_text("Outcome unknown. Try again; it will not start twice.")
+
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(outcome).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        assert len(set(sent)) == 1, sent
+        assert len(_runs_of(page, origin, SCENE_ID)) == 1
+
+
+def test_an_activation_retried_after_an_abort_reuses_its_key(page, registry):
+    _retry_after_unknown(page, registry, lambda route: route.abort())
+
+
+def test_an_activation_retried_after_a_500_reuses_its_key(page, registry):
+    _retry_after_unknown(page, registry, lambda route: route.fulfill(
+        status=500, content_type="application/json", body='{"error": "internal"}'))
+
+
+def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+            "form", name="Activate a Scene", exact=True)
+        expect(form.get_by_label("Leave it running", exact=True)).to_be_checked()
+        restart = form.get_by_label("Restart it", exact=True)
+        restart.check()
+        expect(restart).to_have_accessible_description(
+            "Ends the current Run and starts a new one now. A restarted Run has no Program "
+            "end; it plays until finished.")
+
+
+def test_a_protected_refusal_names_the_protecting_run(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("guard", protect_frames=True))
+    runtime.command("set_scene", _scene(SCENE_ID))
+    runtime.command("activate", "guard", "guard-act", registry.clock.utc(), priority=5)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        response = _activate(page, SCENE_ID, 0)
+        assert response.json()["reason"] == "protected_frames"
+        expect(page.get_by_role("region", name="Runs", exact=True).get_by_label(
+            "Activation outcome", exact=True)).to_have_text(
+            f"Not started: {VALID_FRAME} is protected by the Run of guard.")
