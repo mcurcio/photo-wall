@@ -167,7 +167,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     },
   });
   const { step } = flow;
-  const write = useFlowWrite({ flow, confirm, failure: "Could not schedule Program" });
+  const write = useFlowWrite({ flow, draft, confirm, failure: "Could not schedule Program" });
 
   // --- The write.
   const put = (programId, startsAt, endsAt) =>

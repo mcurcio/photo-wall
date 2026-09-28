@@ -26,7 +26,9 @@ import { Stepper } from "./Stepper.jsx";
  *    `notice` (a note about the draft), the `ProblemSummary` and `children` (the step's
  *    view). The last step's forward action is the flow's write (`onWrite`,
  *    `writeLabel`, `writeDisabled`); every other step's is Continue. While `busy` (the
- *    write in flight) the stepper's steps are text and the form is disabled.
+ *    write in flight, flow/useFlowWrite.js) the stepper's steps are text and the form is
+ *    disabled, and so is every way to replace the draft the write belongs to: New,
+ *    Discard draft, the notice's Discard and "Discard and return" (Resume stays).
  *
  * `replace` enters the flow in place of the section's history entry (Show now; the
  * kit's `start`/`resume` option). The section's refs are the kit's (`flow.refs`:
@@ -99,7 +101,7 @@ export function FlowFrame({
         {next}
       </div>
 
-      <HandOffNotice handOff={handOff} noun={noun} onDiscard={discardAndReturn} />
+      <HandOffNotice handOff={handOff} noun={noun} busy={busy} onDiscard={discardAndReturn} />
 
       {place === "list" && (
         <>
@@ -108,6 +110,7 @@ export function FlowFrame({
             draftName={keys.describe(draft.key)}
             newLabel={newLabel}
             newRef={newRef}
+            busy={busy}
             onNew={() => flow.start(NEW_KEY, null, entry)}
             onResume={() => flow.resume(entry)}
             onDiscard={(event) =>
@@ -129,6 +132,7 @@ export function FlowFrame({
         unavailableReason={unavailableReason}
         sectionHref={formatRoute({ section: keys.section })}
         sectionLabel={sectionLabel}
+        busy={busy}
         onResume={() => flow.resume({ replace: true })}
         onDiscard={flow.discardForRoute}
       />

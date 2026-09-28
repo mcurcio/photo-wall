@@ -20,7 +20,14 @@ from console_tasks import (
     show_now,
     visible_page,
 )
-from operator_harness import INVENTORY, answer_first, drive_poll, operator_server, submit_sign_in
+from operator_harness import (
+    INVENTORY,
+    RequestGate,
+    answer_first,
+    drive_poll,
+    operator_server,
+    submit_sign_in,
+)
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
@@ -456,3 +463,51 @@ def test_an_activation_refused_for_its_origin_keeps_the_draft_and_its_key(page, 
             form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert len(sent) == 2 and len(set(sent)) == 1, sent
+
+
+def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
+        page, registry):
+    """§6 History, final review finding 1: while an activation is in flight its draft is
+    held (flow/useFlowWrite.js), so a card's "Show now" for another Scene cannot reseed it
+    (the draft is clean, and no outcome is unknown yet); the Scene is offered instead. The
+    answer is lost (a 500 after Central committed it), so the retry must send the SAME key:
+    Central returns the stored Admission and there is one Run. Mutation probe: reseed while
+    busy (a new key: "already running, left as is")."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        sent = _keys(page)
+        gate = RequestGate(page, ACTIVATIONS)
+        gate.holding = True
+        _show_scene_card(page, SCENE_ID)  # a clean draft on SCENE_ID
+        form = show_form(page)
+        scene = form.get_by_label("Scene to activate", exact=True)
+        form.get_by_role("button", name="Continue", exact=True).click()
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        gate.wait_held()
+
+        # In flight, the operator picks another Scene's "Show now": the draft is kept.
+        _show_scene_card(page, "elsewhere")
+        assert _hash(page) == "#/now/show/scene"
+        expect(scene).to_have_value(SCENE_ID)
+        # The committed write's answer is lost.
+        route = gate.held.pop(0)
+        route.fetch()
+        route.fulfill(status=500, content_type="application/json", body='{"error": "internal"}')
+        expect(_outcome(page)).to_have_text(UNKNOWN)
+        expect(scene).to_have_value(SCENE_ID)
+        expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
+               ).to_be_visible()
+
+        # The operator retries the same Scene, as the notice invites: the same key.
+        gate.holding = False
+        _show_scene_card(page, SCENE_ID)
+        expect(scene).to_have_value(SCENE_ID)
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        assert len(sent) == 2 and len(set(sent)) == 1, sent
+        assert len(_runs_of(page, origin, SCENE_ID)) == 1

@@ -63,6 +63,19 @@ let edited = draft.patchDraft(result.state, { name: "x" });
 edited = draft.reseedDraft(edited, () => ({ name: "fresh", revision: 7 }));
 out.reseeded = { base: edited.baseRevision, dirty: draft.isDirty(edited), name: edited.value.name,
                  id: edited.id };
+// Held while its write is in flight: another key, a reseed and a close keep it, even
+// clean; a patch still applies; released, it opens and closes as before.
+const held = draft.holdDraft(clean, true);
+result = draft.openDraft(held, "edit/a", seed, 7);
+out.held = {
+  refused: result.opened, same: result.state === held,
+  reseedKeeps: draft.reseedDraft(held, () => ({ name: "fresh", revision: 9 })) === held,
+  closeKeeps: draft.closeDraft(held) === held,
+  patched: draft.patchDraft(held, { name: "y" }).value.name,
+  released: draft.openDraft(draft.holdDraft(held, false), "edit/a", seed, 8).opened,
+  closed: draft.closeDraft(draft.holdDraft(held, false)) === draft.CLOSED,
+  closedNotHeld: draft.holdDraft(draft.CLOSED, true) === draft.CLOSED,
+};
 out.sameValue = [
   draft.sameValue({ a: [1, { b: 2 }], c: "x" }, { c: "x", a: [1, { b: 2 }] }),
   draft.sameValue([1, 2], [2, 1]),
@@ -212,6 +225,10 @@ def test_flow_kit_and_scene_flow_shape():
     # Reload: a reseed takes the stored revision as the new base and is clean again; it
     # is the same draft.
     assert out["reseeded"] == {"base": 7, "dirty": False, "name": "fresh", "id": 6}
+    # A write's hold (flow/useFlowWrite.js): the draft it was sent from stays open.
+    assert out["held"] == {
+        "refused": "new", "same": True, "reseedKeeps": True, "closeKeeps": True,
+        "patched": "y", "released": "edit/a", "closed": True, "closedNotHeld": True}
     assert out["sameValue"] == [True, False, False]
 
     assert out["stepOfField"] == ["b", "c", None]

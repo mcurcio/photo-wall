@@ -130,7 +130,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     },
   });
   const { step } = flow;
-  const write = useFlowWrite({ flow, confirm, failure: "Not started" });
+  const write = useFlowWrite({ flow, draft, confirm, failure: "Not started" });
 
   // A clean draft follows the Scene the operator last saved or picked, while it is
   // stored; a dirty one, or one whose outcome is unknown (its key must be kept for the

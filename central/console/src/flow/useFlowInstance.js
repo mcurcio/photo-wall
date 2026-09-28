@@ -75,6 +75,10 @@ export function useFlowRefs() {
  * that step is on its way (flow/useFlowFocus.js LIFETIME); an instance that is missing
  * or unavailable asks for nothing.
  *
+ * WRITE. The final write is flow/useFlowWrite.js's: while it is in flight the draft is
+ * held (useFlowDraft `held`), and a held draft is kept as a dirty one is: a route naming
+ * another instance shows `blocked`, `start` only resumes it, and a hand-off waits.
+ *
  * REFS. `refs` (the kit's `useFlowRefs`) are the section's New button (`newRef`), its
  * problem summary (`summaryRef`, where `checkAll` sends focus by default) and its said
  * region (`savedRef`, where `finish` sends it by default); FlowFrame renders them.
@@ -121,7 +125,7 @@ export function useFlowInstance({
     routeKey,
     available: routeKey === null ? "ok" : availability(routeKey),
     draftKey: draft.key,
-    dirty: draft.dirty,
+    dirty: draft.dirty || draft.held,
   });
   const step = shownStep(place, steps, route?.step);
   const view = flowView({ shown: route?.section === section, place, routeKey, step });
@@ -241,9 +245,12 @@ export function useFlowInstance({
    * finish replaces the flow's entry with the section again, so Back leaves the section).
    */
   const start = (key, event, options) => {
+    if (draft.held && draft.key !== key) {
+      return; // its write is in flight: New and Edit are disabled meanwhile
+    }
     finishedRef.current = null;
     confirm.setStatus(null);
-    if (draft.key === key && draft.dirty) {
+    if (draft.key === key && (draft.dirty || draft.held)) {
       enter(resumeRoute(), options);
     } else if (open(key)) {
       enter(firstRoute(key), options);
@@ -256,7 +263,7 @@ export function useFlowInstance({
   const handedRef = useRef(/** @type {number|null} */ (null));
   const handOffId = handOff?.id ?? null;
   useEffect(() => {
-    if (handOffId !== null && handOffId !== handedRef.current) {
+    if (handOffId !== null && handOffId !== handedRef.current && !draft.held) {
       handedRef.current = handOffId;
       start(NEW_KEY);
     }

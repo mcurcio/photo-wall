@@ -13,13 +13,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *    instead (`take`, and the kit's `OfferedScene` notice).
  *
  * `held` keeps a clean draft too (Show now's, while its last outcome is unknown: its
- * activation key must stay for the retry). `accepts(sceneId)` says whether the Scene can
+ * activation key must stay for the retry), and so does a draft whose write is in flight
+ * (useFlowDraft `held`: the answer belongs to it). `accepts(sceneId)` says whether the Scene can
  * be taken at all (Show now's: it is still stored); a Scene it refuses is ignored.
  * Only a change of `recentSceneId` asks for any of this. `clear()` forgets the offer
  * (another instance opened, or the flow's write done).
  *
  * @param {{recentSceneId: string|null,
- *          draft: {key: string|null, dirty: boolean, reseed: () => void},
+ *          draft: {key: string|null, dirty: boolean, held: boolean, reseed: () => void},
  *          sceneId: string, held?: boolean, accepts?: (sceneId: string) => boolean,
  *          choose: (sceneId: string) => void}} options
  * @returns {{offered: string|null, take: () => void, clear: () => void}}
@@ -43,7 +44,7 @@ export function useSceneHandOver({
     if (recentSceneId === null || draft.key === null || !accepts(recentSceneId)) {
       return;
     }
-    if (!draft.dirty && !held) {
+    if (!draft.dirty && !held && !draft.held) {
       if (sceneId !== recentSceneId) {
         draft.reseed();
       }

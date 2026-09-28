@@ -1,6 +1,14 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftState.js";
+import {
+  closeDraft,
+  CLOSED,
+  holdDraft,
+  isDirty,
+  openDraft,
+  patchDraft,
+  reseedDraft,
+} from "./draftState.js";
 
 /**
  * One flow's draft (flow design §6 frozen surface): the Plane B values of ONE flow
@@ -23,6 +31,12 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
  *    a draft is opened, kept by patches and reseeds, null while none is open. Anything
  *    begun for one draft (an inline hand-off) captures it, so a later draft of the same
  *    key is never mistaken for it.
+ *  - `hold(held)` holds the draft while its write is in flight, and releases it
+ *    (draftState.js HOLD): a held draft refuses another key, a reseed and a discard.
+ *    `held` says whether it is held (flow/useFlowWrite.js holds it).
+ *  - `isOpen(id)` says, at the moment it is asked, whether draft `id` is still the
+ *    open one: false once it was closed or replaced, and once the flow unmounted (Log
+ *    out remounts the shell, which ends every draft). A write's late answer asks it.
  *
  * `seed` is read when it is called, so it may close over the latest snapshot.
  *
@@ -32,7 +46,8 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
  *            open: (key: string) => string|null,
  *            patch: (partial: Partial<T>|((value: T) => Partial<T>|null)) => void,
  *            reseed: () => void, discard: () => void, dirty: boolean,
- *            baseRevision: number|null, seeded: T|null}}
+ *            baseRevision: number|null, seeded: T|null, held: boolean,
+ *            hold: (held: boolean) => void, isOpen: (id: number|null) => boolean}}
  */
 export function useFlowDraft(seed) {
   const seedRef = useRef(seed);
@@ -69,7 +84,21 @@ export function useFlowDraft(seed) {
     () => commit(reseedDraft(stateRef.current, (k) => seedRef.current(k))),
     [commit],
   );
-  const discard = useCallback(() => commit(CLOSED), [commit]);
+  const discard = useCallback(() => commit(closeDraft(stateRef.current)), [commit]);
+  const hold = useCallback((held) => commit(holdDraft(stateRef.current, held)), [commit]);
+
+  // Mounted: a draft of a flow that unmounted is no longer open (see `isOpen`).
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const isOpen = useCallback(
+    (id) => mountedRef.current && id !== null && stateRef.current.id === id,
+    [],
+  );
 
   const state = stateRef.current;
   return {
@@ -83,5 +112,8 @@ export function useFlowDraft(seed) {
     dirty: isDirty(state),
     baseRevision: state.baseRevision,
     seeded: state.seeded,
+    held: state.held,
+    hold,
+    isOpen,
   };
 }

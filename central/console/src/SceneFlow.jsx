@@ -216,7 +216,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     },
   });
   const { place, step, focus } = flow;
-  const write = useFlowWrite({ flow, confirm, failure: "Could not save Scene" });
+  const write = useFlowWrite({ flow, draft, confirm, failure: "Could not save Scene" });
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
@@ -331,8 +331,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       if (flow.checkAll()) {
         confirm.open(
           { currentTarget: saveRef.current },
-          replaceRequest(editingId, draft.baseRevision, buildSceneSave(editingId), candidates.reload, () =>
-            finish(editingId),
+          replaceRequest(
+            editingId,
+            draft.baseRevision,
+            buildSceneSave(editingId),
+            candidates.reload,
+            write.bind(() => finish(editingId)),
           ),
         );
       }
@@ -425,6 +429,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       cards={
         <SceneList
           snapshot={snapshot}
+          editDisabled={write.busy}
           onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
           onShowNow={showNow}
           onSchedule={schedule}

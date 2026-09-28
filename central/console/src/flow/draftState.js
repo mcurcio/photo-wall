@@ -19,12 +19,25 @@
  * opened draft from a later one of the same key: a new Scene begun after another was
  * discarded is keyed `new` too, but it is another draft.
  *
+ * HOLD. While the flow's write is in flight (flow/useFlowWrite.js) the draft is `held`:
+ * it stays the open draft whatever else is asked. Another key is refused as for a dirty
+ * draft, a reseed keeps it and `closeDraft` keeps it; patches still apply (the prunes
+ * follow the snapshot; the step's controls are disabled). Releasing it changes nothing
+ * else, so the write's answer finds the draft it was sent from.
+ *
  * @typedef {{key: string|null, id: number|null, value: object|null, seeded: object|null,
- *            baseRevision: number|null}} DraftState
+ *            baseRevision: number|null, held: boolean}} DraftState
  */
 
 /** @type {DraftState} */
-export const CLOSED = Object.freeze({ key: null, id: null, value: null, seeded: null, baseRevision: null });
+export const CLOSED = Object.freeze({
+  key: null,
+  id: null,
+  value: null,
+  seeded: null,
+  baseRevision: null,
+  held: false,
+});
 
 /**
  * Structural equality of two draft values (plain data: objects, arrays, primitives).
@@ -71,13 +84,14 @@ function seeded(key, id, seed) {
     value,
     seeded: value,
     baseRevision: typeof revision === "number" ? revision : null,
+    held: false,
   };
 }
 
 /**
  * Open instance `key`. The same key keeps its draft; another key replaces a clean
  * draft (or none) with `seed(key)`, identified by `id`, and is refused while the open
- * draft is dirty.
+ * draft is dirty or held.
  *
  * @param {DraftState} state
  * @param {string} key
@@ -90,7 +104,7 @@ export function openDraft(state, key, seed, id) {
   if (state.key === key) {
     return { state, opened: key };
   }
-  if (isDirty(state)) {
+  if (isDirty(state) || state.held) {
     return { state, opened: state.key };
   }
   return { state: seeded(key, id, seed), opened: key };
@@ -118,11 +132,33 @@ export function patchDraft(state, partial) {
 /**
  * Seed the open instance again from `seed` (Reload): its value, and its
  * `baseRevision`, become the current stored record's. It is the same draft (its `id`).
+ * A held draft is kept as it is.
  *
  * @param {DraftState} state
  * @param {(key: string) => object} seed
  * @returns {DraftState}
  */
 export function reseedDraft(state, seed) {
-  return state.key === null ? state : seeded(state.key, state.id, seed);
+  return state.key === null || state.held ? state : seeded(state.key, state.id, seed);
+}
+
+/**
+ * Close the draft (Discard, or the end of its write), unless it is held.
+ *
+ * @param {DraftState} state
+ * @returns {DraftState}
+ */
+export function closeDraft(state) {
+  return state.held ? state : CLOSED;
+}
+
+/**
+ * Hold the open draft while its write is in flight, or release it (see HOLD).
+ *
+ * @param {DraftState} state
+ * @param {boolean} held
+ * @returns {DraftState}
+ */
+export function holdDraft(state, held) {
+  return state.key === null || state.held === held ? state : { ...state, held };
 }

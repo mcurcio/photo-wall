@@ -9,11 +9,13 @@ import React from "react";
  *  - `missing`: "Y: This <noun> no longer exists.";
  *  - `unavailable`: "Y can't be edited here: <reason>".
  *
- * The last two link back to the section. Nothing renders for any other place.
+ * The last two link back to the section. Nothing renders for any other place. While
+ * `busy` (the draft's write in flight) Discard is disabled.
  *
  * @param {{place: import("./instance.js").Place, draftName: string, targetName: string,
  *          noun: string, unavailableReason?: string, sectionHref: string,
- *          sectionLabel: string, onResume: () => void, onDiscard: () => void}} props
+ *          sectionLabel: string, busy?: boolean, onResume: () => void,
+ *          onDiscard: () => void}} props
  */
 export function InstanceNotice({
   place,
@@ -23,6 +25,7 @@ export function InstanceNotice({
   unavailableReason = "",
   sectionHref,
   sectionLabel,
+  busy = false,
   onResume,
   onDiscard,
 }) {
@@ -35,7 +38,7 @@ export function InstanceNotice({
           <button type="button" className="button--primary" onClick={onResume}>
             Resume
           </button>
-          <button type="button" onClick={onDiscard}>
+          <button type="button" disabled={busy} onClick={onDiscard}>
             Discard
           </button>
         </div>
@@ -60,14 +63,24 @@ export function InstanceNotice({
 /**
  * The section's way into its flow (flow design §6; presentational): with a dirty
  * draft, "Unsaved draft for X." with "Resume draft (Draft)" and "Discard draft";
- * otherwise the section's New button (`newLabel`, `newRef`).
+ * otherwise the section's New button (`newLabel`, `newRef`). While `busy` (the draft's
+ * write in flight) New and Discard draft are disabled.
  *
  * @param {{dirty: boolean, draftName: string, newLabel: string,
- *          newRef?: React.Ref<HTMLButtonElement>, onNew: () => void,
+ *          newRef?: React.Ref<HTMLButtonElement>, busy?: boolean, onNew: () => void,
  *          onResume: () => void,
  *          onDiscard: (event: React.MouseEvent<HTMLButtonElement>) => void}} props
  */
-export function DraftBar({ dirty, draftName, newLabel, newRef, onNew, onResume, onDiscard }) {
+export function DraftBar({
+  dirty,
+  draftName,
+  newLabel,
+  newRef,
+  busy = false,
+  onNew,
+  onResume,
+  onDiscard,
+}) {
   return (
     <div className="flow__toolbar">
       {dirty ? (
@@ -76,12 +89,12 @@ export function DraftBar({ dirty, draftName, newLabel, newRef, onNew, onResume, 
           <button type="button" className="button--primary" onClick={onResume}>
             Resume draft <span className="flow__draft-word">(Draft)</span>
           </button>
-          <button type="button" onClick={onDiscard}>
+          <button type="button" disabled={busy} onClick={onDiscard}>
             Discard draft
           </button>
         </>
       ) : (
-        <button ref={newRef} type="button" className="button--primary" onClick={onNew}>
+        <button ref={newRef} type="button" className="button--primary" disabled={busy} onClick={onNew}>
           {newLabel}
         </button>
       )}
@@ -122,17 +135,19 @@ export function OfferedScene({ offered, current, drafts, action, onTake }) {
  * to <label>" (`onDiscard`). Nothing renders without a pending hand-off. Not a live
  * region: it describes the page, it does not announce a change.
  *
- * @param {{handOff: {label: string}|null, noun: string,
+ * While `busy` (the flow's write in flight) its button is disabled.
+ *
+ * @param {{handOff: {label: string}|null, noun: string, busy?: boolean,
  *          onDiscard: (event: React.MouseEvent<HTMLButtonElement>) => void}} props
  */
-export function HandOffNotice({ handOff, noun, onDiscard }) {
+export function HandOffNotice({ handOff, noun, busy = false, onDiscard }) {
   if (handOff === null) {
     return null;
   }
   return (
     <div className="notice">
       <p>{`This ${noun} is for ${handOff.label}. Saving it takes you back there, with it chosen.`}</p>
-      <button type="button" onClick={onDiscard}>
+      <button type="button" disabled={busy} onClick={onDiscard}>
         {`Discard and return to ${handOff.label}`}
       </button>
     </div>

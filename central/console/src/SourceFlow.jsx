@@ -107,7 +107,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     handOff,
   });
   const { step } = flow;
-  const write = useFlowWrite({ flow, confirm, failure: "Could not save Source" });
+  const write = useFlowWrite({ flow, draft, confirm, failure: "Could not save Source" });
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
   // the cards refresh exactly once after the write.

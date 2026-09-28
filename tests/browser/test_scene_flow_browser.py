@@ -23,7 +23,7 @@ from console_tasks import (
     start_scene,
     visit,
 )
-from operator_harness import RequestGate, answer_first, operator_server
+from operator_harness import RequestGate, answer_first, operator_server, submit_sign_in
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from test_operator_showrunner_browser import (
@@ -745,3 +745,81 @@ def test_a_failed_candidates_read_offers_retry(page, registry):
         expect(chooser.get_by_role("option")).to_have_count(3)
         expect(form.get_by_text("Could not load candidate media for these Frames.")
                ).to_have_count(0)
+
+
+# --- Final review: a write belongs to the draft it was sent from.
+
+
+def test_a_save_in_flight_holds_its_draft(page, registry):
+    """Final review finding 1: while a Save is in flight the draft is held (flow/
+    useFlowWrite.js). Discard, New and another Scene's Edit are disabled, and a route naming
+    another Scene shows "Resume or Discard" with Discard disabled, so no other draft can
+    open for the late answer to close. The answer then ends the flow it was sent from.
+    Mutation probe: leave Discard enabled while busy."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "inflight", SOURCE, (VALID_FRAME,), submit=False)
+        gate = RequestGate(page, "**/v1/operator/scenes/inflight")
+        gate.holding = True
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        gate.wait_held()
+
+        page.go_back()  # the flow's entry -> #/scenes
+        assert _hash(page) == "#/scenes"
+        scenes = _scenes(page)
+        expect(scenes.get_by_role("button", name="Resume draft (Draft)", exact=True)).to_be_enabled()
+        expect(scenes.get_by_role("button", name="Discard draft", exact=True)).to_be_disabled()
+        expect(scenes.get_by_role("button", name="Edit Scene evening", exact=True)).to_be_disabled()
+
+        visit(page, "#/scenes/evening/edit/review")
+        expect(scenes).to_contain_text("Unsaved draft for a new Scene: Resume or Discard")
+        expect(scenes.get_by_role("button", name="Discard", exact=True)).to_be_disabled()
+        scenes.get_by_role("button", name="Resume", exact=True).click()
+        assert _hash(page) == "#/scenes/new/review"
+
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
+                                  and r.request.method == "PUT") as info:
+            gate.release()
+        assert info.value.status == 200
+        expect(scenes.get_by_role("status")).to_have_text("Saved Scene inflight.")
+        assert _hash(page) == "#/scenes"
+        expect(scenes.get_by_role("button", name="New Scene", exact=True)).to_be_enabled()
+
+
+def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, registry):
+    """Final review finding 1: the answer to a Save belongs to the draft it was sent from
+    (its id, useFlowDraft `isOpen`). Log out ends that draft (it remounts the shell); a
+    new Scene begun after signing in again is another draft, so the late answer neither
+    ends its flow nor moves the operator. Mutation probe: finish without checking the
+    draft's id."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "inflight", SOURCE, (VALID_FRAME,), submit=False)
+        gate = RequestGate(page, "**/v1/operator/scenes/inflight")
+        gate.holding = True
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        gate.wait_held()
+
+        page.get_by_role("button", name="Log out", exact=True).click()
+        expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_be_visible()
+        submit_sign_in(page)
+        go(page, "scenes")
+        form = start_scene(page)
+        assert _hash(page) == "#/scenes/new/photos"
+
+        # The answer lands, then its one refresh: the flow would end right after it.
+        with page.expect_response(INVENTORY):
+            with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
+                                      and r.request.method == "PUT") as info:
+                gate.release()
+        assert info.value.status == 200
+        expect(page.get_by_role("group", name="Snapshot status", exact=True)
+               ).not_to_have_attribute("aria-busy", "true")
+        assert _hash(page) == "#/scenes/new/photos"
+        expect(form.get_by_label("Source", exact=True)).to_be_visible()
+

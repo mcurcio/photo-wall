@@ -16,14 +16,15 @@ import { FrameChips } from "./TargetPicker.jsx";
  *
  * Actions: Edit, offered only when the console can save the Scene back without loss
  * (authoring.js `editableDraft`; otherwise withheld with the reason); Show now; and
- * Schedule it. Delete is not offered (slice 3 Question 3).
+ * Schedule it. Delete is not offered (slice 3 Question 3). Edit is disabled while
+ * `editDisabled` (the Scene flow's write is in flight: its draft is held).
  *
- * @param {{snapshot: object|null,
+ * @param {{snapshot: object|null, editDisabled?: boolean,
  *          onEdit: (sceneId: string, event: React.MouseEvent) => void,
  *          onShowNow: (sceneId: string) => void,
  *          onSchedule: (sceneId: string) => void}} props
  */
-export function SceneList({ snapshot, onEdit, onShowNow, onSchedule }) {
+export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, onSchedule }) {
   const runtime = snapshot?.runtime;
   const scenes = Object.values(runtime?.definitions ?? {});
   if (scenes.length === 0) {
@@ -40,6 +41,7 @@ export function SceneList({ snapshot, onEdit, onShowNow, onSchedule }) {
             snapshot={snapshot}
             usedBy={programs.filter((program) => program.scene_id === scene.scene_id)}
             running={live.some((run) => run.scene_id === scene.scene_id)}
+            editDisabled={editDisabled}
             onEdit={onEdit}
             onShowNow={onShowNow}
             onSchedule={onSchedule}
@@ -60,7 +62,7 @@ function feedWording(contributions) {
   return sources.length > 0 ? `live from ${sources.join(", ")}` : "no media";
 }
 
-function SceneCard({ scene, snapshot, usedBy, running, onEdit, onShowNow, onSchedule }) {
+function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onShowNow, onSchedule }) {
   const id = scene.scene_id;
   const filled = normalizeScene(scene);
   const once = cycleWording(scene);
@@ -97,7 +99,12 @@ function SceneCard({ scene, snapshot, usedBy, running, onEdit, onShowNow, onSche
       actions={
         <>
           {editable ? (
-            <button type="button" aria-label={`Edit Scene ${id}`} onClick={(event) => onEdit(id, event)}>
+            <button
+              type="button"
+              aria-label={`Edit Scene ${id}`}
+              disabled={editDisabled}
+              onClick={(event) => onEdit(id, event)}
+            >
               Edit
             </button>
           ) : (
