@@ -8,8 +8,23 @@ builders name them, and each service image is a `<repository>@<digest>` referenc
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from contracts.release import CMDLINE
+
+BUNDLE_BUILDER = Path(__file__).resolve().parents[2] / "scripts" / "build_netboot_bundle.sh"
+
+
+def cmdline_template(script: str | None = None) -> str:
+    """The whole cmdline.txt `script` (by default scripts/build_netboot_bundle.sh) writes: its
+    heredoc's body, so a fixture bundle carries the builder's own template."""
+    text = BUNDLE_BUILDER.read_text() if script is None else script
+    match = re.search(r'cat > "\$boot_dir/cmdline\.txt" <<\'EOF\'\n(.*?\n)EOF\n', text, re.DOTALL)
+    assert match, "cmdline.txt heredoc not found in build_netboot_bundle.sh"
+    return match.group(1)
+
 
 REVISION = "a" * 40
 EPOCH = 1_790_000_000               # a fixed source date for the base tarball's members
@@ -41,9 +56,13 @@ def base_bundle(root: Path) -> Path:
     bundle = root / "base-bundle"
     write(bundle / "photo-wall-base.squashfs", b"fake-base-squashfs-bytes")
     write(bundle / "boot" / "config.txt", b"[all]\narm_64bit=1\n")
+    write(bundle / "boot" / CMDLINE, cmdline_template().encode())
     write(bundle / "boot" / "kernel_2712.img", b"fake-kernel-bytes")
     write(bundle / "boot" / "initrd.img", b"fake-initrd-bytes")
     write(bundle / "boot" / "bcm2712-rpi-5-b.dtb", b"fake-dtb-bytes")
+    write(bundle / "boot" / "overlays" / "fake.dtbo", b"fake-overlay-bytes")
+    write(bundle / "boot" / "pieeprom.upd", b"fake-eeprom-bytes")
+    write(bundle / "boot" / "pieeprom.sig", b"fake-eeprom-digest")
     write(bundle / "SHA256SUMS", b"deadbeef  photo-wall-base.squashfs\n")
     return bundle
 

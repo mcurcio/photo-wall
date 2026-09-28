@@ -537,12 +537,14 @@ who published it.
 
 ## Base OS image (rarely changes)
 
-Unpack `{manifest['base_image']['filename']}` (sha256
-`{manifest['base_image']['sha256']}`) and stage its `photo-wall-base/boot/`
+Unpack `{manifest['boot_image']['filename']}` (sha256
+`{manifest['boot_image']['sha256']}`) and stage its `photo-wall-boot/boot/`
 beneath your TFTP boot-server tree -- see the
 [runbook]({blob}/docs/runbook.md#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014).
-Every diskless Player netboots this image and fetches the current app at
-boot; it carries no application code itself.
+It is the `photo-wall-base/boot/` of `{manifest['base_image']['filename']}`
+(sha256 `{manifest['base_image']['sha256']}`), whose base squashfs Central
+serves over HTTP. Every diskless Player netboots this image and fetches the
+current app at boot; it carries no application code itself.
 
 ## Player application (revs independently of the base)
 

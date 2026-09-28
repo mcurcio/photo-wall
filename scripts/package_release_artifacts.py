@@ -17,6 +17,10 @@ Player and bootstrapper `.deb`s built by `scripts/build_player_deb.py` and
   function of its inputs and `source_date_epoch` alone (every member's time, owner
   and the gzip header are fixed), so packaging the same build twice yields the same
   tarball and a re-run's seal finds the assets it already attached.
+- `photo-wall-boot-<revision>.tar.gz`: that same bundle's `boot/` alone, archived from the
+  same staged copy in the same run (so its kernel and initrd are the base tarball's), for
+  infrastructure that stages a TFTP tree without downloading the base squashfs. Reproducible
+  the same way.
 - `photo-wall-player_<version>_arm64.deb`: the Player application, copied
   through byte-for-byte under its own build-assigned filename. Central serves
   this by reference (`docs/runbook.md`); it is not installed by the base image.
@@ -48,7 +52,7 @@ import shutil
 import stat
 import tarfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
@@ -58,8 +62,13 @@ from contracts.release import (
     BASE_IMAGE,
     BASE_ROOT,
     BASE_SQUASHFS,
+    BOOT_IMAGE,
+    BOOT_REQUIRED,
+    BOOT_ROOT,
     BOOTSTRAPPER_DEB,
     CHECKSUMS,
+    CMDLINE,
+    CMDLINE_PLACEHOLDER,
     FILES,
     IMAGES,
     IMAGES_KEY,
@@ -68,6 +77,8 @@ from contracts.release import (
     MAX_MANIFEST_BYTES,
     PLAYER_DEB,
     base_member,
+    boot_member,
+    tarball_name,
 )
 
 MIB = 1024**2
@@ -76,6 +87,7 @@ MAX_SQUASHFS_BYTES = 2 * 1024**3
 MAX_SUMS_BYTES = 4 * 1024**2
 MAX_DEB_BYTES = 1 * 1024**3
 MAX_TARBALL_BYTES = 4 * 1024**3
+MAX_CMDLINE_BYTES = 4096            # the kernel's own command line is shorter still
 
 # `<name>_<version>_<arch>.deb`, the standard Debian package filename shape the
 # `.deb` builders produce. Best-effort only: a `.deb` whose name does not match
@@ -173,6 +185,18 @@ def _fixed(source_date_epoch: int):
     return normalized
 
 
+def _tarball(root: Path, destination: Path, source_date_epoch: int) -> dict:
+    """Archive the directory `root` into the new tarball `destination`, under one top-level
+    directory named as `root` is, and return its manifest record. Reproducibly: gzip's header
+    carries no name and a zero time, and tar recurses in sorted order through `_fixed`."""
+    with (open(destination, "xb") as raw,
+          gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped,
+          tarfile.open(fileobj=zipped, mode="w") as archive):
+        archive.add(root, arcname=root.name, filter=_fixed(source_date_epoch))
+    record = checked_file(destination, MAX_TARBALL_BYTES)
+    return {"filename": destination.name, "sha256": record["sha256"], "size": record["size"]}
+
+
 def package(
     base_bundle: Path,
     player_deb: Path,
@@ -220,28 +244,26 @@ def package(
         base_root = staging / BASE_ROOT
         shutil.copytree(base_bundle, base_root, symlinks=True,
                         ignore=shutil.ignore_patterns(".staging"))
-        base_tarball_name = f"photo-wall-base-{revision}.tar.gz"
-        base_tarball = destination / base_tarball_name
-        # gzip's header carries no name and a zero time; tar recurses in sorted order.
-        with (open(base_tarball, "xb") as raw,
-              gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped,
-              tarfile.open(fileobj=zipped, mode="w") as archive):
-            archive.add(base_root, arcname=BASE_ROOT, filter=_fixed(source_date_epoch))
+        base_record = _tarball(base_root, destination / tarball_name(BASE_ROOT, revision),
+                               source_date_epoch)
+        # The boot tarball's boot/ is the staged copy the base tarball just archived: one build.
+        boot_root = staging / BOOT_ROOT
+        boot_root.mkdir()
+        boot_root.chmod(0o755)
+        (base_root / BASE_BOOT).rename(boot_root / BASE_BOOT)
+        boot_record = _tarball(boot_root, destination / tarball_name(BOOT_ROOT, revision),
+                               source_date_epoch)
 
         shutil.copyfile(player_deb, destination / player_record["filename"])
         shutil.copyfile(bootstrapper_deb, destination / bootstrapper_record["filename"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    base_tarball_record = checked_file(base_tarball, MAX_TARBALL_BYTES)
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "revision": revision,
-        BASE_IMAGE: {
-            "filename": base_tarball_name,
-            "sha256": base_tarball_record["sha256"],
-            "size": base_tarball_record["size"],
-        },
+        BASE_IMAGE: base_record,
+        BOOT_IMAGE: boot_record,
         PLAYER_DEB: player_record,
         BOOTSTRAPPER_DEB: bootstrapper_record,
         IMAGES_KEY: image_block,
@@ -347,38 +369,109 @@ def read_manifest(manifest: object, *, revision: str) -> Declared:
                                  for name in IMAGES))
 
 
-def _check_base_tarball(path: Path) -> None:
+@dataclass(frozen=True, slots=True)
+class _Member:
+    """One tarball member as verify compares it: a regular file, a directory, or some other
+    type, and a hashed file's sha256. A kept file's bytes ride along, outside the comparison."""
+    file: bool = False
+    directory: bool = False
+    sha256: str | None = None
+    data: bytes | None = field(default=None, compare=False)
+
+
+_ABSENT: Final = _Member()
+
+
+def _members(path: Path, root: str, label: str, hashed: str,
+             kept: str | None = None) -> dict[str, _Member]:
+    """Every member of the tarball `path`, read in one pass: each within `root`, no traversal,
+    no name twice, the sha256 of each regular file beneath `hashed`, and the bytes of the file
+    `kept` (at most MAX_CMDLINE_BYTES of them, one more marking it too long)."""
+    members: dict[str, _Member] = {}
+    try:
+        with tarfile.open(path, "r|gz") as archive:
+            for member in archive:
+                parts = member.name.split("/")
+                if (parts[0] != root or "" in parts[1:] or ".." in parts
+                        or member.name in members):
+                    raise PackagingError(f"{label}_member_invalid:{member.name}")
+                sha256 = content = None
+                if member.isfile() and member.name.startswith(hashed + "/"):
+                    digest, content = hashlib.sha256(), b""
+                    with archive.extractfile(member) as data:
+                        while block := data.read(MIB):
+                            digest.update(block)
+                            if member.name == kept and len(content) <= MAX_CMDLINE_BYTES:
+                                content += block[:MAX_CMDLINE_BYTES + 1 - len(content)]
+                    sha256 = digest.hexdigest()
+                members[member.name] = _Member(member.isfile(), member.isdir(), sha256,
+                                               content if member.name == kept else None)
+    except (tarfile.TarError, OSError, EOFError):
+        raise PackagingError(f"{label}_invalid") from None
+    return members
+
+
+def _tree(members: Mapping[str, _Member], directory: str, label: str) -> dict[str, _Member]:
+    """The members at and beneath `directory`, named relative to it (the directory itself ""),
+    once it is a directory holding at least one file."""
+    tree = {name.removeprefix(directory): member for name, member in members.items()
+            if name == directory or name.startswith(directory + "/")}
+    if not tree.get("", _ABSENT).directory or not any(
+            member.file for member in tree.values()):
+        raise PackagingError(f"{label}_missing:{directory}/")
+    return tree
+
+
+def _check_base_tarball(path: Path) -> dict[str, _Member]:
     """The base tarball holds the declared layout (contracts/release.py): everything within
     BASE_ROOT, no traversal, the squashfs and the bundle's sums as regular files, and a boot/
-    directory holding at least one file."""
-    try:
-        with tarfile.open(path, "r:gz") as archive:
-            members = archive.getmembers()
-    except (tarfile.TarError, OSError, EOFError):
-        raise PackagingError("base_tarball_invalid") from None
-    by_name = {}
-    for member in members:
-        parts = member.name.split("/")
-        if parts[0] != BASE_ROOT or "" in parts[1:] or ".." in parts or member.name in by_name:
-            raise PackagingError(f"base_tarball_member_invalid:{member.name}")
-        by_name[member.name] = member
+    directory holding at least one file. Returns that boot/ tree, each file hashed."""
+    boot = base_member(BASE_BOOT)
+    members = _members(path, BASE_ROOT, "base_tarball", hashed=boot)
     for name in (BASE_SQUASHFS, BASE_CHECKSUMS):
-        member = by_name.get(base_member(name))
-        if member is None or not member.isfile():
+        if not members.get(base_member(name), _ABSENT).file:
             raise PackagingError(f"base_tarball_missing:{base_member(name)}")
-    boot = by_name.get(base_member(BASE_BOOT))
-    if boot is None or not boot.isdir() or not any(
-            member.isfile() and member.name.startswith(base_member(BASE_BOOT) + "/")
-            for member in members):
-        raise PackagingError(f"base_tarball_missing:{base_member(BASE_BOOT)}/")
+    return _tree(members, boot, "base_tarball")
+
+
+def _check_cmdline(data: bytes | None, name: str) -> None:
+    """`data` is the cmdline template contracts/release.py declares: one line (a trailing newline
+    allowed), not a comment, holding CMDLINE_PLACEHOLDER exactly once."""
+    try:
+        line = (data or b"").decode("utf-8").removesuffix("\n")
+    except UnicodeError:
+        line = ""
+    if (len(data or b"") > MAX_CMDLINE_BYTES or "\n" in line or "\r" in line
+            or line.lstrip().startswith("#") or line.count(CMDLINE_PLACEHOLDER) != 1):
+        raise PackagingError(f"boot_tarball_cmdline_invalid:{name}")
+
+
+def _check_boot_tarball(path: Path) -> dict[str, _Member]:
+    """The boot tarball holds the declared layout (contracts/release.py): BOOT_ROOT holding
+    only a boot/ directory of regular files and directories, BOOT_REQUIRED among them, the
+    cmdline the declared one-line template, no traversal. Returns that boot/ tree, each file
+    hashed."""
+    boot = boot_member(BASE_BOOT)
+    cmdline = f"{boot}/{CMDLINE}"
+    members = _members(path, BOOT_ROOT, "boot_tarball", hashed=boot, kept=cmdline)
+    tree = _tree(members, boot, "boot_tarball")
+    for name, member in members.items():
+        if name != BOOT_ROOT and (name.removeprefix(boot) not in tree
+                                  or not (member.file or member.directory)):
+            raise PackagingError(f"boot_tarball_member_invalid:{name}")
+    for name in BOOT_REQUIRED:
+        if not tree.get(f"/{name}", _ABSENT).file:
+            raise PackagingError(f"boot_tarball_missing:{boot}/{name}")
+    _check_cmdline(members[cmdline].data, cmdline)
+    return tree
 
 
 def verify(directory: Path, *, revision: str) -> Packaged:
     """`directory` holds exactly the declared release for `revision`: a manifest of the declared
     schema naming every declared file and image and nothing else, each file present with the
-    recorded sha256 and size, the base tarball in the declared layout, a checksum list that
-    matches every other file, and no other file. Raises PackagingError naming the first
-    difference."""
+    recorded sha256 and size, the base and boot tarballs in the declared layouts with one boot/
+    tree between them, a checksum list that matches every other file, and no other file.
+    Raises PackagingError naming the first difference."""
     directory = directory.absolute()
     manifest_record = _actual(directory, MANIFEST)
     if manifest_record["size"] > MAX_MANIFEST_BYTES:
@@ -402,7 +495,12 @@ def verify(directory: Path, *, revision: str) -> Packaged:
         if actual != {"sha256": sha256, "size": size}:
             raise PackagingError(f"asset_digest_mismatch:{filename}")
         assets.append(Asset(filename, directory / filename, sha256, size))
-    _check_base_tarball(directory / declared.files[BASE_IMAGE][0])
+    base_boot = _check_base_tarball(directory / declared.files[BASE_IMAGE][0])
+    boot_boot = _check_boot_tarball(directory / declared.files[BOOT_IMAGE][0])
+    if boot_boot != base_boot:
+        differing = sorted(set(base_boot).symmetric_difference(boot_boot) | {
+            name for name in set(base_boot) & set(boot_boot) if base_boot[name] != boot_boot[name]})
+        raise PackagingError(f"boot_tarball_mismatch:{boot_member(BASE_BOOT)}{differing[0]}")
 
     sums_record = _actual(directory, CHECKSUMS)
     listed = {}

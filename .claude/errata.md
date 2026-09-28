@@ -1918,3 +1918,15 @@ doc softenings.
   (d) P3 — `signIn` sets `auth` to "checking" on the 204 before its first refresh (the design's
   SigningIn -> Checking), so a 5xx/network failure on that read is retried by the next poll
   instead of stranding the tab on the sign-in form.
+
+## 2026-09-28 — boot release asset: cmdline.txt is one line, no comment lines
+- **Where:** scripts/build_netboot_bundle.sh (cmdline heredoc), contracts/release.py
+  (`CMDLINE`, `CMDLINE_PLACEHOLDER`), scripts/package_release_artifacts.py (verify),
+  .github/workflows/base-image.yml (bundle cmdline check).
+- **Supersedes** the s2b resolution above ("ship the explanatory comment as leading `#` lines
+  the operator MUST delete"). With the boot tree published as its own asset for automated
+  staging (iac), a consumer doing plain placeholder substitution would stage the comment lines
+  and an unbootable cmdline. The template is now exactly ONE line holding
+  `@@PHOTOWALL_CENTRAL@@` once; the explanation lives in the builder as shell comments; the
+  seal's verify refuses any other shape, and the base-image check requires the whole file to be
+  one line.
