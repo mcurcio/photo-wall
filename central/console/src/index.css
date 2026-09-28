@@ -865,9 +865,84 @@ label {
 }
 
 .showrunner__region {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* Layout (pass 2 slice 3 §12): one column, the Runs first; from 1024 px, Now
+   (Runs with Why) beside the Library (Scenes, Programs, Sources). */
+.showrunner__columns,
+.showrunner__column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .showrunner__columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+.showrunner__sources,
+.run-control__runs,
+.program-scheduling__programs,
+.scene-authoring__scenes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.showrunner__source,
+.run-control__run,
+.program-scheduling__program,
+.scene-authoring__scene {
+  min-width: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+/* One record (§12): label/value pairs in a grid whose values wrap anywhere, so
+   a long id never widens the page; the actions wrap beneath. */
+.record {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 0;
+}
+
+.record dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.record dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.record__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.showrunner__region fieldset {
+  min-width: 0;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .showrunner__region-title {

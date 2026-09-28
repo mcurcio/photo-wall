@@ -36,7 +36,7 @@ from test_registry import ADMIN, enroll
 from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository
 from central.registry import FrameCreate
-from central.runtime import Contribution, Scene
+from central.runtime import Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
@@ -1015,3 +1015,68 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
         expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
         expect(summary).not_to_contain_text("already exists")
         expect(summary).to_contain_text("Choose a Source.")
+
+
+# §12 layout.
+
+LONG_ID = "reception" + "northwallleftofthemainentrance" * 3  # no break opportunity
+
+_OFFENDERS = """() => [...document.querySelectorAll("body *")]
+    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
+    .map((el) => el.tagName + "." + [...el.classList].join("."))
+    .slice(0, 12)"""
+
+
+def _seed_long_ids(registry):
+    """A Source, Scene, Program and live Run whose ids are long unbroken strings."""
+    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue()).configure_source(
+        SourceSpec(source_ref=LONG_ID + ":1", connection_ref="fixture-library"))
+    runtime = _runtime(registry)
+    runtime.command("set_scene", Scene(
+        scene_id=LONG_ID, loop=True,
+        contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)))
+    now = registry.clock.utc()
+    runtime.command("set_program", Program(
+        program_id=LONG_ID, scene_id=LONG_ID, starts_at=now + 3600, ends_at=now + 7200))
+    runtime.command("activate", LONG_ID, "long-act", now)
+
+
+def _box(page, region):
+    return page.get_by_role("region", name=region, exact=True).bounding_box()
+
+
+def test_the_showrunner_is_two_columns_wide_and_runs_first_narrow(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        expect(page.get_by_role("region", name="Runs", exact=True)).to_be_visible()
+        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
+        programs, sources = _box(page, "Programs"), _box(page, "Sources")
+        # Now (Runs) beside the Library (Scenes, Programs, Sources), at the same top.
+        assert runs["x"] + runs["width"] <= scenes["x"]
+        assert abs(runs["y"] - scenes["y"]) < 1
+        assert scenes["x"] == programs["x"] == sources["x"]
+        assert scenes["y"] < programs["y"] < sources["y"]
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
+        assert abs(runs["x"] - scenes["x"]) < 1 and runs["y"] < scenes["y"]
+
+
+def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    _seed_long_ids(registry)
+    page.set_viewport_size({"width": 390, "height": 844})
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        expect(page.get_by_role("region", name="Runs", exact=True).get_by_text(
+            f"Scene {LONG_ID}", exact=True)).to_be_visible()
+        expect(page.get_by_role("region", name="Sources", exact=True).get_by_text(
+            LONG_ID + ":1", exact=True)).to_be_visible()
+        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+        assert fits, f"overflows at 390 px: {page.evaluate(_OFFENDERS)}"
