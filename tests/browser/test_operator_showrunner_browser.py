@@ -39,6 +39,7 @@ from console_tasks import (
 from media_queue import RecordingMediaQueue
 from operator_harness import (
     RequestGate,
+    answer_first,
     operator_server,
     report_readiness,
     tile_health,
@@ -1293,7 +1294,7 @@ def _retry_after_unknown(page, registry, answer):
         def first_attempt(route):
             route.fetch()  # the write reaches Central and commits
             answer(route)
-        page.route("**/v1/operator/activations", first_attempt, times=1)
+        answer_first(page, "**/v1/operator/activations", first_attempt)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
         form = runs.get_by_role("form", name="Activate a Scene", exact=True)
@@ -1486,8 +1487,8 @@ def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry)
         schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
         multi = _windows(page)
         multi.get_by_label("Number of windows", exact=True).fill("3")
-        page.route(f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
-            status=500, content_type="application/json", body='{"error": "internal"}'), times=1)
+        answer_first(page, f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
+            status=500, content_type="application/json", body='{"error": "internal"}'))
         bodies = _program_puts(page)
         multi.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(programs.get_by_role("status")).to_have_text(

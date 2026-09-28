@@ -15,7 +15,7 @@ import re
 
 import pytest
 from console_tasks import go
-from operator_harness import operator_server, sign_in, submit_sign_in
+from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -137,14 +137,12 @@ def test_a_browser_that_drops_the_cookie_is_told_so(page, registry):
 def test_a_sign_in_whose_first_read_fails_keeps_checking_until_a_poll_recovers(page, registry):
     # SigningIn -> Checking on 204: a 500 on the first read must not strand the tab on the form.
     _seed(registry)
-    failed = []
     with operator_server(registry.db, registry.clock) as origin:
         page.context.clear_cookies()
         page.goto(origin + "/console")
         expect(_sign_in_button(page)).to_be_visible()
-        page.route("**/v1/operator/inventory",
-                   lambda route: (failed.append(route.request.url), route.fulfill(status=500)),
-                   times=1)
+        failed = answer_first(page, "**/v1/operator/inventory",
+                              lambda route: route.fulfill(status=500))
         page.get_by_label("Operator token").fill(ADMIN)
         _sign_in_button(page).click()
         expect(_sign_in_button(page)).to_have_count(0)

@@ -163,3 +163,26 @@ class RequestGate:
             route.fulfill(**fulfill)
         else:
             route.continue_()
+
+
+def answer_first(page, pattern, answer):
+    """Answer the first request matching `pattern` with `answer(route)`; every later one
+    passes through. Returns the list of answered URLs.
+
+    Use this, never `page.route(..., times=1)`: when a `times` route runs out, Playwright
+    turns request interception off asynchronously (`setNetworkInterceptionPatterns`),
+    and a request the page sends at that moment -- the refresh `useMutate` starts right
+    after a write's answer -- can stall until the console's 15 s fetch timeout. This
+    route stays registered for the page's life, so interception never changes mid-test.
+    """
+    answered = []
+
+    def handle(route):
+        if answered:
+            route.fallback()
+            return
+        answered.append(route.request.url)
+        answer(route)
+
+    page.route(pattern, handle)
+    return answered
