@@ -4,7 +4,9 @@ import { apiWrite } from "./apiWrite.js";
 import { draftId, sceneProblems } from "./authoring.js";
 import { CycleInput } from "./CycleInput.jsx";
 import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { cycleWording } from "./showState.js";
 import { SourcePicker } from "./SourcePicker.jsx";
+import { TargetPicker } from "./TargetPicker.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -54,6 +56,24 @@ export function SceneAuthoring({ snapshot }) {
   );
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [saving, setSaving] = useState(false);
+  // A targeted frame that a poll no longer lists is dropped and announced (§6).
+  const [vanished, setVanished] = useState(/** @type {string|null} */ (null));
+
+  const frameKey = frames.map((frame) => frame.id).join(" ");
+  useEffect(() => {
+    const listed = new Set(frameKey === "" ? [] : frameKey.split(" "));
+    const gone = [...targets].filter((frameId) => !listed.has(frameId));
+    if (gone.length === 0) {
+      return;
+    }
+    setTargets((prev) => new Set([...prev].filter((frameId) => listed.has(frameId))));
+    setSelections((prev) =>
+      Object.fromEntries(Object.entries(prev).filter(([frameId]) => listed.has(frameId))),
+    );
+    setVanished(
+      `${gone.join(", ")} ${gone.length === 1 ? "was" : "were"} deleted and removed from this Scene.`,
+    );
+  }, [frameKey, targets]);
 
   const targetIds = useMemo(() => [...targets], [targets]);
   const draft = { name, idOverride, mode, sourceRef, targets: targetIds, cycleSeconds, selections };
@@ -104,6 +124,7 @@ export function SceneAuthoring({ snapshot }) {
     setCycleSeconds(30);
     setLoop(true);
     setSelections({});
+    setVanished(null);
     problems.reset();
   };
 
@@ -199,16 +220,21 @@ export function SceneAuthoring({ snapshot }) {
           }}
         />
 
-        <TargetFrames
+        <TargetPicker
           id={problems.idFor("targets")}
           reason={problems.reasonFor("targets")}
-          frames={frames}
+          snapshot={snapshot}
           targets={targets}
           onToggle={(frameId) => {
             toggleTarget(frameId);
             problems.touch("targets");
           }}
         />
+        {vanished !== null && (
+          <p className="scene-authoring__vanished" role="status">
+            {vanished}
+          </p>
+        )}
 
         {mode === "authored" && (
           <MediaChoosers
@@ -252,46 +278,15 @@ export function SceneAuthoring({ snapshot }) {
               className="scene-authoring__scene"
               aria-label={`Scene ${scene.scene_id}`}
             >
-              {scene.scene_id}
+              <span className="scene-authoring__scene-id">{scene.scene_id}</span>
+              {cycleWording(scene) !== null && (
+                <span className="scene-authoring__scene-cycle">{` · ${cycleWording(scene)}`}</span>
+              )}
             </li>
           ))}
         </ul>
       )}
     </div>
-  );
-}
-
-/** The explicit target Frames (both modes): one checkbox per Frame. */
-function TargetFrames({ id, reason, frames, targets, onToggle }) {
-  return (
-    <fieldset
-      id={id}
-      className="scene-authoring__targets"
-      aria-label="Target frames"
-      aria-describedby={reason !== null ? `${id}-reason` : undefined}
-    >
-      <legend>Target frames</legend>
-      {frames.length === 0 ? (
-        <p className="scene-authoring__empty">No Frames to target.</p>
-      ) : (
-        frames.map((frame) => (
-          <label key={frame.id} className="scene-authoring__target">
-            <input
-              type="checkbox"
-              aria-label={`Target frame ${frame.id}`}
-              checked={targets.has(frame.id)}
-              onChange={() => onToggle(frame.id)}
-            />
-            {frame.id}
-          </label>
-        ))
-      )}
-      {reason !== null && (
-        <p id={`${id}-reason`} className="field__reason">
-          {reason}
-        </p>
-      )}
-    </fieldset>
   );
 }
 

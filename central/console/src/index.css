@@ -1122,3 +1122,93 @@ label {
   margin: 0;
   padding-left: 20px;
 }
+
+/* The target picker (slice 3 §3): Frames grouped by Surface, health beside. */
+.target-picker__surface {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+
+.target-picker__surface-name {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.target-picker__frame {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.target-picker__health {
+  font-size: 12px;
+}
+
+/* Run rows (slice 3 §9): frame chips carry the plan tile's health label. */
+.run-control__run-title,
+.program-scheduling__program-id-text {
+  margin: 0 0 4px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.run-control__frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.run-control__frame {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.run-control__children {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  list-style: none;
+  border-left: 2px solid var(--border);
+}
+
+.run-control__ended,
+.program-scheduling__past {
+  margin-top: 12px;
+}
+
+.run-control__note,
+.program-scheduling__program-hint,
+.precedence__limit {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.run-control__ended-title {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+/* Central's plan for a frame (slice 3 §10). */
+.precedence__heading {
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+
+.precedence__limit {
+  margin: 4px 0 0;
+}
+
+.run-control__status-line:empty,
+.program-scheduling__status-line:empty {
+  display: none;
+}

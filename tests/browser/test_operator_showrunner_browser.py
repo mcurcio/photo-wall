@@ -36,7 +36,7 @@ from test_registry import ADMIN, enroll
 from central.catalog import CatalogSnapshot
 from central.media_repository import MediaRepository
 from central.registry import FrameCreate
-from central.runtime import Contribution, Program, Scene
+from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
@@ -60,6 +60,17 @@ SOURCE = "holiday:1"
 # The scene_id an operator authors below; a Scene is identified by its id, never
 # a name (design J4).
 SCENE_ID = "holiday-scene"
+
+
+def _runtime(registry):
+    """Central's Runtime, commanded directly: setup the console cannot author."""
+    return RuntimeStore(registry.db, registry.clock)
+
+
+def _scene(scene_id, frame=VALID_FRAME, **fields):
+    """A live-source Scene on one frame, stored as the console would save it."""
+    return Scene(scene_id=scene_id, **{"loop": True, **fields}, contributions=(
+        Contribution(target=f"frame:{frame}", source_refs=(SOURCE,)),))
 
 
 def _seed_source(registry, photos=()):
@@ -753,41 +764,47 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
 
 
 def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, registry):
-    """Bead 16 honesty (design §5/§6, R2): the Runs region renders NO activation
-    HISTORY and, in particular, NO "expired: missed_window" row — that reason is a
-    server-side Admission on NO operator GET, so surfacing it would invent state
-    the operator surface cannot truthfully know. An activation outcome appears
-    ONLY synchronously, at activation time.
+    """Slice 3 §9 (rewrites Bead 16's no-missed-row check): an activation outcome
+    still appears only at the moment of activation, and a Program reads "Missed"
+    only for a missed_window outcome Central served. A window Central slept
+    through after a tick is a warm restart: it caught up logically, so the row
+    reads "Ran" (never "Missed"), with the limit stated in its hint.
 
-    This is the mutation-probe target: rendering an invented missed_window history
-    row turns the `missed_window` assertions below red.
+    Mutation-probe target: treating any past window with no live Run as missed
+    turns the "slept" assertions red.
     """
     _seed(registry)
     queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID, loop=False))
+    now = registry.clock.utc()
+    runtime.command("advance", now)  # Central has ticked: a warm Runtime
+    runtime.command("set_program", Program(  # saved after its window ended
+        program_id="late", scene_id=SCENE_ID, starts_at=now - 600, ends_at=now - 300))
+    runtime.command("set_program", Program(
+        program_id="slept", scene_id=SCENE_ID, starts_at=now + 60, ends_at=now + 120))
+    registry.clock.advance(300)  # Central is down across "slept"
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _connect(page, origin)
         _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
-        expect(runs).to_be_visible()
-
-        # On load: no synchronous outcome, and no expired/missed_window history.
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_count(0)
-        before = runs.inner_text().lower()
-        assert "missed_window" not in before
-        assert "missed window" not in before
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        programs.get_by_text("Past (2)", exact=True).click()
+        missed = "Missed: its window had ended before Central first scheduled it."
+        expect(programs.get_by_label("Program late", exact=True)).to_contain_text(missed)
+        slept = programs.get_by_label("Program slept", exact=True)
+        expect(slept).to_contain_text(re.compile(r"Ran \d\d:\d\d.*\(one cycle, then ended\)"))
+        expect(slept).to_contain_text("if Central was down during the window")
+        expect(slept).not_to_contain_text("Missed")
 
         # The outcome appears ONLY at the synchronous moment of activation.
         response = _activate(page, SCENE_ID, "act-sync", 0)
         assert response.status == 200
         expect(runs.get_by_label("Activation outcome", exact=True)).to_be_visible()
         expect(runs.get_by_text("Activation admitted", exact=True)).to_be_visible()
-
-        # Even after a real outcome, no invented missed_window history is rendered.
-        after = runs.inner_text().lower()
-        assert "missed_window" not in after
-        assert "missed window" not in after
 
 
 def test_cancel_removes_live_run(page, registry):
@@ -812,12 +829,15 @@ def test_cancel_removes_live_run(page, registry):
         expect(run_row).to_be_visible()
         expect(run_row.get_by_text(f"Scene {SCENE_ID}", exact=True)).to_be_visible()
 
+        run_row.get_by_role("button", name=re.compile(r"^Cancel run ")).click()
+        dialog = page.get_by_role("dialog", name=f"Cancel the Run of {SCENE_ID}?")
+        expect(dialog).to_contain_text("skipping its outro; its child Scenes stop too")
         with page.expect_response(
             lambda r: "/v1/operator/runs/" in r.url
             and r.url.endswith("/cancel")
             and r.request.method == "POST"
         ) as info:
-            run_row.get_by_role("button", name=re.compile(r"^Cancel run ")).click()
+            dialog.get_by_role("button", name="Confirm cancel", exact=True).click()
         assert info.value.status == 200
 
         # After the useMutate() refresh the cancelled Run is gone.
@@ -897,9 +917,6 @@ def _epoch(page, local):
     return page.evaluate("(value) => new Date(value).getTime() / 1000", local)
 
 
-def _runtime(registry):
-    """Central's Runtime, commanded directly: setup the console cannot author."""
-    return RuntimeStore(registry.db, registry.clock)
 
 
 def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
@@ -1080,3 +1097,204 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
             LONG_ID + ":1", exact=True)).to_be_visible()
         fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
         assert fits, f"overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+
+
+# §9 rows and §10 precedence.
+
+LOBBY_FRAME = "lobby-left"
+
+
+def _add_lobby_frame(registry):
+    registry.create_frame(FrameCreate(
+        id=LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+
+
+def _refused_by_guard(registry):
+    """A protecting Run of "guard" on VALID_FRAME, and a Program for SCENE_ID on the
+    same frame whose window starts while guard runs: Central refuses it."""
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("guard", protect_frames=True))
+    runtime.command("set_scene", _scene(SCENE_ID))
+    now = registry.clock.utc()
+    runtime.command("activate", "guard", "guard-act", now, priority=5)
+    runtime.command("set_program", Program(
+        program_id="blocked", scene_id=SCENE_ID, starts_at=now + 60, ends_at=now + 200000))
+    return runtime, now
+
+
+def test_a_refused_program_names_its_protector(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    _refused_by_guard(registry)
+    registry.clock.advance(120)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
+            "Program blocked", exact=True)
+        expect(row).to_contain_text(
+            f"Did not start: {VALID_FRAME} was protected by the Run of guard.")
+        guard = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+            "listitem").filter(has_text="Scene guard")
+        expect(guard).to_contain_text(f"protects {VALID_FRAME}")
+        expect(guard).to_contain_text("priority 5")
+
+
+def test_a_refused_program_whose_protector_is_no_longer_served_names_none(page, registry):
+    """The protector ended over a day ago, so it is not served: the row never names
+    a Run it cannot show (mutation-probe target: a name without a served Run)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime, now = _refused_by_guard(registry)
+    guard = next(run.run_id for run in runtime.read().project(now).runs if run.scene_id == "guard")
+    registry.clock.advance(100)
+    runtime.command("cancel", guard, registry.clock.utc())  # refuses "blocked" at +60 first
+    registry.clock.advance(86400 + 60)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
+            "Program blocked", exact=True)
+        expect(row).to_contain_text(
+            f"Did not start: {VALID_FRAME} was protected by another Run, no longer listed.")
+        expect(row).not_to_contain_text("guard")
+
+
+def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form.get_by_label("Keep playing until the Program ends", exact=True).uncheck()
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.request.post_data_json["loop"] is False
+        once = "plays one 30 s cycle, then ends"
+        expect(page.get_by_role("region", name="Scenes", exact=True).get_by_label(
+            f"Scene {SCENE_ID}", exact=True)).to_contain_text(once)
+        _activate(page, SCENE_ID, "once-act", 0)
+        run_row = page.get_by_role("region", name="Runs", exact=True).get_by_role("listitem").first
+        expect(run_row).to_contain_text(once)
+        expect(run_row).to_contain_text("activated directly")
+
+
+def test_why_states_admission_order_and_the_limit_line(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", Scene(
+        scene_id="evening", loop=True,
+        contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),),
+        children=(Child(scene=_scene("intro")),)))
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc())
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
+            "group", name="Why", exact=True)
+        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        expect(why).to_contain_text(
+            f"Central's plan for {VALID_FRAME}: intro (priority 0, activated directly) on top.")
+        rows = why.get_by_role("listitem")
+        expect(rows).to_have_count(2)
+        expect(rows.nth(1)).to_have_text(
+            "evening (priority 0) is underneath: same Run of evening; "
+            "the later child Scene is on top.")
+        expect(why).to_contain_text(
+            "If intro has no usable media for this frame (none eligible, still preparing, or "
+            "no compatible variant), Central plans the next layer down instead.")
+        expect(why).to_contain_text("An unbound frame gets no layers at all.")
+
+
+def test_why_names_the_winning_program_from_its_root_run(page, registry):
+    """The winner's Program is read from its root Run (`program_id`), never from
+    the Intent (mutation-probe target). Removing its running Program is confirmed."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("evening"))
+    runtime.command("set_scene", _scene("morning"))
+    now = registry.clock.utc()
+    runtime.command("set_program", Program(
+        program_id="weekday-evenings", scene_id="evening", starts_at=now + 10,
+        ends_at=now + 7200, priority=5))
+    runtime.command("activate", "morning", "morning-act", now, priority=1)
+    registry.clock.advance(60)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        runs = page.get_by_role("region", name="Runs", exact=True)
+        why = runs.get_by_role("group", name="Why", exact=True)
+        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        expect(why).to_contain_text(
+            f"Central's plan for {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
+        expect(why.get_by_role("listitem").nth(1)).to_have_text(
+            "morning (priority 1) is underneath: evening has priority 5.")
+        expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
+            "Program weekday-evenings")
+
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        row = programs.get_by_label("Program weekday-evenings", exact=True)
+        expect(row).to_contain_text(re.compile(r"Running since \d\d:\d\d"))
+        row.get_by_role("button", name="Remove program weekday-evenings", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Remove program weekday-evenings?")
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/programs/weekday-evenings")
+            and r.request.method == "DELETE"
+        ):
+            dialog.get_by_role("button", name="Confirm remove", exact=True).click()
+        expect(programs.get_by_role("status")).to_have_text("Program weekday-evenings removed.")
+
+
+def test_the_target_picker_groups_by_surface_with_health_in_the_description(page, registry):
+    _seed(registry)
+    _add_lobby_frame(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        lobby = form.get_by_role("group", name="Frames on lobby", exact=True)
+        wall = form.get_by_role("group", name="Frames on wall", exact=True)
+        picked = lobby.get_by_role("checkbox", name=f"Target frame {LOBBY_FRAME}", exact=True)
+        expect(picked).to_have_accessible_name(f"Target frame {LOBBY_FRAME}")
+        expect(picked).to_have_accessible_description("Needs a Player")
+        valid = wall.get_by_role("checkbox", name=f"Target frame {VALID_FRAME}", exact=True)
+        expect(valid).to_have_accessible_name(f"Target frame {VALID_FRAME}")
+        expect(valid).to_have_accessible_description("No report yet")
+        expect(wall.get_by_role("checkbox")).to_have_count(2)
+
+
+def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
+    _seed(registry)
+    _add_lobby_frame(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = _scenes_form(page)
+        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
+
+        registry.delete_frame(LOBBY_FRAME)
+        page.clock.run_for(5000)
+        expect(form.get_by_role("status")).to_have_text(
+            f"{LOBBY_FRAME} was deleted and removed from this Scene.")
+        expect(form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)).to_have_count(0)
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        targets = [c["target"] for c in info.value.request.post_data_json["contributions"]]
+        assert targets == [f"frame:{VALID_FRAME}"]

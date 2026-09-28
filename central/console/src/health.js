@@ -53,8 +53,11 @@ export { isBound };
 // Enrolled this many report intervals ago or less, a Player is still settling.
 const SETTLING_INTERVALS = 2;
 
-/** "N s" / "N min" / "N h" / "N d" for a non-negative age in seconds. */
-function formatAge(seconds) {
+/**
+ * "N s" / "N min" / "N h" / "N d" for a non-negative age in seconds: the one age
+ * formatting every surface uses (the Showrunner's Runs and Programs included).
+ */
+export function formatAge(seconds) {
   const whole = Math.floor(seconds);
   if (whole < 60) {
     return `${whole} s`;
@@ -124,7 +127,7 @@ export function playerLiveness(snapshot, playerId) {
  * Seconds from `timestamp` to `readAt`; NaN when either is missing, so every
  * comparison against it fails closed and no label prints an age.
  */
-function ageAt(readAt, timestamp) {
+export function ageAt(readAt, timestamp) {
   return readAt == null || timestamp == null ? NaN : readAt - timestamp;
 }
 

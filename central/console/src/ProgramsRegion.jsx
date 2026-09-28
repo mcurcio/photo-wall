@@ -1,6 +1,9 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { useConfirm } from "./ConfirmAction.jsx";
+import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { programState, windowLabel } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -9,15 +12,26 @@ import { useMutate } from "./useMutate.js";
  * @param {{snapshot: object|null}} props
  */
 export function ProgramsRegion({ snapshot }) {
+  const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  // After a removal, or when its opener is gone, the Programs region takes focus.
+  const focusRegion = () => regionRef.current?.focus();
+  const confirm = useConfirm(focusRegion, focusRegion);
   return (
-    <section className="showrunner__region" role="region" aria-label="Programs">
+    <section
+      ref={regionRef}
+      tabIndex={-1}
+      className="showrunner__region"
+      role="region"
+      aria-label="Programs"
+    >
       <h2 className="showrunner__region-title">Programs</h2>
       {/* A Program binds a Scene to a SINGLE time window with a priority
           (PUT …/programs/{id}). The optional helper creates N SEPARATE
           windows — N individual, independently-stored Programs — and is never
           described as a recurring rule: central stores no recurrence model
           (design R2, Q2), so the UI implies none. */}
-      <ProgramScheduling snapshot={snapshot} />
+      <ProgramScheduling snapshot={snapshot} confirm={confirm} />
+      {confirm.confirmation("program-scheduling__status-line")}
     </section>
   );
 }
@@ -81,7 +95,7 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
  *
  * @param {{snapshot: object|null}} props
  */
-function ProgramScheduling({ snapshot }) {
+function ProgramScheduling({ snapshot, confirm }) {
   // Scenes to bind come from the runtime definitions map (same source the Scenes
   // region reads); a Program can only reference a Scene that exists.
   const definitions = snapshot?.runtime?.definitions ?? {};
@@ -197,6 +211,19 @@ function ProgramScheduling({ snapshot }) {
     },
     [mutate],
   );
+
+  // Removing a RUNNING Program ends its Run, so it is confirmed (§9).
+  const onRemove = (event, program) => {
+    if (programState(snapshot, program.program_id)?.state === "running") {
+      confirm.open(event, removeRunningRequest(program));
+    } else {
+      removeProgram(program.program_id);
+    }
+  };
+
+  const now = snapshot?.runtime?.current?.now;
+  const past = programs.filter((program) => program.ends_at <= now);
+  const current = programs.filter((program) => !(program.ends_at <= now));
 
   return (
     <div className="program-scheduling">
@@ -322,43 +349,97 @@ function ProgramScheduling({ snapshot }) {
         </p>
       ) : null}
 
-      {/* The Programs list: every stored Program by its program_id, with its
-          single window, scene, priority, and a Remove. Each row is one discrete
-          Program — the operator manages and removes them individually. */}
       {programs.length === 0 ? (
         <p className="program-scheduling__empty">No Programs yet.</p>
       ) : (
-        <ul className="program-scheduling__programs" role="list">
-          {programs.map((program) => (
-            <li
-              key={program.program_id}
-              className="program-scheduling__program"
-              aria-label={`Program ${program.program_id}`}
-            >
-              <span className="program-scheduling__program-id-text">
-                {program.program_id}
-              </span>
-              <span className="program-scheduling__program-scene">
-                {`Scene ${program.scene_id}`}
-              </span>
-              <span className="program-scheduling__program-window">
-                {`${new Date(program.starts_at * 1000).toLocaleString()} – ${new Date(program.ends_at * 1000).toLocaleString()}`}
-              </span>
-              <span className="program-scheduling__program-priority">
-                {`Priority ${program.priority}`}
-              </span>
+        <>
+          {/* Every stored Program by its program_id, each one discrete window with
+              its display state (showState.js); past windows sit under a closed
+              "Past (N)" disclosure. */}
+          <ProgramList programs={current} snapshot={snapshot} onRemove={onRemove} />
+          {past.length > 0 && (
+            <details className="program-scheduling__past">
+              <summary>{`Past (${past.length})`}</summary>
+              <ProgramList programs={past} snapshot={snapshot} onRemove={onRemove} />
+            </details>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Stored Programs as records: the Scene, the window in local time, the
+ * priority, and the display state with its hint (§9).
+ */
+function ProgramList({ programs, snapshot, onRemove }) {
+  return (
+    <ul className="program-scheduling__programs" role="list">
+      {programs.map((program) => {
+        const state = programState(snapshot, program.program_id);
+        return (
+          <li
+            key={program.program_id}
+            className="program-scheduling__program"
+            aria-label={`Program ${program.program_id}`}
+          >
+            <p className="program-scheduling__program-id-text">{program.program_id}</p>
+            <dl className="record">
+              <dt>Scene</dt>
+              <dd className="program-scheduling__program-scene">{`Scene ${program.scene_id}`}</dd>
+              <dt>Window</dt>
+              <dd className="program-scheduling__program-window">{windowLabel(program)}</dd>
+              <dt>Priority</dt>
+              <dd className="program-scheduling__program-priority">{`Priority ${program.priority}`}</dd>
+              <dt>State</dt>
+              <dd className={`program-scheduling__program-state health--${state.severity}`}>
+                {state.label}
+                {state.hint !== null && (
+                  <span className="program-scheduling__program-hint">{` ${state.hint}`}</span>
+                )}
+              </dd>
+            </dl>
+            <div className="record__actions">
               <button
                 type="button"
                 className="program-scheduling__remove"
                 aria-label={`Remove program ${program.program_id}`}
-                onClick={() => removeProgram(program.program_id)}
+                onClick={(event) => onRemove(event, program)}
               >
                 Remove
               </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
+}
+
+/** Remove a running Program: its Run is asked to finish now (central/runtime.py `remove_program`). */
+function removeRunningRequest(program) {
+  return {
+    key: `remove-program:${program.program_id}`,
+    title: `Remove program ${program.program_id}?`,
+    confirmLabel: "Confirm remove",
+    body: (
+      <p>
+        {`It is running now. Its Run of ${program.scene_id} is asked to finish: it ends at the ` +
+          "end of its current cycle, after any outro. Later windows are separate Programs and stay."}
+      </p>
+    ),
+    run: async () => {
+      const result = await apiWrite(`/v1/operator/programs/${encodeURIComponent(program.program_id)}`, {
+        method: "DELETE",
+      });
+      if (result.ok) {
+        return { state: "done", message: `Program ${program.program_id} removed.` };
+      }
+      if (result.status >= 500) {
+        return { state: "unknown", message: UNKNOWN_MESSAGE };
+      }
+      return { state: "refused", message: `Not removed: ${result.error ?? result.status}.` };
+    },
+  };
 }

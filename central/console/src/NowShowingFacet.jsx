@@ -1,6 +1,6 @@
 import React from "react";
 
-import { nowShowing, rankedContributions } from "./join.js";
+import { explainPrecedence, nowShowing } from "./join.js";
 
 /**
  * Now-showing facet (Bead 3, read-only).
@@ -12,25 +12,15 @@ import { nowShowing, rankedContributions } from "./join.js";
  *     `"frame:<id>"` (join.js). We surface only the `scene_id` (+ phase); there
  *     is no operator-facing scene "name", so we never invent one (design §5 J4).
  *
- *  2. The "why" — every `contribution` targeting this Frame, ranked by the total
- *     precedence order (priority, then root_order, then admission_order). The
- *     runtime keeps the MAX-precedence Intent as the visible winner
- *     (runtime.py:708), so this list is sorted DESCENDING: the winner (the
- *     intended Scene above) sits at the top. The filter reuses the SAME verified
- *     string join as primitive #4 — `intent.target === "frame:" + frameId` — not
- *     the object `{kind,id}` shape (which targets only the player protocol and
- *     would match nothing here). The order is total and deterministic.
+ *  2. The "why" — Central's plan for the frame (pass 2 slice 3 §10), read
+ *     through `explainPrecedence` (join.js): who is on top, why each other
+ *     layer is underneath (every line says "priority N"), and the limit line.
+ *     The same explanation the Showrunner's Runs "Why" panel renders.
  *
  * @param {{snapshot: object|null, frameId: string}} props
  */
 export function NowShowingFacet({ snapshot, frameId }) {
   const now = nowShowing(snapshot?.runtime, frameId);
-
-  // The "why" reuses the shared precedence read (primitive #4, join.js) so the
-  // ranking rule lives in exactly one place — the same list the Showrunner Runs
-  // "why" panel (Bead 16) renders. Sorted DESCENDING, so the visible winner tops.
-  const why = rankedContributions(snapshot?.runtime, frameId);
-
   return (
     <div className="facet facet--nowshowing">
       <h3 className="facet__title">Now-showing</h3>
@@ -43,18 +33,36 @@ export function NowShowingFacet({ snapshot, frameId }) {
       )}
 
       <h4 className="facet__subtitle">Why</h4>
-      {why.length === 0 ? (
-        <p className="facet__empty">No contributions target this frame.</p>
-      ) : (
-        <ol className="facet__why" aria-label="Why">
-          {why.map((intent, index) => (
-            <li key={`${intent.run_id}:${index}`}>
-              {`${intent.scene_id} — priority ${intent.priority}, ` +
-                `root order ${intent.root_order}, admission ${intent.admission_order}`}
-            </li>
-          ))}
-        </ol>
-      )}
+      <PrecedenceExplanation
+        explanation={explainPrecedence(snapshot?.runtime, frameId)}
+        listLabel="Why"
+        listClass="facet__why"
+        emptyClass="facet__empty"
+      />
+    </div>
+  );
+}
+
+/**
+ * Central's plan for one frame, as `explainPrecedence` states it: the heading,
+ * one row per layer (winner first), and the limit line, always shown.
+ *
+ * @param {{explanation: ReturnType<typeof explainPrecedence>, listLabel: string,
+ *          listClass: string, emptyClass: string}} props
+ */
+export function PrecedenceExplanation({ explanation, listLabel, listClass, emptyClass }) {
+  if (explanation === null) {
+    return <p className={emptyClass}>No contributions target this frame.</p>;
+  }
+  return (
+    <div className="precedence">
+      <p className="precedence__heading">{explanation.heading}</p>
+      <ol className={listClass} aria-label={listLabel}>
+        {explanation.rows.map(({ intent, sentence }) => (
+          <li key={`${intent.run_id}:${intent.target}`}>{sentence}</li>
+        ))}
+      </ol>
+      <p className="precedence__limit">{explanation.limit}</p>
     </div>
   );
 }

@@ -78,6 +78,64 @@ export function rankedContributions(runtime, frameId) {
     );
 }
 
+/**
+ * Who wins a frame, in Central's plan (pass 2 slice 3 §10), read on
+ * {@link rankedContributions}. The Runtime keeps the highest
+ * `(priority, root_order, admission_order)`; each hidden entry is compared with
+ * the winner on the first element that differs, and every sentence says
+ * "priority N". The winner's origin is read from its ROOT Run (`program_id`),
+ * never from the Intent. The limit line is always shown: this is the plan, not
+ * what the panel shows (R2).
+ *
+ * @param {object} runtime the `/v1/operator/runtime` payload (snapshot.runtime)
+ * @param {string} frameId
+ * @returns {{heading: string, rows: Array<{intent: object, sentence: string}>,
+ *            limit: string}|null} null when nothing targets the frame
+ */
+export function explainPrecedence(runtime, frameId) {
+  const ranked = rankedContributions(runtime, frameId);
+  if (ranked.length === 0) {
+    return null;
+  }
+  const runs = new Map((runtime?.current?.runs ?? []).map((run) => [run.run_id, run]));
+  const [winner] = ranked;
+  const tag = (intent) => {
+    const root = runs.get(intent.root_id);
+    if (root === undefined) {
+      return `priority ${intent.priority}`;
+    }
+    const origin = root.program_id != null ? `Program ${root.program_id}` : "activated directly";
+    return `priority ${intent.priority}, ${origin}`;
+  };
+  const underneath = (intent) => {
+    const lead = `${intent.scene_id} (priority ${intent.priority}) is underneath:`;
+    if (intent.priority !== winner.priority) {
+      return `${lead} ${winner.scene_id} has priority ${winner.priority}.`;
+    }
+    if (intent.root_order !== winner.root_order) {
+      return (
+        `${lead} same priority, and Central admitted ${winner.scene_id}'s Run later. ` +
+        "Admission order, not the Program's start time; Programs starting at the same " +
+        "instant are admitted in Program-id order."
+      );
+    }
+    const root = runs.get(winner.root_id)?.scene_id ?? winner.scene_id;
+    return `${lead} same Run of ${root}; the later child Scene is on top.`;
+  };
+  return {
+    heading: `Central's plan for ${frameId}: ${winner.scene_id} (${tag(winner)}) on top.`,
+    rows: ranked.map((intent, index) => ({
+      intent,
+      sentence: index === 0 ? `${intent.scene_id} (${tag(intent)}) is on top.` : underneath(intent),
+    })),
+    limit:
+      `If ${winner.scene_id} has no usable media for this frame (none eligible, still ` +
+      "preparing, or no compatible variant), Central plans the next layer down instead. " +
+      "An unbound frame gets no layers at all. A partly transparent or fading layer shows " +
+      "what is underneath.",
+  };
+}
+
 /** A frame is bound when both halves of its compound binding key are set. */
 export function isBound(frame) {
   return frame != null && frame.player_id != null && frame.output_id != null;
@@ -134,8 +192,8 @@ export function frameForOutput(snapshot, playerId, outputId) {
 
 // A Run is live in these phases: the same predicate the delete guard uses
 // (central/app.py `remove_frame`), so the console lists exactly the Runs that
-// would refuse a delete.
-const LIVE_PHASES = new Set(["body", "outro"]);
+// would refuse a delete. Every live/ended split in the console reads it here.
+export const LIVE_PHASES = new Set(["body", "outro"]);
 
 /**
  * The live Runs a Frame participates in (phase body or outro), in the runtime's

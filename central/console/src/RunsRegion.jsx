@@ -1,69 +1,259 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useId, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { rankedContributions } from "./join.js";
+import { useConfirm } from "./ConfirmAction.jsx";
+import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { frameHealth } from "./health.js";
+import { explainPrecedence } from "./join.js";
+import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
+import { runRows } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
 /**
- * The Runs region (moved out of Showrunner.jsx, pass 2 slice 3 §3).
+ * The Runs region (Bead 16; pass 2 slice 3 §9–§11), the "Now" column.
+ *
+ *  1. ACTIVATE NOW — POST `/v1/operator/activations`; the server answers
+ *     SYNCHRONOUSLY with an `Admission` ({status, reason}), shown at the moment
+ *     exactly as returned.
+ *  2. RUNS — the served Runs (runtime.current.runs, live plus those ended in the
+ *     last day) as rows from showState.js `runRows`: live roots with their
+ *     children nested, then a closed "Recently ended" list. Finish asks for a
+ *     natural end; Cancel stops now and goes through ConfirmAction.
+ *  3. WHY — Central's plan for a chosen frame (join.js `explainPrecedence`),
+ *     the same explanation the Now-showing facet renders.
+ *
+ * Every write wraps the shared `useMutate()` hook (primitive #7), so Plane A
+ * refreshes exactly once after it.
  *
  * @param {{snapshot: object|null}} props
  */
 export function RunsRegion({ snapshot }) {
+  const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  // After a cancel, or when its opener is gone, the Runs region takes focus.
+  const focusRegion = () => regionRef.current?.focus();
+  const { open, confirmation } = useConfirm(focusRegion, focusRegion);
+  const mutate = useMutate();
+  const rows = runRows(snapshot);
+  const ended = rows.completed.length + rows.cancelled.length;
+
+  const finishRun = useCallback(
+    (runId) =>
+      mutate(() =>
+        apiWrite(`/v1/operator/runs/${encodeURIComponent(runId)}/finish`, {
+          method: "POST",
+        }),
+      ),
+    [mutate],
+  );
+
+  const actions = {
+    onFinish: finishRun,
+    onCancel: (event, row) => open(event, cancelRequest(row)),
+  };
+
   return (
-    <section className="showrunner__region" role="region" aria-label="Runs">
+    <section
+      ref={regionRef}
+      tabIndex={-1}
+      className="showrunner__region"
+      role="region"
+      aria-label="Runs"
+    >
       <h2 className="showrunner__region-title">Runs</h2>
-      <RunControl snapshot={snapshot} />
+      <ActivateForm snapshot={snapshot} />
+
+      {rows.live.length === 0 ? (
+        <p className="run-control__empty">No live Runs.</p>
+      ) : (
+        <ul className="run-control__runs" role="list">
+          {rows.live.map((row) => (
+            <RunRow key={row.run.run_id} row={row} snapshot={snapshot} actions={actions} />
+          ))}
+        </ul>
+      )}
+
+      {ended > 0 && (
+        <details className="run-control__ended">
+          <summary>{`Recently ended (${ended})`}</summary>
+          <p className="run-control__note">Runs that ended in the last day.</p>
+          <EndedRuns title="Completed" rows={rows.completed} snapshot={snapshot} />
+          <EndedRuns title="Cancelled" rows={rows.cancelled} snapshot={snapshot} />
+        </details>
+      )}
+
+      <WhyPanel snapshot={snapshot} />
+      {confirmation("run-control__status-line")}
     </section>
   );
 }
 
 /**
- * The Runs region body (Bead 16 — SR-runs).
- *
- * Three surfaces, all honest to the server's real shapes (design J4, §5/§6):
- *
- *  1. ACTIVATE NOW — a form that POSTs `/v1/operator/activations` with the
- *     stored `ActivationRequest` body ({scene_id, activation_id, priority}). The
- *     server answers SYNCHRONOUSLY with an `Admission` ({status, reason}); we
- *     render that outcome AT THE MOMENT, exactly as returned — admitted, queued,
- *     ignored, rejected or expired — never softened, never invented. This is the
- *     ONLY place an activation outcome is shown, because `Admission` is on no
- *     operator GET (design §5/§6: `/runtime` carries no `admissions` field).
- *
- *  2. CURRENT RUNS — the live Runs from `runtime.current.runs`, each with Finish
- *     and Cancel (`POST …/runs/{id}/finish|cancel`). These are the runs the
- *     projection actually holds right now; there is NO history list, and in
- *     particular NO "expired: missed_window" row — that reason is a server-side
- *     Admission on no GET, so surfacing it would be inventing state the operator
- *     surface cannot truthfully know (design §5/§6, R2).
- *
- *  3. WHY — for a selected Frame, its `contributions` ranked by the total
- *     precedence order (priority, root_order, admission_order) via the shared
- *     read `rankedContributions` (primitive #4, join.js) — the same ranking the
- *     Now-showing facet renders, in one place.
- *
- * Activate/finish/cancel all wrap the shared `useMutate()` hook (primitive #7)
- * so Plane A — and therefore the Runs list and the "why" panel — refresh exactly
- * once after each write.
- *
- * @param {{snapshot: object|null}} props
+ * Cancel one Run (§9): captured when the dialog opens. Cancel stops now,
+ * skipping the outro, and its children stop too (central/runtime.py `_cancel`).
  */
-function RunControl({ snapshot }) {
+function cancelRequest(row) {
+  const { run } = row;
+  const where = row.frames.length > 0 ? row.frames.join(", ") : "its targets";
+  return {
+    key: `cancel:${run.run_id}`,
+    title: `Cancel the Run of ${run.scene_id}?`,
+    confirmLabel: "Confirm cancel",
+    body: <p>{`Stops now on ${where}, skipping its outro; its child Scenes stop too.`}</p>,
+    run: async () => {
+      const result = await apiWrite(`/v1/operator/runs/${encodeURIComponent(run.run_id)}/cancel`, {
+        method: "POST",
+      });
+      if (result.ok) {
+        return { state: "done", message: `Run of ${run.scene_id} cancelled.` };
+      }
+      if (result.status >= 500) {
+        return { state: "unknown", message: UNKNOWN_MESSAGE };
+      }
+      return { state: "refused", message: `Not cancelled: ${result.error ?? result.status}.` };
+    },
+  };
+}
+
+/**
+ * One Run as a record (§9): `Scene X` and its revision, origin, age, state,
+ * one-cycle wording, priority, protection and its frames with their health.
+ * Roots carry Finish and Cancel; their children are nested beneath.
+ */
+function RunRow({ row, snapshot, actions = null }) {
+  const statusId = useId();
+  const { run } = row;
+  return (
+    <li className="run-control__run" aria-label={`Run ${run.run_id}`}>
+      <p className="run-control__run-title">
+        <span className="run-control__run-scene">{`Scene ${run.scene_id}`}</span>
+        {` · revision ${run.scene_revision}`}
+      </p>
+      <dl className="record">
+        <dt>Origin</dt>
+        <dd>{row.origin}</dd>
+        <dt>Started</dt>
+        <dd>{row.started}</dd>
+        <dt>State</dt>
+        <dd id={statusId}>{row.status}</dd>
+        {row.cycle !== null && (
+          <>
+            <dt>Cycle</dt>
+            <dd>{row.cycle}</dd>
+          </>
+        )}
+        <dt>Priority</dt>
+        <dd>{`priority ${run.priority}`}</dd>
+        {row.protects.length > 0 && (
+          <>
+            <dt>Protection</dt>
+            <dd>{`protects ${row.protects.join(", ")}`}</dd>
+          </>
+        )}
+        <dt>Frames</dt>
+        <dd>
+          <span className="run-control__frames">
+            {row.frames.map((frameId) => {
+              const health = frameHealth(snapshot, frameId);
+              return (
+                <span key={frameId} className={`run-control__frame health--${health?.severity ?? "todo"}`}>
+                  {health === null ? `${frameId}: not in the inventory` : `${frameId}: ${health.tileLabel}`}
+                </span>
+              );
+            })}
+          </span>
+        </dd>
+      </dl>
+      {actions !== null && (
+        <div className="record__actions">
+          <button
+            type="button"
+            className="run-control__finish"
+            aria-label={`Finish run ${run.run_id}`}
+            aria-describedby={row.finishing ? statusId : undefined}
+            disabled={row.finishing}
+            onClick={() => actions.onFinish(run.run_id)}
+          >
+            Finish
+          </button>
+          <button
+            type="button"
+            className="run-control__cancel"
+            aria-label={`Cancel run ${run.run_id}`}
+            onClick={(event) => actions.onCancel(event, row)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {row.children.length > 0 && (
+        <ul className="run-control__children" aria-label="Child Scenes">
+          {row.children.map((child) => (
+            <RunRow key={child.run.run_id} row={child} snapshot={snapshot} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function EndedRuns({ title, rows, snapshot }) {
+  if (rows.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      <h3 className="run-control__ended-title">{title}</h3>
+      <ul className="run-control__runs" aria-label={`${title} Runs`}>
+        {rows.map((row) => (
+          <RunRow key={row.run.run_id} row={row} snapshot={snapshot} />
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** Central's plan for a chosen frame (§10). */
+function WhyPanel({ snapshot }) {
+  const frames = snapshot?.inventory?.frames ?? [];
+  // The Frame whose "why" is shown; none until the operator picks.
+  const [whyFrame, setWhyFrame] = useState("");
+  return (
+    <div className="run-control__why" role="group" aria-label="Why">
+      <label className="run-control__field">
+        Frame for why
+        <select
+          className="run-control__why-frame"
+          aria-label="Frame for why"
+          value={whyFrame}
+          onChange={(event) => setWhyFrame(event.target.value)}
+        >
+          <option value="">Choose a Frame</option>
+          {frames.map((frame) => (
+            <option key={frame.id} value={frame.id}>
+              {frame.id}
+            </option>
+          ))}
+        </select>
+      </label>
+      {whyFrame !== "" && (
+        <PrecedenceExplanation
+          explanation={explainPrecedence(snapshot?.runtime, whyFrame)}
+          listLabel="Contribution precedence"
+          listClass="run-control__why-list"
+          emptyClass="run-control__empty"
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Activate a Scene now: POST `/v1/operator/activations`, and show the
+ * synchronous Admission at the moment, exactly as returned.
+ */
+function ActivateForm({ snapshot }) {
   const definitions = snapshot?.runtime?.definitions ?? {};
   const scenes = useMemo(() => Object.values(definitions), [definitions]);
-  // The LIVE Runs the projection holds right now: `runtime.current.runs` carries
-  // ALL runs (including completed/cancelled ones, whose phase has advanced), so
-  // filter to the live phases — body/outro — the SAME "live" definition the
-  // delete guard uses (runtime.py:233; RunView.phase, runtime.py:178). Only a
-  // live Run is Finish/Cancel-able, and a cancelled/completed Run drops off here.
-  // This is the ONLY Run list — no history, so no missed-window row can appear.
-  const runs = useMemo(() => {
-    const all = snapshot?.runtime?.current?.runs ?? [];
-    return all.filter((run) => run.phase === "body" || run.phase === "outro");
-  }, [snapshot]);
-  const frames = snapshot?.inventory?.frames ?? [];
-
   const mutate = useMutate();
 
   // Plane B: the activation draft + the SYNCHRONOUS outcome of the last activate.
@@ -77,9 +267,6 @@ function RunControl({ snapshot }) {
     /** @type {{status: string, reason: string|null}|null} */ (null),
   );
   const [activating, setActivating] = useState(false);
-
-  // The Frame whose "why" is shown; defaults to none until the operator picks.
-  const [whyFrame, setWhyFrame] = useState("");
 
   const activateValid =
     !activating && sceneId !== "" && activationId.trim() !== "";
@@ -120,30 +307,8 @@ function RunControl({ snapshot }) {
     }
   }, [sceneId, activationId, priority, mutate]);
 
-  const finishRun = useCallback(
-    (runId) =>
-      mutate(() =>
-        apiWrite(`/v1/operator/runs/${encodeURIComponent(runId)}/finish`, {
-          method: "POST",
-        }),
-      ),
-    [mutate],
-  );
-
-  const cancelRun = useCallback(
-    (runId) =>
-      mutate(() =>
-        apiWrite(`/v1/operator/runs/${encodeURIComponent(runId)}/cancel`, {
-          method: "POST",
-        }),
-      ),
-    [mutate],
-  );
-
-  const why = whyFrame === "" ? [] : rankedContributions(snapshot?.runtime, whyFrame);
-
   return (
-    <div className="run-control">
+    <>
       <form
         className="run-control__activate"
         role="form"
@@ -214,77 +379,6 @@ function RunControl({ snapshot }) {
             : `Activation ${outcome.status}`}
         </p>
       ) : null}
-
-      {/* Current live Runs (runtime.current.runs) — Finish/Cancel each. */}
-      {runs.length === 0 ? (
-        <p className="run-control__empty">No live Runs.</p>
-      ) : (
-        <ul className="run-control__runs" role="list">
-          {runs.map((run) => (
-            <li
-              key={run.run_id}
-              className="run-control__run"
-              aria-label={`Run ${run.run_id}`}
-            >
-              <span className="run-control__run-scene">{`Scene ${run.scene_id}`}</span>
-              <span className="run-control__run-phase">{`Phase ${run.phase}`}</span>
-              <button
-                type="button"
-                className="run-control__finish"
-                aria-label={`Finish run ${run.run_id}`}
-                onClick={() => finishRun(run.run_id)}
-              >
-                Finish
-              </button>
-              <button
-                type="button"
-                className="run-control__cancel"
-                aria-label={`Cancel run ${run.run_id}`}
-                onClick={() => cancelRun(run.run_id)}
-              >
-                Cancel
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* The "why" panel: pick a Frame, see its contributions ranked by the total
-          precedence order (priority, root_order, admission_order) via the shared
-          primitive #4 read — deterministic, winner first. */}
-      <div className="run-control__why" role="group" aria-label="Why">
-        <label className="run-control__field">
-          Frame for why
-          <select
-            className="run-control__why-frame"
-            aria-label="Frame for why"
-            value={whyFrame}
-            onChange={(event) => setWhyFrame(event.target.value)}
-          >
-            <option value="">Choose a Frame</option>
-            {frames.map((frame) => (
-              <option key={frame.id} value={frame.id}>
-                {frame.id}
-              </option>
-            ))}
-          </select>
-        </label>
-        {whyFrame === "" ? null : why.length === 0 ? (
-          <p className="run-control__empty">No contributions target this frame.</p>
-        ) : (
-          <ol className="run-control__why-list" aria-label="Contribution precedence">
-            {why.map((intent, index) => (
-              <li
-                key={`${intent.run_id}:${index}`}
-                className="run-control__why-row"
-              >
-                {`${intent.scene_id} — priority ${intent.priority}, ` +
-                  `root order ${intent.root_order}, admission ${intent.admission_order}`}
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
