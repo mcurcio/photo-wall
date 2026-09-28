@@ -1714,3 +1714,32 @@ doc softenings.
 - 2026-09-28, console pass 2 slice 1, docs bead 6 (errata closure): findings (a)-(e) of the
   2026-09-27 slice 1 entry above are APPLIED to docs/operator-console-ux-pass2.md in place
   (§3 table, §4, §5, §7, §10, §11, History). The spec now matches the build; no open slice 1 errata.
+- 2026-09-28, console pass 2 slice 2 (docs/operator-console-ux-pass2-onboarding.md), implementer
+  findings, beads 1-6 (none changes the frame; all are slice-page corrections for the docs bead):
+  (a) §11 lists the "Unbind all" per-Frame / mid-sequence-conflict test under Bead 3, but the only
+  surface that offers Unbind all is Bead 5's in-service roster card. Bead 3 built ConfirmAction and
+  the single-Frame verbs; `unbindSequence` (equipmentApi.js), `unbindAllRequest` (ConfirmAction.jsx)
+  and their tests (lists Frames+Runs, mid-sequence conflict never resent, unknown stops the rest)
+  landed in Bead 5.
+  (b) File lists widened: Bead 3 also touched framesApi.js (`deleteFrame` returns the error `code`, so
+  a 404 unknown_frame reads "Already done.") and App.jsx (a plan-region ref: the tray's delete
+  successor is the plan region, which the tray does not own). Bead 4 also touched Inspector.jsx and
+  BindingFacet.jsx (boot facts reach the chooser through the Inspector) and the then-current
+  EquipmentRail.jsx (serial + outcome, so Bead 4's "No netboot record" test had a surface before
+  the roster).
+  (c) §7 is silent on render ordering: the dialog's native `close` event renders in React's sync lane
+  ahead of the default-lane snapshot update, so a focus successor chosen there saw the pre-write
+  surface (unbind focused the heading, not the chooser). ConfirmAction now closes the dialog from an
+  effect after the render carrying the result commits.
+  (d) §7's "[*]" is built as: done closes the dialog (status line + successor); changed, already
+  done, outcome unknown and the Unbind-all summary stay in the dialog as terminal states with only
+  Close. Confirm buttons are "Confirm delete/unbind/retire/unbind all" (the title names the target;
+  the button cannot repeat the opener's accessible name). The Binding facet's own bind keeps the
+  existing "This Frame changed — reload and review its binding." (§6 diagram); dialogs use
+  "Changed since you opened this. Reopen to review."
+  (e) §5 names three boot outcomes; rows with neither known_good_tag nor failed_tag read "Last netboot
+  served <tag>, not yet healthy" or "Netboot seen, no image served yet"; failed+known-good reads
+  "Rolled back from X · last netboot healthy on Y". Group headings are toggles named
+  "<Group> players (N)"; card details default open.
+  (f) Pre-existing: deleting a Surface's last frame renames the plan region "Wall plan for surface
+  null"; the delete-focus test locates the region by prefix.
