@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -34,6 +33,7 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
+from central.operator_auth import OperatorAuth
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, RuntimeConflict, Scene
 from contracts.central_identity import LOCATE_PATH, identity_body
@@ -277,10 +277,11 @@ def create_app(
     app.state.content = content
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
-
-    def admin(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
-        if not credentials or not secrets.compare_digest(credentials.credentials, admin_token):
-            raise RegistryError("unauthorized", 401)
+    # The operator principal (pass A): bearer or signed session cookie. The key derives from the
+    # token here, once, so a wrong-length or unencodable token fails at construction.
+    operator_auth = OperatorAuth(admin_token, clock)
+    app.state.operator_auth = operator_auth
+    admin = operator_auth.admin
 
     def player(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
         if not credentials:
@@ -307,6 +308,9 @@ def create_app(
     @app.exception_handler(ValueError)
     async def invalid_command(request, exc):
         return JSONResponse({"error": "invalid_command"}, status_code=422)
+
+    # The session routes, `no-store` on every operator response, and the unhandled-500 handler.
+    operator_auth.mount(app)
 
     @app.get("/healthz")
     def health():
