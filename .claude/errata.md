@@ -1792,3 +1792,24 @@ doc softenings.
   (b) Drift: §8 freezes `Runtime.operator_projection(now)`, but the code (since 3A-3) is
   `operator_projection(now, *, max_events=10000)`, matching `project`; the restore-and-advance
   copy is now one `_copy()` shared by `project`, `operator_projection` and `timeline`.
+- 2026-09-28, console pass 2 slice 3B beads 1-2 (docs/operator-console-ux-pass2-showrunner.md
+  §13-§14), implementer: (a) §13 "a revision changed in Plane A ends in the terminal 'Changed
+  since you opened this'": Central keeps no precondition (Question 4 default no), so the Replace
+  dialog reads GET /v1/operator/runtime first and ends "changed" (nothing sent) when the stored
+  revision moved since Edit opened; a save racing that read still replaces silently (the stated
+  race). (b) §3 module map: `buildSave` moved from SceneAuthoring.jsx to authoring.js (the
+  lossless check `editableDraft` is pure and needs it); the default tables `SCENE_DEFAULTS` /
+  `CONTRIBUTION_DEFAULTS` live there, pinned in tests/test_operator_runtime.py. `readCandidates`
+  (the one candidates GET) lives in MediaPipeline.jsx and is shared by the authoring choosers and
+  "Check this frame"; `FrameChips` (frames with tile health) is exported from TargetPicker.jsx
+  and shared by Run and Scene rows. (c) §14 Source `failing` label is per served status
+  ("Library unreachable" / "Library refused access" / "Library unsupported"), not the combined
+  literal. (d) §14 chain step 1: when nothing is intended but a served Run on the frame ended,
+  step 1 is informational and the chain stops at step 2 ("Run ended?") — otherwise that stop is
+  unreachable. The retained-still line is conditional ("if its last item was a photo"), since
+  the served facts do not say which item was last. (e) §14 "no compatible variant" restates
+  planner.py `_variant_usable` in mediaHealth.js (the candidates route serves variants, not the
+  verdict); no JS runner pins it (§18's "inferred, not served" cost). (f) Test-line drift: the
+  chooser names §17 cites at `:486,:487,:489,:516` are now `:499,:500,:502,:529`; the three Why
+  count assertions are scoped to the "Contribution precedence" list. Thresholds pytest lives in
+  tests/test_media_queue.py.
