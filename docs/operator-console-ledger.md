@@ -52,3 +52,10 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 |---|---|---|---|---|
 | P2-S1 | Wall health (beads 1–5: liveness facts, classifier and labels, 5 s poll and write fence, attention strip, layout and theme) | in_progress | 0dd6b59, e14b891, b575d68, 4865557, aa45f00 | Beads 1–5 landed; review fix cycle in progress. Errata (a)–(e) applied to the spec. |
 | P2-S1-D | Docs — slice 1 (bead 6: runbook wall health, R2 rewording default) | in_progress | — | R2 rewording pending owner confirmation (pass 2 Question 1). |
+
+### Pass 2, slice 2 — safe onboarding
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| P2-S2 | Safe onboarding (beads 1–6: standing and explicit output chooser, backend rules, ConfirmAction, boot facts, Equipment roster, readable frame ids) | in_progress | 7336afd, 2e5bb19, 25d9501, 0ac87cb, 60d7541, 51f50cb | Beads 1–6 landed. Verifier PASS (pytest 2989 passed, 14 skipped env-gated; browser 108 passed). Review fix cycle 1 in progress. Errata (a)–(f) applied to the spec. |
+| P2-S2-D | Docs — slice 2 (bead 7: runbook onboarding, roster, dialogs, retire/replace/revoke, frame ids; retired-device frontier correction) | in_progress | — | Owner questions 1–7 pending; Question 4 (retire the netboot device row) stated truthfully in the runbook. |

@@ -1743,3 +1743,8 @@ doc softenings.
   "<Group> players (N)"; card details default open.
   (f) Pre-existing: deleting a Surface's last frame renames the plan region "Wall plan for surface
   null"; the delete-focus test locates the region by prefix.
+- 2026-09-28, console pass 2 slice 2, docs bead 7 (errata closure): findings (a)-(f) of the
+  2026-09-28 slice 2 entry above are APPLIED to docs/operator-console-ux-pass2-onboarding.md in
+  place (§5, §6, §7, §9, §11, History), together with the review fix cycle 1 decisions: the boot
+  outcome label branches on `boot_outcome` first; one clear-on-conflict policy for binds; a shared
+  `useConfirm` hook; "Reported serial"; a 5xx answer is outcome unknown. No open slice 2 errata.

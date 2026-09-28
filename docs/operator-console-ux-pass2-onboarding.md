@@ -41,7 +41,7 @@
    - Nothing in Central writes `devices.retired_at`.
    - The frontier is the newest `known_good_tag` of any device whose `retired_at` is null (`catalog.py:268,418`; `infra/catalog_records.py:283-287`).
    - A retired Pi's last healthy tag therefore keeps steering every unpinned Pi. That includes a Pi retired because it was compromised.
-   - `runbook.md:240,261` implies otherwise.
+   - The runbook implied otherwise; Bead 7 corrected it.
 7. **Unbinding one Output re-plans the whole Player.**
    - A plan whose bindings differ from the configuration is dropped (`coordination.py:535,764`).
    - So the Frame on the sibling Output is re-planned too.
@@ -111,11 +111,13 @@ stateDiagram-v2
 
 **Roster (`EquipmentRoster.jsx` replaces `EquipmentRail.jsx`).**
 - **Groups:**
+  - Each group heading is a toggle named "<Group> players (N)".
   - "Pending players" and "Bound players" are open by default; "Retired players" is collapsed.
   - The open/closed state lives in Plane B and survives polls.
   - Players are ordered by `registered_at`, then id. Outputs are ordered by `output_id`.
-- **Card:** a disclosure button whose accessible name is **exactly the Player id** (frozen, so the existing tests hold).
-  - The serial, the boot outcome ("last netboot healthy on v1.4.2"; "rolled back from v1.5.0" when `failed_tag` is set; "No netboot record" when there is no device row) and each Output's label are listed below it.
+- **Card:** a disclosure button whose accessible name is **exactly the Player id** (frozen, so the existing tests hold). Its details are open by default.
+  - The "Reported serial" (the word is deliberate: fact 8), the boot outcome and each Output's label are listed below it.
+  - **Boot outcome (`bootOutcomeLabel`):** the label branches on the device row's `boot_outcome` first — `healthy`, `pending`, `failed`, or none recorded — and only then qualifies it with the row's tags (`known_good_tag`, `failed_tag`, `last_served_tag`). A failed boot with a known-good tag names both (rolled back from one, last healthy on the other); a pending boot names the tag last served, not yet healthy; a row with no outcome says a netboot was seen but no image served. No device row reads "No netboot record". The exact strings are owned by `health.js` and its tests, not this page.
   - "Last heard" is tied to the card with `aria-describedby`, not put in the name.
 - **Actions:**
   - A pending Player offers **Retire…**.
@@ -151,7 +153,9 @@ sequenceDiagram
 - **Selection:** it is keyed on `(player_id, output_id)`.
 - **Option text:** `outputLabel` (handle · output id · "Free"). "Last heard" is attached with `aria-describedby`.
 - **Empty chooser:** "No free outputs with a detected display. Power on a Pi with its panel attached; it appears under Pending."
-- **One write module:** `bind`, `unbind` and `retirePlayer`, together with their message tables, move to a new `equipmentApi.js`. A thrown request (a timeout) maps to `{outcome: "unknown"}`.
+- **One write module:** `bind`, `unbind` and `retirePlayer`, together with their message tables, move to a new `equipmentApi.js`. A thrown request (a timeout or network error) and any 5xx answer map to `{outcome: "unknown"}`: Central may have applied the write, so it is never reported as refused.
+- **One clear-on-conflict policy for binds.** The facet chooser and the roster's Output-first bind share one rule: a refused bind (409 or 404) clears the captured choice and its generation, so a retry needs a fresh choice against the fresh snapshot. A refused bind is never resent.
+- **The facet's own conflict wording stays.** A generation conflict on the facet's bind keeps the existing "This Frame changed — reload and review its binding." (the diagram above); only the dialogs use §7's "Changed since you opened this" wording.
 - **Identify this screen** (flash) needs a Central→Player message. **Deferred.** Until then, the runbook says to **power on and bind one Pi at a time**.
 
 ## 7. One confirmation pattern (`ConfirmAction.jsx`)
@@ -164,7 +168,7 @@ It is a native `<dialog>` opened with `showModal()`. **It captures everything wh
 - the sibling Output's Frame;
 - the handle.
 
-Each surface owns one dialog at its top level, keyed by target and never inside a list row, so a poll that regroups a Player cannot unmount it.
+Each surface owns one dialog at its top level, keyed by target and never inside a list row, so a poll that regroups a Player cannot unmount it. One shared `useConfirm` hook owns that per-surface open, capture and close lifecycle, so every surface opens, captures and closes its dialog the same way.
 
 ```mermaid
 stateDiagram-v2
@@ -174,12 +178,18 @@ stateDiagram-v2
   in_flight --> done: 2xx
   in_flight --> refused: 4xx with a reason (not a conflict)
   in_flight --> changed: 409 binding_generation_conflict
-  in_flight --> unknown: timeout or network error
-  done --> [*]: role=status line, focus to the named successor
+  in_flight --> already: 404 not_bound / unknown_frame
+  in_flight --> unknown: timeout, network error or 5xx
+  done --> [*]: dialog closes; role=status line, focus to the named successor
   refused --> idle: reason in plain words (role=alert)
-  changed --> [*]: "Changed since you opened this. Reopen to review." (terminal; never resent)
-  unknown --> [*]: "Central did not answer. Check this after the next refresh."
+  changed --> [*]: "Changed since you opened this. Reopen to review." (terminal; only Close)
+  already --> [*]: "Already done." (terminal; only Close)
+  unknown --> [*]: "Central did not answer. Check this after the next refresh." (terminal; only Close)
 ```
+
+- **Terminal states:** only "done" closes the dialog. Changed, already done, outcome unknown and the "Unbind all" summary stay in the dialog as terminal states whose only control is Close.
+- **Button names:** the Confirm buttons read "Confirm delete", "Confirm unbind", "Confirm retire" and "Confirm unbind all". The dialog title names the target; the button cannot repeat the opener's accessible name.
+- **Render order:** the dialog's native `close` event renders in React's sync lane, ahead of the default-lane snapshot update, so a focus successor chosen there would see the pre-write surface. The dialog therefore closes from an effect that runs after the render carrying the result has committed.
 
 - **In flight:** Esc and Cancel are blocked.
   - Preventing `cancel` is not enough: under Chromium's close-watcher rule, a repeated Esc without user activation closes the dialog anyway.
@@ -243,7 +253,7 @@ stateDiagram-v2
 | "Unbind all" is partly refused, or times out midway | "K of N unbound" with a result for each Frame; nothing resent | Test |
 | Retire is confirmed twice | The second is a no-op 200 (`registry.py:295-296`) | Structural |
 | The write succeeds but the refresh fails | "Done" + "last refresh failed" | Test |
-| The write times out | "Outcome unknown; check after refresh" | Test |
+| The write times out, or Central answers 5xx | "Outcome unknown; check after refresh" | Test |
 | Stale or empty-connector Output | Shown as `no-display`; never offered | Test |
 | An Output of a retired Player | Never offered | Test |
 | A frame id with `:`, or longer than 96 | Refused in the form and by `FrameCreate` | Construction-time (shared type) + test |
@@ -260,13 +270,15 @@ Bead 1. A two-output Player has HDMI-A-1 bound. The operator opens an unbound Fr
 |---|---|---|
 | **1 Standing + chooser** (tracer) | `health.js`, `join.js`, **new** `equipmentApi.js`, `BindingFacet.jsx`, `EquipmentRail.jsx` (imports only) | Replace "Bind pending display" at `test_operator_binding_browser.py:78,120,186,199` and `test_operator_health_browser.py:288`. **Replace the vacuous `:136`** (disabled button) with "the retired Player's Output is not an option". Stabilize `:175-203` with `page.clock` paused: choose, change the server state, click. **New:** the second Output is bindable; the chosen Output is stored; Bind is disabled until a choice is made; a vanished choice is announced; `no-display` and retired Outputs are excluded. |
 | **2 Backend rules** (Python) | `contracts/models.py` (`TARGET_ID_PATTERN`, `TargetIdentifier`); `runtime.py:18` composes it; delete `contracts.models.Target`; `registry.py` (`FrameCreate.id`; unconditional `player_bound` in `retire`); the store tests listed in §7 rewritten as unbind-then-retire | **pytest:** `FrameCreate` refuses `a:b` and 97 characters; `runtime.Target` accepts exactly `frame:` + the same ids; `retire` of a bound Player returns 409 and leaves it unretired, both through the store and through the route; a pending Player still retires; the two-connection race test. |
-| **3 ConfirmAction** | **new** `ConfirmAction.jsx`; `useMutate.js` (the write result is independent of the refresh); `BindingFacet.jsx` (Unbind); `Plan.jsx`, `UnplacedTray.jsx` (Delete); `EquipmentRail.jsx` (Retire, pending only); `index.css` | Add the confirm step at `test_operator_wall_browser.py:428,440,456` (refusals now show inside the dialog, which sits in the plan region) and the typed step at `test_operator_binding_browser.py:125`. `:129` holds unchanged, because retire opens the Retired group. **New:** typed gate; Esc blocked in flight (a repeated Esc too); focus successor (including the unbind fallback when the refresh fails); conflict is terminal; "Unbind all" per-Frame results with a mid-sequence conflict; "Already done"; outcome unknown (`page.route` abort); refresh failure is not a refusal; unbind stale generation. |
-| **4 Boot facts** | **new** `bootFacts.js`; `App.jsx` (one read, passed down); `health.js` (`bootOutcomeLabel`, handle) | Seed a `devices` row by SQL (as `test_netboot_e2e_wire.py:206-208`): the serial shows in the chooser. A `page.route` 503 → unavailable with serials kept; 401 → no logout; no row → "No netboot record". |
-| **5 Roster** | **new** `EquipmentRoster.jsx` (replaces `EquipmentRail.jsx`); `App.jsx`; `Guidance.jsx:39-43`; `index.css` | `test_operator_binding_browser.py:57,69,82,129,131` hold unchanged (frozen name). **New:** two Outputs with states; Output-first bind opens the Frame via `navigateToFrame`; roster bind stale generation; "Unbind all" lists Frames and Runs; in-service offers no Retire; a dialog survives a regrouping poll; empty states; no sideways scroll at 390 px. |
+| **3 ConfirmAction** | **new** `ConfirmAction.jsx`; `useMutate.js` (the write result is independent of the refresh); `BindingFacet.jsx` (Unbind); `Plan.jsx`, `UnplacedTray.jsx` (Delete); `EquipmentRail.jsx` (Retire, pending only); `index.css`; `framesApi.js` (`deleteFrame` returns the error `code`, so a 404 `unknown_frame` reads "Already done."); `App.jsx` (a plan-region ref: the delete successor is a region the tray does not own) | Add the confirm step at `test_operator_wall_browser.py:428,440,456` (refusals now show inside the dialog, which sits in the plan region) and the typed step at `test_operator_binding_browser.py:125`. `:129` holds unchanged, because retire opens the Retired group. **New:** typed gate; Esc blocked in flight (a repeated Esc too); focus successor (including the unbind fallback when the refresh fails); conflict is terminal; "Already done"; outcome unknown (`page.route` abort); refresh failure is not a refusal; unbind stale generation. |
+| **4 Boot facts** | **new** `bootFacts.js`; `App.jsx` (one read, passed down); `health.js` (`bootOutcomeLabel`, handle); `Inspector.jsx`, `BindingFacet.jsx` (boot facts reach the chooser through the Inspector); the then-current `EquipmentRail.jsx` (serial and outcome, so the "No netboot record" test had a surface before the roster) | Seed a `devices` row by SQL (as `test_netboot_e2e_wire.py:206-208`): the serial shows in the chooser. A `page.route` 503 → unavailable with serials kept; 401 → no logout; no row → "No netboot record". |
+| **5 Roster** | **new** `EquipmentRoster.jsx` (replaces `EquipmentRail.jsx`); `App.jsx`; `Guidance.jsx:39-43`; `index.css`; `equipmentApi.js` (`unbindSequence`) and `ConfirmAction.jsx` (`unbindAllRequest`), because the in-service card is the only surface that offers "Unbind all" | `test_operator_binding_browser.py:57,69,82,129,131` hold unchanged (frozen name). **New:** two Outputs with states; Output-first bind opens the Frame via `navigateToFrame`; roster bind stale generation; "Unbind all" lists Frames and Runs, gives per-Frame results with a mid-sequence conflict never resent, and stops the rest on outcome unknown; in-service offers no Retire; a dialog survives a regrouping poll; empty states; no sideways scroll at 390 px. |
 | **6 Frame ids** | `framesApi.js`, `Plan.jsx` | `test_operator_wall_browser.py:285` and `:319` fill the id and assert it. **New:** `lobby:left` is refused with no request; a duplicate shows a message. **pytest:** `FRAME_ID_PATTERN` equals the contracts pattern. |
 | **7 Docs** | `docs/runbook.md`: onboarding (one Pi at a time; power the panel first; replace = unbind + bind; delete and recreate for a new panel). Correct `:240,261` on retired devices. J1 note per Question 6; history line here | `check_docs.py` |
 
 The `conftest.py` CHECKS keys are unchanged, because no test is renamed.
+
+**Pre-existing defect, not fixed here.** Deleting a Surface's last frame renames the plan region "Wall plan for surface null". The delete-focus test locates the region by its name prefix, so it holds either way.
 
 **Mutation probes (each must turn the named test red).**
 
@@ -325,3 +337,4 @@ The `conftest.py` CHECKS keys are unchanged, because no test is renamed.
   - **Dialogs:** a generation conflict is terminal. "Unbind all" is sequential, with per-Frame results. Esc is guarded against the close-watcher rule.
   - **Focus:** successors are fixed, including retire opening the Retired group and the unbind fallback.
   - **Frame ids:** the unused `contracts.models.Target` is deleted, so there is one id rule.
+- 2026-09-28, build (beads 1–6) and review fix cycle 1: the implementation errata (a)–(f) are applied in place (§5 group toggles, open cards, the "Reported serial" wording and the boot-outcome rule branching on `boot_outcome` first; §6 one clear-on-conflict policy for binds, 5xx as outcome unknown, and the facet keeping its own conflict wording; §7 the shared `useConfirm` hook, terminal in-dialog states, Confirm button names and the close-after-commit render order; §11 "Unbind all" in Bead 5 and the widened file lists; the pre-existing plan-region name defect noted). The frame did not change.
