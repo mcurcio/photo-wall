@@ -100,7 +100,7 @@ Most of this lives outside this repo — your LAN, your Pi hardware, and a DHCP/
 
 Both are GitHub release assets — or build them yourself on any host with `dpkg-deb` (no disk-imaging, no chroot, no signing tooling):
 
-1. **The base bundle** — `config.txt`, a `cmdline.txt` template (fill in your central's base-image URL), the Pi 5 kernel, the initrd, the device tree, and the base squashfs. Stage it in your boot server's tree. It carries no application and almost never changes.
+1. **The base bundle** — `config.txt`, a one-line `cmdline.txt` template (replace `@@PHOTOWALL_CENTRAL@@` with Central's root URL), the Pi 5 kernel, the initrd, the device tree, and the base squashfs, published as `photo-wall-base-<revision>.tar.gz`. Its `boot/` tree is also published alone as `photo-wall-boot-<revision>.tar.gz`; stage that in your boot server's tree ([runbook](docs/runbook.md#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)). Central serves the base squashfs itself. The bundle carries no application and almost never changes.
 2. **The Player `.deb`** — central discovers it from your GitHub releases; you promote the version you want as current. This is the only thing you re-publish to ship an app update.
 
 ### Central's base-image storage and the per-device `.deb` (0012)

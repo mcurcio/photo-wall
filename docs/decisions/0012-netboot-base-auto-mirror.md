@@ -1043,7 +1043,7 @@ DECIDED rollback/health rows, not the DECIDED guarantee); 3–6 are recommendati
    asserted writable at boot. The base fetch runs inside the single-writer worker.
 4. The base squashfs stays within `MAX_NETBOOT_BASE_BYTES` (1 GiB).
 5. The operator stages the TFTP `boot/` tree per 0009 gate #4; only the squashfs is
-   auto-cached. Auto-rollback for a device with a known-good is **server-side** (Central
+   auto-cached. (Amended 2026-09-28: see the amendment under "Deliberately out of scope".) Auto-rollback for a device with a known-good is **server-side** (Central
    serves known-good on the next netboot); the appliance keeps only fail-closed-reboot.
 6. GC's device terms and the latest-verified query both range over the `devices`
    registry filtered `retired_at IS NULL`; frame `bindings` are unrelated.
@@ -1065,6 +1065,14 @@ DECIDED rollback/health rows, not the DECIDED guarantee); 3–6 are recommendati
 - The manifest `squashfs_sha256` enhancement (gate #4 alternative).
 - An operator UI for the release/attachment/cache view (backend fields ship).
 - Auto-mirroring the TFTP `boot/` tree.
+
+  **Amendment (2026-09-28).** Every release now also attaches the base tarball's `boot/`
+  tree as a separate asset, `photo-wall-boot-<revision>.tar.gz` (layout
+  `photo-wall-boot/boot/`, declared in [`contracts/release.py`](../../contracts/release.py)),
+  listed in the release's `SHA256SUMS`; the seal refuses a release whose two trees differ.
+  Staging the per-serial TFTP trees from it is done by the iac deployment, outside this
+  repository, not by Central: Central still mirrors only the squashfs, and this deferral
+  stands for Central.
 - A rollout *policy* engine (percentage canaries, automatic canary scheduling) on top
   of the pin primitive.
 - An operator-visible cap on `devices` row growth from a serial-sprayer (accepted
@@ -1202,6 +1210,10 @@ graph LR
   `boot_outcome` is a guarded state machine (a `healthy` is never clobbered to `failed`
   without an intervening fresh 200); the frontier itself is already race-safe, so this is a
   transient/self-correcting concern, not a frame change.
+- **Amendment (2026-09-28).** The boot tree became its own release asset,
+  `photo-wall-boot-<revision>.tar.gz`, and per-serial TFTP staging moved to the iac
+  deployment; Central's scope is unchanged (see the amendment under "Deliberately out of
+  scope").
 
 **What survives every attack:** the served bytes always match their advertised
 `Digest` (write-once per-version file, construction); nothing writes a shared "current"
