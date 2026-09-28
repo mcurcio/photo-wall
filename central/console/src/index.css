@@ -1,24 +1,64 @@
-/* Colour tokens (pass 2 §6). Dark is the default; the light block below
-   overrides the same tokens, so every rule — SVG fills included — follows the
-   operator's colour scheme. Only an alarm uses --alarm; a to-do is --todo. */
+/* Look and feel (pass C, docs/operator-console-ux-pass2-flow.md §5). Values are
+   re-expressed from the photo library's published theme; no code, markup or asset
+   is copied. Dark is written first; the light block overrides the same tokens, so
+   every rule, SVG fills included, follows the operator's colour scheme.
+   tests/test_console_look.py parses both blocks and checks every contrast pair.
+   Only an alarm uses --alarm; a to-do is --todo. Older names keep their meaning:
+   --fg-subtle is now --fg-muted (no text below 4.5:1), --accent-soft is --accent
+   (strokes and tints), and --shadow is the card shadow's colour. */
+@font-face {
+  /* The Google Sans variable font, subset and renamed (OFL; fonts/README.md). The
+     two overrides are the photo library's, so the line boxes match. */
+  font-family: "Console Sans";
+  src: url("./fonts/ConsoleSans.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  size-adjust: 106.25%;
+  ascent-override: 106.25%;
+}
+
 :root {
-  --bg: #111b22;
-  --bg-raised: #17232c;
-  --bg-sunken: #0b131a;
-  --fg: #e9edf0;
-  --fg-muted: #9dabb5;
-  --fg-subtle: #8b98a4;
-  --border: #32404a;
-  --accent: #2d6cdf;
-  --accent-soft: #7fb3ff;
-  --on-accent: #ffffff;
-  --ok: #4caf7d;
-  --todo: #8fb3d9;
-  --alarm: #e0685a;
-  --warn: #f5a623;
-  --focus: #7fb3ff;
-  --shadow: rgba(0, 0, 0, 0.4);
-  font-family: system-ui, sans-serif;
+  --bg: #0a0a0a;
+  --bg-raised: #171717;
+  --bg-sunken: #101116;
+  --fg: #dbdbdb;
+  --fg-muted: #9ca3af;
+  --fg-subtle: var(--fg-muted);
+  --fg-label: #d1d5db;
+  --border: #262626;
+  --input-bg: #1f2937;
+  --input-ring: #737373;
+  --accent: #accbfa;
+  --accent-soft: var(--accent);
+  --accent-tint: color-mix(in srgb, var(--accent) 10%, transparent);
+  --on-accent: #000000;
+  --focus: var(--accent);
+  --ok: #48ed98;
+  --todo: #7ab7ff;
+  --alarm: #f67d7d;
+  --on-alarm: #000000;
+  --warn: #ffd198;
+  --shadow: rgba(0, 0, 0, 0.5);
+
+  /* Shape and layout. The sidebar numbers are for the navigation shell (bead 1b).
+     A custom property cannot appear in a media query, so a query repeats the
+     breakpoint's value. */
+  --radius-button: 12px;
+  --radius-input: 8px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --sidebar-width: 16rem;
+  --header-height: calc(4.5rem + 4px);
+  --breakpoint-sidebar: 850px;
+  --font-sans: "Console Sans", system-ui, sans-serif;
+
+  /* The font's licence ships beside it: this reference makes the build emit
+     OFL.txt into dist/assets/. The property is never used, so never fetched. */
+  --font-licence: url("./fonts/OFL.txt");
+
+  font-family: var(--font-sans);
+  letter-spacing: 0.1px;
   color: var(--fg);
   background: var(--bg);
   color-scheme: light dark;
@@ -26,22 +66,23 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f8fa;
-    --bg-raised: #ffffff;
-    --bg-sunken: #e9eef2;
-    --fg: #16212a;
-    --fg-muted: #4d5d6a;
-    --fg-subtle: #66757f;
-    --border: #c4ced6;
-    --accent: #2459c2;
-    --accent-soft: #2d6cdf;
+    --bg: #ffffff;
+    --bg-raised: #fafafa;
+    --bg-sunken: #f5f5f5;
+    --fg: #3d3d3d;
+    --fg-muted: #4b5563;
+    --fg-label: #5f6672;
+    --border: #d4d4d4;
+    --input-bg: #f3f4f6;
+    --input-ring: #737373;
+    --accent: #4250af;
     --on-accent: #ffffff;
-    --ok: #1f7a4d;
-    --todo: #2f5f8f;
-    --alarm: #b53a2a;
-    --warn: #9a5b00;
-    --focus: #2459c2;
-    --shadow: rgba(0, 0, 0, 0.15);
+    --ok: #07702a;
+    --todo: #0a4e8e;
+    --alarm: #c81c15;
+    --on-alarm: #ffffff;
+    --warn: #936400;
+    --shadow: rgba(0, 0, 0, 0.1);
   }
 }
 
@@ -68,6 +109,94 @@ label {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* Components (§5), in our own CSS on today's markup. Each base rule has zero
+   specificity (:where), so a region's own class rule still wins. */
+
+/* Buttons: outline (border and tint) by default, for secondary actions; filled
+   primary for a form's one forward action, its submit; ghost for a record's
+   actions other than a submit; danger only for the confirmation dialog's confirm. */
+:where(button) {
+  padding: 8px 20px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+}
+
+:where(button[type="submit"]) {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+:where(.record__actions button:not([type="submit"])) {
+  background: transparent;
+  border-color: transparent;
+}
+
+:where(.record__actions button:not([type="submit"]):hover) {
+  background: var(--accent-tint);
+}
+
+:where(.confirm__confirm) {
+  color: var(--on-alarm);
+  background: var(--alarm);
+  border-color: var(--alarm);
+}
+
+:where(button:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Inputs: filled, with a 1 px ring that turns to the accent on focus. */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea) {
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 0;
+  border-radius: var(--radius-input);
+  box-shadow: inset 0 0 0 1px var(--input-ring);
+}
+
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):focus {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+:where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--accent);
+}
+
+/* The labels of text fields. */
+.field__label,
+.console__token-field,
+.console__surface-field,
+.plan__new-frame-field,
+.calib__control,
+.confirm__typed,
+.run-control__field {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+/* Cards: the regions, groups and panels that hold one subject. */
+.console__guidance,
+.plan,
+.inspector,
+.roster__group,
+.showrunner__region,
+.confirm {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 3px var(--shadow);
 }
 
 .console {
@@ -163,24 +292,6 @@ label {
   color: var(--fg-muted);
 }
 
-.console__token input,
-.console__surface-field select {
-  padding: 6px 8px;
-  background: var(--bg-sunken);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-
-.console__token button {
-  padding: 7px 16px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
 .console__statusbar {
   display: flex;
   flex-wrap: wrap;
@@ -194,19 +305,12 @@ label {
 /* A quiet secondary button: the status bar's Refresh, the strip's toggle. */
 .console__button {
   padding: 4px 12px;
-  background: var(--bg-raised);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 /* The Central pill; its colour is the shared .health--* severity. */
 .console__health {
   margin-left: auto;
   padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 11px;
@@ -288,9 +392,6 @@ label {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 6px;
   padding: 12px 16px;
   margin-bottom: 20px;
 }
@@ -302,11 +403,6 @@ label {
 
 .console__guidance-dismiss {
   padding: 4px 12px;
-  background: transparent;
-  color: var(--fg-muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 .console__surface-filter {
@@ -314,9 +410,7 @@ label {
 }
 
 .plan {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px;
+  padding: 16px;
   margin-bottom: 24px;
 }
 
@@ -416,18 +510,55 @@ label {
 /* Health severity (health.js): one modifier per severity, shared by every
    surface. Only an alarm uses the alarm colour; a to-do is not an alarm. */
 .health--ok {
-  color: var(--ok);
-  fill: var(--ok);
+  --status: var(--ok);
 }
 
 .health--todo {
-  color: var(--todo);
-  fill: var(--todo);
+  --status: var(--todo);
 }
 
 .health--alarm {
-  color: var(--alarm);
-  fill: var(--alarm);
+  --status: var(--alarm);
+}
+
+.health--ok,
+.health--todo,
+.health--alarm {
+  color: var(--status);
+  fill: var(--status);
+}
+
+/* Status chips never rely on colour alone (§5). A chip's words carry its state,
+   in --fg over its status colour at 12 %, inside a 1 px status border. Every
+   status mark in HTML also carries a shape: ▲ alarm, ■ to-do, ● OK. The shape's
+   alternative text is empty, so it adds nothing to an accessible name. (SVG text
+   has no ::before; a plan tile says its state in its label.) */
+.console__health,
+.showrunner__badge,
+.run-control__frame {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--status, var(--border)) 12%, var(--bg-raised));
+  border: 1px solid var(--status, var(--border));
+  border-radius: var(--radius-pill);
+}
+
+.health--ok::before,
+.health--todo::before,
+.health--alarm::before {
+  margin-right: 0.35em;
+  font-size: 0.85em;
+}
+
+.health--ok::before {
+  content: "●" / "";
+}
+
+.health--todo::before {
+  content: "■" / "";
+}
+
+.health--alarm::before {
+  content: "▲" / "";
 }
 
 .plan__health {
@@ -443,7 +574,6 @@ label {
 .tray__health {
   font-size: 12px;
 }
-
 
 .tray__list {
   list-style: none;
@@ -464,8 +594,6 @@ label {
 }
 
 .inspector {
-  border: 1px solid var(--border);
-  border-radius: 6px;
   margin-top: 24px;
 }
 
@@ -700,8 +828,6 @@ label {
 .roster__group {
   min-width: 0;
   padding: 12px 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }
 
 .roster__group-title {
@@ -830,17 +956,14 @@ label {
 }
 
 .console__mode {
-  background: var(--bg-raised);
-  color: var(--fg-muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 14px;
-  cursor: pointer;
+  color: var(--fg);
+  background: transparent;
+  border-color: var(--border);
 }
 
 .console__mode--active {
+  color: var(--on-accent);
   background: var(--accent);
-  color: var(--fg);
   border-color: var(--accent);
 }
 
@@ -860,14 +983,10 @@ label {
 .showrunner__badge {
   font-size: 12px;
   padding: 4px 10px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
 }
 
 .showrunner__region {
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
   padding: 16px;
   overflow-wrap: anywhere;
 }
@@ -997,11 +1116,7 @@ label {
   width: min(32rem, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: 16px 20px;
-  background: var(--bg-raised);
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .confirm::backdrop {
@@ -1168,8 +1283,6 @@ label {
 
 .run-control__frame {
   padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
