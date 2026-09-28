@@ -20,7 +20,9 @@ Runs before the Player app exists on a diskless (RAM-root) base. Every attempt:
 5. writes the handoff, `/etc/photo-wall/public.json` (0644 in a 0755 directory, whatever the
    unit's umask): `central_origin` only when the root came from mDNS, so the Player finds the
    same Central without a second browse; a command-line root is read by the Player itself;
-6. starts `photo-wall-player.service`.
+6. starts `photo-wall-player.service`. A start that fails is one line naming how the unit's
+   process ended, `cause=unit reason=<systemd Result> detail=<unit>/status=216/GROUP` (R9), and
+   the process exits 1 into the unit's start limit.
 
 It never enrolls -- the app enrolls by serial, once, after it starts (0009 gate #2). It never
 steps the clock either: stage 1 did, once, and recorded it (rule 3). A `time` failure therefore
@@ -41,9 +43,10 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from appliance.bootstrap import read_pi_serial
@@ -110,6 +113,11 @@ INSTALL_SECONDS: Final = 300.0
 # photo-wall-player.service sets no TimeoutStartSec, so systemd fails that start itself after its
 # DefaultTimeoutStartSec, 90 s: waiting longer here would wait on a start systemd gave up on.
 START_UNIT_SECONDS: Final = 90.0
+# `systemctl show` after a failed start (subprocess timeout): one property read from PID 1.
+# Not a term of LONGEST_ATTEMPT_SECONDS: it runs only on the path that exits instead of backing
+# off, so it spends part of the MAX_BACKOFF_SECONDS that path never sleeps (a test holds it
+# below that).
+UNIT_STATUS_SECONDS: Final = 5.0
 MAX_BACKOFF_SECONDS: Final = 30.0
 # An allowance, NOT an enforced bound: the CPU- and RAM-local steps -- the sha256 of up to
 # MAX_APP_PACKAGE_BYTES, the 0600 temp .deb write and the handoff write.
@@ -137,6 +145,62 @@ PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = math.ceil(ATTEMPT_MARGIN * LONGEST_AT
 class ProvisionError(ValueError):
     """A content failure with a fixed code (e.g. provision_manifest_invalid). Network failures
     are UplinkError, never this."""
+
+
+# systemd's own exit statuses: the unit's process failed while systemd was setting it up
+# (user, groups, namespaces, directories, exec), before the program itself ran. Named as
+# `systemd-analyze exit-status` prints them for systemd 257, the base's (systemd.exec(5),
+# "Process Exit Codes"). scripts/player_start_probe.py fails the base build on any of them.
+SYSTEMD_EXIT_STATUSES: Final[Mapping[int, str]] = MappingProxyType({
+    200: "CHDIR", 201: "NICE", 202: "FDS", 203: "EXEC", 204: "MEMORY", 205: "LIMITS",
+    206: "OOM_ADJUST", 207: "SIGNAL_MASK", 208: "STDIN", 209: "STDOUT", 210: "CHROOT",
+    211: "IOPRIO", 212: "TIMERSLACK", 213: "SECUREBITS", 214: "SETSCHEDULER",
+    215: "CPUAFFINITY", 216: "GROUP", 217: "USER", 218: "CAPABILITIES", 219: "CGROUP",
+    220: "SETSID", 221: "CONFIRM", 222: "STDERR", 224: "PAM", 225: "NETWORK", 226: "NAMESPACE",
+    227: "NO_NEW_PRIVILEGES", 228: "SECCOMP", 229: "SELINUX_CONTEXT", 230: "PERSONALITY",
+    231: "APPARMOR", 232: "ADDRESS_FAMILIES", 233: "RUNTIME_DIRECTORY", 235: "CHOWN",
+    236: "SMACK_PROCESS_LABEL", 237: "KEYRING", 238: "STATE_DIRECTORY", 239: "CACHE_DIRECTORY",
+    240: "LOGS_DIRECTORY", 241: "CONFIGURATION_DIRECTORY", 242: "NUMA_POLICY",
+    243: "CREDENTIALS", 244: "BPF", 245: "KSM",
+})
+# What `systemctl show` reports about how a unit's start went.
+UNIT_PROPERTIES: Final = ("ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus")
+_UNIT_TOKEN = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
+_CLD_EXITED, _CLD_SIGNALLED = "1", ("2", "3")   # ExecMainCode: exited; killed or dumped
+
+
+def parse_unit_properties(text: str) -> dict[str, str]:
+    """PURE. `systemctl show --property=...` output, `Key=Value` per line, as a dict."""
+    properties = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            properties[key.strip()] = value.strip()
+    return properties
+
+
+def unit_ending(properties: Mapping[str, str]) -> str:
+    """PURE. How the unit's main process ended, as one token: `status=216/GROUP` (systemd's
+    own status, named), `status=1` (the program's), `signal=9`, or `status=unknown`."""
+    code, status = properties.get("ExecMainCode", ""), properties.get("ExecMainStatus", "")
+    if not status.isdigit():
+        return "status=unknown"
+    if code in _CLD_SIGNALLED:
+        return f"signal={status}"
+    name = SYSTEMD_EXIT_STATUSES.get(int(status)) if code == _CLD_EXITED else None
+    return f"status={status}/{name}" if name else f"status={status}"
+
+
+class UnitStartError(RuntimeError):
+    """The Player unit did not start (R9). str() is one line in provisioning's shape,
+    `cause=unit reason=<systemd's Result> detail=<unit>/<unit_ending>`, e.g. `cause=unit
+    reason=exit-code detail=photo-wall-player.service/status=216/GROUP`."""
+
+    def __init__(self, unit: str, properties: Mapping[str, str]) -> None:
+        result = properties.get("Result", "")
+        reason = result if _UNIT_TOKEN.fullmatch(result) else "unknown"
+        name = unit if _UNIT_TOKEN.fullmatch(unit) else "unit"
+        super().__init__(f"cause=unit reason={reason} detail={name}/{unit_ending(properties)}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,10 +303,20 @@ def write_handoff(handoff: Handoff, *, path: Path = DEFAULT_PUBLIC_CONFIG) -> No
 
 def start_player_unit(*, unit: str = DEFAULT_UNIT) -> None:
     """Thin, replaceable step: starts the Player systemd unit once the app is
-    installed and the handoff is written, waiting at most START_UNIT_SECONDS
-    (subprocess.TimeoutExpired escapes, like a failed start). Tests inject a stub
-    instead of shelling to real `systemctl`."""
-    subprocess.run(["systemctl", "start", unit], check=True, timeout=START_UNIT_SECONDS)
+    installed and the handoff is written, waiting at most START_UNIT_SECONDS. A start that
+    fails or outlives that raises UnitStartError, named from the unit's own `systemctl show`
+    (read within UNIT_STATUS_SECONDS; unreadable properties name nothing rather than hide the
+    failure). Tests inject a stub instead of shelling to real `systemctl`."""
+    try:
+        subprocess.run(["systemctl", "start", unit], check=True, timeout=START_UNIT_SECONDS)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        try:
+            shown = subprocess.run(
+                ["systemctl", "show", *(f"--property={name}" for name in UNIT_PROPERTIES), unit],
+                capture_output=True, text=True, timeout=UNIT_STATUS_SECONDS, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            shown = ""
+        raise UnitStartError(unit, parse_unit_properties(shown or "")) from error
 
 
 def _default_backoff(attempt: int) -> float:
@@ -359,7 +433,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     MdnsCentralDiscovery(timeout=DISCOVERY_SECONDS) only when resolution is Unconfigured (lazy
     import: zeroconf is not needed when the cmdline
     names Central). Then asyncio.run(Bootstrapper(...).run()). An UplinkError that escapes is logged with
-    failure_text and exits 1 (systemd restarts; 10 exits in 10 minutes reboot the Pi)."""
+    failure_text, and a UnitStartError as its own line; either exits 1 (systemd restarts; 10
+    exits in 10 minutes reboot the Pi)."""
     parser = argparse.ArgumentParser(description="Photo Wall base bootstrapper (0009)")
     parser.add_argument("--config", type=Path, default=DEFAULT_PUBLIC_CONFIG)
     parser.add_argument("--unit", default=DEFAULT_UNIT)
@@ -388,6 +463,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(bootstrapper.run())
     except UplinkError as error:
         LOG.error("provision: %s", failure_text(error, clock=clock))
+        raise SystemExit(1) from None
+    except UnitStartError as error:
+        LOG.error("provision: %s", error)
         raise SystemExit(1) from None
 
 

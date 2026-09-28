@@ -41,7 +41,8 @@ DEVICE_INCLUDE = (
     "--include=ca-certificates,gir1.2-gst-plugins-base-1.0,gir1.2-gtk-3.0,gstreamer1.0-libav,"
     "gstreamer1.0-plugins-bad,gstreamer1.0-plugins-base,gstreamer1.0-plugins-good,libegl1,"
     "libgl1-mesa-dri,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
-    "python3-httpx,python3-opengl,python3-pydantic,python3-websockets,python3-zeroconf,weston")
+    "python3-httpx,python3-opengl,python3-pydantic,python3-websockets,python3-zeroconf,udev,"
+    "weston")
 SNAPSHOT_LINES = (
     "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] "
     "https://snapshot.debian.org/archive/debian/20260904T000000Z "
@@ -148,7 +149,7 @@ def test_the_pin_names_its_two_sources_each_signed_by_the_debian_keyring():
 def test_each_consumer_gets_its_list():
     assert packages("bootstrapper") == ("ca-certificates", "python3", "python3-zeroconf")
     assert packages("player") == tuple(sorted(
-        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd")))
+        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev")))
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
         {*packages("bootstrapper"), *packages("player")}))
     assert packages("initrd-build") == (

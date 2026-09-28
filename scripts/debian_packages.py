@@ -150,6 +150,14 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("libgl1-mesa-dri", _PLAYER, why=_RENDER_STACK),
     DebianPackage("libegl1", _PLAYER, why=_RENDER_STACK),
     DebianPackage("weston", _PLAYER, why=_RENDER_STACK),
+    # The base's device layer is metadata-only (appliance/rpi_image_gen/device/
+    # photo-wall-device-none.yaml), so nothing else brings udev: without it there is no render
+    # or input group and player.service fails at spawn, 216/GROUP.
+    DebianPackage("udev", _PLAYER,
+                  why="creates the render and input groups player.service's "
+                      "SupplementaryGroups name, and gives /dev/dri and /dev/input their "
+                      "groups (Debian's 50-udev-default.rules); libinput and logind's seats "
+                      "need its database"),
     DebianPackage("passwd", _PLAYER,
                   why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
                       "script's non-essential tool is a Depends)"),
