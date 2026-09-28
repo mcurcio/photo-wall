@@ -397,3 +397,64 @@ def test_first_run_has_no_strip(page, registry):
         _connect(page, origin)
         expect(page.get_by_role("note", name="Getting started")).to_be_visible()
         expect(_strip(page)).to_have_count(0)
+
+
+# --- Layout and theme (pass 2 §6).
+
+LONG_ID = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
+
+_OFFENDERS = """() => [...document.querySelectorAll("body *")]
+    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
+    .map((el) => el.tagName + "." + [...el.classList].join("."))
+    .slice(0, 12)"""
+
+
+def _seed_layout(registry):
+    _seed_attention(registry)
+    enroll(registry, count=1)  # a pending Player on the rail
+    registry.create_frame(FrameCreate(  # an origin-stacked frame with a long id -> tray
+        id=LONG_ID, surface_id="wall", x_mm=0, y_mm=0,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])
+def test_strip_navigation_leaves_the_inspector_in_view(page, registry, viewport):
+    _seed_layout(registry)
+    page.set_viewport_size(viewport)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _open_list(page).get_by_role("button", name="no-player — Needs a Player").click()
+        inspector = page.get_by_role("region", name="Frame no-player inspector", exact=True)
+        expect(inspector).to_be_in_viewport()
+        expect(inspector.get_by_role("heading", name="Frame no-player", exact=True)).to_be_focused()
+
+
+def test_a_phone_width_page_never_scrolls_sideways(page, registry):
+    _seed_layout(registry)
+    page.set_viewport_size({"width": 390, "height": 844})
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        page.get_by_role("button", name="Frame silent-b", exact=True).click()
+        expect(page.get_by_role("region", name="Frame silent-b inspector", exact=True)
+               ).to_be_visible()
+        _open_list(page)
+        for facet in ("Commissioning", "Binding", "Now-showing"):
+            page.get_by_role("tab", name=facet, exact=True).click()
+            fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+            assert fits, f"{facet}: overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+        page.get_by_role("button", name="Showrunner", exact=True).click()
+        expect(page.get_by_role("region", name="Sources", exact=True)).to_be_visible()
+        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+        assert fits, f"Showrunner: overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+
+
+def test_the_console_follows_a_light_colour_scheme(page, registry):
+    _seed_attention(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        expect(_strip(page)).to_be_visible()
+        background = "() => getComputedStyle(document.body).backgroundColor"
+        page.emulate_media(color_scheme="dark")
+        dark = page.evaluate(background)
+        page.emulate_media(color_scheme="light")
+        assert page.evaluate(background) != dark

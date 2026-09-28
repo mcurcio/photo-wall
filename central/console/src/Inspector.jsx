@@ -28,7 +28,10 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * screen; plain selection passes no request and never moves focus.
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
- * @param {{snapshot: object|null, frameId: string, facet: Facet,
+ * With no frame selected (`frameId` null) it renders its empty state, "Select
+ * a frame", so the Inspector column keeps its place in the layout.
+ *
+ * @param {{snapshot: object|null, frameId: string|null, facet: Facet,
  *          onFacet: (facet: Facet) => void, focusRequest?: number|null}} props
  */
 const FACETS = [
@@ -54,6 +57,14 @@ export function Inspector({ snapshot, frameId, facet, onFacet, focusRequest = nu
     }
   }, [focusRequest]);
   const activeLabel = FACETS.find((entry) => entry.key === active)?.label ?? active;
+
+  if (frameId === null) {
+    return (
+      <section className="inspector inspector--empty" role="region" aria-label="Inspector">
+        <p className="inspector__empty">Select a frame</p>
+      </section>
+    );
+  }
   const health = frameHealth(snapshot, frameId);
 
   return (

@@ -119,6 +119,12 @@ export default function App() {
     return [...new Set(frames.map((frame) => frame.surface_id))].sort();
   }, [snapshot]);
 
+  // Wall mode with frames splits into the plan column and the Inspector column
+  // (side by side on wide screens, stacked on narrow ones — CSS only). On the
+  // first run there is no frame to inspect, so there is no Inspector column.
+  const split =
+    snapshot !== null && mode === "wall" && (snapshot.inventory?.frames ?? []).length > 0;
+
   // Default to the first Surface present; fall back if the chosen one vanished.
   const activeSurface =
     surfaceId !== null && surfaces.includes(surfaceId) ? surfaceId : surfaces[0] ?? null;
@@ -229,7 +235,7 @@ export default function App() {
 
       {snapshot !== null && <Guidance snapshot={snapshot} />}
 
-      <main className="console__body">
+      <main className={split ? "console__body console__body--split" : "console__body"}>
         {snapshot === null ? (
           <p>Console ready.</p>
         ) : mode === "showrunner" ? (
@@ -240,68 +246,72 @@ export default function App() {
           <Showrunner snapshot={snapshot} />
         ) : (
           <>
-            {recovered.length > 0 && (
-              <div className="console__recovery" role="status">
-                <p className="console__recovery-text">
-                  Recovered — already bound (serial match, not identity):{" "}
-                  {recovered.join(", ")}
+            <div className="console__main">
+              {recovered.length > 0 && (
+                <div className="console__recovery" role="status">
+                  <p className="console__recovery-text">
+                    Recovered — already bound (serial match, not identity):{" "}
+                    {recovered.join(", ")}
+                  </p>
+                  <button type="button" onClick={() => setRecovered([])}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              <EquipmentRail snapshot={snapshot} onSelect={setSelectedPlayer} />
+              {selectedPlayer !== null && (
+                <p className="console__selected-player">
+                  Pending player selected: {selectedPlayer}
                 </p>
-                <button type="button" onClick={() => setRecovered([])}>
-                  Dismiss
-                </button>
+              )}
+              <div className="console__surface-filter">
+                <label className="console__surface-field">
+                  Surface
+                  <select
+                    aria-label="Surface"
+                    value={activeSurface ?? ""}
+                    onChange={(event) => {
+                      setSurfaceId(event.target.value);
+                      setSelection(null);
+                    }}
+                  >
+                    {surfaces.map((surface) => (
+                      <option key={surface} value={surface}>
+                        {surface}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
-            )}
-            <EquipmentRail snapshot={snapshot} onSelect={setSelectedPlayer} />
-            {selectedPlayer !== null && (
-              <p className="console__selected-player">
-                Pending player selected: {selectedPlayer}
-              </p>
-            )}
-            <div className="console__surface-filter">
-              <label className="console__surface-field">
-                Surface
-                <select
-                  aria-label="Surface"
-                  value={activeSurface ?? ""}
-                  onChange={(event) => {
-                    setSurfaceId(event.target.value);
-                    setSelection(null);
-                  }}
-                >
-                  {surfaces.map((surface) => (
-                    <option key={surface} value={surface}>
-                      {surface}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <Plan
-              snapshot={snapshot}
-              surfaceId={activeSurface}
-              selection={selection}
-              onSelect={selectFrame}
-              onDeleted={() => setSelection(null)}
-              trayDragRef={trayDragRef}
-              onTrayDrop={() => {
-                trayDragRef.current = null;
-              }}
-            />
-            <UnplacedTray
-              snapshot={snapshot}
-              onSelect={selectFrame}
-              onDragStart={(id) => {
-                trayDragRef.current = id;
-              }}
-            />
-            {selection !== null && (
-              <Inspector
+              <Plan
                 snapshot={snapshot}
-                frameId={selection}
-                facet={facet}
-                onFacet={setFacet}
-                focusRequest={focusRequest}
+                surfaceId={activeSurface}
+                selection={selection}
+                onSelect={selectFrame}
+                onDeleted={() => setSelection(null)}
+                trayDragRef={trayDragRef}
+                onTrayDrop={() => {
+                  trayDragRef.current = null;
+                }}
               />
+              <UnplacedTray
+                snapshot={snapshot}
+                onSelect={selectFrame}
+                onDragStart={(id) => {
+                  trayDragRef.current = id;
+                }}
+              />
+            </div>
+            {split && (
+              <aside className="console__side">
+                <Inspector
+                  snapshot={snapshot}
+                  frameId={selection}
+                  facet={facet}
+                  onFacet={setFacet}
+                  focusRequest={focusRequest}
+                />
+              </aside>
             )}
           </>
         )}
