@@ -191,7 +191,8 @@ label {
   margin-bottom: 16px;
 }
 
-.console__refresh {
+/* A quiet secondary button: the status bar's Refresh, the strip's toggle. */
+.console__button {
   padding: 4px 12px;
   background: var(--bg-raised);
   color: var(--fg);
@@ -200,15 +201,7 @@ label {
   cursor: pointer;
 }
 
-.console__health--ok {
-  color: var(--ok);
-}
-
-.console__health--unavailable,
-.console__health--unreachable {
-  color: var(--alarm);
-}
-
+/* The Central pill; its colour is the shared .health--* severity. */
 .console__health {
   margin-left: auto;
   padding: 2px 10px;
@@ -247,12 +240,6 @@ label {
 
 .attention__toggle {
   margin-left: auto;
-  padding: 2px 10px;
-  background: var(--bg-raised);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 .attention__list {

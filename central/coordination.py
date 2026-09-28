@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
 from contextlib import contextmanager
 
 from psycopg.types.json import Jsonb
@@ -17,6 +16,7 @@ from pydantic import Field
 
 from central.db import Database
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
+from central.installation_models import PlayerReports
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
@@ -37,8 +37,6 @@ from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from contracts.models import (
     Commit,
-    Identifier,
-    Instant,
     Layer,
     Model,
     Observation,
@@ -63,17 +61,6 @@ class CoordinationLimits(Model):
 
 class CoordinationError(RegistryError):
     pass
-
-
-class PlayerReports(Model):
-    """When Central last accepted a readiness report from each non-retired Player, for that
-    Player's current authority epoch only (player id -> received_at, Central's clock).
-
-    Every received_at in `reports` is <= `read_at`, so an age taken from `read_at` is never
-    negative, even after the wall clock steps backward."""
-
-    read_at: Instant
-    reports: Mapping[Identifier, Instant]
 
 
 def identity(prefix: str, parts) -> str:

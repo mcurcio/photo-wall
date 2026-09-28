@@ -88,13 +88,13 @@ The media-download retry (`service.py:796-797`) gets its own local `MEDIA_RETRY_
 ## 4. Per-frame health: one closed set, one classifier
 
 `central/console/src/health.js` is the **only** classifier. It exports:
-- `isBound(frame)`: the one definition.
+- `isBound(frame)`: the one definition lives in `join.js` (the lower module, which `boundOutput` also uses); `health.js` re-exports it.
 - `playerLiveness(snapshot, playerId)`
 - `frameHealth(snapshot, frameId)`
 - `facetFor(health, currentFacet)`
 - `wallAttention(snapshot)`
 
-Every health result carries `state`, `severity`, `label`, `facet` and **`cause`**. `cause` is `"liveness"` for `awaiting-report` and `player-silent`. Consumers that treat states as a group (the strip's scheduler collapse, §5) select by `cause`, never by listing state names, so `health.js` is the only place states are grouped.
+Every health result carries `state`, `severity`, `label`, `tileLabel`, `facet`, `settling` and **`cause`**. `cause` is `"liveness"` for `awaiting-report` and `player-silent`, `"binding"` for `unbound`, `"display"` for `display-not-detected`, `"commissioning"` for `needs-commissioning`, and `null` for `ok`. Tiles show the short `tileLabel` ("Needs a Player", "No report yet", "Player silent", "No display detected", "Needs commissioning", "Heard recently"); the full `label`, with its age, is the tile's accessible name and the Inspector header. Without a `read_at` no age is shown and a reported Player reads as silent (fail closed). Consumers that treat states as a group (the strip's scheduler collapse, §5) select by `cause`, never by listing state names, so `health.js` is the only place states are grouped.
 
 `join.js`'s `connectivity()` is deleted, and `boundOutput` stays as a join helper. The Plan tile, Inspector header, Commissioning, Binding, Showrunner, UnplacedTray, EquipmentRail and the strip all consume `health.js`.
 

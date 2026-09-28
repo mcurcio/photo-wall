@@ -1,20 +1,8 @@
-import { getToken } from "./useSnapshot.js";
+import { getToken, noteWrite } from "./session.js";
 
 // Every operator write shares one timeout budget (design §3): a write that does
 // not resolve inside this window is aborted rather than left hanging.
 const TIMEOUT_MS = 15000;
-
-// The write fence (design pass 2 §7): bumped at the START and again at the
-// COMPLETION of every non-GET call. A Plane A refresh records it when it starts
-// and drops its result if it moved, so a read that overlapped a write — in
-// flight, or finished while the read ran — never lands over the write's effect.
-// A GET routed through here is a read and does not move it.
-let writes = 0;
-
-/** The write-fence counter; a change means a write started or completed. */
-export function writeCount() {
-  return writes;
-}
 
 /**
  * Low-level operator-write helper (bead R-apiwrite). Every operator mutation —
@@ -43,9 +31,11 @@ export async function apiWrite(path, { method, body } = {}) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
+  // The write fence (session.js) moves at the start and the completion of every
+  // non-GET call; a GET routed through here is a read and does not move it.
   const isWrite = (method ?? "GET").toUpperCase() !== "GET";
   if (isWrite) {
-    writes += 1;
+    noteWrite();
   }
   let response;
   let data = null;
@@ -61,7 +51,7 @@ export async function apiWrite(path, { method, body } = {}) {
     }
   } finally {
     if (isWrite) {
-      writes += 1;
+      noteWrite();
     }
   }
   return {

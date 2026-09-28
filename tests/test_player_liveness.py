@@ -159,9 +159,11 @@ def test_inventory_answers_while_the_coordination_lock_is_held(registry):
         assert elapsed < 2
 
 
-def test_inventory_serves_the_silence_threshold_and_read_time(registry):
+def test_inventory_serves_the_liveness_constants_and_read_time(registry):
     enroll(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         body = client.get("/v1/operator/inventory", headers=OPERATOR).json()
     assert body["silent_after_seconds"] == liveness.SILENT_AFTER_SECONDS
+    # The console's grace before a fresh enrollment counts as a to-do is derived from this.
+    assert body["report_interval_seconds"] == liveness.REPORT_INTERVAL
     assert body["read_at"] == 1000

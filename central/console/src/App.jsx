@@ -11,7 +11,11 @@ import { detectRecovery } from "./recovery.js";
 import { Showrunner } from "./Showrunner.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { useMode } from "./useMode.js";
-import { setToken, useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
+import { setToken } from "./session.js";
+import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
+
+// The Central pill's colour: the shared health severity for each /healthz state.
+const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 
 /**
  * The console app shell.
@@ -46,7 +50,8 @@ export default function App() {
   const [facet, setFacet] = useState(/** @type {string} */ ("commissioning"));
   // A request for the Inspector to take focus, issued ONLY by attention-strip
   // navigation (a fresh number each time); plain tile or tray selection clears
-  // it, so selecting a Frame never moves focus.
+  // it, so selecting a Frame never moves focus. The Inspector consumes it once
+  // (onFocusDone), so a later remount does not refocus.
   const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
   const focusSeqRef = useRef(0);
   // The pending/retired Player last selected in the Equipment rail (Plane B).
@@ -131,7 +136,7 @@ export default function App() {
 
   const connect = (event) => {
     event.preventDefault();
-    // In-memory only, mirroring the legacy flat page — never persisted.
+    // In-memory only (session.js), mirroring the legacy flat page — never persisted.
     setToken(tokenInput);
     // Trigger one Plane A load with the freshly-set token. A 401 surfaces the
     // auth-rejected state (useSnapshot clears the in-memory token and flags it),
@@ -210,13 +215,13 @@ export default function App() {
           <span aria-hidden="true">·</span>
           <button
             type="button"
-            className="console__refresh"
+            className="console__button"
             onClick={() => refresh().catch(() => {})}
           >
             Refresh
           </button>
           <span
-            className={`console__health console__health--${health.status}`}
+            className={`console__health health--${PILL_SEVERITY[health.status] ?? "unknown"}`}
             role="status"
             aria-label={`Central health: ${centralHealth}`}
           >
@@ -310,6 +315,7 @@ export default function App() {
                   facet={facet}
                   onFacet={setFacet}
                   focusRequest={focusRequest}
+                  onFocusDone={() => setFocusRequest(null)}
                 />
               </aside>
             )}

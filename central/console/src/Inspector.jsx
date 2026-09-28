@@ -25,14 +25,17 @@ import { NowShowingFacet } from "./NowShowingFacet.jsx";
  * health from the one classifier (health.js) — the same label its plan tile
  * shows. When attention-strip navigation issues a new `focusRequest`, the
  * heading takes focus, and the Inspector scrolls into view only if it is off
- * screen; plain selection passes no request and never moves focus.
+ * screen; plain selection passes no request and never moves focus. A request
+ * is consumed once — `onFocusDone` clears it — so remounting the Inspector
+ * (Wall → Showrunner → Wall) never moves focus again.
  *
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * With no frame selected (`frameId` null) it renders its empty state, "Select
  * a frame", so the Inspector column keeps its place in the layout.
  *
  * @param {{snapshot: object|null, frameId: string|null, facet: Facet,
- *          onFacet: (facet: Facet) => void, focusRequest?: number|null}} props
+ *          onFacet: (facet: Facet) => void, focusRequest?: number|null,
+ *          onFocusDone?: () => void}} props
  */
 const FACETS = [
   { key: "commissioning", label: "Commissioning" },
@@ -40,7 +43,14 @@ const FACETS = [
   { key: "nowshowing", label: "Now-showing" },
 ];
 
-export function Inspector({ snapshot, frameId, facet, onFacet, focusRequest = null }) {
+export function Inspector({
+  snapshot,
+  frameId,
+  facet,
+  onFacet,
+  focusRequest = null,
+  onFocusDone = () => {},
+}) {
   const active = facet ?? "commissioning";
   const sectionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
@@ -55,6 +65,7 @@ export function Inspector({ snapshot, frameId, facet, onFacet, focusRequest = nu
     if (offScreen) {
       sectionRef.current.scrollIntoView({ block: "start" });
     }
+    onFocusDone();
   }, [focusRequest]);
   const activeLabel = FACETS.find((entry) => entry.key === active)?.label ?? active;
 

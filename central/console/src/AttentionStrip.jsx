@@ -1,12 +1,9 @@
-import React, { useId, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 
 import { wallAttention } from "./health.js";
 
 // At most this many rows in the detail list; the rest are counted.
 const LIST_CAP = 8;
-
-// Liveness alarms: the frames a stalled scheduler silences (Players cannot report).
-const SILENCED = new Set(["player-silent", "awaiting-report"]);
 
 function frames(count) {
   return `${count} ${count === 1 ? "frame" : "frames"}`;
@@ -24,9 +21,13 @@ function frames(count) {
  * reader is not re-announced on every poll.
  *
  * When Central's scheduler is neither "ok" nor "disabled", the liveness alarms
- * collapse into ONE causal line: Players cannot report while it is stalled, so
- * listing each silent frame would blame the equipment. This is the only place
- * the strip mentions Central; the pill owns Central's health.
+ * (health `cause` "liveness") collapse into ONE causal line: Players may be
+ * unable to report while it is not ok, so listing each silent frame would blame
+ * the equipment. The line says "may": a stopped scheduler that holds no lock
+ * still accepts reports until the last offers expire (design §8). This is the
+ * only place the strip mentions Central; the pill owns Central's health.
+ *
+ * The disclosure closes on Escape and returns focus to its toggle.
  *
  * In Wall mode each entry is a button calling `onNavigate(frameId)`; in
  * Showrunner mode `onNavigate` is null and entries are plain text, so the show
@@ -39,6 +40,7 @@ function frames(count) {
 export function AttentionStrip({ snapshot, central, onNavigate }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
+  const toggleRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const { frameCount, alarms, todos } = wallAttention(snapshot);
   if (frameCount === 0) {
     return null;
@@ -56,7 +58,8 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
           .join(" · ");
 
   const stalled = central?.scheduler ?? null;
-  const silenced = stalled === null ? [] : alarms.filter((entry) => SILENCED.has(entry.health.state));
+  const silenced =
+    stalled === null ? [] : alarms.filter((entry) => entry.health.cause === "liveness");
   const rows = [
     ...(silenced.length > 0
       ? [
@@ -64,7 +67,7 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
             key: "scheduler",
             text:
               `${frames(silenced.length)} silent — Central's scheduler is ` +
-              `${stalled.replaceAll("_", " ")}; Players cannot report until it recovers.`,
+              `${stalled.replaceAll("_", " ")}; Players may be unable to report until it recovers.`,
           },
         ]
       : []),
@@ -82,15 +85,26 @@ export function AttentionStrip({ snapshot, central, onNavigate }) {
   const severity = alarms.length > 0 ? "alarm" : todos.length > 0 ? "todo" : "ok";
 
   return (
-    <section className="attention" aria-label="Wall attention">
+    <section
+      className="attention"
+      aria-label="Wall attention"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          setOpen(false);
+          toggleRef.current?.focus();
+        }
+      }}
+    >
       <div className="attention__line">
         <span className={`attention__summary health--${severity}`} role="status">
           {summary}
         </span>
         {rows.length > 0 && (
           <button
+            ref={toggleRef}
             type="button"
-            className="attention__toggle"
+            className="console__button attention__toggle"
             aria-expanded={open}
             aria-controls={listId}
             onClick={() => setOpen((current) => !current)}

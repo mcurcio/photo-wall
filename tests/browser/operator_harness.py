@@ -72,6 +72,17 @@ def report_readiness(registry, player_id):
         observed_at=registry.clock.utc()))
 
 
+def tile_status(page, frame_id):
+    """A plan tile's status readout, located by frame identity (never by coordinates)."""
+    return page.get_by_role("group", name=f"Frame {frame_id} status", exact=True)
+
+
+def tile_health(page, frame_id):
+    """A plan tile's health: its visible text is the short tile label, and its accessible
+    name is the full label with the age (health.js `tileLabel` / `label`)."""
+    return tile_status(page, frame_id).get_by_role("img")
+
+
 def pause_page_clock(page, at):
     """Install Playwright's fake clock at `at` (Unix seconds) and pause it, before navigation:
     the console's timers (the 5 s poll, the age ticker, the lease countdown) then fire only

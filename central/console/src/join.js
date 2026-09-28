@@ -3,7 +3,8 @@
  *
  * A pure module imported by Plan.jsx (tile chips), the Now-showing facet, the
  * precedence "why" panel and health.js. It carries the TWO load-bearing joins the
- * design pins down (design §1b, §6a):
+ * design pins down (design §1b, §6a), and `isBound`, the one definition of a bound
+ * frame (health.js re-exports it for its consumers):
  *
  *  1. The now-showing join is a VERIFIED STRING compare. `visible[].target` is the
  *     string `"frame:<id>"` (runtime.py:18,140; a serialized `RuntimeView` yields
@@ -77,6 +78,11 @@ export function rankedContributions(runtime, frameId) {
     );
 }
 
+/** A frame is bound when both halves of its compound binding key are set. */
+export function isBound(frame) {
+  return frame != null && frame.player_id != null && frame.output_id != null;
+}
+
 /**
  * The OutputInventory row serving a frame, resolved on the COMPOUND key
  * (player_id AND output_id). This is the ONE copy of the compound-key join rule
@@ -95,7 +101,7 @@ export function rankedContributions(runtime, frameId) {
 export function boundOutput(snapshot, frameId) {
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
-  if (!frame || frame.player_id == null || frame.output_id == null) {
+  if (!isBound(frame)) {
     return null;
   }
   const outputs = snapshot?.inventory?.outputs ?? [];

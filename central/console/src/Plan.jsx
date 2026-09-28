@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 
 import { createFrame, deleteFrame, dropFromTray, moveFrame } from "./framesApi.js";
 import { frameHealth } from "./health.js";
@@ -20,8 +20,10 @@ import { useMutate } from "./useMutate.js";
  *
  * Alongside each drawn frame the plan renders a status readout (Bead 2): the
  * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`)
- * and the frame's health — a severity dot plus its label — from the one
- * classifier, `frameHealth` (health.js). The chip asserts operator INTENT, never
+ * and the frame's health — a severity dot plus its short tile label (the fact
+ * without its age, so it fits the tile) whose accessible name is the full label
+ * — from the one classifier, `frameHealth` (health.js). The readout is clipped
+ * to the tile's rect, so no text ever spills over a neighbouring tile. The chip asserts operator INTENT, never
  * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
  * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
@@ -80,6 +82,8 @@ export function Plan({
 }) {
   const mutate = useMutate();
   const svgRef = useRef(null);
+  // Each tile's status readout is clipped to its rect, so no text leaves the tile.
+  const clipPrefix = "plan-clip" + useId().replace(/[^A-Za-z0-9_-]/g, "");
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
   // because a full pointerdown->move->up sequence can fire before React re-renders
   // — the move/up handlers must read the drag synchronously (cf. tryingRef in
@@ -306,7 +310,7 @@ export function Plan({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        {placed.map(({ id, rect }) => {
+        {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
           const now = nowShowing(snapshot?.runtime, id);
           const health = frameHealth(snapshot, id);
@@ -343,7 +347,15 @@ export function Plan({
                   {id}
                 </text>
               </g>
-              <g className="plan__status" role="group" aria-label={`Frame ${id} status`}>
+              <clipPath id={`${clipPrefix}-${index}`}>
+                <rect x={rect.x} y={rect.y} width={rect.w} height={rect.h} />
+              </clipPath>
+              <g
+                className="plan__status"
+                role="group"
+                aria-label={`Frame ${id} status`}
+                clipPath={`url(#${clipPrefix}-${index})`}
+              >
                 <circle
                   cx={rect.x + 10}
                   cy={rect.y + 12}
@@ -369,8 +381,10 @@ export function Plan({
                   x={rect.x + 22}
                   y={rect.y + 44}
                   className={`plan__health health--${health.severity}`}
+                  role="img"
+                  aria-label={health.label}
                 >
-                  {health.label}
+                  {health.tileLabel}
                 </text>
               </g>
             </React.Fragment>

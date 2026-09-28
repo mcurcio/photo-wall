@@ -23,7 +23,13 @@ from urllib.parse import quote
 
 import pytest
 from media_queue import RecordingMediaQueue
-from operator_harness import RequestGate, operator_server, pause_page_clock, report_readiness
+from operator_harness import (
+    RequestGate,
+    operator_server,
+    pause_page_clock,
+    report_readiness,
+    tile_health,
+)
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -173,10 +179,8 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
         # The wall's labels, read first so the show layer can be held to them.
         valid_label = "Last heard 3 s ago"
         invalid_label = "Needs commissioning"
-        expect(page.get_by_role("group", name=f"Frame {VALID_FRAME} status", exact=True)
-               ).to_contain_text(valid_label)
-        expect(page.get_by_role("group", name=f"Frame {INVALID_FRAME} status", exact=True)
-               ).to_contain_text(invalid_label)
+        expect(tile_health(page, VALID_FRAME)).to_have_accessible_name(valid_label)
+        expect(tile_health(page, INVALID_FRAME)).to_have_accessible_name(invalid_label)
         _to_showrunner(page)
 
         health = page.get_by_role("group", name="Frame health", exact=True)

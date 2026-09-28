@@ -15,7 +15,7 @@ import re
 import time
 
 import pytest
-from operator_harness import operator_server, pause_page_clock, report_readiness
+from operator_harness import operator_server, pause_page_clock, report_readiness, tile_health
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -134,13 +134,15 @@ def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, re
         expect(showing).to_contain_text(f"Scheduled: {SCENE}")
         expect(showing).to_contain_text("Phase: body")
         # Its bound output had a display at Player start; it was never commissioned.
-        expect(showing).to_contain_text("Needs commissioning")
+        expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs commissioning")
 
         # The second frame's bound output reported no display: its health says so,
         # scoped to that frame's identity (compound-key join -- the two frames
         # share a player but resolve to different ports).
         offline = page.get_by_role("group", name=f"Frame {OFFLINE} status", exact=True)
-        expect(offline).to_contain_text("No display detected when the Player started")
+        expect(tile_health(page, OFFLINE)).to_have_accessible_name(
+            "No display detected when the Player started")
+        expect(offline).to_contain_text("No display detected")
         expect(showing).not_to_contain_text("No display detected")
 
         # Honesty (design §6a): the surface asserts intent, never confirmed

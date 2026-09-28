@@ -8,32 +8,16 @@ import React, {
   useState,
 } from "react";
 
-import { writeCount } from "./apiWrite.js";
+import { getToken, setToken, writeCount } from "./session.js";
 
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number}} Snapshot
  */
 
-// The admin bearer token, held in memory only for this tab (never persisted) —
-// the same discipline as the legacy operator page. Bead 0 ships no login UI, so
-// the token defaults to empty and the shell renders its empty state; a later
-// onboarding bead wires setToken() from a login control.
-let adminToken = "";
-
-/** Set the admin bearer token used by every Plane A / mutation fetch. */
-export function setToken(token) {
-  adminToken = token || "";
-}
-
-/** The admin bearer token currently held for this tab. */
-export function getToken() {
-  return adminToken;
-}
-
 async function fetchJson(path) {
   const response = await fetch(path, {
     headers: {
-      Authorization: "Bearer " + adminToken,
+      Authorization: "Bearer " + getToken(),
       "Content-Type": "application/json",
     },
     signal: AbortSignal.timeout(15000),
@@ -73,9 +57,10 @@ const POLL_MS = 5000;
  * stale read can neither overwrite a newer snapshot nor, by failing late, log
  * the operator out or flag a failure the newer read disproved.
  *
- * WRITE FENCE. A refresh records apiWrite's write counter when it starts and is
- * dropped if the counter moved before it returned: a write that was in flight,
- * or completed, while the read ran may not be reflected in it. useMutate's own
+ * WRITE FENCE. A refresh records the write counter (session.js; apiWrite moves
+ * it) when it starts and is dropped if the counter moved before it returned: a
+ * write that was in flight, or completed, while the read ran may not be
+ * reflected in it. useMutate's own
  * refresh starts after the write's completion, so it is kept. The cost is bounded
  * starvation — back-to-back writes drop every overlapping poll.
  */
