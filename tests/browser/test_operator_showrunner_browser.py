@@ -1541,9 +1541,15 @@ def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry)
         expect(programs.get_by_role("status")).to_have_text(
             f"Created 2 of 3 separate Programs. Not confirmed: {PROGRAM_ID}-2; Central did "
             "not answer. Add separate windows again to send only these.")
-        # Bead 4: the flow stays on Review with the draft, so it can be sent again (the
-        # cards, and so the missing window's absence, show once every window is stored).
+        # Bead 4: the flow stays on Review with the draft, so it can be sent again.
         expect(send).to_be_enabled()
+        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
+        # The cards, shown beside the kept draft, list the stored windows only.
+        go(page, "schedule")
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-1", exact=True)).to_be_visible()
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-3", exact=True)).to_be_visible()
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-2", exact=True)).to_have_count(0)
+        programs.get_by_role("button", name="Resume draft (Draft)", exact=True).click()
         assert page.evaluate("window.location.hash") == "#/schedule/new/review"
 
         bodies.clear()
