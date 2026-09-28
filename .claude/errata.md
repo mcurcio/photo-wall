@@ -1696,3 +1696,21 @@ doc softenings.
   is clean. No other owned or unowned file was checked out or reset. Flagging so a reviewer
   diffs the reconstructed `appliance/provision.py` against intent rather than assuming it was
   untouched.
+- 2026-09-27, console pass 2 slice 1 (docs/operator-console-ux-pass2.md), implementer findings:
+  (a) §10 bead 3 freezes `useHealth` as returning `{status, reason}`, but §5's causal line needs the
+  raw scheduler status (not-ok/not-disabled) independently of the pill's reason text (a database
+  outage takes precedence in `reason`). Implemented `{status, reason, scheduler}` (scheduler = the
+  /healthz scheduler status when neither "ok" nor "disabled", else null); `reason` is "database
+  unavailable" or "scheduler <status>". (b) §5 says a stalled scheduler "replaces the N alarm rows";
+  implemented as replacing the LIVENESS alarm rows only (player-silent, overdue awaiting-report) --
+  a display-not-detected alarm is not caused by the scheduler and stays listed. (c) §11's mutation
+  "Restore the facet reset -> strip facet test" only bites if plain selection no longer resets the
+  facet; implemented plain tile/tray selection as keeping the open facet (§1 lists the reset as a
+  defect), and the strip test pins it. (d) §4 does not define a bound frame whose Player row is
+  missing from the inventory (unreachable: bindings FK); health.js fails closed to
+  awaiting-report/alarm "No report from the Player yet". (e) The orchestrator brief called Bead 5
+  "failure-reported (deferred)"; in the approved doc failure-reported was removed and Bead 5 is
+  "Layout and theme" -- built as Bead 5; failure-reported not built.
+- 2026-09-28, console pass 2 slice 1, docs bead 6 (errata closure): findings (a)-(e) of the
+  2026-09-27 slice 1 entry above are APPLIED to docs/operator-console-ux-pass2.md in place
+  (§3 table, §4, §5, §7, §10, §11, History). The spec now matches the build; no open slice 1 errata.

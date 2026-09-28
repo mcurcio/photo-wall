@@ -187,12 +187,18 @@ graph TD
 > Player, Output, Binding, Panel, and **Display** distinct and stops the
 > wall-first shape from collapsing the domain into "the box."
 
-> **R2 — The console shows central *intent* plus real connectivity, and never
-> claims confirmed playback.** No control or label implies a field the API does
+> **R2 — The console shows central *intent* plus last-heard liveness and display
+> detection at Player start, and never claims confirmed playback.** No control or label implies a field the API does
 > not store: no "LIVE" playback, no ambient correction, no recurrence rule, no
 > sensor/actuator registry, no cross-Surface/3D view, no panel color/power
 > control that the backend has not announced. Where prose promises more than the
 > model holds, the UI states the honest limit.
+>
+> *Wording note (2026-09-28):* R2 originally read "central intent plus real
+> connectivity". That connectivity was never real: `observation.connected` is
+> written only at enrollment ([pass 2 §1](operator-console-ux-pass2.md#1-the-problem-in-plain-words)).
+> The rewording above is pass 2's Question 1 default, built on pending owner
+> confirmation ([pass 2 §12](operator-console-ux-pass2.md#12-costs-deferrals-and-questions)).
 
 > **R3 — The read snapshot and the edit draft are two separate planes; a refresh
 > replaces the read plane only and never destroys unsaved work.** Every read is a
@@ -476,7 +482,7 @@ sequenceDiagram
   loop each frame tile
     UI->>UI: join runtime - visible.filter(e => e.target === "frame:"+id)
     UI->>UI: chip = "Scheduled: <scene_id>" + phase; NOT "LIVE"
-    UI->>UI: connectivity dot from observation.connected (real)
+    UI->>UI: connectivity dot from observation.connected (superseded by pass 2: enrollment-time only; now last-heard liveness)
     UI->>UI: calibration_valid badge (Frame health - status, not a control)
   end
   Op->>UI: Drag rectangle on empty canvas (place NEW frame)
@@ -497,8 +503,9 @@ sequenceDiagram
 ```
 
 The plan reads which Player/Output serves each Frame (Binding facet, from
-`player_id/output_id`), whether that Output is connected (observation dot, a real
-fact), whether calibration is valid (badge), and what is **scheduled** on it
+`player_id/output_id`), whether that Output is connected (observation dot; *superseded by
+pass 2: that value is enrollment-time only, and the console now shows last-heard
+liveness and display detection at Player start, see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal)*), whether calibration is valid (badge), and what is **scheduled** on it
 (chip). The **Commissioning** facet reads the Display behind the Frame (read-only
 `OutputReport` connected + FrameProfile Frame facts) and hosts the geometry/gain
 controls plus the gated color/power areas. Existing frames are now **draggable**
@@ -563,7 +570,9 @@ for the Display layer — is treated in [§7.6](#76-capability-gating--derived-n
   "LIVE" sells confirmed playback the operator surface cannot deliver.
 - **The fix:** the chip reads **"Scheduled: `<scene_id>`"** with phase
   (body/outro), never "LIVE." Connectivity (`observation.connected`) is shown as a
-  *separate, real* fact ("player connected / disconnected"). The "why" from
+  *separate, real* fact ("player connected / disconnected"). *(Superseded by pass 2:
+  that value is enrollment-time only; the console now shows last-heard liveness and
+  display detection at Player start, per the reworded R2; see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal).)* The "why" from
   precedence is real and rendered.
 - **Stated plainly:** the console shows what central *intends* per Frame, joined
   with connectivity. It cannot confirm the pixels are lit — there is no
@@ -992,6 +1001,8 @@ this pass, T1 and T2 as separately-greenlit programs.
    no longer permanent.
 3. "Confirmed playback" is **not** a hard requirement for this pass; intent +
    connectivity is sufficient ([§6a](#6a-now-showing-intent-vs-actuality)).
+   *(Superseded by pass 2: "connectivity" is last-heard liveness and display
+   detection at Player start, see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal).)*
 4. Placeholder refresh cadences ([§9](#9-storage-lifecycle--refresh)) are
    acceptable to tune during implementation, not decisions the gate must settle now.
 5. The optional N-window recurrence helper (Q2) is worth building; if not, plain
@@ -1047,7 +1058,7 @@ implementers follow) > *documented* (stated in copy only).
 
 | Failure | Behaviour | Guarantee strength |
 |---|---|---|
-| Stale now-showing acted on | Chip reads intent, not confirmed playback; connectivity dot is the real signal; writes carry tokens so a stale action 409s | **decision** (chip wording + token guard); actuality gap is **documented** |
+| Stale now-showing acted on | Chip reads intent, not confirmed playback; connectivity dot is the real signal (*superseded by pass 2: last-heard liveness, see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal)*); writes carry tokens so a stale action 409s | **decision** (chip wording + token guard); actuality gap is **documented** |
 | Two-tab calibration clobber | Single slot LWW; commit conflicts on `expected_revision`; inventory poll surfaces "preview overtaken" | **transaction** (server 409) + **decision** (overtaken state) |
 | Lease expiry mid-session | Visible countdown; on expiry explicit "panel reverted — Re-preview"; trying values retained in Plane B | **decision** (explicit expiry state); no silent revert by **convention** (no auto-renew) |
 | Activation ignored/queued but looks done | Synchronous `{status, reason}` shown truthfully at activation; queued outcomes are fire-and-forget | **decision** (render the sync result); post-hoc queued→expired is **documented** as unconfirmed |

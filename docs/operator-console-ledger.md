@@ -2,7 +2,7 @@
 
 One row per bead. Status: open | in_progress | blocked | closed.
 Design of record: `operator-console-ux-design.md`. Plan: `operator-console-delivery-plan.md`.
-Pass 2, slice 1 (wall health at a glance, awaiting gate): [operator-console-ux-pass2.md](operator-console-ux-pass2.md).
+Pass 2, slice 1 (wall health at a glance; design built on its gate defaults, owner approval pending): [operator-console-ux-pass2.md](operator-console-ux-pass2.md).
 Running PR: https://github.com/mcurcio/photo-wall/pull/11 (draft; update its bead table as beads land).
 Backend track uses isolated worktrees on Postgres :54332; main/frontend on :54331.
 **STATUS: DELIVERY COMPLETE (DONE-GREEN 2026-09-14).** / serves the React console; legacy page retired. Final gate: test_local.py 1122 passed/59 skipped, tests/browser 55 passed. Open residual: dedupe-calibration-defaults (low). PR #11.
@@ -43,3 +43,10 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | residual: dedupe-calibration-defaults | share DEFAULT_CORNERS/CROP (useDraft+Commissioning) | open | — | opportunistic (M3 coherence) |
 | R-apiwrite | extract shared operator-write helper + frames-API module | closed | 9941612 | M6 start (behavior-preserving) |
 | residual: conftest-evidence | repoint conftest CHECKS at re-hosted console tests | closed | 11f3e35 | operator-browser.json now status=passed; 3 arch-specific items retired |
+
+### Pass 2, slice 1 — wall health at a glance
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| P2-S1 | Wall health (beads 1–5: liveness facts, classifier and labels, 5 s poll and write fence, attention strip, layout and theme) | in_progress | 0dd6b59, e14b891, b575d68, 4865557, aa45f00 | Beads 1–5 landed; review fix cycle in progress. Errata (a)–(e) applied to the spec. |
+| P2-S1-D | Docs — slice 1 (bead 6: runbook wall health, R2 rewording default) | in_progress | — | R2 rewording pending owner confirmation (pass 2 Question 1). |

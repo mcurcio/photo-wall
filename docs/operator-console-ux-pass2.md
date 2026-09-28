@@ -64,7 +64,8 @@ The media-download retry (`service.py:796-797`) gets its own local `MEDIA_RETRY_
 
 | Surface | Owner | Frozen shape |
 |---|---|---|
-| `Coordinator.player_reports_lock_free() -> PlayerReports` | coordination (owns `player_feedback`) | `PlayerReports` is a frozen model with `read_at: Instant` and `reports: Mapping[Identifier, Instant]` (player id → `received_at`). |
+| `Coordinator.player_reports_lock_free() -> PlayerReports` | coordination (owns `player_feedback`) | Returns a `PlayerReports`. |
+| `PlayerReports` | installation_models (the read model beside `InstallationInventory`, so `with_liveness` needs no import from coordination) | A frozen model with `read_at: Instant` and `reports: Mapping[Identifier, Instant]` (player id → `received_at`). |
 | Details of `player_reports_lock_free()` | | One single-statement read: `players ⋈ player_feedback ON (id, authority_epoch) WHERE retired_at IS NULL`. It runs in a plain transaction and **never takes `COORDINATION_LOCK`** (the docstring says so). `read_at = max(clock.utc(), every timestamp returned)`. |
 | `PlayerInventory.last_report_at: Instant \| None = None` | installation_models | Defaulted, like `is_bound` (`installation_models.py:21-24`). |
 | `InstallationInventory.read_at: Instant \| None = None` and `silent_after_seconds: float \| None = None` | installation_models | |
@@ -93,6 +94,8 @@ The media-download retry (`service.py:796-797`) gets its own local `MEDIA_RETRY_
 - `facetFor(health, currentFacet)`
 - `wallAttention(snapshot)`
 
+Every health result carries `state`, `severity`, `label`, `facet` and **`cause`**. `cause` is `"liveness"` for `awaiting-report` and `player-silent`. Consumers that treat states as a group (the strip's scheduler collapse, §5) select by `cause`, never by listing state names, so `health.js` is the only place states are grouped.
+
 `join.js`'s `connectivity()` is deleted, and `boundOutput` stays as a join helper. The Plan tile, Inspector header, Commissioning, Binding, Showrunner, UnplacedTray, EquipmentRail and the strip all consume `health.js`.
 
 States are checked in order and the first match wins. "Age" is always taken from `read_at`, and "limit" means `silent_after_seconds`.
@@ -100,7 +103,7 @@ States are checked in order and the first match wins. "Age" is always taken from
 | # | State | Condition | Severity | Label | Facet |
 |---|---|---|---|---|---|
 | 1 | `unbound` | `!isBound(frame)` | to-do | "Needs a Player" | Binding |
-| 2 | `awaiting-report` | Bound, and no current-epoch report | to-do while enrolled age ≤ limit, **alarm** after | "Enrolled N s ago, no report yet" | Binding |
+| 2 | `awaiting-report` | Bound, and no current-epoch report, **or the bound Player is missing from the inventory** (fail-closed; the bindings FK makes it unreachable today) | to-do while enrolled age ≤ limit, **alarm** after; a missing Player is always alarm | "Enrolled N s ago, no report yet" (missing Player: "No report from the Player yet") | Binding |
 | 3 | `player-silent` | Bound, and report age > limit | alarm | "Player silent · last heard N min ago" | Binding |
 | 4 | `display-not-detected` | Bound output's `observation.connected` is false, **or the output row is missing** (fail-closed; the FK at `001_registry.sql:41` makes a missing row unreachable today) | alarm | "No display detected when the Player started" | Commissioning |
 | 5 | `needs-commissioning` | `calibration_valid` is false (nothing is shown until committed, `registry.py:369-370`) | to-do | "Needs commissioning" | Commissioning |
@@ -112,6 +115,7 @@ States are checked in order and the first match wins. "Age" is always taken from
 1. Only `health.js` classifies.
 2. A label states the fact and its age, nothing more.
 3. `ok` never implies playback (R2).
+4. **Tiles show a short state label** (the plan tile has no room for an age). The full label, with its age, is the tile's accessible name and the Inspector header.
 
 ## 5. The attention strip
 
@@ -120,10 +124,12 @@ A new `AttentionStrip.jsx`, directly under the status bar.
 - **Fixed height.** It is a single line that never reflows the page. Its detail list is a disclosure that **overlays** the content below rather than pushing it down.
 - **Summary.** The live region (`role="status"`) carries **state only**, for example "2 frames need attention · 3 to set up" or "All 6 frames heard from". Ages appear as plain text outside the live region, so screen readers are not re-announced every 5 s.
 - **List.** Alarms come first, then to-dos, capped at 8 entries followed by "and M more". Each entry reads like "lobby-left — Player silent · last heard 4 min ago".
-- **When the scheduler is not ok.** If `/healthz` reports a scheduler status other than `ok` or `disabled`, the strip replaces the N alarm rows with **one** causal line plus a count: "5 frames silent — Central's scheduler is stale; Players cannot report until it recovers."
-- **Navigation, Wall mode.** An entry is a button. It sets the Surface to the frame's `surface_id`, selects the frame, opens `facetFor(...)`, **focuses** the Inspector heading, and **scrolls only if the Inspector is off-screen**. Plain tile or tray selection never moves focus.
+- **Just-enrolled grace.** An `awaiting-report` frame whose enrolled age is under a short grace (2 × `REPORT_INTERVAL`) is left out of the strip's counts and list, so a Player enrolling between reads does not flash a to-do. It is never shown `ok`: its tile and Inspector still read "Enrolled N s ago, no report yet".
+- **When the scheduler is not ok.** If `/healthz` reports a scheduler status other than `ok` or `disabled`, the strip replaces the **liveness** alarm rows (`cause: "liveness"`: `player-silent` and overdue `awaiting-report`) with **one** causal line plus a count: "5 frames silent — Central's scheduler is stale; Players may be unable to report until it recovers." Alarms with another cause, such as `display-not-detected`, are not caused by the scheduler and stay listed.
+- **Navigation, Wall mode.** An entry is a button. It sets the Surface to the frame's `surface_id`, selects the frame, opens `facetFor(...)`, **focuses** the Inspector heading, and **scrolls only if the Inspector is off-screen**. Plain tile or tray selection never moves focus and **keeps the open facet** (the reset on every select is a §1 defect); only strip navigation chooses a facet.
 - **Navigation, Showrunner mode.** Entries are text, not buttons. They do not navigate, so Showrunner work is never abandoned and R4 is preserved.
 - **First run.** With no frames, the strip renders nothing and defers to the Guidance banner (`Guidance.jsx:27-30`).
+- **`useHealth` returns `{status, reason, scheduler}`.** `reason` is "database unavailable" or "scheduler <status>" (a database outage takes precedence). `scheduler` is the raw `/healthz` scheduler status when it is neither `ok` nor `disabled`, else null; the causal line reads it independently of the pill's reason.
 - **Central health is shown in one place: the pill.** It reads "Central: ok" or "Central: scheduler stale" (the reason comes from the `/healthz` body, `app.py:307-343`), or "Central: unreachable". The `aria-label` keeps the "Central health: …" prefix. The strip only ever mentions Central in the causal line above.
 
 ## 6. Layout and theming (CSS first)
@@ -139,7 +145,7 @@ A new `AttentionStrip.jsx`, directly under the status bar.
 - **One poller.** `SnapshotProvider` refreshes every 5 s while the tab is visible. On each tick it reads `getToken()` fresh; it never uses a captured token. 5 s matches the calibration overtake poll (`useCalibration.js:16`), whose own timer (`useCalibration.js:204-209`) is deleted. Its detection effect (`:133-200`) still runs on every snapshot.
 - **Hidden tabs.** The interval is cleared when the tab is hidden. When it becomes visible again, the poller refreshes immediately and restarts. This replaces the listeners at `useSnapshot.js:116-141`.
 - **Newest request wins.** Every refresh (poll, mutation or manual) takes an increasing ticket. A response is applied only if its ticket is newer than the last one applied. The same check guards the **error and 401 branches**, so a stale 401 or 5xx cannot clear the token or overwrite a newer success. Polls are single-flight, because the 15 s fetch timeout (`useSnapshot.js:36`) is longer than the 5 s interval.
-- **Write fence.** `apiWrite.js` keeps a write counter.
+- **Write fence.** A small `session.js` module holds the session's admin token and the write counter; `apiWrite.js` and the poller both read them there, so neither owns the other's state.
   - It is bumped at the **start** and again at the **completion** of every **non-GET** call, including calibration preview (`useCalibration.js:31`). GETs routed through `apiWrite` do not bump it; for example, the candidates read at `SceneAuthoring.jsx:402-405`.
   - A refresh records the counter when it starts. Its response is dropped if the counter has moved since, which covers a write that was in flight or finished while the refresh was running.
   - The refresh `useMutate` issues (`useMutate.js:24-25`) starts after the completion bump, so it is kept.
@@ -174,11 +180,11 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
 
 | Bead | Files and change |
 |---|---|
-| **1 Liveness facts** (Python) | **New `contracts/liveness.py`.** **`player/service.py`:** set `BACKOFF = SESSION_BACKOFF` (the name is kept, so there is no test churn), import `REPORT_INTERVAL` in place of `.5`, and give the media retry (`:796-797`) its own local `MEDIA_RETRY_BACKOFF`. **`player/central_link.py`:** import `REQUEST_TIMEOUT`. **`central/coordination.py`:** add `PlayerReports` and `player_reports_lock_free()`. **`central/installation_models.py`:** add the three fields and `with_liveness`. **`central/app.py`:** compose the inventory route. **`tests/test_registry.py:388-400`:** the equality check now compares against `registry.inventory().with_liveness(...)`. Plus the new pytest cases from §11. |
+| **1 Liveness facts** (Python) | **New `contracts/liveness.py`.** **`player/service.py`:** set `BACKOFF = SESSION_BACKOFF` (the name is kept, so there is no test churn), import `REPORT_INTERVAL` in place of `.5`, and give the media retry (`:796-797`) its own local `MEDIA_RETRY_BACKOFF`. **`player/central_link.py`:** import `REQUEST_TIMEOUT`. **`central/coordination.py`:** add `player_reports_lock_free()`. **`central/installation_models.py`:** add `PlayerReports`, the three fields and `with_liveness`. **`central/app.py`:** compose the inventory route. **`tests/test_registry.py:388-400`:** the equality check now compares against `registry.inventory().with_liveness(...)`. Plus the new pytest cases from §11. |
 | **2 Classifier and labels** | **New `health.js`.** **`join.js`:** delete `connectivity`. Route everything through `health.js` in `Plan.jsx`, `Inspector.jsx` (health header), `Commissioning.jsx` (lines 3, 122-123, 471-490: "Display at last Player start", Detected / Not detected), `BindingFacet.jsx:86` (`isBound`, plus "Last heard"), `EquipmentRail.jsx`, `Showrunner.jsx:52-70` and `UnplacedTray.jsx`. **Tests updated in this bead:** `test_operator_wall_browser.py:135,141`; `test_operator_commissioning_browser.py:152-154`, with the test renamed to `…_frame_facts_vs_display_at_player_start` and its `conftest.py:46` CHECKS key renamed with it; `test_operator_showrunner_browser.py:179,182`. |
-| **3 Polling and fence** | `useSnapshot.js` (poller, ticket, fence check, `useHealth` returns `{status, reason}`), `apiWrite.js` (write counter), `useCalibration.js` (delete the interval), `App.jsx` (pill text; "last refresh failed"). `test_operator_wall_browser.py:512` still passes because the `aria-label` prefix is kept. |
+| **3 Polling and fence** | `useSnapshot.js` (poller, ticket, fence check, `useHealth` returns `{status, reason, scheduler}`), `session.js` (token and write counter), `apiWrite.js` (bumps the counter), `useCalibration.js` (delete the interval), `App.jsx` (pill text; "last refresh failed"). `test_operator_wall_browser.py:512` still passes because the `aria-label` prefix is kept. |
 | **4 Strip and navigation** | New `AttentionStrip.jsx`; `App.jsx` (`selectFrame(id, facet)`, `facetFor`, surface switch); `Inspector.jsx` (focus and conditional scroll on strip navigation only). |
-| **5 Layout and theme** | `index.css` (tokens, light block, grid, 390 px fixes, dead-CSS removal), `App.jsx` (column wrappers), `Inspector.jsx` (empty state, hidden on first run). |
+| **5 Layout and theme** (reported failures are not in this slice; see §12) | `index.css` (tokens, light block, grid, 390 px fixes, dead-CSS removal), `App.jsx` (column wrappers), `Inspector.jsx` (empty state, hidden on first run). |
 | **6 Docs** | `docs/runbook.md` console sections (about lines 350-392): liveness, strip, 5 s poll, "at Player start" wording, and R2's new wording. History line here. |
 
 ## 11. Tests and mutation probes
@@ -216,7 +222,9 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
   - Counts separate alarms from to-dos.
   - A silent entry opens **Binding** and a needs-commissioning entry opens **Commissioning**, with focus on the Inspector.
   - Showrunner entries are not buttons.
-  - Scheduler-not-ok collapses the list to one line.
+  - Scheduler-not-ok collapses the liveness alarms to one line; a `display-not-detected` alarm stays listed.
+  - Plain tile selection keeps the open facet.
+  - An `awaiting-report` frame inside the grace is not counted, and its tile does not read ok.
   - A list over 8 shows "and M more".
 - *Bead 5:*
   - At 1440×900 and at 390×844, strip navigation leaves the Inspector `to_be_in_viewport`.
@@ -238,7 +246,7 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
 | Remove the ticket check on the error branch | Stale-401 test |
 | Remove the write fence, or bump it only at start | Poll-before-bind test (the in-flight-at-completion case) |
 | Bump the fence on GET | The apiWrite GET test |
-| Restore the facet reset | Strip facet test |
+| Restore the facet reset on plain selection | Strip facet test (plain selection keeps the facet) |
 | Delete the light block | Theme test |
 | Add `white-space: nowrap` to ids | 390 px test |
 
@@ -272,3 +280,4 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
   - Beads reordered so each lands green.
   - Failures deferred to slice 1b.
 - 2026-09-27, review round 2 (final): the threshold rationale was re-derived from the real Player loop (2×timeout per failing cycle), with its slow-Central cost stated; `BACKOFF` is kept as an alias, and the media retry gets its own constant; the write fence now bumps at start and completion, for non-GET calls only, and states its starvation cost; the clock-step cost is stated and the invariant narrowed; the lock-holding scheduler stall is corrected to silence within the threshold; the threshold mutation probe is pinned at 25 s.
+- 2026-09-28, implementation review and fix round: the spec was brought in line with what was built (`useHealth` returns `{status, reason, scheduler}`; the scheduler collapse covers liveness alarms only; plain selection keeps the open facet; a bound Player missing from the inventory fails closed to alarm; Bead 5 is layout and theme). Fix-cycle decisions recorded: every health result carries `cause`, and `health.js` alone groups states; `PlayerReports` lives in `installation_models`; the causal line says Players *may be unable* to report; the strip's just-enrolled grace; short tile labels with the full label in the accessible name and Inspector; `session.js` holds the token and write counter.
