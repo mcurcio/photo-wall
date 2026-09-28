@@ -4,7 +4,17 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from central.runtime import Child, Contribution, Program, RecordingActuator, Runtime, Scene
+from central.runtime import (
+    OPERATOR_HISTORY_SECONDS,
+    Child,
+    Contribution,
+    Program,
+    RecordingActuator,
+    Runtime,
+    RuntimeView,
+    RunView,
+    Scene,
+)
 
 
 def media(target="frame:left", source="holiday:v1", **kwargs):
@@ -543,3 +553,117 @@ def test_early_v1_snapshot_without_local_order_restores_child_precedence():
     restored = Runtime.restore(legacy)
     assert restored.advance(1).for_target("frame:left").scene_id == "child"
     assert all("local_order" not in record for record in legacy["runs"].values())
+
+
+# The operator's read (pass 2 slice 3 §8).
+
+
+def test_run_views_carry_their_program_and_priority():
+    assert RunView.model_fields["program_id"].is_required()
+    assert RunView.model_fields["priority"].is_required()
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="direct", loop=True, contributions=(media("frame:right"),)))
+    runtime.set_program(Program(
+        program_id="weekday-evenings", scene_id="evening", starts_at=10, ends_at=100, priority=5))
+    direct = runtime.activate("direct", "act", 0, priority=2).run_id
+    view = runtime.advance(20)
+    scheduled = next(run for run in view.runs if run.scene_id == "evening")
+    assert (scheduled.program_id, scheduled.priority) == ("weekday-evenings", 5)
+    assert (get_run(view, direct).program_id, get_run(view, direct).priority) == (None, 2)
+
+
+def test_protected_frames_are_served_only_by_the_operator_projection():
+    # Never on the scheduler's path: neither view model carries protection.
+    for model in (RunView, RuntimeView):
+        assert not [name for name in model.model_fields if "protect" in name]
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(), lamp())))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    runtime.activate("open", "open-act", 0)
+    projection = runtime.operator_projection(5)
+    assert projection.protected_frames == {guard: frozenset({"frame:left"})}
+    assert {run.run_id for run in projection.current.runs} >= {guard}
+
+
+def _outcome(runtime, program_id, now):
+    return runtime.operator_projection(now).program_outcomes[program_id]
+
+
+def test_program_outcomes_distinguish_missed_windows_from_warm_restarts():
+    scene = Scene(scene_id="evening", cycle_seconds=30, contributions=(media(),))
+
+    # Saved after its window ended, on a warm Runtime: missed.
+    late = Runtime()
+    late.set_scene(scene)
+    late.advance(500)
+    late.set_program(Program(program_id="late", scene_id="evening", starts_at=100, ends_at=200))
+    missed = _outcome(late, "late", 600)
+    assert (missed.status, missed.reason) == ("expired", "missed_window")
+
+    # Ended before the Runtime's first-ever tick: missed.
+    cold = Runtime()
+    cold.set_scene(scene)
+    cold.set_program(Program(program_id="cold", scene_id="evening", starts_at=100, ends_at=200))
+    missed = _outcome(cold, "cold", 300)
+    assert (missed.status, missed.reason) == ("expired", "missed_window")
+
+    # Central was down across the whole window after a tick: a warm restart
+    # catches up logically and the outcome reads admitted, never missed.
+    warm = Runtime()
+    warm.set_scene(scene)
+    warm.advance(0)
+    warm.set_program(Program(program_id="warm", scene_id="evening", starts_at=100, ends_at=200))
+    projection = warm.operator_projection(300)
+    ran = projection.program_outcomes["warm"]
+    assert ran.status == "admitted"
+    run = get_run(projection.current, ran.run_id)
+    assert (run.phase, run.started_at, run.ended_at) == ("completed", 100, 130)
+
+    # Not yet started: no outcome.
+    assert _outcome(warm, "warm", 50) is None
+
+
+def test_a_protected_refusal_is_a_served_program_outcome():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
+    guard = runtime.activate("guard", "guard-act", 0, priority=5).run_id
+    runtime.set_program(Program(program_id="evening", scene_id="evening", starts_at=10, ends_at=100))
+    projection = runtime.operator_projection(20)
+    refused = projection.program_outcomes["evening"]
+    assert (refused.status, refused.reason) == ("rejected", "protected_frames")
+    assert projection.protected_frames[guard] == frozenset({"frame:left"})
+
+
+def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
+    day = OPERATOR_HISTORY_SECONDS
+    runtime = Runtime()
+    for scene_id, target in (("old", "frame:a"), ("recent", "frame:b"), ("live", "frame:c")):
+        runtime.set_scene(Scene(scene_id=scene_id, loop=True, contributions=(media(target),)))
+    old = runtime.activate("old", "old-act", 0).run_id
+    runtime.cancel(old, 10)
+    runtime.set_program(Program(program_id="old-window", scene_id="old", starts_at=20, ends_at=60))
+    recent = runtime.activate("recent", "recent-act", day).run_id
+    runtime.cancel(recent, day + 100)
+    live = runtime.activate("live", "live-act", day + 100).run_id
+    runtime.set_program(Program(
+        program_id="recent-window", scene_id="recent", starts_at=day + 150, ends_at=day + 300))
+    runtime.set_program(Program(
+        program_id="later-window", scene_id="live", starts_at=day + 900, ends_at=day + 1000))
+    before = runtime.export_state()
+
+    now = day + 200
+    projection = runtime.operator_projection(now)
+    served = {run.run_id for run in projection.current.runs}
+    assert {recent, live} <= served  # ended 100 s ago, and live
+    assert old not in served  # ended more than a day ago
+    assert set(projection.program_outcomes) == {"recent-window", "later-window"}
+    assert projection.program_outcomes["later-window"] is None
+
+    # A read filter only: stored state and every other read keep the old Run.
+    assert runtime.export_state() == before
+    assert old in {run.run_id for run in runtime.project(now).runs}

@@ -634,10 +634,14 @@ def create_app(
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
         runtime = coordinator.runtime.read()
+        state = runtime.export_state()
+        projection = runtime.operator_projection(clock.utc())
         return {
-            "definitions": runtime.export_state()["scenes"],
-            "programs": runtime.export_state()["programs"],
-            "current": runtime.project(clock.utc()),
+            "definitions": state["scenes"],
+            "programs": state["programs"],
+            "current": projection.current,
+            "protected_frames": projection.protected_frames,
+            "program_outcomes": projection.program_outcomes,
         }
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])

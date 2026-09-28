@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
@@ -182,6 +183,8 @@ class RunView(FrozenModel):
     children: tuple[str, ...]
     finish_requested_at: FiniteFloat | None
     ended_at: FiniteFloat | None
+    program_id: str | None
+    priority: int
 
 
 class RuntimeView(FrozenModel):
@@ -192,6 +195,27 @@ class RuntimeView(FrozenModel):
 
     def for_target(self, target: str) -> Intent | None:
         return next((intent for intent in self.visible if intent.target == target), None)
+
+
+# The operator's read keeps ended Runs, and Program outcomes, for this long.
+OPERATOR_HISTORY_SECONDS = 86400.0
+
+
+class OperatorProjection(FrozenModel):
+    """The operator console's read of the Runtime (GET /v1/operator/runtime).
+
+    `current` is the projected view with its Runs bounded to the live ones plus
+    those ended in the last `OPERATOR_HISTORY_SECONDS`. `protected_frames` maps
+    each served Run that protects frames to those targets; it is computed only
+    here, never on the scheduler's path. `program_outcomes` maps each Program
+    ending within the same bound, or later, to the Admission of its window
+    (None while it has none). Both bounds are read filters: stored Runs,
+    Programs and admissions are untouched.
+    """
+
+    current: RuntimeView
+    protected_frames: Mapping[str, frozenset[str]]
+    program_outcomes: Mapping[str, Admission | None]
 
 
 class _MutableModel(BaseModel):
@@ -345,6 +369,25 @@ class Runtime:
 
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self.restore(self.export_state()).advance(now, max_events=max_events)
+
+    def operator_projection(self, now: float, *, max_events: int = 10000) -> OperatorProjection:
+        """One restore and advance, as `project`, read for the operator console."""
+        projected = self.restore(self.export_state())
+        view = projected.advance(now, max_events=max_events)
+        state = projected._state
+        since = view.now - OPERATOR_HISTORY_SECONDS
+        runs = tuple(run for run in view.runs if run.ended_at is None or run.ended_at >= since)
+        return OperatorProjection(
+            current=view.model_copy(update={"runs": runs}),
+            protected_frames={
+                run.run_id: protected for run in runs
+                if (protected := state.runs[run.run_id].scene.protected_frames)
+            },
+            program_outcomes={
+                program.program_id: state.admissions.get(program.activation_id)
+                for program in state.programs.values() if program.ends_at >= since
+            },
+        )
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
@@ -716,7 +759,7 @@ class Runtime:
                 scene_id=r.scene.scene_id, scene_revision=r.scene.revision,
                 started_at=r.started_at, phase=r.phase, participants=r.scene.participants,
                 children=tuple(r.children), finish_requested_at=r.finish_requested_at,
-                ended_at=r.ended_at,
+                ended_at=r.ended_at, program_id=r.program_id, priority=r.priority,
             ) for r in runs),
             contributions=tuple(intents), visible=tuple(winners[k] for k in sorted(winners)),
         )
