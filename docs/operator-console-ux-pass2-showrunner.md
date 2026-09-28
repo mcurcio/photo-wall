@@ -26,7 +26,7 @@ Neither part needs a migration.
 | `force` and `repeat` are never sent | **Confirmed.** The route accepts them (`app.py:80-86`); the form sends three fields (`Showrunner.jsx:364-370`). |
 | Buttons disable silently | **Confirmed.** `Showrunner.jsx:647-650,816,850`; `SceneAuthoring.jsx:101-108,211`. An invalid window count silently becomes 1 (`Showrunner.jsx:652`). |
 | Precedence reads "root order 2, admission 0" | **Confirmed** (`Showrunner.jsx:552-553`; `NowShowingFacet.jsx:52-53`). |
-| Targets are a flat id list with no state | **Confirmed, and copied in both modes** (`SceneAuthoring.jsx:306-323,446-463`). A legacy `:` frame id is listed but can never be targeted (`runtime.py:18`). |
+| Targets are a flat id list with no state | **Confirmed, and copied in both modes** (`SceneAuthoring.jsx:306-323,446-463`). A legacy `:` frame id is listed but can never be targeted (`runtime.py:18`); `TargetPicker` (3A-4) lists it with that reason and it cannot be ticked. |
 | Scenes are write-only | **Confirmed.** `definitions` carries each whole Scene (`app.py:638`), but only ids are listed. There is no delete route or Runtime command (`runtime_store.py:42`). Program start indexes `scenes[program.scene_id]` (`runtime.py:630`). |
 | Runs omit fields; a missed window is not on `/runtime` | **Confirmed.** `RunView` has participants, `started_at` and `finish_requested_at` (`runtime.py:171-182`), and none are rendered. It lacks `program_id`, `priority` and protection. Outcomes stay server-side (`app.py:634-641`). |
 | Media health is fetched but not rendered | **Confirmed.** It is fetched at `useSnapshot.js:91-95` and nothing reads it. Worker, jobs and cache: `media_repository.py:503-507`. Per-Source fields: `:91-95`. |
@@ -56,10 +56,11 @@ flowchart LR
 |---|---|---|
 | `authoring.js` (pure) | `IDENTIFIER_PATTERN`, `idFromName`, `sceneProblems` / `programProblems` / `activationProblems` / `windowProblems` / `sourceProblems` → `[{field, message}]`, `newActivationKey()` | 3A |
 | `showState.js` (pure) | `programState(snapshot, id)`, `runRows(snapshot)` | 3A |
-| `join.js` | `explainPrecedence(runtime, frameId)` on `rankedContributions`; **exports** `LIVE_PHASES` (it replaces `Showrunner.jsx:332-335`) | 3A |
+| `Field.jsx` | `useProblems` (touched and submitted reasons; the summary frozen at submit, first-field focus; `check(list)` takes the problems of the action submitted, since the Programs form has two), `Field`, `IdentityFields`, `ProblemSummary`. Used by the Scene, Program, activation and Source forms | 3A |
+| `join.js` | `explainPrecedence(runtime, frameId)` on `rankedContributions`; **exports** `LIVE_PHASES` (it replaces `Showrunner.jsx:332-335`). Its rendering, `PrecedenceExplanation`, is exported from `NowShowingFacet.jsx` and shared by the Runs Why panel (no new module) | 3A |
 | `health.js` | **exports** `formatAge` and `ageAt` (currently private), the one age formatting | 3A |
 | `ScenePicker.jsx`, `SourcePicker.jsx`, `CycleInput.jsx` | One Scene picker (Programs and activation), one Source picker (both modes, and 3B's Why), one cycle-and-loop input (both modes) | 3A |
-| `TargetPicker.jsx` | Frames grouped by Surface, with health (both modes) | 3A |
+| `TargetPicker.jsx` | Frames grouped by Surface, with health (both modes). Groups are named "Frames on <surface>" and "Frames not on any wall", never "Surface <id>" (R4: no `Surface` label in Showrunner mode). A frame id outside the target rule (§1's legacy `:` id) is listed with that reason and cannot be ticked | 3A |
 | `SourcesRegion.jsx`, `ProgramsRegion.jsx`, `RunsRegion.jsx` | Moved out of `Showrunner.jsx` (902 lines), which becomes the layout shell | 3A |
 | `SceneList.jsx`, `mediaHealth.js`, `MediaPipeline.jsx` | Scene view and edit; the media classifier and panel | 3B |
 
@@ -76,11 +77,11 @@ flowchart LR
 | Aspect | Rule |
 |---|---|
 | `idFromName` | NFKD, drop marks, lowercase, runs outside `a-z0-9` → `-`, trim `-`, cut at 96 (room for the window suffix `-NN`). "Family Evening" → `family-evening`. |
-| One rule | `IDENTIFIER_PATTERN` equals `contracts.models.Identifier`'s pattern; a pytest pins it beside slice 2's `FRAME_ID_PATTERN` pin. |
+| One rule | `contracts/models.py` holds an `IDENTIFIER_PATTERN` constant and builds `Identifier` from it (as `TargetIdentifier` is built from `TARGET_ID_PATTERN`); the console's `IDENTIFIER_PATTERN` equals it, and a pytest in `tests/test_registry.py` compares the two literals beside slice 2's `FRAME_ID_PATTERN` pin. |
 | Shown, editable | "Saved as `family-evening` · Change"; Change reveals an **Id** field (same pattern). A name with no Latin letter or digit (「夕方」) shows it at once: "This name needs a Latin letter or digit for its id; type an id." |
 | Collision | "A Scene called `family-evening` already exists; choose another name." No request. A successful save **clears the form**, so the saved Scene never reads as a collision; Programs likewise. |
 | Edit (3B) | Shows the stored id read-only; never re-derived. The name itself is not stored (slice 2 Question 1). |
-| Activation id | Never shown. `newActivationKey()` = `console-<base36 ms>-<8 hex>`, minted when the draft changes or after a definite outcome, **reused** on retry after "outcome unknown"; Central returns the stored Admission for a known id (`runtime.py:381-382`), so a retry cannot activate twice. |
+| Activation id | Never shown. `newActivationKey()` = `console-<base36 ms>-<8 hex>`, minted when the draft changes or after a definite outcome, **reused** on retry after "outcome unknown"; Central returns the stored Admission for a known id (`runtime.py:381-382`), so a retry cannot activate twice. After an unknown outcome the form says "Changing the form makes this a new activation", because an edit mints a new key. |
 
 ## 6. Reasons, never silent disables (3A)
 
@@ -93,8 +94,8 @@ flowchart LR
 | Form | Reasons |
 |---|---|
 | All | "Enter a name." · the non-Latin reason (§5) · the collision line |
-| Scene | "Choose a Source." · "Choose at least one frame." · "Seconds per cycle must be more than 0." · "Choose media for lobby-left." · "Loading compatible media…" (a state, not "No compatible media") |
-| Program | "Choose a Scene." · "…ends 1 h before it starts." · "That window has already ended; Central would record it as missed." (end ≤ `current.now`) · "Priority must be a whole number." |
+| Scene | "Choose a Source." · "Choose at least one frame." · "Seconds per cycle must be more than 0." · "Choose media for lobby-left." · "Loading compatible media…" (a state, not "No compatible media"; **deferred to 3B-2**, whose file list owns the chooser labels and loading) |
+| Program | The Programs form and the windows helper are one form; the reasons beside its fields follow the action last tried. "Choose a Scene." · "…ends 1 h before it starts." · "That window has already ended; Central would record it as missed." (end ≤ `current.now`) · "Priority must be a whole number." |
 | Windows | "Tick at least one weekday." · "Between 1 and 60 windows." (never silently reset) · "Each window must end before the next starts." (keeps today's no-overlap guarantee under day spacing) · "`morning-show-3` already exists." · "Name too long: `<id>-<n>` must be at most 128 characters." (`contracts/models.py:9`) |
 | Source | Ref pattern · "Connection name is required." · "'Taken until' must be after 'Taken from'." |
 
@@ -104,16 +105,17 @@ Times are entered and shown in the browser's time zone, which is named: "Times i
 
 | Form | Change |
 |---|---|
-| Windows helper | Adds a **Repeat on** weekday mask (every day ticked by default). Window 1 is the entered window; each later one falls on the next ticked day at the same *local* clock times (calendar-day arithmetic, so DST keeps 18:00). Each is a separate Program `<id>-<n>`, never a recurrence rule (R2); a partial failure lists the failed ids. |
-| Source form | Exposes `SourceSpec` fields the API already accepts (`media/models.py:32-40`): **Favourites** (Any / Only / Not → `favorites` null / true / false) and **Taken from / until** (local dates → `captured_from` / `captured_until`). **Albums are not covered**: `SourceSpec` has no album field. |
+| Windows helper | Adds a **Repeat on** weekday mask (every day ticked by default). Window 1 is the entered window; each later one falls on the next ticked day at the same *local* clock times (calendar-day arithmetic, so DST keeps 18:00). Each is a separate Program `<id>-<n>`, never a recurrence rule (R2). A partial failure names the windows as **not confirmed** (a request that failed or did not complete may still have been stored), and trying again sends only the ids the served Programs do not yet list. |
+| Source form | Exposes `SourceSpec` fields the API already accepts (`media/models.py:32-40`): **Favourites** (Any / Only / Not → `favorites` null / true / false) and **Taken from / until** (local dates → `captured_from` / `captured_until`). "Taken until" is **exclusive**: the start of that local day, matching "'Taken until' must be after 'Taken from'" and `SourceSpec`'s strict interval; both fields are hinted. The form clears after a successful save, like Scenes and Programs. **Albums are not covered**: `SourceSpec` has no album field. |
 
 ## 8. What Central adds (read-only; frozen for bead 3A-3)
 
 | Surface | Frozen shape |
 |---|---|
 | `RunView` | Gains **required** `program_id: str \| None` and `priority: int` (from `_Run`; both are constructed only in `_view`). |
-| `Runtime.operator_projection(now) -> OperatorProjection` | One restore and advance (as `project`). Frozen fields: `current: RuntimeView`; `protected_frames: Mapping[run_id, frozenset[str]]` (from `_Run.scene.protected_frames`, `runtime.py:105`; computed **only here**, never in `_view` on the scheduler's hot path); and `program_outcomes: Mapping[program_id, Admission \| None]`, read from `admissions[activation_id]`. The same 24 h read filter applies to Runs and to outcomes (Question 2). **3B adds** `queue: tuple[QueuedView, ...]` (`activation_id`, `scene_id`, `priority`, `force`, `expires_at`). |
+| `Runtime.operator_projection(now, *, max_events=10000) -> OperatorProjection` | One restore and advance (as `project`, with the same `max_events` transition budget). Frozen fields: `current: RuntimeView`; `protected_frames: Mapping[run_id, frozenset[str]]` (from `_Run.scene.protected_frames`, `runtime.py:105`; computed **only here**, never in `_view` on the scheduler's hot path; a served Run that protects no frame is omitted); and `program_outcomes: Mapping[program_id, Admission \| None]`, read from `admissions[activation_id]`. The same 24 h read filter applies to Runs and to outcomes (Question 2). **3B adds** `queue: tuple[QueuedView, ...]` (`activation_id`, `scene_id`, `priority`, `force`, `expires_at`). |
 | `GET /v1/operator/runtime` | Adds `protected_frames` and `program_outcomes` (and, in 3B, `queue`). Existing keys are unchanged. |
+| Rejected `Admission` (review fix cycle 1) | A `protected_frames` or `protection_not_visible` rejection carries `blocking_run_id: str | None` (optional, so stored admissions without it still restore): the root Run whose protection refused it, as Central decided it. The console names that Run from the Admission and no longer re-derives protection from `protected_frames` and participants. |
 
 | Also decided | |
 |---|---|
@@ -137,7 +139,7 @@ stateDiagram-v2
 | upcoming | "Starts in 2 h · Tue 18:00–20:00" | ok |
 | running | "Running since 18:00" | ok |
 | ran | "Ran 18:00–18:00:30 (one cycle, then ended)", or "Cancelled at 19:10" | ok |
-| refused | `protected_frames`: "Did not start: lobby-left was protected by the Run of evening." `protection_not_visible`: "Did not start: it protects lobby-left, but a higher-priority Run of evening covered it." **Protector lookup:** served Runs live at the Program's `starts_at` (started at or before it, not ended before it) whose `protected_frames` (or, for `protection_not_visible`, participants at a higher priority) cover the Program Scene's frames. If none is served (outside the 24 h bound): "…was protected by another Run, no longer listed." | alarm |
+| refused | `protected_frames`: "Did not start: lobby-left was protected by the Run of evening." `protection_not_visible`: "Did not start: it protects lobby-left, but a higher-priority Run of evening covered it." **Protector:** the blocking Run id carried by the rejected Admission (§8), named only when that Run is served. If it is not (outside the 24 h bound): "…was protected by another Run, no longer listed." | alarm |
 | missed | "Missed: its window had ended before Central first scheduled it." | to-do |
 
 **Outages are warm restarts, not misses.** `missed_window` is written only by `set_program` for a window already over (`runtime.py:302`), or before the Runtime's first-ever tick (`runtime.py:447-451`). After an outage, catch-up admits and ends the Run logically, so the row reads "Ran" even though the wall showed nothing. That limit is stated in the row's hint and in §16.
@@ -173,15 +175,16 @@ The Runtime keeps the highest `(priority, root_order, admission_order)` (`runtim
 | Choice | Wire | Stated consequence |
 |---|---|---|
 | Leave it running (default) | `repeat: ignore` | "Not started: evening is already running, left as is." |
-| Restart it | `repeat: restart` | Hint: "Ends the current Run and starts a new one now. A restarted Run has no Program end; it plays until finished" (`runtime.py:417-419`). |
+| Restart it | `repeat: restart` | Hint: "Ends the current Run and starts a new one now. A restarted Run has no Program end" (`runtime.py:417-419`), then, for a looping Scene, that it plays until you Finish or Cancel it, and for a one-cycle (`loop: false`) Scene, that it plays one cycle, then ends. (The first draft's unconditional "it plays until finished" was false for one-cycle Scenes.) |
 | Queue after it (3B) | `repeat: queue`, `expires_at = current.now + 60·N` | "Queued: starts when evening's Run ends **and** no protection blocks it (`runtime.py:658`); gives up at 18:05." The queue is listed under "Waiting to start", with **Withdraw** (Question 6). Queueing is refused with a reason while the last refresh failed, because `current.now` would be stale. |
 | Activate anyway (3B) | new key, `force: true` | Offered only after a `protected_frames` refusal, in `ConfirmAction`: "Overrides protection on lobby-left. At priority 0, below the protecting Run's 5, it is admitted but stays underneath." ([requirements](requirements.md#activation-and-visibility-protection): manual activation does not mean force.) |
 
-| Refusal (only served facts; bead 3A-5 follows the read in 3A-3) | Text |
+| Outcome (only served facts; bead 3A-5 follows the read in 3A-3) | Text |
 |---|---|
-| `protected_frames` | "Not started: lobby-left is protected by the Run of evening." |
+| admitted | "Started: Central admitted a Run of evening." |
+| `protected_frames` | "Not started: lobby-left is protected by the Run of evening." The Run is the one the rejected Admission names (§8). |
 | `protection_not_visible` | "…this Scene protects lobby-left, but evening's Run (priority 5) covers it; use priority at least 5." |
-| `queue_full` / no refreshed snapshot / 5xx or thrown | "…16 activations are already waiting." / the plain reason / "Outcome unknown. Try again; it will not start twice." A 5xx is treated as outcome unknown and **keeps the key** (the write may have committed). A 4xx is a definite refusal. |
+| `queue_full` / no refreshed snapshot / 5xx or thrown | "…16 activations are already waiting." / the plain reason / "Outcome unknown. Try again; it will not start twice." A 5xx is treated as outcome unknown and **keeps the key** (the write may have committed). A 4xx is a definite refusal: "Not started: <error>." |
 
 ## 12. Layout (3A, slice 1 tokens only)
 
@@ -249,10 +252,10 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 
 | Bead | Files | Tests (co-changed / new) |
 |---|---|---|
-| **3A-1 Scene loop + ids + reasons** (tracer) | new `authoring.js`, `CycleInput.jsx`, `SourcePicker.jsx`; `SceneAuthoring.jsx` | "Scene ID" → "Scene name" at `:360,:415,:540`. **Harness:** a new `_schedule_program` helper takes over the Program-form fills at `:571,:614,:654`, so 3A-6's rename touches one place. **Pin:** the shared `SourcePicker` keeps the accessible name `Source` (`:361,:417,:481,:504,:541`). **New:** spaces → derived id; a non-Latin name gets the id field; collision; the frozen summary; the form clears; `loop: true` is sent; the tracer Program. **pytest:** the pattern pin. |
+| **3A-1 Scene loop + ids + reasons** (tracer) | new `authoring.js`, `Field.jsx`, `CycleInput.jsx`, `SourcePicker.jsx`; `SceneAuthoring.jsx`; `contracts/models.py` (`IDENTIFIER_PATTERN`) | "Scene ID" → "Scene name" at `:360,:415,:540`. **Harness:** a new `_schedule_program` helper takes over the Program-form fills at `:571,:614,:654`, so 3A-6's rename touches one place. **Pin:** the shared `SourcePicker` keeps the accessible name `Source` (`:361,:417,:481,:504,:541`). **New:** spaces → derived id; a non-Latin name gets the id field; collision; the frozen summary; the form clears; `loop: true` is sent; the tracer Program. **pytest:** the pattern pin (`tests/test_registry.py`, comparing literals). |
 | **3A-2 Layout** | `index.css`; move out `SourcesRegion`, `ProgramsRegion`, `RunsRegion` | `:164`, `:335` hold. **New:** two columns at 1440; no sideways scroll at 390 (long ids). |
-| **3A-3 Central read** | `runtime.py` (`RunView` fields, `operator_projection`, 24 h bound), `app.py` (`/runtime`) | **pytest:** `program_id` and `priority` are required on `RunView`; `protected_frames` is served only by `operator_projection`; outcomes (set after window, first-tick missed, a warm restart reads admitted, protected refusal); the 24 h filter keeps live and recent Runs and outcomes and drops older ones. |
-| **3A-4 Rows + precedence** | new `showState.js`, `TargetPicker.jsx`; `join.js`, `health.js` (exports), `NowShowingFacet.jsx`, both regions | `:760` rewritten: a missed row appears only for a served `missed_window`, and a warm restart shows "Ran". `:825` adds the confirm; `:829` keeps "No live Runs."; `:887-889` and wall `:185` hold ("priority N"). **Pin:** `TargetPicker` keeps the accessible name `Target frame <id>` (`:363,:364,:418,:419,:482,:514,:542`), and a test asserts health reaches it only through `aria-describedby`, never the name. **New:** refused-Program protector lookup and its no-name fallback; one-cycle wording; admission-order sentence; limit line; picker health and grouping; vanished-target announcement. |
+| **3A-3 Central read** | `runtime.py` (`RunView` fields, `operator_projection`, 24 h bound), `app.py` (`/runtime`) | **pytest** (the /runtime check is a new `tests/test_operator_runtime.py`): `program_id` and `priority` are required on `RunView`; `protected_frames` is served only by `operator_projection`; outcomes (set after window, first-tick missed, a warm restart reads admitted, protected refusal); the 24 h filter keeps live and recent Runs and outcomes and drops older ones. |
+| **3A-4 Rows + precedence** | new `showState.js`, `TargetPicker.jsx`; `join.js`, `health.js` (exports), `NowShowingFacet.jsx`, both regions | `:760` rewritten: a missed row appears only for a served `missed_window`, and a warm restart shows "Ran"; its missed and warm-restart Programs are set up through the Runtime directly (as served facts), since the form now refuses an ended window. `:825` adds the confirm; `:829` keeps "No live Runs."; `:887-889` and wall `:185` hold ("priority N"). **Pin:** `TargetPicker` keeps the accessible name `Target frame <id>` (`:363,:364,:418,:419,:482,:514,:542`), and a test asserts health reaches it only through `aria-describedby`, never the name. **New:** refused-Program protector naming and its no-name fallback; one-cycle wording; admission-order sentence; limit line; picker health and "Frames on <surface>" grouping; an untickable legacy `:` frame; vanished-target announcement. |
 | **3A-5 Activation** | new `ScenePicker.jsx`; `RunsRegion.jsx` | `_activate` (`:720`) no longer fills an id; outcome text at `:752,:757,:790`. **New:** an aborted retry and a 500 retry each reuse the key; restart hint; a protected refusal names the Run. |
 | **3A-6 Windows + Source form** | `ProgramsRegion.jsx`, `SourcesRegion.jsx`, `authoring.js` | "Program ID" → "Program name" changes **only** `_schedule_program`; `:640-676` holds (ids `-1..-3`, daily default). **New:** weekday mask; DST keeps local time; overlap and id-length reasons; a count reason with no reset; favourites and capture window in the body. |
 | **3A-7 Docs** | `runbook.md`; `operator-console-ux-design.md` (J4, §1b "not on any GET"); `module-runtime.md`; ledger; history here | `check_docs.py` |
@@ -300,3 +303,4 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 - 2026-09-28: first draft, written after two console audits. Every claim was checked against the cited lines. It found that the id failure is the path rule, and that new saves silently replace.
 - 2026-09-28, review round 1: two adversarial reviews failed the draft; the design was changed: split into 3A/3B; loop control fixes Programs ending after one cycle; precedence worded as Central's plan with "priority N" and its limits; missed-window copy corrected (outages are warm restarts); `protected_frames` served and refusals use served facts; activation copy fixed (restart outlives window, queue waits for protection, force below priority stays hidden, "at least 5"); non-Latin and stored ids; edit compares after defaults and handles authored 409s; why chain uses the planner's exclusions; shared pickers and exported helpers; frozen problem summary and announced vanished targets; silent states removed; payload bound stated.
 - 2026-09-28, review round 2 (final): `program_outcomes` shares the 24 h read filter (`programs` stays unbounded, as a cost); window-overlap and id-length reasons; refused-Program protector lookup with a fallback and a `protection_not_visible` label; loop overrun by up to one cycle and unbound frames getting no layers stated; a `_schedule_program` test helper and pinned picker names; `protected_frames` computed only in `operator_projection`, with `program_id`/`priority` required; an activation 5xx is outcome unknown and keeps the key.
+- 2026-09-28, slice 3A build (docs bead 3A-7): implementer errata (a)–(i) applied in place (`Field.jsx` and `PrecedenceExplanation` homes; `IDENTIFIER_PATTERN` in contracts and the new `tests/test_operator_runtime.py`; "Frames on <surface>" groups and the untickable legacy frame; `protected_frames` omits Runs protecting nothing; `:760` set up through the Runtime; exclusive "Taken until"; the admitted and 4xx texts; "Loading compatible media…" moved to 3B-2). Review fix cycle 1 decisions recorded: a rejected Admission carries the blocking Run id, so the console no longer re-derives protection; a windows-helper partial failure reads "not confirmed" and retries only missing ids; the "Changing the form makes this a new activation" line; `operator_projection` takes `max_events`. Defect corrected: the Restart hint's "plays until finished" was false for one-cycle Scenes.

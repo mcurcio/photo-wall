@@ -1777,3 +1777,18 @@ doc softenings.
   reasons beside its fields follow the action last tried.
   (i) §6's "Loading compatible media…" state is left to 3B-2, whose file list owns the chooser labels
   and loading.
+- 2026-09-28, console pass 2 slice 3A review fix cycle 1 (docs/operator-console-ux-pass2-showrunner.md
+  §8, FRAME CHANGE): (a) `Admission` gains `blocking_run_id: str | None = None`, the root Run
+  whose protection refused it. `Runtime._protected_conflict` returns `(reason, run_id)`; a
+  rejected activation and a rejected Program window store it, so the activation response and
+  `program_outcomes` serve it. The console names the protector from that served id (the Run
+  looked up in `current.runs`, its frames from `protected_frames`) and falls back to "another Run,
+  no longer listed" when the Run is outside the 24 h window; the JS re-derivation of the refusal
+  rule (`sceneParticipants`, `sceneProtectedFrames`, the old `protectorOf`) is deleted. Admissions
+  stored before the field restore with None; the cost is that a state exported by this version
+  does not restore on an older build (`extra="forbid"`). Refusal wording changes: the no-name
+  fallback no longer lists frames ("its frames were protected by another Run, no longer
+  listed"), and `protection_not_visible` names the covering Run without a frame list.
+  (b) Drift: §8 freezes `Runtime.operator_projection(now)`, but the code (since 3A-3) is
+  `operator_projection(now, *, max_events=10000)`, matching `project`; the restore-and-advance
+  copy is now one `_copy()` shared by `project`, `operator_projection` and `timeline`.

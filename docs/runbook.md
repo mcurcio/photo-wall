@@ -495,13 +495,97 @@ The console has two modes, switched by a top-level **Wall / Showrunner** toggle.
 
 **Showrunner never shows Commissioning (R4).** At show time the Commissioning facet is unreachable — hardware setup (calibration geometry, SDR gain, and the gated color/power areas) lives only in Wall mode. The **only** hardware facts the show layer sees are each Frame's **health badge** — the same label the wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs commissioning" when `calibration_valid` is false: an invalid Frame cannot present, so the showrunner must see that it is not presentable. The badge is **status, not a control** — you read it in Showrunner but you fix it in Wall mode's Commissioning facet.
 
-**Sources.** A Source is a **saved live query** named `name:rev` (e.g. `holiday:1`) — never a downloaded album and never something a Player browses or opens; it is live eligibility re-evaluated centrally. The Sources region lists each Source by its `name:rev` identity and status, with a **Refresh** control per Source that re-runs its saved query (`POST /v1/operator/sources/{ref}/refresh`). To **create a Source**, fill the configuration form — its `name:rev` reference, the private worker **connection**, and the **media kinds** (image, video, or both) — which saves the stored query with `PUT /v1/operator/sources/{ref}` (the `name:rev` reference is path-encoded because it contains a colon). A newly created Source reads **"Awaiting refresh"** until its query is first re-run, then appears with its refresh time. There is deliberately **no** album, "open in Immich," or credential field anywhere in this form (the Immich boundary, design decision D-e in the [console design](operator-console-ux-design.md)); the API key is provisioned into the worker out of band (see [Connecting a real media library, in the README](../README.md#connect-a-real-media-library-immich)).
+The Showrunner lays out in two columns on a wide screen: **Now** (Runs and the "why" panel) and **Library** (Scenes, Programs and Sources); below 1024 px it is one column, Runs first. The wording and states below are owned by the [slice 3 design](operator-console-ux-pass2-showrunner.md); this section is how to use them.
 
-**Scenes.** A Scene is a per-target composition. You author it either against a **live source** (a changing collection whose membership is re-checked centrally) or as **per-Frame authored** choices, where each participating Frame gets a chooser listing **only media compatible with that Frame's profile** — the candidate list is hard-filtered by profile server-side (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible asset cannot be chosen. The Scene and all its per-Frame references **save together in one request** (`PUT /v1/operator/scenes/{id}/authored`); source freshness, membership, and compatibility are re-checked centrally on save. Tiles show the `scene_id` (there is no separate display name on a Scene).
+### Names and ids
 
-**Programs.** A Program binds a Scene to a **single time window** with a **priority** (`PUT /v1/operator/programs/{id}`; `DELETE` removes it). Program times are entered and shown in your browser's local time zone. For repeating shows, an optional client helper POSTs **N discrete windows** — but each is a **real, separately stored Program** you manage and remove individually. There is **no stored recurrence rule**: the helper is a convenience that creates N Programs at once, and no control implies a living recurring schedule (design Q2).
+You **name** Scenes and Programs; the console derives the id Central stores. Accents are dropped, letters are lowercased, every other run of characters becomes `-`, and the id is cut at 96 characters: "Family Evening" is shown as "Saved as `family-evening` · Change". Central keeps only the id (there is no stored display name), so tiles, rows and Runs show ids.
 
-**Runs.** **Activate now** (`POST /v1/operator/activations`) returns a **synchronous** `{status, reason}` (admitted / queued / ignored / rejected / expired), and the console shows exactly that outcome — a queued or ignored request reports its real result and never claims a new Run started. You **finish** or **cancel** a live Run from its controls (`POST /v1/operator/runs/{id}/finish` or `/cancel`). A **"why" panel** ranks a Frame's contributions by the full precedence order (priority, then root order, then admission order) — deterministic, no ties — so you can read *why* a given Scene is the winner on that Frame. The calendar shows **only synchronous activation outcomes**: it does **not** render missed-window history (e.g. `expired: missed_window`), because that reason is not on any operator GET — the honest surface is the outcome shown at the moment you activate.
+Type an id yourself, with **Change** (it reveals an **Id** field), when:
+- the name has no Latin letter or digit — the Id field opens by itself with "This name needs a Latin letter or digit for its id; type an id."; or
+- you want a particular id. An id starts with a letter or digit, then letters, digits, `-`, `_`, `.` or `:`, up to 128 characters.
+
+A name whose id already exists is refused before anything is sent ("A Scene called `family-evening` already exists; choose another name."). A successful save clears the form. **Limit:** the check uses the last refresh, so two operators saving the same new id within a few seconds of each other still end with the later save replacing the earlier one (design Question 4). Activation ids are never shown.
+
+### Every disabled control says why
+
+Forms never disable their button over a problem. A field shows its reason once you have edited it. Pressing the button with problems sends nothing: a summary appears at the top of the form (it stays as it was when you pressed, even as the page refreshes) and focus moves to the first field with a problem. Only a write in flight disables a button. **Finish** on a Run that is already finishing is disabled, and the row's "Finishing: requested 20 s ago" says why.
+
+Target frames are grouped **"Frames on `<surface>`"** and **"Frames not on any wall"**, each with its [health label](#operator-console-wall-health-and-the-attention-strip). A legacy frame id containing `:` (or longer than 96 characters) is listed with the reason no Scene can target it, and cannot be ticked. If a frame you ticked is deleted while you are drafting, it is dropped and announced ("lobby-left was deleted and removed from this Scene.").
+
+### Sources
+
+A Source is a **saved live query** named `name:rev` (e.g. `holiday:1`) — never a downloaded album and never something a Player browses or opens; it is live eligibility re-evaluated centrally. The Sources region lists each Source by its `name:rev` identity and status, with a **Refresh** control per Source that re-runs its saved query (`POST /v1/operator/sources/{ref}/refresh`). A newly created Source reads **"Awaiting refresh"** until its query is first re-run, then shows its refresh time.
+
+To **create a Source**, fill **Source name and revision** (like `holiday:1`), the private worker **Connection name**, and **Media type** (images, video, or both); it saves with `PUT /v1/operator/sources/{ref}` (the reference is path-encoded because it contains a colon). Two optional filters narrow it:
+- **Favourites:** Any, Only favourites, or Not favourites.
+- **Capture window:** **Taken from** and **Taken until** are local dates. The window runs from the start of the "from" day **up to the start of** the "until" day (the "until" day itself is excluded), so "Taken until" must be after "Taken from".
+
+**Albums are not supported:** a Source has no album filter. There is deliberately **no** album, "open in Immich," or credential field anywhere in this form (the Immich boundary, design decision D-e in the [console design](operator-console-ux-design.md)); the API key is provisioned into the worker out of band (see [Connecting a real media library, in the README](../README.md#connect-a-real-media-library-immich)).
+
+### Scenes and "Keep playing until the Program ends"
+
+A Scene is a per-target composition. You author it either against a **live source** (a changing collection whose membership is re-checked centrally) or as **per-Frame authored** choices, where each participating Frame gets a chooser listing **only media compatible with that Frame's profile** — the candidate list is hard-filtered by profile server-side (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible asset cannot be chosen. The Scene and all its per-Frame references **save together in one request** (`PUT /v1/operator/scenes/{id}/authored`); source freshness, membership, and compatibility are re-checked centrally on save. While candidates load, the chooser can still read "No compatible media"; a loading state is later work (design bead 3B-2).
+
+Each Scene has **Seconds per cycle** and **Keep playing until the Program ends**, which is **on by default** for new Scenes (the design's default for its Question 1, pending owner confirmation):
+- **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Activated without a Program, it plays until you Finish or Cancel it.
+- **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run row reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
+
+### Programs and the windows helper
+
+A Program binds a Scene to **one time window** with a **priority** (`PUT /v1/operator/programs/{id}`; `DELETE` removes it). Times are entered and shown in your browser's time zone, which the form names ("Times in Europe/London"); if the browser and the wall are in different zones, that label is the only warning. The form refuses a window that ends before it starts, a window that has already ended (Central would record it as missed), and a priority that is not a whole number.
+
+For repeating shows, **Create separate windows**:
+- **Repeat on** is a weekday mask; every day is ticked by default.
+- **Number of windows** is 1 to 60. A number outside that range is a reason on the field, never silently reset.
+- Window 1 is the window entered above. Each later window falls on the **next ticked day at the same local clock times**, so a daylight-saving change keeps 18:00 at 18:00.
+- Each window is a **real, separately stored Program** `<id>-1`, `<id>-2`, …, which you manage and remove individually. There is **no stored recurrence rule**, and no control implies a living recurring schedule (design Q2).
+- Before sending, the helper refuses if a window id already exists, if `<id>-<n>` would exceed 128 characters, or if windows would overlap ("Each window must end before the next starts." — for example, a window longer than the day spacing).
+- If some windows fail, the status lists them as **not confirmed**: a request that failed or did not complete may still have been stored. Pressing the button again sends only the windows Central does not yet list.
+
+The reasons beside the fields follow whichever action you last tried: scheduling one Program or adding separate windows. Removing a Program that is **running now** asks for confirmation: its Run is asked to finish at the end of its current cycle, after any outro, and later windows stay.
+
+### Reading Program states
+
+Each Program row shows one state, read from what Central served. Times are the Run's, never the window's.
+
+| State | Reads | Means |
+|---|---|---|
+| Upcoming | "Starts in 2 h · Tue 2 Mar 18:00–20:00" | Its window has not started. |
+| Running | "Running since 18:00" | Central admitted its Run and it is live. |
+| Ran | "Ran 18:00–18:00:30 (one cycle, then ended)", or "Cancelled at 19:10" | Its Run ended. "(one cycle, then ended)" marks a Scene with Keep playing off. |
+| Refused (alarm) | "Did not start: lobby-left was protected by the Run of evening." | Another Run protected one of its frames when the window started. The Run named is the one Central recorded as blocking it; if that Run is no longer listed, the row says "another Run, no longer listed". A Scene that protects a frame covered by a higher-priority Run reads "…it protects lobby-left, but a higher-priority Run of evening covered it." |
+| Missed (to-do) | "Missed: its window had ended before Central first scheduled it." | Only two cases: the Program was saved after its window ended, or its window ended before Central's very first scheduler tick. |
+
+**A warm restart is not a miss.** If Central was down during a window, it catches up logically when it comes back: it admits the Run and ends it as the plan would have. The row reads "Ran" even though the wall showed nothing, and the row's hint says so. "Ran" describes Central's plan, never what the panels showed. Past Programs sit under a closed "Past (N)" disclosure. Central serves Runs and outcomes for one day, so older rows read "details older than a day".
+
+### Runs and Central's plan
+
+Live Runs are listed with their child Scenes nested beneath. Each row shows `Scene X` and its revision, where it came from ("Program Y", "activated directly" or "part of Z"), when it started, whether it is Running, "Ending (outro)" or "Finishing", its priority, the frames it protects, and its frames with their health. **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Ended Runs from the last day are under a closed "Recently ended (N)" list.
+
+The **why** panel (and the Frame Inspector's Now-showing facet) states **Central's plan** for one frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
+- a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
+- the same priority: the Run Central **admitted later** is on top. This is admission order, not the Program's start time; Programs starting at the same instant are admitted in Program-id order;
+- the same Run: the later child Scene is on top.
+
+**Its limits are always shown.** If the winner has no usable media for this frame (none eligible, still preparing, or no compatible variant), Central plans the next layer down instead. An unbound frame gets no layers at all. A partly transparent or fading layer shows what is underneath. The panel reports what Central intends; it never says a frame is LIVE or confirms what a panel displays (R2).
+
+### Activating a Scene now
+
+Choose the **Scene to activate** and an **Activation priority**, then choose what happens **If it is already running**:
+- **Leave it running** (default): nothing changes; the outcome reads "Not started: evening is already running, left as is."
+- **Restart it:** ends the current Run and starts a new one now. A restarted Run has **no Program end**. A Scene with Keep playing on plays until you Finish or Cancel it; one with Keep playing off plays one cycle, then ends.
+
+**Activate now** (`POST /v1/operator/activations`) answers synchronously, and the console shows exactly that answer:
+
+| Outcome | Reads | What to do |
+|---|---|---|
+| Admitted | "Started: Central admitted a Run of evening." | Nothing. It is Central's plan, not confirmation from the panels. |
+| Refused by protection | "Not started: lobby-left is protected by the Run of evening." | The Run named is the one Central reported as blocking. Finish or cancel it, or wait until it ends. A Scene that itself protects a frame covered by a higher-priority Run reads "…but evening's Run (priority 5) covers it; use priority at least 5." |
+| Other refusal | "Not started: 16 activations are already waiting.", or "Not started: `<error>`." | Correct the cause and try again. |
+| Outcome unknown | "Outcome unknown. Try again; it will not start twice." | The request failed or Central answered with a server error, so the Run may or may not have started. **Try again unchanged**: the retry reuses the same hidden activation key, and Central answers a known key with its stored result, so it cannot start twice. **Changing the form makes this a new activation** with a new key, as the form reminds you. |
+
+Queueing an activation and overriding protection ("force") are not offered yet (design slice 3B).
 
 ## Tests and local development
 

@@ -59,3 +59,10 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 |---|---|---|---|---|
 | P2-S2 | Safe onboarding (beads 1–6: standing and explicit output chooser, backend rules, ConfirmAction, boot facts, Equipment roster, readable frame ids) | in_progress | 7336afd, 2e5bb19, 25d9501, 0ac87cb, 60d7541, 51f50cb | Beads 1–6 landed. Verifier PASS (pytest 2989 passed, 14 skipped env-gated; browser 108 passed). Review fix cycle 1 in progress. Errata (a)–(f) applied to the spec. |
 | P2-S2-D | Docs — slice 2 (bead 7: runbook onboarding, roster, dialogs, retire/replace/revoke, frame ids; retired-device frontier correction) | in_progress | — | Owner questions 1–7 pending; Question 4 (retire the netboot device row) stated truthfully in the runbook. |
+
+### Pass 2, slice 3A — Showrunner readability
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| P2-S3A | Showrunner readability (beads 3A-1–3A-6: Scene loop, ids and reasons; layout; Central read; rows and precedence; activation; windows and Source form) | in_progress | c9a2505, b918e95, 9c44707, 3e8b29c, 4ea2e31, 1fba0b2; residual test e171caf | Verifier PASS (pytest 2996 passed, 14 skipped env-gated; browser 141 passed; 5 mutation probes red; weekday-evening job walked end to end). Review fix cycle 1 in progress. Errata (a)–(i) applied to the spec. |
+| P2-S3A-D | Docs — slice 3A (bead 3A-7: spec errata and fix-cycle decisions, runbook Showrunner, README summary) | in_progress | — | Owner questions 1–6 pending. Also marks the design's J4/§1b and delivery plan's "not on any operator GET" claims superseded, and documents `operator_projection` and `blocking_run_id` in `module-runtime.md`. |

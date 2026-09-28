@@ -821,7 +821,8 @@ imported by components.
   `GET …/runtime`; activate/finish/cancel wrap in the `useMutate()` hook).**
 - **Acceptance:** activation renders the sync outcome; finish/cancel work; "why"
   ranks deterministically; the calendar does NOT render `missed_window` history
-  (not on any GET — design §5/§6).
+  (not on any GET — design §5/§6). **Superseded (pass 2 slice 3A):** `/runtime` now
+  serves `program_outcomes`; see [pass 2 slice 3, §8](operator-console-ux-pass2-showrunner.md#8-what-central-adds-read-only-frozen-for-bead-3a-3).
 - **Mutation probe:** render an invented `expired: missed_window` history row → a
   test asserting only synchronous activation outcomes appear goes **red**.
 - **Risk:** straight to implement.
