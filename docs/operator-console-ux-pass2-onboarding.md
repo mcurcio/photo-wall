@@ -172,17 +172,29 @@ stateDiagram-v2
   idle --> in_flight: Confirm (enabled only when the typed handle matches, retire only)
   idle --> [*]: Cancel / Esc (focus returns to the opener)
   in_flight --> done: 2xx
-  in_flight --> refused: 4xx with a reason
+  in_flight --> refused: 4xx with a reason (not a conflict)
+  in_flight --> changed: 409 binding_generation_conflict
   in_flight --> unknown: timeout or network error
   done --> [*]: role=status line, focus to the named successor
   refused --> idle: reason in plain words (role=alert)
+  changed --> [*]: "Changed since you opened this. Reopen to review." (terminal; never resent)
   unknown --> [*]: "Central did not answer. Check this after the next refresh."
 ```
 
-- **In flight:** Esc and Cancel are blocked; the dialog's `cancel` event is prevented.
+- **In flight:** Esc and Cancel are blocked.
+  - Preventing `cancel` is not enough: under Chromium's close-watcher rule, a repeated Esc without user activation closes the dialog anyway.
+  - The guard is therefore `closedby="none"` on the dialog while it is in flight, plus a fallback: a `close` event that arrives while in flight re-opens the dialog with `showModal()` and keeps its state.
 - **Already done:** 404 `not_bound` or `unknown_frame` reads "Already done."
 - **Write and refresh are separate:** `useMutate` (`useMutate.js:24-25`) returns the write result even when the post-write refresh fails. That failure shows only as slice 1's "last refresh failed", never as a refusal.
-- **Where focus goes after "done":** retire → the "Retired players" heading; delete → the plan region; unbind → the Frame's output chooser.
+- **Where focus goes after "done":**
+  - retire → the "Retired players" group, which opens so the retired card is visible, with focus on its heading;
+  - delete → the plan region;
+  - unbind → the Frame's output chooser, or the Binding facet heading when the refresh failed or the chooser is not rendered.
+- **"Unbind all" is a sequence, not a batch.**
+  - It makes one fenced write per Frame, in order, each with the generation captured when the dialog opened. A stale generation is never resent.
+  - Each Frame gets its own result: unbound, changed since you opened this, already done, outcome unknown, or not attempted.
+  - Conflicts and "already done" continue to the next Frame; "outcome unknown" stops, and the rest are marked not attempted.
+  - It ends in a terminal "K of N unbound" state that lists each Frame's result.
 
 | Verb | Offered on | Says will happen | Says cannot be undone | Deliberate act |
 |---|---|---|---|---|
@@ -190,14 +202,25 @@ stateDiagram-v2
 | Unbind / Unbind all | Bound Frame; in-service card | Each listed Frame stops being served. Its calibration is kept but marked invalid, so it must be re-commissioned (`registry.py:239`). Its live Runs are listed. The sibling Output's Frame is re-planned (fact 7) | Nothing; you can bind it again | Plain Confirm naming each Frame |
 | Delete frame | Plan and tray | Its placement, profile and calibration are removed. Live Runs are listed: the delete will be refused until they finish | Recreating the id starts uncommissioned | Plain Confirm naming the Frame |
 
-**Retire race, closed structurally.** The route refuses with 409 `player_bound` when the Player has any bound Output (Question 5). It checks inside retire's transaction, under the Player row lock that bind also takes first (`registry.py:197-199`). A bind and a retire therefore serialize, and the dialog's "no bound outputs" can no longer be stale.
-- **What changes:** `registry.retire(player_id, *, refuse_if_bound=False)`; `app.py` passes `True`.
-- **What does not:** store callers keep retire-drops-bindings, which the replacement test exercises (`tests/test_registry.py:216-230`) and which decision 0006 calls a disposable box.
+**Retire race, closed structurally.**
+- **The rule:** `registry.retire` refuses **unconditionally** with 409 `player_bound` when the Player has any bound Output (Question 5). There is no option to turn it off. Its binding-drop statements (`registry.py:299-303`) become unreachable and are deleted.
+- **Why the race closes:** the check runs inside retire's transaction, after the Player row lock (`registry.py:292`), and bind takes the same lock first (`registry.py:198`). A bind and a retire therefore serialize, and the dialog's "no bound outputs" can no longer be stale.
+- **Replacement becomes unbind, then retire:** Bead 2 rewrites every store test that retires a bound Player that way:
+  - `tests/test_registry.py:216-230` (replacement) and `:273-274`;
+  - `tests/test_media_store.py:327,393`;
+  - `tests/test_media_gateway.py:48`;
+  - `tests/test_central_session.py:88` (`setup_players` binds).
+
+  *Cost:* those tests now prove revocation for an unbound Player. "Retire revokes a bound Player's live authority" is gone by construction.
+- **Isolation dependency:** this relies on Postgres READ COMMITTED, which is the default; `db.py:47-52` sets none. There, the bindings check runs as a new statement after the lock wait and sees the committed bind. Under REPEATABLE READ the snapshot would predate the wait, and the race would reopen.
+  - *Guard:* a two-connection pytest in which one connection holds a bind open while retire waits and then must answer 409. It fails if the tests run under REPEATABLE READ.
+  - *Cost:* a server-level `default_transaction_isolation` change in production is not caught at boot. No boot assertion is added (it would touch the shared `db.py`).
 
 ## 8. Readable frame ids (one rule, in `contracts`)
 
 - **`contracts/models.py`** gains `TARGET_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"` and `TargetIdentifier`.
   - `runtime.Target` is composed from it.
+  - The unused `contracts.models.Target` (`{kind, id: Identifier}`, `contracts/models.py:19-24`; no references in the repository) is deleted, so the rule is truly one.
   - `FrameCreate.id` becomes a `TargetIdentifier` (Question 2: it only refuses more).
   - Frames already stored, and the path parameters, stay `Identifier`, so any existing odd id is still readable and deletable.
 - **Console:** `framesApi.js` exports `FRAME_ID_PATTERN`, and a pytest pins it equal to `^` + `TARGET_ID_PATTERN` + `$`.
@@ -215,7 +238,9 @@ stateDiagram-v2
 | Two operators bind the same Output | "Just bound elsewhere" (`registry.py:224`) | Structural (unique key) + test |
 | The chosen option disappears on a poll | The choice is cleared and announced | Test |
 | The Frame changes after the choice or after the dialog opens | Generation conflict (the captured `g`) | Structural (fence) + test |
-| Retire races a bind | 409 `player_bound`, shown as refused | Structural (Player row lock) + pytest |
+| Retire races a bind | 409 `player_bound`, shown as refused | Structural (Player row lock, READ COMMITTED) + two-connection pytest |
+| Frame changed after the dialog opened | "Changed since you opened this. Reopen to review." (terminal) | Structural (fence) + test |
+| "Unbind all" is partly refused, or times out midway | "K of N unbound" with a result for each Frame; nothing resent | Test |
 | Retire is confirmed twice | The second is a no-op 200 (`registry.py:295-296`) | Structural |
 | The write succeeds but the refresh fails | "Done" + "last refresh failed" | Test |
 | The write times out | "Outcome unknown; check after refresh" | Test |
@@ -233,9 +258,9 @@ Bead 1. A two-output Player has HDMI-A-1 bound. The operator opens an unbound Fr
 
 | Bead | Files | Tests in the bead |
 |---|---|---|
-| **1 Standing + chooser** (tracer) | `health.js`, `join.js`, **new** `equipmentApi.js`, `BindingFacet.jsx`, `EquipmentRail.jsx` (imports only) | Replace "Bind pending display" at `test_operator_binding_browser.py:78,120,186,199` and `test_operator_health_browser.py:288`. **Replace the vacuous `:137`** (disabled button) with "the retired Player's Output is not an option". Stabilize `:175-203` with `page.clock` paused: choose, change the server state, click. **New:** the second Output is bindable; the chosen Output is stored; Bind is disabled until a choice is made; a vanished choice is announced; `no-display` and retired Outputs are excluded. |
-| **2 Backend rules** (Python) | `contracts/models.py` (`TARGET_ID_PATTERN`, `TargetIdentifier`); `runtime.py:18` composes it; `registry.py` (`FrameCreate.id`, `retire(…, refuse_if_bound)`); `app.py` retire route | **pytest:** `FrameCreate` refuses `a:b` and 97 characters; `runtime.Target` accepts exactly `frame:` + the same ids; the route returns 409 `player_bound` for a bound Player and leaves it unretired; a pending Player still retires; `registry.retire` still drops bindings by default. |
-| **3 ConfirmAction** | **new** `ConfirmAction.jsx`; `useMutate.js` (the write result is independent of the refresh); `BindingFacet.jsx` (Unbind); `Plan.jsx`, `UnplacedTray.jsx` (Delete); `EquipmentRail.jsx` (Retire, pending only); `index.css` | Add the confirm step at `test_operator_wall_browser.py:428,440,456` (refusals now show inside the dialog, which sits in the plan region) and the typed step at `test_operator_binding_browser.py:125`. **New:** typed gate; Esc blocked in flight; focus successor; "Already done"; outcome unknown (`page.route` abort); refresh failure is not a refusal; unbind stale generation. |
+| **1 Standing + chooser** (tracer) | `health.js`, `join.js`, **new** `equipmentApi.js`, `BindingFacet.jsx`, `EquipmentRail.jsx` (imports only) | Replace "Bind pending display" at `test_operator_binding_browser.py:78,120,186,199` and `test_operator_health_browser.py:288`. **Replace the vacuous `:136`** (disabled button) with "the retired Player's Output is not an option". Stabilize `:175-203` with `page.clock` paused: choose, change the server state, click. **New:** the second Output is bindable; the chosen Output is stored; Bind is disabled until a choice is made; a vanished choice is announced; `no-display` and retired Outputs are excluded. |
+| **2 Backend rules** (Python) | `contracts/models.py` (`TARGET_ID_PATTERN`, `TargetIdentifier`); `runtime.py:18` composes it; delete `contracts.models.Target`; `registry.py` (`FrameCreate.id`; unconditional `player_bound` in `retire`); the store tests listed in §7 rewritten as unbind-then-retire | **pytest:** `FrameCreate` refuses `a:b` and 97 characters; `runtime.Target` accepts exactly `frame:` + the same ids; `retire` of a bound Player returns 409 and leaves it unretired, both through the store and through the route; a pending Player still retires; the two-connection race test. |
+| **3 ConfirmAction** | **new** `ConfirmAction.jsx`; `useMutate.js` (the write result is independent of the refresh); `BindingFacet.jsx` (Unbind); `Plan.jsx`, `UnplacedTray.jsx` (Delete); `EquipmentRail.jsx` (Retire, pending only); `index.css` | Add the confirm step at `test_operator_wall_browser.py:428,440,456` (refusals now show inside the dialog, which sits in the plan region) and the typed step at `test_operator_binding_browser.py:125`. `:129` holds unchanged, because retire opens the Retired group. **New:** typed gate; Esc blocked in flight (a repeated Esc too); focus successor (including the unbind fallback when the refresh fails); conflict is terminal; "Unbind all" per-Frame results with a mid-sequence conflict; "Already done"; outcome unknown (`page.route` abort); refresh failure is not a refusal; unbind stale generation. |
 | **4 Boot facts** | **new** `bootFacts.js`; `App.jsx` (one read, passed down); `health.js` (`bootOutcomeLabel`, handle) | Seed a `devices` row by SQL (as `test_netboot_e2e_wire.py:206-208`): the serial shows in the chooser. A `page.route` 503 → unavailable with serials kept; 401 → no logout; no row → "No netboot record". |
 | **5 Roster** | **new** `EquipmentRoster.jsx` (replaces `EquipmentRail.jsx`); `App.jsx`; `Guidance.jsx:39-43`; `index.css` | `test_operator_binding_browser.py:57,69,82,129,131` hold unchanged (frozen name). **New:** two Outputs with states; Output-first bind opens the Frame via `navigateToFrame`; roster bind stale generation; "Unbind all" lists Frames and Runs; in-service offers no Retire; a dialog survives a regrouping poll; empty states; no sideways scroll at 390 px. |
 | **6 Frame ids** | `framesApi.js`, `Plan.jsx` | `test_operator_wall_browser.py:285` and `:319` fill the id and assert it. **New:** `lobby:left` is refused with no request; a duplicate shows a message. **pytest:** `FRAME_ID_PATTERN` equals the contracts pattern. |
@@ -252,7 +277,9 @@ The `conftest.py` CHECKS keys are unchanged, because no test is renamed.
 | Read the generation from the live snapshot at click time (facet, roster, unbind dialog) | The three stale-generation tests |
 | Keep a vanished choice | Vanished-choice test |
 | Include `no-display` or retired Outputs | Exclusion tests |
-| Drop the `refuse_if_bound` check, or default it `True` | Route 409 pytest; store replacement pytest |
+| Drop the `player_bound` check, or run it before taking the Player lock | Store 409 pytest; two-connection race pytest |
+| Resend "Unbind all" with a refreshed generation after a conflict | Mid-sequence conflict test |
+| Only preventing `cancel` (no `closedby`, no re-open) | Repeated-Esc-in-flight test |
 | Enable Confirm without the typed match | Typed-gate test |
 | Let `useMutate` throw on a refresh failure | Refresh-failure test |
 | Move the dialog into the list row | Regrouping-poll test |
@@ -279,7 +306,7 @@ The `conftest.py` CHECKS keys are unchanged, because no test is renamed.
 - **Question 2:** should `FrameCreate.id` share the Scene-target rule, defined once in `contracts`? Build proceeds on the default: yes (Bead 2).
 - **Question 3:** should retire require typing the handle, rather than the word "retire"? Build proceeds on the default: the handle.
 - **Question 4 (prominent):** should retiring a Player also retire its netboot device row? Today a retired, possibly compromised, Pi's last healthy tag keeps setting the release frontier for every unpinned Pi, and its serial still netboots. That would be a backend write. Build proceeds on the default: not in this slice. The runbook will state it truthfully.
-- **Question 5:** should the retire route add a backward-compatible precondition that refuses (409) when the Player has any bound Output? Build proceeds on the default: yes (Bead 2; pytest plus mutation probe).
+- **Question 5:** should `registry.retire` refuse (409 `player_bound`), unconditionally and for every caller, when the Player has any bound Output? It only refuses more, but it removes the one-step "retire a bound Pi". Replacement becomes unbind, then retire, and six store tests are rewritten that way. Build proceeds on the default: yes (Bead 2; pytest plus mutation probe).
 - **Question 6:** R1 says Players and Outputs are never acted on directly. Should the Output-first bind entry be accepted as an R1-conformant pre-fill (the write still targets the Frame), recorded as a J1 note? Build proceeds on the default: yes.
 - **Question 7:** a replaced panel with a new size or resolution needs an editable Frame profile, and `FramePlacement` has none (`registry.py:60-65`). Should that become a new write? Build proceeds on the default: deferred; the runbook documents deleting the Frame and recreating it with the same id.
 
@@ -293,3 +320,8 @@ The `conftest.py` CHECKS keys are unchanged, because no test is renamed.
   - **Roster and chooser:** stable ordering, shared boot facts and labels, `no-display` and retired Outputs excluded, empty states added.
   - **Refuted, with evidence:** the resolution-mismatch cue, because Players report 0×0 (§2.4).
   - **Confirmed:** stale Output rows survive re-enrollment (§2.5).
+- 2026-09-28, review round 2 (final):
+  - **Retire:** the refusal is unconditional in `registry.retire`, and the store tests are rewritten as unbind-then-retire. The READ COMMITTED dependency is stated, with a race pytest.
+  - **Dialogs:** a generation conflict is terminal. "Unbind all" is sequential, with per-Frame results. Esc is guarded against the close-watcher rule.
+  - **Focus:** successors are fixed, including retire opening the Retired group and the unbind fallback.
+  - **Frame ids:** the unused `contracts.models.Target` is deleted, so there is one id rule.
