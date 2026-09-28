@@ -1,310 +1,337 @@
 # Operator Console Pass 2, Passes C and D: Familiar Look, Progressive Flows
 
 **Date:** 2026-09-28 · **Status:** design-gate artifact, awaiting owner approval.
-**Builds on:** [the approved console design](operator-console-ux-design.md) (R1–R4; Q8: non-blocking guidance, never a gating wizard), [slice 1](operator-console-ux-pass2.md) (`health.js`, attention strip, 5 s poll, write fence), [slice 2](operator-console-ux-pass2-onboarding.md) (roster, `ConfirmAction`, output chooser), [slice 3](operator-console-ux-pass2-showrunner.md) (`Field.jsx`, pickers, media pipeline, why chain) and, concurrently, [pass A](operator-console-ux-pass2-session.md) (cookie sign-in, Log out).
-**Layer:** console module layer: navigation shell, visual tokens, flow mechanics, and which existing component lives in which step. No backend change, no new route, no migration.
-**Size:** 11 beads (9 console, 1 test harness, 1 docs), about 2,100 net production lines (roughly 700 of them CSS) and 1,100 test lines. **This is larger than any earlier pass-2 slice.** §13 offers a smaller first scope.
+**Builds on:** [the approved console design](operator-console-ux-design.md) (R1–R4; Q8: non-blocking guidance, never a gating wizard), [slice 1](operator-console-ux-pass2.md) (`health.js`, the attention strip in the header, 5 s poll, write fence), [slice 2](operator-console-ux-pass2-onboarding.md) (`ConfirmAction`, roster), [slice 3](operator-console-ux-pass2-showrunner.md) (`Field.jsx`, pickers, activation key, revision guard, why chain) and [pass A](operator-console-ux-pass2-session.md) (cookie sign-in, Log out; being implemented now).
+**Layer:** console modules: visual tokens, navigation shell, flow mechanics, and which existing component lives in which step. One backend line (the font MIME type, §5). No route, no migration.
+**Size:** 8 beads (6 console, 1 test harness, 1 docs), about 1,700 net production lines and 1,000 test lines. The Player flow, the Display page, the setup checklist and an icon set are deferred (§14).
 
 ## 1. The problem in plain words
 
 | What the operator meets | Where | Why it overwhelms |
 |---|---|---|
-| Every Showrunner form is open at once: Scene authoring, Program scheduling, Source configuration, activation | `Showrunner.jsx:55-67` mounts all regions together | Before choosing anything, the operator sees about 25 fields and 6 checkbox groups. |
-| One form asks many questions together, the rare ones included | `SceneAuthoring.jsx` (id, name, mode, source, targets, cycle, per-frame media); `ProgramsRegion.jsx:295-400` (id, Scene, window, priority, repeat helper) | Defaults exist, but they read as required decisions. |
-| Two modes, "Wall" and "Showrunner" | `App.jsx:156-187` | They describe the tool, not the job ("add a Player", "make a slideshow"). |
-| First-run help is one sentence in a banner | `Guidance.jsx:39-42` | Nothing tracks which step is done. |
+| Every Showrunner form is open at once: Scene, Program, Source, activation | `Showrunner.jsx:55-67` | Before choosing anything, the operator sees about 25 fields and 6 checkbox groups. |
+| One form asks many questions together, the rare ones included | `SceneAuthoring.jsx:57-64` (mode, name, id, source, targets, cycle, loop); `ProgramsRegion.jsx:295-400` | Defaults exist, but they read as required decisions. |
+| Two modes, "Wall" and "Showrunner" | `App.jsx:156-187` | They name the tool, not the job. |
 | Its own blue-grey palette and system font | `index.css:4-45` | It looks unrelated to the photo library the operator already uses. |
 
 ## 2. Requirements (binding; answers are steers, not rules)
 
-1. **Match the photo library's look and feel** so the two feel cohesive (owner, pass C).
+1. **Match the photo library's look and feel** (owner, pass C).
 2. **Progressive configuration** instead of pages of fields and checkboxes (owner, pass D).
-3. **Leave a slot for a tag picker with autocomplete and media previews** in the Source step. Its backend is not designed here (owner, pass B).
-4. **Neutral library language, no vendor vocabulary.** The UI must say that media lives in the operator's photo library and that this tool only *selects* existing media. It never uploads, edits or owns photos (owner). The existing test `test_sources_have_no_immich_or_album_language` stays.
-5. R1–R4 hold. R4: Display controls are reachable only from the Wall side. Show pages see frame health as status only ([design](operator-console-ux-design.md#2-the-answer-in-one-picture)).
-6. Onboarding never gates the console (Q8, [design §10](operator-console-ux-design.md#10-decisions-that-are-yours)).
-7. CSP is `default-src 'self'; style-src 'self' 'unsafe-inline'` (`central/app.py:375`). Every font and icon is bundled; nothing is fetched from another origin.
-8. Leave room for pass A's sign-in screen and a **Log out** control.
-9. Immich web is AGPL-3.0 ([LICENSE](https://github.com/immich-app/immich/blob/main/LICENSE)). **Reuse design values, never code, markup, logos or assets.**
+3. **A slot in the Source step** for a tag picker with autocomplete and media previews. Its backend is not designed here (owner, pass B).
+4. **Neutral library language.** No vendor vocabulary. The UI says that Photo Wall *selects media that lives in your photo library*: it never uploads, edits or owns photos (owner). `test_sources_have_no_immich_or_album_language` stays.
+5. **R1–R4 hold.** R4: Display controls are reachable only from the Wall side, and Show pages see frame health as status only.
+6. **Onboarding never gates the console** (Q8).
+7. **The attention strip stays in the header** (slice 1 §5 contract).
+8. **CSP** is `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'` (`central/app.py:379`). Everything is bundled, and `data:` URLs are refused.
+9. **Pass A:** a sign-in screen and **Log out**.
+10. **Immich web is AGPL-3.0** ([LICENSE](https://github.com/immich-app/immich/blob/main/LICENSE)). Reuse values, never code, markup, logos or assets.
 
 ## 3. One picture, three rules
 
 ```mermaid
 flowchart LR
-  subgraph TOP["Top bar: menu (under 850 px) · Photo Wall · Central health · updated N s ago + Refresh · [Log out: pass A]"]
+  subgraph HDR["Header: menu (under 850 px) · Photo Wall · Central health · updated N s ago + Refresh · Log out (pass A)"]
+    STRIP["Attention strip (slice 1), unchanged; 'Show all' opens #/attention"]
   end
-  subgraph NAV["Sidebar (16 rem; a drawer under 850 px)"]
-    NOW["Now showing  #/now"]
-    ATT["Needs attention (count)  #/attention"]
-    subgraph SHOW["SHOW (never imports Commissioning)"]
-      SC["Scenes  #/scenes"]
-      SCH["Schedule  #/schedule"]
-      SRC["Photo sources  #/sources"]
+  subgraph NAV["Sidebar 16 rem; a modal drawer under 850 px"]
+    subgraph SHOW["showRoutes: always mounted, hidden when not current"]
+      NOW["Now showing #/now"]
+      SC["Scenes #/scenes"]
+      SCH["Schedule #/schedule"]
+      SRC["Photo sources #/sources"]
     end
-    subgraph WALL["WALL"]
-      PLAN["Wall  #/wall"]
-      EQ["Equipment  #/equipment"]
+    subgraph WALL["wallRoutes: mounted only while current"]
+      PLAN["Wall #/wall/frames/id/facet"]
+      EQ["Equipment #/equipment"]
     end
-    SET["Set up (3 of 7)  #/setup"]
+    subgraph NEU["neutralRoutes"]
+      ATT["Needs attention #/attention"]
+    end
   end
-  SC -->|"New / Edit"| F1["Scene flow: Photos → Frames → Playback → Review"]
-  SCH -->|"New"| F2["Schedule flow: Scene → When → Review"]
-  SRC -->|"New"| F3["Source flow: What to include → Name"]
-  EQ -->|"Set up a Player"| F4["Player flow: Identify → Output → Frame → Confirm"]
-  PLAN -->|"frame → Display"| F5["Display page: Check → Shape → Preview and keep"]
-  ATT -->|"facetFor → route"| PLAN
-  DP[("FlowDraftProvider (Plane B)")] -.-> F1 & F2 & F3 & F4
-  SP[("SnapshotProvider (Plane A, 5 s poll)")] -.-> NAV
+  SC -->|"New / Edit"| F1["Scene flow: Kind → Photos → Frames → Media per frame (hand-picked only) → Playback → Review"]
+  SRC -->|New| F3["Source flow: What to include → Name"]
+  SCH -->|New| F4["Schedule flow: Scene → When → Review"]
+  NOW -->|"Show now"| F5["Show now: Scene → Review"]
 ```
 
 **Design rules.**
-1. **One decision per step.** Everything else is prefilled and sits behind **Advanced**. The Review step lists every value, advanced ones included, so nothing hidden goes unseen.
-2. **A draft belongs to its flow, not to the screen.** Changing step, changing section, a poll, or a sign-in prompt never loses it. Only Save or Discard ends it.
-3. **Moving a control never renames it.** Accessible names and labels carry over unchanged ("Scene name", "Save Scene", region "Runs"), so tests and muscle memory move with the change.
+1. **One decision per step.** Everything else has a stated default (§7) and sits behind **Advanced**. Review lists every value, the advanced ones included.
+2. **A draft belongs to its flow, and a flow never unmounts.** Show sections stay mounted and hidden. A step change, a section change, a poll or an expired session therefore cannot lose a draft. Only Save, Discard, Log out or a reload end it.
+3. **Moving a control never renames it.** Labels and accessible names carry over ("Scene name", "Save Scene", region "Runs"), so tests and muscle memory move with the change.
 
 ## 4. Glossary
 
 | Term | Means | Is not |
 |---|---|---|
-| **Section** | One sidebar destination with its own URL (`#/scenes`) | A mode or a permission |
-| **Flow** | An ordered set of steps that ends in one write (Save, Bind, Keep) | A modal wizard: the sidebar stays usable throughout |
-| **Step** | One screen in a flow asking one question, with its own URL (`#/scenes/new/frames`) | A tab; the order matters |
-| **Summary card** | A read-only card for one saved thing with a one-line summary and actions (Edit, Show now, Schedule, Remove) | A form |
-| **Draft** | Plane B values of one flow instance, keyed `new-scene`, `scene:<id>`, `new-program`, `new-source` or `player:<id>` | Anything sent to Central before Save |
-| **Advanced** | A collapsed disclosure ([APG pattern](https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/)) inside a step, holding values that have safe defaults | Hidden state: its values appear on Review |
+| **Section** | A sidebar destination with its own URL | A mode or a permission |
+| **Flow** | Ordered steps that end in one write (Save, Show now) | A modal wizard: the sidebar stays usable |
+| **Step** | One screen asking one question, with its own URL | A tab; the order matters |
+| **Draft** | Plane B values of one flow instance, keyed `new`, or the stored id for an edit | Anything sent before Save |
+| **Advanced** | A collapsed [disclosure](https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/) holding values that have a stated default | Hidden state: Review shows them |
+| **Summary card** | A read-only card for one saved thing, with actions | A form |
 
 ## 5. Look and feel (pass C)
 
-**Sources checked (2026-09-28):** Immich `main` [web/src/app.css](https://github.com/immich-app/immich/blob/main/web/src/app.css); `@immich/ui` 0.90.0 (MIT, [repo](https://github.com/immich-app/static-pages/tree/main/packages/ui)): [theme/default.css](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/theme/default.css), [styles.js](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/styles.js), [internal/Button.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/internal/Button.svelte), [Card.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/components/Card/Card.svelte), [NavbarItem.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/components/Navbar/NavbarItem.svelte); Immich [Sidebar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/sidebar/Sidebar.svelte), [UserSidebar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/shared-components/side-bar/UserSidebar.svelte) and [NavigationBar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/shared-components/navigation-bar/NavigationBar.svelte). Neutral and gray steps are Tailwind's ([colors](https://tailwindcss.com/docs/colors)). Hex values are converted from oklch (≈).
+**Sources checked (2026-09-28):** Immich `main`: [web/src/app.css](https://github.com/immich-app/immich/blob/main/web/src/app.css), [Sidebar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/sidebar/Sidebar.svelte), [UserSidebar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/shared-components/side-bar/UserSidebar.svelte), [NavigationBar.svelte](https://github.com/immich-app/immich/blob/main/web/src/lib/components/shared-components/navigation-bar/NavigationBar.svelte). `@immich/ui` 0.90.0 (MIT, [repo](https://github.com/immich-app/static-pages/tree/main/packages/ui)): [theme/default.css](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/theme/default.css), [styles.js](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/styles.js), [internal/Button.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/internal/Button.svelte), [Card.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/components/Card/Card.svelte), [NavbarItem.svelte](https://cdn.jsdelivr.net/npm/@immich/ui@0.90.0/dist/components/Navbar/NavbarItem.svelte). Tailwind [colors](https://tailwindcss.com/docs/colors). Hex values are converted from oklch (≈). All ratios below were computed with the WCAG formula.
 
-**Tokens.** The existing token names stay, so no rule outside the token block changes meaning. Values are light / dark.
+**Tokens (light / dark).** The existing token names keep their meaning.
 
-| Our token | New value (light / dark) | Immich source value | Note |
+| Our token | Value | Immich source | Contrast |
 |---|---|---|---|
-| `--accent` | `#4250af` / `#accbfa` | `--immich-ui-primary-500` (dark: `oklch(0.836 0.074 258.58)`); `--immich-primary: 66 80 175` | Contrast 7.0:1 on white, 12:1 on `#0a0a0a` |
-| `--on-accent` | `#ffffff` / `#000000` | `filledColor.primary: bg-primary text-light`; `--immich-ui-light` is white / black | |
-| `--accent-tint` (new) | accent at 10 % | active nav item `bg-primary/10 text-primary` | Also the outline-button fill |
-| `--bg` | `#ffffff` / `#0a0a0a` | `--immich-bg: 255 255 255`; `--immich-dark-bg: 10 10 10` | |
-| `--bg-raised` (cards) | `#fafafa` / `#171717` | Card secondary `bg-light-50 dark:bg-light-100` (neutral-50 / neutral-900) | |
-| `--bg-sunken` (hover, search) | `#f5f5f5` / `#101116` | `--immich-ui-gray` `oklch(97% 0 271)` / `oklch(17.89% 0.0104 276.38)` | Immich calls this `subtle` |
-| `--fg` | `#3d3d3d` / `#dbdbdb` | `--immich-ui-dark` `oklch(36% 0 17)` / `oklch(89% 0 271)` | 10.9:1 and 14.3:1 |
-| `--fg-muted` | `#4b5563` / `#9ca3af` | `textColor.muted: text-gray-600 dark:text-gray-400` | Immich's `--immich-ui-muted` (`#a1a1a1`, 2.6:1) fails AA as text, so it is not used for text |
-| `--border` | `#d4d4d4` / `#262626` | `--immich-ui-default-border` (light-300 / light-200) | |
-| `--input-bg`, `--input-ring` (new) | `#f3f4f6`, `#e5e7eb` / `#1f2937`, `#404040` | `inputContainerCommon: bg-gray-100 ring-1 ring-gray-200 … dark:bg-gray-800 dark:ring-neutral-700` | Focused inputs use `--accent` for the ring |
-| `--alarm` | `#c81c15` / `#f67d7d` | danger-600 (light) / danger-500 (dark) | Light uses 600 because danger-500 is 3.9:1 |
-| `--ok` | `#07702a` / `#48ed98` | success-700 / success-500 | success-500 light is 2.4:1 |
+| `--accent`, `--focus` | `#4250af` / `#accbfa` | `--immich-ui-primary-500`; `--immich-primary: 66 80 175` | 7.0 / 12.0 on `--bg`; 6.7 / 10.8 on `--bg-raised` |
+| `--on-accent` | `#ffffff` / `#000000` | `filledColor.primary: bg-primary text-light` | 7.0 / 12.7 |
+| `--accent-tint` | accent at 10 % | active nav item `bg-primary/10 text-primary` | fill only |
+| `--bg` | `#ffffff` / `#0a0a0a` | `--immich-bg`, `--immich-dark-bg: 10 10 10` | |
+| `--bg-raised` | `#fafafa` / `#171717` | Card `bg-light-50 dark:bg-light-100` | |
+| `--bg-sunken` | `#f5f5f5` / `#101116` | `--immich-ui-gray` (`subtle`) | |
+| `--fg` | `#3d3d3d` / `#dbdbdb` | `--immich-ui-dark` `oklch(36% 0 17)` / `oklch(89% 0 271)` | 10.9 / 14.3 |
+| `--fg-muted` | `#4b5563` / `#9ca3af` | `textColor.muted: text-gray-600 dark:text-gray-400` | 7.2 / 7.1 on raised |
+| `--fg-label` (new) | `#5f6672` / `#d1d5db` | `immich-form-label: font-medium text-gray-500 dark:text-gray-300` (app.css:46-48); light **darkened** from gray-500 (`#6b7280`, 4.39 on `--input-bg`) | light 5.3 / 5.5 / 5.8, dark 10.0 / 12.2 / 13.4 (input / raised / bg) |
+| `--border` | `#d4d4d4` / `#262626` | `--immich-ui-default-border` | decorative only |
+| `--input-bg` | `#f3f4f6` / `#1f2937` | `inputContainerCommon: bg-gray-100 … dark:bg-gray-800` | `--fg` 9.9 / 10.6 |
+| `--input-ring` | `#737373` both | Immich uses `ring-gray-200` / `ring-neutral-700`, which is under 3:1; **darkened for WCAG 1.4.11** | light 4.7 / 4.5 / 4.3, dark 4.2 / 3.8 / 3.1 (bg / raised / input) |
+| `--alarm` + `--on-alarm` | `#c81c15` + `#fff` / `#f67d7d` + `#000` | danger-600 light (500 is 3.9:1) / danger-500 dark | 5.8 / 8.2 |
+| `--ok` | `#07702a` / `#48ed98` | success-700 / success-500 | |
 | `--warn` | `#936400` / `#ffd198` | warning-700 / warning-500 | |
-| `--todo` | `#0a4e8e` / `#7ab7ff` | info-700 / info-500 | A to-do stays blue, never alarm |
-| `--focus` | same as `--accent` | Button `focus-visible:outline-2`, `outline-offset-2` | |
-| `--radius-button` | 12 px | Button medium `rounded-xl` | |
-| `--radius-input` | 8 px | `inputRoundedSize … rounded-lg` | |
-| `--radius-card` | 16 px, plus `shadow-sm` and a 1 px border | Card `round: rounded-2xl`, `shadow-sm`, `border` | |
-| `--radius-pill` | 9999 px, trailing edge only on nav items | NavbarItem `rounded-e-full` | |
-| `--sidebar-w`, `--topbar-h` | 16 rem, 4.5 rem + 4 px | Sidebar `sidebar:w-64`; `--navbar-height: calc(4.5rem + 4px)` | Drawer below `--breakpoint-sidebar: 850px` |
+| `--todo` | `#0a4e8e` / `#7ab7ff` | info-700 / info-500 | |
+| Radii | button 12 px, input 8 px, card 16 px, nav pill on the trailing edge | Button medium `rounded-xl`; `inputRoundedSize rounded-lg`; Card `rounded-2xl shadow-sm border`; NavbarItem `rounded-e-full` | |
+| Layout | sidebar 16 rem; header 4.5 rem + 4 px; drawer under 850 px | `sidebar:w-64`; `--navbar-height`; `--breakpoint-sidebar: 850px` | |
 
-**Components, restyled in our own CSS.**
-- **Buttons:** 14 px medium, padding 8 × 20 px. Filled primary for the one forward action per step. Outline (border plus tint) for secondary actions. Ghost (text, tinted on hover) for card actions. Danger is filled `--alarm`, only inside `ConfirmAction`.
-- **Inputs:** filled `--input-bg`, 1 px ring, 10 × 16 px padding. Labels are medium weight in `--fg-muted` (Immich `immich-form-label`).
-- **Nav item:** 14 px medium, padding 12 px vertical and 20 px leading, 16 px gap, pill on the trailing edge. Active items are tinted and carry `aria-current="page"`. Group labels are small uppercase (Immich `NavbarGroup size="tiny"`).
-- **Cards:** 16 px radius, 16 px padding, a header row with the title and a status chip, a footer row with the actions.
+**Status chips never rely on colour alone.** **Colours:** the chip background is its status colour at 12 % over `--bg-raised`, with the text in `--fg` (8.5–10.8:1) and a 1 px border in the status colour (4.9–12.7:1 against raised). **Text and shape:** every chip starts with its state word ("Alarm", "To do", "OK") and a shape (▲, ■ or ●). **Same rule for markers:** the sidebar's draft marker is the word "Draft" and never a dot alone.
 
-**Typography.** Immich renders a self-hosted Google Sans variable font (`--font-sans: 'GoogleSans'`, `letter-spacing: 0.1px`; added in [PR #25174](https://github.com/immich-app/immich/pull/25174)). Google Sans is published in [google/fonts `ofl/googlesans`](https://github.com/google/fonts/tree/main/ofl/googlesans) under **SIL OFL 1.1** with no Reserved Font Name. Its [TRADEMARKS.md](https://github.com/google/fonts/blob/main/ofl/googlesans/TRADEMARKS.md) says the name may not imply affiliation. We take the font from google/fonts, not from Immich's repository.
-- **Subsetting:** a Latin and Latin-Extended subset, weights 400–700, one WOFF2 file of about 100 KB instead of the 5 MB source. The subset command is recorded beside the file, and `OFL.txt` is committed with it.
-- **Name:** the family is declared as `"Console Sans"`, because a subset is a Modified Version.
-- **Fallback:** `system-ui, sans-serif` with `font-display: swap`.
-- **CSP:** Vite emits the file under `/console/assets/`, which `default-src 'self'` allows. Starlette serves it as `font/woff2` (checked on Python 3.12).
+**Contrast pytest.** It parses the token block in both schemes. Text pairs must be at least 4.5:1: fg, muted and label on bg, raised **and `--input-bg`**; on-accent and on-alarm; the chip text. Non-text pairs must be at least 3:1: the ring against bg, raised and input; focus against bg and raised; each status border against raised.
 
-**Colour scheme.** Follow `prefers-color-scheme`, as today. Immich defaults to the system scheme but also offers a toggle (Question 3).
+**Components, in our own CSS.** **Buttons:** 14 px medium, padding 8 × 20 px. Filled primary for the one forward action per step. Outline (border plus tint) for secondary actions. Ghost for card actions. Danger only inside `ConfirmAction`. **Inputs:** filled `--input-bg` with a 1 px `--input-ring`, turning `--accent` on focus. Labels in `--fg-label`. **Nav items:** 14 px medium, padding 12 px vertical and 20 px leading, trailing pill. The active item is tinted, **semibold, with a 3 px `--accent` bar on its leading edge** (so it is never marked by tint alone), and carries `aria-current="page"`. **Cards:** 16 px radius and padding, header (title and chip), footer (actions).
 
-**Licensing stance.** We copy **values** (colours, sizes, radii, breakpoints). Values are facts, and we express them in our own CSS custom properties. No Svelte, Tailwind utility strings or markup is copied. `@immich/ui` is **not** a dependency (it is Svelte). **No Immich logo, logo colours (`--color-logo-*`) or `dist/assets/*` SVG is used.** The wordmark is plain text, "Photo Wall". Icons are Question 4.
+**Typography.** Immich self-hosts a Google Sans variable font (`--font-sans: 'GoogleSans'`, `letter-spacing: 0.1px`, [PR #25174](https://github.com/immich-app/immich/pull/25174)). Its `@font-face` sets `size-adjust: 106.25%; ascent-override: 106.25%` (app.css:94-101), and we copy those two values. We take the font from [google/fonts `ofl/googlesans`](https://github.com/google/fonts/tree/main/ofl/googlesans) (SIL OFL 1.1), not from Immich.
+- **Subset recipe (recorded beside the file):**
+  1. Pin the GRAD and opsz axes (0 and 18) and keep wght 400–700 (`fonttools varLib.instancer`).
+  2. Subset with `pyftsubset` to Latin-1 and common punctuation, keeping `--name-IDs=0,1,2,3,4,5,6,13,14` so the licence description and URL stay in the file.
+  3. **Rename the family to "Console Sans"** in the subset's name table and in its `fvar` and `STAT` instance names. [TRADEMARKS.md](https://github.com/google/fonts/blob/main/ofl/googlesans/TRADEMARKS.md) limits use of the "Google Sans" mark on modified versions, and a subset is one. After step 2, the name table still reads "Google Sans".
+- **Measured result (this revision):** WOFF2 of **44.8 KB**, or 54.1 KB with Latin Extended-A and B (Question 3).
+- **Shipping:** `OFL.txt` is emitted into `dist/assets/` as a referenced asset beside the font. Fallback is `system-ui, sans-serif` with `font-display: swap`.
+- **Vite:** `build.assetsInlineLimit: 0`, because Vite otherwise inlines small assets (the inline SVGs) as `data:` URLs, which the CSP blocks.
+- **MIME type:** the image is `python:3.12.11-slim-trixie` (`Dockerfile:4`). Python 3.12's built-in table has no `.woff2` entry (`MimeTypes(filenames=())` returns `None`, checked), and `/etc/mime.types` in the image is unverified. So the composition root registers `font/woff2` explicitly, and a test pins the served `Content-Type`. That is a one-line change to `central/app.py`, made after pass A lands.
 
-## 6. Navigation model (pass D)
+**Colour scheme and licensing.** The console follows `prefers-color-scheme`. We copy values only; values are facts, re-expressed as our own custom properties. No Svelte, utility strings or markup is copied, and `@immich/ui` is not a dependency. No logo, logo colour or `dist/assets` file is used. The wordmark is plain text. Five inline SVGs (menu, close, chevron, check, alert) are our own simple paths.
 
-| Section | Route | Contents (existing components, reused) | Side |
+## 6. Navigation, routes and modules
+
+| Section | Route | Contents (existing components) | Table |
 |---|---|---|---|
-| Now showing | `#/now` | Frame-health badges; `RunsRegion` (Runs, "Show now" flow, Why); `MediaPipeline` and `WhyNothingNew` behind "Why nothing new?" | Show |
-| Needs attention | `#/attention` | `AttentionStrip` as a list. Each item links to the route that `facetFor` names (Binding: `#/wall/frames/<id>`; Display: `#/wall/frames/<id>/display`) | Neutral: links only |
-| Scenes | `#/scenes`, `#/scenes/new/<step>`, `#/scenes/<id>/edit/<step>` | `SceneList` as summary cards; the Scene flow | Show |
-| Schedule | `#/schedule`, `#/schedule/new/<step>` | Program cards (upcoming; "Past" collapsed); the Schedule flow | Show |
-| Photo sources | `#/sources`, `#/sources/new/<step>` | Source cards with Refresh; the Source flow | Show |
-| Wall | `#/wall`, `#/wall/frames/<id>`, `#/wall/frames/<id>/display/<step>` | Surface filter, `Plan`, `UnplacedTray`, `Inspector` (Binding and Now showing facets); the Display page | Wall |
-| Equipment | `#/equipment`, `#/equipment/players/<id>/setup/<step>` | `EquipmentRoster` (pending players as "Set up" cards); the Player flow | Wall |
-| Set up | `#/setup` | A checklist derived from the snapshot (replaces `Guidance.jsx`) | Neutral: links only |
+| Now showing | `#/now`, `#/now/show/<step>` | Frame-health badges; `RunsRegion` as Run cards; "Show now" flow; Why and `WhyNothingNew` behind disclosures; `MediaPipeline` | show |
+| Scenes | `#/scenes`, `#/scenes/new/<step>`, `#/scenes/<id>/edit/<step>` | `SceneList` as cards; the Scene flow | show |
+| Schedule | `#/schedule`, `#/schedule/new/<step>` | Program cards ("Past" collapsed); the Schedule flow | show |
+| Photo sources | `#/sources`, `#/sources/new/<step>` | Source cards with Refresh; the Source flow | show |
+| Wall | `#/wall`, `#/wall/frames/<id>/<facet>` (facet: `binding`, `commissioning` or `nowshowing`, the `Inspector.jsx:43-45` keys) | Surface filter, `Plan`, `UnplacedTray`, `Inspector`, `Guidance` (unchanged) | wall |
+| Equipment | `#/equipment` | `EquipmentRoster`, unchanged | wall |
+| Needs attention | `#/attention` | The attention strip's expanded list, full width. Each item links to `#/wall/frames/<id>/<facetFor(...)>` | neutral |
 
-- **R4 moves from mode to route.** The route table is split into `showRoutes` and `wallRoutes`. Only `wallRoutes` imports `Commissioning`, so R4 is still enforced by composition. `useMode` and the Wall/Showrunner toggle are deleted. The existing R4 browser test navigates to every Show route, and a new pytest scans the import graph of Show modules for `Commissioning` (§10).
-- **Routing:** hash routes through a small `useRoute()` hook (about 60 lines, no dependency). Hash routes work at both `/` and `/console` with no Central fallback route. Unknown routes `replace` to the landing route. The landing route is `#/setup` while no frame exists, otherwise `#/now` (Question 5).
-- **Top bar:** the menu button (under 850 px); the text wordmark; the Central health pill; "updated N s ago" and Refresh (unchanged); then a **right-aligned account slot** that pass A fills with **Log out**. Pass A's sign-in screen replaces the shell below `FlowDraftProvider`, so a 401 mid-flow keeps the draft (§8).
+**Frozen surfaces (one page per slice later; bodies are not designed here).**
 
-## 7. The flows, one per job
+| Surface | Signature | Owner |
+|---|---|---|
+| `parseRoute(hash) → Route \| null`, `formatRoute(route) → string` | `Route = {section, id?, flow?: "new"\|"edit"\|"show", step?, facet?}`; pure, with no React | `routes.js` |
+| `useRoute() → {route, navigate(route, {replace?})}` | The only writer of `location.hash`; listens to `hashchange` | `useRoute.js` |
+| `showRoutes`, `wallRoutes`, `neutralRoutes` | `ReadonlyArray<{section, label, render(ctx), samplePaths: string[]}>` | `showRoutes.jsx`, `wallRoutes.jsx`, `neutralRoutes.jsx` |
+| `useFlowDraft(seed) → {key, value, open(key), patch(partial), reseed(), discard(), dirty, baseRevision}` | `seed(key)` returns the initial value: defaults for `new`, the stored record for an edit. `reseed()` re-runs `seed(key)` from the current snapshot and resets `baseRevision` (Reload). **Invariant: one draft per flow.** `open(otherKey)` while `dirty` is refused and returns the open key, so the caller asks first. | `flow/useFlowDraft.js` |
+| `Stepper({steps, current, onStep})`, `Advanced({summary, open, onToggle})`, `SummaryCard({title, chip, lines, actions})` | Presentational | `flow/*` |
+| `FIELD_STEP: Record<fieldKey, stepId>` per flow; `ProblemSummary` gains `onOpen(fieldKey)` | Routes a problem to its step | each flow; `Field.jsx` |
+| `coveringPriority(snapshot, frameIds) → number` | The highest priority among live root Runs covering any of the frames; **0 when none does** | `showState.js` |
 
-Each flow is a step list. Defaults are in brackets. Items marked "Advanced" are collapsed.
+```mermaid
+flowchart TB
+  App --> Shell --> useRoute --> routes
+  Shell --> showRoutes & wallRoutes & neutralRoutes
+  showRoutes --> Flows["SceneFlow, SourceFlow, ScheduleFlow, ShowNowFlow"] --> flowkit["flow/*"] & Regions["Field, pickers, SceneList, RunsRegion, MediaPipeline"]
+  wallRoutes --> Plan & Inspector --> Commissioning
+  neutralRoutes --> AttentionList --> health
+```
 
-**J1 First-run setup** (`#/setup`, non-blocking). A checklist computed from Plane A by a new pure `setupProgress(snapshot)`:
-1. Draw a frame.
-2. Power on a Player.
-3. Assign an output.
-4. Commission the display.
-5. Add a photo source.
-6. Make a Scene.
-7. Show it now or schedule it.
+**R4, with its guarantee stated honestly.**
+- Commissioning is reachable only through `wallRoutes`.
+- **What enforces it (a CI test, not a boot check):** a pytest walks the imports reachable from `showRoutes.jsx` and `neutralRoutes.jsx` and fails if `Commissioning.jsx` or `Inspector.jsx` is among them. A browser test visits every `samplePaths` entry of `showRoutes` and `neutralRoutes` and finds no Commissioning landmark.
+- **Hiding uses the HTML `hidden` attribute, not CSS classes,** so hidden sections leave the accessibility tree and their `role="status"` and `alert` regions are not announced.
+- **Why hidden Show pages do not weaken it:** Wall sections unmount when they are not current. The always-mounted Show sections, hidden when not current, therefore contain no Commissioning DOM.
+- `useMode` and the mode toggle are deleted.
 
-Each row shows done or to-do and links into the owning flow. The sidebar shows "Set up (n of 7)" until the list is complete, then moves the item to the sidebar footer. There is no modal and nothing is blocked (Q8).
+**Hash routing details.**
+- **Skip link:** "Skip to content" is a button that focuses `<main>`. An `href="#main"` link would change the route.
+- **Leaving a draft:** `hashchange` cannot be cancelled, so there is no leave prompt. The draft persists instead, and the section shows "Resume draft (Draft)".
+- **Opening another instance:** an in-app action that opens a different instance (Edit on another card) asks through `useConfirm`. A typed or Back-button URL naming another instance shows "Unsaved draft for X: Resume or Discard" and never replaces the draft silently.
+- **Deep links before the first snapshot:** the route parses at once. Sections show "Loading…", and id routes resolve only after the first snapshot, so there is no premature "no longer exists". Before sign-in, the hash is preserved under pass A's screen.
+- **History:** steps move with `replace`, so each flow is one history entry. The in-flow Back button changes step, and browser Back leaves the flow with the draft kept. Save `replace`s the flow entry with its section, so Back after Save never re-enters a finished flow. *Cost:* browser Back does not step backwards inside a flow.
+- **Landing:** unknown routes `replace` to the landing route: `#/wall` while no frame exists (the Guidance banner is there), otherwise `#/now` (Question 4).
 
-**J2 Add a Player** (`#/equipment`, a pending card, then "Set up"):
-1. **Identify:** boot facts and serial from `bootFacts`, and "Is this the box you powered on?" The claims-not-proof note stays.
-2. **Output:** slice 2's explicit output chooser, with connected outputs first.
-3. **Frame:** choose an unbound frame, or "New frame" (name, then an id derived from it; size [defaults] in Advanced).
-4. **Confirm:** a summary, then Bind through `ConfirmAction`. After it succeeds, the flow offers "Commission the display now".
+**Drawer (under 850 px).**
+- **Element:** a native `<dialog>` opened with `showModal()`, like `ConfirmAction.jsx:85`, so the background is inert and focus stays trapped.
+- **Closing:** Esc closes it and returns focus to the menu button. Choosing a link closes it and focuses the new page's `<h1>` (`tabIndex=-1`).
+- **Other keys:** Enter submits a step's Continue. `prefers-reduced-motion` removes transitions.
+- **Narrow screens (390 px):** the stepper collapses to "Step 2 of 5 · Frames". Back and Continue sit in a sticky footer. Cards are one column. The attention strip keeps its slice 1 layout under the header.
 
-**J3 Commission a display** (`#/wall/frames/<id>/display`, a focused page opened from the Inspector or from J2). This is a page with three steps. It has no flow draft, because a preview lease is live hardware state and cannot be resumed.
-1. **Check:** "Display at last Player start" and frame facts, read-only.
-2. **Shape:** direct handles on the aperture (`useCalibration`). Advanced holds the corner coordinates, crop rectangle, rotation, SDR gain and panel colour correction.
-3. **Preview and keep:** Preview, the lease countdown, then Commit or Revert, all unchanged.
+**Cross-pass: session expiry and Log out (changes pass A's code and its Question 4 default; owner Question 6).**
+- **(a) A 401 while signed in keeps the last snapshot.** Pass A's code clears it today (`useSnapshot.js:135-139`). Only Log out clears the snapshot.
+- **The overlay:** pass A's sign-in screen appears as an **overlay**. The shell gets `hidden` and `inert` but stays mounted, and the poll pauses until sign-in. A first load with no session shows the full screen.
+- **(b) Log out:** the snapshot provider exposes `sessionEpoch`, bumped in `signOut()`. The shell is keyed on it, so Log out remounts the shell and discards every draft.
+- **(c) Prune effects:** flow prune effects are no-ops while the snapshot is `null`, so a missing snapshot never reads as "every frame was deleted".
+- **(d) Ownership:** bead 1b owns the `useSnapshot.js` and `App.jsx` edits, and a browser test forces a 401 mid-flow, signs in again and asserts the Scene draft's targets and per-frame selections survive.
+- **(e) Cost:** after a token rotation, the previous snapshot stays in a hidden DOM until someone signs in. It is not visible, but it is readable through dev tools.
+- **Docs follow-up:** bead D updates `operator-console-ux-pass2-session.md` §7 and Question 4.
 
-Leaving the page with a live preview or an unsaved calibration draft asks through `useConfirm` ("The preview reverts on its own in N s").
+## 7. The flows (defaults have a source)
 
-**J4 Make a slideshow (a Scene)** (`#/scenes/new/...`):
-1. **Photos:** pick an existing Source (`SourcePicker`) or "New selection from your photo library", which runs the J5 steps inline and returns here. The copy reads: "Photos stay in your photo library. Photo Wall only chooses which existing photos and videos to show. It never uploads, edits or deletes them."
-2. **Frames:** `TargetPicker` and `FrameChips`, grouped by Surface.
-3. **Playback:** "Seconds per cycle" (`CycleInput`) [default]. Advanced holds the authoring mode (Live source is the default; "Authored per-frame" with the per-frame candidate choosers and planner standing).
-4. **Review:** a check-answers page ([GOV.UK pattern](https://design-system.service.gov.uk/patterns/check-answers/)) with "Scene name", with "Id" derived from it and editable under Advanced, then **Save Scene**. The next actions are "Show now" and "Schedule it".
+**Mechanics shared by every flow.**
+- **Container:** a flow container per section owns `useFlowDraft` and every draft **effect**, and it never unmounts (rule 2). Steps are views over the draft.
+- **Continue:** validates the current step.
+- **Review:** validates everything. `ProblemSummary` entries route through `FIELD_STEP` to the owning step, and focus reaches the field once that step mounts, through a one-shot focus request like `App.jsx`'s `focusRequest`. A problem inside Advanced opens it first.
+- **Check answers:** Review is a [check-answers page](https://design-system.service.gov.uk/patterns/check-answers/) with "Change" links.
 
-**Edit** on a card opens the same flow at Review, seeded from the stored Scene (the `scene:<id>` draft). Each row has a "Change" link to its step. Save keeps slice 3B's revision guard (409 `scene_revision_conflict`, in words).
+**J4 Make a Scene** (`#/scenes/new/...`). The pilot, and the risky flow.
 
-**J5 Add a photo source** (`#/sources/new/...`):
-1. **What to include:** Media type [Images and video], Favourites [Any], Taken from and Taken until [empty]. **The pass B slot:** this step is composed from a criteria list plus a reserved preview area. Pass B adds a "Tags" field (autocomplete) to the list and fills the preview area. Neither renders anything in this pass.
-2. **Name:** "Source name" [derived from the criteria]. "Connection name" goes under Advanced [the only configured connection].
+| Step | Asks | Default, and its source | Advanced |
+|---|---|---|---|
+| 1 Kind | **"Live from a photo source" or "Hand-picked per frame"**: the first question, because it changes the later steps | Live (`SceneAuthoring.jsx:57`) | — |
+| 2 Photos | Source (`SourcePicker`), or "New selection from your photo library", which runs J5 inline and returns | None: a required choice | — |
+| 3 Frames | `TargetPicker` and `FrameChips` | None: required | — |
+| 3b Media per frame | Hand-picked only: per-frame choosers with the planner's `standing` | None: required per frame | — |
+| 4 Playback | "Seconds per cycle" (`CycleInput`) | 30 s (`SceneAuthoring.jsx:62`) | Loop, on (`:64`) |
+| 5 Review | "Scene name", then **Save Scene** | — | "Id", derived from the name (slice 3 §5) |
+
+**Draft effects move to the flow container:**
+- the vanished-frame prune (`SceneAuthoring.jsx:79-92`);
+- the candidate prune and its `useCandidates` read (`:94-111`).
+
+They run whichever step is showing, and the "was deleted and removed from this Scene" notice appears on the current step and on Review.
+
+**Edit** opens the flow at Review, seeded from the stored Scene. The draft records `baseRevision`. When a poll shows a newer stored revision, Review says "This Scene was changed (revision N) since you opened it", disables Save, and offers **Reload**, which reseeds the draft and names the changed fields. So there is no 409 loop. Central's guard (409 `scene_revision_conflict`) remains the backstop for a change between polls. After Save, the next actions are "Show now" and "Schedule it".
+
+**J5 Add a photo source** (`#/sources/new/...`). The intro reads: "Photo Wall selects media that lives in your photo library. It never uploads, edits or deletes anything there."
+
+| Step | Asks | Default, and its source | Advanced |
+|---|---|---|---|
+| 1 What to include | Media type; Favourites; Taken from and Taken until. **Pass B slot:** a criteria list plus a reserved preview area; pass B adds "Tags" (autocomplete) and fills the previews. Nothing renders in this pass. | Images and video; Any (`SourcesRegion.jsx:157-158`); dates empty | — |
+| 2 Name | "Source name"; **"Connection name"** | Name: none, required. Connection: **visible and required while no Source exists**. When every existing Source's served `spec` has one `connection_ref`, that value is prefilled and the field moves to Advanced. Several values give a visible chooser. | Connection (in the one-value case) |
 
 **J6 Schedule it** (`#/schedule/new/...`):
-1. **Scene:** `ScenePicker` [prefilled when arriving from J4].
-2. **When:** Window start and Window end. Advanced holds the "Repeat on" and "Number of windows" helper ("Add separate windows").
-3. **Review:** Priority is shown and changed under Advanced [default]. Then save.
 
-**J7 See what is showing, and why** (`#/now`): Run summary cards (running, recently ended). "Show now" opens a two-step flow: Scene, then Review (Activation priority and "If it is already running" under Advanced). "Why?" on a frame opens the precedence list, and "Why nothing new?" opens the media chain. Now-showing stays **intent**, never "live" (R2).
+| Step | Asks | Default, and its source | Advanced |
+|---|---|---|---|
+| 1 Scene | `ScenePicker` | Prefilled from J4 | — |
+| 2 When | Window start and Window end | None: required | "Repeat on" and "Number of windows" ("Add separate windows") |
+| 3 Review | Summary and save | Priority 0 (`ProgramsRegion.jsx:117`), shown on Review | Priority |
 
-**J8 Fix a problem** (`#/attention`, count in the sidebar): one row per attention item from `wallAttention`. Each row links to its route: Binding to `#/wall/frames/<id>`, Display to J3, silent Player to the Equipment card, media to "Why nothing new?".
+**J7 Show now** (`#/now/show/...`): Scene, then Review.
 
-## 8. Flow mechanics
+- **Priority default: `coveringPriority`**, the highest priority among live root Runs covering the Scene's target frames, or 0 when none does.
+  - *Why max, not max + 1:* precedence is `(priority, root_order, admission_order)` (`runtime.py:174`), the visible winner needs a strictly greater tuple (`:794`), and `root_order` is the admission sequence, which rises on every admission (`:576,587`). At equal priority the later admission wins, so max already shows the new Run on top.
+  - Review always shows the priority. If the operator lowers it below `coveringPriority`, Advanced opens itself with "At priority P this stays underneath Run R (priority Q) on frames …".
+  - Protection refusals keep slice 3's wording (`RunsRegion.jsx:427-428`).
+- **Activation key:** it lives in the Show-now draft, not in step state. Today it is component state (`RunsRegion.jsx:268-272`). It therefore survives step and section changes and session expiry, and the slice 3B rule holds: an unknown outcome keeps the key, and changing the form makes a new activation.
+- **"If it is already running"**: its current default, shown on Review and changeable under Advanced.
 
-| Concern | Choice | Cost |
+**See what is showing and why** (`#/now`, not a flow): Run cards (running, recently ended). "Why?" on a frame opens the precedence list, and "Why nothing new?" opens the media chain. Now-showing stays intent, never "live" (R2).
+
+**Fix a problem:** the header strip is unchanged. "Show all" opens `#/attention`, and its links carry the facet in the route.
+
+## 8. Designed twice
+
+| | **A (chosen): sections + cards + step flows, Show sections kept mounted** | **B: sections, each page keeps its whole form, rare fields collapsed** |
 |---|---|---|
-| Drafts | A new `FlowDraftProvider` sits between `SnapshotProvider` and the sign-in gate. `useFlowDraft(key, seed)` returns the draft, a patch function and discard. The flow forms keep `useProblems` and `Field`, and only their `useState` cells move into the draft. A section with an open draft shows a "Draft" dot in the sidebar and a "Resume draft" card. | Drafts are kept in memory only, so a reload loses them (Question 6: sessionStorage). |
-| Polling | Unchanged. `SnapshotProvider` sits above the router, and a route change neither mounts nor unmounts the poller. The write fence is unchanged. | None |
-| Step validation | "Continue" validates the current step. Review validates the whole draft. A problem inside Advanced opens it and focuses the field. `ProblemSummary` is unchanged. | A value can be invalid only on Review, never earlier |
-| URL and Back | Every step pushes a history entry, so browser Back returns to the previous step. Going back past the first step returns to the section and keeps the draft. A deep link to a later step with no draft `replace`s to step 1. | History grows by one entry per step |
-| Stale targets | A route to a frame, Scene or Player that is no longer in the snapshot shows "This no longer exists" and a link back. The draft is kept until Discard. | |
-| Keyboard | "Skip to content" link. The sidebar is `<nav aria-label="Console">` with links. The drawer is a button with `aria-expanded`; Esc closes it and returns focus. The stepper is `<ol aria-label="Steps">` with `aria-current="step"`. On step change, focus moves to the step heading (`tabIndex=-1`). Enter submits Continue. `prefers-reduced-motion` removes transitions. | |
-| 390 px | The sidebar becomes a drawer. The stepper collapses to "Step 2 of 4 · Frames". Back and Continue sit in a sticky footer. Cards are one column. The health pill becomes a dot that keeps its accessible name. | |
+| Answers "overwhelming" | Yes: one question per screen, and Review shows the defaults | Partly: fewer visible fields, but the form is still the page |
+| Draft safety | Structural (rule 2) | Structural too, if also kept mounted |
+| New mechanisms | `useRoute`, route tables, `useFlowDraft`, `Stepper`, `Advanced`, `SummaryCard` | `useRoute`, route tables, `Advanced` |
+| Gives up | More clicks for an expert (Review's Change links help); browser Back leaves a flow; hidden Show pages re-render on every poll, as today's Showrunner does | The progressive flow the owner asked for |
 
-## 9. Designed twice
+**Rejected: a global draft store above the router with sections unmounted.** It adds a second Plane B owner, and the prune effects would need a home outside any mounted component. **Rejected: keeping Wall sections mounted too.** That would put Commissioning DOM under Show routes and break R4.
 
-| | **A (chosen): sidebar sections + summary cards + step flows for create and edit** | **B: sidebar sections, each page keeps its full form, rare fields collapsed** |
+## 9. Tests: what breaks and how it moves
+
+There are 149 browser test functions (about 155 cases). 116 call sites use a per-file `_connect` or `_to_showrunner`. Region names ("Scenes", "Programs", "Runs", "Sources") and labels are pinned by rule 3.
+
+**Bead 0 (harness) adds task-level helpers** in `tests/browser/console_tasks.py`:
+- **Section and task helpers:** `go(page, section)`, `author_scene(page, …)`, `add_source(page, …)`, `schedule_program(page, …)`, `show_now(page, …)` and `open_frame(page, frame_id, facet)`.
+- **Sign-in:** built on pass A-2's sign-in helper, which pass A-2 owns.
+- **What they absorb:** the coupling to forms and region names. Tests that are *about* a form keep their direct locators.
+- **Scoping to the visible page:** `visible_page(page)` returns `page.locator("main section:not([hidden])")`. Negative assertions (`to_have_count(0)`) are scoped through it, because Playwright's `get_by_text` counts hidden nodes while `get_by_role` excludes them.
+- **Existing helpers:** `_author_live_scene` and `_schedule_program` already exist (`test_operator_showrunner_browser.py:550,571`) and are promoted.
+
+| Bead | Assertions edited (estimate) | Why |
 |---|---|---|
-| Answers "overwhelming" | Yes. One question per screen, with defaults visible on Review | Partly. Fewer visible fields, but the form is still the page |
-| New mechanism | `FlowDraftProvider`, `useRoute`, `Stepper`, `SummaryCard`, `Advanced` | `useRoute`, `Advanced` |
-| Tests rewritten | About 60 assertion edits (§10) | About 25 |
-| Gives up | More clicks for an expert, which Review's "Change" links partly offset. Extra URL states to test. | The progressive flow the owner asked for |
+| 0 | 0 (about 120 call sites move to helpers) | Mechanical |
+| 1a | 0 | Pure CSS |
+| 1b | about 16 | Mode toggle removed (4 direct "Showrunner" clicks); R4 test generated from `samplePaths`; shell tests. **Negative text checks now also match hidden pages' DOM:** `get_by_text(…).to_have_count(0)` at `test_operator_wall_browser.py:150` and `test_operator_health_browser.py:87,260` (plus a sweep for the same idiom) move to `visible_page(page)` |
+| 2 Scene | about 10 | Form-specific tests: Kind first, Review, Advanced id, Edit at Review |
+| 3 Source | about 4 | Steps; connection rule |
+| 4 Schedule | about 5 | Windows helper under Advanced |
+| 5 Show now | about 7 | Activation as a flow; priority default; Why disclosures |
 
-**Rejected: keep every section mounted and hidden** (to keep drafts for free). It renders every region on every 5 s poll. It would also leave Commissioning DOM under Show routes, which breaks R4's "no DOM" guarantee. **Rejected: a modal first-run wizard.** It contradicts Q8.
+**New tests:** a draft surviving a step change, a section change, a Wall visit, a poll and a 401 overlay; Log out discarding drafts; a Review problem focusing its field on its own step; a stale Edit offering Reload (no 409); `coveringPriority` against a live higher Run; the activation key kept across sections; the landing and unknown-route `replace`; the drawer's focus trap, Esc and link-then-heading focus at 390 px; hidden Show sections announcing no status; the font's `Content-Type` and family name, with no cross-origin or `data:` request; the contrast pytest; the R4 import scan.
 
-## 10. Tests: what breaks and how it moves
+**Mutation probes (each must turn a named test red):** unmount the hidden Show sections (draft test); import `Commissioning` in `showRoutes` (scan); use `max + 1` or `0` for the priority (priority test); regenerate the activation key on a section change (key test); drop the name-table rename (font test).
 
-There are 149 browser test functions (about 155 cases). Five files each define their own `_connect` (`test_operator_{wall,health,binding,commissioning,showrunner}_browser.py`). 116 call sites use `_connect` or `_to_showrunner`, and four tests click "Showrunner" directly.
-
-**Harness strategy.** Bead 0 adds `tests/browser/console_nav.py` and changes no behaviour:
-- **Helpers:** `connect(page, origin)`, `go(page, section)`, `open_flow(page, flow, *, edit=None)`, `to_step(page, name)`, `open_frame(page, frame_id, facet=None)` and `open_display(page, frame_id)`.
-- **Bead 0 wiring:** every test file switches to the helpers while they still drive today's UI, and the suite stays green.
-- **Later beads:** each bead changes only the helper bodies it affects, plus the assertions that are really about the change.
-- **Shared seam with pass A:** `connect` is the one place pass A changes to "sign in", so the two passes do not collide.
-
-| Bead | Tests touched (estimate) | Why |
-|---|---|---|
-| 0 harness | about 149 call sites, 0 assertions | Mechanical switch to the helpers |
-| 1 shell | about 10 assertions (shell 2, mode or R4 4, badges 1, age and Refresh 3) | Mode toggle removed; routes |
-| 2 Source flow | about 6 | The Source form becomes steps |
-| 3 Scene flow | about 20 | "Save Scene" is now on Review; authored choosers moved under Advanced |
-| 4 Schedule flow | about 12 | Windows helper under Advanced |
-| 5 Now showing | about 10 | Activation is a flow; Why is behind a disclosure |
-| 6 Player flow | about 8 | Pending players open a flow; the Binding facet is unchanged |
-| 7 Display page | about 6 (15 go through `open_display`) | The facet becomes a page; labels are kept |
-| 8 Setup and attention | about 8 | `Guidance` is replaced; attention links are routes |
-
-**New tests:** Back and forward across steps; a draft surviving a section change, a poll and a forced 401; Review lists the Advanced values; the landing redirect; the drawer at 390 px (focus and Esc); the font file served as `font/woff2` and no request to another origin; a token contrast check (pytest over `index.css`); the R4 import scan. **Mutation probes:** drop the provider's key from the draft (the draft-survives test goes red); import `Commissioning` in a Show route (the scan goes red); make `useRoute` use `replace` for steps (the Back test goes red).
-
-## 11. What can go wrong
+## 10. What can go wrong
 
 | Failure | What the operator sees | Guarantee |
 |---|---|---|
-| Reload mid-flow | The draft is lost | None (in memory only; Question 6) |
-| Saving an edit someone else changed | "Changed since you opened this" | Central 409 revision guard (construction-time, server) |
-| Poll lands mid-step | Nothing is lost | Structural: Plane A and Plane B are separate providers |
-| Session expires mid-flow (pass A) | Sign-in screen, then back to the step with the draft | Structural: the provider is above the gate |
-| An Advanced value is invalid | Review opens Advanced and focuses the field | Test |
-| Leaving the Display page during a preview | A confirm; if the operator leaves anyway, the lease reverts on Central | Central lease expiry (existing) |
-| The font fails to load | System font | CSS fallback |
-| Commissioning leaks into a Show route | Nothing: the scan fails CI | Boot and CI: import scan plus browser test |
-| Unknown or stale route | The landing page, or "This no longer exists" | Test |
+| Reload mid-flow | The draft is lost | None (memory only; Question 5) |
+| A stored Scene changed under an Edit | "Changed since you opened it", then Reload | Poll comparison, plus Central's 409 guard (server) |
+| A poll, a section change or a session expiry mid-flow | Nothing is lost | Structural: the flow container never unmounts; the overlay hides without unmounting |
+| A frame or candidate vanishes mid-flow | A notice; the value is pruned on every step | Flow-level effect, plus a test |
+| An Advanced value is invalid | Review opens it on its step and focuses the field | Test |
+| Show now at a priority below a covering Run | Advanced opens with the explanation | Test |
+| Commissioning reachable from a Show route | CI fails | Test (import scan plus browser), not boot |
+| The font is refused (MIME type, CSP) | System font | CSS fallback; `Content-Type` test |
+| An unknown or stale route | The landing page, or "This no longer exists" once the snapshot is loaded | Test |
 
-## 12. Tracer bullet (bead 1)
+## 11. Tracer bullet
 
-Tokens, the self-hosted font and the sidebar shell. Hash routes mount the **existing** regions, unchanged, one per section. The Show pages temporarily keep today's forms. Because forms no longer share one page, an in-progress Scene form is lost when the operator switches to Schedule. That was also true of today's mode toggle; beads 2–5 remove it.
+**Bead 1a (pure CSS):** tokens, font and component restyle, on today's layout. It proves the font loads under the CSP with the right MIME type, both schemes pass the contrast pytest, and nothing behavioural changes. The browser suite is untouched.
 
-**It proves:**
-- The font loads under the CSP.
-- Both schemes pass AA.
-- Back and forward work between sections.
-- The drawer works at 390 px.
-- The poll survives navigation.
-- R4 holds by routes.
-- The pass A account slot exists.
+**Bead 1b:** the sidebar, the three route tables, the drawer and `#/attention`. The regions are mounted unchanged, with Show sections kept mounted. It proves Back and forward between sections, the poll across navigation, R4 by routes, and that a draft in today's Scene form survives a Wall visit.
 
-**Not in it:** flows, cards, drafts or icons.
+**Not in the tracer:** flows and cards.
 
-## 13. Beads
+## 12. Beads
 
-Every bead lands green. Each ends with one full verify (pytest, ruff, `check_docs.py`, browser suite).
+Every bead lands green, with one full verify each (pytest, ruff, `check_docs.py`, browser suite).
 
-| # | Bead | Main files | Prod / test lines (approx.) |
+| # | Bead | Main files | Prod / test lines |
 |---|---|---|---|
-| 0 | Test harness: `console_nav.py`, tests switched over, no UI change | tests/browser/* | 0 / 250 |
-| 1 | **Tracer:** tokens, font, top bar, sidebar, `useRoute`, sections mounting existing regions, R4 by route, account slot | `index.css`, `App.jsx`, new `Shell.jsx`, `routes.js`, font asset | 650 / 120 |
-| 2 | Flow kit (`FlowDraftProvider`, `Stepper`, `Advanced`, `SummaryCard`, leave guard) + J5 Source flow, pass B slot | new `flow/*`, `SourcesRegion.jsx` | 380 / 130 |
-| 3 | J4 Scene flow: create and Edit at Review, Scene cards | `SceneAuthoring.jsx` split into steps, `SceneList.jsx` | 300 / 160 |
-| 4 | J6 Schedule flow, Program cards | `ProgramsRegion.jsx` | 180 / 100 |
-| 5 | J7 Now showing: Run cards, "Show now" flow, Why and "Why nothing new?" disclosures | `RunsRegion.jsx`, `MediaPipeline.jsx` | 160 / 90 |
-| 6 | J2 Player flow from Equipment | `EquipmentRoster.jsx`, `BindingFacet.jsx` (chooser reused) | 150 / 90 |
-| 7 | J3 Display page with steps and leave guard | `Commissioning.jsx` (split into steps), `Inspector.jsx` | 120 / 70 |
-| 8 | J1 Set up checklist (`setupProgress`), J8 attention routes, `Guidance.jsx` deleted | new `setup.js`, `AttentionStrip.jsx` | 140 / 90 |
-| 9 | Icons (only if Question 4 is yes) | nav, cards | 60 / 10 |
-| D | Docs: runbook sections by job, README, `architecture.md` console section, ledger | docs/* | — |
+| 0 | Task-level test harness (after pass A-2's sign-in helper) | tests/browser/* | 0 / 300 |
+| 1a | Tokens, font subset and licence, component restyle, `assetsInlineLimit: 0`, `font/woff2` registration | `index.css`, font asset, `vite.config.js`, `app.py` (one line) | 250 / 80 |
+| 1b | Header, sidebar, drawer, `routes.js`, `useRoute`, three route tables, `#/attention`, facet in URL, R4 scan; `useMode` deleted | new `Shell.jsx` and route modules; `App.jsx`, `Inspector.jsx` | 450 / 150 |
+| 2 | **Scene flow (pilot)** with the flow kit (`useFlowDraft`, `Stepper`, `Advanced`, `SummaryCard`, problem routing), Scene cards, Edit at Review with `baseRevision` | new `flow/*`, `SceneFlow.jsx`; `SceneAuthoring.jsx` split into steps; `SceneList.jsx`; `Field.jsx` | 500 / 200 |
+| 3 | Source flow, pass B slot, neutral wording, connection rule | `SourcesRegion.jsx` | 150 / 80 |
+| 4 | Schedule flow, Program cards | `ProgramsRegion.jsx` | 150 / 90 |
+| 5 | Show now: `coveringPriority`, key in the draft, Run cards, Why disclosures | `RunsRegion.jsx`, `showState.js`, `MediaPipeline.jsx` | 180 / 100 |
+| D | Docs: runbook by job, README, `architecture.md` console section, pass A doc follow-up (§6), ledger | docs/* | — |
 
-**Smaller first scope, if preferred:** beads 0–2 are pass C plus one proven flow, about 1,030 production lines. Stop there, look at it, then approve beads 3–8.
+## 13. Costs
 
-## 14. Costs, deferrals and questions
+More clicks for an expert; browser Back leaves a flow; hidden Show pages render on every poll (as today); about 42 assertion edits; a 45 KB font; a one-line backend change. Our light-mode status colours and our input ring are darker than Immich's, for AA. The domain nouns (Scene, Program, Run, Frame) stay; the mode names go.
 
-**Costs:**
-- More clicks for an expert who wants one dense page.
-- Two new Plane B mechanisms: routes and flow drafts.
-- About 60 test assertions rewritten.
-- A 100 KB font.
-- The copy renames the modes and sections ("Wall", "Showrunner"). The domain nouns (Scene, Program, Run, Frame) stay.
-- Immich's light-mode status 500 steps are replaced by darker steps for AA, so our light mode is slightly deeper than Immich's.
+## 14. Deferrals and questions
 
-**Deferred:**
-- Tag picker, previews and their backend (pass B).
-- A theme toggle (Question 3).
-- Persisted drafts (Question 6).
-- A Central fallback route for path-style URLs.
+**Deferred to a later pass, with constraints recorded now:**
+- **Player setup flow.** A frame-create-then-bind partial failure must be designed: the frame is created and the bind fails, and the operator is left with an unbound frame plus a retry of the bind only.
+- **Frame profile.** No default can come from the Output: production Players enroll every connector at `width_px=0, height_px=0` (`player/output_discovery.py:59-60`). The profile must stay a visible, required choice with common presets. The `Plan.jsx:80` 1920×1080 default is unchanged in this pass.
+- **Display page** (a stepped Commissioning page with a leave guard).
+- **Setup checklist.**
+- **Icon set:** only five inline SVGs this pass, and no `@mdi/js`.
+- **Pass B:** the tag picker, previews and their backend.
+- **Theme toggle.**
 
 **Questions (the default is used if there is no answer):**
-1. **Nav labels:** "Scenes" or "Slideshows"? *Default: Scenes.* It matches the domain, the runbook and the tests. "Slideshow" appears only in hints.
-2. **Scope:** all beads, or beads 0–2 first? *Default: 0–2 first* (§13).
-3. **Theme toggle** like Immich's? *Default: no.* Follow the system scheme.
-4. **Icons:** bundle `@mdi/js` (Apache-2.0, the set Immich's sidebar uses; paths tree-shaken) for nav and card icons? *Default: yes, as bead 9.* With no icons the shell is text-only and still complete.
-5. **Landing:** `#/setup` until the first frame exists, then `#/now`? *Default: yes.*
-6. **Keep drafts across reload** in `sessionStorage` (per tab, never secrets, cleared on Log out)? *Default: no* (in memory only).
-7. **Font:** Google Sans subset (closest to Immich), or the system font only? *Default: Google Sans subset.*
+1. **Nav label: "Scenes" or "Slideshows"?** Build proceeds on the default: **Scenes** (domain, runbook, tests). "Slideshow" appears only in hints.
+2. **Browser Back inside a flow:** leave the flow (steps use `replace`), or step back (push)? Build proceeds on the default: **leave the flow, keeping the draft.**
+3. **Font subset: Latin-1 (44.8 KB) or Latin Extended (54.1 KB)?** Build proceeds on the default: **Latin-1**. Other characters fall back to the system font.
+4. **Landing:** `#/wall` until a frame exists, then `#/now`? Build proceeds on the default: **yes**.
+5. **Keep drafts across a reload** in `sessionStorage` (per tab, cleared on Log out)? Build proceeds on the default: **no** (memory only).
+6. **Session expiry: the sign-in overlay keeps drafts** (overturns pass A's Question 4 default, "drafts are lost"; costs §6 (e)). Build proceeds on the default: **overlay keeps drafts.**
 
 ## History
 
-- 2026-09-28: first draft (passes C and D). Immich tokens were read from `main` `web/src/app.css` and `@immich/ui` 0.90.0. The font license was checked in google/fonts. The component inventory and test counts were read from the branch `claude/console-ux-pass2` at `8b93ecc`.
+- 2026-09-28: first draft (passes C and D).
+- 2026-09-28, revision 1: two adversarial reviews (UX; licence and accessibility) failed the draft, and the design was changed. Scope cut to beads 0, 1a, 1b, 2–5 and D (Player flow, Display page, setup checklist and `@mdi/js` deferred). Show sections stay mounted, drafts and prune effects sit at flow level, Review problems route to their step, and Edits keep `baseRevision` with Reload. Show now defaults to `coveringPriority` (tie rule checked in `runtime.py`) and holds its activation key in the draft. Kind is the Scene flow's first question. The attention strip stays in the header. R4 rests on three route tables, a scan and generated visits, stated as a test. Hash-routing edge cases, a modal `<dialog>` drawer, frozen signatures and a module DAG were added. A sign-in overlay keeps drafts and Log out discards them (pass A follow-up). The look gained a `#737373` input ring, `--on-alarm`, chips with text and shape, `--fg-label` (citation corrected) and non-text contrast checks. The font subset keeps name IDs 13 and 14, is renamed, copies Immich's metric overrides and measures 44.8 KB. The build sets `assetsInlineLimit: 0` and registers `font/woff2` explicitly.
+- 2026-09-28, revision 2 (final): the design now matches pass A's code for session expiry: a 401 keeps the snapshot, `sessionEpoch` is bumped on Log out, prune effects are no-ops without a snapshot, bead 1b owns the change and its overlay test, and the rotation cost is stated. Question 6 added for the overlay. `--fg-label` darkened to `#5f6672`. The `hidden` attribute specified. The 1b test estimate revised for hidden-page text matches, with `visible_page`. `useFlowDraft.reseed` and the one-draft invariant added. `coveringPriority` returns 0. The active nav item gains weight and a bar. The CSP quote corrected.

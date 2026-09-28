@@ -7,6 +7,7 @@ Pass 2, slice 2 (safe onboarding; design-gate artifact, awaiting owner approval)
 Pass 2, slice 3 (Showrunner readability; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-showrunner.md](operator-console-ux-pass2-showrunner.md).
 Pass 2, pass A (stay signed in: session cookie, Log out; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-session.md](operator-console-ux-pass2-session.md).
 Pass 2, passes C+D (familiar look and progressive flows: library-matched tokens, sidebar sections, step flows; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-flow.md](operator-console-ux-pass2-flow.md).
+Pass 2, pass B (library tag filter, tag suggestions and previews; a Source is one library query shape; design-gate artifact, awaiting owner approval, adversarial review not yet run): [operator-console-ux-pass2-library.md](operator-console-ux-pass2-library.md).
 Running PR: https://github.com/mcurcio/photo-wall/pull/11 (draft; update its bead table as beads land).
 Backend track uses isolated worktrees on Postgres :54332; main/frontend on :54331.
 **STATUS: DELIVERY COMPLETE (DONE-GREEN 2026-09-14).** / serves the React console; legacy page retired. Final gate: test_local.py 1122 passed/59 skipped, tests/browser 55 passed. Open residual: dedupe-calibration-defaults (low). PR #11.
