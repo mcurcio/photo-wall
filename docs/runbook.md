@@ -365,11 +365,14 @@ The operator console edits the wall plan through two admin-authenticated routes 
 
 ## Operator console: signing in and Log out
 
-The design, its protocol and its failure table are owned by [pass A](operator-console-ux-pass2-session.md).
+The design, its protocol and its failure table are owned by [pass A](operator-console-ux-pass2-session.md); what happens to unsaved work is owned by [passes C and D §6](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules).
 
-**Sign in once per browser.** The console opens on a sign-in screen. Paste `PHOTO_WALL_ADMIN_TOKEN` and press **Sign in**. Central sets an `HttpOnly` session cookie that lasts 30 days from sign-in; reloads and new tabs in that browser stay signed in. The token is never stored in the browser. The cookie holds only an expiry, the address you signed in at and a signature. When the 30 days end, the next refresh (within 5 s) shows the sign-in screen again.
+**Sign in once per browser.** With no session, the console opens on **Sign in to Photo Wall**. Paste `PHOTO_WALL_ADMIN_TOKEN` into **Operator token** and press **Sign in**. Central sets an `HttpOnly` session cookie that lasts 30 days from sign-in; reloads and new tabs in that browser stay signed in. The token is never stored in the browser. The cookie holds only an expiry, the address you signed in at and a signature. A console address you opened before signing in (for example `…/#/scenes`) is kept and shown once the first snapshot has loaded.
 
-**Log out** (in the header) ends the sign-in in this browser only. A cookie copied from this browser keeps working until it expires. To sign out every browser, change the token (below).
+**When the session ends, your unsaved work is kept.** When the 30 days end or the token changes, the next refresh (within 5 s) signs the tab out, and the same sign-in dialog opens over the console. It reads "Signed out: the session expired or the token changed. Sign in again." and "Your unsaved work is kept until you sign in again." The console behind it is hidden and inert but kept as it was: the last snapshot and every unsaved draft (a Scene in progress, a Show now awaiting a retry) stay, and the refresh pauses. The dialog cannot be dismissed, and it sits above any confirmation that was open. Signing in closes it and puts focus back where it was. A write refused with 401 in the meantime says so; Show now reads "Not started: the session ended. Sign in again, then activate." and keeps its draft.
+- *Cost:* until someone signs in again, the previous snapshot stays in the hidden page. It is not shown, but it can be read through the browser's developer tools, including after a token rotation. Log out (below) clears it.
+
+**Log out** (in the header) ends the sign-in in this browser only. It also **discards every unsaved draft in this tab**, without asking, and clears the snapshot: the console starts empty behind the sign-in screen. Save or discard what you are doing first. A cookie copied from this browser keeps working until it expires. To sign out every browser, change the token (below).
 
 **Changing the admin token.** Change `PHOTO_WALL_ADMIN_TOKEN` in `.env` (or the deployment secret) and restart every Central process.
 - Every browser is signed out within 5 s and must sign in with the new token. This is the only "log out everywhere".
@@ -394,21 +397,51 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 - **No HSTS.** Central does not pin the host to https, so a first visit over http can be downgraded. Prefer https; over http the cookie also crosses the LAN in clear text.
 - **A forced sign-out is possible.** Another site under the same domain, or another port on the same host, can plant a cookie of the same name. Without the token it can only make you sign in again; it cannot sign in as you.
 
+## Operator console: sections, links and drafts
+
+The console is one page: a header (Central's health, the snapshot age with **Refresh**, **Log out**, and the [attention strip](#operator-console-wall-health-and-the-attention-strip)) and a sidebar of sections. Under 850 px wide the sidebar is a drawer behind **Menu**. Each section, and each step of a flow, has its own address after `#`, so you can bookmark it, type it or send it to someone signed in to the same Central. The design is owned by [passes C and D](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules).
+
+| Section | Addresses | For |
+|---|---|---|
+| **Now showing** | `#/now`; Show now: `#/now/show/scene`, `#/now/show/review` | What each frame is meant to show, [Show now](#now-showing-show-a-scene-now), Run cards, and why a frame shows what it does. |
+| **Scenes** | `#/scenes`; `#/scenes/new/<step>`; `#/scenes/<id>/edit/<step>` | [Making and editing Scenes](#scenes-make-a-scene-step-by-step). Steps: `kind`, `photos`, `frames`, `media` (hand-picked only), `playback`, `review`. |
+| **Schedule** | `#/schedule`; `#/schedule/new/<step>` | [Programs](#schedule-a-program-step-by-step). Steps: `scene`, `when`, `review`. |
+| **Photo sources** | `#/sources`; `#/sources/new/<step>` | [Sources](#photo-sources-add-a-source). Steps: `include`, `name`, `review`. |
+| **Wall** | `#/wall`; a frame: `#/wall/frames/<id>/<facet>`, facet `binding`, `commissioning` or `nowshowing` | The plan, the Unplaced tray, the first-run guidance and the Frame Inspector. |
+| **Equipment** | `#/equipment` | The [Equipment roster](#the-equipment-roster). |
+| **Needs attention** | `#/attention` | Every frame that needs you, each linked to the facet that shows why. |
+
+**Show and Wall are organization, not permission.** There is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Display controls ([Commissioning](#operator-console-commissioning-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
+
+**Where an address leads.**
+- An address the console does not know goes to the Wall while no frame exists (its first-run guidance is there), and to Now showing once one does.
+- Pages read "Loading…" until the first snapshot. An address naming a frame or Scene that no longer exists then says so ("Frame lobby-left: This no longer exists.", "Scene evening: This Scene no longer exists.").
+- An address naming a step that does not exist, or does not apply (`media` for a live Scene), opens the step the draft last showed, or its first step. An address may skip ahead; the steps it skipped are not ticked in the stepper.
+- On the Wall, choosing a frame or a facet updates the address in place, and a frame reached by an address (typed, Back, or a link from the strip, the roster or Needs attention) shows its Surface.
+
+**Drafts.** Each flow (a Scene, a Program, a Source, Show now) holds one unsaved draft. It survives moving between steps, going to another section (the Wall included), a refresh, and a session that ends (above). A section holding one is marked "Draft" in the sidebar and offers **Resume draft (Draft)** and **Discard draft** in place of its New button. Only saving (or Activate now with a known outcome), Discard, Log out or reloading the page ends a draft. **A reload loses every draft**: drafts live only in this tab's memory (flow design Question 5, built on its default).
+
+**Back and Forward.** A flow is one history entry: its steps replace each other, so browser **Back leaves the flow and keeps the draft**; it does not go to the previous step. Use the flow's own **Back** button, or an earlier step in the stepper, for that. After a save, Back never re-enters the finished flow; a save that lands after you went elsewhere leaves you where you are.
+
+**Opening another draft.** **Edit** on another Scene's card while your draft has changes asks you to discard it first. An address typed, or reached with Back, that names another Scene never replaces your draft: the page reads, for example, "Unsaved draft for a new Scene: Resume or Discard" and says what discarding opens.
+
+**Keyboard.** The first Tab reaches **Skip to content**, which moves focus to the page. Enter on a step presses Continue. In the drawer, Esc closes it and returns to Menu; choosing a section closes it and focuses that page's heading.
+
 ## Operator console: refresh, the snapshot-age clock, and the guidance banner
 
-The console has **no push channel** — the player WebSocket is player-only — so every region reads from **one timestamped snapshot**: a single atomic read of `/v1/operator/inventory` + `/v1/operator/runtime` (the design calls this **Plane A**; see [§9](operator-console-ux-design.md#9-storage-lifecycle--refresh) and [§4a](operator-console-ux-design.md#4a-the-two-plane-state-model) of the console design). The wall plan, the Equipment roster, the Frame Inspector, and the now-showing chips all render from that same snapshot, so a Frame's binding row and its now-showing chip always share one age. Between refreshes the console can be stale, and it never hides this.
+The console has **no push channel** — the player WebSocket is player-only — so every region reads from **one timestamped snapshot**: a single atomic read of `/v1/operator/inventory`, `/v1/operator/runtime` and `/v1/operator/media` (the design calls this **Plane A**; see [§9](operator-console-ux-design.md#9-storage-lifecycle--refresh) and [§4a](operator-console-ux-design.md#4a-the-two-plane-state-model) of the console design). The wall plan, the Equipment roster, the Frame Inspector, and the now-showing chips all render from that same snapshot, so a Frame's binding row and its now-showing chip always share one age. Between refreshes the console can be stale, and it never hides this.
 
-**The snapshot-age clock.** The global bar always reads **"updated N s ago"** next to a **Refresh** control. The age is the honest time since the last successful snapshot, not a freshness guarantee — it tells you exactly how stale what you are looking at may be. Pressing **Refresh** re-fetches inventory and runtime together as one new snapshot and resets the clock. Because a stale read can never silently drive a wrong write, mutations still carry their concurrency tokens (`expected_generation`, `expected_revision`, an idempotent `activation_id`), so an action taken against a stale snapshot resolves to an explicit "the world moved" conflict rather than a silent wrong success.
+**The snapshot-age clock.** The global bar always reads **"updated N s ago"** next to a **Refresh** control. The age is the honest time since the last successful snapshot, not a freshness guarantee — it tells you exactly how stale what you are looking at may be. Pressing **Refresh** re-fetches them together as one new snapshot and resets the clock. Because a stale read can never silently drive a wrong write, mutations still carry their concurrency tokens (`expected_generation`, `expected_revision`, an idempotent `activation_id`), so an action taken against a stale snapshot resolves to an explicit "the world moved" conflict rather than a silent wrong success.
 
 **When the snapshot refreshes.** A new snapshot is fetched **every 5 seconds while the tab is visible** (the poll pauses while the tab is hidden and refreshes immediately when you return), **automatically after every mutation** (a bind, a placement, a commit, an activation), and **on an explicit Refresh**. A response that is older than one already shown, or that was read while one of your writes was in flight, is discarded rather than shown, so a poll never undoes what you just did ([pass 2 §7](operator-console-ux-pass2.md#7-polling-and-the-write-fence)). If a refresh fails, the bar reads **"updated N s ago — last refresh failed"**. Separately, the **Central pill polls `/healthz` about every 10 seconds** and reads "Central: ok", "Central: scheduler stale" (or another scheduler or database reason), or "Central: unreachable"; it reports Central's own health, not any Player and not observed presentation. **These interval numbers are tunable placeholders, not fixed guarantees** — the design states them as cadences to tune during operation ([§9](operator-console-ux-design.md#9-storage-lifecycle--refresh), assumption 4 in [§10](operator-console-ux-design.md#10-decisions-that-are-yours)), not gate decisions, so treat "5 s" and "~10 s" as approximate rather than contractual.
 
-**A refresh never discards unsaved work.** The read snapshot is one plane; everything you are *doing* — an in-progress drag, a calibration draft you are "trying" before commit, the lease countdown, the current mode, and the guidance-dismissed flag — is a **separate** plane the design calls **Plane B**. A Refresh replaces the read snapshot **only**; it merges nothing into your draft and cannot reach into it. Concretely, **a calibration draft in progress is not lost by a refresh** (the corners and crop you have dragged stay put); if the refresh reveals that the committed state moved underneath you — the Frame's `revision` or `generation` advanced — the console raises a "committed changed underneath you" conflict and lets you decide, rather than throwing your draft away. This two-plane separation is enforced structurally by the React state model (design rule R3), not by convention.
+**A refresh never discards unsaved work.** The read snapshot is one plane; everything you are *doing* — an in-progress drag, a calibration draft you are "trying" before commit, the lease countdown, a step flow's draft, and the guidance-dismissed flag — is a **separate** plane the design calls **Plane B**. A Refresh replaces the read snapshot **only**; it merges nothing into your draft and cannot reach into it. Concretely, **a calibration draft in progress is not lost by a refresh** (the corners and crop you have dragged stay put); if the refresh reveals that the committed state moved underneath you — the Frame's `revision` or `generation` advanced — the console raises a "committed changed underneath you" conflict and lets you decide, rather than throwing your draft away. This two-plane separation is enforced structurally by the React state model (design rule R3), not by convention.
 
-**First-run guidance banner.** A **non-blocking, dismissible** banner carries first-run onboarding (design Q8: always-visible inventory plus a guidance banner, never a modal wizard that gates the console — see [§10](operator-console-ux-design.md#10-decisions-that-are-yours)). It never blocks a control: the full inventory is visible behind it and you can act before dismissing it. **Dismissing it is per-session** and, because the dismissed flag lives in the draft plane (Plane B), the dismissal **survives a snapshot refresh** — a Refresh does not bring the banner back. Its guidance is only as fresh as the last snapshot (there is no push), which is the stated cost of preferring a non-blocking banner over a linear wizard.
+**First-run guidance banner.** On the Wall, a **non-blocking, dismissible** banner carries first-run onboarding (design Q8: always-visible inventory plus a guidance banner, never a modal wizard that gates the console — see [§10](operator-console-ux-design.md#10-decisions-that-are-yours)). It never blocks a control: the full inventory is visible behind it and you can act before dismissing it. **Dismissing it is per-session** and, because the dismissed flag lives in the draft plane (Plane B), the dismissal **survives a snapshot refresh** and a visit to another section — neither brings the banner back; a reload or Log out does. Its guidance is only as fresh as the last snapshot (there is no push), which is the stated cost of preferring a non-blocking banner over a linear wizard.
 
 ## Operator console: wall health and the attention strip
 
-Every Frame tile, the Frame Inspector header, the Unplaced tray and the Showrunner frame list show one **health** label for each Frame, so the same Frame never reads differently in two places; the [Equipment roster](#the-equipment-roster) shows each Player's "Last heard" or "Enrolled" line from the same source. The plan tile shows a short form; the full label, with its age, is in the Inspector header and in the tile's accessible name. The states, their order and their wording are owned by the [pass 2 design, §4](operator-console-ux-pass2.md#4-per-frame-health-one-closed-set-one-classifier).
+Every Frame tile, the Frame Inspector header, the Unplaced tray, the frame badges on Now showing and the frame lists of the Scene flow and Run cards show one **health** label for each Frame, so the same Frame never reads differently in two places; the [Equipment roster](#the-equipment-roster) shows each Player's "Last heard" or "Enrolled" line from the same source. The plan tile shows a short form; the full label, with its age, is in the Inspector header and in the tile's accessible name. The states, their order and their wording are owned by the [pass 2 design, §4](operator-console-ux-pass2.md#4-per-frame-health-one-closed-set-one-classifier).
 
 **What the labels are based on.** A label reports **Central's record of the last readiness report it accepted from the Player**, aged on Central's clock at the moment of the snapshot. It is **not** a live video readback, and nothing on the console says "LIVE", "online" or "connected". A Frame that reads healthy may still be dark (a failed panel, a failed decode); the console cannot confirm lit pixels. The now-showing chip is Central's **intent** for the Frame, never confirmed playback. A healthy Player reports about twice a second.
 
@@ -425,13 +458,13 @@ Every Frame tile, the Frame Inspector header, the Unplaced tray and the Showrunn
 
 **Display hot-plug is not detected.** Display detection is reported only when the Player starts. Unplugging or plugging in a panel afterwards changes nothing on the console until the Player restarts; this is a known gap, deferred ([pass 2 §12](operator-console-ux-pass2.md#12-costs-deferrals-and-questions)).
 
-**The attention strip.** A one-line strip under the status bar counts the Frames that need you, for example "2 frames need attention · 3 to set up", or "All 6 frames heard from". Alarms count as needing attention and to-dos as to set up; a Player that enrolled within the last second is not yet counted. **Show frames** opens a list (alarms first, then to-dos, up to 8 entries and "and M more"). In Wall mode each entry is a button: it switches to the Frame's Surface, selects it, and opens the Inspector on the facet where the cause is shown (Binding for Player problems, Commissioning for display and calibration). In Showrunner mode the entries are text only, so reading them never abandons show work.
+**The attention strip.** A one-line strip under the status bar counts the Frames that need you, for example "2 frames need attention · 3 to set up", or "All 6 frames heard from". Alarms count as needing attention and to-dos as to set up; a Player that enrolled within the last second is not yet counted. **Show frames** opens a list (alarms first, then to-dos, up to 8 entries and "and M more"). On the Wall, Equipment and Needs attention pages each entry is a button: it opens the Wall on the Frame's Surface, selects the Frame, and opens the Inspector on the facet where the cause is shown (Binding for Player problems, Commissioning for display and calibration). On the Show sections (Now showing, Scenes, Schedule, Photo sources) the entries are text only, so reading them never abandons show work. **Show all** opens **Needs attention** (`#/attention`), the same list at full width with no cap, where each entry links to the Frame's facet (`#/wall/frames/<id>/<facet>`).
 
 **When Central's scheduler is not ok.** If the Central pill reads something like "Central: scheduler stale", the strip replaces the silent-Player entries with one line, for example "5 frames silent — Central's scheduler is stale; Players may be unable to report until it recovers." Fix Central (its logs and `/healthz`) before visiting the Pis. Entries with another cause, such as no display detected, stay listed.
 
 ## Operator console: placing, moving, and deleting Frames (and the Unplaced tray)
 
-In the redesigned console (served at `/` since the cutover, aliased at `/console`) the wall plan is the home: each Surface is a flat millimetre plan and its Frames are drawn as rectangles from their `x_mm/y_mm/width_mm/height_mm`. You build and edit that plan by direct manipulation — the console turns each gesture into one of the operator routes documented above ([reposition and remove Frames](#operator-api-reposition-and-remove-frames)) or the existing `POST /v1/operator/frames`. Selecting a Surface *filters* the plan to that Surface's Frames; a Surface is a bare text label, not something you act on. This mirrors the "reading & building the wall" walkthrough (J3) in the [console design](operator-console-ux-design.md).
+In the console (served at `/` since the cutover, aliased at `/console`) the wall plan is on the **Wall** section (`#/wall`): each Surface is a flat millimetre plan and its Frames are drawn as rectangles from their `x_mm/y_mm/width_mm/height_mm`. You build and edit that plan by direct manipulation — the console turns each gesture into one of the operator routes documented above ([reposition and remove Frames](#operator-api-reposition-and-remove-frames)) or the existing `POST /v1/operator/frames`. Selecting a Surface *filters* the plan to that Surface's Frames; a Surface is a bare text label, not something you act on. This mirrors the "reading & building the wall" walkthrough (J3) in the [console design](operator-console-ux-design.md).
 
 **Place a new Frame.** Drag a rectangle on the empty plan, then enter the Frame's **id** and **display profile** — pixel width/height and diagonal (plus whether it is video-capable). The console sends one `POST /v1/operator/frames` carrying the dragged `surface_id`, `x_mm`, `y_mm`, `width_mm`, `height_mm` and that profile, so the Frame is **created at the position you drew**. It **never lands in the Unplaced tray** — only Frames with no distinct geometry do that (below). Central runs the same orientation-coherence guard as every Frame creation: if the aperture orientation would disagree with the profile (a portrait matte declared against a landscape panel, or vice versa) the create is refused and nothing is added. The profile values are **Frame facts** — operator-declared and persisting across a later panel swap — not live display readback.
 
@@ -451,7 +484,7 @@ New hardware appears in the console before it does any work. Following [decision
 
 ### The Equipment roster
 
-The **Equipment** region lists every Player in three groups, read from the same `/v1/operator/inventory` snapshot as the plan, so a new Pi appears the moment it enrolls:
+The **Equipment** section (`#/equipment`) lists every Player in three groups, read from the same `/v1/operator/inventory` snapshot as the plan, so a new Pi appears the moment it enrolls:
 
 - **Pending**: no Output is bound yet. A new Pi, or one whose Frames were all unbound, lands here.
 - **In service** (headed "Bound players"): at least one Output is bound.
@@ -512,7 +545,7 @@ While a write is in flight, Esc and Cancel do nothing. Then the dialog shows one
 
 ## Operator console: commissioning, calibration, and conflict states
 
-In the redesigned console — now served at `/` (aliased at `/console`) since the cutover retired the old flat page — select a Frame in the wall plan to open the Frame Inspector, then open its **Commissioning** facet — the layer where you set up the display behind a Frame. It is reachable **only in Wall mode**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health badge. Everything below rides the existing admin-authenticated `POST /v1/operator/frames/{frame_id}/calibration` route — no new endpoint, no schema change, no migration.
+In the console — served at `/` (aliased at `/console`) since the cutover retired the old flat page — select a Frame in the wall plan to open the Frame Inspector, then open its **Commissioning** facet (`#/wall/frames/<id>/commissioning`) — the layer where you set up the display behind a Frame. It is reachable **only from the Wall section**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health label ([R4](#operator-console-sections-links-and-drafts)). Everything below rides the existing admin-authenticated `POST /v1/operator/frames/{frame_id}/calibration` route — no new endpoint, no schema change, no migration.
 
 **What the facet shows (read-only, T0).** Four honest readouts, none of them a control:
 
@@ -538,74 +571,89 @@ The **panel color correction** and **display power / parameters** areas render *
 
 Every write carries **both** concurrency tokens (`expected_revision` and `expected_generation`) against the baseline captured when you opened the facet, so a stale commit is refused with a **409** rather than silently overwriting state you never reviewed. (A preview or commit against a Frame whose binding was removed underneath you is refused with "This Frame is no longer bound to a display — bind it before calibrating.")
 
-## Operator console: Showrunner (running the show)
+## Operator console: running the show
 
-The console has two modes, switched by a top-level **Wall / Showrunner** toggle. This is **organization, not permission** — there is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)), so the toggle only changes *what you are looking at*, never *what you are allowed to do*. **Wall mode** is the plan, the Frame Inspector, and hardware **Commissioning**; **Showrunner mode** is the content-and-schedule layer: Sources, Scenes, Programs, and Runs.
+The Show sections (**Now showing**, **Scenes**, **Schedule** and **Photo sources**) are the content-and-schedule layer: Sources, Scenes, Programs and Runs. The wording and states below are owned by the [slice 3 design](operator-console-ux-pass2-showrunner.md), and the step flows by [passes C and D](operator-console-ux-pass2-flow.md#7-the-flows-defaults-have-a-source); this section is how to use them, job by job.
 
-**Showrunner never shows Commissioning (R4).** At show time the Commissioning facet is unreachable — hardware setup (calibration geometry, SDR gain, and the gated color/power areas) lives only in Wall mode. The **only** hardware facts the show layer sees are each Frame's **health badge** — the same label the wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs commissioning" when `calibration_valid` is false: an invalid Frame cannot present, so the showrunner must see that it is not presentable. The badge is **status, not a control** — you read it in Showrunner but you fix it in Wall mode's Commissioning facet.
+**Show sections never show Commissioning (R4).** Hardware setup (calibration geometry, SDR gain, and the gated colour and power areas) lives only on the Wall's [Commissioning facet](#operator-console-commissioning-calibration-and-conflict-states). The **only** hardware fact the Show sections see is each Frame's **health label**, the same one the Wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs commissioning" when `calibration_valid` is false: a Frame that cannot present matters at show time. The label is **status, not a control**; you fix the cause on the Wall.
 
-The Showrunner lays out in two columns on a wide screen: **Now** (Runs and the "why" panel) and **Library** (Scenes, Programs and Sources); below 1024 px it is one column, Runs first. The wording and states below are owned by the [slice 3 design](operator-console-ux-pass2-showrunner.md); this section is how to use them.
+### Step flows: one question at a time
+
+Making a Scene, scheduling it, adding a photo source and showing a Scene now are **step flows**. Each step asks one thing. A stepper above it names the steps (under 850 px it reads, for example, "Step 3 of 5 · Frames"), and earlier steps in it are buttons that go back to them. **Back** and **Continue** sit below the step; Back on the first step returns to the section. Values that have a stated default sit under a collapsed **Advanced** on their step, whose summary line says what is inside. The last step, **Review**, lists every answer, the advanced ones included, each with **Change**, which opens its step.
+
+- **Continue checks only the step you are on.** Its reasons appear beside its fields and focus moves to the first one; later steps say nothing until you reach them. After a Change, Continue returns toward Review, stopping at any step that still has a problem.
+- **The final button** (Save Scene, Replace Scene, Schedule Program, Add separate windows, Save source, Activate now) checks every step. With problems it sends nothing: a list at the top of the step names each, and choosing one opens its step (and its Advanced) with focus on the field.
+- **A button is never disabled over a problem.** Only a write in flight disables one, and the step is read-only meanwhile; Replace Scene also waits while the Scene is stale (below). **Finish** on a Run that is already finishing is disabled, and its card's "Finishing: requested 20 s ago" says why.
+
+Drafts, addresses and browser Back are described in [sections, links and drafts](#operator-console-sections-links-and-drafts).
 
 ### Names and ids
 
-You **name** Scenes and Programs; the console derives the id Central stores. Accents are dropped, letters are lowercased, every other run of characters becomes `-`, and the id is cut at 96 characters: "Family Evening" is shown as "Saved as `family-evening` · Change". Central keeps only the id (there is no stored display name), so tiles, rows and Runs show ids.
+You **name** Scenes and Programs on their Review step; the console derives the id Central stores. Accents are dropped, letters are lowercased, every other run of characters becomes `-`, and the id is cut at 96 characters: "Family Evening" is shown as "Saved as `family-evening` · Change". Central keeps only the id (there is no stored display name), so cards and Runs show ids.
 
-Type an id yourself, with **Change** (it reveals an **Id** field), when:
-- the name has no Latin letter or digit — the Id field opens by itself with "This name needs a Latin letter or digit for its id; type an id."; or
+Type an id yourself, with **Change** (it opens Review's **Advanced** with its **Id** field), when:
+- the name has no Latin letter or digit: Advanced stays open with "This name needs a Latin letter or digit for its id; type an id."; or
 - you want a particular id. An id starts with a letter or digit, then letters, digits, `-`, `_`, `.` or `:`, up to 128 characters.
 
-A name whose id already exists is refused before anything is sent ("A Scene called `family-evening` already exists; choose another name."). A successful save clears the form. The check uses the last refresh, so two operators can still pick the same new id within a few seconds of each other. For a **Scene**, Central refuses the later save and the form reads "A Scene with this id was saved meanwhile; nothing was replaced." Choose another name, or open the stored Scene and Edit it. For a **Program**, the later save still replaces the earlier one (Program saves have no guard; design Question 4). Activation ids are never shown.
+A name whose id already exists is refused before anything is sent ("A Scene called `family-evening` already exists; choose another name."). The check uses the last refresh, so two operators can still pick the same new id within a few seconds of each other. For a **Scene**, Central refuses the later save: "A Scene with this id was saved meanwhile; nothing was replaced." Choose another name, or Edit the stored Scene. For a **Program**, the later save still replaces the earlier one (Program saves have no guard; slice 3 Question 4). Activation ids are never shown.
 
-### Every disabled control says why
+### Now showing: show a Scene now
 
-Forms never disable their button over a problem. A field shows its reason once you have edited it. Pressing the button with problems sends nothing: a summary appears at the top of the form (it stays as it was when you pressed, even as the page refreshes) and focus moves to the first field with a problem. Only a write in flight disables a button. **Finish** on a Run that is already finishing is disabled, and the row's "Finishing: requested 20 s ago" says why.
+Press **Show now** on Now showing, on a Scene's card, or after saving a Scene. The flow is **Scene → Review** (`#/now/show/scene`, `#/now/show/review`):
 
-Target frames are grouped **"Frames on `<surface>`"** and **"Frames not on any wall"**, each with its [health label](#operator-console-wall-health-and-the-attention-strip). A legacy frame id containing `:` (or longer than 96 characters) is listed with the reason no Scene can target it, and cannot be ticked. If a frame you ticked is deleted while you are drafting, it is dropped and announced ("lobby-left was deleted and removed from this Scene.").
+1. **Scene to activate**, with the frames it reaches and their health. From a Scene's card or a Scene's Save it is already chosen.
+2. **Review** lists the Scene, its frames, the **Priority** and **If it is already running**. Under **Advanced** are **Activation priority** and **If it is already running**. Press **Activate now**.
 
-### Sources
+**The priority defaults to the Run already on top.** Review reads, for example, "5 (the default: the highest Run on its frames has priority 5; at equal priority the newer Run shows on top)", or "0 (the default: no Run covers its frames)". It is the highest priority among the live Runs covering any of the Scene's frames. That is enough to show on top, and one more is not needed: Central ranks layers by priority, then by admission order, and at equal priority the Run admitted later wins, so the new Run shows over the one already there ([flow design §7 J7](operator-console-ux-pass2-flow.md#7-the-flows-defaults-have-a-source)). Until you type a priority, the default follows the Runs as they change, even while Review is showing. A priority below it holds Advanced open and says where the Run would stay, for example "At priority 3 this stays underneath the Run of evening (priority 5) on lobby-left."
 
-A Source is a **saved live query** named `name:rev` (e.g. `holiday:1`) — never a downloaded album and never something a Player browses or opens; it is live eligibility re-evaluated centrally. The Sources region lists each Source by its `name:rev` identity and status, with a **Refresh** control per Source that re-runs its saved query (`POST /v1/operator/sources/{ref}/refresh`). A newly created Source reads **"Awaiting refresh"** until its query is first re-run, then shows its refresh time.
+**If it is already running:**
+- **Leave it running** (default): nothing changes; the outcome reads "Not started: evening is already running, left as is."
+- **Restart it:** ends the current Run and starts a new one now. A restarted Run has **no Program end**. A Scene with Keep playing on plays until you Finish or Cancel it; one with Keep playing off plays one cycle, then ends.
 
-To **create a Source**, fill **Source name and revision** (like `holiday:1`), the private worker **Connection name**, and **Media type** (images, video, or both); it saves with `PUT /v1/operator/sources/{ref}` (the reference is path-encoded because it contains a colon). Two optional filters narrow it:
-- **Favourites:** Any, Only favourites, or Not favourites.
-- **Capture window:** **Taken from** and **Taken until** are local dates. The window runs from the start of the "from" day **up to the start of** the "until" day (the "until" day itself is excluded), so "Taken until" must be after "Taken from".
+**Activate now** (`POST /v1/operator/activations`) answers synchronously, and the console shows exactly that answer on Now showing:
 
-**Albums are not supported:** a Source has no album filter. There is deliberately **no** album, "open in Immich," or credential field anywhere in this form (the Immich boundary, design decision D-e in the [console design](operator-console-ux-design.md)); the API key is provisioned into the worker out of band (see [Connecting a real media library, in the README](../README.md#connect-a-real-media-library-immich)).
-
-### Scenes and "Keep playing until the Program ends"
-
-A Scene is a per-target composition. You author it either against a **live source** (a changing collection whose membership is re-checked centrally) or as **per-Frame authored** choices, where each participating Frame gets a chooser listing **only media compatible with that Frame's profile** — the candidate list is hard-filtered by profile server-side (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible asset cannot be chosen. The Scene and all its per-Frame references **save together in one request** (`PUT /v1/operator/scenes/{id}/authored`); source freshness, membership, and compatibility are re-checked centrally on save. While candidates load, the chooser reads "Loading compatible media…". Each choice is labelled with its kind, size, capture time and what Central would do with it on that frame, for example "Photo 108×192 · taken 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version"); "(2)" is added only when two labels would otherwise read the same.
-
-Each Scene has **Seconds per cycle** and **Keep playing until the Program ends**, which is **on by default** for new Scenes (the design's default for its Question 1, pending owner confirmation):
-- **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Activated without a Program, it plays until you Finish or Cancel it.
-- **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run row reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
-
-### Viewing and editing a Scene
-
-The Scenes region lists every stored Scene as a closed disclosure named `Scene X`. Open it to read what feeds it ("live from `family:1`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), its **revision**, the Programs that use it, and whether a Run of it is running now. There is no Delete (design Question 3).
-
-**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the form cannot author (child Scenes, an outro, fades, and similar) shows "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the form would silently drop those features.
-
-To edit:
-1. Press **Edit Scene X**. The form fills with the stored Scene and reads "Editing `evening` · revision 4. Its id stays; Replace saves revision 5." The id is the **stored** one; there is no name field, and the id cannot change. To make a Scene with a new id, stop editing and save a new one.
-2. For an authored Scene, each frame's stored item is pre-selected while it is still in the Source. A frame whose item left the Source has no choice; pick again.
-3. Press **Replace Scene**, then **Confirm replace** in the dialog. **Stop editing** leaves the form without saving.
-
-**What Replace changes.** It stores the Scene as the next revision. **Runs already going keep the version they started with**, and so do activations already queued: each captured its Scene when Central admitted or queued it. Programs that start later, and new activations, use the new revision. Replace does not touch Programs, Sources or other Scenes.
-
-| The dialog ends | Means | What to do |
+| Outcome | Reads | What to do |
 |---|---|---|
-| "Replaced Scene evening: now revision 5." | Stored. | Nothing. |
-| "Changed since you opened this. Reopen to review." | Someone else replaced this Scene after you pressed Edit. Central refused yours (409 `scene_revision_conflict`), so **nothing was replaced** and their version stands. | Close, open the Scene again (it shows their revision), and redo your change if it still applies. |
-| "Not replaced. The Source's last refresh failed; authored choices can be saved once it succeeds." | An authored Scene's Source is failing. | Fix the Source (see [the media pipeline](#the-media-pipeline)), Refresh it, then try again. |
-| "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source. The choosers reload. | Pick again and Replace. |
-| "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, open the Scene and read its revision: if it moved to yours, it was stored. |
+| Admitted | "Started: Central admitted a Run of evening." | Nothing. It is Central's plan, not confirmation from the panels. |
+| Refused by protection | "Not started: lobby-left is protected by the Run of evening." | The Run named is the one Central reported as blocking. Finish or cancel it, or wait until it ends. A Scene that itself protects a frame covered by a higher-priority Run reads "Not started: this Scene protects frames that evening's Run (priority 5) covers; use priority at least 5." |
+| Other refusal | "Not started: 16 activations are already waiting.", or "Not started: `<error>`." | Correct the cause and try again. |
+| Outcome unknown | "Outcome unknown. Try again; it will not start twice. Changing the form makes this a new activation." | The request timed out, failed, or Central answered with a server error, so the Run may or may not have started. **Press Activate now again, unchanged.** |
+| Session ended | "Not started: the session ended. Sign in again, then activate." | Sign in; the draft is still there. |
 
-Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
+**Why a retry cannot start the Scene twice.** Each activation carries a hidden key. It is made when the draft opens and again whenever you change a value (choosing the value already there changes nothing). It stays with the draft across steps, sections, a Wall visit and the sign-in screen. After an unknown outcome the flow stays on Review with the same key, and Central answers a key it already knows with its stored result. A known outcome ends the flow. The flow never replaces a draft that holds changes or awaits a retry; a clean one follows the Scene you last saved or picked.
+
+Queueing an activation and overriding protection ("force") are not offered: design bead 3B-3 is deferred until the owner answers its Question 6 ([slice 3 design](operator-console-ux-pass2-showrunner.md#18-costs-deferrals-and-questions)).
+
+### Now showing: Runs and Central's plan
+
+Now showing starts with each Frame's health label, then the **Runs**: "Central's plan: what each frame is meant to show now, not a readback of the panels." Each live Run is a card named `Scene X`, with a **Running** or **Finishing** chip and its state ("Running", "Ending (outro)" or "Finishing: requested …"), where it came from ("Program Y", "activated directly" or "part of Z"), when it started, its cycle, its priority, the frames it protects, its revision, its frames with their health, and its child Scenes. With none, it reads "No Run is running." **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Runs that ended in the last day are under a closed "Recently ended (N)", as Completed and Cancelled.
+
+Below them, **Why each frame shows what it does** has one row per frame with two disclosures. **Why?** (and the Frame Inspector's Now-showing facet on the Wall) states **Central's plan** for that frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
+- a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
+- the same priority: the Run Central **admitted later** is on top. This is admission order, not the Program's start time; Programs starting at the same instant are admitted in Program-id order;
+- the same Run: the later child Scene is on top.
+
+**Its limits are always shown.** If the winner has no usable media for this frame (none eligible, still preparing, or no compatible variant), Central plans the next layer down instead. An unbound frame gets no layers at all. A partly transparent or fading layer shows what is underneath. The panel reports what Central intends; it never says a frame is LIVE or confirms what a panel displays (R2). **Why nothing new?** is the next section.
+
+### Why nothing new on a frame?
+
+On Now showing, open **Why nothing new?** on the frame's row. It opens its own group beside Central's plan, **"Why nothing new on lobby-left?"**. It walks from intent to equipment; each step restates a served fact, and the first step that is not ok is marked **Stops here**. Fix that one first.
+
+| Step | Stops when | What to do at that stop |
+|---|---|---|
+| 1. Intended? | No Scene is intended for the frame now. (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | [Show a Scene now](#now-showing-show-a-scene-now), or [schedule a Program](#schedule-a-program-step-by-step), that targets the frame. |
+| 2. Run ended? | The last Run on the frame ended ("evening's Run ended at 18:00:30 after one cycle") or was cancelled. If the Scene keeps its last still, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)". | "After one cycle" means Keep playing was off: edit the Scene and turn it on, then start it again. |
+| 3. Authored? | The winning Scene uses fixed, hand-picked media ("new photos never appear by design"), or shows black by design. | Nothing is wrong. To show new photos, use a live-source Scene. |
+| 4. The Source | None of the Scene's Sources is ok. | Read the [Source states](#the-media-pipeline) below. |
+| 5. Check this frame | Press **Check this frame**. It reads each ok Source's items that fit the frame's shape and counts what Central would do with them: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version". It stops on "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." | Still preparing: wait for the worker. Failed to prepare: read the worker line. No compatible version, or nothing fits: the frame's shape (for example portrait) excludes the Source's items; widen the Source. An item two Sources share is counted once; a failing Source is left out, as planning leaves it out. |
+| 6. The worker | The worker is not ok. | See the worker line below. |
+| 7. Frame health | The frame's health is not ok. | Fix it on the Wall ([wall health](#operator-console-wall-health-and-the-attention-strip)). |
+
+**Limit:** the check is a count of each item's standing. It does not report which item Central picks for the next cycle; with some items usable and others not ready, a cycle that lands on one not ready plans the next layer down, as the step's note says.
 
 ### The media pipeline
 
-The **Media pipeline** panel sits in the Now column. Central fetches media from the photo library and prepares it; Players get it only from Central. All ages are on Central's clock.
+The **Media pipeline** panel is at the foot of Now showing (it is left out while the Show now flow shows a step). Central fetches media from the photo library and prepares it; Players get it only from Central. All ages are on Central's clock.
 
 **Worker.** One line:
 - "checked in 40 s ago · preparing 3 · waiting 12 · failed 2 · failed, retry pending 1 · cache 4.1 of 8 GB" when it is healthy. Preparing is running or publishing; waiting is queued; "failed, retry pending" appears only when a failed job is waiting to be retried (planning treats it as failed until then). Only jobs of the **current preparation recipe** are counted; a recipe change fails the old recipe's queued jobs and planning asks for them again.
@@ -615,83 +663,114 @@ The **Media pipeline** panel sits in the Now column. Central fetches media from 
 
 | State | Reads | What to do |
 |---|---|---|
-| Awaiting refresh (to-do) | "Awaiting refresh" | New Source; wait for its first refresh, or press Refresh in the Sources region. |
-| Failing (alarm) | "Library unreachable", "Library refused access" or "Library unsupported", then "· last good 2 h ago" | Unreachable: check the library host and network. Refused: check the worker's library key and its permissions. Unsupported: check the library version. Authored Scenes from this Source cannot be saved until it succeeds. |
+| Awaiting refresh (to-do) | "Awaiting refresh" | New Source; wait for its first refresh, or press Refresh on its card in Photo sources. |
+| Failing (alarm) | "Library unreachable", "Library refused access" or "Library unsupported", then "· last good 2 h ago" | Unreachable: check the library host and network. Refused: check the worker's library key and its permissions. Unsupported: check the library version. Hand-picked Scenes from this Source cannot be saved until it succeeds. |
 | Overdue (alarm) | "Refresh overdue by 6 min" | Refreshes run every 30 s; check that the worker is running. |
 | Nothing valid (to-do) | "nothing valid in the last refresh" | The query found no acceptable item: widen the filters, or read the Reported codes. |
 | OK | "refreshed 1 min ago · 790 valid in the last refresh · only favourites · taken 2024" | Nothing. "Valid" counts items the refresh accepted, not items ready for a particular frame. |
 
-### Why nothing new on a frame?
+### Scenes: make a Scene step by step
 
-In the Runs region's **Why** group, open **Why nothing new?** on the frame's row. It opens a separate group beside Central's plan (**Why?**), **"Why nothing new on lobby-left?"**. It walks from intent to equipment; each step restates a served fact, and the first step that is not ok is marked **Stops here**. Fix that one first.
+A Scene is a per-frame composition. Scenes lists every stored Scene as a card, then **New Scene**. The flow (`#/scenes/new/<step>`) asks:
 
-| Step | Stops when | What to do at that stop |
+| Step | Asks | Default |
 |---|---|---|
-| 1. Intended? | No Scene is intended for the frame now. (If a Run on the frame ended, this step is only informational and the chain stops at step 2.) | Activate a Scene, or schedule a Program, that targets the frame. |
-| 2. Run ended? | The last Run on the frame ended ("evening's Run ended at 18:00:30 after one cycle") or was cancelled. If the Scene keeps its last still, it adds "if its last item was a photo, the frame keeps that still (a video is not kept)". | "After one cycle" means Keep playing was off: edit the Scene and turn it on, then start it again. |
-| 3. Authored? | The winning Scene uses fixed, hand-picked media ("new photos never appear by design"), or shows black by design. | Nothing is wrong. To show new photos, use a live-source Scene. |
-| 4. The Source | None of the Scene's Sources is ok. | Read the [Source states](#the-media-pipeline) above. |
-| 5. Check this frame | Press **Check this frame**. It reads each ok Source's items that fit the frame's shape and counts what Central would do with them: "12 usable · 3 still preparing · 1 failed to prepare · 2 with no compatible version". It stops on "Nothing usable yet: …" or "No item in the Source fits lobby-left's shape." | Still preparing: wait for the worker. Failed to prepare: read the worker line. No compatible version, or nothing fits: the frame's shape (for example portrait) excludes the Source's items; widen the Source. An item two Sources share is counted once; a failing Source is left out, as planning leaves it out. |
-| 6. The worker | The worker is not ok. | See the worker line above. |
-| 7. Frame health | The frame's health is not ok. | Fix it in Wall mode ([wall health](#operator-console-wall-health-and-the-attention-strip)). |
+| 1 Kind | **Live from a photo source** (each frame shows the Source's media as it changes, re-checked centrally) or **Hand-picked per frame** (you choose one item for each frame). It comes first because it decides whether step 3b is asked. | Live |
+| 2 Photos | **Source**: a saved selection from your photo library. Or **New selection from your photo library**, which adds one [inline](#photo-sources-add-a-source) and brings you back with it chosen. | none: required |
+| 3 Frames | The target frames, grouped **"Frames on `<surface>`"** and **"Frames not on any wall"**, each with its [health label](#operator-console-wall-health-and-the-attention-strip). | none: required |
+| 3b Media per frame | Hand-picked only: one chooser per frame. | none: required per frame |
+| 4 Playback | **Seconds per cycle**; under Advanced, **Keep playing until the Program ends**. | 30 s; Keep playing on |
+| 5 Review | Every answer with Change; **Scene name**; under Advanced, its **Id** (derived from the name). Then **Save Scene**. | — |
 
-**Limit:** the check is a count of each item's standing. It does not report which item Central picks for the next cycle; with some items usable and others not ready, a cycle that lands on one not ready plans the next layer down, as the step's note says.
+- **Frames.** A legacy frame id containing `:` (or longer than 96 characters) is listed with the reason no Scene can target it, and cannot be ticked. A frame you ticked that is deleted while you draft is dropped and announced on whichever step shows ("lobby-left was deleted and removed from this Scene.").
+- **Media per frame.** Each chooser lists **only media compatible with that frame's profile**: Central hard-filters the candidates by profile (`GET /v1/operator/sources/{ref}/candidates?frame_id=`), so an incompatible item cannot be chosen. While they load it reads "Loading compatible media…"; a frame with none is a problem routed to Frames; a failed read offers Retry. Each choice is labelled with its kind, size, capture time and what Central would do with it on that frame, for example "Photo 108×192 · taken 3 Mar 2025 14:02 · ready" (or "preparing", "failed to prepare", "no compatible version"); "(2)" is added only when two labels would otherwise read the same. A chosen item that is no longer among a frame's candidates is dropped from the draft, whichever step shows.
+- **Save** stores the Scene and every per-frame choice in **one request** (`PUT /v1/operator/scenes/{id}`, or `…/authored` for a hand-picked Scene); Central re-checks Source freshness, membership and compatibility. The flow returns to the cards with "Saved Scene X." and offers **Show now** and **Schedule it**.
 
-### Programs and the windows helper
+**Keep playing until the Program ends** is **on by default** for new Scenes (slice 3 Question 1, pending owner confirmation):
+- **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Shown without a Program, it plays until you Finish or Cancel it.
+- **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run card reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
 
-A Program binds a Scene to **one time window** with a **priority** (`PUT /v1/operator/programs/{id}`; `DELETE` removes it). Times are entered and shown in your browser's time zone, which the form names ("Times in Europe/London"); if the browser and the wall are in different zones, that label is the only warning. The form refuses a window that ends before it starts, a window that has already ended (Central would record it as missed), and a priority that is not a whole number.
+### Viewing and editing a Scene
 
-For repeating shows, **Create separate windows**:
-- **Repeat on** is a weekday mask; every day is ticked by default.
-- **Number of windows** is 1 to 60. A number outside that range is a reason on the field, never silently reset.
-- Window 1 is the window entered above. Each later window falls on the **next ticked day at the same local clock times**, so a daylight-saving change keeps 18:00 at 18:00.
-- Each window is a **real, separately stored Program** `<id>-1`, `<id>-2`, …, which you manage and remove individually. There is **no stored recurrence rule**, and no control implies a living recurring schedule (design Q2).
-- Before sending, the helper refuses if a window id already exists, if `<id>-<n>` would exceed 128 characters, or if windows would overlap ("Each window must end before the next starts." — for example, a window longer than the day spacing).
-- If some windows fail, the status lists them as **not confirmed**: a request that failed or did not complete may still have been stored. Pressing the button again sends only the windows Central does not yet list.
+Each Scene card, `Scene X`, shows what feeds it ("live from `family:1`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), its **revision**, the Programs that use it, and a **Running now** chip while a Run of it is live. Its actions are **Edit**, **Show now** and **Schedule it**. There is no Delete (slice 3 Question 3).
 
-The reasons beside the fields follow whichever action you last tried: scheduling one Program or adding separate windows. Removing a Program that is **running now** asks for confirmation: its Run is asked to finish at the end of its current cycle, after any outro, and later windows stay.
+**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, an outro, fades, and similar) reads "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
+
+To edit:
+1. Press **Edit**. The flow opens at **Review** (`#/scenes/<id>/edit/review`), filled from the stored Scene: "Editing `evening` · revision 4. Its id stays; Replace saves revision 5." The id cannot change; to make a Scene with a new id, make a new one. Back from Review goes to Playback.
+2. Use **Change** for any answer. For a hand-picked Scene, each frame's stored item is pre-selected while it is still in the Source; a frame whose item left the Source has no choice, so pick again.
+3. Press **Replace Scene**, then **Confirm replace** in the dialog.
+
+**Stale: Reload.** When a refresh shows that someone stored another revision since you opened the edit, Review reads "This Scene was changed (revision N) since you opened it. Reload it to review the stored version; Replace waits until you do." and Replace is disabled. **Reload** refills the draft from storage and names what storage changed ("Reloaded revision 6. Changed: Frames."), adding when it replaced your unsaved changes.
+
+**What Replace changes.** It stores the Scene as the next revision. **Runs already going keep the version they started with**, and so do activations already queued: each captured its Scene when Central admitted or queued it. Programs that start later, and new activations, use the new revision. Replace does not touch Programs, Sources or other Scenes.
+
+| The dialog ends | Means | What to do |
+|---|---|---|
+| "Replaced Scene evening: now revision 5." | Stored. | Nothing. |
+| "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload." | Someone replaced this Scene between two refreshes. Central refused yours (409 `scene_revision_conflict`), so their version stands. | Close; focus moves to **Reload**. Reload, then redo your change if it still applies. |
+| "Not replaced. The Source's last refresh failed; authored choices can be saved once it succeeds." | A hand-picked Scene's Source is failing. | Fix the Source (see [the media pipeline](#the-media-pipeline)), Refresh it, then try again. |
+| "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source. The choosers reload. | Pick again and Replace. |
+| "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, read the Scene's revision on its card: if it moved to yours, it was stored. |
+
+Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
+
+### Schedule: a Program step by step
+
+A Program binds a Scene to **one time window** with a **priority** (`PUT /v1/operator/programs/{id}`; `DELETE` removes it). Schedule lists the Programs as cards, then **Schedule a Program**; **Schedule it** on a Scene's card, or after saving a Scene, opens the flow with that Scene chosen. The flow (`#/schedule/new/<step>`) asks:
+
+| Step | Asks | Default |
+|---|---|---|
+| 1 Scene | **Scene** | the Scene you last saved or picked |
+| 2 When | **Window start** and **Window end**; under Advanced, **Repeat on** and **Number of windows** | none: required; every day; 1 |
+| 3 Review | Every answer with Change; **Program name**; under Advanced, **Priority** and the **Id** (derived from the name). Then **Schedule Program**. | priority 0 |
+
+**Times are in your browser's time zone.** The page, When and Review name it ("Times in Europe/London"); if the browser and the wall are in different zones, that label is the only warning. The flow refuses a window that ends before it starts, a window that has already ended (Central would record it as missed), and a priority that is not a whole number.
+
+**A handed-over Scene never replaces your changes.** If you press Schedule it for another Scene while a Schedule draft holds changes, the Scene step keeps your draft and offers "Schedule Scene X instead".
+
+**Separate windows.** For a repeating show, open **Advanced** on When:
+- **Number of windows** is 1 by default, which schedules one Program under its id. Any other number, 2 to 60, creates that many **separate Programs** `<id>-1`, `<id>-2`, …, and the final button becomes **Add separate windows**. A number outside that range is a reason on the field, never silently reset.
+- **Repeat on** is a weekday mask; every day is ticked by default. It is used only with more than one window.
+- Window 1 is the window entered on When. Each later window falls on the **next ticked day at the same local clock times**, so a daylight-saving change keeps 18:00 at 18:00. Review lists every planned window.
+- Each window is a **real, separately stored Program**, which you manage and remove individually. There is **no stored recurrence rule**, and no control implies a living recurring schedule (slice 3 Q2).
+- When's Continue refuses windows that would overlap ("Each window must end before the next starts." — for example, a window longer than the day spacing). Review refuses a window id that already exists, or an `<id>-<n>` longer than 128 characters.
+- If some windows fail, the flow stays on Review and the status lists them as **not created** (Central refused them) or **not confirmed** (a request that failed or did not complete may still have been stored). Pressing **Add separate windows** again sends only the windows Central does not yet list.
+
+**Removing a Program.** **Remove** on its card removes it at once. Removing a Program that is **running now**, or whose window has started, asks for confirmation: its Run is asked to finish at the end of its current cycle, after any outro, and later windows stay.
 
 ### Reading Program states
 
-Each Program row shows one state, read from what Central served. Times are the Run's, never the window's.
+Each Program card, `Program X`, shows its Scene, its window in local time, its priority and one state, read from what Central served; Running, Refused and Missed also carry a chip. Times are the Run's, never the window's.
 
 | State | Reads | Means |
 |---|---|---|
 | Upcoming | "Starts in 2 h · Tue 2 Mar 18:00–20:00" | Its window has not started. |
 | Running | "Running since 18:00" | Central admitted its Run and it is live. |
 | Ran | "Ran 18:00–18:00:30 (one cycle, then ended)", or "Cancelled at 19:10" | Its Run ended. "(one cycle, then ended)" marks a Scene with Keep playing off. |
-| Refused (alarm) | "Did not start: lobby-left was protected by the Run of evening." | Another Run protected one of its frames when the window started. The Run named is the one Central recorded as blocking it; if that Run is no longer listed, the row says "another Run, no longer listed". A Scene that protects a frame covered by a higher-priority Run reads "…it protects lobby-left, but a higher-priority Run of evening covered it." |
+| Refused (alarm) | "Did not start: lobby-left was protected by the Run of evening." | Another Run protected one of its frames when the window started. The Run named is the one Central recorded as blocking it; if that Run is no longer listed, the card says "…protected by another Run, no longer listed." A Scene that protects a frame covered by a higher-priority Run reads "Did not start: it protects frames that a higher-priority Run of evening covered." |
 | Missed (to-do) | "Missed: its window had ended before Central first scheduled it." | Only two cases: the Program was saved after its window ended, or its window ended before Central's very first scheduler tick. |
 
-**A warm restart is not a miss.** If Central was down during a window, it catches up logically when it comes back: it admits the Run and ends it as the plan would have. The row reads "Ran" even though the wall showed nothing, and the row's hint says so. "Ran" describes Central's plan, never what the panels showed. Past Programs sit under a closed "Past (N)" disclosure. Central serves Runs and outcomes for one day, so older rows read "details older than a day".
+**A warm restart is not a miss.** If Central was down during a window, it catches up logically when it comes back: it admits the Run and ends it as the plan would have. The card reads "Ran" even though the wall showed nothing, and its hint says so. "Ran" describes Central's plan, never what the panels showed. Past Programs sit under a closed "Past (N)". Central serves Runs and outcomes for one day, so older cards read "details older than a day".
 
-### Runs and Central's plan
+### Photo sources: add a Source
 
-Live Runs are listed as cards, with their child Scenes nested inside. Each card shows `Scene X` and its revision, where it came from ("Program Y", "activated directly" or "part of Z"), when it started, whether it is Running, "Ending (outro)" or "Finishing", its priority, the frames it protects, and its frames with their health. **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Ended Runs from the last day are under a closed "Recently ended (N)" list.
+The page opens with: "Photo Wall selects media that lives in your photo library. It never uploads, edits or deletes anything there." A Source is a **saved live query** named `name:rev` (e.g. `holiday:1`): never a downloaded album and never something a Player browses or opens; its membership is re-evaluated centrally. Each Source is a card with its status, when it last refreshed ("Awaiting refresh" until its query first runs), what it includes and its connection, and **Refresh**, which re-runs its query (`POST /v1/operator/sources/{ref}/refresh`). A Source is never edited in place; a change is a new revision.
 
-**Why?** on a frame's row in the **Why** group (and the Frame Inspector's Now-showing facet) states **Central's plan** for one frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
-- a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
-- the same priority: the Run Central **admitted later** is on top. This is admission order, not the Program's start time; Programs starting at the same instant are admitted in Program-id order;
-- the same Run: the later child Scene is on top.
+Press **New source**. The flow (`#/sources/new/<step>`) asks:
 
-**Its limits are always shown.** If the winner has no usable media for this frame (none eligible, still preparing, or no compatible variant), Central plans the next layer down instead. An unbound frame gets no layers at all. A partly transparent or fading layer shows what is underneath. The panel reports what Central intends; it never says a frame is LIVE or confirms what a panel displays (R2).
-
-### Activating a Scene now
-
-Press **Show now** on Now showing (or on a Scene's card), choose the **Scene to activate** and Continue. Review lists every answer. Under its **Advanced** are the **Activation priority** and what happens **If it is already running**. The priority defaults to the highest priority among the Runs covering the Scene's frames (0 when none does): at equal priority the Run admitted later is on top, so the new Run shows. A lower priority opens Advanced with the Run it would stay underneath, for example "At priority 3 this stays underneath the Run of evening (priority 5) on lobby-left."
-- **Leave it running** (default): nothing changes; the outcome reads "Not started: evening is already running, left as is."
-- **Restart it:** ends the current Run and starts a new one now. A restarted Run has **no Program end**. A Scene with Keep playing on plays until you Finish or Cancel it; one with Keep playing off plays one cycle, then ends.
-
-**Activate now** (`POST /v1/operator/activations`) answers synchronously, and the console shows exactly that answer:
-
-| Outcome | Reads | What to do |
+| Step | Asks | Default |
 |---|---|---|
-| Admitted | "Started: Central admitted a Run of evening." | Nothing. It is Central's plan, not confirmation from the panels. |
-| Refused by protection | "Not started: lobby-left is protected by the Run of evening." | The Run named is the one Central reported as blocking. Finish or cancel it, or wait until it ends. A Scene that itself protects a frame covered by a higher-priority Run reads "…but evening's Run (priority 5) covers it; use priority at least 5." |
-| Other refusal | "Not started: 16 activations are already waiting.", or "Not started: `<error>`." | Correct the cause and try again. |
-| Outcome unknown | "Outcome unknown. Try again; it will not start twice." | The request failed or Central answered with a server error, so the Run may or may not have started. **Try again unchanged**: the retry reuses the same hidden activation key, and Central answers a known key with its stored result, so it cannot start twice. **Changing the form makes this a new activation** with a new key, as the form reminds you. |
+| 1 What to include | **Media type** (Images and video, Images only, Video only); **Favourites** (Any, Only favourites, Not favourites); **Taken from** and **Taken until** | Images and video; Any; no dates |
+| 2 Name | **Source name and revision** (like `holiday:1`); **Connection name**, as the rule below says | none: required |
+| 3 Review | Every answer with Change. Then **Save source**. | — |
 
-Queueing an activation and overriding protection ("force") are not offered: design bead 3B-3 is deferred until the owner answers its Question 6 ([slice 3 design](operator-console-ux-pass2-showrunner.md#18-costs-deferrals-and-questions)).
+- **The capture window.** Taken from and Taken until are local days. The window runs from the start of the "from" day **up to the start of** the "until" day (the "until" day itself is excluded), so "Taken until" must be after "Taken from". Either may be left empty.
+- **The connection rule.** Connection name is the private worker connection the Source reads through. While no Source names one, it is a visible, required field. When every existing Source names the same one, it is filled in and moves under the Name step's **Advanced**, where you can change it. When they name several, it is a chooser of those names with none chosen.
+- **Save** writes `PUT /v1/operator/sources/{ref}` (the reference is path-encoded because it contains a colon) and returns to the cards with "Saved Source holiday:1.".
+- **From a Scene.** **New selection from your photo library** on the Scene flow's Photos step opens this flow for your Scene: "This photo source is for your Scene. Saving it takes you back there, with it chosen." Save returns to the Scene's Photos step with the new Source chosen. Back on the first step, or **Discard and return to your Scene**, returns with nothing chosen. If you had gone to another page by the time the Save lands, the Scene draft only takes the new Source; if the Scene draft was discarded meanwhile, the Source is simply saved.
+
+**Albums are not supported:** a Source has no album filter. There is deliberately **no** album, "open in the library" or credential field anywhere in the flow (the media boundary, design decision D-e in the [console design](operator-console-ux-design.md)); the library key is provisioned into the worker out of band (see [Connecting a real media library, in the README](../README.md#connect-a-real-media-library-immich)).
 
 ## Tests and local development
 
@@ -722,7 +801,7 @@ with its architecture and `prepare_base=true`. Fork runs require the definition 
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
 
-The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own temporary PostgreSQL schemas. Install the locked development dependencies and their matching Chromium build, then run:
+The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own temporary PostgreSQL schemas. The shell, the look and each step flow have their own walkthroughs (`tests/browser/test_console_*_browser.py`, `test_scene_flow_browser.py`, `test_source_flow_browser.py`, `test_schedule_flow_browser.py`, `test_show_now_browser.py`), built on the task-level helpers in `tests/browser/console_tasks.py`. The console's pure modules run under Node in ordinary pytest (`tests/test_console_flow.py`, `test_console_schedule_flow.py`, `test_console_show_now.py`); without Node they skip on a developer machine but fail under `CI` or `PHOTO_WALL_BROWSER_TESTS` (the route round trip in `test_console_routes_r4.py` only skips). Install the locked development dependencies and their matching Chromium build, then run:
 
 ```sh
 uv sync --frozen

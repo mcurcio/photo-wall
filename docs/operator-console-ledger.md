@@ -6,8 +6,8 @@ Pass 2, slice 1 (wall health at a glance; design built on its gate defaults, own
 Pass 2, slice 2 (safe onboarding; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-onboarding.md](operator-console-ux-pass2-onboarding.md).
 Pass 2, slice 3 (Showrunner readability; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-showrunner.md](operator-console-ux-pass2-showrunner.md).
 Pass 2, pass A (stay signed in: session cookie, Log out; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-session.md](operator-console-ux-pass2-session.md).
-Pass 2, passes C+D (familiar look and progressive flows: library-matched tokens, sidebar sections, step flows; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-flow.md](operator-console-ux-pass2-flow.md).
-Pass 2, pass B (library tag filter, tag suggestions and previews; a Source is one library query shape; design-gate artifact, awaiting owner approval, adversarial review not yet run): [operator-console-ux-pass2-library.md](operator-console-ux-pass2-library.md).
+Pass 2, passes C+D (familiar look and progressive flows: library-matched tokens, sidebar sections, step flows; built, beads 0, 1a, 1b, 2–5 and D landed; owner approval of questions 1–6 pending, build used their defaults; integration gate for beads 3–5 pending): [operator-console-ux-pass2-flow.md](operator-console-ux-pass2-flow.md).
+Pass 2, pass B (library tag filter, tag suggestions and previews; a Source is one library query shape; reviewed twice (data/caching; security/privacy), revised to revision 5 after a confirmation review (6f78bc5, a98d090); awaiting owner approval; build next): [operator-console-ux-pass2-library.md](operator-console-ux-pass2-library.md).
 Running PR: https://github.com/mcurcio/photo-wall/pull/11 (draft; update its bead table as beads land).
 Backend track uses isolated worktrees on Postgres :54332; main/frontend on :54331.
 **STATUS: DELIVERY COMPLETE (DONE-GREEN 2026-09-14).** / serves the React console; legacy page retired. Final gate: test_local.py 1122 passed/59 skipped, tests/browser 55 passed. Open residual: dedupe-calibration-defaults (low). PR #11.
@@ -86,3 +86,20 @@ Backend track uses isolated worktrees on Postgres :54332; main/frontend on :5433
 | A-1 | Backend: scrypt-keyed total session codec, `admin` dependency (Bearer decides alone, byte compare), sign-in/out routes, no-store middleware and 500 handler | in_progress | a4919db | Verifier PASS (pytest 3059 passed; browser 164 passed; 6 mutation probes red; live curl checks). Security diff review PASS; its P2 (cookie path: now `Path=/v1/operator/`, `__Secure-` over https) fixed in a follow-up (working tree). |
 | A-2 | Console: sign-in screen, Log out, marker header on every operator fetch, 403 alert, harness `sign_in` | in_progress | c97dc58 | Same verifier and review; its P3 (a sign-in 204 now leads to Checking before the first refresh) fixed in the same follow-up (working tree). |
 | A-3 | Docs — pass A (spec errata and fix-cycle changes, runbook signing in and Log out, README sign-in line, ledger) | in_progress | — (working tree) | Owner questions 1–4 pending; builds on their defaults. |
+
+### Pass 2, passes C+D — familiar look and progressive flows
+
+Gates are the full verify of each bead (pytest, ruff, `check_docs.py`, browser suite); probes are mutation probes, each turning a named test red.
+
+| Bead | Name | Status | SHA | Notes |
+|---|---|---|---|---|
+| 0 | Task-level browser helpers (`tests/browser/console_tasks.py`) | closed | 3a0b6d8 | Browser 167/167. |
+| 1a | Look: tokens for both colour schemes, Console Sans subset and licence, component restyle, `assetsInlineLimit: 0`, `font/woff2` registration | closed | 292c517 | pytest 3024; browser 169; probes red: font rename, input ring, asset inlining, MIME type. |
+| 1b | Shell: header, sidebar and drawer, hash routes, three route tables, Needs attention, facet in the route, R4 import scan, sign-in overlay that keeps drafts, `sessionEpoch` on Log out; mode toggle removed | closed | 3e8c7ca | pytest 3033; browser 184; 4 probes red. |
+| 1b-review | Review fixes: landing-route race (`ifUnknown`); sign-in dialog above confirmations; hidden pages put their dialogs away; fail-closed R4 scan that also walks the shell; Surface follows the route; memoized pages | closed | eb74dae, 3b14400 | Browser 194, plus the landing-race test (red without the guard). |
+| 2 | Scene flow (pilot) with the flow kit; Scene cards; Edit at Review with `baseRevision` and Reload | closed | e6c9862, 14f46a5 | pytest 3034; browser 196; 5 probes red. |
+| 2-review | Poll race fix (`aria-busy` while a read is in flight); instance logic lifted into the kit (`useFlowInstance`); activation-retry flake fixed in the harness; review fixes (finish keeps the operator's route, step-scoped reasons, Reload names changes) | closed | fc99a00, 41e5182, 0b5bece, ddc9fcc | Poll race fix: browser 205. Review fixes: pytest 3040; browser 216; 4 probes red. Flake root-caused to Playwright `route(…, times=1)`; fixed test passed 40/40 isolated runs. |
+| 3 | Source flow, pass B slot, connection rule, inline Source from the Scene flow (hand-off) | in_progress | 434d376 | Landed. Integration gate for beads 3–5: gate pending. |
+| 4 | Schedule flow and Program cards | in_progress | fdf09f6 | Landed. Integration gate for beads 3–5: gate pending. |
+| 5 | Show now flow (`coveringPriority`, activation key in the draft), Run cards, Why disclosures | in_progress | 564248c | Landed. Integration gate for beads 3–5: gate pending. |
+| D | Docs: runbook by job, README, `architecture.md` console section, pass A follow-up (session §7, Question 4), flow design status and history, ledger | in_progress | this commit | `check_docs.py` passed. Owner questions 1–6 pending; build used their defaults. |
