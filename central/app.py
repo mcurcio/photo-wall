@@ -527,7 +527,8 @@ def create_app(
         response_model=InstallationInventory,
     )
     def inventory():
-        return registry.inventory()
+        # The reports are read after the inventory, so read_at bounds every timestamp in it.
+        return registry.inventory().with_liveness(coordinator.player_reports_lock_free())
 
     def _content() -> ContentServices:
         if content is None:

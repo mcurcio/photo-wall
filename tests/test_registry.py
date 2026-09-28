@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from central.app import create_app
+from central.coordination import Coordinator
 from central.db import Database
 from central.installation_models import InstallationInventory
 from central.registry import (
@@ -389,7 +390,8 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    expected = registry.inventory()
+    reports = Coordinator(registry.db, registry.clock).player_reports_lock_free()
+    expected = registry.inventory().with_liveness(reports)
     assert isinstance(expected, InstallationInventory)
     assert expected.frames[0].profile.width_px == 1080
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
