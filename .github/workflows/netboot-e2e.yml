@@ -134,17 +134,12 @@ jobs:
 
       - name: Build or restore the central image
         id: central
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: ./.github/actions/service-image
         with:
-          context: .
           target: central
-          platforms: linux/arm64
+          architecture: arm64
           load: true
           tags: photo-wall-netboot-e2e-central:ci
-          cache-from: |
-            type=gha,scope=photo-wall-central-arm64-v1
-            type=gha,scope=photo-wall-software-e2e-arm64-v1
-          cache-to: type=gha,scope=photo-wall-software-e2e-arm64-v1,mode=max,ignore-error=true
 
       # Build the REAL bootstrapper and Player .debs in-job (pure dpkg-deb, no
       # chroot, no OS-base) -- the exact commands base-image.yml uses. Their

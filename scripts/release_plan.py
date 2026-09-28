@@ -277,6 +277,9 @@ NOT_SHIPPED: Final = (
     ".github/workflows/checks.yml", ".github/workflows/software-e2e.yml",
     ".github/workflows/netboot-e2e.yml",
     ".github/workflows/pipeline.yml",           # owner ruling: see the manifest's head
+    # The service images' shared build and BuildKit cache wiring, which pipeline.yml runs: under
+    # the same owner ruling, how an image is built is not a release input.
+    ".github/actions/service-image/action.yml",
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",

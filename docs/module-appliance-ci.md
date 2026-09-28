@@ -141,8 +141,9 @@ container has no network, so unexpected dependency acquisition cannot succeed.
 The final `ci-image.json` retains the OS baseline manifest and optional registry
 reference alongside the application revision and release identities.
 
-Central and worker application builds retain their independent BuildKit scopes;
-the worker's native dependency follows the shared preparation path below.
+Central and worker application builds follow the
+[service image layering and cache policy](#service-image-builds); the worker's
+native dependency follows the shared preparation path below.
 The builder instead uses its own definition and `appliance/build-tools.txt`,
 which avoids invalidating the image when the application `uv.lock` changes.
 The OS carrier image contains the prepared archives under `/os-base`; Docker
@@ -257,3 +258,56 @@ warm-build performance or completed qualification.
 The [initial OS publication failure](evidence/2026-09-08-os-base-publication.md)
 records the packaged test-key fixture correction and distinguishes it from
 the successful shared-media and browser workflow checks.
+
+## Service image builds
+
+The root Dockerfile's application stages and the
+[`service-image`](../.github/actions/service-image/action.yml) action are the
+one policy for building `central`, `media-worker` and `media-test` in every
+workflow.
+
+**Layers.** Each target stacks, from least to most often changed: its base (the
+pinned Python image for `central`, the retained media OS for the worker), the
+locked third-party environment (`deps`: `pyproject.toml` and `uv.lock`, without
+the project), the application source (`source`: the Python packages and the
+console bundle from `console-builder`), and the project's own editable install,
+a `.pth` naming `/app`. Every application layer is copied with
+[`COPY --link`](https://docs.docker.com/reference/dockerfile/#copy---link) from
+the one stage that owns it, so its cache key is its own content. A source edit
+rebuilds only the source and project-install layers; the worker no longer
+re-ships its third-party environment with each code change; a new
+`MEDIA_BASE_IMAGE` rebases the worker's dependency and source layers rather than
+rebuilding them, and only its project-install and cache-directory steps re-run.
+`media-test` layers the `dev-deps` environment (the same lock with the test
+group, a superset of `deps`) over the worker, so a code change does not
+reinstall test dependencies. uv is mounted only while it runs, and its download
+cache, like npm's, lives in a BuildKit cache mount, so neither ships in an
+image. The project install stays after the source: hatchling writes the
+editable path only when the packages exist, and making it source-independent
+would change `pyproject.toml`, an input of every released package and of the
+base squashfs cache key.
+
+**Cache scopes.** Each target reads and writes (`mode=max`) one GHA scope per
+architecture, its own: `photo-wall-<target>-<architecture>-v<epoch>`. An export
+replaces its scope's index, so the former shared scopes
+(`photo-wall-checks-amd64-v1`, `photo-wall-software-e2e-arm64-v1`) kept only
+their last writer's layers, and AMD64 never exported `central`. A build does not
+also import its siblings' scopes: with several imports, BuildKit matched the
+shared `deps` parent in a sibling's index and then missed the target's own
+`COPY --link` layers, depending on import order. Builds in one job still share
+layers through the job's builder. Jobs of one run that build the same target
+write identical content. Raising the action's `CACHE_EPOCH` discards every
+service cache at once.
+
+**Limits.** A workflow run restores only caches of its own ref, its pull
+request's base branch and the default branch
+([GitHub cache access](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)).
+The push to `main` after a merge therefore cannot read the pull request's
+caches and rebuilds every layer the pull request changed. The same rule keeps
+pull request caches out of release builds; a registry cache shared with pull
+requests would trade that boundary for merge-run hits. A fully cached `--load`
+still transfers every layer of the image into the runner's Docker, so the
+retained media OS dominates worker build time on any hit. The build summary's step-count
+percentage reports a `--link` step's zero-cost merge as uncached; the
+[service image cache evidence](evidence/2026-09-28-service-image-cache.md)
+records durations and transferred bytes instead.

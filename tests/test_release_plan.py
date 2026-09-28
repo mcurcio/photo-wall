@@ -595,10 +595,11 @@ def test_every_file_a_service_image_copies_is_claimed_by_it_and_ships():
 
 
 def test_a_new_copy_of_an_unshipped_file_into_an_image_fails_the_manifest():
-    """The probe that once left every test green: the runtime stage copies a NOT_SHIPPED file.
+    """The probe that once left every test green: the source stage copies a NOT_SHIPPED file.
     The image now claims it by construction, which the manifest tests refuse."""
     text = (REPO / DOCKERFILE).read_text().replace(
-        "COPY player ./player\n", "COPY player ./player\nCOPY scripts/configure.py ./\n")
+        "COPY --link player /app/player\n",
+        "COPY --link player /app/player\nCOPY scripts/configure.py /app/\n")
     central = release_plan.Package("central-image", "", image_inputs("central", text), "central")
     assert central.claims("scripts/configure.py")
     assert _image_conflicts(text, "central", central) == [
