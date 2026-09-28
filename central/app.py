@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -34,8 +33,9 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
+from central.operator_auth import OperatorAuth
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
-from central.runtime import Program, Scene
+from central.runtime import Program, RuntimeConflict, Scene
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     BaseHealth,
@@ -277,10 +277,11 @@ def create_app(
     app.state.content = content
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
-
-    def admin(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
-        if not credentials or not secrets.compare_digest(credentials.credentials, admin_token):
-            raise RegistryError("unauthorized", 401)
+    # The operator principal (pass A): bearer or signed session cookie. The key derives from the
+    # token here, once, so a wrong-length or unencodable token fails at construction.
+    operator_auth = OperatorAuth(admin_token, clock)
+    app.state.operator_auth = operator_auth
+    admin = operator_auth.admin
 
     def player(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
         if not credentials:
@@ -290,6 +291,10 @@ def create_app(
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
+
+    @app.exception_handler(RuntimeConflict)
+    async def runtime_conflict(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=409)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(request, exc):
@@ -303,6 +308,9 @@ def create_app(
     @app.exception_handler(ValueError)
     async def invalid_command(request, exc):
         return JSONResponse({"error": "invalid_command"}, status_code=422)
+
+    # The session routes, `no-store` on every operator response, and the unhandled-500 handler.
+    operator_auth.mount(app)
 
     @app.get("/healthz")
     def health():
@@ -527,7 +535,8 @@ def create_app(
         response_model=InstallationInventory,
     )
     def inventory():
-        return registry.inventory()
+        # The reports are read after the inventory, so read_at bounds every timestamp in it.
+        return registry.inventory().with_liveness(coordinator.player_reports_lock_free())
 
     def _content() -> ContentServices:
         if content is None:
@@ -633,10 +642,14 @@ def create_app(
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
         runtime = coordinator.runtime.read()
+        state = runtime.export_state()
+        projection = runtime.operator_projection(clock.utc())
         return {
-            "definitions": runtime.export_state()["scenes"],
-            "programs": runtime.export_state()["programs"],
-            "current": runtime.project(clock.utc()),
+            "definitions": state["scenes"],
+            "programs": state["programs"],
+            "current": projection.current,
+            "protected_frames": projection.protected_frames,
+            "program_outcomes": projection.program_outcomes,
         }
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])

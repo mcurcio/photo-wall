@@ -17,8 +17,8 @@ from test_registry import enroll
 # artifact keeps tracking real coverage. Each acceptance item is attached to the
 # console test that asserts the equivalent behavior. Three legacy items are RETIRED
 # because the redesigned console has no equivalent by architecture: the console is
-# REST with per-request bearer auth (test_operator_binding_browser.py:143-145), so
-# there is no persistent browser-held token (volatile_browser_token) and no
+# REST with a signed HttpOnly session cookie (pass A; the page never holds the
+# token, so there is no volatile browser-held token, volatile_browser_token) and no
 # operator-websocket fencing (same_token_reconnect, delayed_rejection_fence).
 
 # The two console tests whose green result qualifies the authored-media and program
@@ -43,7 +43,9 @@ CHECKS = {
     "test_calibration_stale_commit_conflicts_on_revision": ("stale_calibration_conflict",),
     "test_calibration_overtaken_detected_by_inventory_poll": ("inventory_refresh_recovery",),
     "test_calibration_lease_expiry_reverts_to_committed_no_auto_renew": ("preview_expiry",),
-    "test_commissioning_provenance_frame_facts_vs_live_readback": ("fresh_server_persistence",),
+    "test_commissioning_provenance_frame_facts_vs_display_at_player_start": (
+        "fresh_server_persistence",
+    ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).
     "test_sources_render_name_rev_with_refresh": ("current_generation_content_refresh",),
     "test_source_configuration_creates_source_awaiting_refresh": ("source_configuration_refresh",),

@@ -1,45 +1,88 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import "./index.css";
-import { EquipmentRail } from "./EquipmentRail.jsx";
+import { AttentionStrip } from "./AttentionStrip.jsx";
+import { useBootFacts } from "./bootFacts.js";
+import { EquipmentRoster } from "./EquipmentRoster.jsx";
 import { Guidance } from "./Guidance.jsx";
+import { facetFor, frameHealth } from "./health.js";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
 import { detectRecovery } from "./recovery.js";
 import { Showrunner } from "./Showrunner.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { useMode } from "./useMode.js";
-import { setToken, useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
+import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
+
+// The Central pill's colour: the shared health severity for each /healthz state.
+const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
+
+// Why the tab is signed out or a sign-in / log-out failed (pass A §7).
+const AUTH_NOTICES = {
+  rejected: "Operator token was not accepted. Re-enter the token to sign in.",
+  expired: "Signed out: the session expired or the token changed. Sign in again.",
+  blocked: "Your browser did not keep the sign-in; allow cookies for this site.",
+  failed: "Sign-in failed: Central did not answer. Try again.",
+  signOutFailed: "Log out failed: Central did not answer. Try again.",
+};
+
+// A write Central refused because it did not come from the signed-in page (403
+// request_unmarked / origin_mismatch; pass A §7). A header-stripping proxy reads the same.
+const ORIGIN_REFUSED_MESSAGE =
+  "Central refused this write because it did not come from the page you signed in on. " +
+  "Reload the console from the address you signed in at, or sign in again.";
 
 /**
  * The console app shell.
  *
  * Bead 0 built the empty frame + Plane A wiring. Bead 1 adds:
- *  - a minimal shared "Token" control (design §2): an "Operator token" input and
- *    a "Connect" button that set the in-memory token and trigger one Plane A
- *    refresh. The token is never persisted (useSnapshot holds it in memory only).
+ *  - the sign-in screen (pass A §7): while signed out, an "Operator token" field
+ *    and a "Sign in" button exchange the token once for the session cookie; the
+ *    field is cleared on submit and the token is kept nowhere. Signed in, the
+ *    header offers "Log out".
  *  - a Surface filter that groups frames by `surface_id` and switches plans,
  *    defaulting to the first Surface present.
  *  - the read-only per-Surface SVG Plan and the Unplaced tray.
  */
 export default function App() {
-  const { snapshot, refresh, authRejected } = useSnapshot();
+  const {
+    snapshot,
+    refresh,
+    auth,
+    authNotice,
+    signIn,
+    signOut,
+    refreshFailed,
+    originRefused,
+    dismissOriginRefused,
+  } = useSnapshot();
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
+  // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
+  // the Equipment roster and the output chooser.
+  const bootFacts = useBootFacts(snapshot);
   // Bead 18: the global snapshot-age clock (advances each second, resets on
-  // refresh) and the ~10s /healthz reachability pill. Both are global, so they
-  // read one age/one health regardless of Wall/Showrunner mode.
+  // refresh) and the ~10s /healthz pill. Both are global, so they read one
+  // age/one health regardless of Wall/Showrunner mode. The pill is the ONE place
+  // Central's own health is shown (pass 2 §5).
   const age = useSnapshotAge();
   const health = useHealth();
+  const centralHealth =
+    health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
   const [tokenInput, setTokenInput] = useState("");
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [selection, setSelection] = useState(/** @type {string|null} */ (null));
   // Which Inspector facet is open (Plane B, component-local). Defaults to
-  // "commissioning" and resets to it each time a new Frame is selected.
+  // "commissioning"; selecting another Frame keeps it (pass 2 §4 — no reset),
+  // and only attention-strip navigation moves it, to the facet showing the cause.
   const [facet, setFacet] = useState(/** @type {string} */ ("commissioning"));
-  // The pending/retired Player last selected in the Equipment rail (Plane B).
-  const [selectedPlayer, setSelectedPlayer] = useState(/** @type {string|null} */ (null));
+  // A request for the Inspector to take focus, issued ONLY by attention-strip
+  // navigation (a fresh number each time); plain tile or tray selection clears
+  // it, so selecting a Frame never moves focus. The Inspector consumes it once
+  // (onFocusDone), so a later remount does not refocus.
+  const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
+  const focusSeqRef = useRef(0);
 
   // Unplaced-tray drag-out (Bead 11). The dragged frame id lives in a REF so the
   // plan's pointer-up reads it synchronously (a full press->move->release can
@@ -50,6 +93,8 @@ export default function App() {
   // handler runs first (React binds at the root, below window in the bubble
   // path), so a genuine drop is read and cleared before this reset sees it.
   const trayDragRef = useRef(/** @type {string|null} */ (null));
+  // The plan region: the focus successor of a delete from the plan or the tray.
+  const planRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
   useEffect(() => {
     const clear = () => {
       trayDragRef.current = null;
@@ -76,11 +121,30 @@ export default function App() {
     prevSnapshotRef.current = snapshot;
   }, [snapshot]);
 
-  // Selecting a Frame (on the plan or in the tray) opens its Inspector on the
-  // default facet; the facet contract's default is "commissioning".
-  const selectFrame = (frameId) => {
+  // Selecting a Frame opens its Inspector. Plain selection (plan or tray) keeps
+  // the open facet and never moves focus; attention-strip navigation passes the
+  // facet that shows the frame's cause (health.js facetFor) and asks the
+  // Inspector to take focus.
+  const selectFrame = (frameId, nextFacet = null) => {
     setSelection(frameId);
-    setFacet("commissioning");
+    if (nextFacet === null) {
+      setFocusRequest(null);
+      return;
+    }
+    setFacet(nextFacet);
+    focusSeqRef.current += 1;
+    setFocusRequest(focusSeqRef.current);
+  };
+
+  // Attention-strip and Equipment-roster navigation (Wall mode only): show the
+  // frame's Surface, select it, and open the facet for its health.
+  const navigateToFrame = (frameId) => {
+    const frame = (snapshot?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
+    if (frame === undefined) {
+      return;
+    }
+    setSurfaceId(frame.surface_id);
+    selectFrame(frameId, facetFor(frameHealth(snapshot, frameId), facet));
   };
 
   // Surfaces present in the snapshot, sorted for a deterministic default.
@@ -89,19 +153,23 @@ export default function App() {
     return [...new Set(frames.map((frame) => frame.surface_id))].sort();
   }, [snapshot]);
 
+  // Wall mode with frames splits into the plan column and the Inspector column
+  // (side by side on wide screens, stacked on narrow ones — CSS only). On the
+  // first run there is no frame to inspect, so there is no Inspector column.
+  const split =
+    snapshot !== null && mode === "wall" && (snapshot.inventory?.frames ?? []).length > 0;
+
   // Default to the first Surface present; fall back if the chosen one vanished.
   const activeSurface =
     surfaceId !== null && surfaces.includes(surfaceId) ? surfaceId : surfaces[0] ?? null;
 
-  const connect = (event) => {
+  const submitSignIn = (event) => {
     event.preventDefault();
-    // In-memory only, mirroring the legacy flat page — never persisted.
-    setToken(tokenInput);
-    // Trigger one Plane A load with the freshly-set token. A 401 surfaces the
-    // auth-rejected state (useSnapshot clears the in-memory token and flags it),
-    // rendering the token form again with a "not accepted" message below; any
-    // other failure leaves the empty state in place (Bead 18 richer surfacing).
-    refresh().catch(() => {});
+    // The token goes into the one sign-in request and is cleared from the field
+    // at once; nothing keeps it (pass A §7).
+    const token = tokenInput;
+    setTokenInput("");
+    signIn(token);
   };
 
   return (
@@ -138,26 +206,42 @@ export default function App() {
             Showrunner
           </button>
         </div>
+        {auth === "signedIn" && (
+          <button type="button" className="console__button" onClick={() => signOut()}>
+            Log out
+          </button>
+        )}
       </header>
 
-      <form className="console__token" onSubmit={connect}>
-        <label className="console__token-field">
-          Operator token
-          <input
-            type="password"
-            name="operator-token"
-            autoComplete="off"
-            value={tokenInput}
-            onChange={(event) => setTokenInput(event.target.value)}
-          />
-        </label>
-        <button type="submit">Connect</button>
-      </form>
+      {auth === "signedOut" && (
+        <form className="console__token" onSubmit={submitSignIn}>
+          <label className="console__token-field">
+            Operator token
+            <input
+              type="password"
+              name="operator-token"
+              autoComplete="off"
+              value={tokenInput}
+              onChange={(event) => setTokenInput(event.target.value)}
+            />
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+      )}
 
-      {authRejected && (
+      {authNotice !== null && (
         <p className="console__auth-error" role="alert">
-          Operator token was not accepted. Re-enter the token to connect.
+          {AUTH_NOTICES[authNotice]}
         </p>
+      )}
+
+      {originRefused && (
+        <div className="console__auth-error" role="alert">
+          <p>{ORIGIN_REFUSED_MESSAGE}</p>
+          <button type="button" onClick={dismissOriginRefused}>
+            Dismiss
+          </button>
+        </div>
       )}
 
       {snapshot !== null && (
@@ -168,99 +252,120 @@ export default function App() {
         >
           <span className="console__age">
             {age === null ? "never updated" : `updated ${age} s ago`}
+            {/* Only after a refresh actually failed — never inferred from age. */}
+            {refreshFailed && " — last refresh failed"}
           </span>
           <span aria-hidden="true">·</span>
           <button
             type="button"
-            className="console__refresh"
+            className="console__button"
             onClick={() => refresh().catch(() => {})}
           >
             Refresh
           </button>
           <span
-            className="console__health"
+            className={`console__health health--${PILL_SEVERITY[health.status] ?? "unknown"}`}
             role="status"
-            aria-label={`Central health: ${health}`}
+            aria-label={`Central health: ${centralHealth}`}
           >
-            {health}
+            {`Central: ${centralHealth}`}
           </span>
         </div>
       )}
 
+      {snapshot !== null && (
+        <AttentionStrip
+          snapshot={snapshot}
+          central={health}
+          onNavigate={mode === "wall" ? navigateToFrame : null}
+        />
+      )}
+
       {snapshot !== null && <Guidance snapshot={snapshot} />}
 
-      <main className="console__body">
+      <main className={split ? "console__body console__body--split" : "console__body"}>
         {snapshot === null ? (
           <p>Console ready.</p>
         ) : mode === "showrunner" ? (
           // The show layer. R4 is enforced by COMPOSITION: Showrunner never
           // imports the Commissioning facet, and the Wall-only surfaces below
-          // (Plan/Inspector/EquipmentRail/tray — the only mounts of
+          // (Plan/Inspector/EquipmentRoster/tray — the only mounts of
           // Commissioning) are simply not rendered in this mode.
           <Showrunner snapshot={snapshot} />
         ) : (
           <>
-            {recovered.length > 0 && (
-              <div className="console__recovery" role="status">
-                <p className="console__recovery-text">
-                  Recovered — already bound (serial match, not identity):{" "}
-                  {recovered.join(", ")}
-                </p>
-                <button type="button" onClick={() => setRecovered([])}>
-                  Dismiss
-                </button>
+            <div className="console__main">
+              {recovered.length > 0 && (
+                <div className="console__recovery" role="status">
+                  <p className="console__recovery-text">
+                    Recovered — already bound (serial match, not identity):{" "}
+                    {recovered.join(", ")}
+                  </p>
+                  <button type="button" onClick={() => setRecovered([])}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              <div className="console__surface-filter">
+                <label className="console__surface-field">
+                  Surface
+                  <select
+                    aria-label="Surface"
+                    value={activeSurface ?? ""}
+                    onChange={(event) => {
+                      setSurfaceId(event.target.value);
+                      setSelection(null);
+                    }}
+                  >
+                    {surfaces.map((surface) => (
+                      <option key={surface} value={surface}>
+                        {surface}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
-            )}
-            <EquipmentRail snapshot={snapshot} onSelect={setSelectedPlayer} />
-            {selectedPlayer !== null && (
-              <p className="console__selected-player">
-                Pending player selected: {selectedPlayer}
-              </p>
-            )}
-            <div className="console__surface-filter">
-              <label className="console__surface-field">
-                Surface
-                <select
-                  aria-label="Surface"
-                  value={activeSurface ?? ""}
-                  onChange={(event) => {
-                    setSurfaceId(event.target.value);
-                    setSelection(null);
-                  }}
-                >
-                  {surfaces.map((surface) => (
-                    <option key={surface} value={surface}>
-                      {surface}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <Plan
-              snapshot={snapshot}
-              surfaceId={activeSurface}
-              selection={selection}
-              onSelect={selectFrame}
-              onDeleted={() => setSelection(null)}
-              trayDragRef={trayDragRef}
-              onTrayDrop={() => {
-                trayDragRef.current = null;
-              }}
-            />
-            <UnplacedTray
-              snapshot={snapshot}
-              onSelect={selectFrame}
-              onDragStart={(id) => {
-                trayDragRef.current = id;
-              }}
-            />
-            {selection !== null && (
-              <Inspector
+              <Plan
                 snapshot={snapshot}
-                frameId={selection}
-                facet={facet}
-                onFacet={setFacet}
+                surfaceId={activeSurface}
+                selection={selection}
+                onSelect={selectFrame}
+                onDeleted={() => setSelection(null)}
+                regionRef={planRegionRef}
+                trayDragRef={trayDragRef}
+                onTrayDrop={() => {
+                  trayDragRef.current = null;
+                }}
               />
+              <UnplacedTray
+                snapshot={snapshot}
+                onSelect={selectFrame}
+                onDragStart={(id) => {
+                  trayDragRef.current = id;
+                }}
+                onDeleted={(id) => {
+                  setSelection((current) => (current === id ? null : current));
+                  planRegionRef.current?.focus();
+                }}
+              />
+              <EquipmentRoster
+                snapshot={snapshot}
+                bootFacts={bootFacts}
+                onNavigate={navigateToFrame}
+              />
+            </div>
+            {split && (
+              <aside className="console__side">
+                <Inspector
+                  snapshot={snapshot}
+                  bootFacts={bootFacts}
+                  frameId={selection}
+                  facet={facet}
+                  onFacet={setFacet}
+                  focusRequest={focusRequest}
+                  onFocusDone={() => setFocusRequest(null)}
+                />
+              </aside>
             )}
           </>
         )}

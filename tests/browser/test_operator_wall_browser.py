@@ -15,9 +15,15 @@ import re
 import time
 
 import pytest
-from operator_harness import operator_server
+from operator_harness import (
+    operator_server,
+    pause_page_clock,
+    report_readiness,
+    sign_in,
+    tile_health,
+)
 from playwright.sync_api import expect
-from test_registry import ADMIN, enroll
+from test_registry import enroll
 
 from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
@@ -53,16 +59,10 @@ def _seed(registry):
         width_mm=400, height_mm=300, profile=LANDSCAPE))
 
 
-def _connect(page, origin):
-    page.goto(origin + "/console")
-    page.get_by_label("Operator token").fill(ADMIN)
-    page.get_by_role("button", name="Connect", exact=True).click()
-
-
 def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The placed frame renders ON THE PLAN (default Surface "wall"), located
         # by its accessible identity label, not by coordinates.
@@ -76,8 +76,8 @@ def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, regi
         expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_have_count(0)
 
 
-# Bead 2 -- now-showing join + connectivity + honesty. A frame that a live Run
-# targets vs a frame whose bound output reports disconnected.
+# Bead 2 -- now-showing join + frame health + honesty. A frame that a live Run
+# targets vs a frame whose bound output reported no display at Player start.
 SHOWING = "showing-frame"
 OFFLINE = "offline-frame"
 SCENE = "lobby-scene"
@@ -101,7 +101,7 @@ def _seed_now_showing(registry):
     registry.create_frame(FrameCreate(
         id=OFFLINE, surface_id="wall", x_mm=600, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
-    # Compound-key bindings: same player, different outputs. connectivity() must
+    # Compound-key bindings: same player, different outputs. frameHealth() must
     # resolve each frame to its OWN (player_id, output_id) port.
     registry.bind(SHOWING, player_id, "HDMI-A-1", expected_generation=0)
     registry.bind(OFFLINE, player_id, "HDMI-A-2", expected_generation=0)
@@ -120,10 +120,12 @@ def _seed_now_showing(registry):
     return player_id
 
 
-def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, registry):
-    _seed_now_showing(registry)
+def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, registry):
+    player_id = _seed_now_showing(registry)
+    # The Player is heard, so each tile's health reaches its display/commissioning rows.
+    report_readiness(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The frame a live Run targets shows the intended now-showing chip -- the
         # scene_id joined by the STRING "frame:<id>" -- plus its phase, located by
@@ -131,14 +133,17 @@ def test_tile_shows_scheduled_intent_connectivity_and_never_claims_live(page, re
         showing = page.get_by_role("group", name=f"Frame {SHOWING} status", exact=True)
         expect(showing).to_contain_text(f"Scheduled: {SCENE}")
         expect(showing).to_contain_text("Phase: body")
-        # Its bound output is connected.
-        expect(showing.get_by_role("img", name="Player connected")).to_be_visible()
+        # Its bound output had a display at Player start; it was never commissioned.
+        expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs commissioning")
 
-        # The second frame's bound output reports disconnected: its connectivity
-        # dot says so, scoped to that frame's identity (compound-key join -- the
-        # two frames share a player but resolve to different ports).
+        # The second frame's bound output reported no display: its health says so,
+        # scoped to that frame's identity (compound-key join -- the two frames
+        # share a player but resolve to different ports).
         offline = page.get_by_role("group", name=f"Frame {OFFLINE} status", exact=True)
-        expect(offline.get_by_role("img", name="Player disconnected")).to_be_visible()
+        expect(tile_health(page, OFFLINE)).to_have_accessible_name(
+            "No display detected when the Player started")
+        expect(offline).to_contain_text("No display detected")
+        expect(showing).not_to_contain_text("No display detected")
 
         # Honesty (design §6a): the surface asserts intent, never confirmed
         # playback -- the literal "LIVE" appears nowhere on the console.
@@ -150,7 +155,7 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
     # live Run targets. `player_id` is the Player the frame is bound to.
     player_id = _seed_now_showing(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # Selecting the frame on the plan (by identity) opens its read-only
         # Inspector, scoped to that frame's identity.
@@ -187,7 +192,7 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
 def test_surface_filter_switches_the_plan(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # Default Surface "wall" shows its placed frame.
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
@@ -271,13 +276,14 @@ def _fill_landscape_profile(page):
 def test_drag_create_posts_frame_with_scaled_placement(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
         # Drag a landscape rectangle across the middle of the empty canvas, then
         # capture a coherent (landscape) display profile in the new-frame form.
         _drag(page, box, 0.30, 0.30, 0.60, 0.50)
+        page.get_by_label("Frame id", exact=True).fill("lobby-left")
         _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         # The form closes on a successful POST -> the row exists server-side.
@@ -286,6 +292,8 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         created = [frame for frame in registry.inventory().frames if frame.id not in before]
         assert len(created) == 1
         frame = created[0]
+        # The operator's readable id is the stored id (slice 2 §8).
+        assert frame.id == "lobby-left"
         # STORED placement matches the dragged region under the px->mm scale:
         # start viewBox (0.30*960, 0.30*600), end (0.60*960, 0.50*600).
         assert abs(frame.x_mm - 0.30 * 960 * SCALE) <= TOL       # ~1200
@@ -297,10 +305,45 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         expect(page.get_by_role("button", name=f"Frame {frame.id}", exact=True)).to_be_visible()
 
 
+def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        posts = []
+        page.on("request", lambda request: posts.append(request.url)
+                if request.method == "POST" and request.url.endswith("/v1/operator/frames")
+                else None)
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        field = page.get_by_label("Frame id", exact=True)
+        field.fill("lobby:left")
+        # Checked as you type: the rule is stated against the field.
+        expect(field).to_have_attribute("aria-invalid", "true")
+        expect(field).to_have_accessible_description(re.compile(r"^Not usable\."))
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("form", name="New frame").get_by_role("alert")
+               ).to_contain_text("up to 96")
+        page.wait_for_timeout(300)
+        assert posts == []
+        assert {frame.id for frame in registry.inventory().frames} == {"origin-seed"}
+
+
+def test_a_taken_frame_id_says_so(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        page.get_by_label("Frame id", exact=True).fill("origin-seed")
+        _fill_landscape_profile(page)
+        page.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("form", name="New frame").get_by_role("alert")
+               ).to_have_text("A frame named origin-seed already exists.")
+
+
 def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
@@ -310,6 +353,7 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         # non-origin nudge (errata: isUnplaced heuristic) must push it off (0,0) so
         # it is DRAWN, not routed into the Unplaced tray.
         _drag(page, box, 0.40, 0.40, 0.0, 0.0)
+        page.get_by_label("Frame id", exact=True).fill("corner.1")
         _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
@@ -317,6 +361,7 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         created = [frame for frame in registry.inventory().frames if frame.id not in before]
         assert len(created) == 1
         frame = created[0]
+        assert frame.id == "corner.1"
         # Never the exact origin -> never mis-routed to the tray.
         assert (frame.x_mm, frame.y_mm) != (0, 0)
         assert frame.x_mm >= 1
@@ -332,7 +377,7 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
         id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         box = _plan_box(page)
 
@@ -355,6 +400,38 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
 
 
+def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
+    """Pass 2 §7: the 5 s poll replaces Plane A mid-drag, and the drag (a ref plus local
+    state in Plan) survives it -- the release lands where the operator dragged to."""
+    registry.create_frame(FrameCreate(
+        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        sign_in(page, origin)
+        expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
+        box = _plan_box(page)
+
+        page.mouse.move(box["x"] + 180 / 960 * box["width"], box["y"] + 300 / 600 * box["height"])
+        page.mouse.down()
+        page.mouse.move(box["x"] + 360 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
+                        steps=4)
+        # A poll lands mid-drag.
+        with page.expect_response("**/v1/operator/inventory"):
+            page.clock.run_for(5000)
+        page.wait_for_timeout(200)
+        page.mouse.move(box["x"] + 540 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
+                        steps=4)
+        page.mouse.up()
+
+        def _moved():
+            frame = next(f for f in registry.inventory().frames if f.id == PLACED)
+            return frame if frame.x_mm != 100 else None
+
+        frame = _wait_for(_moved)
+        assert abs(frame.x_mm - 360 * SCALE) <= TOL
+
+
 # Bead 11 -- S-remove: DELETE (guarded 409 -> distinctive operator guidance) + drag
 # a tray (origin-stacked) frame onto the plan (PATCH -> distinct geometry -> leaves
 # the tray). Assertions are behavioral OUTCOMES: server-side identity via
@@ -366,6 +443,11 @@ BOUND = "bound-frame"
 
 def _plan(page):
     return page.get_by_role("group", name="Wall plan for surface wall", exact=True)
+
+
+def _confirm_delete(page):
+    """The delete confirmation (slice 2 §7): a plain Confirm naming the frame."""
+    page.get_by_role("dialog").get_by_role("button", name="Confirm delete", exact=True).click()
 
 
 def _seed_bound(registry):
@@ -385,22 +467,30 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         # Select the clear frame on the plan, then delete it via its control.
         page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
 
         # Gone by identity from the plan AND from server inventory (real removal).
         expect(page.get_by_role("button", name=f"Frame {CLEAR}", exact=True)).to_have_count(0)
         _wait_for(lambda: all(f.id != CLEAR for f in registry.inventory().frames))
+        # The dialog closed, the plan region holds focus, and a status line says so. (The
+        # wall's last frame is gone, so the region now names no surface.)
+        plan = page.get_by_role("group", name=re.compile(r"^Wall plan for surface"))
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        expect(plan).to_be_focused()
+        expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
 
 
 def test_delete_bound_frame_shows_unbind_guidance(page, registry):
     _seed_bound(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         page.get_by_role("button", name=f"Frame {BOUND}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {BOUND}", exact=True).click()
+        _confirm_delete(page)
 
         # 409 frame_bound -> the DISTINCTIVE unbind guidance (design §9a). Asserting
         # the specific remedy wording, not a generic substring, so a mapping that
@@ -416,9 +506,12 @@ def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
     # first, so DELETE is refused with frame_in_use (not frame_bound).
     _seed_now_showing(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {SHOWING}", exact=True).click()
+        # The dialog lists the live Run it captured when it opened.
+        expect(page.get_by_role("dialog")).to_contain_text("Live Runs on it")
+        _confirm_delete(page)
 
         # 409 frame_in_use -> the DISTINCTIVE finish/cancel-the-Run guidance.
         expect(_plan(page).get_by_role("alert")).to_contain_text("finish or cancel")
@@ -431,7 +524,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
         id=ORIGIN, surface_id="wall", x_mm=0, y_mm=0,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         tray = page.get_by_role("group", name="Unplaced frames")
         item = tray.get_by_role("button", name=ORIGIN, exact=True)
         expect(item).to_be_visible()
@@ -484,7 +577,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
 def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The global bar shows the snapshot age in the "updated N s ago" form.
         expect(page.get_by_text(re.compile(r"updated \d+ s ago"))).to_be_visible()
@@ -504,7 +597,7 @@ def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
 def test_health_pill_renders_a_health_state(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The /healthz pill reports central reachable (DB up in the test harness),
         # located by its accessible name, not by coordinates.
@@ -516,7 +609,7 @@ def test_health_pill_renders_a_health_state(page, registry):
 def test_guidance_banner_is_dismissible_and_dismissal_survives_refresh(page, registry):
     # No frames seeded -> first-run empty wall -> the guidance banner shows.
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()

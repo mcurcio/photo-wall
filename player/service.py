@@ -30,6 +30,7 @@ from pydantic import ConfigDict, Field, model_validator
 from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
+from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
     Commit,
     Instant,
@@ -67,7 +68,11 @@ from uplink.trust import Trust
 
 MAX_JSON = 1024 * 1024
 CHUNK_SIZE = 64 * 1024
-BACKOFF = (1, 5, 15, 60)
+# The session-cycle backoff is a liveness contract (Central's silence threshold is derived from
+# it); the name is kept so tests can shorten the session retry.
+BACKOFF = SESSION_BACKOFF
+# A failed media download retries on its own schedule; it is not a liveness contract.
+MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -794,7 +799,7 @@ class PlayerService:
                     success = False
                     self.fault("media_download")
                 attempts[job] = (min(count + 1, 3), self.clock.monotonic()
-                    + (1 if success else BACKOFF[min(count, 3)]))
+                    + (1 if success else MEDIA_RETRY_BACKOFF[min(count, 3)]))
             if self.executor is not None and self.clock.monotonic() - maintained_at >= 2:
                 await asyncio.get_running_loop().run_in_executor(self._worker,
                                                                self.executor.maintain_cache)
@@ -878,7 +883,7 @@ class PlayerService:
             # A completed state/readiness exchange with the GLib thread answering: the
             # session is live (M5; the unit's WatchdogSec is the deadline owner).
             watchdog.pet()
-            await asyncio.sleep(max(0, .5 - (asyncio.get_running_loop().time() - started)))
+            await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
         # A slow observation endpoint cannot consume the readiness reporting slot.

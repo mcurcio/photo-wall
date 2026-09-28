@@ -121,6 +121,18 @@ def test_queue_idempotency_limit_and_reservation_pressure_are_transactional(regi
     assert repo.health()["worker_error"] == "storage_pressure"
 
 
+def test_health_counts_only_the_current_recipes_jobs(registry):
+    """The console's worker line reads these counts (slice 3 §14): a recipe change
+    fails the old recipe's queued jobs, and those are not the worker's failures now."""
+    repo, _spec, originals = setup_repository(registry, count=2)
+    repo.request_acquisitions((request(originals[0]),))
+    assert repo.health()["jobs"] == [{"state": "queued", "count": 1}]
+    repo.set_recipe("b" * 64)  # the old recipe's queued job fails as recipe_changed
+    assert repo.health()["jobs"] == []
+    repo.request_acquisitions((request(originals[1]),))
+    assert repo.health()["jobs"] == [{"state": "queued", "count": 1}]
+
+
 def test_procrastinate_enqueue_rolls_back_with_domain_request(registry):
     queue = ProcrastinateMediaQueue(registry.db.dsn)
     queue.apply_schema(registry.db.dsn)

@@ -1,6 +1,8 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import procrastinate
@@ -13,7 +15,15 @@ from central.media_queue import (
     REFRESH_MEDIA_SOURCE_TASK,
     ProcrastinateMediaQueue,
 )
-from media.task_queue import MediaRetryStrategy, RetryableMediaTask, create_worker_app
+from central.media_repository import StoreLimits
+from media.task_queue import (
+    MAINTENANCE_CRON,
+    REFRESH_CRON,
+    MediaRetryStrategy,
+    RetryableMediaTask,
+    create_worker_app,
+)
+from media.worker import WorkerLimits
 
 
 class Deferrer:
@@ -172,3 +182,24 @@ def test_periodic_schedules_use_croniter_seconds_last_semantics():
 
     assert refresh - base == 11
     assert maintenance - base == 101
+
+
+def _every_seconds(cron):
+    """The period of a Procrastinate periodic schedule written as `*/N` in one field
+    (minute, hour, day, month, weekday, second)."""
+    fields = cron.split()
+    steps = [(index, int(field[2:])) for index, field in enumerate(fields) if field.startswith("*/")]
+    assert len(steps) == 1, cron
+    index, step = steps[0]
+    assert index in (0, 5), cron
+    return step * 60 if index == 0 else step
+
+
+def test_the_console_media_thresholds_follow_the_worker_schedule():
+    # Slice 3 §14: "quiet" and "overdue" are console constants derived from these.
+    source = (Path(__file__).parents[1] / "central/console/src/mediaHealth.js").read_text()
+    pinned = dict(re.findall(r"^export const ([A-Z_]+_SECONDS) = (\d+);$", source, re.MULTILINE))
+    assert int(pinned["WORKER_CHECK_IN_SECONDS"]) == _every_seconds(MAINTENANCE_CRON)
+    assert int(pinned["SOURCE_REFRESH_SECONDS"]) == _every_seconds(REFRESH_CRON)
+    assert int(pinned["SOURCE_REFRESH_SECONDS"]) == StoreLimits().refresh_seconds
+    assert int(pinned["REFRESH_RUN_SECONDS"]) == WorkerLimits().refresh_seconds

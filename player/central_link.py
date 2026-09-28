@@ -18,13 +18,12 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus
 
+from contracts.liveness import REQUEST_TIMEOUT
 from uplink.causes import Cause, Phase, UplinkError, classify
 from uplink.fetch import MAX_ERROR_BODY, refusal
 from uplink.locate import LocatedCentral
 from uplink.origin import Url, parse_url
 from uplink.trust import Trust
-
-REQUEST_TIMEOUT: Final = 15.0
 
 
 async def refuse_redirect(response: httpx.Response) -> None:

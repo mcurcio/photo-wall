@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from contracts.models import TARGET_ID_PATTERN
+
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
 
-Target = Annotated[str, Field(pattern=r"^(frame|actuator):[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")]
+Target = Annotated[str, Field(pattern=rf"^(frame|actuator):{TARGET_ID_PATTERN}$")]
 Seconds = Annotated[FiniteFloat, Field(ge=0)]
 PositiveSeconds = Annotated[FiniteFloat, Field(gt=0)]
 Identifier = Annotated[str, Field(min_length=1, max_length=160)]
@@ -134,6 +137,9 @@ class Admission(FrozenModel):
     status: Literal["admitted", "ignored", "queued", "rejected", "expired"]
     run_id: str | None = None
     reason: str | None = None
+    # The root Run whose protection refused it (a protected refusal only).
+    # Optional so admissions stored before it existed still restore.
+    blocking_run_id: str | None = None
 
 
 class Intent(FrozenModel):
@@ -180,6 +186,8 @@ class RunView(FrozenModel):
     children: tuple[str, ...]
     finish_requested_at: FiniteFloat | None
     ended_at: FiniteFloat | None
+    program_id: str | None
+    priority: int
 
 
 class RuntimeView(FrozenModel):
@@ -190,6 +198,27 @@ class RuntimeView(FrozenModel):
 
     def for_target(self, target: str) -> Intent | None:
         return next((intent for intent in self.visible if intent.target == target), None)
+
+
+# The operator's read keeps ended Runs, and Program outcomes, for this long.
+OPERATOR_HISTORY_SECONDS = 86400.0
+
+
+class OperatorProjection(FrozenModel):
+    """The operator console's read of the Runtime (GET /v1/operator/runtime).
+
+    `current` is the projected view with its Runs bounded to the live ones plus
+    those ended in the last `OPERATOR_HISTORY_SECONDS`. `protected_frames` maps
+    each served Run that protects frames to those targets; it is computed only
+    here, never on the scheduler's path. `program_outcomes` maps each Program
+    ending within the same bound, or later, to the Admission of its window
+    (None while it has none). Both bounds are read filters: stored Runs,
+    Programs and admissions are untouched.
+    """
+
+    current: RuntimeView
+    protected_frames: Mapping[str, frozenset[str]]
+    program_outcomes: Mapping[str, Admission | None]
 
 
 class _MutableModel(BaseModel):
@@ -269,6 +298,22 @@ def _run_id(identity: str) -> str:
     return "run-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 
+def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
+    reason, blocking_run_id = denial
+    return Admission(
+        activation_id=activation_id, status="rejected", reason=reason,
+        blocking_run_id=blocking_run_id,
+    )
+
+
+class RuntimeConflict(Exception):
+    """A command refused because it conflicts with the stored state; nothing changed."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
@@ -292,6 +337,15 @@ class Runtime:
         self._state = _State()
 
     def set_scene(self, scene: Scene) -> None:
+        """Store a Scene; a save must move its revision past the stored one.
+
+        A revision at or below the stored one is refused (`scene_revision_conflict`)
+        so a save built from an older copy never silently replaces a newer one,
+        unless it is the stored Scene exactly (an idempotent retry).
+        """
+        stored = self._state.scenes.get(scene.scene_id)
+        if stored is not None and scene.revision <= stored.revision and scene != stored:
+            raise RuntimeConflict("scene_revision_conflict")
         self._state.scenes[scene.scene_id] = scene
 
     def set_program(self, program: Program) -> None:
@@ -323,7 +377,17 @@ class Runtime:
         return view
 
     def export_state(self) -> dict:
-        return self._state.model_dump(mode="json")
+        """The persisted form; the only path by which runtime state is stored.
+
+        Rollback compatibility: builds before `Admission.blocking_run_id` forbid
+        the key, so it is written only when set. A state holding no protection
+        refusal therefore still restores on the previous Central build.
+        """
+        state = self._state.model_dump(mode="json")
+        for admission in state["admissions"].values():
+            if admission["blocking_run_id"] is None:
+                del admission["blocking_run_id"]
+        return state
 
     @classmethod
     def restore(cls, state: dict) -> Runtime:
@@ -341,8 +405,31 @@ class Runtime:
                 root.descendant_sequence = max(root.descendant_sequence, root_orders[root.run_id])
         return runtime
 
+    def _copy(self) -> Runtime:
+        """A detached copy, so a projection never touches the owned state."""
+        return self.restore(self.export_state())
+
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
-        return self.restore(self.export_state()).advance(now, max_events=max_events)
+        return self._copy().advance(now, max_events=max_events)
+
+    def operator_projection(self, now: float, *, max_events: int = 10000) -> OperatorProjection:
+        """One restore and advance, as `project`, read for the operator console."""
+        projected = self._copy()
+        view = projected.advance(now, max_events=max_events)
+        state = projected._state
+        since = view.now - OPERATOR_HISTORY_SECONDS
+        runs = tuple(run for run in view.runs if run.ended_at is None or run.ended_at >= since)
+        return OperatorProjection(
+            current=view.model_copy(update={"runs": runs}),
+            protected_frames={
+                run.run_id: protected for run in runs
+                if (protected := state.runs[run.run_id].scene.protected_frames)
+            },
+            program_outcomes={
+                program.program_id: state.admissions.get(program.activation_id)
+                for program in state.programs.values() if program.ends_at >= since
+            },
+        )
 
     def timeline(
         self, start: float, end: float, *, max_events: int = 10000
@@ -352,7 +439,7 @@ class Runtime:
         if end <= start:
             raise ValueError("timeline end must follow start")
         budget = _TransitionBudget(max_events)
-        projected = self.restore(self.export_state())
+        projected = self._copy()
         views = [projected._advance(start, budget)]
         budget.consume()
         while (boundary := projected._next_event()) is not None and boundary < end:
@@ -410,9 +497,7 @@ class Runtime:
             excluded = {r.run_id for r in matches} if repeat == "restart" else set()
             denial = self._protected_conflict(scene, priority, force, excluded)
             if denial:
-                result = Admission(
-                    activation_id=activation_id, status="rejected", reason=denial
-                )
+                result = _refusal(activation_id, denial)
             else:
                 for run in matches if repeat == "restart" else ():
                     self._cancel(run, now)
@@ -469,7 +554,8 @@ class Runtime:
 
     def _protected_conflict(
         self, scene: Scene, priority: int, force: bool, excluded: set[str] | None = None
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
+        """The refusal reason and the root Run that refuses `scene`, if any."""
         frames = {target for target in scene.participants if target.startswith("frame:")}
         for run in self._state.runs.values():
             if run.parent_id is not None or not run.active or run.run_id in (excluded or set()):
@@ -477,9 +563,9 @@ class Runtime:
             if not frames.intersection(run.scene.participants):
                 continue
             if frames.intersection(run.scene.protected_frames) and not force:
-                return "protected_frames"
+                return "protected_frames", run.run_id
             if scene.protected_frames.intersection(run.scene.participants) and run.priority > priority:
-                return "protection_not_visible"
+                return "protection_not_visible", run.run_id
         return None
 
     def _admit(
@@ -630,7 +716,7 @@ class Runtime:
             scene = self._state.scenes[program.scene_id]
             denial = self._protected_conflict(scene, program.priority, False)
             result = (
-                Admission(activation_id=program.activation_id, status="rejected", reason=denial)
+                _refusal(program.activation_id, denial)
                 if denial else self._admit(
                     scene, program.activation_id, program.starts_at, program.priority,
                     program_id=program.program_id, program_end=program.ends_at,
@@ -714,7 +800,7 @@ class Runtime:
                 scene_id=r.scene.scene_id, scene_revision=r.scene.revision,
                 started_at=r.started_at, phase=r.phase, participants=r.scene.participants,
                 children=tuple(r.children), finish_requested_at=r.finish_requested_at,
-                ended_at=r.ended_at,
+                ended_at=r.ended_at, program_id=r.program_id, priority=r.priority,
             ) for r in runs),
             contributions=tuple(intents), visible=tuple(winners[k] for k in sorted(winners)),
         )

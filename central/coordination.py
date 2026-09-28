@@ -16,6 +16,7 @@ from pydantic import Field
 
 from central.db import Database
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
+from central.installation_models import PlayerReports
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
@@ -590,6 +591,21 @@ class Coordinator:
                 "commits": commits,
                 "revocations": revocations,
             }
+
+    def player_reports_lock_free(self) -> PlayerReports:
+        """The Players' last accepted reports, read in one statement of a plain transaction.
+
+        This never takes COORDINATION_LOCK, so it answers while advance() or readiness() holds
+        it. A report from an earlier authority epoch, or from a retired Player, is not counted:
+        a Player is only heard once it reports on its current session."""
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
+                "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
+                "WHERE p.retired_at IS NULL"
+            ).fetchall()
+        reports = {row["player_id"]: row["received_at"] for row in rows}
+        return PlayerReports(read_at=max((self.clock.utc(), *reports.values())), reports=reports)
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()

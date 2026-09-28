@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 
-import { createFrame, deleteFrame, dropFromTray, moveFrame } from "./framesApi.js";
-import { connectivity, nowShowing } from "./join.js";
+import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
+import { createFrame, dropFromTray, FRAME_ID_PATTERN, moveFrame } from "./framesApi.js";
+import { frameHealth } from "./health.js";
+import { nowShowing } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
 import { useMutate } from "./useMutate.js";
 
@@ -18,15 +20,18 @@ import { useMutate } from "./useMutate.js";
  * never by coordinates (design §1c, tracer testing philosophy).
  *
  * Alongside each drawn frame the plan renders a status readout (Bead 2): the
- * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`),
- * a connectivity dot (from `connectivity`), and a `calibration_valid` badge. The
- * chip asserts operator INTENT, never confirmed playback — the word "LIVE" is
- * deliberately absent (design §6a).
+ * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`)
+ * and the frame's health — a severity dot plus its short tile label (the fact
+ * without its age, so it fits the tile) whose accessible name is the full label
+ * — from the one classifier, `frameHealth` (health.js). The readout is clipped
+ * to the tile's rect, so no text ever spills over a neighbouring tile. The chip asserts operator INTENT, never
+ * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
  * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
  * an in-progress rectangle (Plane B, held as component-local drag state) and, on
- * release, opens a minimal new-frame form to capture the display `FrameProfile`;
- * submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
+ * release, opens a minimal new-frame form to capture the Frame id (slice 2 §8:
+ * readable, checked as you type against FRAME_ID_PATTERN, never generated) and
+ * the display `FrameProfile`; submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
  * ON an existing frame repositions it via {@link moveFrame} (`PATCH`,
  * last-write-wins, no token — §9a). Both writes go through the shared
  * `useMutate()` hook so the plan corrects from the next Plane A snapshot. A press
@@ -34,6 +39,12 @@ import { useMutate } from "./useMutate.js";
  *
  * Origin-stacked / geometry-less frames are NOT drawn here; they belong to the
  * Unplaced tray (see UnplacedTray.jsx).
+ *
+ * DELETE (slice 2 §7) opens the one confirmation dialog (ConfirmAction), which
+ * captures the frame's binding and live Runs when it opens and shows a refusal
+ * inside itself. After a delete the plan region takes focus and a status line
+ * says what happened. `regionRef` (optional) is attached to the plan region so
+ * the Unplaced tray can move focus here after its own delete.
  *
  * @param {{snapshot: object|null, surfaceId: string|null,
  *          selection: string|null, onSelect: (frameId: string) => void}} props
@@ -43,12 +54,6 @@ const VIEWPORT = { width: 960, height: 600 };
 // Movement (viewBox px) a press must exceed before it counts as a drag rather
 // than a click. Below this, a press-release on a frame selects it.
 const DRAG_THRESHOLD = 6;
-
-const CONNECTIVITY_LABEL = {
-  connected: "Player connected",
-  disconnected: "Player disconnected",
-  unbound: "Player unbound",
-};
 
 /**
  * Normalize the two drag endpoints (viewBox px) into a top-left rect `{x,y,w,h}`.
@@ -74,6 +79,16 @@ function toViewbox(svg, event) {
 
 const PROFILE_DEFAULTS = { width_px: 1920, height_px: 1080, diagonal_inches: 24, video: true };
 
+const FRAME_ID_HINT = "Letters, digits, -, _ or .; up to 96; cannot be changed later.";
+
+/** Why a typed Frame id cannot be used, or null when it can. */
+function frameIdProblem(id) {
+  if (id === "") {
+    return "Enter a frame id.";
+  }
+  return FRAME_ID_PATTERN.test(id) ? null : `Frame id: ${FRAME_ID_HINT}`;
+}
+
 export function Plan({
   snapshot,
   surfaceId,
@@ -82,9 +97,21 @@ export function Plan({
   onDeleted,
   trayDragRef,
   onTrayDrop,
+  regionRef,
 }) {
   const mutate = useMutate();
   const svgRef = useRef(null);
+  const ownRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const planRef = regionRef ?? ownRegionRef;
+  // The delete confirmation: after a delete, or when its opener is gone, the
+  // plan region takes focus.
+  const focusPlan = () => planRef.current?.focus();
+  const { open, confirmation } = useConfirm(focusPlan, () => {
+    onDeleted?.();
+    focusPlan();
+  });
+  // Each tile's status readout is clipped to its rect, so no text leaves the tile.
+  const clipPrefix = "plan-clip" + useId().replace(/[^A-Za-z0-9_-]/g, "");
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
   // because a full pointerdown->move->up sequence can fire before React re-renders
   // — the move/up handlers must read the drag synchronously (cf. tryingRef in
@@ -94,18 +121,12 @@ export function Plan({
   // The pending new-frame drag rect awaiting a profile from the form (px).
   const [newFrame, setNewFrame] = useState(/** @type {{pxRect: object}|null} */ (null));
   const [profile, setProfile] = useState(PROFILE_DEFAULTS);
+  const [frameId, setFrameId] = useState("");
+  const hintId = useId();
   const [formError, setFormError] = useState(/** @type {string|null} */ (null));
-  // The guard message from a refused DELETE (design §9a), cleared on the next attempt.
-  const [deleteError, setDeleteError] = useState(/** @type {string|null} */ (null));
   // True once the current press has moved past the threshold — read by a frame's
   // onClick so a drag-move is not also treated as a selection.
   const didDragRef = useRef(false);
-
-  // A guard message is about the frame it was raised for; drop it when the
-  // selection moves so one frame's refusal never lingers over another.
-  useEffect(() => {
-    setDeleteError(null);
-  }, [selection]);
 
   const frames = snapshot?.inventory?.frames ?? [];
   const framesById = new Map(frames.map((frame) => [frame.id, frame]));
@@ -209,6 +230,7 @@ export function Plan({
     if (finished.mode === "create") {
       setFormError(null);
       setProfile(PROFILE_DEFAULTS);
+      setFrameId("");
       setNewFrame({ pxRect: normRect(finished.start, finished.cur) });
       return;
     }
@@ -242,6 +264,11 @@ export function Plan({
     if (newFrame == null || surfaceId == null) {
       return;
     }
+    const idProblem = frameIdProblem(frameId);
+    if (idProblem !== null) {
+      setFormError(idProblem);
+      return;
+    }
     const placement = dragToPlacement(newFrame.pxRect, VIEWPORT, surfaceId);
     const widthPx = Number(profile.width_px);
     const heightPx = Number(profile.height_px);
@@ -256,8 +283,9 @@ export function Plan({
       setFormError("Display profile must match the frame's orientation.");
       return;
     }
+    const id = frameId;
     mutate(() =>
-      createFrame(placement, {
+      createFrame(id, placement, {
         width_px: widthPx,
         height_px: heightPx,
         diagonal_inches: diagonal,
@@ -268,6 +296,8 @@ export function Plan({
         if (result.ok) {
           setNewFrame(null);
           setFormError(null);
+        } else if (result.error === "frame_exists") {
+          setFormError(`A frame named ${id} already exists.`);
         } else {
           setFormError("Could not create the frame — check the profile.");
         }
@@ -275,30 +305,22 @@ export function Plan({
       .catch(() => setFormError("Could not create the frame."));
   };
 
-  const onDelete = () => {
+  const onDelete = (event) => {
     if (selection == null) {
       return;
     }
-    setDeleteError(null);
-    mutate(() => deleteFrame(selection))
-      .then((result) => {
-        if (result.ok) {
-          onDeleted?.();
-        } else {
-          // Surface the design §9a guard wording verbatim (unbind / finish the Run).
-          setDeleteError(result.message);
-        }
-      })
-      .catch(() => setDeleteError("Could not delete the frame."));
+    open(event, deleteFrameRequest(snapshot, selection));
   };
 
   const draftRect = draft;
 
   return (
     <section
+      ref={planRef}
       className="plan"
       role="group"
       aria-label={`Wall plan for surface ${surfaceId}`}
+      tabIndex={-1}
     >
       <svg
         ref={svgRef}
@@ -311,12 +333,10 @@ export function Plan({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        {placed.map(({ id, rect }) => {
+        {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
           const now = nowShowing(snapshot?.runtime, id);
-          const connected = connectivity(snapshot, id);
-          const frame = framesById.get(id);
-          const calibrationValid = frame?.calibration_valid === true;
+          const health = frameHealth(snapshot, id);
           return (
             <React.Fragment key={id}>
               <g
@@ -350,14 +370,21 @@ export function Plan({
                   {id}
                 </text>
               </g>
-              <g className="plan__status" role="group" aria-label={`Frame ${id} status`}>
+              <clipPath id={`${clipPrefix}-${index}`}>
+                <rect x={rect.x} y={rect.y} width={rect.w} height={rect.h} />
+              </clipPath>
+              <g
+                className="plan__status"
+                role="group"
+                aria-label={`Frame ${id} status`}
+                clipPath={`url(#${clipPrefix}-${index})`}
+              >
                 <circle
                   cx={rect.x + 10}
                   cy={rect.y + 12}
                   r={5}
-                  className={`plan__dot plan__dot--${connected}`}
-                  role="img"
-                  aria-label={CONNECTIVITY_LABEL[connected]}
+                  className={`plan__dot health--${health.severity}`}
+                  aria-hidden="true"
                 />
                 {now === null ? (
                   <text x={rect.x + 22} y={rect.y + 16} className="plan__chip plan__chip--idle">
@@ -376,9 +403,11 @@ export function Plan({
                 <text
                   x={rect.x + 22}
                   y={rect.y + 44}
-                  className={`plan__badge plan__badge--${calibrationValid ? "valid" : "invalid"}`}
+                  className={`plan__health health--${health.severity}`}
+                  role="img"
+                  aria-label={health.label}
                 >
-                  {calibrationValid ? "Calibration valid" : "Calibration invalid"}
+                  {health.tileLabel}
                 </text>
               </g>
             </React.Fragment>
@@ -398,6 +427,28 @@ export function Plan({
       {newFrame != null && (
         <form className="plan__new-frame" aria-label="New frame" onSubmit={submitNewFrame}>
           <h3 className="plan__new-frame-title">New frame</h3>
+          <label className="plan__new-frame-field">
+            Frame id
+            <input
+              type="text"
+              required
+              value={frameId}
+              aria-describedby={hintId}
+              aria-invalid={frameId !== "" && frameIdProblem(frameId) !== null}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(event) => {
+                setFrameId(event.target.value);
+                setFormError(null);
+              }}
+            />
+          </label>
+          <p id={hintId} className="plan__new-frame-hint">
+            {frameId !== "" && frameIdProblem(frameId) !== null
+              ? `Not usable. ${FRAME_ID_HINT}`
+              : FRAME_ID_HINT}
+          </p>
           <label className="plan__new-frame-field">
             Display width (px)
             <input
@@ -457,13 +508,9 @@ export function Plan({
           <button type="button" className="plan__delete" onClick={onDelete}>
             {`Delete frame ${selection}`}
           </button>
-          {deleteError != null && (
-            <p className="plan__delete-error" role="alert">
-              {deleteError}
-            </p>
-          )}
         </div>
       )}
+      {confirmation("plan__status-line")}
     </section>
   );
 }

@@ -85,6 +85,7 @@ def test_live_session_rejects_retired_or_wrong_epoch_authority(registry):
         assert unauthorized.value.code == 1008
         with client.websocket_connect("/v1/player/session", headers={"Authorization": "Bearer " + player["token"]}) as connection:
             assert connection.receive_json()["configuration"]["authority_epoch"] == 1
+            registry.unbind("frame-0", expected_generation=1)
             registry.retire(player["player_id"])
             with pytest.raises(WebSocketDisconnect) as retired:
                 connection.receive_json()

@@ -45,6 +45,7 @@ def test_http_exact_body_and_headers_requires_current_player_offer(storage, regi
             assert client.get("/v1/media/" + "0" * 64, headers=headers).status_code == 404
             stranger, _, _ = enroll(registry)
             assert client.get(url, headers={"Authorization": f"Bearer {stranger['token']}"}).status_code == 403
+            registry.unbind("portrait", expected_generation=1)
             registry.retire(player["player_id"])
             assert client.get(url, headers=headers).status_code == 401
 

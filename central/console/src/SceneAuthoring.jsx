@@ -1,35 +1,41 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { buildSave, draftId, sceneProblems } from "./authoring.js";
+import { useConfirm } from "./ConfirmAction.jsx";
+import { CycleInput } from "./CycleInput.jsx";
+import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { readCandidates } from "./candidatesApi.js";
+import { SceneList } from "./SceneList.jsx";
+import { SourcePicker } from "./SourcePicker.jsx";
+import { TargetPicker } from "./TargetPicker.jsx";
+import { candidateLabels } from "./mediaHealth.js";
 import { useMutate } from "./useMutate.js";
 
 /**
- * Scene authoring shell (Bead 14a — SR-scenes-live).
+ * Scene authoring (Beads 14a/14b; pass 2 slice 3 §4–§6, §13).
  *
- * A Scene is a per-target COMPOSITION of contributions (design J4). This shell
- * authors and saves a LIVE-SOURCE scene: a Scene whose media for each target
- * Frame is driven by a live Source, targeting one or more EXPLICIT Frames, on a
- * fixed seconds-per-cycle interval. The saved Scene then appears in the Scenes
- * list by its `scene_id` (tiles carry the id, never a name — design J4).
+ * A Scene is a per-target COMPOSITION of contributions (design J4): media for
+ * one or more EXPLICIT Frames on a seconds-per-cycle interval, from a live
+ * Source ("live") or one hand-picked asset per Frame ("authored"). The operator
+ * names the Scene; the id is derived from the name (authoring.js) and shown
+ * before saving. Problems are reasons beside the fields and a summary frozen at
+ * submit (Field.jsx); only the in-flight save disables the button. A successful
+ * save clears the form.
  *
- * A live-source scene saves in ONE request to the plain scene route
- * `PUT /v1/operator/scenes/{scene_id}` with the Scene as the body: each target
- * Frame becomes a media Contribution `{target:"frame:<id>", role:"<id>",
- * source_refs:[<sourceRef>], kind:"media", retain_on_expiry:true}` (mirroring
- * the legacy operator.js live branch, ~operator.js:416). The write goes through
- * the shared `apiWrite` helper wrapped in `useMutate()` (primitive #7), so Plane
- * A — and therefore the Scenes list below — refreshes exactly once after the
- * save.
+ * Each mode saves in ONE request, built by authoring.js `buildSave(mode, …)`:
+ * "live" to `PUT /v1/operator/scenes/{scene_id}` with the Scene as the body,
+ * "authored" to `PUT …/scenes/{id}/authored` (scene + source_ref + asset_ids).
+ * The write goes through `apiWrite` inside `useMutate()` (primitive #7), so
+ * Plane A — and the Scenes list below — refreshes exactly once after the save.
  *
- * SEAM for Bead 14b (SR-scenes-authored): the authoring MODE is the split
- * boundary. This component drives its payload+route through `buildSave(mode,…)`,
- * dispatched on `mode`; Bead 14a registers only the "live" branch. Bead 14b adds
- * an "authored" mode — its per-frame candidate choosers (a clearly-separable
- * subtree rendered where {@link ModeControls} branches) and its single-request
- * `PUT …/scenes/{id}/authored` payload (scene + source_ref + asset_ids) — WITHOUT
- * reshaping this component: it adds a mode option, a chooser subtree, and an
- * "authored" case to `buildSave`. The profile hard-filter on candidates is 14b,
- * NOT here. This bead deliberately builds ONLY the live branch.
+ * EDIT (§13) loads a stored Scene the console can author losslessly into the
+ * same form. It shows the stored id, never a derived one, and Replace goes
+ * through ConfirmAction with the stored revision + 1. Central refuses a save
+ * that does not move past the stored revision (409 `scene_revision_conflict`,
+ * central/runtime.py `set_scene`), so a Scene replaced since Edit was opened
+ * ends the dialog "Changed since you opened this" and stays as it is.
  *
  * @param {{snapshot: object|null}} props
  */
@@ -37,26 +43,83 @@ export function SceneAuthoring({ snapshot }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const sources = snapshot?.media?.sources ?? [];
   // Existing scenes come from the runtime definitions map, keyed by scene_id
-  // (central/app.py:669 -> runtime.export_state()["scenes"]). Tiles show the id.
+  // (central/app.py `runtime_state` -> runtime.export_state()["scenes"]).
   const definitions = snapshot?.runtime?.definitions ?? {};
-  const scenes = useMemo(() => Object.values(definitions), [definitions]);
+  const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
 
   const mutate = useMutate();
+  const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const editingRef = useRef(/** @type {HTMLParagraphElement|null} */ (null));
 
   // Plane B: component-local authoring draft. `mode` is the 14a/14b split seam;
-  // both modes now exist, so a user-facing toggle (live <-> authored) selects
+  // both modes exist, so a user-facing toggle (live <-> authored) selects
   // between a live-source Scene and a per-Frame authored Scene.
   const [mode, setMode] = useState("live");
-  const [sceneId, setSceneId] = useState("");
+  const [name, setName] = useState("");
+  const [idOverride, setIdOverride] = useState(/** @type {string|null} */ (null));
   const [sourceRef, setSourceRef] = useState("");
   const [targets, setTargets] = useState(/** @type {Set<string>} */ (new Set()));
-  const [cycleSeconds, setCycleSeconds] = useState(30);
+  const [cycleSeconds, setCycleSeconds] = useState(/** @type {string|number} */ (30));
+  // New Scenes keep playing until their Program ends (slice 3 Question 1).
+  const [loop, setLoop] = useState(true);
   // Authored mode only: the chosen asset per target Frame, keyed by frame id.
   const [selections, setSelections] = useState(
     /** @type {Record<string, string>} */ ({}),
   );
-  const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  // The stored Scene being edited (§13): its stored id and revision; null
+  // while authoring a new Scene.
+  const [editing, setEditing] = useState(
+    /** @type {{sceneId: string, revision: number}|null} */ (null),
+  );
   const [saving, setSaving] = useState(false);
+  // A targeted frame that a poll no longer lists is dropped and announced (§6).
+  const [vanished, setVanished] = useState(/** @type {string|null} */ (null));
+
+  const frameKey = frames.map((frame) => frame.id).join(" ");
+  useEffect(() => {
+    const listed = new Set(frameKey === "" ? [] : frameKey.split(" "));
+    const gone = [...targets].filter((frameId) => !listed.has(frameId));
+    if (gone.length === 0) {
+      return;
+    }
+    setTargets((prev) => new Set([...prev].filter((frameId) => listed.has(frameId))));
+    setSelections((prev) =>
+      Object.fromEntries(Object.entries(prev).filter(([frameId]) => listed.has(frameId))),
+    );
+    setVanished(
+      `${gone.join(", ")} ${gone.length === 1 ? "was" : "were"} deleted and removed from this Scene.`,
+    );
+  }, [frameKey, targets]);
+
+  const targetIds = useMemo(() => [...targets], [targets]);
+  const candidates = useCandidates(mode === "authored" ? sourceRef : "", targetIds);
+
+  // A per-Frame choice belongs to one Source's catalog: once a Frame's
+  // candidates are read, a choice that is not among them is dropped. An edited
+  // authored Scene keeps its stored items only while they are still candidates.
+  useEffect(() => {
+    if (!candidates.ready) {
+      return;
+    }
+    setSelections((prev) => {
+      const kept = Object.entries(prev).filter(([frameId, assetId]) =>
+        (candidates.byFrame[frameId] ?? []).some((candidate) => candidate.asset_id === assetId),
+      );
+      return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept);
+    });
+  }, [candidates.ready, candidates.byFrame]);
+
+  const draft = {
+    name,
+    idOverride,
+    mode,
+    sourceRef,
+    targets: targetIds,
+    cycleSeconds,
+    selections,
+    loadingMedia: candidates.loading,
+  };
+  const problems = useProblems(sceneProblems(draft, existingIds, { editing: editing !== null }));
 
   const toggleTarget = useCallback((frameId) => {
     setTargets((prev) => {
@@ -93,55 +156,77 @@ export function SceneAuthoring({ snapshot }) {
     });
   }, []);
 
-  // Per-Frame choices are only valid within one Source's catalog, so clear them
-  // whenever the Source changes.
-  const clearSelections = useCallback(() => setSelections({}), []);
+  // A successful save clears the form, so the saved Scene never reads as a
+  // collision with itself (§5); a replaced Scene leaves edit mode.
+  const clear = () => {
+    setName("");
+    setIdOverride(null);
+    setSourceRef("");
+    setTargets(new Set());
+    setCycleSeconds(30);
+    setLoop(true);
+    setSelections({});
+    setVanished(null);
+    setEditing(null);
+    problems.reset();
+  };
 
-  const targetIds = useMemo(() => [...targets], [targets]);
-  const canSave =
-    !saving &&
-    sceneId.trim() !== "" &&
-    sourceRef !== "" &&
-    targetIds.length > 0 &&
-    Number(cycleSeconds) > 0 &&
-    // Authored mode additionally requires a chosen asset for every target Frame.
-    (mode !== "authored" || targetIds.every((frameId) => selections[frameId]));
+  const confirm = useConfirm(() => saveRef.current?.focus(), clear);
 
-  const onSave = useCallback(
-    async (event) => {
-      event.preventDefault();
-      if (!canSave) {
-        return;
+  // Edit (§13): the stored Scene into the form, under its stored id.
+  const startEdit = (scene, stored) => {
+    setEditing({ sceneId: scene.scene_id, revision: scene.revision });
+    setMode(stored.mode);
+    setName("");
+    setIdOverride(null);
+    setSourceRef(stored.sourceRef);
+    setTargets(new Set(stored.targetIds));
+    setCycleSeconds(stored.cycleSeconds);
+    setLoop(stored.loop);
+    setSelections(stored.selections);
+    setVanished(null);
+    confirm.setStatus(null);
+    problems.reset();
+    requestAnimationFrame(() => editingRef.current?.focus());
+  };
+
+  const onSave = async (event) => {
+    event.preventDefault();
+    if (saving || !problems.check()) {
+      return;
+    }
+    const sceneId = editing?.sceneId ?? draftId(draft);
+    const save = buildSave(mode, {
+      sceneId,
+      sourceRef,
+      targetIds,
+      cycleSeconds: Number(cycleSeconds),
+      loop,
+      selections,
+      revision: editing === null ? 1 : editing.revision + 1,
+    });
+    if (editing !== null) {
+      confirm.open({ currentTarget: saveRef.current }, replaceRequest(editing, save, candidates.reload));
+      return;
+    }
+    setSaving(true);
+    confirm.setStatus(null);
+    try {
+      // ONE request: the scene is saved in a single PUT; useMutate() then does
+      // its one Plane A refresh so the Scenes list reflects the new scene.
+      const result = await mutate(() => apiWrite(save.path, { method: "PUT", body: save.body }));
+      if (result.ok) {
+        clear();
+        confirm.setStatus(`Saved Scene ${sceneId}.`);
+      } else {
+        confirm.setStatus(refusal("Could not save Scene", result, candidates.reload));
       }
-      const trimmedId = sceneId.trim();
-      const { path, body } = buildSave(mode, {
-        sceneId: trimmedId,
-        sourceRef,
-        targetIds,
-        cycleSeconds: Number(cycleSeconds),
-        selections,
-      });
-      setSaving(true);
-      setStatus(null);
-      try {
-        // ONE request: the scene is saved in a single PUT; useMutate() then does
-        // its one Plane A refresh so the Scenes list reflects the new scene.
-        const result = await mutate(() =>
-          apiWrite(path, { method: "PUT", body }),
-        );
-        setStatus(
-          result.ok
-            ? `Saved Scene ${trimmedId}.`
-            : `Could not save Scene: ${result.error ?? result.status}.`,
-        );
-      } catch {
-        setStatus("Could not save Scene: the request did not complete.");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [canSave, mode, sceneId, sourceRef, targetIds, cycleSeconds, selections, mutate],
-  );
+    } catch {
+      confirm.setStatus("Could not save Scene: the request did not complete.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="scene-authoring">
@@ -149,18 +234,26 @@ export function SceneAuthoring({ snapshot }) {
         className="scene-authoring__form"
         role="form"
         aria-label="Author a Scene"
+        noValidate
         onSubmit={onSave}
       >
-        <label className="scene-authoring__field">
-          Scene ID
-          <input
-            type="text"
-            className="scene-authoring__scene-id"
-            aria-label="Scene ID"
-            value={sceneId}
-            onChange={(event) => setSceneId(event.target.value)}
+        <ProblemSummary summary={problems.summary} label="Scene problems" />
+        {editing === null ? (
+          <IdentityFields
+            kind="Scene"
+            name={name}
+            idOverride={idOverride}
+            onName={setName}
+            onIdOverride={setIdOverride}
+            problems={problems}
           />
-        </label>
+        ) : (
+          <p ref={editingRef} tabIndex={-1} className="scene-authoring__editing">
+            {"Editing "}
+            <code>{editing.sceneId}</code>
+            {` · revision ${editing.revision}. Its id stays; Replace saves revision ${editing.revision + 1}.`}
+          </p>
+        )}
 
         <fieldset
           className="scene-authoring__mode"
@@ -189,329 +282,250 @@ export function SceneAuthoring({ snapshot }) {
           </label>
         </fieldset>
 
-        <ModeControls
-          mode={mode}
+        <SourcePicker
+          id={problems.idFor("source")}
+          reason={problems.reasonFor("source")}
           sources={sources}
-          sourceRef={sourceRef}
-          onSource={setSourceRef}
-          frames={frames}
-          targets={targets}
-          onToggleTarget={toggleTarget}
-          cycleSeconds={cycleSeconds}
-          onCycleSeconds={setCycleSeconds}
-          targetIds={targetIds}
-          selections={selections}
-          onSelect={onSelect}
-          onClearSelections={clearSelections}
+          value={sourceRef}
+          onChange={(next) => {
+            setSourceRef(next);
+            problems.touch("source");
+          }}
         />
 
-        <button
-          type="submit"
-          className="scene-authoring__save"
-          disabled={!canSave}
-        >
-          Save Scene
-        </button>
+        <TargetPicker
+          id={problems.idFor("targets")}
+          reason={problems.reasonFor("targets")}
+          snapshot={snapshot}
+          targets={targets}
+          onToggle={(frameId) => {
+            toggleTarget(frameId);
+            problems.touch("targets");
+          }}
+        />
+        {vanished !== null && (
+          <p className="scene-authoring__vanished" role="status">
+            {vanished}
+          </p>
+        )}
+
+        {mode === "authored" && (
+          <MediaChoosers
+            candidates={candidates}
+            targetIds={targetIds}
+            selections={selections}
+            onSelect={onSelect}
+            problems={problems}
+          />
+        )}
+
+        <CycleInput
+          problems={problems}
+          seconds={cycleSeconds}
+          onSeconds={setCycleSeconds}
+          loop={loop}
+          onLoop={setLoop}
+        />
+
+        <div className="record__actions">
+          <button ref={saveRef} type="submit" className="scene-authoring__save" disabled={saving}>
+            {editing === null ? "Save Scene" : "Replace Scene"}
+          </button>
+          {editing !== null && (
+            <button type="button" onClick={clear}>
+              Stop editing
+            </button>
+          )}
+        </div>
       </form>
 
-      {status !== null ? (
-        <p className="scene-authoring__status" role="status">
-          {status}
-        </p>
-      ) : null}
+      {confirm.confirmation("scene-authoring__status-line")}
 
-      {/* The Scenes list: every saved Scene by its scene_id (design J4 — the id
-          is the tile, never a name). The just-saved scene appears here after the
-          useMutate() refresh. */}
-      {scenes.length === 0 ? (
-        <p className="scene-authoring__empty">No Scenes yet.</p>
-      ) : (
-        <ul className="scene-authoring__scenes" role="list">
-          {scenes.map((scene) => (
-            <li
-              key={scene.scene_id}
-              className="scene-authoring__scene"
-              aria-label={`Scene ${scene.scene_id}`}
-            >
-              {scene.scene_id}
-            </li>
-          ))}
-        </ul>
-      )}
+      <SceneList snapshot={snapshot} onEdit={startEdit} />
     </div>
   );
 }
 
+// Refusals in plain words (§13): media_repository.py `author_candidates_in`
+// answers the first two (authored route) with 409; runtime.py `set_scene` the
+// last (both routes) when another save of this id landed first.
+const SAVE_REFUSALS = {
+  source_not_fresh:
+    "The Source's last refresh failed; authored choices can be saved once it succeeds.",
+  authored_asset_not_member: "That item is no longer in the Source; choose again.",
+  scene_revision_conflict: "A Scene with this id was saved meanwhile; nothing was replaced.",
+};
+
 /**
- * The per-mode authoring controls. 14a renders the LIVE-source controls (pick a
- * Source, pick target Frames, set seconds-per-cycle). 14b adds the
- * `mode === "authored"` branch: a per-frame candidate-chooser subtree
- * ({@link AuthoredControls}), rendered without touching the live branch.
+ * A refused save in words: a known refusal as its sentence (and, when an item
+ * left the Source, the choosers read their candidates again), otherwise the
+ * served error code.
  */
-function ModeControls({
-  mode,
-  sources,
-  sourceRef,
-  onSource,
-  frames,
-  targets,
-  onToggleTarget,
-  cycleSeconds,
-  onCycleSeconds,
-  targetIds,
-  selections,
-  onSelect,
-  onClearSelections,
-}) {
-  if (mode === "authored") {
-    return (
-      <AuthoredControls
-        sources={sources}
-        sourceRef={sourceRef}
-        onSource={onSource}
-        frames={frames}
-        targets={targets}
-        onToggleTarget={onToggleTarget}
-        cycleSeconds={cycleSeconds}
-        onCycleSeconds={onCycleSeconds}
-        targetIds={targetIds}
-        selections={selections}
-        onSelect={onSelect}
-        onClearSelections={onClearSelections}
-      />
-    );
+function refusal(lead, result, reload) {
+  const words = SAVE_REFUSALS[result.error];
+  if (words === undefined) {
+    return `${lead}: ${result.error ?? `HTTP ${result.status}`}.`;
   }
-  if (mode !== "live") {
-    return null;
+  if (result.error === "authored_asset_not_member") {
+    reload();
   }
-  return (
-    <fieldset className="scene-authoring__live" aria-label="Live source">
-      <label className="scene-authoring__field">
-        Source
-        <select
-          className="scene-authoring__source"
-          aria-label="Source"
-          value={sourceRef}
-          onChange={(event) => onSource(event.target.value)}
-        >
-          <option value="">Choose a Source</option>
-          {sources.map((source) => (
-            <option key={source.source_ref} value={source.source_ref}>
-              {source.source_ref}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <fieldset className="scene-authoring__targets" aria-label="Target frames">
-        <legend>Target frames</legend>
-        {frames.length === 0 ? (
-          <p className="scene-authoring__empty">No Frames to target.</p>
-        ) : (
-          frames.map((frame) => (
-            <label key={frame.id} className="scene-authoring__target">
-              <input
-                type="checkbox"
-                aria-label={`Target frame ${frame.id}`}
-                checked={targets.has(frame.id)}
-                onChange={() => onToggleTarget(frame.id)}
-              />
-              {frame.id}
-            </label>
-          ))
-        )}
-      </fieldset>
-
-      <label className="scene-authoring__field">
-        Seconds per cycle
-        <input
-          type="number"
-          min="1"
-          className="scene-authoring__cycle"
-          aria-label="Seconds per cycle"
-          value={cycleSeconds}
-          onChange={(event) => onCycleSeconds(event.target.value)}
-        />
-      </label>
-    </fieldset>
-  );
+  return `${lead}. ${words}`;
 }
 
 /**
- * A human label for one candidate option — kind and original geometry, so the
- * operator can tell photos/videos apart. The option VALUE is the asset id.
+ * Replace a stored Scene (§13), captured when the dialog opens: the body and
+ * the revision it was opened at. Central refuses it with 409
+ * `scene_revision_conflict` when the stored Scene moved past that revision
+ * since Edit, which ends in the terminal "changed".
  */
-function candidateLabel(candidate) {
-  const kind = candidate.kind === "video" ? "Video" : "Photo";
-  return `${kind} ${candidate.original_width}×${candidate.original_height}`;
+function replaceRequest({ sceneId, revision }, { path, body }, reload) {
+  return {
+    key: `replace:${sceneId}:${revision}`,
+    title: `Replace Scene ${sceneId}?`,
+    confirmLabel: "Confirm replace",
+    body: (
+      <p>
+        {`Saves it as revision ${revision + 1}. Runs already going keep the version they ` +
+          "started with; Programs that start later use the new one."}
+      </p>
+    ),
+    run: async () => {
+      const result = await apiWrite(path, { method: "PUT", body });
+      if (result.ok) {
+        return { state: "done", message: `Replaced Scene ${sceneId}: now revision ${revision + 1}.` };
+      }
+      if (result.error === "scene_revision_conflict") {
+        return { state: "changed", message: CHANGED_MESSAGE };
+      }
+      if (result.status >= 500) {
+        return { state: "unknown", message: UNKNOWN_MESSAGE };
+      }
+      return { state: "refused", message: refusal("Not replaced", result, reload) };
+    },
+  };
 }
 
 /**
- * The authored-mode controls (Bead 14b): pick a Source and target Frames, then
- * choose ONE asset per Frame from that Frame's candidate list. The candidates
- * come from `GET /v1/operator/sources/{ref}/candidates?frame_id=<frame>`, which
- * central HARD-FILTERS by the Frame's profile server-side — an asset ineligible
- * for a Frame's profile is never returned, so it can never be offered here. The
- * whole selection is later saved in ONE `PUT …/scenes/{id}/authored`.
+ * Each target Frame's candidates from one Source (Bead 14b), read through
+ * candidatesApi.js `readCandidates`, which Central HARD-FILTERS by the Frame's
+ * profile — an asset ineligible for a Frame's profile is never returned, so it
+ * can never be offered here. `loading` until they are read (§6); `ready`
+ * once the lists for exactly this Source and these Frames are read; `reload`
+ * reads them again.
+ *
+ * @param {string} sourceRef "" reads nothing
+ * @param {string[]} targetIds
  */
-function AuthoredControls({
-  sources,
-  sourceRef,
-  onSource,
-  frames,
-  targets,
-  onToggleTarget,
-  cycleSeconds,
-  onCycleSeconds,
-  targetIds,
-  selections,
-  onSelect,
-  onClearSelections,
-}) {
-  // Candidate lists keyed by frame id, each already hard-filtered by that
-  // Frame's profile on the server.
-  const [byFrame, setByFrame] = useState(
-    /** @type {Record<string, Array<object>>} */ ({}),
-  );
-  const [loadError, setLoadError] = useState(/** @type {string|null} */ (null));
+function useCandidates(sourceRef, targetIds) {
+  const [nonce, setNonce] = useState(0);
   const targetKey = targetIds.join(" ");
+  const key = sourceRef === "" || targetKey === "" ? "" : `${nonce}\n${sourceRef}\n${targetKey}`;
+  const [loaded, setLoaded] = useState(
+    /** @type {{key: string, byFrame: Record<string, Array<object>>, error: string|null}} */ ({
+      key: "",
+      byFrame: {},
+      error: null,
+    }),
+  );
 
-  // A per-Frame choice belongs to one Source's catalog; changing the Source
-  // invalidates every prior choice.
   useEffect(() => {
-    onClearSelections();
-  }, [sourceRef, onClearSelections]);
-
-  useEffect(() => {
-    if (sourceRef === "" || targetKey === "") {
-      setByFrame({});
-      setLoadError(null);
+    if (key === "") {
       return undefined;
     }
     let ignore = false;
-    setLoadError(null);
     const frameIds = targetKey.split(" ");
     (async () => {
       try {
         const entries = await Promise.all(
-          frameIds.map(async (frameId) => {
-            // frame_id makes central drop every asset ineligible for THIS Frame's
-            // profile — the profile hard-filter (design J4). Dropping it would
-            // offer incompatible assets, which is exactly what the mutation probe
-            // attacks.
-            const result = await apiWrite(
-              `/v1/operator/sources/${encodeURIComponent(sourceRef)}/candidates?frame_id=${encodeURIComponent(frameId)}`,
-              { method: "GET" },
-            );
-            if (!result.ok) {
-              throw new Error(result.error ?? String(result.status));
-            }
-            return [frameId, result.data?.candidates ?? []];
-          }),
+          frameIds.map(async (frameId) => [
+            frameId,
+            (await readCandidates(sourceRef, frameId)).candidates,
+          ]),
         );
         if (!ignore) {
-          setByFrame(Object.fromEntries(entries));
+          setLoaded({ key, byFrame: Object.fromEntries(entries), error: null });
         }
       } catch {
         if (!ignore) {
-          setByFrame({});
-          setLoadError("Could not load candidate media for these Frames.");
+          setLoaded({ key, byFrame: {}, error: "Could not load candidate media for these Frames." });
         }
       }
     })();
     return () => {
       ignore = true;
     };
-  }, [sourceRef, targetKey]);
+    // `key` carries sourceRef, targetKey and the reload nonce.
+  }, [key]);
 
+  const current = key !== "" && loaded.key === key;
+  return {
+    byFrame: current ? loaded.byFrame : EMPTY,
+    loading: key !== "" && !current,
+    error: current ? loaded.error : null,
+    ready: current && loaded.error === null,
+    reload: () => setNonce((value) => value + 1),
+  };
+}
+
+const EMPTY = {};
+
+/**
+ * The authored-mode choosers (Bead 14b): ONE asset per target Frame from that
+ * Frame's candidate list (`useCandidates`, profile-filtered by Central). The
+ * whole selection is later saved in ONE `PUT …/scenes/{id}/authored`.
+ */
+function MediaChoosers({ candidates, targetIds, selections, onSelect, problems }) {
+  const { byFrame, loading, error: loadError } = candidates;
   return (
-    <fieldset className="scene-authoring__authored" aria-label="Authored controls">
-      <label className="scene-authoring__field">
-        Source
-        <select
-          className="scene-authoring__source"
-          aria-label="Source"
-          value={sourceRef}
-          onChange={(event) => onSource(event.target.value)}
-        >
-          <option value="">Choose a Source</option>
-          {sources.map((source) => (
-            <option key={source.source_ref} value={source.source_ref}>
-              {source.source_ref}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <fieldset className="scene-authoring__targets" aria-label="Target frames">
-        <legend>Target frames</legend>
-        {frames.length === 0 ? (
-          <p className="scene-authoring__empty">No Frames to target.</p>
-        ) : (
-          frames.map((frame) => (
-            <label key={frame.id} className="scene-authoring__target">
-              <input
-                type="checkbox"
-                aria-label={`Target frame ${frame.id}`}
-                checked={targets.has(frame.id)}
-                onChange={() => onToggleTarget(frame.id)}
-              />
-              {frame.id}
-            </label>
-          ))
-        )}
-      </fieldset>
-
-      <fieldset
-        className="scene-authoring__choosers"
-        aria-label="Per-frame media choices"
-      >
-        <legend>Per-frame media choices</legend>
-        {targetIds.length === 0 ? (
-          <p className="scene-authoring__empty">
-            Choose a Source and target Frames to pick media.
-          </p>
-        ) : (
-          targetIds.map((frameId) => {
-            const candidates = byFrame[frameId] ?? [];
-            return (
-              <label key={frameId} className="scene-authoring__chooser">
-                {`Media for frame ${frameId}`}
+    <fieldset
+      className="scene-authoring__choosers"
+      aria-label="Per-frame media choices"
+    >
+      <legend>Per-frame media choices</legend>
+      {targetIds.length === 0 ? (
+        <p className="scene-authoring__empty">
+          Choose a Source and target Frames to pick media.
+        </p>
+      ) : (
+        targetIds.map((frameId) => {
+          const list = byFrame[frameId] ?? [];
+          const labels = candidateLabels(list);
+          const field = `media:${frameId}`;
+          return (
+            <Field
+              key={frameId}
+              id={problems.idFor(field)}
+              label={`Media for frame ${frameId}`}
+              reason={problems.reasonFor(field)}
+            >
+              {(props) => (
                 <select
+                  {...props}
                   className="scene-authoring__choice"
-                  aria-label={`Media for frame ${frameId}`}
                   value={selections[frameId] ?? ""}
-                  onChange={(event) => onSelect(frameId, event.target.value)}
+                  onChange={(event) => {
+                    onSelect(frameId, event.target.value);
+                    problems.touch(field);
+                  }}
                 >
                   <option value="">
-                    {candidates.length === 0
-                      ? "No compatible media"
-                      : "Choose compatible media"}
+                    {loading
+                      ? "Loading compatible media…"
+                      : list.length === 0
+                        ? "No compatible media"
+                        : "Choose compatible media"}
                   </option>
-                  {candidates.map((candidate) => (
+                  {list.map((candidate, index) => (
                     <option key={candidate.asset_id} value={candidate.asset_id}>
-                      {candidateLabel(candidate)}
+                      {labels[index]}
                     </option>
                   ))}
                 </select>
-              </label>
-            );
-          })
-        )}
-      </fieldset>
-
-      <label className="scene-authoring__field">
-        Seconds per cycle
-        <input
-          type="number"
-          min="1"
-          className="scene-authoring__cycle"
-          aria-label="Seconds per cycle"
-          value={cycleSeconds}
-          onChange={(event) => onCycleSeconds(event.target.value)}
-        />
-      </label>
-
+              )}
+            </Field>
+          );
+        })
+      )}
       {loadError !== null ? (
         <p className="scene-authoring__status" role="status">
           {loadError}
@@ -519,68 +533,4 @@ function AuthoredControls({
       ) : null}
     </fieldset>
   );
-}
-
-/**
- * Build the save {path, body} for the given authoring mode (the 14a/14b seam).
- * "live": the plain scene route with the Scene as the body. "authored": the
- * authored route with a {scene, source_ref, asset_ids} body — one media
- * Contribution per target Frame carrying that Frame's chosen asset ref.
- *
- * @param {"live"|"authored"} mode
- * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number, selections?: Record<string,string>}} draft
- * @returns {{path: string, body: object}}
- */
-export function buildSave(
-  mode,
-  { sceneId, sourceRef, targetIds, cycleSeconds, selections = {} },
-) {
-  if (mode === "authored") {
-    // An authored Scene: one media Contribution per target Frame, each carrying
-    // the operator's chosen asset ref (never a live source_ref). The asset_ids
-    // list is the de-duplicated set of chosen refs the authored route persists.
-    const contributions = targetIds.map((frameId) => ({
-      target: `frame:${frameId}`,
-      role: frameId,
-      kind: "media",
-      asset_refs: [selections[frameId]],
-      retain_on_expiry: true,
-    }));
-    const assetIds = [...new Set(targetIds.map((frameId) => selections[frameId]))];
-    const scene = {
-      scene_id: sceneId,
-      revision: 1,
-      cycle_seconds: cycleSeconds,
-      loop: false,
-      contributions,
-    };
-    return {
-      path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}/authored`,
-      body: { scene, source_ref: sourceRef, asset_ids: assetIds },
-    };
-  }
-  if (mode !== "live") {
-    throw new Error(`unsupported scene authoring mode: ${mode}`);
-  }
-  // A live-source Scene: one media Contribution per target Frame, all driven by
-  // the chosen Source. `target` is the verified string "frame:<id>" (design
-  // §1b); role carries the frame id; retain_on_expiry keeps the last still.
-  const contributions = targetIds.map((frameId) => ({
-    target: `frame:${frameId}`,
-    role: frameId,
-    kind: "media",
-    source_refs: [sourceRef],
-    retain_on_expiry: true,
-  }));
-  const scene = {
-    scene_id: sceneId,
-    revision: 1,
-    cycle_seconds: cycleSeconds,
-    loop: false,
-    contributions,
-  };
-  return {
-    path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`,
-    body: scene,
-  };
 }

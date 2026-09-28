@@ -6,9 +6,9 @@ import React, { useState } from "react";
  * NOT a modal wizard that gates the console).
  *
  * First-run is inferred from Plane A: an installation with no Frames yet has an
- * empty canvas, so the banner points the installer at the first steps (enrol a
- * Player, bind an Output, place and commission a Frame). Once any Frame exists
- * the banner is irrelevant and never shows.
+ * empty canvas, so the banner points the installer at the first steps (draw a
+ * Frame, power on one Pi, bind the Frame to one of its Outputs, commission the
+ * display — slice 2 §5). Once any Frame exists the banner never shows.
  *
  * The dismissed flag lives in PLANE B — ordinary component-local state, never in
  * the snapshot — so a Plane A refresh (focus/visibility, after-mutate, explicit
@@ -37,9 +37,8 @@ export function Guidance({ snapshot }) {
       aria-label="Getting started"
     >
       <p className="console__guidance-text">
-        Getting started: enrol a Player and bind an Output, then place a Frame on
-        the wall and commission its display. This tip is dismissible and returns
-        only while the wall is empty.
+        Draw a frame, power on one Pi, bind the frame to one of its outputs, then
+        commission the display.
       </p>
       <button
         type="button"

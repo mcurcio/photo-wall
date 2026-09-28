@@ -1,8 +1,48 @@
+/* Colour tokens (pass 2 §6). Dark is the default; the light block below
+   overrides the same tokens, so every rule — SVG fills included — follows the
+   operator's colour scheme. Only an alarm uses --alarm; a to-do is --todo. */
 :root {
+  --bg: #111b22;
+  --bg-raised: #17232c;
+  --bg-sunken: #0b131a;
+  --fg: #e9edf0;
+  --fg-muted: #9dabb5;
+  --fg-subtle: #8b98a4;
+  --border: #32404a;
+  --accent: #2d6cdf;
+  --accent-soft: #7fb3ff;
+  --on-accent: #ffffff;
+  --ok: #4caf7d;
+  --todo: #8fb3d9;
+  --alarm: #e0685a;
+  --warn: #f5a623;
+  --focus: #7fb3ff;
+  --shadow: rgba(0, 0, 0, 0.4);
   font-family: system-ui, sans-serif;
-  color: #e9edf0;
-  background: #111b22;
-  color-scheme: dark;
+  color: var(--fg);
+  background: var(--bg);
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa;
+    --bg-raised: #ffffff;
+    --bg-sunken: #e9eef2;
+    --fg: #16212a;
+    --fg-muted: #4d5d6a;
+    --fg-subtle: #66757f;
+    --border: #c4ced6;
+    --accent: #2459c2;
+    --accent-soft: #2d6cdf;
+    --on-accent: #ffffff;
+    --ok: #1f7a4d;
+    --todo: #2f5f8f;
+    --alarm: #b53a2a;
+    --warn: #9a5b00;
+    --focus: #2459c2;
+    --shadow: rgba(0, 0, 0, 0.15);
+  }
 }
 
 * {
@@ -12,19 +52,85 @@
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* A form control never grows past its container (a select widens to its
+   longest option, which may be a long frame id). */
+select,
+input,
+label {
+  max-width: 100%;
+  min-width: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .console {
   margin: 0 auto;
   padding: 40px 24px;
-  max-width: 1180px;
+  max-width: 1440px;
+}
+
+/* Layout (pass 2 §6). Narrow screens: one column, the Inspector after the plan
+   and tray. Wide screens: the Inspector sits beside the plan and stays in view. */
+.console__main,
+.console__side {
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .console__body--split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
+    gap: 24px;
+    align-items: start;
+  }
+
+  .console__side {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+  }
+
+  .console__side .inspector {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .console {
+    padding: 20px 12px;
+  }
+}
+
+/* Identifiers (player, frame and scene ids) are long unbroken strings; let them
+   wrap rather than widen the page. */
+.roster__player,
+.roster__output-label,
+.roster__boot,
+.tray__item,
+.tray__delete,
+.facet__field dd,
+.inspector__title,
+.console__recovery-text,
+.showrunner__badge {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .console__header {
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   justify-content: space-between;
   align-items: center;
-  border-bottom: 1px solid #32404a;
+  border-bottom: 1px solid var(--border);
   padding-bottom: 24px;
   margin-bottom: 28px;
 }
@@ -36,12 +142,13 @@ body {
 }
 
 .console__body {
-  color: #9dabb5;
+  color: var(--fg-muted);
   line-height: 1.5;
 }
 
 .console__token {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 12px;
   margin-bottom: 24px;
@@ -53,22 +160,22 @@ body {
   flex-direction: column;
   gap: 4px;
   font-size: 13px;
-  color: #9dabb5;
+  color: var(--fg-muted);
 }
 
 .console__token input,
 .console__surface-field select {
   padding: 6px 8px;
-  background: #0b131a;
-  color: #e9edf0;
-  border: 1px solid #32404a;
+  background: var(--bg-sunken);
+  color: var(--fg);
+  border: 1px solid var(--border);
   border-radius: 4px;
 }
 
 .console__token button {
   padding: 7px 16px;
-  background: #2d6cdf;
-  color: #fff;
+  background: var(--accent);
+  color: var(--on-accent);
   border: 0;
   border-radius: 4px;
   cursor: pointer;
@@ -76,38 +183,113 @@ body {
 
 .console__statusbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   font-size: 13px;
-  color: #9dabb5;
+  color: var(--fg-muted);
   margin-bottom: 16px;
 }
 
-.console__refresh {
+/* A quiet secondary button: the status bar's Refresh, the strip's toggle. */
+.console__button {
   padding: 4px 12px;
-  background: #1c2a34;
-  color: #e9edf0;
-  border: 1px solid #32404a;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
 }
 
+/* The Central pill; its colour is the shared .health--* severity. */
 .console__health {
   margin-left: auto;
   padding: 2px 10px;
-  border: 1px solid #32404a;
+  border: 1px solid var(--border);
   border-radius: 999px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 11px;
 }
 
+/* Attention strip (pass 2 §5): one fixed-height line; its list overlays the
+   content below instead of pushing it down. */
+.attention {
+  position: relative;
+  height: 2.25rem;
+  margin-bottom: 16px;
+}
+
+.attention__line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.attention__summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attention__toggle {
+  margin-left: auto;
+}
+
+.attention__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.attention__item {
+  padding: 4px 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.attention__entry {
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention__entry:hover,
+.attention__entry:focus-visible {
+  text-decoration: underline;
+}
+
+.attention__more {
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 .console__guidance {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  background: #16232c;
-  border: 1px solid #32404a;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 12px 16px;
   margin-bottom: 20px;
@@ -121,8 +303,8 @@ body {
 .console__guidance-dismiss {
   padding: 4px 12px;
   background: transparent;
-  color: #9dabb5;
-  border: 1px solid #32404a;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
 }
@@ -132,7 +314,7 @@ body {
 }
 
 .plan {
-  border: 1px solid #32404a;
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 12px;
   margin-bottom: 24px;
@@ -141,7 +323,7 @@ body {
 .plan__svg {
   width: 100%;
   height: auto;
-  background: #0b131a;
+  background: var(--bg-sunken);
   border-radius: 4px;
   touch-action: none;
 }
@@ -151,8 +333,8 @@ body {
 }
 
 .plan__draft {
-  fill: rgba(127, 179, 255, 0.15);
-  stroke: #7fb3ff;
+  fill: color-mix(in srgb, var(--accent-soft) 15%, transparent);
+  stroke: var(--accent-soft);
   stroke-width: 2;
   stroke-dasharray: 6 4;
   pointer-events: none;
@@ -161,7 +343,7 @@ body {
 .plan__new-frame {
   margin-top: 12px;
   padding: 12px;
-  border: 1px solid #32404a;
+  border: 1px solid var(--border);
   border-radius: 6px;
   display: flex;
   flex-wrap: wrap;
@@ -187,23 +369,23 @@ body {
 
 .plan__new-frame-error {
   flex-basis: 100%;
-  color: #ff8f8f;
+  color: var(--alarm);
   margin: 0;
 }
 
 .plan__rect {
-  fill: #1c3350;
-  stroke: #4a83d6;
+  fill: color-mix(in srgb, var(--accent) 25%, transparent);
+  stroke: var(--accent-soft);
   stroke-width: 2;
 }
 
 .plan__rect--selected {
-  fill: #295089;
-  stroke: #7fb3ff;
+  fill: color-mix(in srgb, var(--accent) 50%, transparent);
+  stroke: var(--accent-soft);
 }
 
 .plan__label {
-  fill: #e9edf0;
+  fill: var(--fg);
   font-size: 14px;
   pointer-events: none;
 }
@@ -213,47 +395,55 @@ body {
 }
 
 .plan__dot {
-  stroke: #0b131a;
+  stroke: var(--bg-sunken);
   stroke-width: 1;
 }
 
-.plan__dot--connected {
-  fill: #4caf7d;
-}
-
-.plan__dot--disconnected {
-  fill: #d66a5a;
-}
-
-.plan__dot--unbound {
-  fill: #6b7884;
-}
-
 .plan__chip {
-  fill: #e9edf0;
+  fill: var(--fg);
   font-size: 11px;
 }
 
 .plan__chip--idle {
-  fill: #8b98a4;
+  fill: var(--fg-subtle);
 }
 
 .plan__phase {
-  fill: #b7c1cb;
+  fill: var(--fg-muted);
   font-size: 10px;
 }
 
-.plan__badge {
+/* Health severity (health.js): one modifier per severity, shared by every
+   surface. Only an alarm uses the alarm colour; a to-do is not an alarm. */
+.health--ok {
+  color: var(--ok);
+  fill: var(--ok);
+}
+
+.health--todo {
+  color: var(--todo);
+  fill: var(--todo);
+}
+
+.health--alarm {
+  color: var(--alarm);
+  fill: var(--alarm);
+}
+
+.plan__health {
   font-size: 10px;
 }
 
-.plan__badge--valid {
-  fill: #4caf7d;
+.inspector__health {
+  margin: 0;
+  padding: 10px 16px 0;
+  font-size: 13px;
 }
 
-.plan__badge--invalid {
-  fill: #d6a55a;
+.tray__health {
+  font-size: 12px;
 }
+
 
 .tray__list {
   list-style: none;
@@ -266,30 +456,37 @@ body {
 
 .tray__item {
   padding: 6px 12px;
-  background: #17232c;
-  color: #e9edf0;
-  border: 1px solid #32404a;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
 }
 
 .inspector {
-  border: 1px solid #32404a;
+  border: 1px solid var(--border);
   border-radius: 6px;
   margin-top: 24px;
 }
 
+.inspector__title {
+  margin: 0;
+  padding: 12px 16px 0;
+  font-size: 15px;
+}
+
 .inspector__tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  border-bottom: 1px solid #32404a;
+  border-bottom: 1px solid var(--border);
   padding: 8px 8px 0;
 }
 
 .inspector__tab {
   padding: 8px 14px;
   background: transparent;
-  color: #9dabb5;
+  color: var(--fg-muted);
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 4px 4px 0 0;
@@ -297,18 +494,24 @@ body {
 }
 
 .inspector__tab--active {
-  background: #17232c;
-  color: #e9edf0;
-  border-color: #32404a;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border-color: var(--border);
 }
 
 .inspector__body {
   padding: 16px;
-  color: #cdd6de;
+  color: var(--fg);
+}
+
+.inspector__empty {
+  margin: 0;
+  padding: 16px;
+  color: var(--fg-subtle);
 }
 
 .inspector__stub {
-  color: #8b98a4;
+  color: var(--fg-subtle);
   font-style: italic;
 }
 
@@ -320,7 +523,7 @@ body {
 .facet__subtitle {
   font-size: 13px;
   margin: 16px 0 6px;
-  color: #9dabb5;
+  color: var(--fg-muted);
 }
 
 .facet__fields {
@@ -329,22 +532,23 @@ body {
 
 .facet__field {
   display: flex;
+  min-width: 0;
   gap: 8px;
   margin-bottom: 6px;
 }
 
 .facet__field dt {
-  color: #9dabb5;
+  color: var(--fg-muted);
   min-width: 72px;
 }
 
 .facet__field dd {
   margin: 0;
-  color: #e9edf0;
+  color: var(--fg);
 }
 
 .facet__empty {
-  color: #8b98a4;
+  color: var(--fg-subtle);
 }
 
 .facet__why {
@@ -354,44 +558,44 @@ body {
 
 .facet__note {
   margin: 0 0 8px;
-  color: #8b98a4;
+  color: var(--fg-subtle);
   font-size: 0.85em;
 }
 
 .facet__error {
   margin: 8px 0 0;
-  color: #e5484d;
+  color: var(--alarm);
   font-weight: 600;
 }
 
 .facet__draft-status {
   margin: 6px 0 0;
-  color: #8b98a4;
+  color: var(--fg-subtle);
 }
 
 .calib__svg {
   touch-action: none;
   display: block;
-  background: #10161c;
+  background: var(--bg-sunken);
   border-radius: 6px;
 }
 
 .calib__frame {
-  fill: #1b232b;
-  stroke: #2b3946;
+  fill: var(--bg-raised);
+  stroke: var(--border);
   stroke-width: 1;
 }
 
 .calib__crop {
-  fill: rgba(90, 160, 255, 0.12);
-  stroke: #5aa0ff;
+  fill: color-mix(in srgb, var(--accent-soft) 12%, transparent);
+  stroke: var(--accent-soft);
   stroke-width: 1;
   stroke-dasharray: 4 3;
 }
 
 .calib__quad {
-  fill: rgba(120, 220, 160, 0.1);
-  stroke: #6fdc9c;
+  fill: color-mix(in srgb, var(--ok) 10%, transparent);
+  stroke: var(--ok);
   stroke-width: 1.5;
 }
 
@@ -400,11 +604,11 @@ body {
 }
 
 .calib__handle--corner {
-  fill: #6fdc9c;
+  fill: var(--ok);
 }
 
 .calib__handle--crop {
-  fill: #5aa0ff;
+  fill: var(--accent-soft);
 }
 
 .calib__controls {
@@ -419,7 +623,7 @@ body {
   flex-direction: column;
   gap: 2px;
   font-size: 0.8em;
-  color: #b9c4cf;
+  color: var(--fg-muted);
 }
 
 .calib__control input,
@@ -436,23 +640,23 @@ body {
 
 .calib__countdown {
   margin: 8px 0 0;
-  color: #6fdc9c;
+  color: var(--ok);
   font-weight: 600;
 }
 
 .calib__lease-banner {
   margin: 8px 0 0;
-  color: #f5a623;
+  color: var(--warn);
   font-weight: 600;
 }
 
-/* Bead 9 — equipment rails, recovery banner, bind/unbind facet. */
+/* Bead 9 — recovery banner, bind/unbind facet. */
 .console__recovery {
   margin: 0 0 16px;
   padding: 12px 16px;
-  border: 1px solid #3aa0ff;
+  border: 1px solid var(--accent-soft);
   border-radius: 8px;
-  background: #16324a;
+  background: color-mix(in srgb, var(--accent-soft) 15%, transparent);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -466,86 +670,156 @@ body {
 .console__auth-error {
   margin: 0 0 16px;
   padding: 12px 16px;
-  border: 1px solid #ff6b6b;
+  border: 1px solid var(--alarm);
   border-radius: 8px;
-  background: #3a1616;
-  color: #ffd0d0;
+  background: color-mix(in srgb, var(--alarm) 15%, transparent);
+  color: var(--fg);
 }
 
-.console__selected-player {
-  margin: 0 0 12px;
-  color: #9fb2bf;
-}
-
-.equipment-rail {
+/* Equipment roster (slice 2 §5): groups by standing, one card per Player. On a
+   narrow screen it sits below the plan and tray; ids wrap and actions wrap
+   under the facts. */
+.roster {
+  margin: 24px 0 0;
   display: flex;
-  gap: 24px;
-  margin: 0 0 20px;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.rail {
-  flex: 1;
+.roster__title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.roster__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.roster__group {
+  min-width: 0;
   padding: 12px 16px;
-  border: 1px solid #24333d;
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
-.rail__title {
-  margin: 0 0 8px;
+.roster__group-title {
+  margin: 0;
   font-size: 0.9rem;
+}
+
+.roster__group-toggle {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font: inherit;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #9fb2bf;
+  cursor: pointer;
 }
 
-.rail__list {
-  margin: 0;
+.roster__cards,
+.roster__outputs {
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
-.rail__item {
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
+.roster__card {
+  min-width: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
 }
 
-.rail__entry {
-  flex: 1;
+.roster__player {
+  max-width: 100%;
   text-align: left;
 }
 
-.rail__retire {
-  flex: 0 0 auto;
-  color: #f5a623;
-  border-color: #6a4a12;
+.roster__standing,
+.roster__boot {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--fg-muted);
 }
 
-.rail__empty {
+.roster__boot:empty {
+  display: none;
+}
+
+.roster__output {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.roster__output--no-display .roster__output-label,
+.roster__output--retired .roster__output-label {
+  color: var(--fg-subtle);
+}
+
+.roster__bind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.roster__action {
+  margin-top: 8px;
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.roster__empty {
   margin: 0;
-  color: #6f8494;
+  color: var(--fg-subtle);
+}
+
+.roster__alert {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+
+/* Text for assistive technology only (e.g. the Player id in "Retire player"). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .facet__review {
   margin: 12px 0;
   padding: 12px 16px;
-  border: 1px solid #f5a623;
+  border: 1px solid var(--warn);
   border-radius: 8px;
-  background: #3a2c12;
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
 }
 
 .facet__review-text {
   margin: 0 0 8px;
-  color: #f5a623;
+  color: var(--warn);
   font-weight: 600;
 }
 
 .facet__conflict {
   margin: 12px 0 0;
-  color: #ff6b6b;
+  color: var(--alarm);
   font-weight: 600;
 }
 
@@ -556,18 +830,18 @@ body {
 }
 
 .console__mode {
-  background: #1c262d;
-  color: #9dabb5;
-  border: 1px solid #32404a;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 14px;
   cursor: pointer;
 }
 
 .console__mode--active {
-  background: #2f6f8f;
-  color: #f2f6f8;
-  border-color: #2f6f8f;
+  background: var(--accent);
+  color: var(--fg);
+  border-color: var(--accent);
 }
 
 /* Showrunner shell (Bead 12): Frame-health badges + region shells. */
@@ -587,25 +861,421 @@ body {
   font-size: 12px;
   padding: 4px 10px;
   border-radius: 12px;
-  border: 1px solid #32404a;
-}
-
-.showrunner__badge--valid {
-  color: #4caf7d;
-}
-
-.showrunner__badge--invalid {
-  color: #d6a55a;
+  border: 1px solid var(--border);
 }
 
 .showrunner__region {
-  border: 1px solid #32404a;
+  min-width: 0;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* Layout (pass 2 slice 3 §12): one column, the Runs first; from 1024 px, Now
+   (Runs with Why) beside the Library (Scenes, Programs, Sources). */
+.showrunner__columns,
+.showrunner__column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .showrunner__columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+.showrunner__sources,
+.run-control__runs,
+.program-scheduling__programs,
+.scene-authoring__scenes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.showrunner__source,
+.run-control__run,
+.program-scheduling__program,
+.scene-authoring__scene {
+  min-width: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+/* One record (§12): label/value pairs in a grid whose values wrap anywhere, so
+   a long id never widens the page; the actions wrap beneath. */
+.record {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 0;
+}
+
+.record dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.record dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.record__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.showrunner__region fieldset {
+  min-width: 0;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .showrunner__region-title {
   margin: 0;
   font-size: 16px;
-  color: #f2f6f8;
+  color: var(--fg);
+}
+
+/* The output chooser (slice 2 §6): one radio per free Output, liveness beneath. */
+.chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.chooser__title {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.chooser__label {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chooser__liveness {
+  display: block;
+  padding-left: 22px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.chooser__empty {
+  margin: 0;
+  color: var(--fg-subtle);
+}
+
+.chooser__status:empty,
+.plan__status-line:empty,
+.tray__status-line:empty,
+.roster__status-line:empty {
+  display: none;
+}
+
+/* The one confirmation dialog (slice 2 §7). */
+.confirm {
+  box-sizing: border-box;
+  width: min(32rem, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  padding: 16px 20px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.confirm__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.confirm__title,
+.confirm__body,
+.confirm__outcome,
+.confirm__results {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.confirm__typed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 0;
+}
+
+.confirm__alert {
+  margin: 12px 0 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+
+.confirm__outcome {
+  margin: 12px 0 0;
+  font-weight: 600;
+}
+
+.confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.confirm__progress {
+  margin: 8px 0 0;
+  color: var(--fg-muted);
+}
+
+/* Boot facts (slice 2 §5): serial and netboot outcome beside a Player. */
+.chooser__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+/* The new-frame form's id rule (slice 2 §8), shown as you type. */
+.plan__new-frame-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Authoring fields (pass 2 slice 3 §6, §12): the label above the control, then
+   the hint, then the reason. Reasons are --warn; only alarms are --alarm. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 8px 0;
+}
+
+.field--check .field__label {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.field__hint,
+.field__reason {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.field__hint {
+  color: var(--fg-muted);
+}
+
+.field__reason {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.field__inline-action {
+  padding: 0 4px;
+  font: inherit;
+}
+
+.problems {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.problems__title {
+  margin: 0 0 4px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.problems__list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+/* The target picker (slice 3 §3): Frames grouped by Surface, health beside. */
+.target-picker__surface {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+
+.target-picker__surface-name {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.target-picker__frame {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.target-picker__health {
+  font-size: 12px;
+}
+
+/* Run rows (slice 3 §9): frame chips carry the plan tile's health label. */
+.run-control__run-title,
+.program-scheduling__program-id-text {
+  margin: 0 0 4px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.run-control__frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.run-control__frame {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.run-control__children {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  list-style: none;
+  border-left: 2px solid var(--border);
+}
+
+.run-control__ended,
+.program-scheduling__past {
+  margin-top: 12px;
+}
+
+.run-control__note,
+.program-scheduling__program-hint,
+.precedence__limit {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.run-control__ended-title {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+/* Central's plan for a frame (slice 3 §10). */
+.precedence__heading {
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+
+.precedence__limit {
+  margin: 4px 0 0;
+}
+
+.run-control__status-line:empty,
+.program-scheduling__status-line:empty {
+  display: none;
+}
+
+/* Scene rows (slice 3 §13): a disclosure per Scene; edit mode names the stored id. */
+.scene-list__summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.scene-list__details[open] > .record {
+  margin-top: 6px;
+}
+
+.scene-authoring__editing {
+  margin: 8px 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scene-authoring__status-line:empty {
+  display: none;
+}
+
+/* The media pipeline and "why nothing new?" (slice 3 §14). */
+.media-pipeline__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.media-pipeline__source {
+  min-width: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.why-chain__title {
+  margin: 12px 0 4px;
+  font-size: 14px;
+}
+
+.why-chain__steps {
+  margin: 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+.why-chain__step {
+  margin: 2px 0;
+}
+
+.why-chain__step--skip {
+  color: var(--fg-subtle);
+}
+
+.why-chain__step[aria-current="step"] {
+  color: var(--warn);
+}
+
+.why-chain__step-title {
+  font-weight: 600;
+}
+
+.why-chain__step button {
+  margin-left: 8px;
 }

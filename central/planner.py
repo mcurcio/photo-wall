@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
@@ -135,6 +135,24 @@ def _variant_usable(candidate: Candidate, profile: FrameProfile) -> bool:
     )
 
 
+Standing = Literal["usable", "preparing", "failed_to_prepare", "no_compatible_variant"]
+
+
+def candidate_standing(candidate: Candidate, profile: FrameProfile) -> Standing:
+    """What planning does with one candidate eligible for a Frame's profile.
+
+    The one statement of the planner's per-candidate exclusions, in its order:
+    `_pool` drops a failed preparation; `add` requests a missing variant
+    (`preparation_pending`) and refuses one the profile cannot use
+    (`variant_incompatible`). The operator candidates route serves it as is.
+    """
+    if candidate.preparation_failure:
+        return "failed_to_prepare"
+    if candidate.variant is None:
+        return "preparing"
+    return "usable" if _variant_usable(candidate, profile) else "no_compatible_variant"
+
+
 class _ProjectionBuilder:
     def __init__(
         self,
@@ -230,7 +248,8 @@ class _ProjectionBuilder:
                 (entry[1] for entry in merged.values()),
                 key=lambda candidate: (-candidate.captured_at, candidate.asset_id),
             )
-        pool = tuple(candidate for candidate in candidates if not candidate.preparation_failure and eligible(candidate, profile))
+        pool = tuple(candidate for candidate in candidates if eligible(candidate, profile)
+                     and candidate_standing(candidate, profile) != "failed_to_prepare")
         self.pools[key] = pool
         return pool
 
@@ -302,7 +321,8 @@ class _ProjectionBuilder:
             return
         candidate = pool[0] if intent.asset_refs else pool[intent.cycle_index % len(pool)]
         self.selections.append(AssignmentSelection(assignment_id=identity, asset_id=candidate.asset_id))
-        if candidate.variant is None:
+        standing = candidate_standing(candidate, binding.profile)
+        if standing == "preparing":
             if candidate.asset_id not in self.requests:
                 _bound(len(self.requests) + 1, self.limits.max_acquisitions, "acquisition count")
                 self.requests[candidate.asset_id] = (set(), intent.interval_start)
@@ -311,7 +331,7 @@ class _ProjectionBuilder:
             self.requests[candidate.asset_id] = (assignments, min(earliest, intent.interval_start))
             self.diagnose("preparation_pending", intent=intent, assignment=identity)
             return
-        if not _variant_usable(candidate, binding.profile):
+        if standing == "no_compatible_variant":
             self.diagnose("variant_incompatible", intent=intent, assignment=identity)
             return
         self.layers[player].append(Layer(**fields, presentation="media", variant=candidate.variant,

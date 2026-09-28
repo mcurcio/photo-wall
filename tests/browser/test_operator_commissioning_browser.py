@@ -15,9 +15,9 @@ import os
 import time
 
 import pytest
-from operator_harness import inventory, operator_server
+from operator_harness import inventory, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
-from test_registry import ADMIN, enroll
+from test_registry import enroll
 
 from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # A portrait Frame profile: distinct from the OutputReport (1920x1080) so the
-# provenance assertions can tell a Frame fact from a live Display readback.
+# provenance assertions can tell a Frame fact from the Display report.
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 FRAME = "commission-frame"
@@ -39,7 +39,7 @@ GAIN = 1.5
 def _seed(registry):
     """Bind a frame to a connected output and commit a distinctive SDR gain.
 
-    enroll(count=1) reports HDMI-A-1 connected=True, giving a live readback to
+    enroll(count=1) reports HDMI-A-1 connected=True, giving a Display report to
     show. bind bumps generation 0->1 and sets calibration_valid=false; the commit
     then writes the committed calibration (gain=1.5, revision 2) the facet reads.
     Returns the bound player id for the binding assertions.
@@ -57,12 +57,6 @@ def _seed(registry):
         FRAME, "commit", expected_revision=1,
         calibration=Calibration(gain=GAIN), expected_generation=1)
     return player_id
-
-
-def _connect(page, origin):
-    page.goto(origin + "/console")
-    page.get_by_label("Operator token").fill(ADMIN)
-    page.get_by_role("button", name="Connect", exact=True).click()
 
 
 def _open_commissioning(page):
@@ -83,7 +77,7 @@ def _open_commissioning(page):
 def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registry):
     player_id = _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         # (R4 placeholder, probe b) The Commissioning facet is reachable within
@@ -120,7 +114,7 @@ def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry)
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         expect(inspector.get_by_text("not yet available")).to_have_count(2)
@@ -129,19 +123,19 @@ def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry)
         expect(inspector.get_by_role("button", name="Set display power")).to_have_count(0)
 
 
-def test_commissioning_provenance_frame_facts_vs_live_readback(page, registry):
-    """Provenance probe (c): FrameProfile fields are Frame facts; the ONLY live
-    Display readback is OutputReport.
+def test_commissioning_provenance_frame_facts_vs_display_at_player_start(page, registry):
+    """Provenance probe (c): FrameProfile fields are Frame facts; the ONLY Display
+    report is OutputReport, sent when the Player started (not a live readback).
 
     The frame's diagonal (24 in) is a FrameProfile fact and appears under
-    "Frame facts", NOT under "Live Display readback" (OutputReport carries no
-    diagonal). Mutation: render a FrameProfile field inside the Live Display
-    readback region (mislabel it as live readback) -> the not_to_contain_text
-    assertion goes RED. Restore -> GREEN.
+    "Frame facts", NOT under "Display at last Player start" (OutputReport carries
+    no diagonal). Mutation: render a FrameProfile field inside the Display region
+    (mislabel it as a Display report) -> the not_to_contain_text assertion goes
+    RED. Restore -> GREEN.
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         frame_facts = inspector.get_by_role("group", name="Frame facts")
@@ -149,12 +143,13 @@ def test_commissioning_provenance_frame_facts_vs_live_readback(page, registry):
         # shown as a Frame fact.
         expect(frame_facts).to_contain_text("24")
 
-        live = inspector.get_by_role("group", name="Live Display readback")
-        # The one live Display readback is OutputReport.connected.
-        expect(live).to_contain_text("Connected")
+        display = inspector.get_by_role("group", name="Display at last Player start")
+        # The one Display report is OutputReport.connected, from Player start.
+        expect(display).to_contain_text("Detected")
+        expect(display).not_to_contain_text("Not detected")
         # Provenance: a FrameProfile-only fact (diagonal) must NOT appear as a
-        # live Display readback — OutputReport has no diagonal.
-        expect(live).not_to_contain_text("24")
+        # Display report — OutputReport has no diagonal.
+        expect(display).not_to_contain_text("24")
 
 
 # --- Bead 7: calibration direct-manipulation + client convex guard (Plane B) ---
@@ -175,7 +170,7 @@ def test_calibration_drag_to_convex_updates_draft(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         editor = inspector.get_by_role("group", name="Adjust calibration")
@@ -206,7 +201,7 @@ def test_calibration_folded_quad_snaps_back_no_request(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         inspector.get_by_role("spinbutton", name="Corner 1 x").fill("0.9")
@@ -231,7 +226,7 @@ def test_calibration_thin_quad_is_rejected_client_side(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         inspector.get_by_role("spinbutton", name="Corner 3 y").fill("0.0000005")
@@ -245,7 +240,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
     """A snapshot refresh mid-edit leaves the Plane B draft intact (two-plane).
 
     The operator edits the trying SDR gain; meanwhile committed calibration moves
-    underneath (a commit from elsewhere), and a Plane A refresh (Connect) is
+    underneath (a commit from elsewhere), and a Plane A refresh (Refresh) is
     triggered. Plane A visibly updates (the committed read-back shows the NEW
     gain, proving the refresh was real and non-vacuous) while Plane B (the draft
     input) persists — because useDraft is a separate, refresh-proof state cell.
@@ -255,7 +250,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         committed = inspector.get_by_role("group", name="Committed calibration")
@@ -273,7 +268,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
 
         # Trigger a Plane A refresh. Plane A updates (committed now 1.2) — the
         # refresh is real — but Plane B (the draft) must NOT be clobbered.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
         expect(committed).to_contain_text("1.2")
         expect(gain).to_have_value("1.9")
 
@@ -323,7 +318,7 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -333,6 +328,30 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
         expect(timer).to_be_visible()
         expect(timer).to_contain_text("lease expires in")
         # The panel is genuinely previewing on the server (preview slot set).
+        assert inventory(page, origin).frames[0].preview is not None
+
+
+def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, registry):
+    """Pass 2 §7: the console's one 5 s poll replaces Plane A while a preview is held; the
+    draft (Plane B) and the server-driven countdown survive, and the panel stays previewing.
+    The page clock is paused at the server's clock, so the countdown is exact."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        pause_page_clock(page, registry.clock.utc())
+        sign_in(page, origin)
+        inspector = _open_commissioning(page)
+        gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
+        gain.fill("1.9")
+        _lease(inspector).get_by_role("button", name="Preview", exact=True).click()
+        timer = inspector.get_by_role("timer", name="Preview lease countdown")
+        expect(timer).to_contain_text("lease expires in 29s")
+
+        for _ in range(2):
+            with page.expect_response("**/v1/operator/inventory"):
+                page.clock.run_for(5000)
+        expect(timer).to_contain_text("lease expires in 19s")
+        expect(gain).to_have_value("1.9")
+        expect(inspector.get_by_role("alert")).to_have_count(0)
         assert inventory(page, origin).frames[0].preview is not None
 
 
@@ -352,7 +371,7 @@ def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, regis
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -363,7 +382,7 @@ def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, regis
         # not move (server-authoritative expiry, not countdown-driven).
         registry.clock.advance(31)
         # Deterministically drive the overtake/expiry poll via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         expect(lease.get_by_role("alert")).to_contain_text("Panel is back on committed")
         # Trying retained in Plane B -> Re-preview offered.
@@ -390,7 +409,7 @@ def test_calibration_stale_commit_conflicts_on_revision(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -417,7 +436,7 @@ def test_calibration_stale_commit_conflicts_on_generation(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -439,7 +458,7 @@ def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -450,7 +469,7 @@ def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
             FRAME, "commit", expected_revision=2,
             calibration=Calibration(gain=1.2), expected_generation=1)
         # Drive the overtake poll deterministically via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
 
@@ -479,7 +498,7 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -493,7 +512,7 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
             FRAME, "preview", expected_revision=2,
             calibration=Calibration(gain=1.7), expected_generation=1)
         # Drive the overtake poll deterministically via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         # The overtaken banner shows (§4b copy)...
         expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
@@ -527,7 +546,7 @@ def test_manual_revert_clears_preview_and_returns_draft_to_committed(page, regis
     _seed(registry)  # committed gain 1.5
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 

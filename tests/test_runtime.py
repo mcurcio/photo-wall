@@ -4,7 +4,18 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from central.runtime import Child, Contribution, Program, RecordingActuator, Runtime, Scene
+from central.runtime import (
+    OPERATOR_HISTORY_SECONDS,
+    Child,
+    Contribution,
+    Program,
+    RecordingActuator,
+    Runtime,
+    RuntimeConflict,
+    RuntimeView,
+    RunView,
+    Scene,
+)
 
 
 def media(target="frame:left", source="holiday:v1", **kwargs):
@@ -200,6 +211,22 @@ def test_cancel_is_downward_and_skips_outro():
     final = runtime.cancel(root, 3)
     assert get_run(final, root).phase == "cancelled"
     assert final.contributions == ()
+
+
+def test_a_scene_save_must_move_past_the_stored_revision():
+    """A save built from an older copy never silently replaces a newer Scene (slice 3
+    §13); an identical retry is idempotent. Mutation probe: drop the guard."""
+    runtime = Runtime()
+    stored = Scene(scene_id="scene", revision=2, cycle_seconds=10, contributions=(media(),))
+    runtime.set_scene(stored)
+    for stale in (stored.model_copy(update={"cycle_seconds": 45}),
+                  stored.model_copy(update={"revision": 1})):
+        with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+            runtime.set_scene(stale)
+        assert runtime.export_state()["scenes"]["scene"]["cycle_seconds"] == 10
+    runtime.set_scene(Scene.model_validate(stored.model_dump(mode="json")))  # a retry
+    runtime.set_scene(stored.model_copy(update={"revision": 3, "cycle_seconds": 45}))
+    assert runtime.export_state()["scenes"]["scene"]["revision"] == 3
 
 
 def test_tree_edits_adopt_only_on_next_root_including_delayed_child():
@@ -543,3 +570,201 @@ def test_early_v1_snapshot_without_local_order_restores_child_precedence():
     restored = Runtime.restore(legacy)
     assert restored.advance(1).for_target("frame:left").scene_id == "child"
     assert all("local_order" not in record for record in legacy["runs"].values())
+
+
+# The operator's read (pass 2 slice 3 §8).
+
+
+def test_run_views_carry_their_program_and_priority():
+    assert RunView.model_fields["program_id"].is_required()
+    assert RunView.model_fields["priority"].is_required()
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="direct", loop=True, contributions=(media("frame:right"),)))
+    runtime.set_program(Program(
+        program_id="weekday-evenings", scene_id="evening", starts_at=10, ends_at=100, priority=5))
+    direct = runtime.activate("direct", "act", 0, priority=2).run_id
+    view = runtime.advance(20)
+    scheduled = next(run for run in view.runs if run.scene_id == "evening")
+    assert (scheduled.program_id, scheduled.priority) == ("weekday-evenings", 5)
+    assert (get_run(view, direct).program_id, get_run(view, direct).priority) == (None, 2)
+
+
+def test_protected_frames_are_served_only_by_the_operator_projection():
+    # Never on the scheduler's path: neither view model carries protection.
+    for model in (RunView, RuntimeView):
+        assert not [name for name in model.model_fields if "protect" in name]
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(), lamp())))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    runtime.activate("open", "open-act", 0)
+    projection = runtime.operator_projection(5)
+    assert projection.protected_frames == {guard: frozenset({"frame:left"})}
+    assert {run.run_id for run in projection.current.runs} >= {guard}
+
+
+def _outcome(runtime, program_id, now):
+    return runtime.operator_projection(now).program_outcomes[program_id]
+
+
+def test_program_outcomes_distinguish_missed_windows_from_warm_restarts():
+    scene = Scene(scene_id="evening", cycle_seconds=30, contributions=(media(),))
+
+    # Saved after its window ended, on a warm Runtime: missed.
+    late = Runtime()
+    late.set_scene(scene)
+    late.advance(500)
+    late.set_program(Program(program_id="late", scene_id="evening", starts_at=100, ends_at=200))
+    missed = _outcome(late, "late", 600)
+    assert (missed.status, missed.reason) == ("expired", "missed_window")
+
+    # Ended before the Runtime's first-ever tick: missed.
+    cold = Runtime()
+    cold.set_scene(scene)
+    cold.set_program(Program(program_id="cold", scene_id="evening", starts_at=100, ends_at=200))
+    missed = _outcome(cold, "cold", 300)
+    assert (missed.status, missed.reason) == ("expired", "missed_window")
+
+    # Central was down across the whole window after a tick: a warm restart
+    # catches up logically and the outcome reads admitted, never missed.
+    warm = Runtime()
+    warm.set_scene(scene)
+    warm.advance(0)
+    warm.set_program(Program(program_id="warm", scene_id="evening", starts_at=100, ends_at=200))
+    projection = warm.operator_projection(300)
+    ran = projection.program_outcomes["warm"]
+    assert ran.status == "admitted"
+    run = get_run(projection.current, ran.run_id)
+    assert (run.phase, run.started_at, run.ended_at) == ("completed", 100, 130)
+
+    # Not yet started: no outcome.
+    assert _outcome(warm, "warm", 50) is None
+
+
+def test_a_protected_refusal_is_a_served_program_outcome():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="evening", loop=True, contributions=(media(),)))
+    guard = runtime.activate("guard", "guard-act", 0, priority=5).run_id
+    runtime.set_program(Program(program_id="evening", scene_id="evening", starts_at=10, ends_at=100))
+    projection = runtime.operator_projection(20)
+    refused = projection.program_outcomes["evening"]
+    assert (refused.status, refused.reason) == ("rejected", "protected_frames")
+    assert refused.blocking_run_id == guard
+    assert projection.protected_frames[guard] == frozenset({"frame:left"})
+
+
+def test_a_refused_activation_names_the_run_that_refused_it():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="shy", protect_frames=True, loop=True,
+                            contributions=(media("frame:right"),)))
+    runtime.set_scene(Scene(scene_id="cover", loop=True, contributions=(media("frame:right"),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    cover = runtime.activate("cover", "cover-act", 0, priority=5).run_id
+    refused = runtime.activate("open", "open-act", 1)
+    assert (refused.reason, refused.blocking_run_id) == ("protected_frames", guard)
+    hidden = runtime.activate("shy", "shy-act", 1)
+    assert (hidden.reason, hidden.blocking_run_id) == ("protection_not_visible", cover)
+    # Every other outcome names no blocker.
+    assert runtime.activate("guard", "again", 1).blocking_run_id is None
+
+
+def test_an_admission_stored_before_the_blocking_run_existed_restores():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    runtime.activate("guard", "guard-act", 0)
+    runtime.activate("open", "open-act", 1)
+    old = json.loads(json.dumps(runtime.export_state()))
+    for admission in old["admissions"].values():
+        admission.pop("blocking_run_id", None)
+    restored = Runtime.restore(old)
+    assert restored.activate("open", "open-act", 2).blocking_run_id is None
+    exported = restored.export_state()
+    assert "blocking_run_id" not in exported["admissions"]["open-act"]
+    assert Runtime.restore(exported).export_state() == exported
+
+
+# Rollback compatibility: the Admission fields the Central build before
+# `blocking_run_id` accepts (its models forbid extra keys). A stored state
+# must stay inside this set unless a protection refusal has been recorded.
+PREVIOUS_ADMISSION_FIELDS = frozenset({"activation_id", "status", "run_id", "reason"})
+
+
+def _keys_named(value, key):
+    if isinstance(value, dict):
+        return (key in value) + sum(_keys_named(v, key) for v in value.values())
+    if isinstance(value, list):
+        return sum(_keys_named(v, key) for v in value)
+    return 0
+
+
+def test_a_state_without_a_protection_refusal_restores_on_the_previous_build():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media("frame:right"),)))
+    runtime.activate("guard", "guard-act", 0)
+    runtime.activate("guard", "guard-again", 1)
+    runtime.set_program(Program(program_id="gone", scene_id="open", starts_at=0, ends_at=1))
+    runtime.set_program(Program(program_id="later", scene_id="open", starts_at=5, ends_at=50))
+    runtime.advance(10)
+    exported = json.loads(json.dumps(runtime.export_state()))
+    statuses = {a["status"] for a in exported["admissions"].values()}
+    assert {"admitted", "ignored"} <= statuses
+    assert _keys_named(exported, "blocking_run_id") == 0
+    for admission in exported["admissions"].values():
+        assert set(admission) <= PREVIOUS_ADMISSION_FIELDS
+    assert Runtime.restore(exported).export_state() == exported
+
+
+def test_a_protection_refusal_is_stored_and_restores_on_this_build():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="guard", protect_frames=True, loop=True,
+                            contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="open", loop=True, contributions=(media(),)))
+    guard = runtime.activate("guard", "guard-act", 0).run_id
+    runtime.activate("open", "open-act", 1)
+    exported = json.loads(json.dumps(runtime.export_state()))
+    assert exported["admissions"]["open-act"]["blocking_run_id"] == guard
+    assert "blocking_run_id" not in exported["admissions"]["guard-act"]
+    restored = Runtime.restore(exported)
+    assert restored.activate("open", "open-act", 2).blocking_run_id == guard
+    assert restored.export_state()["admissions"] == exported["admissions"]
+
+
+def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
+    day = OPERATOR_HISTORY_SECONDS
+    runtime = Runtime()
+    for scene_id, target in (("old", "frame:a"), ("recent", "frame:b"), ("live", "frame:c")):
+        runtime.set_scene(Scene(scene_id=scene_id, loop=True, contributions=(media(target),)))
+    old = runtime.activate("old", "old-act", 0).run_id
+    runtime.cancel(old, 10)
+    runtime.set_program(Program(program_id="old-window", scene_id="old", starts_at=20, ends_at=60))
+    recent = runtime.activate("recent", "recent-act", day).run_id
+    runtime.cancel(recent, day + 100)
+    live = runtime.activate("live", "live-act", day + 100).run_id
+    runtime.set_program(Program(
+        program_id="recent-window", scene_id="recent", starts_at=day + 150, ends_at=day + 300))
+    runtime.set_program(Program(
+        program_id="later-window", scene_id="live", starts_at=day + 900, ends_at=day + 1000))
+    before = runtime.export_state()
+
+    now = day + 200
+    projection = runtime.operator_projection(now)
+    served = {run.run_id for run in projection.current.runs}
+    assert {recent, live} <= served  # ended 100 s ago, and live
+    assert old not in served  # ended more than a day ago
+    assert set(projection.program_outcomes) == {"recent-window", "later-window"}
+    assert projection.program_outcomes["later-window"] is None
+
+    # A read filter only: stored state and every other read keep the old Run.
+    assert runtime.export_state() == before
+    assert old in {run.run_id for run in runtime.project(now).runs}

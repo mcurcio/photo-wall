@@ -22,7 +22,14 @@ from central.installation_models import (
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
-from contracts.models import Calibration, FrameProfile, Identifier, Model, OutputBinding
+from contracts.models import (
+    Calibration,
+    FrameProfile,
+    Identifier,
+    Model,
+    OutputBinding,
+    TargetIdentifier,
+)
 from contracts.time import Clock
 
 
@@ -41,7 +48,10 @@ def _orientation_coherent(width_mm: float, height_mm: float,
 
 
 class FrameCreate(Model):
-    id: Identifier
+    # A new Frame's id must be reachable by a Scene (contracts TARGET_ID_PATTERN).
+    # Stored Frames and path parameters stay `Identifier`, so an older id is still
+    # readable and deletable.
+    id: TargetIdentifier
     surface_id: Identifier = "wall"
     x_mm: float = 0
     y_mm: float = 0
@@ -288,19 +298,24 @@ class Registry:
             return {"status": "deleted"}
 
     def retire(self, player_id: str) -> None:
+        """Retire a Player permanently. Refuses (409 player_bound), for every caller,
+        while any of its Outputs is bound: replacement is unbind, then retire.
+
+        The bindings check runs AFTER the Player row lock, which bind takes first
+        too, so a bind and a retire serialize. Under READ COMMITTED (the default;
+        central/db.py sets no isolation) the check is a new statement after any lock
+        wait and sees a bind that committed during it. Retiring twice is a no-op."""
         with self.db.transaction() as conn:
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if not player:
                 raise RegistryError("unknown_player", 404)
             if player["retired_at"] is not None:
                 return
+            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s LIMIT 1",
+                            (player_id,)).fetchone():
+                raise RegistryError("player_bound")
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (self.clock.utc(), player_id))
-            conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
-                         "configuration_revision=configuration_revision+1,"
-                         "preview=NULL,preview_expires=NULL WHERE id IN "
-                         "(SELECT frame_id FROM bindings WHERE player_id=%s)", (player_id,))
-            conn.execute("DELETE FROM bindings WHERE player_id=%s", (player_id,))
             self._audit(conn, "player_retired", player_id)
 
     def calibrate(self, frame_id: str, operation: str, expected_revision: int,

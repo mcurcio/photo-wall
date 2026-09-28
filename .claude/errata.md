@@ -1696,3 +1696,225 @@ doc softenings.
   is clean. No other owned or unowned file was checked out or reset. Flagging so a reviewer
   diffs the reconstructed `appliance/provision.py` against intent rather than assuming it was
   untouched.
+- 2026-09-27, console pass 2 slice 1 (docs/operator-console-ux-pass2.md), implementer findings:
+  (a) §10 bead 3 freezes `useHealth` as returning `{status, reason}`, but §5's causal line needs the
+  raw scheduler status (not-ok/not-disabled) independently of the pill's reason text (a database
+  outage takes precedence in `reason`). Implemented `{status, reason, scheduler}` (scheduler = the
+  /healthz scheduler status when neither "ok" nor "disabled", else null); `reason` is "database
+  unavailable" or "scheduler <status>". (b) §5 says a stalled scheduler "replaces the N alarm rows";
+  implemented as replacing the LIVENESS alarm rows only (player-silent, overdue awaiting-report) --
+  a display-not-detected alarm is not caused by the scheduler and stays listed. (c) §11's mutation
+  "Restore the facet reset -> strip facet test" only bites if plain selection no longer resets the
+  facet; implemented plain tile/tray selection as keeping the open facet (§1 lists the reset as a
+  defect), and the strip test pins it. (d) §4 does not define a bound frame whose Player row is
+  missing from the inventory (unreachable: bindings FK); health.js fails closed to
+  awaiting-report/alarm "No report from the Player yet". (e) The orchestrator brief called Bead 5
+  "failure-reported (deferred)"; in the approved doc failure-reported was removed and Bead 5 is
+  "Layout and theme" -- built as Bead 5; failure-reported not built.
+- 2026-09-28, console pass 2 slice 1, docs bead 6 (errata closure): findings (a)-(e) of the
+  2026-09-27 slice 1 entry above are APPLIED to docs/operator-console-ux-pass2.md in place
+  (§3 table, §4, §5, §7, §10, §11, History). The spec now matches the build; no open slice 1 errata.
+- 2026-09-28, console pass 2 slice 2 (docs/operator-console-ux-pass2-onboarding.md), implementer
+  findings, beads 1-6 (none changes the frame; all are slice-page corrections for the docs bead):
+  (a) §11 lists the "Unbind all" per-Frame / mid-sequence-conflict test under Bead 3, but the only
+  surface that offers Unbind all is Bead 5's in-service roster card. Bead 3 built ConfirmAction and
+  the single-Frame verbs; `unbindSequence` (equipmentApi.js), `unbindAllRequest` (ConfirmAction.jsx)
+  and their tests (lists Frames+Runs, mid-sequence conflict never resent, unknown stops the rest)
+  landed in Bead 5.
+  (b) File lists widened: Bead 3 also touched framesApi.js (`deleteFrame` returns the error `code`, so
+  a 404 unknown_frame reads "Already done.") and App.jsx (a plan-region ref: the tray's delete
+  successor is the plan region, which the tray does not own). Bead 4 also touched Inspector.jsx and
+  BindingFacet.jsx (boot facts reach the chooser through the Inspector) and the then-current
+  EquipmentRail.jsx (serial + outcome, so Bead 4's "No netboot record" test had a surface before
+  the roster).
+  (c) §7 is silent on render ordering: the dialog's native `close` event renders in React's sync lane
+  ahead of the default-lane snapshot update, so a focus successor chosen there saw the pre-write
+  surface (unbind focused the heading, not the chooser). ConfirmAction now closes the dialog from an
+  effect after the render carrying the result commits.
+  (d) §7's "[*]" is built as: done closes the dialog (status line + successor); changed, already
+  done, outcome unknown and the Unbind-all summary stay in the dialog as terminal states with only
+  Close. Confirm buttons are "Confirm delete/unbind/retire/unbind all" (the title names the target;
+  the button cannot repeat the opener's accessible name). The Binding facet's own bind keeps the
+  existing "This Frame changed — reload and review its binding." (§6 diagram); dialogs use
+  "Changed since you opened this. Reopen to review."
+  (e) §5 names three boot outcomes; rows with neither known_good_tag nor failed_tag read "Last netboot
+  served <tag>, not yet healthy" or "Netboot seen, no image served yet"; failed+known-good reads
+  "Rolled back from X · last netboot healthy on Y". Group headings are toggles named
+  "<Group> players (N)"; card details default open.
+  (f) Pre-existing: deleting a Surface's last frame renames the plan region "Wall plan for surface
+  null"; the delete-focus test locates the region by prefix.
+- 2026-09-28, console pass 2 slice 2, docs bead 7 (errata closure): findings (a)-(f) of the
+  2026-09-28 slice 2 entry above are APPLIED to docs/operator-console-ux-pass2-onboarding.md in
+  place (§5, §6, §7, §9, §11, History), together with the review fix cycle 1 decisions: the boot
+  outcome label branches on `boot_outcome` first; one clear-on-conflict policy for binds; a shared
+  `useConfirm` hook; "Reported serial"; a 5xx answer is outcome unknown. No open slice 2 errata.
+- 2026-09-28, console pass 2 slice 3A (docs/operator-console-ux-pass2-showrunner.md), implementer
+  findings, beads 3A-1..3A-6 plus the useConfirm fallback test (none changes the frame; all are
+  slice-page corrections for docs bead 3A-7):
+  (a) §3 module map has no home for the shared reasons machinery. Added `Field.jsx` (`useProblems`,
+  `Field`, `IdentityFields`, `ProblemSummary`): one hook for touched/submitted reasons, the summary
+  frozen at submit and first-field focus, used by the Scene, Program, activation and Source forms.
+  `useProblems.check(list)` takes the list of the action submitted (the Programs form has two).
+  (b) §3: the precedence rendering shared by the Now-showing facet and the Runs Why panel is
+  `PrecedenceExplanation`, exported from `NowShowingFacet.jsx` (no new module).
+  (c) Bead 3A-1 file list widened: `contracts/models.py` gains an `IDENTIFIER_PATTERN` constant
+  (Identifier is built from it, as TARGET_ID_PATTERN is), so the pin in `tests/test_registry.py` compares
+  literals. Bead 3A-3's /runtime check is a new `tests/test_operator_runtime.py`.
+  (d) §3/§9 TargetPicker: Surface groups are named "Frames on <surface>" (and "Frames not on any
+  wall"), not "Surface <id>": the R4 test asserts `get_by_label("Surface")` (substring) finds nothing
+  in Showrunner mode. A frame id outside the target rule (§1's legacy `:` id) is listed with that
+  reason and cannot be ticked — §1 confirms the defect but no bead named the fix; built in 3A-4.
+  (e) §8: `protected_frames` lists only served Runs that protect at least one frame (empty sets are
+  omitted).
+  (f) §6/§17: once bead 3A-6's "window has already ended" reason exists the form cannot create an
+  ended window, so the rewritten `:760` test sets up its missed and warm-restart Programs through the
+  Runtime directly (as served facts), not the form.
+  (g) §7 Source form: "Taken until" is exclusive (the start of that local day), matching the spec's
+  "'Taken until' must be after 'Taken from'" and `SourceSpec`'s strict interval; both fields are
+  hinted. The form also clears after a successful save, like Scenes and Programs.
+  (h) §11 names no text for an admitted activation; built as "Started: Central admitted a Run of X."
+  A 4xx reads "Not started: <error>." The Programs form and the windows helper are one form; the
+  reasons beside its fields follow the action last tried.
+  (i) §6's "Loading compatible media…" state is left to 3B-2, whose file list owns the chooser labels
+  and loading.
+- 2026-09-28, console pass 2 slice 3A review fix cycle 1 (docs/operator-console-ux-pass2-showrunner.md
+  §8, FRAME CHANGE): (a) `Admission` gains `blocking_run_id: str | None = None`, the root Run
+  whose protection refused it. `Runtime._protected_conflict` returns `(reason, run_id)`; a
+  rejected activation and a rejected Program window store it, so the activation response and
+  `program_outcomes` serve it. The console names the protector from that served id (the Run
+  looked up in `current.runs`, its frames from `protected_frames`) and falls back to "another Run,
+  no longer listed" when the Run is outside the 24 h window; the JS re-derivation of the refusal
+  rule (`sceneParticipants`, `sceneProtectedFrames`, the old `protectorOf`) is deleted. Admissions
+  stored before the field restore with None; the cost is that a state exported by this version
+  does not restore on an older build (`extra="forbid"`). Refusal wording changes: the no-name
+  fallback no longer lists frames ("its frames were protected by another Run, no longer
+  listed"), and `protection_not_visible` names the covering Run without a frame list.
+  (b) Drift: §8 freezes `Runtime.operator_projection(now)`, but the code (since 3A-3) is
+  `operator_projection(now, *, max_events=10000)`, matching `project`; the restore-and-advance
+  copy is now one `_copy()` shared by `project`, `operator_projection` and `timeline`.
+- 2026-09-28, console pass 2 slice 3B beads 1-2 (docs/operator-console-ux-pass2-showrunner.md
+  §13-§14), implementer: (a) §13 "a revision changed in Plane A ends in the terminal 'Changed
+  since you opened this'": Central keeps no precondition (Question 4 default no), so the Replace
+  dialog reads GET /v1/operator/runtime first and ends "changed" (nothing sent) when the stored
+  revision moved since Edit opened; a save racing that read still replaces silently (the stated
+  race). (b) §3 module map: `buildSave` moved from SceneAuthoring.jsx to authoring.js (the
+  lossless check `editableDraft` is pure and needs it); the default tables `SCENE_DEFAULTS` /
+  `CONTRIBUTION_DEFAULTS` live there, pinned in tests/test_operator_runtime.py. `readCandidates`
+  (the one candidates GET) lives in MediaPipeline.jsx and is shared by the authoring choosers and
+  "Check this frame"; `FrameChips` (frames with tile health) is exported from TargetPicker.jsx
+  and shared by Run and Scene rows. (c) §14 Source `failing` label is per served status
+  ("Library unreachable" / "Library refused access" / "Library unsupported"), not the combined
+  literal. (d) §14 chain step 1: when nothing is intended but a served Run on the frame ended,
+  step 1 is informational and the chain stops at step 2 ("Run ended?") — otherwise that stop is
+  unreachable. The retained-still line is conditional ("if its last item was a photo"), since
+  the served facts do not say which item was last. (e) §14 "no compatible variant" restates
+  planner.py `_variant_usable` in mediaHealth.js (the candidates route serves variants, not the
+  verdict); no JS runner pins it (§18's "inferred, not served" cost). (f) Test-line drift: the
+  chooser names §17 cites at `:486,:487,:489,:516` are now `:499,:500,:502,:529`; the three Why
+  count assertions are scoped to the "Contribution precedence" list. Thresholds pytest lives in
+  tests/test_media_queue.py.
+- 2026-09-28, console pass 2 slice 3B review fix cycle 1 (docs/operator-console-ux-pass2-showrunner.md
+  §13-§14, FRAME CHANGE — owner to confirm (a)): (a) OWNER QUESTION 4 DEFAULT FLIPPED: `Runtime.set_scene`
+  (the one Scene write path; both PUT routes) now refuses with 409 `scene_revision_conflict` a save whose
+  revision is at or below the stored one, unless it equals the stored Scene exactly (an idempotent retry
+  stays 200). It refuses only conflicting writes; no expected-revision field is added. New
+  `central.runtime.RuntimeConflict(code)`, mapped to 409 in app.py. Replace no longer pre-reads
+  /v1/operator/runtime; on the 409 it ends "Changed since you opened this. Reopen to review." A new Scene
+  whose id another operator saved meanwhile is refused too ("A Scene with this id was saved meanwhile;
+  nothing was replaced.") — §15's "silent replace, None (Question 4)" row no longer holds. Program PUTs
+  are unchanged. Callers checked: coordination.py configure_authored_scene, app.py configure_scene,
+  RuntimeStore.command; scripts/demo_wall.py (first write on a fresh Central; its frame POSTs already
+  require that); tests (one browser fixture re-stored a Scene at the same revision; now revision 2).
+  (b) Supersedes 3B errata (e): `planner.candidate_standing(candidate, profile)` is the planner's one
+  per-candidate verdict ("usable" / "preparing" / "failed_to_prepare" / "no_compatible_variant"); `_pool`
+  and `add` decide through it, and the candidates route serves it as `standing` per candidate when
+  `frame_id` is given. The JS `variantUsable`/`candidateStanding` are deleted; chooser labels and "Check
+  this frame" read the served standing. The check leaves out a Source whose served status is not ok and
+  counts an item shared by several Sources once (its standing is per item, not per Source).
+  (c) `readCandidates` moved from MediaPipeline.jsx to a new `candidatesApi.js` (returns `{status,
+  candidates}`); regions no longer import each other. (d) `MediaRepository.health()` jobs are scoped to
+  the current recipe (a recipe change fails the old recipe's queued jobs as `recipe_changed`). The worker
+  line reads a `retry` job as "failed, retry pending N" (shown only when N > 0), not "waiting", matching
+  the catalog's hydration of a not-yet-due retry as a preparation failure. (e) Wording: the Source step
+  says "N valid in the last refresh" / "nothing valid in the last refresh" (`counts.valid`), the Last
+  refresh row "valid N"; the check no longer claims "as Central's planner would count them"; a looping
+  Scene reads "keeps playing until its Program ends or, when started by hand, until you Finish or Cancel
+  it". (f) DST: the capture window's last day is `day(until - 1)` (the day holding the last included
+  second), not `until - 86400`. (g) RESIDUAL, not built: serve the planner's own per-frame
+  `projection.diagnostics` (coordination.py:403) so "Check this frame" reports what planning actually
+  concluded (pool order, cycle pick, `no_eligible_candidates`) instead of a tally of per-candidate
+  standings.
+
+## console pass 2, pass A (stay signed in) — docs/operator-console-ux-pass2-session.md
+
+- 2026-09-28, bead A-1 (backend), SPEC AMENDMENTS from the final security review (docs bead A-3
+  to fold into §5/§8/§10): (1) A cookie-authenticated write with a MISSING `Origin` is refused
+  403 `origin_mismatch`, exactly as at sign-in (§5 "an `Origin` that differs" now reads "a missing
+  or different `Origin`"); pytest pins the missing case. (2) `Cache-Control: no-store` on every
+  `/v1/operator/*` response is delivered by a pure-ASGI path-prefix middleware (covers the route
+  and every `app.exception_handler` response, incl. 404/405) PLUS an `Exception` handler, because
+  an unhandled exception is answered by Starlette's outermost `ServerErrorMiddleware`, outside all
+  user middleware; that handler keeps the old body ("Internal Server Error", 500) and adds
+  `no-store` only under `/v1/operator/`. pytest forces a 500 on inventory. (3) The scrypt
+  parameters are module constants in `central/operator_session.py`; tests never lower them; a
+  pytest pins `session_key` equal to `hashlib.scrypt` with §3's exact parameters; the
+  per-process `lru_cache` keyed by token bytes keeps the suite fast. (4) http→https on the same
+  host is a named behaviour: the plain (non-`Secure`) cookie is still sent over https, so reads
+  work and every write is 403 `origin_mismatch` (the bound Origin is `http://…`) until the
+  operator signs in again at the https address (pytest). Add a failure-table row.
+- 2026-09-28, bead A-1, IMPLEMENTATION CHOICES the spec left open (A-3 to state): (a) `expires_at`
+  is ZERO-PADDED to 10 digits (`%010d`); the test clocks run at unix 1000, so an unpadded value
+  would not be 10 digits. (b) The Bearer compare is over the bytes the client SENT (Starlette
+  decodes headers as latin-1, so `.encode("latin-1")` recovers them) against the token's UTF-8
+  bytes; the sign-in JSON token is UTF-8-encoded (a lone surrogate → 401, never 500). One
+  `SessionCodec.token_matches(bytes)` serves both. (c) A bindable sign-in Origin is
+  `http(s)://authority` (ASCII, no path) of at most 258 characters (its base64url fits the 344-char
+  part); `null`, `file://`, paths and longer values are 403 `origin_mismatch`. (d) The sign-in gate
+  (marker, Origin, Sec-Fetch-Site) is a dependency, so it runs before body validation — except a
+  body that is not JSON at all, which FastAPI rejects (422 `invalid_request`) before any
+  dependency; no state changes and no cookie either way. (e) Log out needs only the marker; its
+  `Origin` is read only to decide the plain clearing header's `Secure`. (f) When the `__Host-`
+  cookie is present it alone is verified (an invalid one is 401 even beside a valid plain one).
+  (g) Code layout: `central/operator_session.py` (stdlib codec, key, token compare) and
+  `central/operator_auth.py` (`OperatorAuth.admin`, the session routes, no-store middleware and
+  500 handler, mounted from `create_app`; `app.state.operator_auth` is how the route-table test
+  identifies the dependency). (h) A `\d`-without-`re.ASCII` regex would admit Unicode digits and
+  then raise on `.encode("ascii")`; the codec unit test pins this (the explicit `[0-9]` classes
+  make `re.ASCII` itself redundant, so dropping only the flag is an equivalent mutant).
+- 2026-09-28, bead A-2 (console), IMPLEMENTATION CHOICES (A-3 to state in §7): (a) Sign in and
+  Log out go through `apiWrite` (POST/DELETE `/v1/operator/session`), so the marker header is
+  added in exactly two places (`apiWrite`, `useSnapshot.fetchJson`) and both calls move the write
+  fence like any write. (b) The 403 `request_unmarked`/`origin_mismatch` copy is ONE dismissible
+  alert in the shell, raised by `apiWrite` through a `session.js` listener (`onOriginRefused`), not
+  added to each caller's message table; the caller still shows its own generic failure. A sign-in
+  refused 403 shows the same alert. (c) A Log out whose DELETE fails (network/5xx) keeps the tab
+  signed in and says "Log out failed: Central did not answer. Try again." (the spec was silent; the
+  cookie may still be set). (d) Notices: "Operator token was not accepted. Re-enter the token to
+  sign in." / "Signed out: the session expired or the token changed. Sign in again." / "Your
+  browser did not keep the sign-in; allow cookies for this site." / "Sign-in failed: Central did
+  not answer. Try again." (e) The empty body still reads "Console ready." while checking or
+  signed out. (f) Browser harness: `operator_harness.sign_in(page, origin, token=ADMIN)` is the
+  suite's one sign-in step (the five `_connect` helpers are gone); it clears the context's
+  cookies first, because cookies ignore the port and a cookie from an earlier loopback server
+  would already be sent (reads OK, writes 403). `operator_server` takes `admin_token=` for the
+  rotation test. Tests that clicked "Connect" as a refresh now click the status bar's "Refresh".
+  The evidence-mapped test name `test_connect_with_a_rejected_token_…` is kept (conftest CHECKS).
+- 2026-09-28, pass A fix cycle (security diff review residuals), SPEC CHANGES for the pass A doc
+  (§5/§6/§7) to adopt: (a) P2 — the session cookie is scoped to `Path=/v1/operator/` so other
+  servers on the same host (cookies ignore the port) never receive it. `__Host-` forces `Path=/`,
+  so https now issues `__Secure-photo_wall_session` (Secure, HttpOnly, SameSite=Strict, no
+  Domain); http issues `photo_wall_session` (HttpOnly, SameSite=Strict). Every console fetch
+  already lives under `/v1/operator/`; the page, assets and `/healthz` need no cookie. (b) Name
+  precedence, first present decides (present-but-invalid is 401): `__Secure-`, legacy `__Host-`,
+  plain. (c) Legacy `Path=/` cookies (`__Host-photo_wall_session`, `photo_wall_session`) are
+  still ACCEPTED until they expire (<= 30 days after this release; removable after that), never
+  issued, and cleared on every sign-in (after the issued cookie) and log out (after the two scoped
+  clears); a plain clear is `Secure` when the request Origin is https. Cost: `__Secure-` gives up
+  `__Host-`'s host-only/Path=/ guarantee, so a sibling https subdomain can toss a
+  `__Secure-photo_wall_session` (Domain=parent) that shadows a valid one (denial, not forgery:
+  the MAC still decides); a same-host server that itself serves `/v1/operator/` still receives it;
+  and a same-named plain cookie at `Path=/` sent beside the scoped one wins in Starlette's parser
+  (last duplicate wins), which sign-in's legacy clear prevents for cookies Central set.
+  (d) P3 — `signIn` sets `auth` to "checking" on the 204 before its first refresh (the design's
+  SigningIn -> Checking), so a 5xx/network failure on that read is retried by the next poll
+  instead of stranding the tab on the sign-in form.
