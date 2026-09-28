@@ -11,21 +11,25 @@ import { ChevronIcon } from "../icons.jsx";
  * Review lists them all the same.
  *
  * The caller owns `open`, so a flow can open it to route a problem to a field inside.
+ * `lockedOpen` holds it open while a value inside must be answered (a name with no
+ * usable id): the toggle then says it is expanded and is disabled.
  *
- * @param {{summary: React.ReactNode, open: boolean, onToggle: () => void,
+ * @param {{summary: React.ReactNode, open: boolean, lockedOpen?: boolean, onToggle: () => void,
  *          children: React.ReactNode}} props
  */
-export function Advanced({ summary, open, onToggle, children }) {
+export function Advanced({ summary, open, lockedOpen = false, onToggle, children }) {
+  const shown = open || lockedOpen;
   const id = useId();
   return (
-    <div className={`advanced${open ? " advanced--open" : ""}`}>
+    <div className={`advanced${shown ? " advanced--open" : ""}`}>
       <div className="advanced__head">
         <button
           type="button"
           className="advanced__toggle"
-          aria-expanded={open}
+          aria-expanded={shown}
           aria-controls={`${id}-panel`}
           aria-describedby={`${id}-summary`}
+          disabled={lockedOpen}
           onClick={onToggle}
         >
           <ChevronIcon />
@@ -35,7 +39,7 @@ export function Advanced({ summary, open, onToggle, children }) {
           {summary}
         </span>
       </div>
-      <div id={`${id}-panel`} className="advanced__panel" hidden={!open}>
+      <div id={`${id}-panel`} className="advanced__panel" hidden={!shown}>
         {children}
       </div>
     </div>

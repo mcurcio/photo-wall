@@ -11,7 +11,7 @@ import {
   UNAUTHORABLE_REASON,
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { ProblemSummary, useProblems } from "./Field.jsx";
 import { editedId, editKey, NEW_KEY } from "./flow/instance.js";
 import { DraftBar, InstanceNotice } from "./flow/InstanceNotice.jsx";
@@ -67,8 +67,8 @@ const HEADINGS = {
  * step (and its Advanced, for "loop" and "id") and focuses the field.
  *
  * EDIT opens at Review, seeded from the stored Scene, with `baseRevision`. When a poll
- * shows a newer stored revision, Review says so, withholds Replace and offers Reload
- * (reseed; the changed values are named). Central's 409 `scene_revision_conflict`
+ * shows another stored revision, Review says so, withholds Replace and offers Reload
+ * (reseed; the values storage changed are named). Central's 409 `scene_revision_conflict`
  * remains the backstop for a change between polls. Replace goes through ConfirmAction
  * (slice 3 §13).
  *
@@ -100,6 +100,8 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const newRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const summaryRef = useRef(/** @type {HTMLDivElement|null} */ (null));
   const savedRef = useRef(/** @type {HTMLDivElement|null} */ (null));
 
@@ -147,24 +149,33 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     });
   }, [loaded, candidates.ready, candidates.byFrame, patch]);
 
-  // --- Problems, in step order.
+  // --- Problems, in step order. A hand-picked frame whose candidates were read empty
+  // has nothing to choose (its problem is the frame choice's).
+  const noMedia = useMemo(
+    () =>
+      candidates.ready
+        ? value.targets.filter((frameId) => (candidates.byFrame[frameId] ?? []).length === 0)
+        : [],
+    [candidates.ready, candidates.byFrame, value.targets],
+  );
   const problemList = useMemo(
     () =>
       inStepOrder(
-        sceneProblems({ ...value, loadingMedia: candidates.loading }, existingIds, {
+        sceneProblems({ ...value, loadingMedia: candidates.loading, noMedia }, existingIds, {
           editing: editingId !== null,
         }),
         SCENE_FIELD_STEP,
         steps,
       ),
-    [value, candidates.loading, existingIds, editingId, steps],
+    [value, candidates.loading, noMedia, existingIds, editingId, steps],
   );
   const problems = useProblems(problemList);
 
   // One confirmation (ConfirmAction) for this section: Replace, and discarding a
-  // draft. A request's `after` runs once it is done.
+  // draft. A request's `after` runs once it is done. When a Replace ends without
+  // replacing and Replace is withheld (a newer revision), focus moves on to Reload.
   const confirm = useConfirm(
-    () => saveRef.current?.focus(),
+    () => (reloadRef.current ?? saveRef.current)?.focus(),
     (_result, request) => request.after?.(),
   );
 
@@ -193,7 +204,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     problems,
     confirm,
     onOpened: () => {
-      confirm.setStatus(null);
       setVanished(null);
       setReloaded(null);
       setSaved(null);
@@ -233,36 +243,41 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
       return { selections };
     });
 
-  // --- Edit: a newer stored revision than the draft's base.
+  // --- Edit: a stored revision other than the draft's base.
   const stored = editingId === null ? undefined : definitions[editingId];
   const storedRevision = stored === undefined ? null : normalizeScene(stored).revision;
+  // A newer one, or a lower one (a Scene deleted and made again, or restored).
   const stale =
-    storedRevision !== null && draft.baseRevision !== null && storedRevision > draft.baseRevision;
+    storedRevision !== null && draft.baseRevision !== null && storedRevision !== draft.baseRevision;
 
+  /** Reseed from storage, naming what storage changed and what the operator lost. */
   const reload = () => {
     const fresh = seedScene(definitions)(draft.key);
     if (fresh === null) {
       return;
     }
-    const changed = changedSceneFields(value, fresh);
+    const changed = changedSceneFields(draft.seeded, fresh);
+    const lost = draft.dirty
+      ? ` Your unsaved changes to ${SCENE_KEYS.describe(draft.key)} were replaced.`
+      : "";
     draft.reseed();
     problems.reset();
     setReloaded(
       `Reloaded revision ${fresh.revision}. ` +
         (changed.length === 0
-          ? "None of the values here changed."
-          : `Changed: ${changed.join(", ")}.`),
+          ? "None of its stored values changed."
+          : `Changed: ${changed.join(", ")}.`) +
+        lost,
     );
   };
 
   // --- Save.
   const finish = (sceneId) => {
-    flow.finish();
+    flow.finish(() => savedRef.current);
     setVanished(null);
     setReloaded(null);
     setSaved(sceneId);
     rememberScene(sceneId);
-    focus.focusWhenShown(() => savedRef.current);
   };
 
   const onSave = async () => {
@@ -334,7 +349,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
           <div className="notice notice--warn" role="status">
             <p>{`This Scene was changed (revision ${storedRevision}) since you opened it.`}</p>
             <p>Reload it to review the stored version; Replace waits until you do.</p>
-            <button type="button" onClick={reload}>
+            <button ref={reloadRef} type="button" onClick={reload}>
               Reload
             </button>
           </div>
@@ -381,9 +396,15 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
             dirty={draft.dirty}
             draftName={draftName}
             newLabel="New Scene"
+            newRef={newRef}
             onNew={() => flow.start(NEW_KEY)}
             onResume={() => flow.resume()}
-            onDiscard={(event) => confirm.open(event, flow.discardRequest())}
+            onDiscard={(event) =>
+              confirm.open(
+                event,
+                flow.discardRequest(() => focus.focusWhenShown(() => newRef.current)),
+              )
+            }
           />
           <SceneList
             snapshot={snapshot}
@@ -403,7 +424,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
         sectionHref="#/scenes"
         sectionLabel="Scenes"
         onResume={() => flow.resume({ replace: true })}
-        onDiscard={() => flow.discard(focus.focusStep)}
+        onDiscard={flow.discardForRoute}
       />
 
       {step !== null && (
@@ -411,7 +432,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
           <h2 className="scene-flow__title">
             {editingId === null ? "New Scene" : `Edit Scene ${editingId}`}
           </h2>
-          <Stepper steps={steps} current={step} onStep={flow.showStep} />
+          <Stepper
+            steps={steps}
+            current={step}
+            onStep={saving ? undefined : flow.showStep}
+            answered={flow.answered}
+          />
           <StepForm
             label="Author a Scene"
             heading={HEADINGS[step] ?? stepLabel}
@@ -421,6 +447,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
               step !== "review" ? "Continue" : editingId === null ? "Save Scene" : "Replace Scene"
             }
             submitDisabled={step === "review" && (saving || stale)}
+            busy={saving}
             submitRef={saveRef}
           >
             {vanished !== null && (
@@ -441,6 +468,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft 
     </div>
   );
 }
+
+// A Replace refused because another editor saved first: nothing was replaced, and the
+// next refresh shows the newer revision, so Review withholds Replace and offers Reload.
+const REPLACE_CHANGED =
+  "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload.";
 
 // Refusals in plain words (slice 3 §13): media_repository.py `author_candidates_in`
 // answers the first two (authored route) with 409; runtime.py `set_scene` the last
@@ -490,7 +522,7 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
         return { state: "done", message: `Replaced Scene ${sceneId}: now revision ${revision + 1}.` };
       }
       if (result.error === "scene_revision_conflict") {
-        return { state: "changed", message: CHANGED_MESSAGE };
+        return { state: "changed", message: REPLACE_CHANGED };
       }
       if (result.status >= 500) {
         return { state: "unknown", message: UNKNOWN_MESSAGE };

@@ -17,7 +17,8 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
  *    so effects (prunes) compose with the operator's edits.
  *  - `reseed()` re-runs `seed(key)` against the current snapshot and resets
  *    `baseRevision` (Reload); `discard()` closes the draft.
- *  - `baseRevision` is the stored revision the draft was seeded from (null for new).
+ *  - `baseRevision` is the stored revision the draft was seeded from (null for new);
+ *    `seeded` is the value it was seeded with (Reload compares it with storage).
  *
  * `seed` is read when it is called, so it may close over the latest snapshot.
  *
@@ -26,7 +27,7 @@ import { CLOSED, isDirty, openDraft, patchDraft, reseedDraft } from "./draftStat
  * @returns {{key: string|null, value: T|null, open: (key: string) => string|null,
  *            patch: (partial: Partial<T>|((value: T) => Partial<T>|null)) => void,
  *            reseed: () => void, discard: () => void, dirty: boolean,
- *            baseRevision: number|null}}
+ *            baseRevision: number|null, seeded: T|null}}
  */
 export function useFlowDraft(seed) {
   const seedRef = useRef(seed);
@@ -68,5 +69,6 @@ export function useFlowDraft(seed) {
     discard,
     dirty: isDirty(state),
     baseRevision: state.baseRevision,
+    seeded: state.seeded,
   };
 }

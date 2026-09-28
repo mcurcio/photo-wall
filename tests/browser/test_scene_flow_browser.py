@@ -23,13 +23,15 @@ from console_tasks import (
     start_scene,
     visit,
 )
-from operator_harness import operator_server
+from operator_harness import RequestGate, answer_first, operator_server
 from playwright.sync_api import expect
+from psycopg.types.json import Jsonb
 from test_operator_showrunner_browser import (
     LOBBY_FRAME,
     SOURCE,
     VALID_FRAME,
     _add_lobby_frame,
+    _authored_photos,
     _console_scene,
     _runtime,
     _seed,
@@ -60,6 +62,51 @@ def _steps(page):
 def _scenes_link(page):
     return page.get_by_role("navigation", name="Sections", exact=True).get_by_role(
         "link", name="Scenes", exact=True)
+
+
+INVENTORY = "**/v1/operator/inventory"
+
+
+def _poll(page):
+    """Run the paused page clock to the next poll and wait for its inventory read."""
+    with page.expect_response(INVENTORY):
+        page.clock.run_for(5000)
+
+
+def _put_scene(page, origin, scene):
+    """Another operator saves `scene` through the public route."""
+    response = page.request.put(origin + f"/v1/operator/scenes/{scene.scene_id}",
+                                headers={"Authorization": "Bearer " + ADMIN},
+                                data=scene.model_dump(mode="json"))
+    assert response.status == 200, response.text()
+
+
+def _restore_scene(registry, scene):
+    """Central's stored Scene replaced outright, revision and all, as restoring an older
+    backup would (nothing the console or the API can do: a save only moves forward)."""
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+        snapshot = row["snapshot"]
+        snapshot["scenes"][scene.scene_id] = scene.model_dump(mode="json")
+        conn.execute("UPDATE runtime_state SET snapshot=%s, revision=revision+1 WHERE singleton",
+                     (Jsonb(snapshot),))
+
+
+def _drop_scene(registry, scene_id):
+    """Central's stored Scene gone, as restoring a backup without it would."""
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+        snapshot = row["snapshot"]
+        del snapshot["scenes"][scene_id]
+        conn.execute("UPDATE runtime_state SET snapshot=%s, revision=revision+1 WHERE singleton",
+                     (Jsonb(snapshot),))
+
+
+def _focused_heading(page):
+    """The text of the focused element when it is a flow step heading, else None."""
+    return page.evaluate(
+        "() => document.activeElement?.matches('[data-flow-step-heading]')"
+        " ? document.activeElement.textContent : null")
 
 
 def _puts(page):
@@ -161,6 +208,9 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
         puts = _puts(page)
         visit(page, "#/scenes/new/review")  # a typed URL skips the earlier steps
         form = scene_form(page)
+        # ...so none of them is ticked as answered: each keeps its number.
+        expect(_steps(page).get_by_role("listitem")).to_have_text(
+            ["1Kind", "2Photos", "3Frames", "4Playback", "5Review"])
         form.get_by_label("Scene name", exact=True).fill("Routed")
         form.get_by_role("button", name="Save Scene", exact=True).click()
         summary = form.get_by_role("alert")
@@ -205,6 +255,9 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         form = scene_form(page)
         expect(form).to_contain_text("Editing evening · revision 1.")
+        # The stored Scene answers every step, so each is ticked.
+        expect(_steps(page).get_by_role("listitem")).to_have_text(
+            ["Kind", "Photos", "Frames", "Playback", "5Review"])
         replace = form.get_by_role("button", name="Replace Scene", exact=True)
         expect(replace).to_be_enabled()
 
@@ -220,6 +273,8 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         expect(replace).to_be_disabled()
         form.evaluate("(element) => element.requestSubmit()")  # Enter, in effect
         page.wait_for_timeout(200)
+        # Neither sent nor asked: no Replace confirmation opens while stale.
+        expect(page.get_by_role("dialog")).to_have_count(0)
         assert puts == []
 
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
@@ -335,6 +390,10 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         dialog.get_by_role("button", name="Discard draft", exact=True).click()
         expect(form).to_contain_text("Editing morning · revision 1.")
         assert _hash(page) == "#/scenes/morning/edit/review"
+        # The discard is said, and opening the next instance does not silence it.
+        expect(_scenes(page).get_by_role("status").filter(has_text="Discarded")).to_have_text(
+            "Discarded the draft for Scene evening.")
+        expect(form.get_by_role("heading", name="Check your Scene", exact=True)).to_be_focused()
 
         visit(page, "#/scenes/ghost/edit/review")
         expect(_scenes(page).get_by_text("Scene ghost: This Scene no longer exists.")
@@ -363,3 +422,323 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         next_actions.get_by_role("button", name="Schedule it", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()
         assert _hash(page) == "#/schedule"
+
+
+# --- Review fixes (bead 2 review).
+
+
+def test_a_save_that_lands_after_the_operator_left_keeps_them_where_they_went(page, registry):
+    """§6 History, review finding 1: Save replaces the flow's entry with #/scenes only if
+    the location still names the flow when the write lands. The operator who went to Now
+    showing meanwhile stays there, and Back onto the finished flow's entry shows the cards,
+    not a fresh draft. While the write is in flight the step is read-only. Mutation probe:
+    navigate in finish without reading the location."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "inflight", SOURCE, (VALID_FRAME,), submit=False)
+        gate = RequestGate(page, "**/v1/operator/scenes/inflight")
+        gate.holding = True
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        gate.wait_held()
+        # Read-only in flight: the fields, Back, Change and the stepper take no edit.
+        expect(form.get_by_label("Scene name", exact=True)).to_be_disabled()
+        expect(form.get_by_role("button", name="Back", exact=True)).to_be_disabled()
+        expect(form.get_by_role("button", name="Change Photos", exact=True)).to_be_disabled()
+        expect(_steps(page).get_by_role("button")).to_have_count(0)
+
+        go(page, "now")
+        assert _hash(page) == "#/now"
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
+                                  and r.request.method == "PUT") as info:
+            gate.release()
+        assert info.value.status == 200
+        expect(_scenes_link(page)).to_have_accessible_description("")  # the draft ended
+        page.wait_for_timeout(300)
+        assert _hash(page) == "#/now"
+        expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
+
+        page.go_back()
+        expect(page.get_by_role("heading", level=1, name="Scenes", exact=True)).to_be_visible()
+        expect(_scenes(page).get_by_role("button", name="New Scene", exact=True)).to_be_visible()
+        assert _hash(page) == "#/scenes"
+        expect(scene_form(page)).to_have_count(0)
+        expect(_scenes(page).get_by_label("Scene inflight", exact=True)).to_be_visible()
+
+
+def test_continue_shows_only_its_own_steps_reasons(page, registry):
+    """Review finding 2: a failed Continue shows its own step's reasons; a later step shows
+    none until its own Continue (the name on Review is not invalid on arrival), and only
+    Review's Save shows every reason. Mutation probe: make Continue's check global."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_role("button", name="Continue", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text("Choose a Source.")
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        targets = form.get_by_role("group", name="Target frames", exact=True)
+        expect(targets).to_be_visible()
+        expect(form.get_by_text("Choose at least one frame.")).to_have_count(0)
+        expect(targets).to_have_accessible_description("")
+        # Its own Continue shows it.
+        form.get_by_role("button", name="Continue", exact=True).click()
+        expect(targets).to_have_accessible_description("Choose at least one frame.")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        name = form.get_by_label("Scene name", exact=True)
+        expect(name).not_to_have_attribute("aria-invalid", "true")
+        expect(form.locator(".field__reason")).to_have_count(0)
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(name).to_have_attribute("aria-invalid", "true")
+
+
+def test_browser_back_from_a_discard_confirmation_leaves_the_page_usable(page, registry):
+    """Review finding 3: the Discard confirmation on the always-mounted Scenes page is put
+    away when browser Back hides the page (pageVisibility.js), so the page shown is not
+    inert, and the draft is kept."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        page.go_back()  # the flow's entry -> #/scenes
+        page.go_back()  # -> #/now
+        assert _hash(page) == "#/now"
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        expect(page.get_by_role("dialog", name="Discard your unsaved draft?")).to_be_visible()
+        page.go_back()
+        assert _hash(page) == "#/now"
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        go(page, "schedule")  # the sidebar takes the click: nothing is inert
+        go(page, "scenes")
+        expect(_scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
+               ).to_be_visible()
+
+
+def test_a_replace_in_flight_on_a_hidden_page_neither_blocks_nor_moves_the_operator(
+        page, registry):
+    """Review finding 3 with finding 1: a Replace in flight when its page is hidden leaves
+    no invisible modal; when it lands, the flow ends without taking the operator's route,
+    and the Scenes page says what happened."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        scene_continue(page, "Review")
+        gate = RequestGate(page, "**/v1/operator/scenes/evening")
+        gate.holding = True
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name="Confirm replace").click()
+        gate.wait_held()
+
+        visit(page, "#/now")  # a typed URL, while the dialog is in flight
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        go(page, "schedule")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/evening")
+                                  and r.request.method == "PUT") as info:
+            gate.release()
+        assert info.value.status == 200
+        expect(_scenes_link(page)).to_have_accessible_description("")
+        page.wait_for_timeout(300)
+        assert _hash(page) == "#/schedule"
+        expect(page.get_by_role("dialog")).to_have_count(0)
+
+        go(page, "scenes")
+        expect(_scenes(page).get_by_role("status").filter(has_text="Replaced")).to_have_text(
+            "Replaced Scene evening: now revision 2.")
+        expect(scene_form(page)).to_have_count(0)
+        expect(_scenes(page).get_by_label("Scene evening", exact=True)).to_contain_text(
+            "revision 2")
+
+
+def test_a_focus_request_dies_with_the_view_it_was_made_for(page, registry):
+    """Review finding 4: a routed problem whose field is not there (no Frame to tick) leaves
+    a focus request for the Frames step; moving to another step by URL drops it, so when
+    the Frames step shows later, with a Frame by then, focus does not jump to it.
+    Mutation probe: keep a request until it is spent."""
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        visit(page, "#/scenes/new/review")
+        form = scene_form(page)
+        form.get_by_label("Scene name", exact=True).fill("Stale focus")
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        form.get_by_role("alert").get_by_role(
+            "button", name="Choose at least one frame.", exact=True).click()
+        assert _hash(page) == "#/scenes/new/frames"
+        expect(form.get_by_text("No Frames to target.", exact=True)).to_be_visible()
+
+        visit(page, "#/scenes/new/playback")
+        expect(form.get_by_label("Seconds per cycle", exact=True)).to_be_visible()
+        _add_lobby_frame(registry)
+        _poll(page)
+        visit(page, "#/scenes/new/frames")
+        lobby = form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)
+        expect(lobby).to_be_visible()
+        page.wait_for_timeout(200)
+        expect(lobby).not_to_be_focused()
+
+
+def test_resuming_a_draft_whose_scene_is_gone_asks_for_no_focus(page, registry):
+    """Review finding 4: Resume on a draft whose stored Scene is gone shows "no longer
+    exists" and leaves no focus request behind, so when the Scene is back (a later poll)
+    and its step shows, focus does not jump to the step heading."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        go(page, "scenes")
+        _drop_scene(registry, "evening")
+        _poll(page)
+        resume = _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
+        resume.click()
+        expect(_scenes(page).get_by_text("Scene evening: This Scene no longer exists.")
+               ).to_be_visible()
+
+        _restore_scene(registry, _console_scene("evening"))
+        _poll(page)
+        visit(page, "#/scenes/evening/edit/playback")
+        expect(form.get_by_label("Seconds per cycle", exact=True)).to_have_value("45")
+        page.wait_for_timeout(200)
+        assert _focused_heading(page) is None
+
+
+def test_a_scene_restored_at_a_lower_revision_is_stale_too(page, registry):
+    """Review finding 5: any other stored revision withholds Replace, including a lower
+    one (a Scene deleted and made again, or restored). Mutation probe: stale only when the
+    stored revision is greater."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening", revision=3))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        expect(form).to_contain_text("Editing evening · revision 3.")
+        _restore_scene(registry, _console_scene("evening", cycle_seconds=20))
+        _poll(page)
+        expect(_scenes(page)).to_contain_text(
+            "This Scene was changed (revision 1) since you opened it.")
+        expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
+        _scenes(page).get_by_role("button", name="Reload", exact=True).click()
+        expect(form).to_contain_text("Editing evening · revision 1.")
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/scenes/evening") and r.request.method == "PUT"
+        ) as info:
+            page.get_by_role("dialog").get_by_role("button", name="Confirm replace").click()
+        assert info.value.status == 200
+        assert info.value.request.post_data_json["revision"] == 2
+
+
+def test_reload_names_what_storage_changed_and_the_changes_it_replaced(page, registry):
+    """Review finding 6: Reload names the values the other save changed (not the
+    operator's own edits) and says the operator's unsaved changes were replaced."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
+        form = scene_form(page)
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        scene_continue(page, "Review")
+        _put_scene(page, origin, _console_scene("evening", revision=2, loop=False))
+        _poll(page)
+        _scenes(page).get_by_role("button", name="Reload", exact=True).click()
+        expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
+            "Reloaded revision 2. Changed: Keep playing until the Program ends. "
+            "Your unsaved changes to Scene evening were replaced.")
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text("No, it plays one cycle")
+        expect(answers).to_contain_text("30")
+
+
+def test_discarding_from_the_cards_says_so_and_focuses_new_scene(page, registry):
+    """Review finding 7: after the cards' Discard draft, the status says what was discarded
+    and focus moves to New Scene (the button that replaced Discard)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Discard draft", exact=True).click()
+        page.get_by_role("dialog", name="Discard your unsaved draft?").get_by_role(
+            "button", name="Discard draft", exact=True).click()
+        expect(_scenes(page).get_by_role("status").filter(has_text="Discarded")).to_have_text(
+            "Discarded the draft for a new Scene.")
+        expect(_scenes(page).get_by_role("button", name="New Scene", exact=True)).to_be_focused()
+
+
+def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
+    """Review finding 8: a hand-picked frame whose Source offers it nothing says so on the
+    frame choice, and Review's summary routes it to Frames."""
+    _seed(registry)
+    _, _, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (landscape,))  # nothing fits a portrait frame
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page, hand_picked=True)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        message = (f"No compatible media for {VALID_FRAME} in {SOURCE}. "
+                   "Choose another frame, or another Source.")
+        targets = form.get_by_role("group", name="Target frames", exact=True)
+        expect(targets).to_have_accessible_description(message)
+        form.get_by_role("button", name="Continue", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text(message)
+        assert _hash(page) == "#/scenes/new/frames"
+
+        visit(page, "#/scenes/new/review")
+        form.get_by_label("Scene name", exact=True).fill("nothing-fits")
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        form.get_by_role("alert").get_by_role("button", name=message, exact=True).click()
+        assert _hash(page) == "#/scenes/new/frames"
+        expect(targets.locator("input:focus")).to_have_count(1)  # the frame choice
+
+
+def test_a_failed_candidates_read_offers_retry(page, registry):
+    """Review finding 8: a candidates read that fails says so on Media per frame and
+    offers Retry, which reads them again."""
+    _seed(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        failed = answer_first(page, "**/v1/operator/sources/*/candidates*",
+                              lambda route: route.fulfill(status=500))
+        form = start_scene(page, hand_picked=True)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
+        expect(form.get_by_text("Could not load candidate media for these Frames.")
+               ).to_be_visible()
+        assert len(failed) == 1
+        form.get_by_role("button", name="Retry", exact=True).click()
+        chooser = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(chooser.get_by_role("option")).to_have_count(3)
+        expect(form.get_by_text("Could not load candidate media for these Frames.")
+               ).to_have_count(0)

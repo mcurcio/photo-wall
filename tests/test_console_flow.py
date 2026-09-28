@@ -1,13 +1,17 @@
 """The console's flow kit and the Scene flow's shape, as pure modules (flow design §6, §7;
 bead 2): the one-draft-per-flow invariant, reseed and its base revision, step order and
-problem routing, and the Scene flow's steps, keys and seed.
+problem routing, instances, places and focus views, and the Scene flow's steps, keys, seed
+and problems.
 
 Runs the modules under Node (they are pure: no React), which the console build already
 requires, the way tests/test_console_routes_r4.py runs routes.js. The browser half is
-tests/browser/test_scene_flow_browser.py.
+tests/browser/test_scene_flow_browser.py. Without Node it skips on a developer machine,
+but FAILS where the checks are meant to run in full (`CI` or `PHOTO_WALL_BROWSER_TESTS`
+set), so a missing Node never reads as a pass there.
 """
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,14 +20,21 @@ import pytest
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("node") is None, reason="Node (the console build's) is absent")
+
+def _require_node():
+    if shutil.which("node") is not None:
+        return
+    if os.environ.get("CI") or os.environ.get("PHOTO_WALL_BROWSER_TESTS"):
+        pytest.fail("Node (the console build's) is absent where the console checks must run")
+    pytest.skip("Node (the console build's) is absent")
+
 
 SCRIPT = r"""
 const draft = await import(process.argv[1]);
 const steps = await import(process.argv[2]);
 const scene = await import(process.argv[3]);
 const instance = await import(process.argv[4]);
+const authoring = await import(process.argv[5]);
 const out = {};
 
 // --- One draft per flow.
@@ -127,15 +138,54 @@ out.seedEdit = seedOf("edit/evening");
 out.seedMissing = seedOf("edit/ghost");
 out.changed = scene.changedSceneFields(seedOf("edit/evening"),
   { ...seedOf("edit/evening"), cycleSeconds: "20", targets: ["lobby"], loop: false });
+
+// --- Focus views and finishing (flow/instance.js).
+out.views = [
+  instance.flowView({ shown: false, place: "open", routeKey: "new", step: "frames" }),
+  instance.flowView({ shown: true, place: "open", routeKey: "new", step: "frames" }),
+  instance.flowView({ shown: true, place: "open", routeKey: "new", step: null }),
+  instance.flowView({ shown: true, place: "opening", routeKey: "edit/a", step: null }),
+  instance.flowView({ shown: true, place: "missing", routeKey: "edit/a", step: null }),
+  instance.flowView({ shown: true, place: "list", routeKey: null, step: null }),
+];
+out.matches = [
+  instance.viewMatches(instance.stepView("new", "frames"), "open:new:frames"),
+  instance.viewMatches(instance.stepView("new", "frames"), "open:new:playback"),
+  instance.viewMatches(instance.stepView("edit/a"), "open:edit/a:review"),
+  instance.viewMatches(instance.stepView("edit/a"), "open:edit/ab:review"),
+  instance.viewMatches(instance.stepView("edit/a"), "missing:edit/a"),
+];
+out.here = [
+  instance.hashNamesInstance(K, "#/scenes/new/review", "new"),
+  instance.hashNamesInstance(K, "#/scenes/new/kind", "new"),
+  instance.hashNamesInstance(K, "#/now", "new"),
+  instance.hashNamesInstance(K, "#/scenes", "new"),
+  instance.hashNamesInstance(K, "#/scenes/evening/edit/review", "edit/evening"),
+  instance.hashNamesInstance(K, "#/scenes/evening/edit/review", "new"),
+  instance.hashNamesInstance(K, "#/scenes/new/review", null),
+];
+
+// --- The Scene's problems and labels (authoring.js).
+const hand = { ...scene.seedScene({})("new"), name: "x", mode: "authored", sourceRef: "holiday:1",
+               targets: ["lobby", "hall"] };
+out.noMedia = authoring.sceneProblems({ ...hand, noMedia: ["lobby"] }, new Set())
+  .map((p) => [p.field, p.message]);
+out.loadingMedia = authoring.sceneProblems({ ...hand, noMedia: ["lobby"], loadingMedia: true },
+  new Set()).map((p) => p.field);
+out.cycleProblem = authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds: "0" }, new Set())
+  .map((p) => p.message);
+out.answerLabels = scene.SCENE_ANSWER_LABELS;
 console.log(JSON.stringify(out));
 """
 
 
 def test_flow_kit_and_scene_flow_shape():
+    _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
          (SRC / "flow/draftState.js").as_uri(), (SRC / "flow/steps.js").as_uri(),
-         (SRC / "sceneFlowModel.js").as_uri(), (SRC / "flow/instance.js").as_uri()],
+         (SRC / "sceneFlowModel.js").as_uri(), (SRC / "flow/instance.js").as_uri(),
+         (SRC / "authoring.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -189,3 +239,25 @@ def test_flow_kit_and_scene_flow_shape():
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True, "revision": 3}
     assert out["seedMissing"] is None
     assert out["changed"] == ["Keep playing until the Program ends"]
+
+    # Focus views: away while another section shows; a step; between views (normalising,
+    # opening) none; any other place by its name.
+    assert out["views"] == [
+        "away", "open:new:frames", None, None, "missing:edit/a", "list:"]
+    # A step view without a step names every step of that instance, and only it.
+    assert out["matches"] == [True, False, True, False, False]
+    # Finish may take the history entry only while the location names the instance.
+    assert out["here"] == [True, True, False, False, True, False, False]
+
+    # A hand-picked frame with nothing to choose is a frame problem, said with its Source;
+    # while candidates load, that is what each frame says.
+    assert out["noMedia"] == [
+        ["targets", "No compatible media for lobby in holiday:1. "
+                    "Choose another frame, or another Source."],
+        ["media:hall", "Choose media for hall."]]
+    assert out["loadingMedia"] == ["media:lobby", "media:hall"]
+    # One wording per label: the problem, Review's answers and Reload share it.
+    assert out["cycleProblem"] == ["Seconds per cycle must be more than 0."]
+    assert out["answerLabels"] == {
+        "mode": "Kind", "source": "Photos", "targets": "Frames", "media": "Media per frame",
+        "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends"}

@@ -96,12 +96,25 @@ export function identityProblems(kind, draft, existingIds) {
 }
 
 /**
+ * The labels of a Scene's playback fields (slice 3 §4): the one wording wherever they
+ * are asked (CycleInput.jsx), answered (the Scene flow's Review) or named (Reload).
+ */
+export const PLAYBACK_LABELS = Object.freeze({
+  cycle: "Seconds per cycle",
+  loop: "Keep playing until the Program ends",
+});
+
+/**
  * A Scene draft's problems (§6 Scene), in form order. Editing a stored Scene
  * (§13) keeps its stored id, so there is no name, id or collision to check.
  *
+ * A hand-picked frame whose candidates were read and are empty (`noMedia`) has
+ * nothing to choose: its problem belongs to the frame choice (field `targets`).
+ *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
  *          sourceRef: string, targets: string[], cycleSeconds: string|number,
- *          selections: Record<string, string>, loadingMedia?: boolean}} draft
+ *          selections: Record<string, string>, loadingMedia?: boolean,
+ *          noMedia?: string[]}} draft
  * @param {Set<string>} existingIds the stored Scene ids
  * @param {{editing?: boolean}} [options]
  * @returns {Problem[]}
@@ -115,14 +128,25 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
     problems.push({ field: "targets", message: "Choose at least one frame." });
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
-    problems.push({ field: "cycle", message: "Seconds per cycle must be more than 0." });
+    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle} must be more than 0.` });
   }
   if (draft.mode === "authored") {
     for (const frameId of draft.targets) {
-      if (!draft.selections[frameId]) {
+      if (draft.selections[frameId]) {
+        continue;
+      }
+      if (draft.loadingMedia) {
         // While a frame's candidates are read, that is the state to say (§6).
-        const message = draft.loadingMedia ? "Loading compatible media…" : `Choose media for ${frameId}.`;
-        problems.push({ field: `media:${frameId}`, message });
+        problems.push({ field: `media:${frameId}`, message: "Loading compatible media…" });
+      } else if (draft.noMedia?.includes(frameId)) {
+        problems.push({
+          field: "targets",
+          message:
+            `No compatible media for ${frameId} in ${draft.sourceRef}. ` +
+            "Choose another frame, or another Source.",
+        });
+      } else {
+        problems.push({ field: `media:${frameId}`, message: `Choose media for ${frameId}.` });
       }
     }
   }

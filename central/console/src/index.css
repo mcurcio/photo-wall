@@ -1403,6 +1403,11 @@ label {
   min-width: 0;
 }
 
+/* The step's fields and footer; disabled while the flow's write is in flight. */
+.flow__fields {
+  display: contents;
+}
+
 .flow__footer {
   display: flex;
   flex-wrap: wrap;

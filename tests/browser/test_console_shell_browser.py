@@ -24,6 +24,7 @@ import pytest
 from console_tasks import (
     LABELS,
     add_source,
+    author_scene,
     connect,
     go,
     scene_continue,
@@ -269,15 +270,12 @@ def test_the_poll_keeps_running_across_sections(page, registry):
 
 def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page, registry):
     """Rule 2. Bead 2: the draft is the Scene flow's; it also survives step changes, and
-    the Scenes page resumes it at the step it was left on."""
+    the Scenes page resumes it at the step it was left on (here Review, with the name)."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
-        form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        scene_continue(page, "Frames")
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        form = author_scene(page, "evening-draft", SOURCE, (VALID_FRAME,), submit=False)
 
         go(page, "wall")
         expect(page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True)).to_be_visible()
@@ -287,10 +285,13 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
         go(page, "scenes")
         page.get_by_role("button", name="Resume draft (Draft)", exact=True).click()
 
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value("evening-draft")
+        form.get_by_role("button", name="Change Photos", exact=True).click()
+        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
         expect(form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)).not_to_be_checked()
-        form.get_by_role("button", name="Back", exact=True).click()
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
 
 
 def test_hidden_show_pages_announce_no_status(page, registry):
@@ -456,7 +457,7 @@ def test_skip_to_content_focuses_main_without_changing_the_route(page, registry)
 
 
 def _fill_hand_picked_draft(page, portrait_a, portrait_b):
-    """A hand-picked Scene draft, left on its Media per frame step."""
+    """A hand-picked Scene draft named "kept-draft", left on its Review step."""
     form = start_scene(page, hand_picked=True)
     form.get_by_label("Source", exact=True).select_option(SOURCE)
     scene_continue(page, "Frames")
@@ -468,6 +469,9 @@ def _fill_hand_picked_draft(page, portrait_a, portrait_b):
     expect(valid.get_by_role("option")).to_have_count(3)
     valid.select_option(portrait_a.asset.asset_id)
     invalid.select_option(portrait_b.asset.asset_id)
+    scene_continue(page, "Playback")
+    scene_continue(page, "Review")
+    form.get_by_label("Scene name", exact=True).fill("kept-draft")
     return form, valid, invalid
 
 
@@ -488,12 +492,11 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         expect(page.get_by_role("alert")).to_contain_text("Signed out: the session expired")
         expect(page.get_by_role("banner")).to_be_hidden()
         assert page.evaluate("document.querySelector('.shell').inert") is True
-        # The last snapshot and the draft are kept under the overlay: the hidden step still
-        # holds both frames' choices (get_by_label, unlike get_by_role, finds hidden
-        # elements).
-        kept = page.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        # The last snapshot and the draft are kept under the overlay: the hidden Review
+        # still holds the name (get_by_label, unlike get_by_role, finds hidden elements).
+        kept = page.get_by_label("Scene name", exact=True)
         expect(kept).to_be_attached()
-        assert kept.evaluate("(select) => select.value") == portrait_a.asset.asset_id
+        assert kept.evaluate("(input) => input.value") == "kept-draft"
         # The poll pauses until sign-in.
         seen = []
         page.on("request", lambda request: seen.append(request.url)
@@ -507,6 +510,9 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         _expect_on(page, "scenes")
         # Bead 2: the draft is back on the step it was left on, and the earlier steps
         # keep their answers.
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value("kept-draft")
+        steps = page.get_by_role("navigation", name="Steps", exact=True)
+        steps.get_by_role("button", name="Media per frame", exact=True).click()
         expect(valid).to_have_value(portrait_a.asset.asset_id)
         expect(invalid).to_have_value(portrait_b.asset.asset_id)
         form.get_by_role("button", name="Back", exact=True).click()

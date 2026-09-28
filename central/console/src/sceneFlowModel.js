@@ -8,7 +8,7 @@
  * (flow/instance.js); a new Scene opens at Kind, an edit at Review.
  */
 
-import { NEW_SCENE_DRAFT, sceneEditDraft } from "./authoring.js";
+import { NEW_SCENE_DRAFT, PLAYBACK_LABELS, sceneEditDraft } from "./authoring.js";
 import { sameValue } from "./flow/draftState.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 
@@ -77,14 +77,27 @@ export function seedScene(definitions) {
   };
 }
 
-// The authored values a Reload can change, each by the label the flow shows it with.
+/**
+ * The label of each authored value, by its problem field, as Review answers it and
+ * Reload names it: the step's label, or the field's own for the playback values.
+ */
+export const SCENE_ANSWER_LABELS = Object.freeze({
+  mode: KIND.label,
+  source: PHOTOS.label,
+  targets: FRAMES.label,
+  media: MEDIA.label,
+  cycle: PLAYBACK_LABELS.cycle,
+  loop: PLAYBACK_LABELS.loop,
+});
+
+// The authored values a Reload can change, each by its answer label.
 const RELOADED = [
-  ["Kind", (draft) => draft.mode],
-  ["Photos", (draft) => draft.sourceRef],
-  ["Frames", (draft) => [...draft.targets].sort()],
-  ["Media per frame", (draft) => draft.selections],
-  ["Seconds per cycle", (draft) => Number(draft.cycleSeconds)],
-  ["Keep playing until the Program ends", (draft) => draft.loop],
+  [SCENE_ANSWER_LABELS.mode, (draft) => draft.mode],
+  [SCENE_ANSWER_LABELS.source, (draft) => draft.sourceRef],
+  [SCENE_ANSWER_LABELS.targets, (draft) => [...draft.targets].sort()],
+  [SCENE_ANSWER_LABELS.media, (draft) => draft.selections],
+  [SCENE_ANSWER_LABELS.cycle, (draft) => Number(draft.cycleSeconds)],
+  [SCENE_ANSWER_LABELS.loop, (draft) => draft.loop],
 ];
 
 /**

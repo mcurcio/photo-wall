@@ -12,7 +12,8 @@ import { idFromName } from "./authoring.js";
  *    `aria-describedby`), or at once when the problem is `immediate`;
  *  - submitting with problems sends nothing, freezes a `role="alert"` summary
  *    at that moment (a poll never rewrites it under the reader), shows every
- *    field's reason and focuses the first field with a problem;
+ *    field's reason (a scoped check: the checked fields' reasons) and focuses
+ *    the first field with a problem;
  *  - only an in-flight write disables a button (the caller's concern).
  *
  * @param {import("./authoring.js").Problem[]} problems the live problems
@@ -44,14 +45,22 @@ export function useProblems(problems) {
    * On submit: true when there is nothing to fix. Otherwise freeze the
    * summary, show every reason, focus the first field and return false. A form
    * with two actions checks the list for the one submitted.
+   *
+   * `scoped` shows only the listed fields' reasons, as if each had been edited:
+   * a flow's Continue checks its own step, and the steps after it stay quiet
+   * until their own Continue (or the final submit, unscoped).
    */
-  const check = (list = problems) => {
+  const check = (list = problems, { scoped = false } = {}) => {
     if (list.length === 0) {
       setSummary(null);
       return true;
     }
     setSummary(list);
-    setSubmitted(true);
+    if (scoped) {
+      setTouched((previous) => new Set([...previous, ...list.map((problem) => problem.field)]));
+    } else {
+      setSubmitted(true);
+    }
     fieldControl(idFor(list[0].field))?.focus();
     return false;
   };

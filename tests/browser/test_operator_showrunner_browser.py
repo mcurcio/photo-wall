@@ -905,8 +905,10 @@ def test_a_name_without_a_latin_letter_asks_for_an_id(page, registry):
         form = author_scene(page, "夕方", SOURCE, (VALID_FRAME,), submit=False)
         identifier = form.get_by_label("Id", exact=True)
         expect(identifier).to_be_visible()
-        expect(form.get_by_role("button", name="Advanced", exact=True)).to_have_attribute(
-            "aria-expanded", "true")
+        # Held open while the id must be typed: the toggle says so and cannot close it.
+        advanced = form.get_by_role("button", name="Advanced", exact=True)
+        expect(advanced).to_have_attribute("aria-expanded", "true")
+        expect(advanced).to_be_disabled()
         expect(identifier).to_have_accessible_description(
             "This name needs a Latin letter or digit for its id; type an id.")
         identifier.fill("yugata")
@@ -1629,10 +1631,20 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
         assert _hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
-        answers = form.get_by_label("Your answers", exact=True)
-        expect(answers).to_contain_text(SOURCE)
-        expect(answers).to_contain_text(VALID_FRAME)
-        expect(answers.get_by_text("Yes", exact=True)).to_be_visible()  # keep playing
+        # The stored values, exactly, where each is asked: every Change link opens its
+        # step, and Continue returns to Review.
+        form.get_by_role("button", name="Change Photos", exact=True).click()
+        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Frames", exact=True).click()
+        expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
+        expect(form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)).not_to_be_checked()
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Keep playing until the Program ends",
+                         exact=True).click()
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)
+               ).to_be_checked()
+        scene_continue(page, "Review")
         form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
         seconds = form.get_by_label("Seconds per cycle", exact=True)
         expect(seconds).to_be_focused()
@@ -1811,10 +1823,16 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
             dialog.get_by_role("button", name="Confirm replace", exact=True).click()
         assert (info.value.status, info.value.json()) == (409, {"error": "scene_revision_conflict"})
         expect(dialog.get_by_role("status")).to_have_text(
-            "Changed since you opened this. Reopen to review.")
+            "This Scene was changed since you opened it; nothing was replaced. "
+            "Review now offers Reload.")
         expect(dialog.get_by_role("button", name="Confirm replace")).to_have_count(0)
         stored = _runtime(registry).read().export_state()["scenes"][SCENE_ID]
         assert (stored["revision"], stored["cycle_seconds"]) == (2, 20)
+        # The refresh after the write shows revision 2: Replace is withheld, so closing
+        # the dialog moves focus to Reload rather than to the disabled Replace.
+        expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        expect(form.get_by_role("button", name="Reload", exact=True)).to_be_focused()
 
 
 # Pass 2 slice 3B (§14): the media pipeline and "why nothing new?".

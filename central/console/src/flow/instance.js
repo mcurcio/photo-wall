@@ -14,6 +14,11 @@
  * own instance), `blocked` (another instance while the draft is dirty: "Resume or
  * Discard") or `opening` (another instance, the draft clean or closed: it opens).
  *
+ * VIEWS. A string naming what the flow shows, so a focus request can say which view
+ * it was made for (flow/useFlowFocus.js): `away` while the section is not shown,
+ * `open:<key>:<step>` for a step, `<place>:<key>` otherwise, and null while the flow
+ * is between views (an instance opening, or a step being normalised).
+ *
  * @typedef {import("../routes.js").Route} Route
  * @typedef {"list"|"missing"|"unavailable"|"open"|"blocked"|"opening"} Place
  * @typedef {"ok"|"missing"|"unavailable"} Availability
@@ -21,6 +26,8 @@
  *            toRoute: (key: string, step: string) => Route,
  *            firstStep: (key: string) => string, describe: (key: string) => string}} FlowKeys
  */
+
+import { parseRoute } from "../routes.js";
 
 export const NEW_KEY = "new";
 
@@ -116,4 +123,56 @@ export function instancePlace({ routeKey, available, draftKey, dirty }) {
  */
 export function shownStep(place, steps, routeStep) {
   return place === "open" && steps.some((step) => step.id === routeStep) ? routeStep : null;
+}
+
+/**
+ * The view of step `step` of instance `key`; with no step, any step of it.
+ *
+ * @param {string} key
+ * @param {string|null} [step]
+ * @returns {string}
+ */
+export function stepView(key, step = null) {
+  return `open:${key}:${step ?? "*"}`;
+}
+
+/**
+ * The view shown (see VIEWS above).
+ *
+ * @param {{shown: boolean, place: Place, routeKey: string|null, step: string|null}} state
+ * @returns {string|null}
+ */
+export function flowView({ shown, place, routeKey, step }) {
+  if (!shown) {
+    return "away";
+  }
+  if (place === "opening" || (place === "open" && step === null)) {
+    return null;
+  }
+  return place === "open" ? stepView(routeKey, step) : `${place}:${routeKey ?? ""}`;
+}
+
+/**
+ * Whether `view` is the one `target` names (a step view without a step names every
+ * step of its instance).
+ *
+ * @param {string} target
+ * @param {string} view
+ * @returns {boolean}
+ */
+export function viewMatches(target, view) {
+  return target.endsWith(":*") ? view.startsWith(target.slice(0, -1)) : target === view;
+}
+
+/**
+ * Whether location hash `hash` still names instance `key` of the flow: a write that
+ * ends the flow may take the flow's history entry only then (§6 History).
+ *
+ * @param {FlowKeys} keys
+ * @param {string} hash
+ * @param {string|null} key
+ * @returns {boolean}
+ */
+export function hashNamesInstance(keys, hash, key) {
+  return key !== null && keys.fromRoute(parseRoute(hash)) === key;
 }

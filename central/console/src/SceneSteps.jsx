@@ -5,6 +5,7 @@ import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { candidateLabels } from "./mediaHealth.js";
+import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
 
@@ -131,7 +132,8 @@ export function FramesStep({ value, problems, snapshot, onToggle }) {
 /**
  * Step 3b, Media per frame (hand-picked only): ONE item per target frame from that
  * frame's candidates (the container's `useCandidates`, profile-filtered by Central),
- * each labelled with the planner's `standing` (mediaHealth.js `candidateLabels`).
+ * each labelled with the planner's `standing` (mediaHealth.js `candidateLabels`). A
+ * failed read says so and offers Retry (`candidates.reload`).
  *
  * @param {StepProps & {candidates: ReturnType<typeof import("./useCandidates.js").useCandidates>,
  *          onSelect: (frameId: string, assetId: string) => void}} props
@@ -183,9 +185,12 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
         })
       )}
       {loadError !== null && (
-        <p className="scene-flow__status" role="status">
-          {loadError}
-        </p>
+        <div className="scene-flow__status" role="status">
+          <p>{loadError}</p>
+          <button type="button" onClick={candidates.reload}>
+            Retry
+          </button>
+        </div>
       )}
     </fieldset>
   );
@@ -241,10 +246,14 @@ export function ReviewStep({
   const authored = value.mode === "authored";
   const missing = <span className="review__missing">Not chosen</span>;
   const rows = [
-    { label: "Kind", field: "mode", value: KIND_LABELS[value.mode] },
-    { label: "Photos", field: "source", value: value.sourceRef === "" ? missing : value.sourceRef },
+    { label: SCENE_ANSWER_LABELS.mode, field: "mode", value: KIND_LABELS[value.mode] },
     {
-      label: "Frames",
+      label: SCENE_ANSWER_LABELS.source,
+      field: "source",
+      value: value.sourceRef === "" ? missing : value.sourceRef,
+    },
+    {
+      label: SCENE_ANSWER_LABELS.targets,
       field: "targets",
       value:
         value.targets.length === 0 ? missing : <FrameChips snapshot={snapshot} frameIds={value.targets} />,
@@ -252,15 +261,15 @@ export function ReviewStep({
   ];
   if (authored) {
     rows.push({
-      label: "Media per frame",
+      label: SCENE_ANSWER_LABELS.media,
       field: value.targets.length > 0 ? `media:${value.targets[0]}` : "targets",
       value: value.targets.length === 0 ? missing : <MediaAnswers value={value} candidates={candidates} />,
     });
   }
   rows.push(
-    { label: "Seconds per cycle", field: "cycle", value: String(value.cycleSeconds) },
+    { label: SCENE_ANSWER_LABELS.cycle, field: "cycle", value: String(value.cycleSeconds) },
     {
-      label: "Keep playing until the Program ends",
+      label: SCENE_ANSWER_LABELS.loop,
       field: "loop",
       value: value.loop ? "Yes" : "No, it plays one cycle",
     },
@@ -311,7 +320,8 @@ export function ReviewStep({
           />
           <Advanced
             summary={`Id: ${draftId(value) || "none yet"}`}
-            open={advanced.open || idNeeded(value.name)}
+            open={advanced.open}
+            lockedOpen={idNeeded(value.name)}
             onToggle={advanced.onToggle}
           >
             <IdField

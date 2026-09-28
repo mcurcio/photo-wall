@@ -1,5 +1,6 @@
 import React from "react";
 
+import { PLAYBACK_LABELS } from "./authoring.js";
 import { Field } from "./Field.jsx";
 
 /**
@@ -11,7 +12,7 @@ import { Field } from "./Field.jsx";
  */
 export function CycleField({ problems, seconds, onSeconds }) {
   return (
-    <Field id={problems.idFor("cycle")} label="Seconds per cycle" reason={problems.reasonFor("cycle")}>
+    <Field id={problems.idFor("cycle")} label={PLAYBACK_LABELS.cycle} reason={problems.reasonFor("cycle")}>
       {(props) => (
         <input
           {...props}
@@ -49,7 +50,7 @@ export function LoopField({ problems, loop, onLoop }) {
           aria-describedby={`${loopId}-hint`}
           onChange={(event) => onLoop(event.target.checked)}
         />
-        Keep playing until the Program ends
+        {PLAYBACK_LABELS.loop}
       </label>
       <p id={`${loopId}-hint`} className="field__hint">
         Without a Program, it plays until you Finish or Cancel it. It stops at the end of the

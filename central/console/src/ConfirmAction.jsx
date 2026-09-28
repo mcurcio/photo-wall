@@ -276,7 +276,7 @@ export function ConfirmAction({ request, onClose }) {
  * Every surface that owns a ConfirmAction uses this, so the close policy is
  * written once: done -> the status line states the result and `onDone` runs
  * (the owner's successor); anything else -> focus returns to the opener, or,
- * when a poll removed it, `successor` moves it on.
+ * when a poll removed or disabled it, `successor` moves it on.
  *
  * `confirmation(statusClass)` renders the role=status line and the dialog; the
  * owner places it once at its top level, never inside a list row.
@@ -304,7 +304,7 @@ export function useConfirm(successor, onDone = null) {
     if (result?.state === "done") {
       setStatus(result.message);
       onDone?.(result, closed);
-    } else if (openerRef.current?.isConnected) {
+    } else if (openerRef.current?.isConnected && !openerRef.current.disabled) {
       openerRef.current.focus();
     } else {
       successor?.();

@@ -1,7 +1,14 @@
 import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { fieldControl } from "../Field.jsx";
-import { instancePlace, shownStep } from "./instance.js";
+import {
+  editedId,
+  flowView,
+  hashNamesInstance,
+  instancePlace,
+  shownStep,
+  stepView,
+} from "./instance.js";
 import { nextStep, previousStep, problemsOf, stepOfField } from "./steps.js";
 import { useFlowFocus } from "./useFlowFocus.js";
 
@@ -19,17 +26,31 @@ import { useFlowFocus } from "./useFlowFocus.js";
  * shows `blocked` ("Unsaved draft for X: Resume or Discard"); an edit whose record is
  * gone or cannot be authored shows `missing` or `unavailable` (`availability`).
  *
- * STEPS. Continue checks the current step's problems (`problemsOf`) and moves on;
- * after a Change link or a routed problem (`openField`) it returns toward the last
- * step (Review), stopping at a step that still has a problem. Back goes to the
- * previous step, or from the first step to the section. The container's final write
- * checks every problem itself and ends with `finish()`.
+ * STEPS. Continue checks the current step's problems only (a scoped `problems.check`:
+ * later steps show no reason before their own Continue) and moves on; after a Change
+ * link or a routed problem (`openField`) it returns toward the last step (Review),
+ * stopping at a step that still has a problem. Back goes to the previous step, or
+ * from the first step to the section. A step before the current one is `answered`
+ * once it has been shown in this draft (an edit's stored values answer them all), so
+ * a typed URL that skips steps ticks none of them. The container's final write checks
+ * every problem itself (unscoped) and ends with `finish()`.
  *
- * OPENING. `start(key, event)` is the in-app way in (New, Edit): the open instance
- * resumes; another is opened, or, while the draft is dirty, the container's
- * confirmation (`confirm`, whose `onDone` must run `request.after`) asks to discard it
- * first. `onOpened(key)` runs when another instance opens, for the container's own
- * per-instance state. `markDraft(section, dirty)` tells the shell's sidebar.
+ * FINISH. After the write, `finish(focusAfter?)` closes the draft. Only if the location
+ * still names this instance (read at that moment: the operator may have left while
+ * the write was in flight) does it replace the flow's history entry with the section
+ * (and focus `focusAfter()` there); otherwise history is left alone, and the flow's
+ * entry, if Back or Forward reaches it, is replaced with the section instead of
+ * opening a fresh draft (§6 History: Back after Save never re-enters a finished flow).
+ *
+ * OPENING. `start(key, event)` is the in-app way in (New, Edit): a dirty draft of the
+ * same instance resumes; another is opened, or, while the draft is dirty, the
+ * container's confirmation (`confirm`, whose `onDone` must run `request.after`) asks to
+ * discard it first. `onOpened(key)` runs when another instance opens, for the
+ * container's own per-instance state. `markDraft(section, dirty)` tells the sidebar.
+ *
+ * FOCUS. Moving to a step asks for its heading, with a request that lives only while
+ * that step is on its way (flow/useFlowFocus.js LIFETIME); an instance that is missing
+ * or unavailable asks for nothing.
  *
  * @template T
  * @param {{section: string,
@@ -71,11 +92,16 @@ export function useFlowInstance({
     dirty: draft.dirty,
   });
   const step = shownStep(place, steps, route?.step);
+  const view = flowView({ shown: route?.section === section, place, routeKey, step });
   const lastStepId = steps[steps.length - 1].id;
 
   const [returning, setReturning] = useState(false);
+  // The steps this draft has shown (Stepper ticks).
+  const [visited, setVisited] = useState(() => new Set());
   // The step the open draft last showed, for Resume.
   const lastStepRef = useRef(/** @type {string|null} */ (null));
+  // The history entry of a flow finished while it was not shown: {key, step}.
+  const finishedRef = useRef(/** @type {{key: string, step: string|null}|null} */ (null));
 
   const goToStep = useCallback(
     (stepId) => {
@@ -85,8 +111,11 @@ export function useFlowInstance({
     },
     [draft.key, keys, navigate],
   );
+  const draftStepView = useCallback((stepId) => stepView(draft.key, stepId), [draft.key]);
   const focus = useFlowFocus({
+    view,
     step,
+    stepView: draftStepView,
     fieldStep,
     advancedFields,
     goToStep,
@@ -107,6 +136,7 @@ export function useFlowInstance({
       problems.reset();
       focus.reset();
       setReturning(false);
+      setVisited(new Set());
       lastStepRef.current = null;
       onOpened?.(key);
     }
@@ -115,11 +145,19 @@ export function useFlowInstance({
 
   useLayoutEffect(() => {
     if (place === "opening") {
-      open(routeKey);
+      const finished = finishedRef.current;
+      finishedRef.current = null;
+      if (finished !== null && finished.key === routeKey && finished.step === route.step) {
+        navigate({ section }, { replace: true }); // Back onto a finished flow's entry
+      } else {
+        open(routeKey);
+      }
     } else if (place === "open" && step === null) {
       navigate(keys.toRoute(routeKey, lastStepRef.current ?? keys.firstStep(routeKey)), {
         replace: true,
       });
+    } else if (step !== null && !visited.has(step)) {
+      setVisited((previous) => new Set(previous).add(step));
     }
   });
 
@@ -127,10 +165,13 @@ export function useFlowInstance({
     lastStepRef.current = step;
   }
 
-  /** Show `target` (a step route) and move focus to its step heading. */
+  /** Show `target` (a step route) and, when it can show, move focus to its heading. */
   const enter = (target, options) => {
     navigate(target, options);
-    focus.focusStep();
+    const key = keys.fromRoute(target);
+    if (key !== null && availability(key) === "ok") {
+      focus.focusStep(stepView(key, target.step));
+    }
   };
 
   const firstRoute = (key) => keys.toRoute(key, keys.firstStep(key));
@@ -141,6 +182,12 @@ export function useFlowInstance({
     draft.discard();
     then?.();
   };
+
+  /**
+   * The `blocked` notice's Discard: close the dirty draft, so the instance the route
+   * names opens, and move focus to its step.
+   */
+  const discardForRoute = () => discard(() => focus.focusStep(stepView(routeKey)));
 
   /** The confirmation that discards the dirty draft, then runs `then()`. */
   const discardRequest = (then) => {
@@ -160,6 +207,8 @@ export function useFlowInstance({
    * it opens at its first step, after asking to discard another instance's dirty draft.
    */
   const start = (key, event) => {
+    finishedRef.current = null;
+    confirm.setStatus(null);
     if (draft.key === key && draft.dirty) {
       enter(resumeRoute());
     } else if (open(key)) {
@@ -172,7 +221,7 @@ export function useFlowInstance({
   /** Show a step and move focus to its heading (the stepper). */
   const showStep = (stepId) => {
     goToStep(stepId);
-    focus.focusStep();
+    focus.focusStep(draftStepView(stepId));
   };
 
   /** Route a problem (a summary entry) or a Change link to its field. */
@@ -185,7 +234,7 @@ export function useFlowInstance({
 
   const onContinue = () => {
     const own = problemsOf(problemList, fieldStep, step);
-    if (!problems.check(own)) {
+    if (!problems.check(own, { scoped: true })) {
       focus.openField(own[0].field);
       return;
     }
@@ -206,14 +255,29 @@ export function useFlowInstance({
     showStep(previous);
   };
 
-  /** End the flow after its write: close the draft and return to the section. */
-  const finish = () => {
+  /**
+   * End the flow after its write (see FINISH): true when the flow was still shown and
+   * the section replaced its entry.
+   *
+   * @param {(() => HTMLElement|null)|null} [focusAfter]
+   */
+  const finish = (focusAfter = null) => {
+    const key = draft.key;
+    const here = hashNamesInstance(keys, window.location.hash, key);
+    finishedRef.current = here ? null : { key, step: lastStepRef.current };
     draft.discard();
     problems.reset();
     focus.reset();
     setReturning(false);
+    setVisited(new Set());
     lastStepRef.current = null;
-    navigate({ section }, { replace: true });
+    if (here) {
+      navigate({ section }, { replace: true });
+      if (focusAfter !== null) {
+        focus.focusWhenShown(focusAfter, flowView({ shown: true, place: "list", routeKey: null }));
+      }
+    }
+    return here;
   };
 
   return {
@@ -221,9 +285,11 @@ export function useFlowInstance({
     step,
     routeKey,
     focus,
+    answered: (stepId) => editedId(draft.key) !== null || visited.has(stepId),
     start,
     resume: (options) => enter(resumeRoute(), options),
     discard,
+    discardForRoute,
     discardRequest,
     showStep,
     openField,
