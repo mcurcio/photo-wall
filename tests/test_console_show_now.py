@@ -97,6 +97,21 @@ out.same = model.editActivation({ repeat: "ignore" }, mint)(value);
 out.repeat = model.editActivation({ repeat: "restart" }, mint)(value);
 out.scene = model.editActivation({ sceneId: "morning" }, mint)(value);
 out.priority = model.editActivation({ priority: "4" }, mint)(value);
+// How an answer to the activation ends the flow.
+const answer = (status, error = null) => model.activationAnswer(
+  { ok: status >= 200 && status < 300, status, error, data: null });
+out.answers = [
+  model.activationAnswer(null),
+  answer(503),
+  answer(200),
+  answer(409, "some_conflict"),
+  answer(422, "invalid_command"),
+  answer(401, "unauthorized"),
+  answer(403, "origin_mismatch"),
+  answer(403, "request_unmarked"),
+  answer(422, "invalid_request"),
+  answer(404),
+];
 out.shown = [
   model.shownPriority({ ...value, priority: null }, 5),
   model.shownPriority(value, 5),
@@ -167,3 +182,17 @@ def test_covering_priority_and_the_show_now_model():
     assert out["scene"] == {"priority": None, "sceneId": "morning", "activationKey": "key-5"}
     assert out["priority"] == {"priority": "4", "activationKey": "key-6"}
     assert out["shown"] == [5, 3, ""]
+
+    # An answer ends the flow only when Central's Runtime gave it (an Admission, or a
+    # refusal of the command); one refused before the Runtime (the session, the origin,
+    # the request) keeps the draft and its key, as no answer does.
+    kept = "kept"
+    assert [a["kind"] for a in out["answers"]] == [
+        "unknown", "unknown", "known", "known", "known", kept, kept, kept, kept, kept]
+    assert out["answers"][5]["text"] == (
+        "Not started: the session ended. Sign in again, then activate.")
+    assert out["answers"][6]["text"] == out["answers"][7]["text"] == (
+        "Not started: Central refused the request from this page. Reload the console from "
+        "the address you signed in at, then activate.")
+    assert out["answers"][8]["text"] == "Not started: invalid_request. Nothing reached Central's Runtime."
+    assert out["answers"][9]["text"] == "Not started: HTTP 404. Nothing reached Central's Runtime."

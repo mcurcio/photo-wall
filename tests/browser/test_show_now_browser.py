@@ -424,3 +424,27 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
             form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert len(sent) == 2 and len(set(sent)) == 1, sent
+
+
+def test_an_activation_refused_for_its_origin_keeps_the_draft_and_its_key(page, registry):
+    """A 403 origin refusal is answered before the Runtime, as a 401 is: nothing started,
+    so the draft and its key stay on Review for the retry. Mutation probe: read a 403 as
+    a known outcome (the flow would end and the draft be discarded)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        sent = _keys(page)
+        answer_first(page, ACTIVATIONS, lambda route: route.fulfill(
+            status=403, content_type="application/json", body='{"error": "origin_mismatch"}'))
+        form = show_now(page, SCENE_ID, submit=False)
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(
+            "Not started: Central refused the request from this page. Reload the console "
+            "from the address you signed in at, then activate.")
+        assert _hash(page) == "#/now/show/review"
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        assert len(sent) == 2 and len(set(sent)) == 1, sent

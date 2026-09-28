@@ -14,6 +14,7 @@ import { useFlowInstance } from "./flow/useFlowInstance.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
+  activationAnswer,
   editActivation,
   REPEAT_LABELS,
   seedShowNow,
@@ -55,7 +56,9 @@ const UNKNOWN_ACTIVATION =
  * or section change, a Wall visit, a poll or the sign-in overlay keep the draft and its
  * ACTIVATION KEY. The key is minted with the draft and again by every change the
  * operator makes (`editActivation`); an unknown outcome keeps it, so a retry cannot
- * start the Scene twice; a known outcome ends the flow (`finish`). The Scene step is
+ * start the Scene twice, and so does a refusal before the Runtime (the session, the
+ * origin: showNowModel.js `activationAnswer`); a known outcome ends the flow
+ * (`finish`). The Scene step is
  * prefilled from the shell's `recentSceneId`: a clean draft follows it when it changes
  * (a Scene card's or the Scene flow's "Show now"); a dirty one, or one whose outcome is
  * unknown, is kept, and its Scene step offers the handed-over Scene instead (the kit's
@@ -172,14 +175,15 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     } finally {
       setActivating(false);
     }
-    if (result === null || result.status >= 500) {
+    const answer = activationAnswer(result);
+    if (answer.kind === "unknown") {
       setOutcome({ unknown: true }); // the draft, and its key, stay for the retry
       return;
     }
-    if (result.status === 401) {
-      // Refused before it reached the Runtime: nothing started. The session has ended
-      // (the refresh after this write shows sign-in), and the draft stays for after it.
-      setOutcome({ text: "Not started: the session ended. Sign in again, then activate." });
+    if (answer.kind === "kept") {
+      // Refused before it reached the Runtime (the session, the page's origin, the
+      // request): nothing started, and the draft and its key stay for the retry.
+      setOutcome({ text: answer.text });
       return;
     }
     setOutcome(

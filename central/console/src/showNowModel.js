@@ -20,6 +20,7 @@
 import { newActivationKey } from "./authoring.js";
 import { sameValue } from "./flow/draftState.js";
 import { flowKeys } from "./flow/instance.js";
+import { ORIGIN_REFUSALS } from "./session.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 /**
@@ -94,6 +95,46 @@ export function editActivation(changes, mint = newActivationKey) {
     }
     const scene = "sceneId" in changes && changes.sceneId !== value.sceneId ? { priority: null } : {};
     return { ...scene, ...changes, activationKey: mint() };
+  };
+}
+
+/**
+ * How an answer to the activation write (apiWrite's result, or null when the request
+ * threw or timed out) ends the flow:
+ *
+ *  - `unknown`: no answer, or a 5xx; it may have started, so the draft and its key stay
+ *    for the retry;
+ *  - `known`: Central's Runtime answered it, with an Admission (2xx) or by refusing the
+ *    command (409, or 422 `invalid_command`: central/app.py maps the Runtime's
+ *    conflicts and ValueErrors so); the flow ends;
+ *  - `kept`: refused before it reached the Runtime (the session ended, the page's origin
+ *    was refused, the request itself was refused): nothing started, and the draft and
+ *    its key stay, with `text` saying why.
+ *
+ * @param {{ok: boolean, status: number, error: string|null}|null} result
+ * @returns {{kind: "unknown"|"known"}|{kind: "kept", text: string}}
+ */
+export function activationAnswer(result) {
+  if (result === null || result.status >= 500) {
+    return { kind: "unknown" };
+  }
+  if (result.ok || result.status === 409 || result.error === "invalid_command") {
+    return { kind: "known" };
+  }
+  if (result.status === 401) {
+    return { kind: "kept", text: "Not started: the session ended. Sign in again, then activate." };
+  }
+  if (result.status === 403 && ORIGIN_REFUSALS.has(result.error)) {
+    return {
+      kind: "kept",
+      text:
+        "Not started: Central refused the request from this page. Reload the console " +
+        "from the address you signed in at, then activate.",
+    };
+  }
+  return {
+    kind: "kept",
+    text: `Not started: ${result.error ?? `HTTP ${result.status}`}. Nothing reached Central's Runtime.`,
   };
 }
 
