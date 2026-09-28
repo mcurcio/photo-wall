@@ -212,14 +212,18 @@ def start_source(page):
 def answer_connection(form, connection):
     """Answer "Connection name" on the Name step however the connection rule shows it: a
     text field (no Source yet), under Advanced (every Source names the same one; opened
-    here first) or a chooser (several)."""
+    here first) or a chooser (several; "Another connection…" and "New connection name"
+    for one no Source uses yet)."""
     field = form.get_by_label("Connection name", exact=True)
     if not field.is_visible():
         form.get_by_role("button", name="Advanced", exact=True).click()
-    if field.evaluate("(element) => element.tagName") == "SELECT":
-        field.select_option(connection)
-    else:
+    if field.evaluate("(element) => element.tagName") != "SELECT":
         field.fill(connection)
+    elif connection in field.evaluate("(element) => [...element.options].map((o) => o.value)"):
+        field.select_option(connection)
+    else:  # a connection no Source uses yet
+        field.select_option(label="Another connection…")
+        form.get_by_label("New connection name", exact=True).fill(connection)
 
 
 def add_source(page, source_ref, connection, *, media_type=None, submit=True):

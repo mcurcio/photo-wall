@@ -128,7 +128,7 @@ def test_several_connections_give_a_visible_chooser_with_none_chosen(page, regis
         expect(chooser).to_be_visible()
         expect(chooser).to_have_value("")
         expect(chooser.get_by_role("option")).to_have_text(
-            ["Choose a connection", "fixture-library", "second-library"])
+            ["Choose a connection", "fixture-library", "second-library", "Another connection…"])
         expect(_advanced(page)).to_have_count(0)
 
         source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
@@ -382,3 +382,43 @@ def test_log_out_mid_hand_off_drops_it(page, registry):
         go(page, "scenes")
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
             "button", name="New Scene", exact=True)).to_be_visible()
+
+
+def test_with_several_connections_another_one_can_be_typed(page, registry):
+    """The chooser (several connections) also offers "Another connection…", which shows a
+    field for a connection no Source uses yet, so a Source can still be added on a new
+    one. Mutation probe: offer only the served connections."""
+    _seed(registry)
+    queue = _seed_source(registry)  # SOURCE, on "fixture-library"
+    MediaRepository(registry.db, registry.clock, queue=queue).configure_source(
+        SourceSpec(source_ref="garden:1", connection_ref="second-library"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        _to_name_step(page)
+        form = source_form(page)
+        chooser = form.get_by_role("combobox", name="Connection name", exact=True)
+        other = form.get_by_label("New connection name", exact=True)
+        expect(other).to_have_count(0)
+        chooser.select_option(label="Another connection…")
+        expect(other).to_be_visible()
+        expect(other).to_have_value("")
+
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_continue(page)
+        expect(form.get_by_role("alert")).to_contain_text("Connection name is required.")
+        expect(other).to_be_focused()
+        other.fill("third-library")
+        source_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("third-library")
+        # Change goes back to the field it was typed in.
+        form.get_by_role("button", name="Change Connection name", exact=True).click()
+        expect(other).to_be_focused()
+        expect(other).to_have_value("third-library")
+        source_continue(page, "Review")
+        with page.expect_response(lambda r: r.request.method == "PUT"
+                                  and "/v1/operator/sources/" in r.url) as info:
+            form.get_by_role("button", name="Save source", exact=True).click()
+        assert info.value.status == 200
+        assert info.value.request.post_data_json["connection_ref"] == "third-library"
+        expect(_sources(page).get_by_role("article", name=NEW_SOURCE, exact=True)).to_contain_text(
+            "third-library")

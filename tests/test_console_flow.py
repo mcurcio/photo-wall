@@ -362,7 +362,7 @@ def test_hand_offs_and_source_flow_shape():
     assert out["advanced"] == [[], ["connection"], []]
     assert out["seeds"] == [
         {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
-         "sourceRef": "", "connectionRef": ""}, "home", ""]
+         "sourceRef": "", "connectionRef": "", "newConnection": False}, "home", ""]
     assert out["answers"] == [
         {"label": "Media type", "field": "type", "value": "Images and video"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},

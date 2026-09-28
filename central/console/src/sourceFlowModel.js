@@ -55,6 +55,17 @@ export const SOURCE_LABELS = Object.freeze({
   connection: "Connection name",
 });
 
+/**
+ * The chooser's last choice (several connections), and the field it shows: a connection
+ * no Source uses yet. The choice's value can never be a connection's name (an
+ * Identifier starts with a letter or digit).
+ */
+export const ANOTHER_CONNECTION = Object.freeze({
+  value: "*another",
+  words: "Another connection…",
+  label: "New connection name",
+});
+
 /** "Media type" choices, [value, words]; the first is the default. */
 export const MEDIA_TYPE_CHOICES = Object.freeze([
   ["both", "Images and video"],
@@ -73,9 +84,12 @@ export const FAVOURITES_CHOICES = Object.freeze([
  * A new Source's defaults, each with its source: images and video, any favourites
  * (the single form's, `SourcesRegion.jsx:157-158` before bead 3), no capture window;
  * the name and the connection are the operator's (the connection rule may prefill it).
+ * `newConnection` is true once the chooser's "Another connection…" is chosen: the
+ * connection is then typed.
  *
  * @typedef {{mediaType: string, favorites: "any"|"only"|"not", capturedFrom: string,
- *            capturedUntil: string, sourceRef: string, connectionRef: string}} SourceDraft
+ *            capturedUntil: string, sourceRef: string, connectionRef: string,
+ *            newConnection: boolean}} SourceDraft
  * @type {Readonly<SourceDraft>}
  */
 export const NEW_SOURCE_DRAFT = Object.freeze({
@@ -85,6 +99,7 @@ export const NEW_SOURCE_DRAFT = Object.freeze({
   capturedUntil: "",
   sourceRef: "",
   connectionRef: "",
+  newConnection: false,
 });
 
 /**
@@ -94,7 +109,9 @@ export const NEW_SOURCE_DRAFT = Object.freeze({
  *    required text field, empty;
  *  - `advanced`: every Source's served `spec` has the same one `connection_ref`; it is
  *    prefilled and the field sits under the Name step's Advanced;
- *  - `chooser`: several values; a visible chooser of them, with none chosen.
+ *  - `chooser`: several values; a visible chooser of them, with none chosen, whose
+ *    last choice, "Another connection…" (`ANOTHER_CONNECTION`), shows a field for a
+ *    connection no Source uses yet.
  *
  * @param {ReadonlyArray<{spec?: {connection_ref?: string}}>} sources
  * @returns {{shown: "field"|"advanced"|"chooser", values: string[], prefill: string}}

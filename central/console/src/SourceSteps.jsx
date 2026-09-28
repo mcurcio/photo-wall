@@ -4,6 +4,7 @@ import { Field } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import {
+  ANOTHER_CONNECTION,
   FAVOURITES_CHOICES,
   MEDIA_TYPE_CHOICES,
   SOURCE_LABELS,
@@ -47,13 +48,24 @@ function ChoiceField({ field, choices, value, onChange, problems }) {
   );
 }
 
-/** A text or date input for problem field `field`, labelled as the form labels it. */
-function InputField({ field, type = "text", hint = null, value, onChange, problems }) {
+/**
+ * A text or date input for problem field `field`, labelled as the form labels it (or
+ * `label`).
+ */
+function InputField({
+  field,
+  label = SOURCE_LABELS[field],
+  type = "text",
+  hint = null,
+  value,
+  onChange,
+  problems,
+}) {
   const text = type === "text" ? { autoCapitalize: "off", autoCorrect: "off", spellCheck: false } : {};
   return (
     <Field
       id={problems.idFor(field)}
-      label={SOURCE_LABELS[field]}
+      label={label}
       hint={hint}
       reason={problems.reasonFor(field)}
     >
@@ -137,10 +149,69 @@ export function IncludeStep({ value, patch, problems }) {
 }
 
 /**
+ * The connection rule's chooser (several connections): "Connection name" offers each
+ * served connection and, last, "Another connection…", which shows "New connection name"
+ * for one no Source uses yet. The connection's problem is then said, and focused,
+ * beside the typed field.
+ *
+ * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
+ */
+function ConnectionChooser({ value, patch, problems, rule }) {
+  const typed = value.newConnection;
+  const served = [...new Set([...rule.values, typed ? "" : value.connectionRef])]
+    .filter((ref) => ref !== "")
+    .sort();
+  const id = problems.idFor("connection");
+  return (
+    <>
+      <Field
+        id={typed ? `${id}-choice` : id}
+        label={SOURCE_LABELS.connection}
+        reason={typed ? null : problems.reasonFor("connection")}
+      >
+        {(props) => (
+          <select
+            {...props}
+            value={typed ? ANOTHER_CONNECTION.value : value.connectionRef}
+            onChange={(event) => {
+              const choice = event.target.value;
+              if (choice === ANOTHER_CONNECTION.value) {
+                patch({ connectionRef: "", newConnection: true });
+              } else {
+                patch({ connectionRef: choice, newConnection: false });
+                problems.touch("connection");
+              }
+            }}
+          >
+            <option value="">Choose a connection</option>
+            {served.map((ref) => (
+              <option key={ref} value={ref}>
+                {ref}
+              </option>
+            ))}
+            <option value={ANOTHER_CONNECTION.value}>{ANOTHER_CONNECTION.words}</option>
+          </select>
+        )}
+      </Field>
+      {typed && (
+        <InputField
+          field="connection"
+          label={ANOTHER_CONNECTION.label}
+          hint="A library connection no photo source uses yet."
+          value={value.connectionRef}
+          onChange={(connectionRef) => patch({ connectionRef })}
+          problems={problems}
+        />
+      )}
+    </>
+  );
+}
+
+/**
  * Step 2, Name: "Source name and revision" (required), then "Connection name" as the
  * connection rule says (sourceFlowModel.js `connectionRule`): a visible text field
  * while no Source names one; under Advanced, prefilled, when every Source names the
- * same one; a visible chooser of them when they name several.
+ * same one; a visible chooser of them, and of another one, when they name several.
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
  *          advanced: {open: boolean, onToggle: () => void}}} props
@@ -148,18 +219,7 @@ export function IncludeStep({ value, patch, problems }) {
 export function NameStep({ value, patch, problems, rule, advanced }) {
   const connection =
     rule.shown === "chooser" ? (
-      <ChoiceField
-        field="connection"
-        choices={[
-          ["", "Choose a connection"],
-          ...[...new Set([...rule.values, value.connectionRef].filter((ref) => ref !== ""))]
-            .sort()
-            .map((ref) => [ref, ref]),
-        ]}
-        value={value.connectionRef}
-        onChange={(connectionRef) => patch({ connectionRef })}
-        problems={problems}
-      />
+      <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
     ) : (
       <InputField
         field="connection"
