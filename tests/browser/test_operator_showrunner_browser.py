@@ -569,7 +569,7 @@ def _schedule_program(page, program, scene_id, start=WINDOW_START, end=WINDOW_EN
     with `submit`, schedule it and return the PUT response."""
     programs = page.get_by_role("region", name="Programs", exact=True)
     form = programs.get_by_role("form", name="Schedule a Program", exact=True)
-    form.get_by_label("Program ID", exact=True).fill(program)
+    form.get_by_label("Program name", exact=True).fill(program)
     form.get_by_label("Scene", exact=True).select_option(scene_id)
     form.get_by_label("Window start", exact=True).fill(start)
     form.get_by_label("Window end", exact=True).fill(end)
@@ -1388,3 +1388,144 @@ def test_a_protected_refusal_names_the_protecting_run(page, registry):
         expect(page.get_by_role("region", name="Runs", exact=True).get_by_label(
             "Activation outcome", exact=True)).to_have_text(
             f"Not started: {VALID_FRAME} is protected by the Run of guard.")
+
+
+# §7 windows helper and Source form.
+
+
+def _program_puts(page):
+    """Collect every Program PUT body the console sends, in order."""
+    bodies = []
+    page.on("request", lambda request: bodies.append(request.post_data_json)
+            if request.method == "PUT" and "/v1/operator/programs/" in request.url else None)
+    return bodies
+
+
+def _windows(page):
+    return page.get_by_role("region", name="Programs", exact=True).get_by_role(
+        "group", name="Create separate windows", exact=True)
+
+
+def test_the_windows_helper_follows_the_weekday_mask(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+        # 1 March 2027 is a Monday.
+        _schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
+                          "2027-03-01T20:00", 0, submit=False)
+        multi = _windows(page)
+        repeat = multi.get_by_role("group", name="Repeat on", exact=True)
+        for day in ("Saturday", "Sunday"):
+            repeat.get_by_label(day, exact=True).uncheck()
+        multi.get_by_label("Number of windows", exact=True).fill("6")
+        bodies = _program_puts(page)
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        expect(programs.get_by_role("status")).to_have_text("Created 6 separate Programs.")
+        days = ("01", "02", "03", "04", "05", "08")
+        expected = {f"weekday-show-{n}": _epoch(page, f"2027-03-{day}T18:00")
+                    for n, day in enumerate(days, start=1)}
+        assert {body["program_id"]: body["starts_at"] for body in bodies} == expected
+
+
+@pytest.mark.browser_context_args(timezone_id="Europe/London")
+def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        expect(programs).to_contain_text("Times in Europe/London")
+        # British Summer Time starts at 01:00 UTC on Sunday 28 March 2027.
+        _schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
+                          "2027-03-27T20:00", 0, submit=False)
+        _windows(page).get_by_label("Number of windows", exact=True).fill("2")
+        bodies = _program_puts(page)
+        _windows(page).get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(programs.get_by_label("Program evening-2", exact=True)).to_be_visible()
+        first, second = sorted(bodies, key=lambda body: body["program_id"])
+        # 18:00 GMT then 18:00 BST: 23 hours apart, not 24.
+        assert second["starts_at"] - first["starts_at"] == 23 * 3600
+        assert second["ends_at"] - first["ends_at"] == 23 * 3600
+
+
+def test_the_windows_helper_refuses_overlap_and_overlong_ids(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+        bodies = _program_puts(page)
+        form = page.get_by_role("region", name="Programs", exact=True).get_by_role(
+            "form", name="Schedule a Program", exact=True)
+        # A 25 h window repeated daily: each would overlap the next.
+        _schedule_program(page, "Marathon", SCENE_ID, "2027-03-01T18:00",
+                          "2027-03-02T19:00", 0, submit=False)
+        multi = _windows(page)
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text(
+            "Each window must end before the next starts.")
+
+        # An id whose window ids pass 128 characters.
+        form.get_by_role("button", name="Change", exact=True).click()
+        form.get_by_label("Id", exact=True).fill("x" * 127)
+        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text(
+            f"Name too long: {'x' * 127}-3 must be at most 128 characters.")
+        assert bodies == []
+
+
+def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        _author_live_scene(page, SCENE_ID)
+        bodies = _program_puts(page)
+        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
+        multi = _windows(page)
+        count = multi.get_by_label("Number of windows", exact=True)
+        count.fill("0")
+        expect(count).to_have_accessible_description("Between 1 and 60 windows.")
+        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        expect(count).to_have_value("0")
+        expect(count).to_be_focused()
+        count.fill("61")
+        expect(count).to_have_accessible_description("Between 1 and 60 windows.")
+        assert bodies == []
+
+
+def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        _connect(page, origin)
+        _to_showrunner(page)
+        form = page.get_by_role("region", name="Sources", exact=True).get_by_role(
+            "form", name="Configure a Source", exact=True)
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        form.get_by_label("Favourites", exact=True).select_option("only")
+        until = form.get_by_label("Taken until", exact=True)
+        form.get_by_label("Taken from", exact=True).fill("2024-01-01")
+        until.fill("2023-06-01")
+        expect(until).to_have_accessible_description(
+            re.compile("'Taken until' must be after 'Taken from'."))
+        until.fill("2025-01-01")
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
+            and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save source", exact=True).click()
+        assert info.value.status == 200
+        body = info.value.request.post_data_json
+        assert body["favorites"] is True
+        assert body["captured_from"] == _epoch(page, "2024-01-01T00:00")
+        assert body["captured_until"] == _epoch(page, "2025-01-01T00:00")

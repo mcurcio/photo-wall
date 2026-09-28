@@ -1,8 +1,19 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import {
+  draftId,
+  MAX_WINDOWS,
+  planWindows,
+  programProblems,
+  timeZoneName,
+  toEpochSeconds,
+  windowProblems,
+} from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { Field, IdentityFields, ProblemSummary, useProblems } from "./Field.jsx";
+import { ScenePicker } from "./ScenePicker.jsx";
 import { programState, windowLabel } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
@@ -37,23 +48,6 @@ export function ProgramsRegion({ snapshot }) {
 }
 
 /**
- * Convert a `datetime-local` field value (interpreted in the operator's local
- * timezone) to a POSIX epoch in SECONDS — the unit `Program.starts_at` /
- * `ends_at` carry (central/runtime.py:117-118, filled from `clock.utc()` =
- * time.time()). Returns NaN for an empty/unparseable field so callers can gate
- * the save on a valid window.
- *
- * @param {string} local
- * @returns {number}
- */
-export function toEpochSeconds(local) {
-  if (!local) {
-    return NaN;
-  }
-  return new Date(local).getTime() / 1000;
-}
-
-/**
  * The body of a single-window Program write: exactly the stored `Program` shape
  * (central/runtime.py:114-125) — a Scene bound to ONE `[starts_at, ends_at)`
  * window with a priority. There is deliberately no recurrence field: central
@@ -73,133 +67,158 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
   };
 }
 
+// Weekdays in display order, each with its `Date.getDay()` index.
+const WEEKDAYS = [
+  ["Monday", 1],
+  ["Tuesday", 2],
+  ["Wednesday", 3],
+  ["Thursday", 4],
+  ["Friday", 5],
+  ["Saturday", 6],
+  ["Sunday", 0],
+];
+
+const EVERY_DAY = [true, true, true, true, true, true, true];
+
 /**
- * The Programs region body (Bead 15 — SR-programs).
+ * The Programs region body (Bead 15; pass 2 slice 3 §5–§7, §9).
  *
  * A Program binds a Scene to a SINGLE time window with a priority (design J4).
- * The form saves one Program via `PUT /v1/operator/programs/{id}` (a stored
- * single-window Program), the list shows every stored Program with a Remove
- * (`DELETE /v1/operator/programs/{id}`), and an OPTIONAL helper creates N
- * SEPARATE windows in one action — N independent, individually-stored Programs
- * (each a real single-window `PUT`), which the operator then manages and removes
- * one by one.
+ * The operator names it and the id is derived (authoring.js). The form saves
+ * one Program via `PUT /v1/operator/programs/{id}`; the helper creates N
+ * SEPARATE windows in one action — N independent Programs `<id>-<n>`, window 1
+ * the entered one and each later one on the next ticked weekday at the same
+ * local clock times — each a real single-window `PUT`, managed and removed one
+ * by one. Nothing here is a recurring rule: central stores none (design R2/Q2).
+ * Times are entered and shown in the browser's time zone, which is named.
  *
- * HONESTY (design R2 / Q2): central stores no recurrence model, so NOTHING here
- * is a "recurring rule". The N-window helper is described only as creating
- * separate windows / individual Programs — never a recurrence — because the
- * stored reality is exactly N discrete Programs, nothing that keeps recurring on
- * its own.
+ * All writes wrap the shared `useMutate()` hook (primitive #7), so Plane A —
+ * and the Programs list below — refreshes exactly once after a write.
  *
- * All writes wrap in the shared `useMutate()` hook (primitive #7) so Plane A —
- * and therefore the Programs list below — refreshes exactly once after a write.
- *
- * @param {{snapshot: object|null}} props
+ * @param {{snapshot: object|null, confirm: ReturnType<typeof useConfirm>}} props
  */
 function ProgramScheduling({ snapshot, confirm }) {
-  // Scenes to bind come from the runtime definitions map (same source the Scenes
-  // region reads); a Program can only reference a Scene that exists.
   const definitions = snapshot?.runtime?.definitions ?? {};
-  const scenes = useMemo(() => Object.values(definitions), [definitions]);
   // Stored Programs are the runtime programs map, keyed by program_id
-  // (central/app.py:670 -> runtime.export_state()["programs"]).
+  // (central/app.py -> runtime.export_state()["programs"]).
   const programsMap = snapshot?.runtime?.programs ?? {};
   const programs = useMemo(() => Object.values(programsMap), [programsMap]);
+  const programIds = useMemo(() => new Set(Object.keys(programsMap)), [programsMap]);
+  const now = snapshot?.runtime?.current?.now;
 
   const mutate = useMutate();
 
   // Plane B: component-local scheduling draft.
-  const [programId, setProgramId] = useState("");
+  const [name, setName] = useState("");
+  const [idOverride, setIdOverride] = useState(/** @type {string|null} */ (null));
   const [sceneId, setSceneId] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
-  const [priority, setPriority] = useState(0);
-  // The optional N-window helper: how many SEPARATE windows to create at once.
-  const [windowCount, setWindowCount] = useState(3);
+  const [priority, setPriority] = useState(/** @type {string|number} */ (0));
+  // The helper: how many SEPARATE windows, and on which weekdays.
+  const [windowCount, setWindowCount] = useState(/** @type {string|number} */ (3));
+  const [weekdays, setWeekdays] = useState(EVERY_DAY);
+  // Which action the reasons beside the fields describe: the last one tried.
+  const [action, setAction] = useState(/** @type {"single"|"windows"} */ ("single"));
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [saving, setSaving] = useState(false);
 
-  const startsAt = toEpochSeconds(start);
-  const endsAt = toEpochSeconds(end);
-  const windowValid =
-    Number.isFinite(startsAt) && Number.isFinite(endsAt) && endsAt > startsAt;
-  const baseValid =
-    !saving && programId.trim() !== "" && sceneId !== "" && windowValid;
+  const draft = { name, idOverride, sceneId, start, end, priority, weekdays, count: windowCount };
+  const single = programProblems(draft, programIds, now);
+  const windows = windowProblems(draft, programIds, now);
+  const problems = useProblems(
+    action === "windows"
+      ? windows
+      : [...single, ...windows.filter((p) => p.field === "count" || p.field === "weekdays")],
+  );
+  const count = Number(windowCount);
+  const countShown = Number.isInteger(count) && count >= 1 && count <= MAX_WINDOWS;
 
-  const count = Math.max(1, Math.floor(Number(windowCount) || 0));
+  const field = (setter, key) => (value) => {
+    setter(value);
+    problems.touch(key);
+  };
 
-  const saveProgram = useCallback(async () => {
-    const id = programId.trim();
+  // A successful save clears the form, so the saved Program never reads as a
+  // collision with itself (§5).
+  const clear = () => {
+    setName("");
+    setIdOverride(null);
+    setSceneId("");
+    setStart("");
+    setEnd("");
+    setPriority(0);
+    setWindowCount(3);
+    setWeekdays(EVERY_DAY);
+    setAction("single");
+    problems.reset();
+  };
+
+  const put = (programId, startsAt, endsAt) =>
+    apiWrite(`/v1/operator/programs/${encodeURIComponent(programId)}`, {
+      method: "PUT",
+      body: buildProgram({ programId, sceneId, startsAt, endsAt, priority: Number(priority) }),
+    });
+
+  const saveProgram = async () => {
+    setAction("single");
+    if (saving || !problems.check(single)) {
+      return;
+    }
+    const id = draftId(draft);
     setSaving(true);
     setStatus(null);
     try {
-      const result = await mutate(() =>
-        apiWrite(`/v1/operator/programs/${encodeURIComponent(id)}`, {
-          method: "PUT",
-          body: buildProgram({
-            programId: id,
-            sceneId,
-            startsAt,
-            endsAt,
-            priority: Number(priority),
-          }),
-        }),
-      );
-      setStatus(
-        result.ok
-          ? `Scheduled Program ${id}.`
-          : `Could not schedule Program: ${result.error ?? result.status}.`,
-      );
+      const result = await mutate(() => put(id, toEpochSeconds(start), toEpochSeconds(end)));
+      if (result.ok) {
+        clear();
+        setStatus(`Scheduled Program ${id}.`);
+      } else {
+        setStatus(`Could not schedule Program: ${result.error ?? result.status}.`);
+      }
     } catch {
       setStatus("Could not schedule Program: the request did not complete.");
     } finally {
       setSaving(false);
     }
-  }, [programId, sceneId, startsAt, endsAt, priority, mutate]);
+  };
 
-  // The N-window helper: create `count` SEPARATE Programs in one action, each a
-  // real stored single-window Program (id `<base>-<n>`), the whole window shifted
-  // by n × the base window's duration so the windows do not overlap. This is N
-  // discrete Programs, NOT a recurring rule — each must be managed and removed on
-  // its own below.
-  const addSeparateWindows = useCallback(async () => {
-    const id = programId.trim();
-    const duration = endsAt - startsAt;
+  // The helper: `count` SEPARATE Programs in one action, each a real stored
+  // single-window Program `<id>-<n>`. A partial failure names the ids that
+  // were not created.
+  const addSeparateWindows = async () => {
+    setAction("windows");
+    if (saving || !problems.check(windows)) {
+      return;
+    }
+    const id = draftId(draft);
+    const planned = planWindows({ start, end, weekdays, count });
     setSaving(true);
     setStatus(null);
-    try {
-      const result = await mutate(() =>
-        Promise.all(
-          Array.from({ length: count }, (_unused, index) => {
-            const windowId = `${id}-${index + 1}`;
-            const offset = index * duration;
-            return apiWrite(
-              `/v1/operator/programs/${encodeURIComponent(windowId)}`,
-              {
-                method: "PUT",
-                body: buildProgram({
-                  programId: windowId,
-                  sceneId,
-                  startsAt: startsAt + offset,
-                  endsAt: endsAt + offset,
-                  priority: Number(priority),
-                }),
-              },
-            );
-          }),
+    const results = await mutate(() =>
+      Promise.all(
+        planned.map(({ startsAt, endsAt }, index) =>
+          put(`${id}-${index + 1}`, startsAt, endsAt).then(
+            (result) => result.ok,
+            () => false,
+          ),
         ),
-      );
-      const failed = result.filter((r) => !r.ok).length;
+      ),
+    );
+    const failed = planned
+      .map((_window, index) => `${id}-${index + 1}`)
+      .filter((_windowId, index) => !results[index]);
+    if (failed.length === 0) {
+      clear();
+      setStatus(`Created ${planned.length} separate Programs.`);
+    } else {
       setStatus(
-        failed === 0
-          ? `Created ${count} separate Programs.`
-          : `Created ${count - failed} of ${count} separate Programs.`,
+        `Created ${planned.length - failed.length} of ${planned.length} separate Programs. ` +
+          `Not created: ${failed.join(", ")}.`,
       );
-    } catch {
-      setStatus("Could not create the windows: a request did not complete.");
-    } finally {
-      setSaving(false);
     }
-  }, [programId, sceneId, startsAt, endsAt, priority, count, mutate]);
+    setSaving(false);
+  };
 
   const removeProgram = useCallback(
     async (id) => {
@@ -221,9 +240,21 @@ function ProgramScheduling({ snapshot, confirm }) {
     }
   };
 
-  const now = snapshot?.runtime?.current?.now;
   const past = programs.filter((program) => program.ends_at <= now);
   const current = programs.filter((program) => !(program.ends_at <= now));
+
+  const dateField = (key, label, value, setter) => (
+    <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
+      {(props) => (
+        <input
+          {...props}
+          type="datetime-local"
+          value={value}
+          onChange={(event) => field(setter, key)(event.target.value)}
+        />
+      )}
+    </Field>
+  );
 
   return (
     <div className="program-scheduling">
@@ -231,117 +262,118 @@ function ProgramScheduling({ snapshot, confirm }) {
         className="program-scheduling__form"
         role="form"
         aria-label="Schedule a Program"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          if (baseValid) {
-            saveProgram();
-          }
+          saveProgram();
         }}
       >
-        <label className="program-scheduling__field">
-          Program ID
-          <input
-            type="text"
-            className="program-scheduling__program-id"
-            aria-label="Program ID"
-            value={programId}
-            onChange={(event) => setProgramId(event.target.value)}
-          />
-        </label>
+        <ProblemSummary summary={problems.summary} label="Program problems" />
+        <IdentityFields
+          kind="Program"
+          name={name}
+          idOverride={idOverride}
+          onName={setName}
+          onIdOverride={setIdOverride}
+          problems={problems}
+        />
+        <ScenePicker
+          id={problems.idFor("scene")}
+          label="Scene"
+          reason={problems.reasonFor("scene")}
+          definitions={definitions}
+          value={sceneId}
+          onChange={field(setSceneId, "scene")}
+        />
+        <p className="program-scheduling__zone">{`Times in ${timeZoneName()}`}</p>
+        {dateField("start", "Window start", start, setStart)}
+        {dateField("end", "Window end", end, setEnd)}
+        <Field id={problems.idFor("priority")} label="Priority" reason={problems.reasonFor("priority")}>
+          {(props) => (
+            <input
+              {...props}
+              type="number"
+              step="1"
+              value={priority}
+              onChange={(event) => field(setPriority, "priority")(event.target.value)}
+            />
+          )}
+        </Field>
 
-        <label className="program-scheduling__field">
-          Scene
-          <select
-            className="program-scheduling__scene"
-            aria-label="Scene"
-            value={sceneId}
-            onChange={(event) => setSceneId(event.target.value)}
-          >
-            <option value="">Choose a Scene</option>
-            {scenes.map((scene) => (
-              <option key={scene.scene_id} value={scene.scene_id}>
-                {scene.scene_id}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="program-scheduling__field">
-          Window start
-          <input
-            type="datetime-local"
-            className="program-scheduling__start"
-            aria-label="Window start"
-            value={start}
-            onChange={(event) => setStart(event.target.value)}
-          />
-        </label>
-
-        <label className="program-scheduling__field">
-          Window end
-          <input
-            type="datetime-local"
-            className="program-scheduling__end"
-            aria-label="Window end"
-            value={end}
-            onChange={(event) => setEnd(event.target.value)}
-          />
-        </label>
-
-        <label className="program-scheduling__field">
-          Priority
-          <input
-            type="number"
-            className="program-scheduling__priority"
-            aria-label="Priority"
-            value={priority}
-            onChange={(event) => setPriority(event.target.value)}
-          />
-        </label>
-
-        <button
-          type="submit"
-          className="program-scheduling__save"
-          disabled={!baseValid}
-        >
+        <button type="submit" className="program-scheduling__save" disabled={saving}>
           Schedule Program
         </button>
-      </form>
 
-      {/* Optional helper (design Q2): create N SEPARATE windows at once. Each is
-          a real, independently-stored single-window Program — this is N discrete
-          Programs to manage individually, and it is intentionally NOT a
-          recurring rule (central stores no recurrence model). */}
-      <fieldset
-        className="program-scheduling__multi"
-        aria-label="Create separate windows"
-      >
-        <legend>Create separate windows</legend>
-        <p className="program-scheduling__multi-note">
-          Creates {count} separate windows — {count} individual Programs, each
-          stored on its own and removed one by one below.
-        </p>
-        <label className="program-scheduling__field">
-          Number of windows
-          <input
-            type="number"
-            min="1"
-            className="program-scheduling__count"
-            aria-label="Number of windows"
-            value={windowCount}
-            onChange={(event) => setWindowCount(event.target.value)}
-          />
-        </label>
-        <button
-          type="button"
-          className="program-scheduling__multi-add"
-          aria-label="Add separate windows"
-          disabled={!baseValid}
-          onClick={addSeparateWindows}
-        >
-          {`Add ${count} separate windows`}
-        </button>
-      </fieldset>
+        {/* Optional helper (design Q2): create N SEPARATE windows at once. Each is
+            a real, independently-stored single-window Program — N discrete
+            Programs to manage individually, never a rule that repeats itself. */}
+        <fieldset className="program-scheduling__multi" aria-label="Create separate windows">
+          <legend>Create separate windows</legend>
+          <p className="program-scheduling__multi-note">
+            {countShown
+              ? `Creates ${count} separate windows — ${count} individual Programs, each stored ` +
+                "on its own and removed one by one below. Window 1 is the one above; each " +
+                "later one falls on the next ticked day at the same local times."
+              : "Creates separate windows — individual Programs, each stored on its own and " +
+                "removed one by one below."}
+          </p>
+          <fieldset
+            id={problems.idFor("weekdays")}
+            className="program-scheduling__weekdays"
+            aria-label="Repeat on"
+            aria-describedby={
+              problems.reasonFor("weekdays") !== null ? `${problems.idFor("weekdays")}-reason` : undefined
+            }
+          >
+            <legend>Repeat on</legend>
+            {WEEKDAYS.map(([day, index]) => (
+              <label key={day} className="program-scheduling__weekday">
+                <input
+                  type="checkbox"
+                  checked={weekdays[index]}
+                  onChange={(event) => {
+                    const next = [...weekdays];
+                    next[index] = event.target.checked;
+                    field(setWeekdays, "weekdays")(next);
+                  }}
+                />
+                {day}
+              </label>
+            ))}
+            {problems.reasonFor("weekdays") !== null && (
+              <p id={`${problems.idFor("weekdays")}-reason`} className="field__reason">
+                {problems.reasonFor("weekdays")}
+              </p>
+            )}
+          </fieldset>
+          <Field
+            id={problems.idFor("count")}
+            label="Number of windows"
+            reason={problems.reasonFor("count")}
+          >
+            {(props) => (
+              <input
+                {...props}
+                type="number"
+                min="1"
+                max={MAX_WINDOWS}
+                className="program-scheduling__count"
+                value={windowCount}
+                onChange={(event) => field(setWindowCount, "count")(event.target.value)}
+              />
+            )}
+          </Field>
+          <button
+            type="button"
+            className="program-scheduling__multi-add"
+            aria-label="Add separate windows"
+            disabled={saving}
+            onClick={addSeparateWindows}
+          >
+            {countShown ? `Add ${count} separate windows` : "Add separate windows"}
+          </button>
+        </fieldset>
+      </form>
 
       {status !== null ? (
         <p className="program-scheduling__status" role="status">

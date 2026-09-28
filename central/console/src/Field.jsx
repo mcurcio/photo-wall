@@ -42,16 +42,17 @@ export function useProblems(problems) {
 
   /**
    * On submit: true when there is nothing to fix. Otherwise freeze the
-   * summary, show every reason, focus the first field and return false.
+   * summary, show every reason, focus the first field and return false. A form
+   * with two actions checks the list for the one submitted.
    */
-  const check = () => {
-    if (problems.length === 0) {
+  const check = (list = problems) => {
+    if (list.length === 0) {
       setSummary(null);
       return true;
     }
-    setSummary(problems);
+    setSummary(list);
     setSubmitted(true);
-    const first = document.getElementById(idFor(problems[0].field));
+    const first = document.getElementById(idFor(list[0].field));
     const target = first?.matches("input, select, textarea, button")
       ? first
       : first?.querySelector("input, select, textarea, button");

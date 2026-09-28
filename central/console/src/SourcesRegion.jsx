@@ -1,6 +1,8 @@
 import React, { useCallback, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { localDayStart, sourceProblems } from "./authoring.js";
+import { Field, ProblemSummary, useProblems } from "./Field.jsx";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -82,44 +84,65 @@ export function SourcesRegion({ snapshot }) {
   );
 }
 
+const FAVOURITES = { any: null, only: true, not: false };
+
 /**
- * The stored `SourceSpec` write body (media/models.py:32-40) for a saved live
- * query: `schema` (alias of schema_version, populate_by_name), the `source_ref`
- * (`name:rev`), its `connection_ref`, and the `media_types` subset. `favorites`
- * and the capture window are optional (default null / unbounded) and omitted
- * here — a Source is defined by its query identity + connection + kinds, and the
- * server applies its own defaults for the rest.
+ * The stored `SourceSpec` write body (media/models.py `SourceSpec`) for a saved
+ * live query: `schema` (alias of schema_version), the `source_ref` (`name:rev`),
+ * its `connection_ref`, the `media_types` subset, and the filters the API
+ * already accepts (§7): `favorites` (Any / Only / Not → null / true / false)
+ * and the capture window (`captured_from` / `captured_until`, the local
+ * midnights of the chosen days; "until" is exclusive). An unset filter is
+ * omitted, so the server applies its default.
  *
  * A single "both" choice maps to the full ["image", "video"] subset; otherwise
  * the one chosen kind. There is deliberately NO album/Immich/open-in field: a
- * Source is a saved live query, not a downloaded album (design D-e).
+ * Source is a saved live query, not a downloaded album (design D-e), and
+ * `SourceSpec` has no album filter.
  *
- * @param {{sourceRef: string, connectionRef: string, mediaType: string}} draft
- * @returns {{schema: number, source_ref: string, connection_ref: string, media_types: string[]}}
+ * @param {{sourceRef: string, connectionRef: string, mediaType: string,
+ *          favorites?: "any"|"only"|"not", capturedFrom?: string,
+ *          capturedUntil?: string}} draft
+ * @returns {object}
  */
-export function buildSourceSpec({ sourceRef, connectionRef, mediaType }) {
-  return {
+export function buildSourceSpec({
+  sourceRef,
+  connectionRef,
+  mediaType,
+  favorites = "any",
+  capturedFrom = "",
+  capturedUntil = "",
+}) {
+  const spec = {
     schema: 1,
     source_ref: sourceRef,
     connection_ref: connectionRef,
     media_types: mediaType === "both" ? ["image", "video"] : [mediaType],
   };
+  if (FAVOURITES[favorites] !== null) {
+    spec.favorites = FAVOURITES[favorites];
+  }
+  const from = localDayStart(capturedFrom);
+  const until = localDayStart(capturedUntil);
+  if (from !== null) {
+    spec.captured_from = from;
+  }
+  if (until !== null) {
+    spec.captured_until = until;
+  }
+  return spec;
 }
 
 /**
- * The Source-configuration form (Bead G2 — SR-source-config), closing
- * content-parity GAP 2: the legacy flat page could CREATE a Source, but the
- * console (Bead 13) could only list + Refresh. This restores create BEFORE the
- * cutover.
+ * The Source-configuration form (Bead G2 — SR-source-config; slice 3 §6, §7).
  *
  * A Source is a saved live QUERY named `name:rev` (design D-e) — never a
  * downloaded album, an Immich link, or anything a Player browses/opens; this
  * form carries no such language. It saves the query via
  * `PUT /v1/operator/sources/{ref}` (the `source_ref` path segment is `name:rev`
  * and may contain a colon, so it is path-encoded) with the stored `SourceSpec`
- * body. The write wraps the shared `useMutate()` hook (primitive #7) so Plane A
- * — and therefore the Sources list above — refreshes exactly once; the new
- * Source then appears by its `name:rev` identity, awaiting its first Refresh.
+ * body, inside `useMutate()` (primitive #7). Problems are reasons beside the
+ * fields; only the in-flight save disables the button.
  *
  * The server answers with a `SourceConfigurationReceipt` ({source_ref, created});
  * `created` is true for a first configuration and false if the exact same spec
@@ -132,13 +155,26 @@ function SourceConfiguration() {
   const [sourceRef, setSourceRef] = useState("");
   const [connectionRef, setConnectionRef] = useState("");
   const [mediaType, setMediaType] = useState("both");
+  const [favorites, setFavorites] = useState(/** @type {"any"|"only"|"not"} */ ("any"));
+  const [capturedFrom, setCapturedFrom] = useState("");
+  const [capturedUntil, setCapturedUntil] = useState("");
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
   const [saving, setSaving] = useState(false);
+  const problems = useProblems(
+    sourceProblems({ sourceRef, connectionRef, capturedFrom, capturedUntil }),
+  );
 
-  const valid =
-    !saving && sourceRef.trim() !== "" && connectionRef.trim() !== "";
+  const field = (setter, key) => (event) => {
+    setter(event.target.value);
+    if (key !== null) {
+      problems.touch(key);
+    }
+  };
 
-  const saveSource = useCallback(async () => {
+  const saveSource = async () => {
+    if (saving || !problems.check()) {
+      return;
+    }
     const ref = sourceRef.trim();
     setSaving(true);
     setStatus(null);
@@ -150,78 +186,100 @@ function SourceConfiguration() {
             sourceRef: ref,
             connectionRef: connectionRef.trim(),
             mediaType,
+            favorites,
+            capturedFrom,
+            capturedUntil,
           }),
         }),
       );
-      setStatus(
-        result.ok
-          ? `Saved Source ${ref}.`
-          : `Could not save Source: ${result.error ?? result.status}.`,
-      );
+      if (result.ok) {
+        setSourceRef("");
+        setConnectionRef("");
+        setMediaType("both");
+        setFavorites("any");
+        setCapturedFrom("");
+        setCapturedUntil("");
+        problems.reset();
+        setStatus(`Saved Source ${ref}.`);
+      } else {
+        setStatus(`Could not save Source: ${result.error ?? result.status}.`);
+      }
     } catch {
       setStatus("Could not save Source: the request did not complete.");
     } finally {
       setSaving(false);
     }
-  }, [sourceRef, connectionRef, mediaType, mutate]);
+  };
+
+  const text = (key, label, value, setter, hint = null) => (
+    <Field id={problems.idFor(key)} label={label} hint={hint} reason={problems.reasonFor(key)}>
+      {(props) => (
+        <input
+          {...props}
+          type="text"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          value={value}
+          onChange={field(setter, key)}
+        />
+      )}
+    </Field>
+  );
+
+  const day = (key, label, value, setter, hint) => (
+    <Field id={problems.idFor(key)} label={label} hint={hint} reason={problems.reasonFor(key)}>
+      {(props) => <input {...props} type="date" value={value} onChange={field(setter, key)} />}
+    </Field>
+  );
 
   return (
-      <form
-        className="source-config"
-        role="form"
-        aria-label="Configure a Source"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (valid) {
-            saveSource();
-          }
-        }}
-      >
-        <label className="source-config__field">
-          Source name and revision
-          <input
-            type="text"
-            className="source-config__ref"
-            aria-label="Source name and revision"
-            value={sourceRef}
-            onChange={(event) => setSourceRef(event.target.value)}
-          />
-        </label>
+    <form
+      className="source-config"
+      role="form"
+      aria-label="Configure a Source"
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        saveSource();
+      }}
+    >
+      <ProblemSummary summary={problems.summary} label="Source problems" />
+      {text("ref", "Source name and revision", sourceRef, setSourceRef, "Like holiday:1.")}
+      {text("connection", "Connection name", connectionRef, setConnectionRef)}
 
-        <label className="source-config__field">
-          Connection name
-          <input
-            type="text"
-            className="source-config__connection"
-            aria-label="Connection name"
-            value={connectionRef}
-            onChange={(event) => setConnectionRef(event.target.value)}
-          />
-        </label>
-
-        <label className="source-config__field">
-          Media type
-          <select
-            className="source-config__type"
-            aria-label="Media type"
-            value={mediaType}
-            onChange={(event) => setMediaType(event.target.value)}
-          >
+      <Field id={problems.idFor("type")} label="Media type">
+        {(props) => (
+          <select {...props} value={mediaType} onChange={field(setMediaType, null)}>
             <option value="both">Images and video</option>
             <option value="image">Images only</option>
             <option value="video">Video only</option>
           </select>
-        </label>
+        )}
+      </Field>
 
-        <button type="submit" className="source-config__save" disabled={!valid}>
-          Save source
-        </button>
+      <Field id={problems.idFor("favorites")} label="Favourites">
+        {(props) => (
+          <select {...props} value={favorites} onChange={field(setFavorites, null)}>
+            <option value="any">Any</option>
+            <option value="only">Only favourites</option>
+            <option value="not">Not favourites</option>
+          </select>
+        )}
+      </Field>
 
-        {status !== null ? (
-          <p className="source-config__status" role="status">
-            {status}
-          </p>
-        ) : null}
-      </form>
+      {day("from", "Taken from", capturedFrom, setCapturedFrom, "From the start of this day.")}
+      {day("until", "Taken until", capturedUntil, setCapturedUntil, "Up to the start of this day.")}
+
+      <button type="submit" className="source-config__save" disabled={saving}>
+        Save source
+      </button>
+
+      {status !== null ? (
+        <p className="source-config__status" role="status">
+          {status}
+        </p>
+      ) : null}
+    </form>
   );
 }
