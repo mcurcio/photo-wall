@@ -12,25 +12,50 @@ import { detectRecovery } from "./recovery.js";
 import { Showrunner } from "./Showrunner.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { useMode } from "./useMode.js";
-import { setToken } from "./session.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
 
 // The Central pill's colour: the shared health severity for each /healthz state.
 const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 
+// Why the tab is signed out or a sign-in / log-out failed (pass A §7).
+const AUTH_NOTICES = {
+  rejected: "Operator token was not accepted. Re-enter the token to sign in.",
+  expired: "Signed out: the session expired or the token changed. Sign in again.",
+  blocked: "Your browser did not keep the sign-in; allow cookies for this site.",
+  failed: "Sign-in failed: Central did not answer. Try again.",
+  signOutFailed: "Log out failed: Central did not answer. Try again.",
+};
+
+// A write Central refused because it did not come from the signed-in page (403
+// request_unmarked / origin_mismatch; pass A §7). A header-stripping proxy reads the same.
+const ORIGIN_REFUSED_MESSAGE =
+  "Central refused this write because it did not come from the page you signed in on. " +
+  "Reload the console from the address you signed in at, or sign in again.";
+
 /**
  * The console app shell.
  *
  * Bead 0 built the empty frame + Plane A wiring. Bead 1 adds:
- *  - a minimal shared "Token" control (design §2): an "Operator token" input and
- *    a "Connect" button that set the in-memory token and trigger one Plane A
- *    refresh. The token is never persisted (useSnapshot holds it in memory only).
+ *  - the sign-in screen (pass A §7): while signed out, an "Operator token" field
+ *    and a "Sign in" button exchange the token once for the session cookie; the
+ *    field is cleared on submit and the token is kept nowhere. Signed in, the
+ *    header offers "Log out".
  *  - a Surface filter that groups frames by `surface_id` and switches plans,
  *    defaulting to the first Surface present.
  *  - the read-only per-Surface SVG Plan and the Unplaced tray.
  */
 export default function App() {
-  const { snapshot, refresh, authRejected, refreshFailed } = useSnapshot();
+  const {
+    snapshot,
+    refresh,
+    auth,
+    authNotice,
+    signIn,
+    signOut,
+    refreshFailed,
+    originRefused,
+    dismissOriginRefused,
+  } = useSnapshot();
   // Top-level Wall/Showrunner mode (Plane B). A snapshot refresh replaces the
   // fetched inventory alone and never resets this (design §2).
   const { mode, setMode } = useMode();
@@ -138,15 +163,13 @@ export default function App() {
   const activeSurface =
     surfaceId !== null && surfaces.includes(surfaceId) ? surfaceId : surfaces[0] ?? null;
 
-  const connect = (event) => {
+  const submitSignIn = (event) => {
     event.preventDefault();
-    // In-memory only (session.js), mirroring the legacy flat page — never persisted.
-    setToken(tokenInput);
-    // Trigger one Plane A load with the freshly-set token. A 401 surfaces the
-    // auth-rejected state (useSnapshot clears the in-memory token and flags it),
-    // rendering the token form again with a "not accepted" message below; any
-    // other failure leaves the empty state in place (Bead 18 richer surfacing).
-    refresh().catch(() => {});
+    // The token goes into the one sign-in request and is cleared from the field
+    // at once; nothing keeps it (pass A §7).
+    const token = tokenInput;
+    setTokenInput("");
+    signIn(token);
   };
 
   return (
@@ -183,26 +206,42 @@ export default function App() {
             Showrunner
           </button>
         </div>
+        {auth === "signedIn" && (
+          <button type="button" className="console__button" onClick={() => signOut()}>
+            Log out
+          </button>
+        )}
       </header>
 
-      <form className="console__token" onSubmit={connect}>
-        <label className="console__token-field">
-          Operator token
-          <input
-            type="password"
-            name="operator-token"
-            autoComplete="off"
-            value={tokenInput}
-            onChange={(event) => setTokenInput(event.target.value)}
-          />
-        </label>
-        <button type="submit">Connect</button>
-      </form>
+      {auth === "signedOut" && (
+        <form className="console__token" onSubmit={submitSignIn}>
+          <label className="console__token-field">
+            Operator token
+            <input
+              type="password"
+              name="operator-token"
+              autoComplete="off"
+              value={tokenInput}
+              onChange={(event) => setTokenInput(event.target.value)}
+            />
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+      )}
 
-      {authRejected && (
+      {authNotice !== null && (
         <p className="console__auth-error" role="alert">
-          Operator token was not accepted. Re-enter the token to connect.
+          {AUTH_NOTICES[authNotice]}
         </p>
+      )}
+
+      {originRefused && (
+        <div className="console__auth-error" role="alert">
+          <p>{ORIGIN_REFUSED_MESSAGE}</p>
+          <button type="button" onClick={dismissOriginRefused}>
+            Dismiss
+          </button>
+        </div>
       )}
 
       {snapshot !== null && (

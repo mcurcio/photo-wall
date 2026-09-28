@@ -25,9 +25,9 @@ _SEQUENCE = itertools.count(1)
 
 
 @contextmanager
-def operator_server(db, clock, *, media_root=None, media_queue=None):
+def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN):
     """Run the production app on an ephemeral loopback listener with real lifespan."""
-    app = create_app(db, clock, ADMIN, run_scheduler=False,
+    app = create_app(db, clock, admin_token, run_scheduler=False,
                      media_root=media_root, media_queue=media_queue)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -47,6 +47,20 @@ def operator_server(db, clock, *, media_root=None, media_queue=None):
         thread.join(timeout=10)
         listener.close()
         assert not thread.is_alive(), "operator server did not stop"
+
+
+def sign_in(page, origin, token=ADMIN):
+    """Open the console at `origin` and sign in through its sign-in screen (pass A).
+
+    The suite's ONE sign-in step. Cookies ignore the port, so a session from an
+    earlier server in the same browser context would already be sent here (reads
+    work, writes are refused for their Origin); the helper clears them first so
+    every sign-in binds this origin through the real screen.
+    """
+    page.context.clear_cookies()
+    page.goto(origin + "/console")
+    page.get_by_label("Operator token").fill(token)
+    page.get_by_role("button", name="Sign in", exact=True).click()
 
 
 def inventory(page, origin, token=ADMIN):

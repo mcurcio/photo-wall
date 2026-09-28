@@ -8,22 +8,29 @@ import React, {
   useState,
 } from "react";
 
-import { getToken, setToken, writeCount } from "./session.js";
+import { apiWrite } from "./apiWrite.js";
+import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number}} Snapshot
+ * @typedef {"checking"|"signedIn"|"signedOut"} Auth
+ * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|null} AuthNotice
  */
 
+// Sign in (POST) and Log out (DELETE): pass A §5.
+const SESSION_PATH = "/v1/operator/session";
+
 async function fetchJson(path) {
+  // The session cookie travels with this same-origin fetch; no credential is held here.
   const response = await fetch(path, {
     headers: {
-      Authorization: "Bearer " + getToken(),
+      ...CONSOLE_HEADER,
       "Content-Type": "application/json",
     },
     signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) {
-    // Carry the HTTP status so a rejected operator token (401) can be told
+    // Carry the HTTP status so a missing or ended session (401) can be told
     // apart from a transient network/500 failure by refresh() below.
     const error = new Error(path + " -> " + response.status);
     error.status = response.status;
@@ -45,8 +52,15 @@ const POLL_MS = 5000;
  * runtime are swapped together so a frame's binding row and its now-showing chip
  * always share one age (design §4a). It never merges into Plane B (useDraft).
  *
+ * SIGN-IN (pass A §7). `auth` starts "checking": the first Plane A read decides
+ * it (2xx signed in, 401 signed out; a network error or 5xx keeps checking and
+ * the next poll retries). `signIn(token)` posts the token once — it is never
+ * stored — and re-reads Plane A; `signOut()` deletes the session cookie and
+ * clears Plane A. A Plane A 401 while signed in signs the tab out. Drafts live in
+ * the regions Plane A mounts, so they are lost with it (pass A Question 4).
+ *
  * POLLING (pass 2 §7). The provider is the ONE poller: every 5 s while the tab
- * is visible it refreshes Plane A, reading the token fresh on each tick. A hidden
+ * is visible and not signed out it refreshes Plane A. A hidden
  * tab clears the interval; becoming visible refreshes at once and restarts it.
  * Polls are single-flight (the 15 s fetch timeout outlasts the interval); a
  * dropped or failed poll releases the slot, so the next tick still runs.
@@ -66,15 +80,26 @@ const POLL_MS = 5000;
  */
 export function SnapshotProvider({ children }) {
   const [snapshot, setSnapshot] = useState(/** @type {Snapshot|null} */ (null));
-  // Whether the last connect/refresh was refused for a bad operator token (a
-  // 401 from any plane fetch). App renders the token form + a "not accepted"
-  // message when this is set, instead of silently blanking (design R3).
-  const [authRejected, setAuthRejected] = useState(false);
+  // The sign-in state (a ref mirrors it for the poller) and why the tab was
+  // signed out or a sign-in failed; App renders the sign-in screen and the
+  // notice instead of silently blanking (design R3).
+  const [auth, setAuthState] = useState(/** @type {Auth} */ ("checking"));
+  const authRef = useRef(/** @type {Auth} */ ("checking"));
+  const [authNotice, setAuthNotice] = useState(/** @type {AuthNotice} */ (null));
+  // Whether Central refused a write for its origin (apiWrite reports it).
+  const [originRefused, setOriginRefused] = useState(false);
   // Whether the newest applied refresh failed (never inferred from age).
   const [refreshFailed, setRefreshFailed] = useState(false);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
   const pollingRef = useRef(false);
+
+  const setAuth = useCallback((next) => {
+    authRef.current = next;
+    setAuthState(next);
+  }, []);
+
+  useEffect(() => onOriginRefused(() => setOriginRefused(true)), []);
 
   const refresh = useCallback(async () => {
     const ticket = ++issuedRef.current;
@@ -103,42 +128,84 @@ export function SnapshotProvider({ children }) {
     appliedRef.current = ticket;
     if (failure !== null) {
       setRefreshFailed(true);
-      // A rejected operator token (401 on connect OR mid-session) drops the tab
-      // back to the token-entry state: clear the IN-MEMORY token and the stale
-      // snapshot, and flag the rejection so App re-renders the token form with a
-      // "not accepted" message. Any other failure (network/5xx) leaves the prior
-      // snapshot and token untouched for the next poll.
+      // No session (401 on the first read OR mid-session: expired, token
+      // rotated, cookie refused) drops the tab to the sign-in screen and clears
+      // the stale snapshot; a tab that was signed in says why. Any other failure
+      // (network/5xx) leaves the prior snapshot and state for the next poll.
       if (failure?.status === 401) {
-        setToken("");
+        const wasSignedIn = authRef.current === "signedIn";
         setSnapshot(null);
-        setAuthRejected(true);
+        setAuth("signedOut");
+        setAuthNotice(wasSignedIn ? "expired" : null);
       }
       throw failure;
     }
     setSnapshot(next);
-    // A successful load clears any prior token-rejection or failure notice.
-    setAuthRejected(false);
+    // A successful load signs the tab in and clears any prior notice.
+    setAuth("signedIn");
+    setAuthNotice(null);
     setRefreshFailed(false);
     return next;
-  }, []);
+  }, [setAuth]);
 
-  useEffect(() => {
-    // Load the first snapshot on mount once a token is present. With no token
-    // the shell stays in its empty state rather than firing a doomed
-    // unauthenticated request.
-    if (!getToken()) {
+  const signIn = useCallback(
+    async (token) => {
+      let result;
+      try {
+        result = await apiWrite(SESSION_PATH, { method: "POST", body: { token } });
+      } catch {
+        setAuthNotice("failed");
+        return;
+      }
+      if (!result.ok) {
+        // A 403 is explained by the origin notice apiWrite raised.
+        setAuthNotice(result.status === 401 ? "rejected" : result.status === 403 ? null : "failed");
+        return;
+      }
+      setAuthNotice(null);
+      try {
+        await refresh();
+      } catch (error) {
+        // Central issued the cookie but the browser did not send it back.
+        if (error?.status === 401) {
+          setAuthNotice("blocked");
+        }
+      }
+    },
+    [refresh],
+  );
+
+  const signOut = useCallback(async () => {
+    let result = null;
+    try {
+      result = await apiWrite(SESSION_PATH, { method: "DELETE" });
+    } catch {
+      // Central did not answer: the cookie may still be set, so stay signed in.
+    }
+    if (result === null || !result.ok) {
+      setAuthNotice("signOutFailed");
       return;
     }
-    // A failed initial load leaves Plane A null; the next poll retries.
+    // Any read in flight overlapped this write and is dropped by the fence.
+    setSnapshot(null);
+    setAuth("signedOut");
+    setAuthNotice(null);
+    setRefreshFailed(false);
+  }, [setAuth]);
+
+  const dismissOriginRefused = useCallback(() => setOriginRefused(false), []);
+
+  useEffect(() => {
+    // The first Plane A read decides whether this browser is signed in. A failed
+    // (non-401) initial load leaves Plane A null; the next poll retries.
     refresh().catch(() => {});
   }, [refresh]);
 
   useEffect(() => {
     let id = null;
     const tick = () => {
-      // The token is read fresh on every tick; with none in hand a read is
-      // doomed, so it is skipped until Connect.
-      if (!getToken() || pollingRef.current) {
+      // Signed out, a read is doomed, so it is skipped until Sign in.
+      if (authRef.current === "signedOut" || pollingRef.current) {
         return;
       }
       pollingRef.current = true;
@@ -178,8 +245,28 @@ export function SnapshotProvider({ children }) {
   }, [refresh]);
 
   const value = useMemo(
-    () => ({ snapshot, refresh, authRejected, refreshFailed }),
-    [snapshot, refresh, authRejected, refreshFailed],
+    () => ({
+      snapshot,
+      refresh,
+      auth,
+      authNotice,
+      signIn,
+      signOut,
+      refreshFailed,
+      originRefused,
+      dismissOriginRefused,
+    }),
+    [
+      snapshot,
+      refresh,
+      auth,
+      authNotice,
+      signIn,
+      signOut,
+      refreshFailed,
+      originRefused,
+      dismissOriginRefused,
+    ],
   );
   return React.createElement(SnapshotContext.Provider, { value }, children);
 }
@@ -189,13 +276,17 @@ export function SnapshotProvider({ children }) {
  *
  * Returns the current atomic snapshot, a refresh fn that replaces Plane A
  * wholesale and NEVER merges into Plane B (it resolves null when its read was
- * superseded or fenced off by a write), `authRejected` (true once a fetch was
- * refused for a bad operator token) and `refreshFailed` (true while the newest
- * applied refresh failed). Must be used within a SnapshotProvider so every
- * region and useMutate share one Plane A.
+ * superseded or fenced off by a write), the sign-in state `auth` with its
+ * `authNotice`, `signIn(token)` and `signOut()`, `refreshFailed` (true while the
+ * newest applied refresh failed) and `originRefused` (Central refused a write
+ * for its origin; `dismissOriginRefused` clears it). Must be used within a
+ * SnapshotProvider so every region and useMutate share one Plane A.
  *
  * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot|null>,
- *            authRejected: boolean, refreshFailed: boolean}}
+ *            auth: Auth, authNotice: AuthNotice,
+ *            signIn: (token: string) => Promise<void>, signOut: () => Promise<void>,
+ *            refreshFailed: boolean, originRefused: boolean,
+ *            dismissOriginRefused: () => void}}
  */
 export function useSnapshot() {
   const value = useContext(SnapshotContext);

@@ -15,9 +15,9 @@ import os
 import time
 
 import pytest
-from operator_harness import inventory, operator_server, pause_page_clock
+from operator_harness import inventory, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
-from test_registry import ADMIN, enroll
+from test_registry import enroll
 
 from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
@@ -59,12 +59,6 @@ def _seed(registry):
     return player_id
 
 
-def _connect(page, origin):
-    page.goto(origin + "/console")
-    page.get_by_label("Operator token").fill(ADMIN)
-    page.get_by_role("button", name="Connect", exact=True).click()
-
-
 def _open_commissioning(page):
     """Select the seeded frame and open its Commissioning facet; return the facet.
 
@@ -83,7 +77,7 @@ def _open_commissioning(page):
 def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registry):
     player_id = _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         # (R4 placeholder, probe b) The Commissioning facet is reachable within
@@ -120,7 +114,7 @@ def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry)
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         expect(inspector.get_by_text("not yet available")).to_have_count(2)
@@ -141,7 +135,7 @@ def test_commissioning_provenance_frame_facts_vs_display_at_player_start(page, r
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         frame_facts = inspector.get_by_role("group", name="Frame facts")
@@ -176,7 +170,7 @@ def test_calibration_drag_to_convex_updates_draft(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         editor = inspector.get_by_role("group", name="Adjust calibration")
@@ -207,7 +201,7 @@ def test_calibration_folded_quad_snaps_back_no_request(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         inspector.get_by_role("spinbutton", name="Corner 1 x").fill("0.9")
@@ -232,7 +226,7 @@ def test_calibration_thin_quad_is_rejected_client_side(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         inspector.get_by_role("spinbutton", name="Corner 3 y").fill("0.0000005")
@@ -246,7 +240,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
     """A snapshot refresh mid-edit leaves the Plane B draft intact (two-plane).
 
     The operator edits the trying SDR gain; meanwhile committed calibration moves
-    underneath (a commit from elsewhere), and a Plane A refresh (Connect) is
+    underneath (a commit from elsewhere), and a Plane A refresh (Refresh) is
     triggered. Plane A visibly updates (the committed read-back shows the NEW
     gain, proving the refresh was real and non-vacuous) while Plane B (the draft
     input) persists — because useDraft is a separate, refresh-proof state cell.
@@ -256,7 +250,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
 
         committed = inspector.get_by_role("group", name="Committed calibration")
@@ -274,7 +268,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
 
         # Trigger a Plane A refresh. Plane A updates (committed now 1.2) — the
         # refresh is real — but Plane B (the draft) must NOT be clobbered.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
         expect(committed).to_contain_text("1.2")
         expect(gain).to_have_value("1.9")
 
@@ -324,7 +318,7 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -344,7 +338,7 @@ def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, re
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
         gain.fill("1.9")
@@ -377,7 +371,7 @@ def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, regis
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -388,7 +382,7 @@ def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, regis
         # not move (server-authoritative expiry, not countdown-driven).
         registry.clock.advance(31)
         # Deterministically drive the overtake/expiry poll via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         expect(lease.get_by_role("alert")).to_contain_text("Panel is back on committed")
         # Trying retained in Plane B -> Re-preview offered.
@@ -415,7 +409,7 @@ def test_calibration_stale_commit_conflicts_on_revision(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -442,7 +436,7 @@ def test_calibration_stale_commit_conflicts_on_generation(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -464,7 +458,7 @@ def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -475,7 +469,7 @@ def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
             FRAME, "commit", expected_revision=2,
             calibration=Calibration(gain=1.2), expected_generation=1)
         # Drive the overtake poll deterministically via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
 
@@ -504,7 +498,7 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
     _seed(registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 
@@ -518,7 +512,7 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
             FRAME, "preview", expected_revision=2,
             calibration=Calibration(gain=1.7), expected_generation=1)
         # Drive the overtake poll deterministically via a Plane A refresh.
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.get_by_role("button", name="Refresh", exact=True).click()
 
         # The overtaken banner shows (§4b copy)...
         expect(lease.get_by_role("alert")).to_contain_text("your preview was superseded")
@@ -552,7 +546,7 @@ def test_manual_revert_clears_preview_and_returns_draft_to_committed(page, regis
     _seed(registry)  # committed gain 1.5
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         inspector = _open_commissioning(page)
         lease = _lease(inspector)
 

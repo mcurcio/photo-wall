@@ -15,9 +15,15 @@ import re
 import time
 
 import pytest
-from operator_harness import operator_server, pause_page_clock, report_readiness, tile_health
+from operator_harness import (
+    operator_server,
+    pause_page_clock,
+    report_readiness,
+    sign_in,
+    tile_health,
+)
 from playwright.sync_api import expect
-from test_registry import ADMIN, enroll
+from test_registry import enroll
 
 from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
@@ -53,16 +59,10 @@ def _seed(registry):
         width_mm=400, height_mm=300, profile=LANDSCAPE))
 
 
-def _connect(page, origin):
-    page.goto(origin + "/console")
-    page.get_by_label("Operator token").fill(ADMIN)
-    page.get_by_role("button", name="Connect", exact=True).click()
-
-
 def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The placed frame renders ON THE PLAN (default Surface "wall"), located
         # by its accessible identity label, not by coordinates.
@@ -125,7 +125,7 @@ def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, re
     # The Player is heard, so each tile's health reaches its display/commissioning rows.
     report_readiness(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The frame a live Run targets shows the intended now-showing chip -- the
         # scene_id joined by the STRING "frame:<id>" -- plus its phase, located by
@@ -155,7 +155,7 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
     # live Run targets. `player_id` is the Player the frame is bound to.
     player_id = _seed_now_showing(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # Selecting the frame on the plan (by identity) opens its read-only
         # Inspector, scoped to that frame's identity.
@@ -192,7 +192,7 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
 def test_surface_filter_switches_the_plan(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # Default Surface "wall" shows its placed frame.
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
@@ -276,7 +276,7 @@ def _fill_landscape_profile(page):
 def test_drag_create_posts_frame_with_scaled_placement(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
@@ -308,7 +308,7 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
 def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         posts = []
         page.on("request", lambda request: posts.append(request.url)
                 if request.method == "POST" and request.url.endswith("/v1/operator/frames")
@@ -331,7 +331,7 @@ def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
 def test_a_taken_frame_id_says_so(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
         page.get_by_label("Frame id", exact=True).fill("origin-seed")
         _fill_landscape_profile(page)
@@ -343,7 +343,7 @@ def test_a_taken_frame_id_says_so(page, registry):
 def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
@@ -377,7 +377,7 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
         id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         box = _plan_box(page)
 
@@ -408,7 +408,7 @@ def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
-        _connect(page, origin)
+        sign_in(page, origin)
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         box = _plan_box(page)
 
@@ -467,7 +467,7 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         # Select the clear frame on the plan, then delete it via its control.
         page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
@@ -487,7 +487,7 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
 def test_delete_bound_frame_shows_unbind_guidance(page, registry):
     _seed_bound(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         page.get_by_role("button", name=f"Frame {BOUND}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {BOUND}", exact=True).click()
         _confirm_delete(page)
@@ -506,7 +506,7 @@ def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
     # first, so DELETE is refused with frame_in_use (not frame_bound).
     _seed_now_showing(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {SHOWING}", exact=True).click()
         # The dialog lists the live Run it captured when it opened.
@@ -524,7 +524,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
         id=ORIGIN, surface_id="wall", x_mm=0, y_mm=0,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
         tray = page.get_by_role("group", name="Unplaced frames")
         item = tray.get_by_role("button", name=ORIGIN, exact=True)
         expect(item).to_be_visible()
@@ -577,7 +577,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
 def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The global bar shows the snapshot age in the "updated N s ago" form.
         expect(page.get_by_text(re.compile(r"updated \d+ s ago"))).to_be_visible()
@@ -597,7 +597,7 @@ def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
 def test_health_pill_renders_a_health_state(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         # The /healthz pill reports central reachable (DB up in the test harness),
         # located by its accessible name, not by coordinates.
@@ -609,7 +609,7 @@ def test_health_pill_renders_a_health_state(page, registry):
 def test_guidance_banner_is_dismissible_and_dismissal_survives_refresh(page, registry):
     # No frames seeded -> first-run empty wall -> the guidance banner shows.
     with operator_server(registry.db, registry.clock) as origin:
-        _connect(page, origin)
+        sign_in(page, origin)
 
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()
