@@ -43,9 +43,20 @@ The operator cannot tell whether anything is broken:
 | `REQUEST_TIMEOUT` | 15 s | `central_link.py:27` |
 | `SILENT_AFTER_SECONDS` | `2*REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL` = **31.5 s** | new |
 
-**Why that formula.** The threshold tolerates exactly one failed session cycle. A failing request can hang for up to `REQUEST_TIMEOUT` before the cycle ends. The Player then sleeps `SESSION_BACKOFF[0]`. The retry cycle then gets up to one more `REQUEST_TIMEOUT` to deliver its first report, plus one `REPORT_INTERVAL`. A gap longer than that means more than one failed cycle.
+**Why that formula (checked against the real loop).**
+- **The failing cycle:** one control iteration issues `poll_state` and then the readiness POST, each allowed `REQUEST_TIMEOUT` (`service.py:862-871`). A failing cycle can therefore take `2*REQUEST_TIMEOUT` after the last accepted report.
+- **The backoff:** after a session of 30 s or longer, `attempt` resets and the Player sleeps `SESSION_BACKOFF[0]` (`service.py:949-962`).
+- **The retry:** the retry cycle issues about 5 requests before its first report: locate, time probe, `poll_state`, the loop's `poll_state`, then readiness (`service.py:918-930,862-871`).
+- **What the threshold covers:** it allows **one failed cycle against a Central that answers the retry promptly**: `2*REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL`.
+- **Stated costs:**
+  - A Central answering near its timeout makes a live Player read as silent. The five retry requests alone can take up to 75 s.
+  - A Player that flaps (a second failure within 30 s) gets `SESSION_BACKOFF[1]` = 5 s and may briefly read as silent.
+- **Why not reuse the watchdog model:** the watchdog test models the *slowest healthy* cycle (`tests/test_player_link_guards.py:520-528`: `BACKOFF[-1] + LOCATE_DEADLINE + MDNS_TIMEOUT + 8*REQUEST_TIMEOUT`, over 180 s). That is far too slow for display. Sharing one model would mean moving the locate and mDNS deadlines into `contracts/`, which is not cheap, so it is not done.
+- **The earlier "1+5+15 = 21 s" rationale was wrong.**
 
-The earlier "1+5+15 = 21 s" reasoning ignored the 15 s hang and was wrong. The Player imports all three inputs from this module. Central serves the derived value as `InstallationInventory.silent_after_seconds`, and `health.js` reads it from the snapshot, so no copy of the number exists anywhere else. A pytest pins both the formula and the Player's imports.
+**One source, no copies.** `player.service` keeps the name `BACKOFF`, bound to `contracts.liveness.SESSION_BACKOFF`. The 17 tests that monkeypatch `player.service.BACKOFF` therefore need no change: `test_player_link_guards.py:22,110,264,324,350,533`, `test_player_service.py:520,621,654,680,1356,1389` and `test_player_uplink_faults.py:74,102,125,142,171`. All of them are session-cycle tests.
+
+The media-download retry (`service.py:796-797`) gets its own local `MEDIA_RETRY_BACKOFF`, because it is not a liveness contract. Central serves the derived value as `InstallationInventory.silent_after_seconds`, and `health.js` reads it from the snapshot. A pytest pins the formula and the Player's bindings.
 
 **Ages use Central's clock, frozen at read time.** `age = read_at − timestamp`. No browser clock is involved, and nothing ticks between reads. **Labels:** "Last heard N s ago" and "Enrolled N s ago, no report yet". Never "LIVE", "online", or "connected".
 
@@ -60,7 +71,9 @@ The earlier "1+5+15 = 21 s" reasoning ignored the 15 s hang and was wrong. The P
 | `InstallationInventory.with_liveness(self, reports: PlayerReports) -> InstallationInventory` | installation_models | A pure copy: it sets each Player's `last_report_at`, sets `read_at = max(reports.read_at, every last_seen)`, and sets `silent_after_seconds` from `contracts.liveness`. |
 | `GET /v1/operator/inventory` (`app.py:524-530`) | app (composition root) | Returns `registry.inventory().with_liveness(coordinator.player_reports_lock_free())`. The reports are read **after** the inventory. Still admin-only. |
 
-**Invariant: every timestamp in the payload is ≤ `read_at`.** This holds by construction (the reports are read later, and both reads use `max`), so no age can be negative even if the wall clock steps backward.
+**Invariant: every `last_seen` and `last_report_at` in the payload is ≤ `read_at`.** It holds by construction (the reports are read later, and both reads use `max`), so no liveness age can be negative. The invariant does not cover `preview_expires`, which is in the future by design.
+
+**Cost of the clamp.** If the wall clock steps backward, `read_at` is pinned to the newest timestamp, so the ages it reports are *smaller* than the truth. A Player can look fresher, and silence is delayed, until the clock catches up. I chose to delay a warning over showing a negative or nonsense age.
 
 **Designed twice.**
 - **A (chosen): raw facts on the existing inventory, classified in the console.** This follows the `join.js` convention, keeps the one atomic snapshot, and adds no route.
@@ -126,7 +139,12 @@ A new `AttentionStrip.jsx`, directly under the status bar.
 - **One poller.** `SnapshotProvider` refreshes every 5 s while the tab is visible. On each tick it reads `getToken()` fresh; it never uses a captured token. 5 s matches the calibration overtake poll (`useCalibration.js:16`), whose own timer (`useCalibration.js:204-209`) is deleted. Its detection effect (`:133-200`) still runs on every snapshot.
 - **Hidden tabs.** The interval is cleared when the tab is hidden. When it becomes visible again, the poller refreshes immediately and restarts. This replaces the listeners at `useSnapshot.js:116-141`.
 - **Newest request wins.** Every refresh (poll, mutation or manual) takes an increasing ticket. A response is applied only if its ticket is newer than the last one applied. The same check guards the **error and 401 branches**, so a stale 401 or 5xx cannot clear the token or overwrite a newer success. Polls are single-flight, because the 15 s fetch timeout (`useSnapshot.js:36`) is longer than the 5 s interval.
-- **Write fence.** `apiWrite.js` keeps a write counter, bumped at the **start** of every write, including calibration preview (`useCalibration.js:31`). A refresh records the counter when it starts, and its response is dropped if a write started after that. The refresh `useMutate` issues after a write (`useMutate.js:24-25`) starts after the bump, so it is kept.
+- **Write fence.** `apiWrite.js` keeps a write counter.
+  - It is bumped at the **start** and again at the **completion** of every **non-GET** call, including calibration preview (`useCalibration.js:31`). GETs routed through `apiWrite` do not bump it; for example, the candidates read at `SceneAuthoring.jsx:402-405`.
+  - A refresh records the counter when it starts. Its response is dropped if the counter has moved since, which covers a write that was in flight or finished while the refresh was running.
+  - The refresh `useMutate` issues (`useMutate.js:24-25`) starts after the completion bump, so it is kept.
+  - A dropped poll releases the single-flight slot in a `finally`, so the next tick runs.
+  - **Cost:** bounded starvation. While writes run back to back (for example, repeated calibration previews), every overlapping poll is dropped, and the snapshot lags by the length of that burst.
 - **The draft plane is untouched.** A refresh replaces Plane A only. `useDraft` re-seeds only when `frameId` changes (`useDraft.js:62-73`), and `useCalibration` re-baselines only per frame (`:116-127`). Plan drag state lives in a ref and local state.
 - **Stale-snapshot notice.** The status bar reads "updated N s ago — last refresh failed" only after a refresh has actually failed. It is never inferred from age, so there is no flash when returning to the tab.
 - **Cost:** three GETs every 5 s per open tab, because the snapshot stays atomic (design §4a).
@@ -139,7 +157,8 @@ A new `AttentionStrip.jsx`, directly under the status bar.
 | The Player is alive but Central rejects its reports | "Player silent · last heard …". This is honest: the label says heard, not offline | Test |
 | A Player crash-loops through re-enrollment | Never `ok`. Each enrollment bumps the epoch, so no current report exists. It shows as `awaiting-report`, but because every loop resets the enrolled age, a loop faster than 31.5 s **stays a to-do and never reaches alarm**. Stated limit; slice 1b | Test (never ok) |
 | Offer backpressure: 64 offers in an epoch, then no new offer (`coordination.py:435-437`) | Once the last offer expires, reports fail `unknown_offer` and the frame goes silent. The cause (an execution event) is not surfaced | Test (silent) |
-| The scheduler stalls | The pill shows "scheduler stale" within 10 s (`app.py:54`). Frames stay healthy until the last offers expire, **300–330 s later** (`coordination.py:53-54,398-399`). Then they go silent and the strip shows its one causal line | Test |
+| `advance()` hangs while **holding** `COORDINATION_LOCK` | Readiness needs the same lock, and `lock_timeout` is 5 s (`coordination.py:172-176,597`), so every report fails and frames go silent within about `SILENT_AFTER_SECONDS`. The pill shows "scheduler stale" within 10 s (`app.py:54`), and the strip shows its one causal line | Test |
+| The scheduler task **stops** (no lock held) | Reports are still accepted against live offers until they expire, **300–330 s** later (`coordination.py:53-54,398-399`). Then frames go silent. The pill shows "scheduler stale" throughout | Test |
 | Central is unreachable | Frozen states, and the pill reads "unreachable". Silence is never inferred from browser time | Structural |
 | A display is unplugged after boot | Not detected until the Player restarts | None. Needs a protocol change (§12) |
 | A poll started before a write lands after it | Dropped by the write fence | Test |
@@ -155,7 +174,7 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
 
 | Bead | Files and change |
 |---|---|
-| **1 Liveness facts** (Python) | **New `contracts/liveness.py`.** **`player/service.py`:** import `SESSION_BACKOFF` and `REPORT_INTERVAL`, dropping the local `BACKOFF` and `.5`. **`player/central_link.py`:** import `REQUEST_TIMEOUT`. **`central/coordination.py`:** add `PlayerReports` and `player_reports_lock_free()`. **`central/installation_models.py`:** add the three fields and `with_liveness`. **`central/app.py`:** compose the inventory route. **`tests/test_registry.py:388-400`:** the equality check now compares against `registry.inventory().with_liveness(...)`. Plus the new pytest cases from §11. |
+| **1 Liveness facts** (Python) | **New `contracts/liveness.py`.** **`player/service.py`:** set `BACKOFF = SESSION_BACKOFF` (the name is kept, so there is no test churn), import `REPORT_INTERVAL` in place of `.5`, and give the media retry (`:796-797`) its own local `MEDIA_RETRY_BACKOFF`. **`player/central_link.py`:** import `REQUEST_TIMEOUT`. **`central/coordination.py`:** add `PlayerReports` and `player_reports_lock_free()`. **`central/installation_models.py`:** add the three fields and `with_liveness`. **`central/app.py`:** compose the inventory route. **`tests/test_registry.py:388-400`:** the equality check now compares against `registry.inventory().with_liveness(...)`. Plus the new pytest cases from §11. |
 | **2 Classifier and labels** | **New `health.js`.** **`join.js`:** delete `connectivity`. Route everything through `health.js` in `Plan.jsx`, `Inspector.jsx` (health header), `Commissioning.jsx` (lines 3, 122-123, 471-490: "Display at last Player start", Detected / Not detected), `BindingFacet.jsx:86` (`isBound`, plus "Last heard"), `EquipmentRail.jsx`, `Showrunner.jsx:52-70` and `UnplacedTray.jsx`. **Tests updated in this bead:** `test_operator_wall_browser.py:135,141`; `test_operator_commissioning_browser.py:152-154`, with the test renamed to `…_frame_facts_vs_display_at_player_start` and its `conftest.py:46` CHECKS key renamed with it; `test_operator_showrunner_browser.py:179,182`. |
 | **3 Polling and fence** | `useSnapshot.js` (poller, ticket, fence check, `useHealth` returns `{status, reason}`), `apiWrite.js` (write counter), `useCalibration.js` (delete the interval), `App.jsx` (pill text; "last refresh failed"). `test_operator_wall_browser.py:512` still passes because the `aria-label` prefix is kept. |
 | **4 Strip and navigation** | New `AttentionStrip.jsx`; `App.jsx` (`selectFrame(id, facet)`, `facetFor`, surface switch); `Inspector.jsx` (focus and conditional scroll on strip navigation only). |
@@ -165,14 +184,14 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
 ## 11. Tests and mutation probes
 
 **pytest (Bead 1).**
-1. The derivation equals `2*REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL`, and `player.service` and `player.central_link` use the `contracts.liveness` objects.
+1. The derivation equals `2*REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL`. `player.service.BACKOFF is SESSION_BACKOFF`, and `player.central_link` uses the `contracts.liveness` objects.
 2. An accepted report sets `last_report_at`. *Precondition:* advance `ManualClock` between enroll and readiness, so that `received_at ≠ last_seen`.
 3. **Unbound-Player service test**, over HTTP: enroll with no binding. Read the inventory **before `advance()`** and see `last_report_at` null. After `advance()`, `/v1/player/state` returns an empty plan, `POST /v1/player/readiness` is accepted, and `last_report_at` is set.
 4. Enrolled, no report: `last_report_at` is null and `last_seen` is set.
 5. Re-enrollment (epoch bump) hides the old report.
 6. A retired Player has no report.
 7. A rejected report (`stale_binding`) leaves `last_report_at` unchanged.
-8. **Non-negative age:** after the `ManualClock` is set backward, every timestamp is still ≤ `read_at`.
+8. **Non-negative age:** after the `ManualClock` is set backward, every `last_seen` and `last_report_at` is still ≤ `read_at`.
 9. **The route answers while `COORDINATION_LOCK` is held** by another connection, well within the statement timeout.
 10. `silent_after_seconds` is served.
 
@@ -188,7 +207,9 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
   - While hidden, fast-forwarding 30 s issues no inventory GET.
   - A delayed stale poll (held by `page.route`) is dropped after a newer Refresh.
   - A stale 401 does not log the operator out.
-  - A poll that started before a bind is dropped.
+  - A poll that started before a bind, or that was in flight when the bind completed, is dropped, and the next tick still runs (single-flight is released).
+  - A GET through `apiWrite` does not drop a poll.
+  - **Threshold pin:** a Player whose last report is 25 s old reads "Last heard 25 s ago", and one 32 s old reads "Player silent". 25 s sits between the old 21 s threshold and the new 31.5 s.
   - **A drag across a poll** ends in the dragged placement.
   - **A calibration preview across polls** keeps its draft and countdown.
 - *Bead 4:*
@@ -210,12 +231,13 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
 | Source `last_report_at` from `last_seen` | pytest 2 (needs its clock precondition) |
 | Take `COORDINATION_LOCK` in the read | pytest 9 |
 | Remove the `max` in `read_at` | pytest 8 |
-| Hard-code 21 in `health.js` | pytest 1 or the silent browser test |
+| Hard-code 21 in `health.js`, ignoring `silent_after_seconds` | Threshold-pin browser test (the 25 s case) |
 | Let `awaiting-report` fall through to `ok` | Enrolled browser test |
 | Swap rows 3 and 5 | Strip facet test |
 | Remove the visibility pause | Hidden test |
 | Remove the ticket check on the error branch | Stale-401 test |
-| Remove the write fence | Poll-before-bind test |
+| Remove the write fence, or bump it only at start | Poll-before-bind test (the in-flight-at-completion case) |
+| Bump the fence on GET | The apiWrite GET test |
 | Restore the facet reset | Strip facet test |
 | Delete the light block | Theme test |
 | Add `white-space: nowrap` to ids | 390 px test |
@@ -249,3 +271,4 @@ Beads 1 and 2 run back to back. An accepted report flows through `player_reports
   - One classifier, and one place that shows Central health.
   - Beads reordered so each lands green.
   - Failures deferred to slice 1b.
+- 2026-09-27, review round 2 (final): the threshold rationale was re-derived from the real Player loop (2×timeout per failing cycle), with its slow-Central cost stated; `BACKOFF` is kept as an alias, and the media retry gets its own constant; the write fence now bumps at start and completion, for non-GET calls only, and states its starvation cost; the clock-step cost is stated and the invariant narrowed; the lock-holding scheduler stall is corrected to silence within the threshold; the threshold mutation probe is pinned at 25 s.
