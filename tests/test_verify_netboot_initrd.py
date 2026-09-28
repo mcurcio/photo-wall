@@ -87,6 +87,9 @@ REQUIRED_CACHED = [
     ("socket stdlib module", f"{_PREFIX}/socket.py"),
     ("boot script", "scripts/photowall-netboot"),
     ("configure_networking helper", "scripts/functions"),
+    ("mount helper", "usr/bin/mount"),
+    ("umount helper", "usr/bin/umount"),
+    ("modprobe helper", "usr/sbin/modprobe"),
 ]
 
 
