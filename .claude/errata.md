@@ -1748,3 +1748,32 @@ doc softenings.
   place (§5, §6, §7, §9, §11, History), together with the review fix cycle 1 decisions: the boot
   outcome label branches on `boot_outcome` first; one clear-on-conflict policy for binds; a shared
   `useConfirm` hook; "Reported serial"; a 5xx answer is outcome unknown. No open slice 2 errata.
+- 2026-09-28, console pass 2 slice 3A (docs/operator-console-ux-pass2-showrunner.md), implementer
+  findings, beads 3A-1..3A-6 plus the useConfirm fallback test (none changes the frame; all are
+  slice-page corrections for docs bead 3A-7):
+  (a) §3 module map has no home for the shared reasons machinery. Added `Field.jsx` (`useProblems`,
+  `Field`, `IdentityFields`, `ProblemSummary`): one hook for touched/submitted reasons, the summary
+  frozen at submit and first-field focus, used by the Scene, Program, activation and Source forms.
+  `useProblems.check(list)` takes the list of the action submitted (the Programs form has two).
+  (b) §3: the precedence rendering shared by the Now-showing facet and the Runs Why panel is
+  `PrecedenceExplanation`, exported from `NowShowingFacet.jsx` (no new module).
+  (c) Bead 3A-1 file list widened: `contracts/models.py` gains an `IDENTIFIER_PATTERN` constant
+  (Identifier is built from it, as TARGET_ID_PATTERN is), so the pin in `tests/test_registry.py` compares
+  literals. Bead 3A-3's /runtime check is a new `tests/test_operator_runtime.py`.
+  (d) §3/§9 TargetPicker: Surface groups are named "Frames on <surface>" (and "Frames not on any
+  wall"), not "Surface <id>": the R4 test asserts `get_by_label("Surface")` (substring) finds nothing
+  in Showrunner mode. A frame id outside the target rule (§1's legacy `:` id) is listed with that
+  reason and cannot be ticked — §1 confirms the defect but no bead named the fix; built in 3A-4.
+  (e) §8: `protected_frames` lists only served Runs that protect at least one frame (empty sets are
+  omitted).
+  (f) §6/§17: once bead 3A-6's "window has already ended" reason exists the form cannot create an
+  ended window, so the rewritten `:760` test sets up its missed and warm-restart Programs through the
+  Runtime directly (as served facts), not the form.
+  (g) §7 Source form: "Taken until" is exclusive (the start of that local day), matching the spec's
+  "'Taken until' must be after 'Taken from'" and `SourceSpec`'s strict interval; both fields are
+  hinted. The form also clears after a successful save, like Scenes and Programs.
+  (h) §11 names no text for an admitted activation; built as "Started: Central admitted a Run of X."
+  A 4xx reads "Not started: <error>." The Programs form and the windows helper are one form; the
+  reasons beside its fields follow the action last tried.
+  (i) §6's "Loading compatible media…" state is left to 3B-2, whose file list owns the chooser labels
+  and loading.
