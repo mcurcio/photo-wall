@@ -500,7 +500,7 @@ The **Equipment** section (`#/equipment`) lists every Player in three groups, re
 
 Each group heading is a toggle showing its count, and its open or closed state survives a refresh. Players are listed in enrolment order. Each Player card shows:
 
-- **Reported serial.** The serial the Pi sent when it last netbooted. It is a claim, not proof: the console cannot confirm which physical box sent it.
+- **Reported serial.** The serial the Pi sent when it last netbooted. Its final six characters appear beside the Player's standing even when the card is collapsed; expand the card for the full serial and boot outcome. No serial suffix appears when there is no boot record. The serial is a claim, not proof: the console cannot confirm which physical box sent it.
 - **Boot outcome.** The last netboot result for that serial: healthy on a tag, pending (served a tag, base health not reported), or failed and rolled back. Pending is expected when the Pi provisioner uses the default global `.deb` path, which does not post base-health; it does not mean the enrolled Player is silent or unhealthy. "No netboot record" means the Pi never netbooted (for example a flashed card); its short handle then comes from the Player id and proves nothing physical.
 - **Each Output's state**: "Shows frame …" (bound), "Free", "No display detected at last Player start", or "Retired with its Player". A Player that reported no Outputs reads "No outputs reported".
 - **Liveness**: the same "Last heard" or "Enrolled" line as [wall health](#operator-console-wall-health-and-the-attention-strip).

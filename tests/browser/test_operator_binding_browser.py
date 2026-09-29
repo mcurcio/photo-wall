@@ -581,6 +581,56 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
 
 
+def test_collapsed_pending_cards_show_distinct_reported_serial_handles(page, registry):
+    first_serial = SERIAL
+    second_serial = "10000000c0ffee93"
+    first_player = _netbooted_player(registry, first_serial)
+    second_player = _netbooted_player(registry, second_serial)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = _group(page, "Pending players")
+        first = pending.get_by_role("button", name=first_player, exact=True)
+        second = pending.get_by_role("button", name=second_player, exact=True)
+        expect(first).to_be_visible()
+        expect(second).to_be_visible()
+
+        # The disclosure name remains the Player ID; the description carries the
+        # serial suffix so the two newly enrolled devices are distinguishable.
+        expect(first).to_have_accessible_description(re.compile(r"Serial …ffee42"))
+        expect(second).to_have_accessible_description(re.compile(r"Serial …ffee93"))
+        first.click()
+        second.click()
+        expect(first).to_have_attribute("aria-expanded", "false")
+        expect(second).to_have_attribute("aria-expanded", "false")
+        expect(first).to_have_accessible_name(first_player)
+        expect(second).to_have_accessible_name(second_player)
+        expect(first).to_have_accessible_description(re.compile(r"Serial …ffee42"))
+        expect(second).to_have_accessible_description(re.compile(r"Serial …ffee93"))
+
+        # Expanding still exposes the full serial and the existing commissioning action.
+        first.click()
+        expect(pending.get_by_text(f"Reported serial {first_serial}", exact=False)).to_be_visible()
+        expect(pending.get_by_role("button", name=f"Retire player {first_player}", exact=True)
+               ).to_be_visible()
+
+
+def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    page.route(NETBOOT, lambda route: route.fulfill(
+        status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = _group(page, "Pending players")
+        player = pending.get_by_role("button", name=player_id, exact=True)
+        expect(player).to_be_visible()
+        expect(pending).to_contain_text("Boot records unavailable")
+        expect(pending.get_by_text(re.compile(r"Serial …"))).to_have_count(0)
+        # The existing action remains available even when serial enrichment fails.
+        expect(pending.get_by_role("button", name=f"Retire player {player_id}", exact=True)
+               ).to_be_visible()
+
+
 def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")

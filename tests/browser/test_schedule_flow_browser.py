@@ -134,6 +134,7 @@ def test_priority_defaults_to_zero_shown_on_review_and_changes_under_advanced(pa
             "Priority 7")
 
 
+@pytest.mark.browser_context_args(timezone_id="America/Los_Angeles")
 def test_future_program_edit_posts_exact_expected_program_and_keeps_its_id(page, registry):
     """Editing opens at Review, disables the multi-window helper and replaces against
     the exact stored Program; the id stays fixed and only future Runs use the change."""
@@ -141,7 +142,7 @@ def test_future_program_edit_posts_exact_expected_program_and_keeps_its_id(page,
     runtime = _runtime(registry)
     runtime.command("set_scene", _console_scene("evening"))
     # These are the later occurrence of 01:30 in the 2026 Los Angeles fallback,
-    # then 02:30 PST. The browser suite runs with TZ=America/Los_Angeles.
+    # then 02:30 PST. The Playwright context uses America/Los_Angeles in CI too.
     baseline = Program(program_id="editable", scene_id="evening", starts_at=1793525400,
                        ends_at=1793529000, priority=2)
     runtime.command("set_program", baseline)

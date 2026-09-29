@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 Player serials on collapsed Equipment cards](2026-09-29-player-serial-summary.md):
+  pending Players remain distinguishable from their reported serial suffixes
+  without opening each card, with browser proof and identity limits.
 - [2026-09-29 repeated-hour Program edit](2026-09-29-program-repeated-hour-edit.md):
   exact saved-instants retained while editing an upcoming Program across a
   daylight-saving fallback, with model/browser proof and deployment limits.

@@ -378,7 +378,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
             )}
           </>
         }
-        unavailableReason="only upcoming Programs whose times can be represented exactly in this editor can be edited"
+        unavailableReason="only upcoming Programs with supported stored times can be edited"
         title={editingId === null ? "New Program" : `Edit Program ${editingId}`}
         steps={SCHEDULE_STEPS}
         formLabel={editingId === null ? "Schedule a Program" : `Edit Program ${editingId}`}
@@ -443,7 +443,7 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit }) {
                     <p className="field__hint program-list__edit-hint">
                       {state.state === "running" ? "Editing unavailable: this Program has an active Run; changes cannot alter it." :
                         state.state === "due" ? "Editing unavailable: its window has started." :
-                        !editableTime ? "Editing unavailable: this editor cannot preserve its exact times." :
+                        !editableTime ? "Editing unavailable: its times are outside this editor's supported range." :
                           state.state === "old" ? "Editing unavailable: its outcome details have expired." :
                             state.state === "missed" || state.state === "ran" ? "Editing unavailable: this Program has already ended." :
                               "Editing is available before the Program window starts."}

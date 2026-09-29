@@ -23,6 +23,14 @@ zone passed for replacing only the priority; it asserted that the HTTP
 replacement body preserved both original epoch values. The console production
 build and `git diff --check` passed during focused verification.
 
+The first hosted browser walkthrough at `3c15f9b` ran this test in UTC and
+failed its Los Angeles-specific display assertion; its other 274 browser
+tests passed. The test now sets its Playwright context to
+`America/Los_Angeles` directly, independent of the host timezone. The
+corrected focused test passed in the default host environment.
+The subsequent full local Chromium suite in that environment passed **277
+tests**, including the corrected test and two new Player-card checks.
+
 The full portable suite passed **2,549 tests**, skipped 919 database,
 browser and platform opt-in cases, and reported three warnings. The local
 PostgreSQL suite passed **3,178 tests**, skipped 289 browser and platform

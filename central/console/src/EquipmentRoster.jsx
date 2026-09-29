@@ -8,6 +8,7 @@ import {
   isBound,
   outputLabel,
   outputStates,
+  playerHandle,
   playerLiveness,
   playerSerial,
   playersInOrder,
@@ -212,6 +213,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
     const outputs = outputStates(snapshot, player.id);
     const liveness = standing.state === "retired" ? null : playerLiveness(snapshot, player.id);
     const serial = playerSerial(snapshot, bootFacts, player.id);
+    const serialHandle = serial === null ? null : playerHandle(snapshot, bootFacts, player.id);
     const boot = bootOutcomeLabel(bootFacts, player.device_id);
     const bootPending = bootFacts?.devices?.get(player.device_id)?.boot_outcome === "pending";
     return (
@@ -227,7 +229,13 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
           {player.id}
         </button>
         <p id={describedId} className="roster__standing">
-          {[standing.label, liveness?.label].filter(Boolean).join(" · ")}
+          {[
+            standing.label,
+            serialHandle === null ? null : `Serial …${serialHandle}`,
+            liveness?.label,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
         </p>
         {expanded && (
           <div id={detailsId} className="roster__details">
