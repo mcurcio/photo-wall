@@ -114,7 +114,7 @@ flowchart LR
 - **Vite:** `build.assetsInlineLimit: 0`, because Vite otherwise inlines small assets (the inline SVGs) as `data:` URLs, which the CSP blocks.
 - **MIME type:** the image is `python:3.12.11-slim-trixie` (`Dockerfile:4`). Python 3.12's built-in table has no `.woff2` entry (`MimeTypes(filenames=())` returns `None`, checked), and `/etc/mime.types` in the image is unverified. So the composition root registers `font/woff2` explicitly, and a test pins the served `Content-Type`. That is a one-line change to `central/app.py`, made after pass A lands.
 
-**Colour scheme and licensing.** The console follows `prefers-color-scheme`. We copy values only; values are facts, re-expressed as our own custom properties. No Svelte, utility strings or markup is copied, and `@immich/ui` is not a dependency. No logo, logo colour or `dist/assets` file is used. The wordmark is plain text. Five inline SVGs (menu, close, chevron, check, alert) are our own simple paths.
+**Colour scheme and licensing.** The console follows `prefers-color-scheme`. We copy values only; values are facts, re-expressed as our own custom properties. No Svelte, utility strings or markup is copied, and `@immich/ui` is not a dependency. No logo, logo colour or `dist/assets` file is used. The wordmark is plain text. Four inline SVGs (menu, close, chevron, check; `icons.jsx`) are our own simple paths; no alert icon was needed.
 
 ## 6. Navigation, routes and modules
 
@@ -178,7 +178,7 @@ flowchart TB
 - **(b) Log out:** the snapshot provider exposes `sessionEpoch`, bumped in `signOut()`. The shell is keyed on it, so Log out remounts the shell and discards every draft.
 - **(c) Prune effects:** flow prune effects are no-ops while the snapshot is `null`, so a missing snapshot never reads as "every frame was deleted".
 - **(d) Ownership:** bead 1b owns the `useSnapshot.js` and `App.jsx` edits, and a browser test forces a 401 mid-flow, signs in again and asserts the Scene draft's targets and per-frame selections survive.
-- **(e) Cost:** after a token rotation, the previous snapshot stays in a hidden DOM until someone signs in. It is not visible, but it is readable through dev tools.
+- **(e) Cost:** after a token rotation, the previous snapshot stays in a hidden DOM until someone signs in. It is not visible, but it is readable through dev tools. Log out in one tab deletes the shared session cookie, so another open tab sees it as an expired session: its sign-in overlay keeps that tab's snapshot and drafts, as for any expiry.
 - **Docs follow-up:** bead D updates `operator-console-ux-pass2-session.md` §7 and Question 4 (done).
 
 ## 7. The flows (defaults have a source)
@@ -329,7 +329,7 @@ More clicks for an expert; browser Back leaves a flow; hidden Show pages render 
 - **Frame profile.** No default can come from the Output: production Players enroll every connector at `width_px=0, height_px=0` (`player/output_discovery.py:59-60`). The profile must stay a visible, required choice with common presets. The `Plan.jsx:80` 1920×1080 default is unchanged in this pass.
 - **Display page** (a stepped Commissioning page with a leave guard).
 - **Setup checklist.**
-- **Icon set:** only five inline SVGs this pass, and no `@mdi/js`.
+- **Icon set:** only four inline SVGs this pass, and no `@mdi/js`.
 - **Pass B:** the tag picker, previews and their backend.
 - **Theme toggle.**
 
