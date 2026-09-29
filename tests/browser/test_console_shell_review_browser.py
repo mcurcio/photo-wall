@@ -12,8 +12,8 @@ import os
 import re
 
 import pytest
-from console_tasks import LABELS, author_scene, connect, go, show_now, visit
-from operator_harness import RequestGate, operator_server, sign_in
+from console_tasks import LABELS, author_scene, connect, current_hash, go, show_now, visit
+from operator_harness import INVENTORY, RequestGate, operator_server, sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import SCENE_ID, SOURCE, VALID_FRAME, _seed, _seed_source
 from test_registry import ADMIN, enroll
@@ -27,12 +27,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-INVENTORY = "**/v1/operator/inventory"
 NARROW = {"width": 390, "height": 844}
 
-
-def _hash(page):
-    return page.evaluate("window.location.hash")
 
 
 def _heading(page, section):
@@ -72,7 +68,7 @@ def test_a_section_chosen_as_the_first_snapshot_renders_is_not_replaced_by_landi
         sign_in(page, origin)
         expect(_heading(page, "wall")).to_be_visible()
         page.wait_for_timeout(300)  # any landing replace would have run by now
-        assert _hash(page) == "#/wall"
+        assert current_hash(page) == "#/wall"
         expect(_heading(page, "wall")).to_be_visible()
 
 
@@ -190,7 +186,7 @@ def test_browser_back_cancels_an_idle_show_confirmation_and_leaves_the_page_usab
         # Nothing invisible holds the page: no dialog is open, and the sidebar answers.
         assert page.evaluate("document.querySelector('dialog[open]')") is None
         go(page, "scenes")
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
 
         # Back on Now showing the idle confirmation is gone (cancelled, as Esc would), and
         # the Run was not cancelled.
@@ -260,10 +256,10 @@ def test_a_route_typed_before_the_first_snapshot_is_never_replaced(page, registr
         page.goto(origin + "/console#/equipment")
         expect(_heading(page, "equipment")).to_be_visible()
         page.wait_for_timeout(300)
-        assert _hash(page) == "#/equipment"
+        assert current_hash(page) == "#/equipment"
         visit(page, "#/nope")
         expect(_heading(page, "now")).to_be_visible()
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
 
 
 # --- The Surface follows a routed frame (item 4).
@@ -303,7 +299,7 @@ def test_show_all_focuses_the_needs_attention_heading(page, registry):
         strip.get_by_role("button", name="Show frames", exact=True).click()
         strip.get_by_role("link", name="Show all", exact=True).click()
         expect(_heading(page, "attention")).to_be_focused()
-        assert _hash(page) == "#/attention"
+        assert current_hash(page) == "#/attention"
         # Again from the page itself: the route does not change, and focus still moves.
         strip.get_by_role("button", name="Show frames", exact=True).click()
         strip.get_by_role("link", name="Show all", exact=True).click()
@@ -322,7 +318,7 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
             drawer.get_by_role("link", name="Scenes", exact=True).click(modifiers=["Control"])
         other.value.close()
         # This tab did not follow the link: still on Now showing, the drawer still open.
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
         expect(drawer).to_be_visible()
         page.keyboard.press("Escape")
         expect(menu).to_be_focused()

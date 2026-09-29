@@ -66,9 +66,10 @@ def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registr
         sign_in(page, origin)
         inspector = open_frame(page, FRAME, "commissioning")
 
-        # (R4 placeholder, probe b) The Commissioning facet is reachable within
-        # the Wall/Inspector context. Strengthened to show-layer-unreachable in
-        # Bead 12 once Showrunner mode exists.
+        # R4's positive control in a browser: the Commissioning facet is reachable in
+        # the Wall's Inspector. That the Show and neutral pages never reach it is
+        # tests/test_console_routes_r4.py (the module graph) and the sample-path visits
+        # in tests/browser/test_console_shell_browser.py.
         calibration = inspector.get_by_role("group", name="Committed calibration")
         expect(calibration).to_be_visible()
 

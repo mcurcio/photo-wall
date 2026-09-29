@@ -17,6 +17,7 @@ import pytest
 from console_tasks import (
     author_scene,
     connect,
+    current_hash,
     go,
     schedule_continue,
     schedule_form,
@@ -47,9 +48,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _hash(page):
-    return page.evaluate("window.location.hash")
-
 
 def _programs(page):
     return page.get_by_role("region", name="Programs", exact=True)
@@ -79,7 +77,7 @@ def test_schedule_it_prefills_the_scene_from_the_scene_flow_and_a_card(page, reg
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         scenes.get_by_role("group", name="Next for Scene saved-scene").get_by_role(
             "button", name="Schedule it", exact=True).click()
-        assert _hash(page) == "#/schedule/new/scene"
+        assert current_hash(page) == "#/schedule/new/scene"
         form = schedule_form(page)
         scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value("saved-scene")
@@ -87,7 +85,7 @@ def test_schedule_it_prefills_the_scene_from_the_scene_flow_and_a_card(page, reg
         # A card's "Schedule it" refills the untouched draft.
         go(page, "scenes")
         scenes.get_by_role("button", name="Schedule Scene evening", exact=True).click()
-        assert _hash(page) == "#/schedule/new/scene"
+        assert current_hash(page) == "#/schedule/new/scene"
         expect(scene).to_have_value("evening")
 
         # A changed draft is kept; the hand-over is offered, not forced.
@@ -95,7 +93,7 @@ def test_schedule_it_prefills_the_scene_from_the_scene_flow_and_a_card(page, reg
         form.get_by_label("Window start", exact=True).fill(WINDOW_START)
         go(page, "scenes")
         scenes.get_by_role("button", name="Schedule Scene saved-scene", exact=True).click()
-        assert _hash(page) == "#/schedule/new/scene"
+        assert current_hash(page) == "#/schedule/new/scene"
         expect(scene).to_have_value("evening")
         expect(form).to_contain_text("Your unsaved draft schedules Scene evening.")
         form.get_by_role("button", name="Schedule Scene saved-scene instead", exact=True).click()
@@ -148,7 +146,7 @@ def test_continue_checks_only_its_own_step(page, registry):
         summary = form.get_by_role("alert")
         expect(summary).to_have_text(re.compile("Choose a Scene."))
         expect(form.get_by_label("Scene", exact=True)).to_be_focused()
-        assert _hash(page) == "#/schedule/new/scene"
+        assert current_hash(page) == "#/schedule/new/scene"
 
         form.get_by_label("Scene", exact=True).select_option("evening")
         schedule_continue(page, "When")
@@ -161,7 +159,7 @@ def test_continue_checks_only_its_own_step(page, registry):
         expect(summary).to_contain_text("Enter when the window ends.")
         expect(summary).not_to_contain_text("Enter a name.")
         expect(start).to_be_focused()
-        assert _hash(page) == "#/schedule/new/when"
+        assert current_hash(page) == "#/schedule/new/when"
 
 
 def test_review_routes_each_problem_to_its_step_and_its_advanced(page, registry):
@@ -195,7 +193,7 @@ def test_review_routes_each_problem_to_its_step_and_its_advanced(page, registry)
         summary = form.get_by_role("alert")
         expect(summary).to_be_focused()
         summary.get_by_role("button", name="Between 1 and 60 windows.", exact=True).click()
-        assert _hash(page) == "#/schedule/new/when"
+        assert current_hash(page) == "#/schedule/new/when"
         count = form.get_by_label("Number of windows", exact=True)
         expect(count).to_be_focused()
         expect(form.get_by_role("button", name="Advanced", exact=True)).to_have_attribute(
@@ -228,7 +226,7 @@ def test_the_draft_survives_a_section_change_and_the_sidebar_says_draft(page, re
         resume = _programs(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
         expect(resume).to_be_visible()
         resume.click()
-        assert _hash(page) == "#/schedule/new/when"
+        assert current_hash(page) == "#/schedule/new/when"
         expect(form.get_by_label("Window start", exact=True)).to_have_value(WINDOW_START)
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Scene", exact=True).click()
@@ -245,14 +243,14 @@ def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, regis
         schedule_program(page, PROGRAM_ID, "evening", WINDOW_START, WINDOW_END)
         programs = _programs(page)
         expect(programs.get_by_role("status")).to_have_text(f"Scheduled Program {PROGRAM_ID}.")
-        assert _hash(page) == "#/schedule"
+        assert current_hash(page) == "#/schedule"
         card = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(card).to_contain_text("Scene evening")
         expect(card.get_by_role("button")).to_have_text(["Remove"])
         expect(_schedule_link(page)).to_have_accessible_description("")
 
         page.go_back()  # one Back leaves the section: no second #/schedule entry
-        assert not _hash(page).startswith("#/schedule"), _hash(page)
+        assert not current_hash(page).startswith("#/schedule"), current_hash(page)
         expect(schedule_form(page)).to_have_count(0)
         go(page, "schedule")
         expect(programs.get_by_role("button", name="Schedule a Program", exact=True)
@@ -305,14 +303,14 @@ def test_a_program_central_did_not_answer_may_have_been_saved_and_again_confirms
         expect(programs.get_by_role("status").filter(has_text="may have been saved")).to_have_text(
             f"Program {PROGRAM_ID} may have been saved: Central did not answer. "
             "Schedule Program again to confirm.")
-        assert _hash(page) == "#/schedule/new/review"
+        assert current_hash(page) == "#/schedule/new/review"
         expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
 
         with _put(page) as info:
             form.get_by_role("button", name="Schedule Program", exact=True).click()
         assert info.value.status == 200
         expect(programs.get_by_role("status")).to_have_text(f"Scheduled Program {PROGRAM_ID}.")
-        assert _hash(page) == "#/schedule"
+        assert current_hash(page) == "#/schedule"
         response = page.request.get(origin + "/v1/operator/runtime",
                                     headers={"Authorization": "Bearer " + ADMIN})
         assert sorted(response.json()["programs"]) == [PROGRAM_ID]

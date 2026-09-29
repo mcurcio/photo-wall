@@ -14,6 +14,7 @@ import re
 import pytest
 from console_tasks import (
     connect,
+    current_hash,
     go,
     show_advanced,
     show_form,
@@ -67,9 +68,6 @@ def _keys(page):
     return sent
 
 
-def _hash(page):
-    return page.evaluate("window.location.hash")
-
 
 def _covered(registry):
     """A Run of "evening" at priority 5 on VALID_FRAME; SCENE_ID on the same frame and
@@ -109,7 +107,7 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
             form.get_by_role("button", name="Activate now", exact=True).click()
         assert info.value.request.post_data_json["priority"] == 5
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
 
         # Central's plan puts the new Run on top of the frame.
         why = _runs(page).get_by_role("group", name="Why", exact=True)
@@ -182,7 +180,7 @@ def test_the_activation_key_outlives_steps_sections_the_wall_and_the_overlay(pag
         form = show_now(page, SCENE_ID, submit=False)
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(UNKNOWN)
-        assert _hash(page) == "#/now/show/review"
+        assert current_hash(page) == "#/now/show/review"
 
         # A step change and back: the form is unchanged.
         steps = page.get_by_role("navigation", name="Steps", exact=True)
@@ -208,7 +206,7 @@ def test_the_activation_key_outlives_steps_sections_the_wall_and_the_overlay(pag
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert len(sent) == 2 and len(set(sent)) == 1, sent
         assert len(_runs_of(page, origin, SCENE_ID)) == 1
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
 
 
 def test_changing_the_form_makes_a_new_activation(page, registry):
@@ -252,7 +250,7 @@ def test_an_activation_refused_as_signed_out_keeps_the_draft(page, registry):
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(
             "Not started: the session ended. Sign in again, then activate.")
-        assert _hash(page) == "#/now/show/review"
+        assert current_hash(page) == "#/now/show/review"
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
             form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
@@ -269,7 +267,7 @@ def test_a_scene_cards_show_now_opens_the_flow_on_that_scene(page, registry):
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         scenes.get_by_role("button", name=f"Show Scene {SCENE_ID} now", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
-        assert _hash(page) == "#/now/show/scene"
+        assert current_hash(page) == "#/now/show/scene"
         expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
 
         go(page, "scenes")
@@ -422,7 +420,7 @@ def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
         connect(page, origin, "now")
         form = show_now(page, SCENE_ID, priority=2, submit=False)
         _show_scene_card(page, "elsewhere")
-        assert _hash(page) == "#/now/show/scene"
+        assert current_hash(page) == "#/now/show/scene"
         scene = form.get_by_label("Scene to activate", exact=True)
         expect(scene).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
@@ -478,7 +476,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         expect(now_link).to_have_accessible_description("")
 
         _show_scene_card(page, "elsewhere")
-        assert _hash(page) == "#/now/show/scene"
+        assert current_hash(page) == "#/now/show/scene"
         expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
         expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
@@ -507,7 +505,7 @@ def test_an_activation_refused_for_its_origin_keeps_the_draft_and_its_key(page, 
         expect(_outcome(page)).to_have_text(
             "Not started: Central refused the request from this page. Reload the console "
             "from the address you signed in at, then activate.")
-        assert _hash(page) == "#/now/show/review"
+        assert current_hash(page) == "#/now/show/review"
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")):
             form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
@@ -539,7 +537,7 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
 
         # In flight, the operator picks another Scene's "Show now": the draft is kept.
         _show_scene_card(page, "elsewhere")
-        assert _hash(page) == "#/now/show/scene"
+        assert current_hash(page) == "#/now/show/scene"
         expect(scene).to_have_value(SCENE_ID)
         # The committed write's answer is lost.
         route = gate.held.pop(0)

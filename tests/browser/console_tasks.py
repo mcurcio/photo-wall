@@ -71,6 +71,11 @@ def go(page, section):
     expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
 
 
+def current_hash(page):
+    """The console's route as the location says it now (`#/…`)."""
+    return page.evaluate("window.location.hash")
+
+
 def visit(page, route):
     """Follow hash `route` ("#/…") in the loaded console, as a typed URL or a bookmark
     does: a new history entry, and no page load."""

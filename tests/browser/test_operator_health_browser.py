@@ -16,6 +16,7 @@ import time
 import pytest
 from console_tasks import connect, go, open_frame
 from operator_harness import (
+    INVENTORY,
     RequestGate,
     assert_fits_width,
     operator_server,
@@ -37,7 +38,6 @@ pytestmark = pytest.mark.skipif(
 
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 FRAME = "lobby-left"
-INVENTORY = "**/v1/operator/inventory"
 
 
 def _bound_frame(registry, frame_id=FRAME, *, x_mm=100, commissioned=True):

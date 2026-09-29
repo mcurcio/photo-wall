@@ -17,13 +17,21 @@ from console_tasks import (
     LIVE,
     author_scene,
     connect,
+    current_hash,
     go,
     scene_continue,
     scene_form,
     start_scene,
     visit,
 )
-from operator_harness import RequestGate, answer_first, operator_server, submit_sign_in
+from operator_harness import (
+    INVENTORY,
+    RequestGate,
+    answer_first,
+    drive_poll,
+    operator_server,
+    submit_sign_in,
+)
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from test_operator_showrunner_browser import (
@@ -47,9 +55,6 @@ pytestmark = pytest.mark.skipif(
 NARROW = {"width": 390, "height": 844}
 
 
-def _hash(page):
-    return page.evaluate("window.location.hash")
-
 
 def _scenes(page):
     return page.get_by_role("region", name="Scenes", exact=True)
@@ -64,13 +69,6 @@ def _scenes_link(page):
         "link", name="Scenes", exact=True)
 
 
-INVENTORY = "**/v1/operator/inventory"
-
-
-def _poll(page):
-    """Run the paused page clock to the next poll and wait for its inventory read."""
-    with page.expect_response(INVENTORY):
-        page.clock.run_for(5000)
 
 
 def _put_scene(page, origin, scene):
@@ -123,7 +121,7 @@ def test_kind_is_the_first_question_and_decides_the_steps(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         _scenes(page).get_by_role("button", name="New Scene", exact=True).click()
-        assert _hash(page) == "#/scenes/new/kind"
+        assert current_hash(page) == "#/scenes/new/kind"
         form = scene_form(page)
         # Live is the stated default; the stepper lists five steps for it.
         expect(form.get_by_label(LIVE, exact=True)).to_be_checked()
@@ -142,7 +140,7 @@ def test_kind_is_the_first_question_and_decides_the_steps(page, registry):
         expect(summary).to_contain_text("Choose a Source.")
         expect(summary).not_to_contain_text("Choose at least one frame.")
         expect(form.get_by_label("Source", exact=True)).to_be_focused()
-        assert _hash(page) == "#/scenes/new/photos"
+        assert current_hash(page) == "#/scenes/new/photos"
 
 
 def test_steps_replace_their_entry_and_back_leaves_the_flow_keeping_the_draft(page, registry):
@@ -159,7 +157,7 @@ def test_steps_replace_their_entry_and_back_leaves_the_flow_keeping_the_draft(pa
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        assert _hash(page) == "#/scenes/new/frames"
+        assert current_hash(page) == "#/scenes/new/frames"
         assert page.evaluate("history.length") == before + 1
         expect(_scenes_link(page)).to_have_accessible_description("Draft")
         expect(_scenes_link(page)).to_contain_text("Draft")
@@ -167,11 +165,11 @@ def test_steps_replace_their_entry_and_back_leaves_the_flow_keeping_the_draft(pa
         page.go_back()
         expect(_scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
                ).to_be_visible()
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         expect(_scenes_link(page)).to_have_accessible_description("Draft")
 
         _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
-        assert _hash(page) == "#/scenes/new/frames"
+        assert current_hash(page) == "#/scenes/new/frames"
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
 
 
@@ -187,7 +185,7 @@ def test_enter_submits_the_steps_continue(page, registry):
         seconds.fill("12")
         seconds.press("Enter")
         expect(form.get_by_label("Scene name", exact=True)).to_be_visible()
-        assert _hash(page) == "#/scenes/new/review"
+        assert current_hash(page) == "#/scenes/new/review"
         # Enter in the name submits Review's Save Scene.
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/enter-scene") and r.request.method == "PUT"
@@ -218,7 +216,7 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
             ["Choose a Source.", "Choose at least one frame."])
 
         summary.get_by_role("button", name="Choose a Source.", exact=True).click()
-        assert _hash(page) == "#/scenes/new/photos"
+        assert current_hash(page) == "#/scenes/new/photos"
         source = form.get_by_label("Source", exact=True)
         expect(source).to_be_focused()
         source.select_option(SOURCE)
@@ -370,7 +368,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         expect(blocked).to_be_visible()
         expect(scene_form(page)).to_have_count(0)
         _scenes(page).get_by_role("button", name="Resume", exact=True).click()
-        assert _hash(page) == "#/scenes/new/photos"
+        assert current_hash(page) == "#/scenes/new/photos"
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
         visit(page, "#/scenes/evening/edit/review")
         _scenes(page).get_by_role("button", name="Discard", exact=True).click()
@@ -389,7 +387,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         _scenes(page).get_by_role("button", name="Edit Scene morning", exact=True).click()
         dialog.get_by_role("button", name="Discard draft", exact=True).click()
         expect(form).to_contain_text("Editing morning · revision 1.")
-        assert _hash(page) == "#/scenes/morning/edit/review"
+        assert current_hash(page) == "#/scenes/morning/edit/review"
         # The discard is said, and opening the next instance does not silence it.
         expect(_scenes(page).get_by_role("status").filter(has_text="Discarded")).to_have_text(
             "Discarded the draft for Scene evening.")
@@ -415,7 +413,7 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         author_scene(page, "saved-scene", SOURCE, (VALID_FRAME,))
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         scenes = _scenes(page)
         expect(scenes.get_by_role("status")).to_have_text("Saved Scene saved-scene.")
         next_actions = scenes.get_by_role("group", name="Next for Scene saved-scene")
@@ -424,12 +422,12 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it"])
 
         page.go_back()
-        assert not _hash(page).startswith("#/scenes"), _hash(page)
+        assert not current_hash(page).startswith("#/scenes"), current_hash(page)
         go(page, "scenes")
         next_actions.get_by_role("button", name="Schedule it", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()
         # Bead 4: "Schedule it" opens the Schedule flow at its Scene step, prefilled.
-        assert _hash(page) == "#/schedule/new/scene"
+        assert current_hash(page) == "#/schedule/new/scene"
         expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
             "Scene", exact=True)).to_have_value("saved-scene")
 
@@ -459,20 +457,20 @@ def test_a_save_that_lands_after_the_operator_left_keeps_them_where_they_went(pa
         expect(_steps(page).get_by_role("button")).to_have_count(0)
 
         go(page, "now")
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
                                   and r.request.method == "PUT") as info:
             gate.release()
         assert info.value.status == 200
-        expect(_scenes_link(page)).to_have_accessible_description("")  # the draft ended
-        page.wait_for_timeout(300)
-        assert _hash(page) == "#/now"
+        # The draft ended: the write's `finish` has run, and left the location alone.
+        expect(_scenes_link(page)).to_have_accessible_description("")
+        assert current_hash(page) == "#/now"
         expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
 
         page.go_back()
         expect(page.get_by_role("heading", level=1, name="Scenes", exact=True)).to_be_visible()
         expect(_scenes(page).get_by_role("button", name="New Scene", exact=True)).to_be_visible()
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         expect(scene_form(page)).to_have_count(0)
         expect(_scenes(page).get_by_label("Scene inflight", exact=True)).to_be_visible()
 
@@ -520,12 +518,12 @@ def test_browser_back_from_a_discard_confirmation_leaves_the_page_usable(page, r
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         page.go_back()  # the flow's entry -> #/scenes
         page.go_back()  # -> #/now
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         expect(page.get_by_role("dialog", name="Discard your unsaved draft?")).to_be_visible()
         page.go_back()
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
         expect(page.get_by_role("dialog")).to_have_count(0)
         go(page, "schedule")  # the sidebar takes the click: nothing is inert
         go(page, "scenes")
@@ -561,9 +559,9 @@ def test_a_replace_in_flight_on_a_hidden_page_neither_blocks_nor_moves_the_opera
                                   and r.request.method == "PUT") as info:
             gate.release()
         assert info.value.status == 200
+        # The draft ended: the Replace's `finish` has run, and left the location alone.
         expect(_scenes_link(page)).to_have_accessible_description("")
-        page.wait_for_timeout(300)
-        assert _hash(page) == "#/schedule"
+        assert current_hash(page) == "#/schedule"
         expect(page.get_by_role("dialog")).to_have_count(0)
 
         go(page, "scenes")
@@ -588,13 +586,13 @@ def test_a_focus_request_dies_with_the_view_it_was_made_for(page, registry):
         form.get_by_role("button", name="Save Scene", exact=True).click()
         form.get_by_role("alert").get_by_role(
             "button", name="Choose at least one frame.", exact=True).click()
-        assert _hash(page) == "#/scenes/new/frames"
+        assert current_hash(page) == "#/scenes/new/frames"
         expect(form.get_by_text("No Frames to target.", exact=True)).to_be_visible()
 
         visit(page, "#/scenes/new/playback")
         expect(form.get_by_label("Seconds per cycle", exact=True)).to_be_visible()
         _add_lobby_frame(registry)
-        _poll(page)
+        drive_poll(page)
         visit(page, "#/scenes/new/frames")
         lobby = form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)
         expect(lobby).to_be_visible()
@@ -617,14 +615,14 @@ def test_resuming_a_draft_whose_scene_is_gone_asks_for_no_focus(page, registry):
         form.get_by_label("Seconds per cycle", exact=True).fill("45")
         go(page, "scenes")
         _drop_scene(registry, "evening")
-        _poll(page)
+        drive_poll(page)
         resume = _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True)
         resume.click()
         expect(_scenes(page).get_by_text("Scene evening: This Scene no longer exists.")
                ).to_be_visible()
 
         _restore_scene(registry, _console_scene("evening"))
-        _poll(page)
+        drive_poll(page)
         visit(page, "#/scenes/evening/edit/playback")
         expect(form.get_by_label("Seconds per cycle", exact=True)).to_have_value("45")
         page.wait_for_timeout(200)
@@ -644,7 +642,7 @@ def test_a_scene_restored_at_a_lower_revision_is_stale_too(page, registry):
         form = scene_form(page)
         expect(form).to_contain_text("Editing evening · revision 3.")
         _restore_scene(registry, _console_scene("evening", cycle_seconds=20))
-        _poll(page)
+        drive_poll(page)
         expect(_scenes(page)).to_contain_text(
             "This Scene was changed (revision 1) since you opened it.")
         expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
@@ -673,7 +671,7 @@ def test_reload_names_what_storage_changed_and_the_changes_it_replaced(page, reg
         form.get_by_label("Seconds per cycle", exact=True).fill("45")
         scene_continue(page, "Review")
         _put_scene(page, origin, _console_scene("evening", revision=2, loop=False))
-        _poll(page)
+        drive_poll(page)
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
         expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
             "Reloaded revision 2. Changed: Keep playing until the Program ends. "
@@ -719,13 +717,13 @@ def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
         expect(targets).to_have_accessible_description(message)
         form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(message)
-        assert _hash(page) == "#/scenes/new/frames"
+        assert current_hash(page) == "#/scenes/new/frames"
 
         visit(page, "#/scenes/new/review")
         form.get_by_label("Scene name", exact=True).fill("nothing-fits")
         form.get_by_role("button", name="Save Scene", exact=True).click()
         form.get_by_role("alert").get_by_role("button", name=message, exact=True).click()
-        assert _hash(page) == "#/scenes/new/frames"
+        assert current_hash(page) == "#/scenes/new/frames"
         expect(targets.locator("input:focus")).to_have_count(1)  # the frame choice
 
 
@@ -775,7 +773,7 @@ def test_a_save_in_flight_holds_its_draft(page, registry):
         gate.wait_held()
 
         page.go_back()  # the flow's entry -> #/scenes
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         scenes = _scenes(page)
         expect(scenes.get_by_role("button", name="Resume draft (Draft)", exact=True)).to_be_enabled()
         expect(scenes.get_by_role("button", name="Discard draft", exact=True)).to_be_disabled()
@@ -785,14 +783,14 @@ def test_a_save_in_flight_holds_its_draft(page, registry):
         expect(scenes).to_contain_text("Unsaved draft for a new Scene: Resume or Discard")
         expect(scenes.get_by_role("button", name="Discard", exact=True)).to_be_disabled()
         scenes.get_by_role("button", name="Resume", exact=True).click()
-        assert _hash(page) == "#/scenes/new/review"
+        assert current_hash(page) == "#/scenes/new/review"
 
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
                                   and r.request.method == "PUT") as info:
             gate.release()
         assert info.value.status == 200
         expect(scenes.get_by_role("status")).to_have_text("Saved Scene inflight.")
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         expect(scenes.get_by_role("button", name="New Scene", exact=True)).to_be_enabled()
 
 
@@ -817,7 +815,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         submit_sign_in(page)
         go(page, "scenes")
         form = start_scene(page)
-        assert _hash(page) == "#/scenes/new/photos"
+        assert current_hash(page) == "#/scenes/new/photos"
 
         # The answer lands, then its one refresh: the flow would end right after it.
         with page.expect_response(INVENTORY):
@@ -827,7 +825,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         assert info.value.status == 200
         expect(page.get_by_role("group", name="Snapshot status", exact=True)
                ).not_to_have_attribute("aria-busy", "true")
-        assert _hash(page) == "#/scenes/new/photos"
+        assert current_hash(page) == "#/scenes/new/photos"
         expect(form.get_by_label("Source", exact=True)).to_be_visible()
 
 
@@ -864,7 +862,7 @@ def test_a_save_central_did_not_answer_may_have_been_saved_and_saving_again_conf
         scenes = _scenes(page)
         expect(scenes.get_by_role("status").filter(has_text="may have been saved")).to_have_text(
             "Scene late-show may have been saved: Central did not answer. Save again to confirm.")
-        assert _hash(page) == "#/scenes/new/review"
+        assert current_hash(page) == "#/scenes/new/review"
         # The refresh after the write lists it; it is not read as another Scene's name.
         expect(scenes.get_by_label("Scene late-show", exact=True)).to_have_count(0)
         assert _stored(page, origin, "definitions") == ["late-show"]
@@ -877,7 +875,7 @@ def test_a_save_central_did_not_answer_may_have_been_saved_and_saving_again_conf
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert info.value.status == 200
         expect(scenes.get_by_role("status")).to_have_text("Saved Scene late-show.")
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         assert _stored(page, origin, "definitions") == ["late-show"]
         assert [url.rsplit("/", 1)[1] for url in puts] == ["late-show", "late-show"]
 

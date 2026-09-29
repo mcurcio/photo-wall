@@ -26,6 +26,7 @@ from console_tasks import (
     add_source,
     author_scene,
     connect,
+    current_hash,
     go,
     scene_continue,
     scene_form,
@@ -34,6 +35,7 @@ from console_tasks import (
     visit,
 )
 from operator_harness import (
+    INVENTORY,
     RequestGate,
     drive_poll,
     operator_server,
@@ -67,12 +69,8 @@ SAMPLES = json.loads(
     (Path(__file__).parents[2] / "central/console/src/routeSamples.json").read_text())
 SAMPLE_FRAME = "sample-frame"  # the frame id in the Wall's sample paths
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-INVENTORY = "**/v1/operator/inventory"
 NARROW = {"width": 390, "height": 844}
 
-
-def _hash(page):
-    return page.evaluate("window.location.hash")
 
 
 def _heading(page, section):
@@ -161,13 +159,13 @@ def test_landing_is_the_wall_until_a_frame_exists_then_now_showing(page, registr
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         _expect_on(page, "wall")
-        assert _hash(page) == "#/wall"
+        assert current_hash(page) == "#/wall"
         expect(page.get_by_role("note", name="Getting started")).to_be_visible()
     _frame(registry, "first")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         _expect_on(page, "now")
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
 
 
 def test_an_unknown_route_is_replaced_by_the_landing_route(page, registry):
@@ -177,7 +175,7 @@ def test_an_unknown_route_is_replaced_by_the_landing_route(page, registry):
         before = page.evaluate("history.length")
         visit(page, "#/no-such-page")
         _expect_on(page, "now")
-        assert _hash(page) == "#/now"
+        assert current_hash(page) == "#/now"
         # Replaced, not pushed: the unknown route's own entry now reads #/now, and Back
         # returns to the page before it, never to the unknown route.
         assert page.evaluate("history.length") == before + 1
@@ -203,7 +201,7 @@ def test_a_deep_link_survives_sign_in_and_waits_for_the_snapshot(page, registry)
         gate.holding = False
         gate.release()
         expect(page.get_by_role("region", name="Sources", exact=True)).to_be_visible()
-        assert _hash(page) == "#/sources"
+        assert current_hash(page) == "#/sources"
 
 
 def test_a_stale_frame_route_says_it_no_longer_exists(page, registry):
@@ -234,7 +232,7 @@ def test_back_and_forward_move_between_sections(page, registry):
         page.get_by_role("button", name="Frame first", exact=True).click()
         expect(page.get_by_role("region", name="Frame first inspector", exact=True)
                ).to_be_visible()
-        assert _hash(page) == "#/wall/frames/first/commissioning"
+        assert current_hash(page) == "#/wall/frames/first/commissioning"
         assert page.evaluate("history.length") == before
         page.go_back()
         _expect_on(page, "schedule")
@@ -338,7 +336,7 @@ def test_no_show_or_neutral_route_holds_display_controls(page, registry):
             for path in paths:
                 visit(page, path)
                 _expect_on(page, section)
-                assert _hash(page) == path
+                assert current_hash(page) == path
         visit(page, f"#/wall/frames/{SAMPLE_FRAME}/commissioning")
         for landmark in commissioning:
             expect(landmark).to_have_count(1)
@@ -349,7 +347,7 @@ def test_no_show_or_neutral_route_holds_display_controls(page, registry):
                 for path in paths:
                     visit(page, path)
                     _expect_on(page, section)
-                    assert _hash(page) == path, path  # a real route of its section
+                    assert current_hash(page) == path, path  # a real route of its section
                     for landmark in commissioning:
                         expect(landmark).to_have_count(0)
                     visited += 1
@@ -385,7 +383,7 @@ def test_needs_attention_links_each_frame_to_the_facet_showing_its_cause(page, r
             "aria-selected", "true")
         expect(inspector.get_by_role("heading", name="Frame to-commission", exact=True)
                ).to_be_focused()
-        assert _hash(page) == "#/wall/frames/to-commission/commissioning"
+        assert current_hash(page) == "#/wall/frames/to-commission/commissioning"
 
 
 # --- The drawer under 850 px.
@@ -427,7 +425,7 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
         drawer.get_by_role("link", name="Scenes", exact=True).click()
         expect(drawer).to_be_hidden()
         expect(_heading(page, "scenes")).to_be_focused()
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
         fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
         assert fits, "the shell overflows at 390 px"
 
@@ -454,7 +452,7 @@ def test_skip_to_content_focuses_main_without_changing_the_route(page, registry)
         skip.focus()
         page.keyboard.press("Enter")
         expect(page.locator("main")).to_be_focused()
-        assert _hash(page) == "#/schedule"
+        assert current_hash(page) == "#/schedule"
 
 
 # --- The session overlay and Log out (§6 cross-pass (a)-(e)).

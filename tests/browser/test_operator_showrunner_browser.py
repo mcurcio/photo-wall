@@ -28,6 +28,7 @@ from console_tasks import (
     add_source,
     author_scene,
     connect,
+    current_hash,
     go,
     scene_continue,
     scene_form,
@@ -1655,9 +1656,6 @@ def _scene_row(page, scene_id):
         f"Scene {scene_id}", exact=True)
 
 
-def _hash(page):
-    return page.evaluate("window.location.hash")
-
 
 def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):
     """§13: a Scene saved with its other fields at their defaults stays editable
@@ -1682,7 +1680,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 
         form = _scenes_form(page)
         expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
-        assert _hash(page) == f"#/scenes/{STORED_ID}/edit/review"
+        assert current_hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
         # The stored values, exactly, where each is asked: every Change link opens its
         # step, and Continue returns to Review.
@@ -1720,7 +1718,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
             "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
         expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
-        assert _hash(page) == "#/scenes"
+        assert current_hash(page) == "#/scenes"
 
 
 def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, registry):

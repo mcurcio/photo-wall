@@ -166,8 +166,7 @@ def test_the_session_cookie_is_scoped_to_the_operator_api(page, registry):
         sent.clear()
         page.reload()
         expect(_frame(page)).to_be_visible()
-        page.evaluate("fetch('/healthz')")
-        page.wait_for_timeout(200)
+        page.evaluate("fetch('/healthz').then((response) => response.status)")  # answered
     operator = [cookie for url, cookie in sent if "/v1/operator/" in url]
     others = [(url, cookie) for url, cookie in sent if "/v1/operator/" not in url]
     assert operator and all(cookie for cookie in operator)
