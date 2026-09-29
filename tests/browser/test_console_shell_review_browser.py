@@ -10,6 +10,7 @@ ephemeral loopback listener, the disposable-schema `registry` fixture and the au
 
 import os
 import re
+import sys
 
 import pytest
 from console_tasks import LABELS, author_scene, connect, current_hash, go, show_now, visit
@@ -314,8 +315,10 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         menu = page.get_by_role("button", name="Menu", exact=True)
         menu.click()
         drawer = page.get_by_role("dialog", name="Menu", exact=True)
+        new_tab_modifier = "Meta" if sys.platform == "darwin" else "Control"
         with page.context.expect_page() as other:
-            drawer.get_by_role("link", name="Scenes", exact=True).click(modifiers=["Control"])
+            drawer.get_by_role("link", name="Scenes", exact=True).click(
+                modifiers=[new_tab_modifier])
         other.value.close()
         # This tab did not follow the link: still on Now showing, the drawer still open.
         assert current_hash(page) == "#/now"

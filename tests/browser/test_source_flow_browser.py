@@ -27,9 +27,13 @@ from console_tasks import (
 from operator_harness import operator_server, submit_sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
+    SCENE_ID,
     SOURCE,
+    _runtime,
+    _scene,
     _seed,
     _seed_source,
+    _set_source,
 )
 
 from central.media_repository import MediaRepository
@@ -40,7 +44,7 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-NEW_SOURCE = "spring:1"
+NEW_SOURCE = "spring"
 
 
 
@@ -77,15 +81,89 @@ def test_with_no_source_the_connection_is_a_visible_required_field(page, registr
         connection = _connection(page)
         expect(connection).to_be_visible()
         expect(connection).to_have_value("")
+        expect(source_form(page)).to_contain_text(
+            "Enter a connection name already configured in the media worker.")
+        expect(source_form(page)).to_contain_text(
+            "This form does not set the Immich URL or API key.")
         assert connection.evaluate("(element) => element.tagName") == "INPUT"
         expect(_advanced(page)).to_have_count(0)
 
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(source_form(page).get_by_role("alert")).to_contain_text(
             "Connection name is required.")
         expect(connection).to_be_focused()
         assert current_hash(page) == "#/sources/new/name"
+
+
+def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry):
+    _seed(registry)
+    _set_source(registry, "all-photos:1", status="incompatible",
+                refresh_completed_revision=1, refresh_requested_revision=1,
+                diagnostics=[{"code": "unsupported_version"}])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="all-photos")
+        expect(card).to_contain_text("No successful refresh")
+        expect(card).to_contain_text(
+            "This Photo Wall release does not support the Immich version.")
+        expect(card).not_to_contain_text("Awaiting refresh")
+
+
+def test_edit_rename_and_delete_use_plain_names_with_revision_fencing(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        assert add_source(page, "spring", "fixture-library").status == 200
+        cards = _sources(page)
+        cards.get_by_role("button", name="Edit Source spring", exact=True).click()
+        assert current_hash(page) == "#/sources/spring/edit/review"
+        form = source_form(page)
+        form.get_by_role("button", name="Change Source name", exact=True).click()
+        form.get_by_label("Source name", exact=True).fill("spring-renamed")
+        source_continue(page, "Review")
+        with page.expect_response(lambda r: r.request.method == "PUT"
+                                  and r.url.endswith("/v1/operator/source-names/spring")) as info:
+            form.get_by_role("button", name="Save changes", exact=True).click()
+        assert info.value.status == 200
+        assert info.value.request.post_data_json["expected_revision"] == 1
+        assert info.value.request.post_data_json["new_name"] == "spring-renamed"
+        expect(cards.get_by_role("article", name="spring-renamed", exact=True)).to_be_visible()
+        expect(cards.get_by_role("article", name="spring", exact=True)).to_have_count(0)
+
+        cards.get_by_role("button", name="Delete Source spring-renamed", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Delete Source spring-renamed?")
+        with page.expect_response(lambda r: r.request.method == "DELETE"
+                                  and "/v1/operator/source-names/spring-renamed" in r.url) as deletion:
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert deletion.value.status == 200
+        expect(dialog).to_have_count(0)
+        expect(cards.get_by_role("article", name="spring-renamed", exact=True)).to_have_count(0)
+
+
+def test_delete_names_scenes_that_still_use_the_source(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "sources")
+        _sources(page).get_by_role("button", name="Delete Source holiday", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Delete Source holiday?")
+        dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        expect(dialog.get_by_role("alert")).to_contain_text(SCENE_ID)
+        expect(_sources(page).get_by_role("article", name="holiday", exact=True)).to_be_visible()
+
+
+def test_scene_picker_shows_plain_name_but_keeps_exact_source_ref(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        form = start_scene(page)
+        picker = form.get_by_label("Source", exact=True)
+        expect(picker.get_by_role("option", name="holiday", exact=True)).to_have_attribute("value", SOURCE)
+        expect(picker.get_by_role("option", name="holiday:1")).to_have_count(0)
 
 
 def test_one_connection_among_the_sources_is_prefilled_under_advanced(page, registry):
@@ -103,12 +181,12 @@ def test_one_connection_among_the_sources_is_prefilled_under_advanced(page, regi
         expect(connection).to_have_value("fixture-library")
 
         # Saved without typing it: Review lists it, and the body carries it.
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         answers = source_form(page).get_by_role("definition").filter(has_text="fixture-library")
         expect(answers).to_have_count(1)
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             source_form(page).get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
         assert info.value.request.post_data_json["connection_ref"] == "fixture-library"
@@ -129,7 +207,7 @@ def test_several_connections_give_a_visible_chooser_with_none_chosen(page, regis
             ["Choose a connection", "fixture-library", "second-library", "Another connection…"])
         expect(_advanced(page)).to_have_count(0)
 
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(source_form(page).get_by_role("alert")).to_contain_text(
             "Connection name is required.")
@@ -159,7 +237,7 @@ def test_continue_checks_only_its_own_step(page, registry):
         until.fill("2025-01-01")
         source_continue(page, "Name")
         expect(form.get_by_role("alert")).to_have_count(0)
-        ref = form.get_by_label("Source name and revision", exact=True)
+        ref = form.get_by_label("Source name", exact=True)
         expect(ref).not_to_have_attribute("aria-invalid", "true")
         expect(_connection(page)).not_to_have_attribute("aria-invalid", "true")
 
@@ -176,13 +254,13 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
         save.click()
         summary = form.get_by_role("alert")
         expect(summary).to_be_focused()
-        problem = summary.get_by_role("button").filter(has_text="Name and revision")
+        problem = summary.get_by_role("button").filter(has_text="Source name")
         problem.click()
         assert current_hash(page) == "#/sources/new/name"
-        expect(form.get_by_label("Source name and revision", exact=True)).to_be_focused()
+        expect(form.get_by_label("Source name", exact=True)).to_be_focused()
 
         # A value under Advanced: its Change link opens Advanced on its step first.
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         form.get_by_role("button", name="Change Connection name", exact=True).click()
         assert current_hash(page) == "#/sources/new/name"
@@ -197,7 +275,7 @@ def test_the_draft_survives_a_section_change(page, registry):
         form = start_source(page)
         form.get_by_label("Media type", exact=True).select_option("video")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill("kept:1")
+        form.get_by_label("Source name", exact=True).fill("kept")
         expect(_link(page, "Photo sources")).to_have_accessible_description("Draft")
 
         go(page, "wall")
@@ -205,7 +283,7 @@ def test_the_draft_survives_a_section_change(page, registry):
         assert current_hash(page) == "#/sources"
         _sources(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
         assert current_hash(page) == "#/sources/new/name"
-        expect(form.get_by_label("Source name and revision", exact=True)).to_have_value("kept:1")
+        expect(form.get_by_label("Source name", exact=True)).to_have_value("kept")
         form.get_by_role("button", name="Back", exact=True).click()
         expect(form.get_by_label("Media type", exact=True)).to_have_value("video")
 
@@ -250,10 +328,10 @@ def test_a_new_selection_runs_inline_and_returns_with_the_new_source_chosen(page
         expect(form.get_by_role("heading", name="What to include", exact=True)).to_be_focused()
         form.get_by_label("Media type", exact=True).select_option("image")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
 
@@ -261,7 +339,7 @@ def test_a_new_selection_runs_inline_and_returns_with_the_new_source_chosen(page
         expect(page.get_by_role("heading", level=1, name="Scenes", exact=True)).to_be_visible()
         assert current_hash(page) == "#/scenes/new/photos"
         picker = scene_form(page).get_by_label("Source", exact=True)
-        expect(picker).to_have_value(NEW_SOURCE)
+        expect(picker).to_have_value(NEW_SOURCE + ":1")
         expect(picker).to_be_focused()
         expect(_link(page, "Photo sources")).to_have_accessible_description("")
         expect(_link(page, "Scenes")).to_have_accessible_description("Draft")
@@ -341,12 +419,12 @@ def test_a_hand_off_ends_with_the_scene_draft_it_was_begun_for(page, registry):
         expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_have_count(0)
         expect(_sources(page).get_by_role(
             "button", name="Discard and return to your Scene", exact=True)).to_have_count(0)
-        response = add_source(page, "stale:1", "fixture-library")
+        response = add_source(page, "stale", "fixture-library")
         assert response.status == 200
         assert current_hash(page) == "#/sources"
         expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)
                ).to_be_visible()
-        expect(_sources(page).get_by_role("article", name="stale:1", exact=True)).to_be_visible()
+        expect(_sources(page).get_by_role("article", name="stale", exact=True)).to_be_visible()
 
         # B is as the operator left it.
         go(page, "scenes")
@@ -401,7 +479,7 @@ def test_with_several_connections_another_one_can_be_typed(page, registry):
         expect(other).to_be_visible()
         expect(other).to_have_value("")
 
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(form.get_by_role("alert")).to_contain_text("Connection name is required.")
         expect(other).to_be_focused()
@@ -414,7 +492,7 @@ def test_with_several_connections_another_one_can_be_typed(page, registry):
         expect(other).to_have_value("third-library")
         source_continue(page, "Review")
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
         assert info.value.request.post_data_json["connection_ref"] == "third-library"

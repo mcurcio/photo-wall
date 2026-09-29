@@ -77,6 +77,16 @@ def main():
         renderer = CapturingRenderer((NativeOutput("hdmi1", "org.photowall.hdmi1", 320, 240),
                                       NativeOutput("hdmi2", "org.photowall.hdmi2", 320, 240)))
         try:
+            assert all(surface.diagnostic.get_visible()
+                       for surface in renderer._surfaces.values())
+            renderer.set_unbound_outputs(("hdmi1",), "p-" + "a" * 32)
+            assert renderer._surfaces["hdmi1"].diagnostic.get_visible()
+            assert not renderer._surfaces["hdmi2"].diagnostic.get_visible()
+            assert "configuration received" in renderer._surfaces[
+                "hdmi1"].diagnostic_label.get_text()
+            renderer.set_unbound_outputs((), "p-" + "a" * 32)
+            assert not any(surface.diagnostic.get_visible()
+                           for surface in renderer._surfaces.values())
             binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1,
                                     profile=FrameProfile(width_px=4, height_px=3, diagonal_inches=20))
             second = binding.model_copy(update={"output_id": "hdmi2", "frame_id": "frame2"})

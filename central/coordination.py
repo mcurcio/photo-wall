@@ -257,8 +257,8 @@ class Coordinator:
             result[layer.assignment_id] = layer
         return result
 
-    def _catalog(self, conn):
-        return self.media.catalog_in(conn, self.clock.utc())
+    def _catalog(self, conn, runtime):
+        return self.media.catalog_in(conn, self.clock.utc(), runtime.planning_source_refs())
 
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
@@ -393,7 +393,8 @@ class Coordinator:
                 for p in self._players(conn)
             }
             offers = self._offers(conn, configurations)
-            snapshots, authored = self._catalog(conn)
+            self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
+            snapshots, authored = self._catalog(conn, runtime)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds

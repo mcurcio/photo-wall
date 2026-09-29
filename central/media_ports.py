@@ -48,8 +48,10 @@ class SourceConfigurationReceipt(Model):
 class CoordinationMedia(Protocol):
     """Media capabilities needed by execution coordination."""
 
+    def reconcile_source_activity_in(self, conn: Any, runtime_refs: set[str]) -> None: ...
+
     def catalog_in(
-        self, conn: Any, now: float,
+        self, conn: Any, now: float, source_refs: set[str] | None = None,
     ) -> tuple[dict[str, CatalogSnapshot], dict[str, Candidate]]: ...
 
     def authored_candidates_in(

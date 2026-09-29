@@ -269,10 +269,10 @@ def test_sources_render_name_rev_with_refresh(page, registry):
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # The Source is identified by its `name:rev` string, not an album title.
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
         refresh = sources.get_by_role(
-            "button", name=f"Refresh {SOURCE}", exact=True)
+            "button", name="Refresh holiday", exact=True)
         with page.expect_response(
             lambda r: r.url.endswith("/refresh")
             and "/v1/operator/sources/" in r.url
@@ -283,7 +283,7 @@ def test_sources_render_name_rev_with_refresh(page, registry):
 
         # After the useMutate() refresh, the Source is still listed (Plane A —
         # including the media catalog — was re-fetched, not dropped).
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
 
 def test_sources_have_no_immich_or_album_language(page, registry):
@@ -299,7 +299,7 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # The Source must be present, so this is not vacuously true.
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
         # The intro says what a Source is, in neutral library words (flow design §2 req 4).
         expect(sources.get_by_text(
@@ -312,7 +312,7 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         _assert_neutral(sources)
         source_continue(page, "Name")
         form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         _assert_neutral(sources)
         source_continue(page, "Review")
         _assert_neutral(sources)
@@ -329,7 +329,7 @@ def _assert_neutral(region):
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
 # GAP 2). A distinct name:rev the seeded SOURCE does not use, so its appearance
 # below is caused by THIS create, not the fixture.
-NEW_SOURCE = "spring:1"
+NEW_SOURCE = "spring"
 
 
 def test_source_configuration_creates_source_awaiting_refresh(page, registry):
@@ -359,12 +359,13 @@ def test_source_configuration_creates_source_awaiting_refresh(page, registry):
         assert response.status == 200
         # The saved query carries its identity, connection and chosen kind.
         body = response.request.post_data_json
-        assert body["source_ref"] == NEW_SOURCE
+        assert body["expected_revision"] is None
         assert body["connection_ref"] == "fixture-library"
         assert body["media_types"] == ["image"]
         # The server reports the Source as CREATED.
         receipt = response.json()
-        assert receipt["source_ref"] == NEW_SOURCE and receipt["created"] is True
+        assert receipt["name"] == NEW_SOURCE and receipt["source_ref"] == NEW_SOURCE + ":1"
+        assert receipt["created"] is True
 
         # After the useMutate() refresh the new Source is listed by name:rev, and
         # — never having been refreshed — shows the honest "Awaiting refresh".
@@ -1090,7 +1091,7 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
         connect(page, origin, "now")
         # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
         for section, text in (
-                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID + ":1")):
+                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID)):
             go(page, section)
             expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
             assert_fits_width(page, section)
@@ -1592,11 +1593,11 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
             re.compile("'Taken until' must be after 'Taken from'."))
         until.fill("2025-01-01")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         form.get_by_label("Connection name", exact=True).fill("fixture-library")
         source_continue(page, "Review")
         with page.expect_response(
-            lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
+            lambda r: r.url.endswith("/v1/operator/source-names/" + quote(NEW_SOURCE, safe=""))
             and r.request.method == "PUT"
         ) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
@@ -1673,7 +1674,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         row = _scene_row(page, STORED_ID)
-        expect(row).to_contain_text("live from " + SOURCE)
+        expect(row).to_contain_text("live from holiday")
         expect(row).to_contain_text("revision 1")
         expect(row).to_contain_text("no Program")
         row.get_by_role("button", name=f"Edit Scene {STORED_ID}", exact=True).click()
@@ -1929,7 +1930,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
         pipeline = _pipeline(page)
 
         def state(ref):
-            return pipeline.get_by_label(f"Refresh of {ref}", exact=True)
+            return pipeline.get_by_label(f"Refresh of {ref.rsplit(':', 1)[0]}", exact=True)
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
             "refreshed 1 min ago · 790 valid in the last refresh · photos only · only favourites"
@@ -2054,7 +2055,7 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
         expect(chain).to_contain_text(
-            f"The Source {SOURCE}: refreshed 0 s ago · 3 valid in the last refresh.")
+            "The Source holiday: refreshed 0 s ago · 3 valid in the last refresh.")
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")
@@ -2120,7 +2121,7 @@ def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, reg
     _set_source(registry, "spring:1", spec={"captured_from": start, "captured_until": until})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
-        expect(_pipeline(page).get_by_label("Refresh of spring:1", exact=True)).to_contain_text(
+        expect(_pipeline(page).get_by_label("Refresh of spring", exact=True)).to_contain_text(
             re.compile(r"taken (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
 
 

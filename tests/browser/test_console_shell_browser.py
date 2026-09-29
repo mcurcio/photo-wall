@@ -300,8 +300,8 @@ def test_hidden_show_pages_announce_no_status(page, registry):
     _frame(registry, "first")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        add_source(page, "spring:1", "fixture-library")
-        saved = "Saved Source spring:1."
+        add_source(page, "spring", "fixture-library")
+        saved = "Saved Source spring."
         expect(page.get_by_role("status").filter(has_text=saved)).to_be_visible()
 
         go(page, "wall")

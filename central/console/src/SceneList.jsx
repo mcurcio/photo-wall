@@ -5,6 +5,7 @@ import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { frameOf, LIVE_PHASES } from "./join.js";
 import { cycleWording } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
+import { sourceName } from "./sourceNames.js";
 
 /**
  * The stored Scenes as cards (pass 2 slice 3 §13; flow design §7): each a summary
@@ -59,7 +60,7 @@ function feedWording(contributions) {
   if (assets.size > 0) {
     return `authored: ${assets.size} chosen ${assets.size === 1 ? "item" : "items"}`;
   }
-  return sources.length > 0 ? `live from ${sources.join(", ")}` : "no media";
+  return sources.length > 0 ? `live from ${sources.map(sourceName).join(", ")}` : "no media";
 }
 
 function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onShowNow, onSchedule }) {

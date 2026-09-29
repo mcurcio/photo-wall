@@ -234,6 +234,17 @@ def read_pi_serial() -> bytes | None:
     return None
 
 
+def display_serial(raw: bytes | None) -> str | None:
+    """Only put a bounded hardware serial on the local diagnostic display."""
+    if raw is None:
+        return None
+    try:
+        serial = raw.decode("ascii").strip(" \t\r\n\x00").lower()
+    except UnicodeDecodeError:
+        return None
+    return serial if re.fullmatch(r"[a-f0-9]{8,32}", serial) else None
+
+
 def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
     """Flashed/D0 fallback for when no netboot boot context file exists.
 
@@ -403,6 +414,8 @@ class PlayerService:
         # None until a check-in lands, then one report per epoch (a re-enroll
         # bumps the epoch and re-reports; central is monotonic per epoch).
         self._base_health_epoch: int | None = None
+        self._base_health_sequence_epoch: int | None = None
+        self._base_health_sequence = 0
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
@@ -576,14 +589,21 @@ class PlayerService:
             return
         if self._base_health_epoch == self.registration.authority_epoch:
             return
+        epoch = self.registration.authority_epoch
+        if self._base_health_sequence_epoch != epoch:
+            self._base_health_sequence_epoch = epoch
+            self._base_health_sequence = 0
+        self._base_health_sequence += 1
         try:
-            await self.request("POST", "/v1/player/base-health", body={
-                "authority_epoch": self.registration.authority_epoch,
-                "sequence": 1,
+            response = await self.request("POST", "/v1/player/base-health", body={
+                "authority_epoch": epoch,
+                "sequence": self._base_health_sequence,
                 "running_tag": tag,
                 "healthy": True,
             })
-            self._base_health_epoch = self.registration.authority_epoch
+            if response.get("accepted") is not True:
+                raise ServiceError("base_health_rejected")
+            self._base_health_epoch = epoch
         except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
                 UplinkError, asyncio.TimeoutError) as error:
             LOG.info("player base-health check-in deferred: %s",
@@ -632,6 +652,10 @@ class PlayerService:
                     # A fresh report is required; never infer replacement authority.
                     self.fault("stale_commit")
                 self._seen_commits.append(commit)
+            bound = {binding.output_id for binding in configuration.bindings}
+            unbound = tuple(output.output_id for output in self.outputs
+                            if output.connected and output.output_id not in bound)
+            self.renderer.set_unbound_outputs(unbound, configuration.player_id)
             self.tick_main()
 
     def tick_main(self):
@@ -998,6 +1022,9 @@ class UnavailableRenderer:
     def prepare(self, layer):
         return PrepareResult("failed", "capacity")
 
+    def set_unbound_outputs(self, output_ids, player_id):
+        pass
+
     def capacity(self, compositions):
         return CapacityResult(False)
 
@@ -1074,7 +1101,8 @@ def main():
             renderer = NativeRenderer(tuple(NativeOutput(output.output_id,
                 output_app_id(output.output_id), output.width_px or 1920,
                 output.height_px or 1080) for output in connected_outputs),
-                decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
+                decoder_limit=config.decoder_limit, texture_budget=config.texture_budget,
+                serial=display_serial(read_pi_serial()))
         except Exception:
             native_fault = "native_initialization"
     service = PlayerService(

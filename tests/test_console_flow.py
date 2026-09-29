@@ -281,7 +281,7 @@ def test_flow_kit_and_scene_flow_shape():
     # A hand-picked frame with nothing to choose is a frame problem, said with its Source;
     # while candidates load, that is what each frame says.
     assert out["noMedia"] == [
-        ["targets", "No compatible media for lobby in holiday:1. "
+            ["targets", "No compatible media for lobby in holiday. "
                     "Choose another frame, or another Source."],
         ["media:hall", "Choose media for hall."]]
     assert out["loadingMedia"] == ["media:lobby", "media:hall"]
@@ -322,10 +322,12 @@ out.fieldSteps = ["type", "favorites", "from", "until", "ref", "connection"]
   .map((field) => steps.stepOfField(source.SOURCE_FIELD_STEP, field));
 const K = source.SOURCE_KEYS;
 out.keys = [K.fromRoute({ section: "sources", flow: "new", step: "name" }),
+            K.fromRoute({ section: "sources", id: "spring", flow: "edit", step: "review" }),
             K.fromRoute({ section: "sources" }),
             K.fromRoute({ section: "scenes", flow: "new", step: "kind" })];
 out.route = K.toRoute("new", K.firstStep("new"));
 out.describe = K.describe("new");
+out.editRoute = K.toRoute("edit/spring", K.firstStep("edit/spring"));
 const spec = (ref) => ({ source_ref: "x", spec: ref === undefined ? {} : { connection_ref: ref } });
 out.rules = [
   source.connectionRule([]),
@@ -336,12 +338,14 @@ out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
   .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(sources))]);
 out.seeds = [source.seedSource([])("new"), source.seedSource([spec("home")])("new").connectionRef,
              source.seedSource([spec("a"), spec("b")])("new").connectionRef];
+out.seedEdit = source.seedSource([{ name: "spring", revision: 3, source_ref: "spring:3",
+  spec: { connection_ref: "home", media_types: ["image"], favorites: true } }])("edit/spring");
 out.answers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, favorites: "only",
-                                     capturedFrom: "2024-01-01", sourceRef: " spring:1 " });
+                                     capturedFrom: "2024-01-01", sourceName: " spring " });
 out.problems = authoring.sourceProblems(source.NEW_SOURCE_DRAFT).map((p) => p.field);
-out.spec = source.buildSourceSpec({ sourceRef: "spring:1", connectionRef: "home",
+out.spec = source.buildSourceSpec({ expectedRevision: 2, connectionRef: "home",
                                     mediaType: "image", favorites: "not" });
-out.specBoth = source.buildSourceSpec({ sourceRef: "s:1", connectionRef: "h", mediaType: "both" });
+out.specBoth = source.buildSourceSpec({ connectionRef: "h", mediaType: "both" });
 console.log(JSON.stringify(out));
 """
 
@@ -367,8 +371,9 @@ def test_hand_offs_and_source_flow_shape():
 
     assert out["steps"] == [["include", "What to include"], ["name", "Name"], ["review", "Review"]]
     assert out["fieldSteps"] == ["include", "include", "include", "include", "name", "name"]
-    assert out["keys"] == ["new", None, None]
+    assert out["keys"] == ["new", "edit/spring", None, None]
     assert out["route"] == {"section": "sources", "flow": "new", "step": "include"}
+    assert out["editRoute"] == {"section": "sources", "id": "spring", "flow": "edit", "step": "review"}
     assert out["describe"] == "a new photo source"
     # The connection rule: none -> a visible field; one value -> prefilled under Advanced
     # (a Source without one adds no value); several -> a chooser, none chosen.
@@ -379,16 +384,19 @@ def test_hand_offs_and_source_flow_shape():
     assert out["advanced"] == [[], ["connection"], []]
     assert out["seeds"] == [
         {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
-         "sourceRef": "", "connectionRef": "", "newConnection": False}, "home", ""]
+         "sourceName": "", "connectionRef": "", "newConnection": False}, "home", ""]
+    assert out["seedEdit"] == {
+        "mediaType": "image", "favorites": "only", "capturedFrom": "", "capturedUntil": "",
+        "sourceName": "spring", "connectionRef": "home", "newConnection": False, "revision": 3}
     assert out["answers"] == [
         {"label": "Media type", "field": "type", "value": "Images and video"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
         {"label": "Taken from", "field": "from", "value": "2024-01-01"},
         {"label": "Taken until", "field": "until", "value": "No limit"},
-        {"label": "Source name and revision", "field": "ref", "value": "spring:1"},
+        {"label": "Source name", "field": "ref", "value": "spring"},
         {"label": "Connection name", "field": "connection", "value": None}]
     assert out["problems"] == ["ref", "connection"]
-    assert out["spec"] == {"schema": 1, "source_ref": "spring:1", "connection_ref": "home",
+    assert out["spec"] == {"expected_revision": 2, "connection_ref": "home",
                            "media_types": ["image"], "favorites": False}
     assert out["specBoth"]["media_types"] == ["image", "video"]
     assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]

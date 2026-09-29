@@ -601,9 +601,9 @@ OLD, NEW = "v1.4.2", "v1.5.0"
     ("healthy", OLD, OLD, None, f"Last netboot healthy on {OLD}"),
     ("healthy", OLD, OLD, NEW, f"Rolled back from {NEW} · last netboot healthy on {OLD}"),
     # pending: record_served moved last_served and left known_good behind.
-    ("pending", NEW, OLD, None, f"Netboot served {NEW}, not yet healthy · last healthy on {OLD}"),
-    ("pending", NEW, None, None, f"Netboot served {NEW}, not yet healthy"),
-    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, not yet healthy"),
+    ("pending", NEW, OLD, None, f"Netboot served {NEW}, base health not reported · last healthy on {OLD}"),
+    ("pending", NEW, None, None, f"Netboot served {NEW}, base health not reported"),
+    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, base health not reported"),
     # fenced with no known-good: the failed tag is served again (boot_policy.py).
     ("pending", NEW, None, NEW,
      f"Retrying {NEW} after a failed netboot · no healthy version to roll back to"),
@@ -625,6 +625,9 @@ def test_the_boot_outcome_names_each_tag_by_what_central_recorded(
         expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         expect(pending.get_by_text(f"Reported serial {SERIAL} · {label}", exact=True)
                ).to_be_visible()
+        if outcome == "pending":
+            expect(pending).to_contain_text(
+                "Base health is separate from Player connection")
 
 
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):

@@ -1,5 +1,7 @@
 # Acceptance evidence
 
+- [2026-09-28 Kubernetes Player onboarding](2026-09-28-kubernetes-player-onboarding.md): read-only Central request trace of a newly enrolled Player on the default global `.deb` path; it distinguishes accepted requests from base-health and visible-output qualification.
+
 - [2026-09-28 service image cache](2026-09-28-service-image-cache.md): cause of
   the low BuildKit cache use in hosted run 36463535409, and a local, CI-shaped
   comparison of the per-target layer and cache policy: about 10 % less image

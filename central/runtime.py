@@ -348,6 +348,56 @@ class Runtime:
             raise RuntimeConflict("scene_revision_conflict")
         self._state.scenes[scene.scene_id] = scene
 
+    @staticmethod
+    def _scene_source_refs(scene: Scene) -> set[str]:
+        refs = {ref for contribution in (*scene.contributions, *scene.outro_contributions)
+                for ref in contribution.source_refs}
+        for child in scene.children:
+            refs.update(Runtime._scene_source_refs(child.scene))
+        return refs
+
+    def scenes_using_sources(self, refs: set[str]) -> tuple[str, ...]:
+        return tuple(sorted(scene_id for scene_id, scene in self._state.scenes.items()
+                            if self._scene_source_refs(scene) & refs))
+
+    def planning_source_refs(self) -> set[str]:
+        """Refs that can contribute to a current or future Run projection."""
+        refs = set()
+        for scene in self._state.scenes.values():
+            refs.update(self._scene_source_refs(scene))
+        for run in self._state.runs.values():
+            if run.active:
+                refs.update(self._scene_source_refs(run.scene))
+        for queued in self._state.queue:
+            refs.update(self._scene_source_refs(queued.scene))
+        return refs
+
+    def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
+        """Revise future Scene definitions; admitted and queued snapshots stay intact."""
+        def revise(scene: Scene) -> Scene:
+            def contributions(items):
+                return tuple(item.model_copy(update={
+                    "source_refs": tuple(new_ref if ref in old_refs else ref for ref in item.source_refs)
+                }) if any(ref in old_refs for ref in item.source_refs) else item for item in items)
+
+            body = contributions(scene.contributions)
+            outro = contributions(scene.outro_contributions)
+            children = tuple(child.model_copy(update={"scene": revise(child.scene)})
+                             for child in scene.children)
+            if (body, outro, children) == (scene.contributions, scene.outro_contributions, scene.children):
+                return scene
+            return scene.model_copy(update={"revision": scene.revision + 1,
+                                            "contributions": body, "outro_contributions": outro,
+                                            "children": children})
+
+        changed = []
+        for scene_id, scene in self._state.scenes.items():
+            updated = revise(scene)
+            if updated is not scene:
+                self._state.scenes[scene_id] = updated
+                changed.append(scene_id)
+        return tuple(sorted(changed))
+
     def set_program(self, program: Program) -> None:
         if program.scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {program.scene_id}")

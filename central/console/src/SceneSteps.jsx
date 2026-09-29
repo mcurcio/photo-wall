@@ -8,6 +8,7 @@ import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
+import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
 
 /**
@@ -252,7 +253,7 @@ export function ReviewStep({
     {
       label: SCENE_ANSWER_LABELS.source,
       field: "source",
-      value: value.sourceRef === "" ? missing : value.sourceRef,
+      value: value.sourceRef === "" ? missing : sourceName(value.sourceRef),
     },
     {
       label: SCENE_ANSWER_LABELS.targets,

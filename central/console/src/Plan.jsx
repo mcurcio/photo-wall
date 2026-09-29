@@ -333,6 +333,16 @@ export function Plan({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
+        {placed.length === 0 && draftRect == null && (
+          <text
+            x={VIEWPORT.width / 2}
+            y={VIEWPORT.height / 2}
+            textAnchor="middle"
+            className="plan__empty-hint"
+          >
+            Drag on this plan to place a Frame
+          </text>
+        )}
         {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
           const now = nowShowing(snapshot?.runtime, id);

@@ -197,7 +197,7 @@ function ConnectionChooser({ value, patch, problems, rule }) {
         <InputField
           field="connection"
           label={ANOTHER_CONNECTION.label}
-          hint="A library connection no photo source uses yet."
+          hint="Enter a connection name already configured in the media worker. This form does not set the Immich URL or API key."
           value={value.connectionRef}
           onChange={(connectionRef) => patch({ connectionRef })}
           problems={problems}
@@ -208,7 +208,7 @@ function ConnectionChooser({ value, patch, problems, rule }) {
 }
 
 /**
- * Step 2, Name: "Source name and revision" (required), then "Connection name" as the
+ * Step 2, Name: a plain Source name (required), then "Connection name" as the
  * connection rule says (sourceFlowModel.js `connectionRule`): a visible text field
  * while no Source names one; under Advanced, prefilled, when every Source names the
  * same one; a visible chooser of them, and of another one, when they name several.
@@ -216,14 +216,16 @@ function ConnectionChooser({ value, patch, problems, rule }) {
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
  *          advanced: {open: boolean, onToggle: () => void}}} props
  */
-export function NameStep({ value, patch, problems, rule, advanced }) {
+export function NameStep({ value, patch, problems, rule, advanced, editing = false }) {
   const connection =
     rule.shown === "chooser" ? (
       <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
     ) : (
       <InputField
         field="connection"
-        hint={rule.shown === "field" ? "The library connection this Source reads from." : null}
+        hint={rule.shown === "field"
+          ? "Enter a connection name already configured in the media worker. This form does not set the Immich URL or API key."
+          : null}
         value={value.connectionRef}
         onChange={(connectionRef) => patch({ connectionRef })}
         problems={problems}
@@ -233,9 +235,11 @@ export function NameStep({ value, patch, problems, rule, advanced }) {
     <>
       <InputField
         field="ref"
-        hint="Like holiday:1."
-        value={value.sourceRef}
-        onChange={(sourceRef) => patch({ sourceRef })}
+        hint={editing
+          ? "Renaming also updates the Scenes that use this Source for future Runs."
+          : "For example, all-photos."}
+        value={value.sourceName}
+        onChange={(sourceName) => patch({ sourceName })}
         problems={problems}
       />
       {rule.shown === "advanced" ? (

@@ -1,4 +1,4 @@
-"""Bounded central transport for Immich v2.5.6, without storage or selection policy."""
+"""Bounded central transport for qualified Immich versions, without selection policy."""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ from media.models import (
     asset_identity,
     canonical_uuid,
 )
+
+_SUPPORTED_VERSIONS = frozenset({(2, 5, 6), (3, 1, 0)})
 
 
 @dataclass
@@ -254,13 +256,15 @@ class ImmichClient:
         except httpx.HTTPError:
             raise MediaError("upstream_unavailable") from None
 
-    async def _check(self, budget: _Budget) -> None:
+    async def _check(self, budget: _Budget) -> tuple[int, int, int]:
         version = await self._json("GET", "server/version", budget)
-        if tuple(_integer(version.get(key)) for key in ("major", "minor", "patch")) != (2, 5, 6):
+        release = tuple(_integer(version.get(key)) for key in ("major", "minor", "patch"))
+        if release not in _SUPPORTED_VERSIONS:
             raise MediaError("unsupported_version", "incompatible")
         user = await self._json("GET", "users/me", budget)
         if _uuid(user.get("id")) != self.config.owner_id:
             raise MediaError("owner_mismatch", "permission")
+        return release
 
     async def check_connection(self) -> None:
         """Validate exact upstream version and configured API-key owner."""
@@ -292,7 +296,7 @@ class ImmichClient:
             return None
         return _Head(upstream_id, sha1, kind, captured)
 
-    def _original(self, raw: dict, head: _Head) -> OriginalAsset:
+    def _original(self, raw: dict, head: _Head, version: tuple[int, int, int]) -> OriginalAsset:
         exif = raw.get("exifInfo")
         if not isinstance(exif, dict):
             raise MediaError("metadata_invalid", "incompatible")
@@ -311,11 +315,16 @@ class ImmichClient:
         duration = None
         if head.kind == "video":
             value = raw.get("duration")
-            if (not isinstance(value, str) or len(value) > 32
-                    or not re.fullmatch(r"[0-9]{1,4}:[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?", value)):
-                raise MediaError("metadata_invalid", "incompatible")
-            hours, minutes, seconds = value.split(":")
-            duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            if version == (3, 1, 0):
+                if type(value) is not int:
+                    raise MediaError("metadata_invalid", "incompatible")
+                duration = value / 1000
+            else:
+                if (not isinstance(value, str) or len(value) > 32
+                        or not re.fullmatch(r"[0-9]{1,4}:[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?", value)):
+                    raise MediaError("metadata_invalid", "incompatible")
+                hours, minutes, seconds = value.split(":")
+                duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
             if not 0 < duration <= self.limits.max_video_seconds:
                 raise MediaError("metadata_invalid", "incompatible")
         return OriginalAsset(
@@ -326,7 +335,7 @@ class ImmichClient:
         )
 
     async def _walk(self, spec: SourceSpec, kind: str, with_exif: bool,
-                    budget: _Budget) -> dict[str, _Member]:
+                    budget: _Budget, version: tuple[int, int, int]) -> dict[str, _Member]:
         ceiling = min(self.limits.max_candidates + 1, 1000)
         body = dict(size=min(self.limits.page_size, ceiling), order="desc", type=kind.upper(),
                     visibility="timeline", isOffline=False, withDeleted=False, withExif=with_exif)
@@ -379,7 +388,7 @@ class ImmichClient:
                 asset, problem = None, None
                 if with_exif:
                     try:
-                        asset = self._original(raw, head)
+                        asset = self._original(raw, head, version)
                     except MediaError as error:
                         problem = error.code
                 members[head.upstream_id] = _Member(head, asset, problem)
@@ -402,12 +411,12 @@ class ImmichClient:
             if spec.connection_ref != self.config.connection_id:
                 raise MediaError("connection_mismatch", "incompatible")
             async with asyncio.timeout(self.limits.refresh_seconds):
-                await self._check(budget)
+                version = await self._check(budget)
                 walks: list[dict[str, _Member]] = []
                 for with_exif in (False, True):
                     members: dict[str, _Member] = {}
                     for kind in spec.media_types:
-                        members.update(await self._walk(spec, kind, with_exif, budget))
+                        members.update(await self._walk(spec, kind, with_exif, budget, version))
                         if len(members) > self.limits.max_candidates:
                             raise MediaError("source_limit", "incompatible")
                     walks.append(members)
@@ -476,12 +485,12 @@ class ImmichClient:
             async with asyncio.timeout(self.limits.original_seconds):
                 if asset.connection_id != self.config.connection_id:
                     raise MediaError("connection_mismatch", "incompatible")
-                await self._check(budget)
+                version = await self._check(budget)
                 raw = await self._json("GET", f"assets/{asset.upstream_id}", budget, original=True)
                 head = self._head(raw)
                 if head is None:
                     raise MediaError("asset_missing")
-                fresh = self._original(raw, head)
+                fresh = self._original(raw, head, version)
                 if fresh != asset:
                     raise MediaError("asset_changed")
                 remaining = budget.remaining()

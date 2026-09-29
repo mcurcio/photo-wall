@@ -711,7 +711,7 @@ def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        message = (f"No compatible media for {VALID_FRAME} in {SOURCE}. "
+        message = (f"No compatible media for {VALID_FRAME} in holiday. "
                    "Choose another frame, or another Source.")
         targets = form.get_by_role("group", name="Target frames", exact=True)
         expect(targets).to_have_accessible_description(message)

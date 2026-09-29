@@ -10,7 +10,7 @@ control messages or operate the compositor service.
 
 ## API and ownership
 
-`NativeRenderer(outputs, *, decoder_limit=4, texture_budget=512*1024**2, prepare_timeout=5)` accepts
+`NativeRenderer(outputs, *, decoder_limit=4, texture_budget=512*1024**2, prepare_timeout=5, serial=None)` accepts
 fixed `NativeOutput(output_id, app_id, width, height)` surfaces. Construct it and
 call `prepare`, `capacity`, `present`, `release`, `close` and `diagnostics` on the
 GTK/GLib owning thread. Native imports are lazy so the neutral package and pure
@@ -18,6 +18,16 @@ reference tests remain usable without GI or a display. Each persistent GTK3
 window contains a GLArea; production Wayland windows receive their distinct app
 IDs before their first content buffer. Application code applies a complete control snapshot and the
 immediate Executor tick in one GLib callback.
+
+Each connected Output starts with an opaque, full-Output Photo Wall diagnostic
+above the GLArea. Before enrollment it says the OS and Player are running and
+Central is connecting. After an authenticated configuration arrives,
+`set_unbound_outputs` keeps the diagnostic only on connected Outputs absent from
+that configuration's bindings and identifies their Output and Player. Bound
+Outputs hide it before the Executor's next tick, including when authored content
+is black. This equipment diagnostic is not a Scene layer or presentation
+acknowledgment. A Linux GTK smoke has checked widget visibility transitions;
+actual pixels and physical HDMI visibility still require Pi verification.
 
 `prepare(LocalLayer)` creates an explicit local-file JPEG, PNG or silent H.264 MP4
 pipeline, returns pending until preroll/seek and a matching RGBA sample complete,

@@ -431,14 +431,14 @@ export function bootOutcomeLabel(bootFacts, deviceId) {
         : `Last netboot healthy on ${served}`;
     case "pending":
       if (failed && failed !== served) {
-        return `Rolled back from ${failed} · netboot served ${served}, not yet healthy`;
+        return `Rolled back from ${failed} · netboot served ${served}, base health not reported`;
       }
       if (failed) {
         return `Retrying ${served} after a failed netboot · ${fallback}`;
       }
       return good && good !== served
-        ? `Netboot served ${served}, not yet healthy · ${fallback}`
-        : `Netboot served ${served}, not yet healthy`;
+        ? `Netboot served ${served}, base health not reported · ${fallback}`
+        : `Netboot served ${served}, base health not reported`;
     case "failed":
       return `Last netboot of ${served} failed · ${fallback}`;
     default:

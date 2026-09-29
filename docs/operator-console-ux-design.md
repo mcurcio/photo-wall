@@ -154,7 +154,7 @@ graph TD
   end
 
   subgraph SHOW["SHOWRUNNER MODE"]
-    SRC["Sources (name:rev, Refresh)"]
+    SRC["Sources (plain names, Refresh/Edit/Delete)"]
     SCN["Scenes (per-target authoring)"]
     PRG["Programs (single windows + priority)"]
     RUN["Runs (activate / finish / cancel)"]
@@ -281,8 +281,8 @@ Plane B and the preview lease unchanged.
 - **Scope tier (T0 / T1 / T2)** — the staged scope of the Display dimension: T0
   UX-only (this pass), T1 a photometric backend program, T2 a CEC/actuator
   cross-layer epic. The owner picks how far to go ([§10](#10-decisions-that-are-yours)).
-- **Source** — a saved, immutably-versioned Immich *query* named `name:rev` (e.g.
-  `holiday:1`): live eligibility, not a downloaded album. Players never see it.
+- **Source** — a saved Immich *query* with a plain operator name (e.g.
+  `holiday`) and internal immutable revisions: live eligibility, not a downloaded album. Players never see it.
 - **Scene / Program / Run** — a **Scene** is a per-target composition of
   contributions (media/black/actuator); a **Program** binds a Scene to a *single*
   time window with a priority; a **Run** is a live execution instance with phases
@@ -549,8 +549,7 @@ and `current.runs`). "Why" = the `contributions` for a Frame ranked by the total
 precedence order — deterministic, no ties. The **synchronous** activation result
 is shown at the moment of activation; the calendar does **not** render
 "expired: missed_window" history, because that reason is not on any operator GET
-(see the cost in [§6](#6-the-hard-part)). **Superseded (pass 2 slice 3A):** `/runtime` now serves each recent Program's outcome, so Program rows show missed and refused windows; see [pass 2 slice 3, §8](operator-console-ux-pass2-showrunner.md#8-what-central-adds-read-only-frozen-for-bead-3a-3). A Source is labelled a saved query
-(`name:rev`); no "open in Immich," no album language. Showrunner **never** exposes
+(see the cost in [§6](#6-the-hard-part)). **Superseded (pass 2 slice 3A):** `/runtime` now serves each recent Program's outcome, so Program rows show missed and refused windows; see [pass 2 slice 3, §8](operator-console-ux-pass2-showrunner.md#8-what-central-adds-read-only-frozen-for-bead-3a-3). A Source is labelled a saved query by its plain name; no "open in Immich," no album language. Showrunner **never** exposes
 the Commissioning facet; the only hardware fact it sees is the
 `calibration_valid` badge (R4).
 

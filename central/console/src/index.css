@@ -412,6 +412,12 @@ label {
   cursor: pointer;
 }
 
+.plan__empty-hint {
+  fill: var(--fg-subtle);
+  font-size: 19px;
+  pointer-events: none;
+}
+
 .plan__draft {
   fill: color-mix(in srgb, var(--accent-soft) 15%, transparent);
   stroke: var(--accent-soft);
@@ -659,6 +665,39 @@ label {
 
 .facet__empty {
   color: var(--fg-subtle);
+}
+
+.facet__content-path {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.facet__content-path .facet__subtitle {
+  margin-top: 0;
+}
+
+.facet__content-path p {
+  margin: 0 0 12px;
+}
+
+.facet__content-path .record__actions {
+  margin: 0;
+}
+
+.facet__content-path .record__actions a {
+  display: inline-block;
+  padding: 8px 12px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-button);
+  text-decoration: none;
+}
+
+.facet__content-path .record__actions a:hover {
+  background: var(--accent-tint);
 }
 
 .facet__why {

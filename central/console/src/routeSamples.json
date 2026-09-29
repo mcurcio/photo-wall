@@ -16,7 +16,7 @@
       "#/schedule/new/when",
       "#/schedule/new/review"
     ],
-    "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review"]
+    "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
   },
   "wall": {
     "wall": [

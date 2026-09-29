@@ -46,9 +46,14 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
   }, []);
 
   const frames = snapshot?.inventory?.frames ?? [];
-  // Surfaces present in the snapshot, sorted for a deterministic default.
+  // Surfaces present in the snapshot, sorted for a deterministic default. A new
+  // installation has no Frames to derive one from, but the first drag still
+  // needs the registry's default Surface to create its first Frame.
   const surfaces = useMemo(
-    () => [...new Set(frames.map((frame) => frame.surface_id))].sort(),
+    () => {
+      const existing = [...new Set(frames.map((frame) => frame.surface_id))].sort();
+      return existing.length > 0 ? existing : ["wall"];
+    },
     [frames],
   );
   const routeFrameId = route.id ?? null;

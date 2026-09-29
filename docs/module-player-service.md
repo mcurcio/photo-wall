@@ -34,9 +34,17 @@ The existing readiness thresholds remain: uncertainty is `RTT/2 + abs(offset)` a
 
 After current configuration is reconciled, the service atomically writes `/run/photo-wall/player/service-health.json`. The public sample includes Linux boot ID, monotonic sample time, current player/session identity, a `persistence` field, health and reason, and clock diagnostics. It contains no key or token. As implemented, the health sample's `persistence` field is currently always published as `volatile`, independent of the boot context's own `persistence` (which is `persistent` for a flashed D0 Player — see [Startup and enrollment](#startup-and-enrollment)); this is a known discrepancy worth verifying against intent rather than a documented guarantee. Healthy requires an Executor, reconciled configuration, a safe current clock mapping, and available renderer capacity; an unbound Player with healthy connected Outputs may be healthy.
 
+The service sends each accepted configuration's connected, unbound Output IDs to
+the Renderer before the next Executor tick. The Renderer owns the local status
+page and never treats it as Scene content or playback evidence. When the Pi
+provisioner hands forward a base-running tag on the per-device `.deb` path, the
+service posts base-health; a response with `accepted: false` does not count as
+reported and a retry uses a higher sequence number. The default global `.deb`
+path hands forward no tag and sends no base-health report.
+
 The journal line for faults is `player fault: <code> <detail>`, logged once per change of code. Network failures use `<cause>_<reason>` codes (e.g. `tls_untrusted`, `time_not_yet_valid`, `redirect_unexpected`, `connect_refused`, `dns_failed`, `central_error`, `http_status`, `transfer_short`), and the detail is `cause=... reason=... host=... detail=...` plus the stage-1 clock record for time and untrusted-TLS failures. Service codes (e.g. `registration_required`, `media_download`, `clock_probe`) are unchanged.
 
-The signed-release boot-health trial has been retired: every boot is ticketless, so there is no per-boot release to report against and no trial watchdog to disarm. The Player posts current health locally to the health file only. The hardware watchdog that stage 1 arms and hands to systemd ([0014](decisions/0014-reaching-central-from-every-boot-stage.md)) is systemd's to pet; the Player never touches it.
+The earlier signed-release boot-health trial has been retired: every boot is ticketless, so there is no per-boot signed release trial or trial watchdog to disarm. The optional base-health report above belongs to the later per-device base/package path. The Player also writes current process health locally to the health file. The hardware watchdog that stage 1 arms and hands to systemd ([0014](decisions/0014-reaching-central-from-every-boot-stage.md)) is systemd's to pet; the Player never touches it.
 
 The Player .deb runs `/usr/bin/python3 -I -B /usr/lib/photo-wall-player --config /etc/photo-wall/public.json`, executing the package's private directory application. The public configuration shape is:
 

@@ -36,7 +36,8 @@ export function Guidance({ snapshot, dismissed, onDismiss }) {
     >
       <p className="console__guidance-text">
         Draw a frame, power on one Pi, bind the frame to one of its outputs, then
-        commission the display.
+        commission the display. To show photos, make a Scene targeting that Frame,
+        then Show now or Schedule it.
       </p>
       <button
         type="button"

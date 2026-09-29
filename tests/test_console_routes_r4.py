@@ -493,6 +493,7 @@ ROUTES = [
     {"section": "scenes", "id": "new", "flow": "edit", "step": "review"},
     {"section": "scenes", "id": "lobby/evening ç?#%", "flow": "edit", "step": "frames"},
     {"section": "sources", "flow": "new", "step": "name"},
+    {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
     {"section": "wall", "id": "reception north", "facet": "commissioning"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
@@ -500,7 +501,7 @@ ROUTES = [
 ]
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/sources/x/edit/y",
+    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/schedule/x/edit/y",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
 ]
 INVALID_ROUTES = [

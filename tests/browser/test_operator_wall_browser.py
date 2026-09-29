@@ -190,6 +190,29 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
 
 
+def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, registry):
+    registry.create_frame(FrameCreate(
+        id="new-frame", surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name="Frame new-frame", exact=True).click()
+        inspector = page.get_by_role(
+            "region", name="Frame new-frame inspector", exact=True)
+        inspector.get_by_role("tab", name="Now-showing", exact=True).click()
+
+        expect(inspector).to_contain_text("Nothing scheduled.")
+        expect(inspector).to_contain_text("choose Frame new-frame on its Frames step")
+        expect(inspector).to_contain_text("Show now or Schedule it")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
+
+        expect(page.get_by_role(
+            "heading", level=1, name="Scenes", exact=True)).to_be_visible()
+        expect(page.get_by_role(
+            "heading", name="What kind of Scene?", exact=True)).to_be_visible()
+        assert page.evaluate("window.location.hash") == "#/scenes/new/kind"
+
+
 def test_surface_filter_switches_the_plan(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -272,6 +295,23 @@ def _fill_landscape_profile(page):
     page.get_by_label("Display width (px)").fill("1920")
     page.get_by_label("Display height (px)").fill("1080")
     page.get_by_label("Diagonal (inches)").fill("24")
+
+
+def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry):
+    assert not registry.inventory().frames
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        expect(page.get_by_label("Surface", exact=True)).to_have_value("wall")
+        expect(page.get_by_text("Drag on this plan to place a Frame")).to_be_visible()
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        form = page.get_by_role("form", name="New frame")
+        expect(form).to_be_visible()
+        form.get_by_label("Frame id", exact=True).fill("first-frame")
+        _fill_landscape_profile(page)
+        form.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Frame first-frame", exact=True)
+               ).to_be_visible()
+        assert {frame.id for frame in registry.inventory().frames} == {"first-frame"}
 
 
 def test_drag_create_posts_frame_with_scaled_placement(page, registry):

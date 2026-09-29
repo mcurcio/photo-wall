@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -37,6 +37,8 @@ from central.netboot_base import record_base_health
 from central.operator_auth import OperatorAuth
 from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
 from central.runtime import Program, RuntimeConflict, Scene
+from central.runtime_store import RuntimeStore
+from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     BaseHealth,
@@ -142,6 +144,7 @@ def create_app(
         ),
         media=media_repository,
     )
+    source_names = SourceNameService(db, media_repository, RuntimeStore(db, clock))
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
@@ -291,7 +294,10 @@ def create_app(
 
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=exc.status)
+        detail = {"error": exc.code}
+        if isinstance(exc, SourceInUse):
+            detail["scene_ids"] = exc.scene_ids
+        return JSONResponse(detail, status_code=exc.status)
 
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
@@ -659,6 +665,14 @@ def create_app(
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])
     def media_state():
         return {"sources": media_application.sources(), "health": media_application.health()}
+
+    @app.put("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
+    def configure_source_name(name: str, request: NamedSourceWrite):
+        return source_names.put(name, request)
+
+    @app.delete("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
+    def delete_source_name(name: str, expected_revision: int = Query(ge=1)):
+        return source_names.delete(name, expected_revision)
 
     @app.put(
         "/v1/operator/sources/{source_ref}",

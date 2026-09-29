@@ -254,8 +254,8 @@ def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag():
             conn.execute("INSERT INTO app_release_poll(singleton, etag) VALUES(TRUE, 'W/\"x\"')")
         db.migrate()
         with db.transaction() as conn:
-            assert conn.execute("SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1"
-                                ).fetchone()["name"] == "029_release_upstream_version.sql"
+            assert conn.execute("SELECT 1 FROM schema_migrations WHERE name=%s",
+                                ("029_release_upstream_version.sql",)).fetchone() is not None
             row = conn.execute("SELECT upstream_changed_at, upstream_asset_id FROM app_releases"
                                ).fetchone()
             assert dict(row) == {"upstream_changed_at": None, "upstream_asset_id": None}

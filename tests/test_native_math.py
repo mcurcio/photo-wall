@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +18,53 @@ from player.geometry import (
     source_uv,
     transform,
 )
-from player.native import NativeOutput, SampleMailbox, packed_rgba
+from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
+
+
+def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
+    startup = diagnostic_text("HDMI-A-1", serial="0123456789abcdef")
+    assert "OS and Player running" in startup
+    assert "Central: connecting" in startup
+    assert "enrolled" not in startup
+    enrolled = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+                               serial="0123456789abcdef")
+    assert "Central: enrolled; configuration received" in enrolled
+    assert "No Frame assigned" in enrolled
+    assert "Output HDMI-A-1" in enrolled
+    assert "Player p-…aaaaaaaa" in enrolled
+    assert "Serial 0123456789abcdef" in enrolled
+
+
+def test_native_diagnostic_is_hidden_for_bound_outputs():
+    class Widget:
+        def __init__(self):
+            self.visible = True
+            self.text = ""
+
+        def show(self):
+            self.visible = True
+
+        def hide(self):
+            self.visible = False
+
+        def set_text(self, value):
+            self.text = value
+
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._owner = threading.get_ident()
+    renderer._closed = False
+    renderer._serial_label = "0123456789abcdef"
+    first, second = Widget(), Widget()
+    renderer._surfaces = {
+        "HDMI-A-1": SimpleNamespace(diagnostic=first, diagnostic_label=Widget()),
+        "HDMI-A-2": SimpleNamespace(diagnostic=second, diagnostic_label=Widget()),
+    }
+    renderer.set_unbound_outputs(("HDMI-A-1",), "p-" + "a" * 32)
+    assert first.visible
+    assert not second.visible
+    assert "No Frame assigned" in renderer._surfaces["HDMI-A-1"].diagnostic_label.text
+    renderer.set_unbound_outputs((), "p-" + "a" * 32)
+    assert not first.visible and not second.visible
 
 
 def test_projective_corners_and_interior_roundtrip():

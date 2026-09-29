@@ -54,6 +54,8 @@ class PresentationResult:
 
 
 class Renderer(Protocol):
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str) -> None: ...
+
     def prepare(self, layer: LocalLayer) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
@@ -84,6 +86,12 @@ class RecordingRenderer:
         self.presentations: list[OutputComposition] = []
         self.outputs: dict[str, OutputComposition] = {}
         self.resident: dict[str, LocalLayer] = {}
+        self.unbound_outputs: tuple[str, ...] = ()
+        self.enrolled_player_id: str | None = None
+
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str) -> None:
+        self.unbound_outputs = output_ids
+        self.enrolled_player_id = player_id
 
     def prepare(self, layer: LocalLayer) -> PrepareResult:
         self.preparations.append(layer)

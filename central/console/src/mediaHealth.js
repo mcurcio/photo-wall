@@ -1,6 +1,7 @@
 import { ageAt, formatAge, frameHealth } from "./health.js";
 import { LIVE_PHASES, rankedContributions, toTarget } from "./join.js";
 import { clockTime, cycleWording, runScene } from "./showState.js";
+import { sourceName } from "./sourceNames.js";
 
 /**
  * The media pipeline in words (pass 2 slice 3 §14). Pure reads of the served
@@ -354,7 +355,7 @@ export function whyNothingNew(snapshot, frameId, check = null) {
       text: "Fixed, hand-picked media; new photos never appear by design.",
     });
   } else {
-    steps.push({ title: "Authored?", state: "ok", text: `No: live from ${winner.source_refs.join(", ")}.` });
+    steps.push({ title: "Authored?", state: "ok", text: `No: live from ${winner.source_refs.map(sourceName).join(", ")}.` });
   }
 
   if (live) {
@@ -362,14 +363,14 @@ export function whyNothingNew(snapshot, frameId, check = null) {
     const read = winner.source_refs.map((ref) => {
       const source = sources.find((candidate) => candidate.source_ref === ref);
       return source === undefined
-        ? { ok: false, text: `${ref}: not configured` }
-        : (({ severity, label }) => ({ ok: severity === "ok", text: `${ref}: ${label}` }))(
+        ? { ok: false, saved: true, text: `${sourceName(ref)}: this Run uses saved Source settings; their current status is not shown here` }
+        : (({ severity, label }) => ({ ok: severity === "ok", text: `${sourceName(source)}: ${label}` }))(
           sourceState(source, now),
         );
     });
     steps.push({
       title: "The Source",
-      state: read.some((entry) => entry.ok) ? "ok" : "stop",
+      state: read.some((entry) => entry.ok) ? "ok" : read.some((entry) => entry.saved) ? "info" : "stop",
       text: `${read.map((entry) => entry.text).join("; ")}.`,
     });
     steps.push({ title: "Check this frame", ...checkStep(frameId, check) });

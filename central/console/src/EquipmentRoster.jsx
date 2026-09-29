@@ -213,6 +213,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
     const liveness = standing.state === "retired" ? null : playerLiveness(snapshot, player.id);
     const serial = playerSerial(snapshot, bootFacts, player.id);
     const boot = bootOutcomeLabel(bootFacts, player.device_id);
+    const bootPending = bootFacts?.devices?.get(player.device_id)?.boot_outcome === "pending";
     return (
       <li key={player.id} className="roster__card">
         <button
@@ -233,6 +234,12 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
             <p className="roster__boot">
               {[serial === null ? null : `Reported serial ${serial}`, boot].filter(Boolean).join(" · ")}
             </p>
+            {bootPending && (
+              <p className="roster__note">
+                Base health is separate from Player connection. Check Last heard above;
+                boots using the global Player package do not send a base-health report.
+              </p>
+            )}
             {outputs.length === 0 ? (
               <p className="roster__empty">No outputs reported</p>
             ) : (

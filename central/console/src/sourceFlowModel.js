@@ -5,16 +5,18 @@
  * no React; tests/test_console_flow.py drives it under Node. The Source's problems
  * stay in authoring.js (`sourceProblems`).
  *
- * A Source is a saved live query named `name:rev` (design D-e): Photo Wall selects
+ * A Source is a saved live query with a plain operator name (its stored revision is hidden): Photo Wall selects
  * media that lives in the photo library and never uploads, edits or deletes anything
  * there. Nothing here names a vendor or an album.
  *
- * INSTANCES. Only a new Source is authored here (a Source is never edited in place: a
- * change is a new revision), so the one key is `new`, opening at "What to include".
+ * INSTANCES. A new Source opens at "What to include"; an edit opens at Review and
+ * carries the stored revision for an optimistic write. Central creates the next hidden
+ * revision and moves future Scene definitions to it.
  */
 
 import { localDayStart } from "./authoring.js";
-import { flowKeys } from "./flow/instance.js";
+import { editedId, flowKeys } from "./flow/instance.js";
+import { namedSource, sourceDay, sourceName } from "./sourceNames.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -38,8 +40,8 @@ export const SOURCE_FIELD_STEP = Object.freeze({
 /** The Source flow's instances and their routes (flow/instance.js `flowKeys`). */
 export const SOURCE_KEYS = flowKeys({
   section: "sources",
-  firstStep: { create: INCLUDE.id },
-  describe: { create: "a new photo source" },
+  firstStep: { create: INCLUDE.id, edit: REVIEW.id },
+  describe: { create: "a new photo source", edit: (name) => `photo source ${name}` },
 });
 
 /**
@@ -51,7 +53,7 @@ export const SOURCE_LABELS = Object.freeze({
   favorites: "Favourites",
   from: "Taken from",
   until: "Taken until",
-  ref: "Source name and revision",
+  ref: "Source name",
   connection: "Connection name",
 });
 
@@ -88,7 +90,7 @@ export const FAVOURITES_CHOICES = Object.freeze([
  * connection is then typed.
  *
  * @typedef {{mediaType: string, favorites: "any"|"only"|"not", capturedFrom: string,
- *            capturedUntil: string, sourceRef: string, connectionRef: string,
+ *            capturedUntil: string, sourceName: string, connectionRef: string,
  *            newConnection: boolean}} SourceDraft
  * @type {Readonly<SourceDraft>}
  */
@@ -97,7 +99,7 @@ export const NEW_SOURCE_DRAFT = Object.freeze({
   favorites: FAVOURITES_CHOICES[0][0],
   capturedFrom: "",
   capturedUntil: "",
-  sourceRef: "",
+  sourceName: "",
   connectionRef: "",
   newConnection: false,
 });
@@ -151,7 +153,26 @@ export function sourceAdvancedFields(rule) {
  * @returns {(key: string) => SourceDraft}
  */
 export function seedSource(sources) {
-  return () => ({ ...NEW_SOURCE_DRAFT, connectionRef: connectionRule(sources).prefill });
+  return (key) => {
+    const name = editedId(key);
+    if (name === null) {
+      return { ...NEW_SOURCE_DRAFT, connectionRef: connectionRule(sources).prefill };
+    }
+    const source = namedSource(sources, name);
+    if (!source) return NEW_SOURCE_DRAFT;
+    const spec = source.spec ?? {};
+    const kinds = spec.media_types ?? ["image", "video"];
+    return {
+      mediaType: kinds.length === 1 ? kinds[0] : "both",
+      favorites: spec.favorites === true ? "only" : spec.favorites === false ? "not" : "any",
+      capturedFrom: sourceDay(spec.captured_from),
+      capturedUntil: sourceDay(spec.captured_until),
+      sourceName: sourceName(source),
+      connectionRef: spec.connection_ref ?? "",
+      newConnection: false,
+      revision: source.revision ?? Number(source.source_ref?.match(/:([0-9]+)$/)?.[1] ?? 1),
+    };
+  };
 }
 
 const words = (choices, value) => choices.find(([choice]) => choice === value)?.[1] ?? value;
@@ -173,7 +194,7 @@ export function sourceAnswers(draft) {
     ["favorites", words(FAVOURITES_CHOICES, draft.favorites)],
     ["from", given(draft.capturedFrom) ?? NO_DAY_LIMIT],
     ["until", given(draft.capturedUntil) ?? NO_DAY_LIMIT],
-    ["ref", given(draft.sourceRef)],
+    ["ref", given(draft.sourceName)],
     ["connection", given(draft.connectionRef)],
   ].map(([field, value]) => ({ label: SOURCE_LABELS[field], field, value }));
 }
@@ -182,8 +203,8 @@ const FAVOURITES = { any: null, only: true, not: false };
 
 /**
  * The stored `SourceSpec` write body (media/models.py `SourceSpec`) for a saved live
- * query: `schema` (alias of schema_version), the `source_ref` (`name:rev`), its
- * `connection_ref`, the `media_types` subset, and the filters the API accepts:
+ * logical Source write body: `expected_revision`, its `connection_ref`, the
+ * `media_types` subset, and the filters the API accepts:
  * `favorites` (Any / Only / Not → omitted / true / false) and the capture window
  * (`captured_from` / `captured_until`, the local midnights of the chosen days; "until"
  * is exclusive). An unset filter is omitted, so the server applies its default.
@@ -192,30 +213,35 @@ const FAVOURITES = { any: null, only: true, not: false };
  * There is deliberately no album or vendor field: a Source is a saved live query, and
  * `SourceSpec` has no album filter.
  *
- * @param {{sourceRef: string, connectionRef: string, mediaType: string,
+ * @param {{connectionRef: string, mediaType: string, expectedRevision?: number|null,
+ *          newName?: string|null, originalCapturedFrom?: number|null,
+ *          originalCapturedUntil?: number|null,
  *          favorites?: "any"|"only"|"not", capturedFrom?: string,
  *          capturedUntil?: string}} draft
  * @returns {object}
  */
 export function buildSourceSpec({
-  sourceRef,
   connectionRef,
   mediaType,
+  expectedRevision = null,
+  newName = null,
+  originalCapturedFrom = undefined,
+  originalCapturedUntil = undefined,
   favorites = "any",
   capturedFrom = "",
   capturedUntil = "",
 }) {
   const spec = {
-    schema: 1,
-    source_ref: sourceRef,
+    expected_revision: expectedRevision,
     connection_ref: connectionRef,
     media_types: mediaType === "both" ? ["image", "video"] : [mediaType],
   };
+  if (newName !== null) spec.new_name = newName;
   if (FAVOURITES[favorites] !== null) {
     spec.favorites = FAVOURITES[favorites];
   }
-  const from = localDayStart(capturedFrom);
-  const until = localDayStart(capturedUntil);
+  const from = originalCapturedFrom === undefined ? localDayStart(capturedFrom) : originalCapturedFrom;
+  const until = originalCapturedUntil === undefined ? localDayStart(capturedUntil) : originalCapturedUntil;
   if (from !== null) {
     spec.captured_from = from;
   }
