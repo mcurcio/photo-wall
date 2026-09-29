@@ -120,3 +120,23 @@ export function programDraftProblems(draft, programIds, now, pendingIds = []) {
   const taken = new Set([...programIds].filter((id) => !pending.has(id)));
   return separateWindows(draft) ? windowProblems(draft, taken, now) : programProblems(draft, taken, now);
 }
+
+/**
+ * The body of a single-window Program write: exactly the stored `Program` shape
+ * (central/runtime.py:114-125) — a Scene bound to ONE `[starts_at, ends_at)`
+ * window with a priority. There is deliberately no recurrence field: central
+ * stores single windows only (design Q2), so N-window scheduling is N of THESE,
+ * never one recurring rule.
+ *
+ * @param {{programId: string, sceneId: string, startsAt: number, endsAt: number, priority: number}} draft
+ * @returns {{program_id: string, scene_id: string, starts_at: number, ends_at: number, priority: number}}
+ */
+export function buildProgram({ programId, sceneId, startsAt, endsAt, priority }) {
+  return {
+    program_id: programId,
+    scene_id: sceneId,
+    starts_at: startsAt,
+    ends_at: endsAt,
+    priority,
+  };
+}

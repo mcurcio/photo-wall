@@ -180,8 +180,7 @@ label {
 .console__surface-field,
 .plan__new-frame-field,
 .calib__control,
-.confirm__typed,
-.run-control__field {
+.confirm__typed {
   color: var(--fg-label);
   font-weight: 500;
 }
@@ -624,11 +623,6 @@ label {
   margin: 0;
   padding: 16px;
   color: var(--fg-subtle);
-}
-
-.inspector__stub {
-  color: var(--fg-subtle);
-  font-style: italic;
 }
 
 .facet__title {
@@ -1203,13 +1197,6 @@ label {
   padding: 1px 8px;
   font-size: 12px;
   overflow-wrap: anywhere;
-}
-
-.run-control__children {
-  margin: 8px 0 0;
-  padding-left: 16px;
-  list-style: none;
-  border-left: 2px solid var(--border);
 }
 
 .run-control__ended {
