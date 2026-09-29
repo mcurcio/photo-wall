@@ -130,6 +130,16 @@ export function Commissioning({ snapshot, frameId }) {
   const output = boundOutput(snapshot, frameId);
   const observation = output?.observation ?? null;
   const bound = isBound(frame);
+  const rotation = calibration.rotation ?? 0;
+  const hasUsableResolutions = (dimensions) =>
+    Number.isFinite(dimensions?.width_px) && dimensions.width_px > 0 &&
+    Number.isFinite(dimensions?.height_px) && dimensions.height_px > 0;
+  const quarterTurn = frame.calibration_valid === true && (rotation === 90 || rotation === 270);
+  const reportedProfileMismatch =
+    bound && observation?.connected === true &&
+    hasUsableResolutions(profile) && hasUsableResolutions(observation) &&
+    (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
+      profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
 
   const beginProfileEdit = () => {
     setProfileDraft({
@@ -531,6 +541,11 @@ export function Commissioning({ snapshot, frameId }) {
             <dd>{profile.video ? "yes" : "no"}</dd>
           </div>
         </dl>
+        {reportedProfileMismatch ? (
+          <p className="facet__note" role="status">
+            {`The Player reported ${observation.width_px} × ${observation.height_px} at its last start; this observation may be stale. The Frame profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `Committed rotation ${rotation}° was considered.` : "Calibration is not yet valid for this binding."} Verify the display and intended rotation, and restart the Player if the display changed. If the profile is wrong, unbind this Frame, edit its profile, then bind and calibrate it.`}
+          </p>
+        ) : null}
         {profileDraft == null ? (
           <>
             <button ref={profileEditButtonRef} type="button" onClick={beginProfileEdit}>Edit profile</button>

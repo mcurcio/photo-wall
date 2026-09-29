@@ -31,6 +31,9 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
+import { sourceRefreshPath } from "./mediaApi.js";
+import { useMutate } from "./useMutate.js";
+import { codeWords, mediaNow } from "./mediaHealth.js";
 
 const EMPTY = {};
 
@@ -98,6 +101,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
   const sources = snapshot?.media?.sources ?? [];
+  const now = mediaNow(snapshot);
   const loaded = snapshot != null;
 
   const draft = useFlowDraft(seedScene(definitions));
@@ -110,6 +114,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
+  const [refreshingSource, setRefreshingSource] = useState(/** @type {string|null} */ (null));
+  const [refreshFeedback, setRefreshFeedback] = useState(/** @type {object|null} */ (null));
+  const refreshRequest = useRef(0);
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const refs = useFlowRefs();
@@ -176,6 +183,48 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   );
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
+  const mutate = useMutate();
+  const currentSource = sources.find((source) => source.source_ref === value.sourceRef) ?? null;
+  const sourceReadiness = {
+    source: currentSource,
+    historicalRef: value.sourceRef !== "" && currentSource === null,
+    now,
+    feedback: refreshFeedback?.sourceRef === value.sourceRef ? refreshFeedback : null,
+    refreshing: refreshingSource === value.sourceRef,
+    onManage: () => navigate({ section: "sources" }),
+    onRefresh: async () => {
+      const sourceRef = value.sourceRef;
+      const requestId = ++refreshRequest.current;
+      setRefreshingSource(sourceRef);
+      setRefreshFeedback(null);
+      try {
+        // Convert transport failures into a result so useMutate still performs its
+        // single Plane A refresh and the caller can report the outcome as unknown.
+        const result = await mutate(async () => {
+          try {
+            return await apiWrite(sourceRefreshPath(sourceRef), { method: "POST" });
+          } catch {
+            return { ok: false, status: 0, error: null, data: null };
+          }
+        });
+        // A later Scene draft or request owns the status line now.
+        if (requestId !== refreshRequest.current) return;
+        if (result.ok && result.status === 202) {
+          setRefreshFeedback({
+            sourceRef,
+            requestedRevision: result.data?.requested_revision ?? null,
+            message: "Refresh requested. The status will update when the media worker finishes.",
+          });
+        } else if (result.status === 0 || result.status >= 500) {
+          setRefreshFeedback({ sourceRef, message: "The refresh request outcome is unknown. Check the Source status before retrying." });
+        } else {
+          setRefreshFeedback({ sourceRef, message: `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.` });
+        }
+      } finally {
+        if (requestId === refreshRequest.current) setRefreshingSource(null);
+      }
+    },
+  };
 
   // A Save Central did not answer may have stored its id: while the draft is the one it
   // sent, that id is not another Scene's (flow/useFlowWrite.js NOT CONFIRMED).
@@ -225,9 +274,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     problems,
     confirm,
     onOpened: () => {
+      refreshRequest.current += 1;
       setVanished(null);
       setReloaded(null);
       setSaved(null);
+      setRefreshFeedback(null);
+      setRefreshingSource(null);
     },
   });
   const { place, step, focus } = flow;
@@ -381,7 +433,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const views = {
     kind: () => <KindStep {...stepProps} />,
     photos: () => (
-      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} />
+      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} sourceReadiness={sourceReadiness} />
     ),
     frames: () => <FramesStep {...stepProps} snapshot={snapshot} onToggle={toggleTarget} />,
     media: () => <MediaStep {...stepProps} candidates={candidates} onSelect={selectMedia} />,
@@ -407,6 +459,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
           snapshot={snapshot}
           editingId={editingId}
           candidates={candidates}
+          sourceReadiness={sourceReadiness}
           advanced={advanced("review")}
           onChange={flow.openField}
         />

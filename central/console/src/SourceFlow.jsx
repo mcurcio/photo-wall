@@ -25,6 +25,7 @@ import {
 } from "./sourceFlowModel.js";
 import { IncludeStep, NameStep, SourceReview } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
+import { sourceRefreshPath } from "./mediaApi.js";
 import { useMutate } from "./useMutate.js";
 
 const EMPTY = [];
@@ -132,7 +133,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   const refreshSource = useCallback(
     (sourceRef) =>
       mutate(() =>
-        apiWrite(`/v1/operator/sources/${encodeURIComponent(sourceRef)}/refresh`, { method: "POST" }),
+        apiWrite(sourceRefreshPath(sourceRef), { method: "POST" }),
       ),
     [mutate],
   );

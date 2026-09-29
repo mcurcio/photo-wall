@@ -5,7 +5,7 @@ import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
-import { candidateLabels } from "./mediaHealth.js";
+import { candidateLabels, sourceState } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
@@ -78,7 +78,7 @@ export function KindStep({ value, patch, problems }) {
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
-export function PhotosStep({ value, patch, problems, sources, onNewSource }) {
+export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness }) {
   return (
     <>
       <p className="field__hint">
@@ -95,6 +95,7 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource }) {
           problems.touch("source");
         }}
       />
+      <SourceReadiness {...sourceReadiness} />
       <div className="record__actions">
         <button type="button" onClick={onNewSource}>
           New selection from your photo library
@@ -245,6 +246,7 @@ export function ReviewStep({
   candidates,
   advanced,
   onChange,
+  sourceReadiness,
 }) {
   const authored = value.mode === "authored";
   const missing = <NotChosen />;
@@ -291,6 +293,7 @@ export function ReviewStep({
         </p>
       )}
       <CheckAnswers rows={rows} onChange={onChange} />
+      <SourceReadiness {...sourceReadiness} />
       {editingId === null && (
         <>
           <NameField
@@ -319,6 +322,46 @@ export function ReviewStep({
         </>
       )}
     </>
+  );
+}
+
+/** Current Source health and its effect on the Scene, shared by Photos and Review. */
+function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onRefresh, onManage }) {
+  if (source === null && !historicalRef) return null;
+  const state = source === null ? null : sourceState(source, now, false);
+  const consequence = state === null
+    ? "Status is unavailable for this saved reference. Choose a current Source to check its media status."
+    : state.state === "ok"
+      ? "A recent refresh found media; each Frame still needs compatible, prepared content."
+      : state.state === "empty"
+        ? "The last refresh found no valid items, so this Scene may have nothing to show."
+        : state.state === "failing"
+          ? "The last refresh failed, so this Scene may have no current media."
+          : state.state === "overdue"
+            ? "The catalog may be stale, so this Scene may not show the latest media."
+            : "No catalog has been loaded yet, so this Scene may have nothing to show.";
+  const completed = source !== null && feedback?.requestedRevision != null &&
+    Number(source.refresh_completed_revision ?? 0) >= feedback.requestedRevision;
+  let message = feedback?.message ?? null;
+  if (state?.state === "ok" && feedback?.requestedRevision == null) message = null;
+  if (completed) message = `Refresh finished. Current Source status: ${state.label}.`;
+  return (
+    <section className={`notice scene-flow__source-readiness${state !== null && state.severity !== "ok" ? " notice--warn" : ""}`} aria-label="Source media status">
+      <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>
+      <p>{consequence}</p>
+      {message !== null && <p role="status">{message}</p>}
+      {state !== null && state.state !== "ok" && (
+        <button type="button" disabled={refreshing} onClick={onRefresh}>
+          {refreshing ? "Requesting refresh…" : "Refresh Source"}
+        </button>
+      )}
+      {(state === null || state.state !== "ok") && (
+        <div className="scene-flow__source-manage">
+          <p>Your Scene draft stays open in this tab while you manage Sources.</p>
+          <button type="button" onClick={onManage}>Manage in Photo sources</button>
+        </div>
+      )}
+    </section>
   );
 }
 

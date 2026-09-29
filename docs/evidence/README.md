@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 Scene Source readiness and commissioning resolution check](2026-09-29-scene-readiness-and-display-check.md):
+  selected Source health and recovery inside Scene authoring, plus a
+  rotation-aware check of declared versus reported display resolution.
 - [2026-09-29 Player serials on collapsed Equipment cards](2026-09-29-player-serial-summary.md):
   pending Players remain distinguishable from their reported serial suffixes
   without opening each card, with browser proof and identity limits.

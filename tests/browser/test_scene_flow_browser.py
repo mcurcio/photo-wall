@@ -44,6 +44,7 @@ from test_operator_showrunner_browser import (
     _runtime,
     _seed,
     _seed_source,
+    _set_source,
 )
 from test_registry import ADMIN
 
@@ -62,6 +63,93 @@ def _scenes(page):
 
 def _steps(page):
     return page.get_by_role("navigation", name="Steps", exact=True)
+
+
+@pytest.mark.parametrize(
+    ("state", "setup", "expected", "consequence"),
+    [
+        ("awaiting", lambda registry, now: None, "Awaiting refresh", "No catalog has been loaded yet"),
+        ("failed", lambda registry, now: _set_source(
+            registry, SOURCE, status="unavailable", next_refresh=now + 30,
+            refresh_completed_revision=0, refresh_requested_revision=1,
+            diagnostics=[{"code": "source_unavailable"}],
+        ), "Library unreachable", "last refresh failed"),
+        ("empty", lambda registry, now: _set_source(
+            registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,
+            counts={"valid": 0, "discovered": 0, "pending": 0, "rejected": 0},
+        ), "nothing valid in the last refresh", "found no valid items"),
+    ],
+)
+def test_scene_photos_and_review_explain_source_readiness(
+    page, registry, state, setup, expected, consequence,
+):
+    _seed(registry)
+    _seed_source(registry)
+    now = registry.clock.utc()
+    setup(registry, now)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text(expected)
+        expect(readiness).to_contain_text(consequence)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text(expected)
+        expect(readiness).to_contain_text(consequence)
+
+
+def test_refresh_source_from_scene_photos_preserves_draft_and_reports_request(
+    page, registry,
+):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text("Awaiting refresh")
+        with page.expect_response(
+            lambda response: response.url.endswith("/refresh")
+            and response.request.method == "POST"
+        ) as info:
+            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
+        assert info.value.status == 202
+        expect(readiness).to_contain_text(
+            "Refresh requested. The status will update when the media worker finishes."
+        )
+        assert info.value.json()["requested_revision"] == 1
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("holiday")
+        form.get_by_label("Scene name", exact=True).fill("source-refresh-keeps-draft")
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
+            "source-refresh-keeps-draft"
+        )
+        expect(form.get_by_role("region", name="Source media status")).to_contain_text(
+            "Refresh requested."
+        )
+        form.get_by_role("region", name="Source media status").get_by_role(
+            "button", name="Manage in Photo sources", exact=True
+        ).click()
+        expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)).to_be_visible()
+        expect(page.get_by_role("region", name="Sources", exact=True)).to_contain_text("holiday")
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
+        assert current_hash(page) == "#/scenes/new/review"
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
+            "source-refresh-keeps-draft"
+        )
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text("holiday")
+        expect(answers).to_contain_text(VALID_FRAME)
 
 
 def _scenes_link(page):
