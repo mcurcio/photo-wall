@@ -622,6 +622,43 @@ def test_program_remove_deletes_it(page, registry):
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
 
+def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        author_scene(page, "delete-unused", SOURCE, (VALID_FRAME,))
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and "/v1/operator/scenes/delete-unused?" in r.url) as info:
+            scenes.get_by_role("button", name="Delete Scene delete-unused", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            expect(dialog).to_contain_text("removes Scene delete-unused from future choices")
+            expect(dialog).to_contain_text("never stops a Run")
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert info.value.status == 200
+        assert info.value.request.url.endswith("expected_revision=1")
+        expect(scenes.get_by_role("heading", name="Scene delete-unused", exact=True)).to_have_count(0)
+
+
+def test_scene_delete_refusal_names_dependent_program(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
+        go(page, "schedule")
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        go(page, "scenes")
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and f"/v1/operator/scenes/{SCENE_ID}?" in r.url) as info:
+            scenes.get_by_role("button", name=f"Delete Scene {SCENE_ID}", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            expect(dialog).to_contain_text(f"Program {PROGRAM_ID}")
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert info.value.status == 409
+        expect(page.get_by_role("alert")).to_contain_text(f"Program {PROGRAM_ID}")
+
+
 def test_n_window_helper_creates_separate_programs(page, registry):
     """Bead 15 / Q2: the optional helper creates N SEPARATE windows in one action
     — N independent, individually-stored single-window Programs (each a real

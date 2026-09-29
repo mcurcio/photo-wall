@@ -313,9 +313,7 @@ export function useConfirm(successor, onDone = null) {
 
   const confirmation = (statusClass) => (
     <>
-      <p className={statusClass} role="status">
-        {status}
-      </p>
+      {status !== null && <p className={statusClass} role="status">{status}</p>}
       {request !== null && <ConfirmAction key={request.key} request={request} onClose={onClosed} />}
     </>
   );

@@ -419,7 +419,7 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         next_actions = scenes.get_by_role("group", name="Next for Scene saved-scene")
         expect(next_actions.get_by_role("button")).to_have_text(["Show now", "Schedule it"])
         card = scenes.get_by_label("Scene saved-scene", exact=True)
-        expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it"])
+        expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it", "Delete"])
 
         page.go_back()
         assert not current_hash(page).startswith("#/scenes"), current_hash(page)

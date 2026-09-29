@@ -35,8 +35,15 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.operator_auth import OperatorAuth
-from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
-from central.runtime import Program, RuntimeConflict, Scene
+from central.registry import (
+    Enrollment,
+    FrameCreate,
+    FramePlacement,
+    FrameProfileReplacement,
+    Registry,
+    RegistryError,
+)
+from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
@@ -307,6 +314,16 @@ def create_app(
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
         return JSONResponse({"error": exc.code}, status_code=409)
+
+    @app.exception_handler(SceneInUse)
+    async def scene_in_use(request, exc):
+        return JSONResponse({
+            "error": exc.code,
+            "program_ids": exc.program_ids,
+            "run_ids": exc.run_ids,
+            "queued_activation_ids": exc.queued_activation_ids,
+            "scene_ids": exc.scene_ids,
+        }, status_code=409)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(request, exc):
@@ -610,6 +627,21 @@ def create_app(
     def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
         return registry.place_frame(frame_id, placement)
 
+    def _refuse_frame_in_use(frame_id: str) -> None:
+        # Runs refer to Frame ids by string, so keep destructive/reconfiguring
+        # operator actions away from a target while its projected Run is live.
+        view = coordinator.runtime.read().project(clock.utc())
+        target = f"frame:{frame_id}"
+        if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
+            raise RegistryError("frame_in_use", 409)
+
+    @app.put("/v1/operator/frames/{frame_id}/profile", dependencies=[Depends(admin)])
+    def replace_frame_profile(frame_id: Identifier, request: FrameProfileReplacement) -> dict:
+        _refuse_frame_in_use(frame_id)
+        return registry.replace_frame_profile(
+            frame_id, request.profile, expected_generation=request.expected_generation
+        )
+
     @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
     def remove_frame(frame_id: Identifier) -> dict:
         # Guard 1 (runtime, in-route, in-memory, cheap): refuse while a live Run
@@ -619,10 +651,7 @@ def create_app(
         # projected RunView). participants is built from ALL runs unfiltered, so
         # filtering to the live phases (body, outro) is BOTH correct and required:
         # completed/cancelled runs must not block a delete.
-        view = coordinator.runtime.read().project(clock.utc())
-        target = f"frame:{frame_id}"
-        if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
-            raise RegistryError("frame_in_use", 409)
+        _refuse_frame_in_use(frame_id)
         # Guard 2 (binding) is enforced atomically inside the store transaction.
         return registry.delete_frame(frame_id)
 
@@ -724,6 +753,11 @@ def create_app(
             raise ValueError("Scene identity mismatch")
         coordinator.runtime.command("set_scene", scene)
         return {"status": "configured"}
+
+    @app.delete("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
+    def delete_scene(scene_id: Identifier, expected_revision: int = Query(ge=1)):
+        coordinator.runtime.command("delete_scene", scene_id, expected_revision)
+        return {"status": "deleted"}
 
     @app.put("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
     def configure_program(program_id: Identifier, program: Program):

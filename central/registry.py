@@ -75,6 +75,11 @@ class FramePlacement(Model):
     height_mm: float | None = Field(default=None, gt=0)
 
 
+class FrameProfileReplacement(Model):
+    profile: FrameProfile
+    expected_generation: int = Field(ge=0)
+
+
 class Registry:
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
@@ -275,6 +280,43 @@ class Registry:
                           merged["width_mm"], merged["height_mm"], frame_id))
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
+
+    def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
+                              expected_generation: int) -> dict:
+        """Replace display dimensions after an optimistic generation check.
+
+        The persistent Frame and its placement remain the same. A changed display
+        profile invalidates committed calibration and any outstanding preview.
+        """
+        with self.db.transaction() as conn:
+            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            # Check the token before idempotency so an old tab cannot silently
+            # succeed merely because another operator chose the same profile.
+            if frame["generation"] != expected_generation:
+                raise RegistryError("binding_generation_conflict")
+            current = FrameProfile.model_validate(frame["profile"])
+            if current == profile:
+                return {"profile": current.model_dump(), "generation": frame["generation"],
+                        "changed": False}
+            if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+                raise RegistryError("frame_bound")
+            if not _orientation_coherent(frame["width_mm"], frame["height_mm"],
+                                         profile.width_px, profile.height_px):
+                raise RegistryError("oriented_profile", 422)
+            calibration = Calibration.model_validate(frame["calibration"])
+            invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
+            row = conn.execute(
+                "UPDATE frames SET profile=%s,calibration=%s,calibration_valid=false,"
+                "preview=NULL,preview_expires=NULL,generation=generation+1,"
+                "configuration_revision=configuration_revision+1 WHERE id=%s "
+                "RETURNING generation",
+                (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump()), frame_id),
+            ).fetchone()
+            self._audit(conn, "frame_profile_changed", frame_id,
+                        {"profile": profile.model_dump(), **row})
+            return {"profile": profile.model_dump(), **row, "changed": True}
 
     def delete_frame(self, frame_id: str) -> dict:
         """Remove a clear Frame. Refuses (409 frame_bound) while a binding exists.

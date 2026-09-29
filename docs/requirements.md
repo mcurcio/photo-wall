@@ -90,6 +90,7 @@ Supporting vocabulary:
 
 - **Calibration** maps intended content into physical apertures and output pixels, including geometric and photometric correction. Placement and aperture geometry persist independently of equipment. Equipment-dependent calibration may need revalidation after replacement. Ambient correction is separate from baseline calibration.
 - **Frame display profile** combines aperture geometry, physical size, resolution, and capabilities of assigned equipment.
+- An operator can correct a Frame's declared display profile when equipment changes without deleting the persistent Frame or losing its authored Scene targets. A changed profile requires calibration revalidation before the new equipment is considered ready.
 - **Compatibility policy** defines hard media-suitability rules for a Frame. It need not become a separate user-facing object.
 - **Peripheral** is the supporting-equipment abstraction beneath Sensors and Actuators. **Power Domain** describes shared power dependencies and controls.
 

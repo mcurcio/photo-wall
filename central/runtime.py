@@ -314,6 +314,17 @@ class RuntimeConflict(Exception):
         super().__init__(code)
 
 
+class SceneInUse(RuntimeConflict):
+    """A stored Scene definition is still referenced by durable runtime state."""
+
+    def __init__(self, *, program_ids=(), run_ids=(), queued_activation_ids=(), scene_ids=()) -> None:
+        self.program_ids = tuple(sorted(program_ids))
+        self.run_ids = tuple(sorted(run_ids))
+        self.queued_activation_ids = tuple(sorted(queued_activation_ids))
+        self.scene_ids = tuple(sorted(scene_ids))
+        super().__init__("scene_in_use")
+
+
 class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
@@ -347,6 +358,33 @@ class Runtime:
         if stored is not None and scene.revision <= stored.revision and scene != stored:
             raise RuntimeConflict("scene_revision_conflict")
         self._state.scenes[scene.scene_id] = scene
+
+    @staticmethod
+    def _scene_ids(scene: Scene) -> set[str]:
+        ids = {scene.scene_id}
+        for child in scene.children:
+            ids.update(Runtime._scene_ids(child.scene))
+        return ids
+
+    def delete_scene(self, scene_id: str, expected_revision: int) -> None:
+        """Delete an unused authored Scene with optimistic revision checking."""
+        stored = self._state.scenes.get(scene_id)
+        if stored is None:
+            raise RuntimeConflict("scene_missing")
+        if stored.revision != expected_revision:
+            raise RuntimeConflict("scene_revision_conflict")
+
+        program_ids = [p.program_id for p in self._state.programs.values() if p.scene_id == scene_id]
+        run_ids = [r.run_id for r in self._state.runs.values()
+                   if r.active and scene_id in self._scene_ids(r.scene)]
+        queued_activation_ids = [q.activation_id for q in self._state.queue
+                                 if scene_id in self._scene_ids(q.scene)]
+        scene_ids = [parent_id for parent_id, scene in self._state.scenes.items()
+                     if parent_id != scene_id and scene_id in self._scene_ids(scene)]
+        if program_ids or run_ids or queued_activation_ids or scene_ids:
+            raise SceneInUse(program_ids=program_ids, run_ids=run_ids,
+                             queued_activation_ids=queued_activation_ids, scene_ids=scene_ids)
+        del self._state.scenes[scene_id]
 
     @staticmethod
     def _scene_source_refs(scene: Scene) -> set[str]:

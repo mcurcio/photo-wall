@@ -809,3 +809,52 @@ def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
     # A read filter only: stored state and every other read keep the old Run.
     assert runtime.export_state() == before
     assert old in {run.run_id for run in runtime.project(now).runs}
+
+
+def test_delete_scene_checks_revision_and_removes_only_an_unused_definition():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="unused", revision=3))
+    before = runtime.export_state()
+    with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+        runtime.delete_scene("unused", 2)
+    assert runtime.export_state() == before
+    runtime.delete_scene("unused", 3)
+    assert "unused" not in runtime.export_state()["scenes"]
+    with pytest.raises(RuntimeConflict, match="scene_missing"):
+        runtime.delete_scene("unused", 3)
+
+
+@pytest.mark.parametrize("dependency", ["program", "run", "queued", "child"])
+def test_delete_scene_refuses_each_live_or_authored_dependency(dependency):
+    runtime = Runtime()
+    target = Scene(scene_id="target", loop=True, contributions=(media(),))
+    runtime.set_scene(target)
+    if dependency == "program":
+        runtime.set_program(Program(program_id="uses-target", scene_id="target", starts_at=10, ends_at=20))
+    elif dependency == "run":
+        runtime.activate("target", "active", 0)
+    elif dependency == "queued":
+        runtime.activate("target", "active", 0)
+        runtime.activate("target", "queued", 1, repeat="queue", expires_at=30)
+    else:
+        runtime.set_scene(Scene(scene_id="parent", children=(Child(scene=target),)))
+
+    before = runtime.export_state()
+    with pytest.raises(RuntimeConflict) as raised:
+        runtime.delete_scene("target", 1)
+    assert raised.value.code == "scene_in_use"
+    assert runtime.export_state() == before
+    assert ("uses-target" in getattr(raised.value, "program_ids", ())) == (dependency == "program")
+    assert bool(getattr(raised.value, "run_ids", ())) == (dependency in {"run", "queued"})
+    assert bool(getattr(raised.value, "queued_activation_ids", ())) == (dependency == "queued")
+    assert ("parent" in getattr(raised.value, "scene_ids", ())) == (dependency == "child")
+
+
+def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="historical", loop=True, contributions=(media(),)))
+    run_id = runtime.activate("historical", "historical-activation", 0).run_id
+    runtime.cancel(run_id, 1)
+    snapshot = runtime.export_state()["runs"][run_id]["scene"]
+    runtime.delete_scene("historical", 1)
+    assert runtime.export_state()["runs"][run_id]["scene"] == snapshot

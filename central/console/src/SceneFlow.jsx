@@ -446,9 +446,18 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         <SceneList
           snapshot={snapshot}
           editDisabled={write.busy}
+          editingId={editingId}
+          editingDirty={draft.dirty}
           onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
           onShowNow={showNow}
           onSchedule={schedule}
+          onDeleted={(sceneId) => {
+            if (saved === sceneId) setSaved(null);
+            if (editingId === sceneId) {
+              draft.discard();
+              flow.leave();
+            }
+          }}
         />
       }
       title={editingId === null ? "New Scene" : `Edit Scene ${editingId}`}

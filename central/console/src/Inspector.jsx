@@ -122,7 +122,7 @@ export function Inspector({
         aria-label={`${activeLabel} facet`}
       >
         {active === "commissioning" && (
-          <Commissioning snapshot={snapshot} frameId={frameId} />
+          <Commissioning key={frameId} snapshot={snapshot} frameId={frameId} />
         )}
         {active === "binding" && (
           <BindingFacet
