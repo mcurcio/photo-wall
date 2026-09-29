@@ -1,17 +1,16 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { useProblems } from "./Field.jsx";
-import { sameValue } from "./flow/draftState.js";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
-import { useFlowWrite } from "./flow/useFlowWrite.js";
+import { NOT_CONFIRMED, useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import {
   NEW_PROGRAM_DRAFT,
@@ -89,7 +88,8 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
  * names the ids refused (4xx) and those not confirmed (5xx or no answer: they may be
  * saved), keeps the flow on Review, and sending the same draft again sends only the
  * windows not yet confirmed (a `PUT` of the same body is idempotent), so its own windows
- * never read as collisions. Writes wrap the shared `useMutate()` (one Plane A refresh
+ * never read as collisions. One window Central did not answer "may have been saved" in
+ * the same way, and Schedule Program again confirms it (the kit's `attempt`). Writes wrap the shared `useMutate()` (one Plane A refresh
  * after a write); a write that stores everything ends the flow (`finish`).
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
@@ -109,11 +109,6 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
 
   const draft = useFlowDraft(seedSchedule(recentSceneId));
   const value = draft.value ?? NEW_PROGRAM_DRAFT;
-  // A separate-windows write that did not confirm every window: the draft it was sent
-  // from, its window ids and those confirmed.
-  const [batch, setBatch] = useState(
-    /** @type {{draft: object, ids: string[], confirmed: string[]}|null} */ (null),
-  );
 
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
@@ -127,7 +122,17 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     choose: (sceneId) => draft.patch({ sceneId }),
   });
 
-  const pending = batch !== null && sameValue(batch.draft, value) ? batch : null;
+  // One confirmation (ConfirmAction) for this section: removing a running or due
+  // Program, and discarding the draft. A request's `after` runs once it is done; after a
+  // removal, or when its opener is gone, the region takes focus.
+  const focusRegion = () => regionRef.current?.focus();
+  const confirm = useConfirm(focusRegion, (_result, request) =>
+    request.after !== undefined ? request.after() : focusRegion(),
+  );
+
+  // A write that did not confirm every id it sent (flow/useFlowWrite.js NOT CONFIRMED).
+  const write = useFlowWrite({ draft, confirm, failure: "Could not schedule Program" });
+  const pending = write.attempt;
   const problemList = useMemo(
     () =>
       inStepOrder(
@@ -138,14 +143,6 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     [value, programIds, now, pending],
   );
   const problems = useProblems(problemList);
-
-  // One confirmation (ConfirmAction) for this section: removing a running or due
-  // Program, and discarding the draft. A request's `after` runs once it is done; after a
-  // removal, or when its opener is gone, the region takes focus.
-  const focusRegion = () => regionRef.current?.focus();
-  const confirm = useConfirm(focusRegion, (_result, request) =>
-    request.after !== undefined ? request.after() : focusRegion(),
-  );
 
   const flow = useFlowInstance({
     section: "schedule",
@@ -161,13 +158,9 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
     problemList,
     problems,
     confirm,
-    onOpened: () => {
-      setBatch(null);
-      handOver.clear();
-    },
+    onOpened: () => handOver.clear(),
   });
   const { step } = flow;
-  const write = useFlowWrite({ flow, draft, confirm, failure: "Could not schedule Program" });
 
   // --- The write.
   const put = (programId, startsAt, endsAt) =>
@@ -185,15 +178,16 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   /** Everything is stored: say so on the cards and end the flow. */
   const stored = (sent, message) => {
     sent.say(message);
-    setBatch(null);
     handOver.clear();
     sent.finish();
   };
 
   const scheduleOne = async (sent, id) => {
     const result = await sent.request(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
-    if (result === null) {
-      sent.incomplete();
+    if (result === null || result.status >= 500) {
+      // It may have been stored: scheduling the same draft again confirms it.
+      sent.attempted([id]);
+      sent.say(`Program ${id} ${NOT_CONFIRMED} Schedule Program again to confirm.`);
     } else if (result.ok) {
       stored(sent, `Scheduled Program ${id}.`);
     } else {
@@ -228,7 +222,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
       return;
     }
     const [refused, unknown] = [outcome("refused"), outcome("unknown")];
-    setBatch({ draft: value, ids: planned.map((window) => window.programId), confirmed: [...confirmed] });
+    sent.attempted(
+      planned.map((window) => window.programId),
+      [...confirmed],
+    );
     sent.say(
       [
         `Created ${confirmed.size} of ${planned.length} separate Programs.`,
@@ -242,7 +239,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   };
 
   const onSave = () =>
-    write.send((sent) =>
+    write.send(flow, (sent) =>
       (separateWindows(value) ? addSeparateWindows : scheduleOne)(sent, draftId(value)),
     );
 

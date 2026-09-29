@@ -19,7 +19,7 @@ import { inStepOrder } from "./flow/steps.js";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useHandOffFrom } from "./flow/useHandOff.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
-import { useFlowWrite } from "./flow/useFlowWrite.js";
+import { NOT_CONFIRMED, useFlowWrite } from "./flow/useFlowWrite.js";
 import {
   changedSceneFields,
   SCENE_ADVANCED_FIELDS,
@@ -78,6 +78,10 @@ const HEADINGS = {
  * focus on "Source". Once this draft closes or another replaces it, the hand-off is
  * settled with nothing (`useHandOffFrom`), so a Source saved later stays a Source and
  * never lands in another draft.
+ *
+ * A Save Central did not answer (no answer, or a 5xx) "may have been saved": the kit
+ * remembers its id, which the name check then leaves out while the draft is unchanged,
+ * and Save again (an idempotent PUT of the same body) confirms it.
  *
  * SAVE writes ONE request (authoring.js `buildSave`) through the kit's write
  * (flow/useFlowWrite.js: one Plane A refresh, so the new card is listed), ends the flow
@@ -163,19 +167,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         : [],
     [candidates.ready, candidates.byFrame, value.targets],
   );
-  const problemList = useMemo(
-    () =>
-      inStepOrder(
-        sceneProblems({ ...value, loadingMedia: candidates.loading, noMedia }, existingIds, {
-          editing: editingId !== null,
-        }),
-        SCENE_FIELD_STEP,
-        steps,
-      ),
-    [value, candidates.loading, noMedia, existingIds, editingId, steps],
-  );
-  const problems = useProblems(problemList);
-
   // One confirmation (ConfirmAction) for this section: Replace, and discarding a
   // draft. A request's `after` runs once it is done. When a Replace ends without
   // replacing and Replace is withheld (a newer revision), focus moves on to Reload.
@@ -183,6 +174,30 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     () => (reloadRef.current ?? saveRef.current)?.focus(),
     (_result, request) => request.after?.(),
   );
+
+  const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
+
+  // A Save Central did not answer may have stored its id: while the draft is the one it
+  // sent, that id is not another Scene's (flow/useFlowWrite.js NOT CONFIRMED).
+  const takenIds = useMemo(
+    () =>
+      write.attempt === null
+        ? existingIds
+        : new Set([...existingIds].filter((id) => !write.attempt.ids.includes(id))),
+    [existingIds, write.attempt],
+  );
+  const problemList = useMemo(
+    () =>
+      inStepOrder(
+        sceneProblems({ ...value, loadingMedia: candidates.loading, noMedia }, takenIds, {
+          editing: editingId !== null,
+        }),
+        SCENE_FIELD_STEP,
+        steps,
+      ),
+    [value, candidates.loading, noMedia, takenIds, editingId, steps],
+  );
+  const problems = useProblems(problemList);
 
   // --- The instance, its route and its steps (the flow kit).
   const flow = useFlowInstance({
@@ -216,7 +231,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     },
   });
   const { place, step, focus } = flow;
-  const write = useFlowWrite({ flow, draft, confirm, failure: "Could not save Scene" });
 
   const showNow = (sceneId) => {
     rememberScene(sceneId);
@@ -342,14 +356,16 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       }
       return;
     }
-    write.send(async (sent) => {
+    write.send(flow, async (sent) => {
       const sceneId = draftId(value);
       const save = buildSceneSave(sceneId);
       // ONE request, then one Plane A refresh, so the new card is listed when the flow
       // returns to the cards.
       const result = await sent.request(() => apiWrite(save.path, { method: "PUT", body: save.body }));
-      if (result === null) {
-        sent.incomplete();
+      if (result === null || result.status >= 500) {
+        // It may have been stored: saving the same draft again confirms it.
+        sent.attempted([sceneId]);
+        sent.say(`Scene ${sceneId} ${NOT_CONFIRMED} Save again to confirm.`);
       } else if (result.ok) {
         sent.say(`Saved Scene ${sceneId}.`);
         finish(sceneId, sent.finish);

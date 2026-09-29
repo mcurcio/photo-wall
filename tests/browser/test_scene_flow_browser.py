@@ -823,3 +823,73 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         assert _hash(page) == "#/scenes/new/photos"
         expect(form.get_by_label("Source", exact=True)).to_be_visible()
 
+
+def _stored(page, origin, key):
+    """The ids of what Central stores under runtime `key` ("definitions", "programs"),
+    read through the public contract."""
+    response = page.request.get(origin + "/v1/operator/runtime",
+                                headers={"Authorization": "Bearer " + ADMIN})
+    return sorted(response.json()[key])
+
+
+def _committed_then_500(route):
+    """The write reaches Central (and commits), but its answer is lost."""
+    route.fetch()
+    route.fulfill(status=500, content_type="application/json", body='{"error": "internal"}')
+
+
+def test_a_save_central_did_not_answer_may_have_been_saved_and_saving_again_confirms(
+        page, registry):
+    """Final review finding 2: a new Scene's Save that got no answer (a 5xx after Central
+    stored it) is not a collision with itself. The flow remembers the id it sent
+    (flow/useFlowWrite.js `attempted`), says it may have been saved, leaves it out of the
+    name check while the draft is unchanged, and Save again (an idempotent PUT of the same
+    body) confirms it: one Scene, no second id. Mutation probe: drop the exclusion (Review
+    says "already exists" and withholds Save)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        puts = _puts(page)
+        answer_first(page, "**/v1/operator/scenes/**", _committed_then_500)
+        form = author_scene(page, "late-show", SOURCE, (VALID_FRAME,), submit=False)
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        scenes = _scenes(page)
+        expect(scenes.get_by_role("status").filter(has_text="may have been saved")).to_have_text(
+            "Scene late-show may have been saved: Central did not answer. Save again to confirm.")
+        assert _hash(page) == "#/scenes/new/review"
+        # The refresh after the write lists it; it is not read as another Scene's name.
+        expect(scenes.get_by_label("Scene late-show", exact=True)).to_have_count(0)
+        assert _stored(page, origin, "definitions") == ["late-show"]
+        expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
+        expect(form.get_by_label("Scene name", exact=True)).not_to_have_attribute(
+            "aria-invalid", "true")
+
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/late-show")
+                                  and r.request.method == "PUT") as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+        expect(scenes.get_by_role("status")).to_have_text("Saved Scene late-show.")
+        assert _hash(page) == "#/scenes"
+        assert _stored(page, origin, "definitions") == ["late-show"]
+        assert [url.rsplit("/", 1)[1] for url in puts] == ["late-show", "late-show"]
+
+
+def test_a_changed_draft_after_an_unanswered_save_checks_its_name_again(page, registry):
+    """The exclusion lasts only while the draft is the one sent: a changed draft is another
+    Scene to save, so a stored id is a collision again."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        answer_first(page, "**/v1/operator/scenes/**", _committed_then_500)
+        form = author_scene(page, "late-show", SOURCE, (VALID_FRAME,), submit=False)
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(_scenes(page).get_by_role("status")).to_contain_text("may have been saved")
+        assert _stored(page, origin, "definitions") == ["late-show"]
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(form.get_by_label("Scene name", exact=True)).to_have_attribute("aria-invalid", "true")
+        expect(form.get_by_role("alert")).to_contain_text("already exists")

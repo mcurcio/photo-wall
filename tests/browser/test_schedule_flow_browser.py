@@ -24,7 +24,7 @@ from console_tasks import (
     start_schedule,
     visit,
 )
-from operator_harness import operator_server
+from operator_harness import answer_first, operator_server
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     PROGRAM_ID,
@@ -37,6 +37,7 @@ from test_operator_showrunner_browser import (
     _seed,
     _seed_source,
 )
+from test_registry import ADMIN
 
 from central.runtime import Program
 
@@ -278,3 +279,40 @@ def test_a_program_whose_window_ended_while_its_run_finishes_is_not_past(page, r
         expect(card).to_be_visible()
         expect(card).to_contain_text("Running since")
         expect(programs.get_by_text(re.compile(r"^Past \("))).to_have_count(0)
+
+
+def test_a_program_central_did_not_answer_may_have_been_saved_and_again_confirms(
+        page, registry):
+    """Final review finding 2, the single-window Program: a Schedule Program that got no
+    answer (a 5xx after Central stored it) says it may have been saved, is not read as a
+    collision with itself while the draft is unchanged, and Schedule Program again (an
+    idempotent PUT of the same body) confirms it: one Program. Mutation probe: drop the
+    exclusion."""
+    _seed(registry)
+    _runtime(registry).command("set_scene", _console_scene("evening"))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "schedule")
+
+        def committed_then_500(route):
+            route.fetch()
+            route.fulfill(status=500, content_type="application/json", body='{"error": "internal"}')
+
+        answer_first(page, "**/v1/operator/programs/**", committed_then_500)
+        form = schedule_program(page, PROGRAM_ID, "evening", WINDOW_START, WINDOW_END, submit=False)
+        with _put(page):
+            form.get_by_role("button", name="Schedule Program", exact=True).click()
+        programs = _programs(page)
+        expect(programs.get_by_role("status").filter(has_text="may have been saved")).to_have_text(
+            f"Program {PROGRAM_ID} may have been saved: Central did not answer. "
+            "Schedule Program again to confirm.")
+        assert _hash(page) == "#/schedule/new/review"
+        expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
+
+        with _put(page) as info:
+            form.get_by_role("button", name="Schedule Program", exact=True).click()
+        assert info.value.status == 200
+        expect(programs.get_by_role("status")).to_have_text(f"Scheduled Program {PROGRAM_ID}.")
+        assert _hash(page) == "#/schedule"
+        response = page.request.get(origin + "/v1/operator/runtime",
+                                    headers={"Authorization": "Bearer " + ADMIN})
+        assert sorted(response.json()["programs"]) == [PROGRAM_ID]

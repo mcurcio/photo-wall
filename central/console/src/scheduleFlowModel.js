@@ -102,8 +102,9 @@ export function separateWindows(draft) {
 /**
  * The problems of the write this draft makes: one Program's (authoring.js
  * `programProblems`), or the separate-windows helper's (`windowProblems`). `pendingIds`
- * are the window ids of this very draft's earlier, partly confirmed attempt: sending it
- * again sends only those not confirmed, so its own windows never read as collisions.
+ * are the ids of this very draft's earlier attempt that Central did not confirm, or only
+ * partly (flow/useFlowWrite.js NOT CONFIRMED): sending it again confirms them, so its own
+ * Programs never read as collisions.
  *
  * @param {ProgramDraft} draft
  * @param {Set<string>} programIds the stored Program ids
@@ -112,9 +113,7 @@ export function separateWindows(draft) {
  * @returns {import("./authoring.js").Problem[]}
  */
 export function programDraftProblems(draft, programIds, now, pendingIds = []) {
-  if (!separateWindows(draft)) {
-    return programProblems(draft, programIds, now);
-  }
   const pending = new Set(pendingIds);
-  return windowProblems(draft, new Set([...programIds].filter((id) => !pending.has(id))), now);
+  const taken = new Set([...programIds].filter((id) => !pending.has(id)));
+  return separateWindows(draft) ? windowProblems(draft, taken, now) : programProblems(draft, taken, now);
 }

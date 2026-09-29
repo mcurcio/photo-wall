@@ -188,6 +188,7 @@ flowchart TB
 - **Continue:** validates the current step and shows only its reasons; a later step shows none until its own Continue or Review's Save.
 - **Review:** validates everything. `ProblemSummary` entries route through `FIELD_STEP` to the owning step, and focus reaches the field once that step mounts, through a one-shot focus request like `App.jsx`'s `focusRequest`. A problem inside Advanced opens it first.
 - **Check answers:** Review is a [check-answers page](https://design-system.service.gov.uk/patterns/check-answers/) with "Change" links.
+- **A write Central did not answer** (no answer, or a 5xx) may still have been stored. The flow says so ("Scene X may have been saved: Central did not answer. Save again to confirm."), and while the draft is unchanged its own id is not a collision; sending it again is an idempotent `PUT` of the same body that confirms it (the kit's `useFlowWrite` `attempt`, which also carries the separate windows' partial outcome).
 
 **J4 Make a Scene** (`#/scenes/new/...`). The pilot, and the risky flow.
 

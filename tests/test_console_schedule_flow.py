@@ -41,6 +41,7 @@ const fields = (draft, ids = new Set(), pending = []) =>
   model.programDraftProblems(draft, ids, now, pending).map((p) => `${p.field}: ${p.message}`);
 out.single = fields(base);
 out.singleCollision = fields(base, new Set(["show", "show-1"]));
+out.singlePending = fields(base, new Set(["show"]), ["show"]);
 out.windows = fields({ ...base, count: 3 }, new Set(["show", "show-2"]));
 out.windowsPending = fields({ ...base, count: 3 }, new Set(["show-1", "show-2"]), ["show-1", "show-2", "show-3"]);
 out.badCount = fields({ ...base, count: "2.5" });
@@ -80,6 +81,8 @@ def test_schedule_flow_shape():
     # One Program collides on its own id only.
     assert out["singleCollision"] == [
         "name: A Program called show already exists; choose another name."]
+    # Its own earlier, unanswered Program is not a collision when it is sent again.
+    assert out["singlePending"] == []
     # Separate windows collide on their window ids, never the base id.
     assert out["windows"] == ["name: show-2 already exists."]
     # This draft's own earlier windows are not collisions when it is sent again.

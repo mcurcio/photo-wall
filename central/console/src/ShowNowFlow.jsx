@@ -130,7 +130,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
     },
   });
   const { step } = flow;
-  const write = useFlowWrite({ flow, draft, confirm, failure: "Not started" });
+  const write = useFlowWrite({ draft, confirm, failure: "Not started" });
 
   // A clean draft follows the Scene the operator last saved or picked, while it is
   // stored; a dirty one, or one whose outcome is unknown (its key must be kept for the
@@ -152,7 +152,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   };
 
   const activate = () =>
-    write.send(async (sent) => {
+    write.send(flow, async (sent) => {
       const asked = { sceneId: value.sceneId, priority: Number(priority) };
       const body = {
         scene_id: asked.sceneId,
