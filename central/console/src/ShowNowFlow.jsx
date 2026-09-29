@@ -29,6 +29,7 @@ import {
   coveringPriority,
   coveringRuns,
   cycleWording,
+  protectingRuns,
   protectorOf,
   sceneFrames,
   sceneProtectedFrames,
@@ -68,7 +69,9 @@ const UNKNOWN_ACTIVATION =
  * the current snapshot until the operator sets one under Advanced. Review always shows
  * it; a priority below that default holds Advanced open with where the Run would stay
  * underneath (or, when the Scene protects frames a higher Run covers, that Central will
- * refuse it). Refusals keep slice 3's wording (`admissionSentence`).
+ * refuse it). When a live Run protects any of the frames, Central refuses it at any
+ * priority: Review says so, holds Advanced open, and never promises "on top".
+ * Refusals keep slice 3's wording (`admissionSentence`).
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
@@ -92,6 +95,8 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   const covering = coveringPriority(snapshot, frames);
   // Whether a live Run covers the frames at all: one may itself have priority 0.
   const covered = coveringRuns(snapshot, frames).length > 0;
+  // Whether one protects any of them: Central refuses the activation at any priority.
+  const protectedNow = protectingRuns(snapshot, frames).length > 0;
   const priority = shownPriority(value, covering);
 
   const problemList = useMemo(
@@ -200,6 +205,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
         definitions={definitions}
         covering={covering}
         covered={covered}
+        protectedNow={protectedNow}
         priority={priority}
         priorityValid={priorityValid}
         advanced={flow.advanced("review")}
@@ -288,18 +294,20 @@ function SceneStep({ value, problems, edit, snapshot, frames, definitions, offer
 
 /**
  * Review's words for the priority: its value, and where a default comes from. `covered`
- * says whether any live Run covers the frames (a covering Run may have priority 0).
+ * says whether any live Run covers the frames (a covering Run may have priority 0), and
+ * `protectedNow` whether one protects any of them (no priority shows it on top then).
  */
-function priorityWords(value, priority, covering, covered) {
+function priorityWords(value, priority, covering, covered, protectedNow) {
   if (value.priority !== null) {
     return Number(priority) < covering
       ? `${priority} (below ${covering}, the highest Run on its frames)`
       : String(priority);
   }
-  return !covered
-    ? "0 (the default: no Run covers its frames)"
-    : `${priority} (the default: the highest Run on its frames has priority ${covering}; ` +
-        "at equal priority the newer Run shows on top)";
+  if (!covered) {
+    return "0 (the default: no Run covers its frames)";
+  }
+  const lead = `${priority} (the default: the highest Run on its frames has priority ${covering}`;
+  return protectedNow ? `${lead})` : `${lead}; at equal priority the newer Run shows on top)`;
 }
 
 /**
@@ -317,6 +325,7 @@ function ReviewStep({
   definitions,
   covering,
   covered,
+  protectedNow,
   priority,
   priorityValid,
   advanced,
@@ -340,7 +349,11 @@ function ReviewStep({
         rows={[
           { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : value.sceneId },
           { label: "Frames", value: <SceneFramesValue snapshot={snapshot} frames={frames} /> },
-          { label: "Priority", field: "priority", value: priorityWords(value, priority, covering, covered) },
+          {
+            label: "Priority",
+            field: "priority",
+            value: priorityWords(value, priority, covering, covered, protectedNow),
+          },
           { label: "If it is already running", field: "repeat", value: REPEAT_LABELS[value.repeat] },
         ]}
       />

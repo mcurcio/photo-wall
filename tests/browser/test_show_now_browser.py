@@ -375,6 +375,35 @@ def test_a_protecting_scene_below_a_covering_run_says_central_will_refuse_it(pag
             "use priority at least 5.")
 
 
+def test_a_run_protecting_the_frames_is_said_to_refuse_it_at_any_priority(page, registry):
+    """Final review: a live Run whose Scene protects one of the frames refuses the
+    activation at ANY priority (central/runtime.py `_protected_conflict`,
+    `protected_frames`), so Review never promises "on top" there: it says Central will
+    refuse it, holds Advanced open, and Central's answer agrees."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("evening", protect_frames=True))
+    runtime.command("set_scene", _scene(SCENE_ID))
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = show_now(page, SCENE_ID, submit=False)
+        expect(form).to_contain_text(
+            "5 (the default: the highest Run on its frames has priority 5)")
+        expect(form.get_by_text(re.compile("shows on top"))).to_have_count(0)
+        expect(form.get_by_role("status").filter(has_text="refuse")).to_have_text(
+            f"Central will refuse this at any priority: {VALID_FRAME} is protected by the Run "
+            "of evening.")
+        expect(form.get_by_role("button", name="Advanced", exact=True)).to_be_disabled()
+        form.get_by_label("Activation priority", exact=True).fill("50")
+        expect(form.get_by_role("status").filter(has_text="refuse")).to_contain_text(
+            "at any priority")
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(_outcome(page)).to_have_text(
+            f"Not started: {VALID_FRAME} is protected by the Run of evening.")
+
+
 def _show_scene_card(page, scene_id):
     """A Scene card's "Show now", from the Scenes page."""
     go(page, "scenes")

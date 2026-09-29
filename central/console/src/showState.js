@@ -313,9 +313,34 @@ export function coveringPriority(snapshot, frameIds) {
 }
 
 /**
- * What happens to an activation on `frameIds` at `priority` below the live root Runs of
- * a strictly higher priority covering its frames (§7 J7), highest first; null when no
- * covering Run is higher.
+ * The live root Runs covering any of `frameIds` whose Scene protects some of them, each
+ * with those frames, highest first: Central refuses an activation there at ANY priority
+ * (central/runtime.py `_protected_conflict`, `protected_frames`; the console never sends
+ * `force`). The served `protected_frames` map says what each Run protects (the Scene it
+ * started with, not the one stored now).
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {{run: object, frames: string[]}[]}
+ */
+export function protectingRuns(snapshot, frameIds) {
+  const served = snapshot?.runtime?.protected_frames ?? {};
+  return coveringRuns(snapshot, frameIds)
+    .map(({ run, frames }) => ({
+      run,
+      frames: frames.filter((frameId) => (served[run.run_id] ?? []).includes(toTarget(frameId))),
+    }))
+    .filter(({ frames }) => frames.length > 0);
+}
+
+/**
+ * What happens to an activation on `frameIds` at `priority` (§7 J7), or null when it
+ * shows on top as asked.
+ *
+ * A live Run whose Scene protects any of the frames refuses it at any priority
+ * ({@link protectingRuns}): "Central will refuse this at any priority: a is protected by
+ * the Run of X." Otherwise the live root Runs of a strictly higher priority covering its
+ * frames, highest first, decide:
  *
  * A Scene that protects frames (`protectedFrames`, {@link sceneProtectedFrames}) is
  * refused when such a Run covers any of them (central/runtime.py `_protected_conflict`,
@@ -331,6 +356,13 @@ export function coveringPriority(snapshot, frameIds) {
  * @returns {string|null}
  */
 export function underneathSentence(snapshot, frameIds, priority, protectedFrames = []) {
+  const protecting = protectingRuns(snapshot, frameIds);
+  if (protecting.length > 0) {
+    const parts = protecting.map(
+      ({ run, frames }) => `${frames.join(", ")} ${frames.length === 1 ? "is" : "are"} protected by the Run of ${run.scene_id}`,
+    );
+    return `Central will refuse this at any priority: ${parts.join("; ")}.`;
+  }
   const above = coveringRuns(snapshot, frameIds).filter(({ run }) => run.priority > priority);
   if (above.length === 0) {
     return null;

@@ -55,6 +55,17 @@ out.refused = [
   show.underneathSentence(snapshot, ["lobby", "hall"], 5, ["lobby", "hall"]),
   show.underneathSentence(snapshot, ["lobby"], 0, ["attic"]),
 ];
+// A live Run whose Scene protects a frame refuses the activation at ANY priority
+// (central/runtime.py `_protected_conflict`: `protected_frames`, no force).
+const guarded = { runtime: { ...snapshot.runtime, protected_frames: { "r-high": ["frame:hall"] } } };
+out.protecting = {
+  runs: show.protectingRuns(guarded, ["lobby", "hall"]).map(({ run, frames }) => [run.run_id, frames]),
+  sentences: [
+    show.underneathSentence(guarded, ["lobby", "hall"], 9),
+    show.underneathSentence(guarded, ["hall"], 0, ["hall"]),
+    show.underneathSentence(guarded, ["lobby"], 9),
+  ],
+};
 out.protectedFrames = [
   show.sceneProtectedFrames({ protect_frames: true,
     contributions: [{ target: "frame:b" }, { target: "actuator:x" }],
@@ -144,6 +155,14 @@ def test_covering_priority_and_the_show_now_model():
         "At priority 0 this stays underneath the Run of later (priority 5) on lobby; "
         "and the Run of low (priority 1) on lobby.",
     ]
+    # A Run protecting one of the frames refuses the activation at any priority, before
+    # anything else is said; a Run protecting none of them changes nothing.
+    assert out["protecting"] == {
+        "runs": [["r-high", ["hall"]]],
+        "sentences": [
+            "Central will refuse this at any priority: hall is protected by the Run of high.",
+            "Central will refuse this at any priority: hall is protected by the Run of high.",
+            None]}
     # A protecting Scene below a higher covering Run is refused, not "underneath": each
     # refusing Run is named with the protected frames it covers, and the priority that
     # would be accepted.
