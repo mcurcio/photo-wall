@@ -27,6 +27,8 @@ dev = [
     "import-linter==2.15",
     "pytest-playwright==0.9.0",
     "playwright==1.62.0",
+    "fonttools==4.66.0",
+    "brotli==1.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]

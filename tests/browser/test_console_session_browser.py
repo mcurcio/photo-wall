@@ -4,13 +4,18 @@ The production app on a loopback listener (operator_harness), real Chromium. The
 the token: every operator fetch carries the console marker and the browser's HttpOnly cookie, and
 no request carries a bearer. Cookies ignore the port, so two servers on 127.0.0.1 share one
 cookie jar: that is how a rotated token and "another address" are exercised for real.
+
+Signed in, the console lands on Now showing (a frame exists), whose frame-health badge is the
+proof that the inventory rendered. A session that ends while signed in shows the sign-in screen
+as an overlay over the kept, hidden console (flow design §6 (a)).
 """
 
 import os
 import re
 
 import pytest
-from operator_harness import operator_server, sign_in
+from console_tasks import go
+from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
@@ -34,7 +39,9 @@ def _seed(registry):
 
 
 def _frame(page):
-    return page.get_by_role("button", name=f"Frame {FRAME}", exact=True)
+    """The frame's health badge on Now showing: visible only while signed in and shown."""
+    return page.get_by_role("group", name="Frame health", exact=True).get_by_label(
+        re.compile(rf"^Frame {FRAME}: "))
 
 
 def _sign_in_button(page):
@@ -62,7 +69,7 @@ def test_sign_in_once_survives_reload_and_a_second_tab(page, registry):
 
         second = page.context.new_page()
         second.goto(origin + "/console")
-        expect(second.get_by_role("button", name=f"Frame {FRAME}", exact=True)).to_be_visible()
+        expect(_frame(second)).to_be_visible()
         expect(second.get_by_role("button", name="Sign in", exact=True)).to_have_count(0)
         second.close()
 
@@ -84,11 +91,23 @@ def test_session_expiry_after_thirty_days_returns_to_the_sign_in_screen(page, re
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         expect(_frame(page)).to_be_visible()
+        page.evaluate("window.__notReloaded = true")
         registry.clock.advance(SESSION_SECONDS)
         page.get_by_role("button", name="Refresh", exact=True).click()
         _expect_signed_out(page)
         expect(page.get_by_role("alert")).to_contain_text(
             "Signed out: the session expired or the token changed")
+        # The sign-in screen overlays the console, which keeps its last snapshot, hidden
+        # and inert (flow design §6 (a)), and says the work is kept.
+        expect(page.get_by_text("Your unsaved work is kept until you sign in again.")
+               ).to_be_visible()
+        expect(page.get_by_label(re.compile(rf"^Frame {FRAME}: "))).to_be_attached()
+        expect(page.get_by_label(re.compile(rf"^Frame {FRAME}: "))).to_be_hidden()
+        # Signing in again shows the same console, without a reload.
+        submit_sign_in(page)
+        expect(_frame(page)).to_be_visible()
+        expect(_sign_in_button(page)).to_have_count(0)
+        assert page.evaluate("window.__notReloaded") is True
 
 
 def test_a_rotated_token_signs_the_browser_out(page, registry):
@@ -118,14 +137,12 @@ def test_a_browser_that_drops_the_cookie_is_told_so(page, registry):
 def test_a_sign_in_whose_first_read_fails_keeps_checking_until_a_poll_recovers(page, registry):
     # SigningIn -> Checking on 204: a 500 on the first read must not strand the tab on the form.
     _seed(registry)
-    failed = []
     with operator_server(registry.db, registry.clock) as origin:
         page.context.clear_cookies()
         page.goto(origin + "/console")
         expect(_sign_in_button(page)).to_be_visible()
-        page.route("**/v1/operator/inventory",
-                   lambda route: (failed.append(route.request.url), route.fulfill(status=500)),
-                   times=1)
+        failed = answer_first(page, "**/v1/operator/inventory",
+                              lambda route: route.fulfill(status=500))
         page.get_by_label("Operator token").fill(ADMIN)
         _sign_in_button(page).click()
         expect(_sign_in_button(page)).to_have_count(0)
@@ -149,8 +166,7 @@ def test_the_session_cookie_is_scoped_to_the_operator_api(page, registry):
         sent.clear()
         page.reload()
         expect(_frame(page)).to_be_visible()
-        page.evaluate("fetch('/healthz')")
-        page.wait_for_timeout(200)
+        page.evaluate("fetch('/healthz').then((response) => response.status)")  # answered
     operator = [cookie for url, cookie in sent if "/v1/operator/" in url]
     others = [(url, cookie) for url, cookie in sent if "/v1/operator/" not in url]
     assert operator and all(cookie for cookie in operator)
@@ -222,7 +238,7 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
         sign_in(page, first)
         expect(_frame(page)).to_be_visible()
         # The same host on another port: the cookie is sent, so reads work...
-        page.goto(second + "/console")
+        page.goto(second + "/console#/equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
         expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         # ...but a write is refused for its Origin, and the console says what to do.
@@ -237,6 +253,7 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
             exact=False)).to_be_visible()
         # Signing in at this address binds it, and the same write then succeeds.
         sign_in(page, second)
+        go(page, "equipment")
         expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         pending.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])

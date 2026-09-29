@@ -536,9 +536,9 @@ def test_the_console_frame_id_pattern_is_the_contracts_target_id_rule():
 
 def test_the_console_identifier_pattern_is_the_contracts_identifier_rule():
     # Slice 3 §5: Scene, Program and Source ids are path parameters under Identifier.
-    source = (Path(__file__).parents[1] / "central/console/src/authoring.js").read_text()
+    source = (Path(__file__).parents[1] / "central/console/src/routes.js").read_text()
     pinned = re.search(r"^export const IDENTIFIER_PATTERN = /(.+)/;$", source, re.MULTILINE)
-    assert pinned is not None, "authoring.js no longer exports IDENTIFIER_PATTERN as a literal"
+    assert pinned is not None, "routes.js no longer exports IDENTIFIER_PATTERN as a literal"
     assert pinned.group(1) == "^" + IDENTIFIER_PATTERN + "$"
 
 

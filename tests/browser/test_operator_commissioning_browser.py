@@ -15,7 +15,8 @@ import os
 import time
 
 import pytest
-from operator_harness import inventory, operator_server, pause_page_clock, sign_in
+from console_tasks import open_frame
+from operator_harness import drive_poll, inventory, operator_server, pause_page_clock, sign_in
 from playwright.sync_api import expect
 from test_registry import enroll
 
@@ -59,30 +60,16 @@ def _seed(registry):
     return player_id
 
 
-def _open_commissioning(page):
-    """Select the seeded frame and open its Commissioning facet; return the facet.
-
-    Placeholder for the R4 rule (probe b): there is no Showrunner mode yet
-    (Bead 12), so this only asserts Commissioning is reachable WITHIN the
-    Wall/Inspector context. Bead 12 strengthens this to assert it is UNreachable
-    in the show layer.
-    """
-    page.get_by_role("button", name=f"Frame {FRAME}", exact=True).click()
-    inspector = page.get_by_role("region", name=f"Frame {FRAME} inspector", exact=True)
-    expect(inspector).to_be_visible()
-    inspector.get_by_role("tab", name="Commissioning", exact=True).click()
-    return inspector
-
-
 def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registry):
     player_id = _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
-        # (R4 placeholder, probe b) The Commissioning facet is reachable within
-        # the Wall/Inspector context. Strengthened to show-layer-unreachable in
-        # Bead 12 once Showrunner mode exists.
+        # R4's positive control in a browser: the Commissioning facet is reachable in
+        # the Wall's Inspector. That the Show and neutral pages never reach it is
+        # tests/test_console_routes_r4.py (the module graph) and the sample-path visits
+        # in tests/browser/test_console_shell_browser.py.
         calibration = inspector.get_by_role("group", name="Committed calibration")
         expect(calibration).to_be_visible()
 
@@ -115,7 +102,7 @@ def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry)
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         expect(inspector.get_by_text("not yet available")).to_have_count(2)
         # No dead/ungrounded hardware control appears from a bare (would-be) flag.
@@ -136,7 +123,7 @@ def test_commissioning_provenance_frame_facts_vs_display_at_player_start(page, r
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         frame_facts = inspector.get_by_role("group", name="Frame facts")
         # The diagonal is a Frame fact (operator-declared FrameProfile), so it is
@@ -171,7 +158,7 @@ def test_calibration_drag_to_convex_updates_draft(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         editor = inspector.get_by_role("group", name="Adjust calibration")
         expect(editor.get_by_role("status")).to_have_text("Draft matches committed")
@@ -202,7 +189,7 @@ def test_calibration_folded_quad_snaps_back_no_request(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         inspector.get_by_role("spinbutton", name="Corner 1 x").fill("0.9")
         inspector.get_by_role("spinbutton", name="Corner 1 y").fill("0.9")
@@ -227,7 +214,7 @@ def test_calibration_thin_quad_is_rejected_client_side(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         inspector.get_by_role("spinbutton", name="Corner 3 y").fill("0.0000005")
 
@@ -251,7 +238,7 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
 
         committed = inspector.get_by_role("group", name="Committed calibration")
         expect(committed).to_contain_text(str(GAIN))  # 1.5, the seeded commit
@@ -319,7 +306,7 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         lease.get_by_role("button", name="Preview", exact=True).click()
@@ -339,7 +326,7 @@ def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, re
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         gain = inspector.get_by_role("spinbutton", name="SDR gain (draft)")
         gain.fill("1.9")
         _lease(inspector).get_by_role("button", name="Preview", exact=True).click()
@@ -347,8 +334,7 @@ def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, re
         expect(timer).to_contain_text("lease expires in 29s")
 
         for _ in range(2):
-            with page.expect_response("**/v1/operator/inventory"):
-                page.clock.run_for(5000)
+            drive_poll(page)
         expect(timer).to_contain_text("lease expires in 19s")
         expect(gain).to_have_value("1.9")
         expect(inspector.get_by_role("alert")).to_have_count(0)
@@ -372,7 +358,7 @@ def test_calibration_lease_expiry_reverts_to_committed_no_auto_renew(page, regis
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         lease.get_by_role("button", name="Preview", exact=True).click()
@@ -410,7 +396,7 @@ def test_calibration_stale_commit_conflicts_on_revision(page, registry):
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         # Out-of-band commit advances revision under this session.
@@ -437,7 +423,7 @@ def test_calibration_stale_commit_conflicts_on_generation(page, registry):
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         # A binding change bumps generation under this session.
@@ -459,7 +445,7 @@ def test_calibration_overtaken_detected_by_inventory_poll(page, registry):
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         lease.get_by_role("button", name="Preview", exact=True).click()
@@ -499,7 +485,7 @@ def test_calibration_foreign_preview_overtakes_by_inventory_poll(page, registry)
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         lease.get_by_role("button", name="Preview", exact=True).click()
@@ -547,7 +533,7 @@ def test_manual_revert_clears_preview_and_returns_draft_to_committed(page, regis
     _sync_clock(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        inspector = _open_commissioning(page)
+        inspector = open_frame(page, FRAME, "commissioning")
         lease = _lease(inspector)
 
         # Change the draft gain away from committed and preview it onto the panel.

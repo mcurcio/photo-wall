@@ -55,9 +55,12 @@ const POLL_MS = 5000;
  * SIGN-IN (pass A §7). `auth` starts "checking": the first Plane A read decides
  * it (2xx signed in, 401 signed out; a network error or 5xx keeps checking and
  * the next poll retries). `signIn(token)` posts the token once — it is never
- * stored — and re-reads Plane A; `signOut()` deletes the session cookie and
- * clears Plane A. A Plane A 401 while signed in signs the tab out. Drafts live in
- * the regions Plane A mounts, so they are lost with it (pass A Question 4).
+ * stored — and re-reads Plane A; `signOut()` deletes the session cookie,
+ * clears Plane A and bumps `sessionEpoch`, on which the shell is keyed, so Log
+ * out discards every draft. A Plane A 401 while signed in signs the tab out but
+ * KEEPS the last snapshot: the sign-in screen overlays the still-mounted shell
+ * and drafts survive signing in again (flow design §6 (a), overturning pass A
+ * Question 4).
  *
  * POLLING (pass 2 §7). The provider is the ONE poller: every 5 s while the tab
  * is visible and not signed out it refreshes Plane A. A hidden
@@ -90,6 +93,13 @@ export function SnapshotProvider({ children }) {
   const [originRefused, setOriginRefused] = useState(false);
   // Whether the newest applied refresh failed (never inferred from age).
   const [refreshFailed, setRefreshFailed] = useState(false);
+  // Bumped by each Log out; the shell is keyed on it (flow design §6 (b)).
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  // How many Plane A reads are in flight. `refreshing` (any in flight) is shown as
+  // `aria-busy` on the snapshot status, so a refresh in progress is announced as
+  // such and its end is observable: it clears only after the read has been applied
+  // (or dropped), which is also when the poller's single-flight slot frees.
+  const [inFlight, setInFlight] = useState(0);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
   const pollingRef = useRef(false);
@@ -101,7 +111,7 @@ export function SnapshotProvider({ children }) {
 
   useEffect(() => onOriginRefused(() => setOriginRefused(true)), []);
 
-  const refresh = useCallback(async () => {
+  const read = useCallback(async () => {
     const ticket = ++issuedRef.current;
     const writesAtStart = writeCount();
     // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
@@ -129,12 +139,14 @@ export function SnapshotProvider({ children }) {
     if (failure !== null) {
       setRefreshFailed(true);
       // No session (401 on the first read OR mid-session: expired, token
-      // rotated, cookie refused) drops the tab to the sign-in screen and clears
-      // the stale snapshot; a tab that was signed in says why. Any other failure
-      // (network/5xx) leaves the prior snapshot and state for the next poll.
+      // rotated, cookie refused) signs the tab out, which pauses the poll and
+      // shows the sign-in screen; a tab that was signed in says why. The last
+      // snapshot is KEPT (flow design §6 (a)): the shell stays mounted under the
+      // sign-in overlay, so no draft is lost and nothing reads as deleted. Only
+      // Log out clears it. Any other failure (network/5xx) leaves the prior
+      // snapshot and state for the next poll.
       if (failure?.status === 401) {
         const wasSignedIn = authRef.current === "signedIn";
-        setSnapshot(null);
         setAuth("signedOut");
         setAuthNotice(wasSignedIn ? "expired" : null);
       }
@@ -147,6 +159,15 @@ export function SnapshotProvider({ children }) {
     setRefreshFailed(false);
     return next;
   }, [setAuth]);
+
+  const refresh = useCallback(async () => {
+    setInFlight((count) => count + 1);
+    try {
+      return await read();
+    } finally {
+      setInFlight((count) => count - 1);
+    }
+  }, [read]);
 
   const signIn = useCallback(
     async (token) => {
@@ -194,6 +215,9 @@ export function SnapshotProvider({ children }) {
     setAuth("signedOut");
     setAuthNotice(null);
     setRefreshFailed(false);
+    // A new session epoch: the shell is keyed on it, so it remounts and every
+    // draft is discarded (flow design §6 (b)).
+    setSessionEpoch((epoch) => epoch + 1);
   }, [setAuth]);
 
   const dismissOriginRefused = useCallback(() => setOriginRefused(false), []);
@@ -256,8 +280,10 @@ export function SnapshotProvider({ children }) {
       signIn,
       signOut,
       refreshFailed,
+      refreshing: inFlight > 0,
       originRefused,
       dismissOriginRefused,
+      sessionEpoch,
     }),
     [
       snapshot,
@@ -267,8 +293,10 @@ export function SnapshotProvider({ children }) {
       signIn,
       signOut,
       refreshFailed,
+      inFlight,
       originRefused,
       dismissOriginRefused,
+      sessionEpoch,
     ],
   );
   return React.createElement(SnapshotContext.Provider, { value }, children);
@@ -281,15 +309,17 @@ export function SnapshotProvider({ children }) {
  * wholesale and NEVER merges into Plane B (it resolves null when its read was
  * superseded or fenced off by a write), the sign-in state `auth` with its
  * `authNotice`, `signIn(token)` and `signOut()`, `refreshFailed` (true while the
- * newest applied refresh failed) and `originRefused` (Central refused a write
- * for its origin; `dismissOriginRefused` clears it). Must be used within a
+ * newest applied refresh failed), `refreshing` (a Plane A read is in flight),
+ * `originRefused` (Central refused a write for its origin; `dismissOriginRefused`
+ * clears it) and `sessionEpoch` (bumped
+ * by each Log out; the shell is keyed on it). Must be used within a
  * SnapshotProvider so every region and useMutate share one Plane A.
  *
  * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot|null>,
  *            auth: Auth, authNotice: AuthNotice,
  *            signIn: (token: string) => Promise<void>, signOut: () => Promise<void>,
  *            refreshFailed: boolean, originRefused: boolean,
- *            dismissOriginRefused: () => void}}
+ *            dismissOriginRefused: () => void, sessionEpoch: number}}
  */
 export function useSnapshot() {
   const value = useContext(SnapshotContext);
@@ -389,6 +419,16 @@ export function useHealth(intervalMs = 10000) {
   );
   useEffect(() => {
     let live = true;
+    // The same health keeps the same object, so a poll that reads no change re-renders
+    // nothing that depends on it.
+    const update = (next) =>
+      setHealth((previous) =>
+        previous.status === next.status &&
+        previous.reason === next.reason &&
+        previous.scheduler === next.scheduler
+          ? previous
+          : next,
+      );
     const poll = async () => {
       try {
         const response = await fetch("/healthz", {
@@ -401,12 +441,12 @@ export function useHealth(intervalMs = 10000) {
           // A non-JSON body: fall back to the HTTP status alone.
         }
         if (live) {
-          setHealth(readHealth(response.ok, body));
+          update(readHealth(response.ok, body));
         }
       } catch {
         // No response at all (network error / timeout) — central is unreachable.
         if (live) {
-          setHealth({ status: "unreachable", reason: null, scheduler: null });
+          update({ status: "unreachable", reason: null, scheduler: null });
         }
       }
     };

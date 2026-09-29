@@ -24,13 +24,33 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pytest
+from console_tasks import (
+    add_source,
+    author_scene,
+    connect,
+    current_hash,
+    go,
+    scene_continue,
+    scene_form,
+    schedule_continue,
+    schedule_form,
+    schedule_program,
+    show_advanced,
+    show_now,
+    source_continue,
+    start_scene,
+    start_schedule,
+    start_source,
+    visible_page,
+    visit,
+)
 from media_queue import RecordingMediaQueue
 from operator_harness import (
     RequestGate,
+    answer_first,
+    assert_fits_width,
     operator_server,
-    pause_page_clock,
     report_readiness,
-    sign_in,
     tile_health,
 )
 from playwright.sync_api import expect
@@ -157,30 +177,26 @@ def _seed(registry):
     return id_a["player_id"], id_b["player_id"]
 
 
-def _to_showrunner(page):
-    page.get_by_role("button", name="Showrunner", exact=True).click()
-
-
 def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
-        # Wall mode is the default: the wall plan and equipment rail are present.
+        # The Wall side: the plan on the Wall page, the equipment on Equipment.
         expect(page.get_by_role("group", name="Wall plan for surface wall")).to_be_visible()
+        go(page, "equipment")
         expect(page.get_by_role("group", name="Pending players")).to_be_visible()
 
-        _to_showrunner(page)
-
-        # The four Showrunner regions appear.
-        for region in ("Sources", "Scenes", "Programs", "Runs"):
+        # Each Show region has its own page, and none of them holds a Wall-only surface
+        # (not even hidden: include_hidden and get_by_label count hidden DOM too).
+        for section, region in (("now", "Runs"), ("scenes", "Scenes"),
+                                ("schedule", "Programs"), ("sources", "Sources")):
+            go(page, section)
             expect(page.get_by_role("region", name=region, exact=True)).to_be_visible()
-
-        # The Wall-only surfaces are gone (not rendered in Showrunner mode).
-        expect(page.get_by_role("group", name="Wall plan for surface wall")).to_have_count(0)
-        expect(page.get_by_role("group", name="Pending players")).to_have_count(0)
-        expect(page.get_by_role("group", name="Unplaced frames")).to_have_count(0)
-        expect(page.get_by_label("Surface")).to_have_count(0)
+            expect(page.get_by_role("group", name="Wall plan for surface wall", include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Pending players", include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Unplaced frames", include_hidden=True)).to_have_count(0)
+            expect(page.get_by_label("Surface")).to_have_count(0)
 
 
 def test_showrunner_frame_health_badges_match_the_wall(page, registry):
@@ -188,13 +204,13 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
         report_readiness(registry, player_id)
     registry.clock.advance(3)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
         # The wall's labels, read first so the show layer can be held to them.
         valid_label = "Last heard 3 s ago"
         invalid_label = "Needs commissioning"
         expect(tile_health(page, VALID_FRAME)).to_have_accessible_name(valid_label)
         expect(tile_health(page, INVALID_FRAME)).to_have_accessible_name(invalid_label)
-        _to_showrunner(page)
+        go(page, "now")
 
         health = page.get_by_role("group", name="Frame health", exact=True)
         expect(health).to_be_visible()
@@ -219,20 +235,25 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
 
-        # Sanity: in Wall mode the Commissioning facet IS reachable (proves the
+        # Sanity: on the Wall the Commissioning facet IS reachable (proves the
         # assertion below is meaningful, not vacuously true).
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
         expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_be_visible()
 
-        _to_showrunner(page)
-
-        # No Commissioning tab, no committed-calibration control, no editor — the
-        # facet is composed out of the show layer entirely.
-        expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_have_count(0)
-        expect(page.get_by_role("group", name="Committed calibration")).to_have_count(0)
-        expect(page.get_by_role("group", name="Adjust calibration")).to_have_count(0)
+        # On every Show page: no Commissioning tab, no committed-calibration control,
+        # no editor, not even in hidden DOM — the facet is composed out of the show
+        # layer entirely (tests/browser/test_console_shell_browser.py visits every
+        # Show route; this visits each Show page from an open Commissioning facet).
+        for section in ("now", "scenes", "schedule", "sources"):
+            go(page, section)
+            expect(page.get_by_role("tab", name="Commissioning", exact=True,
+                                    include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Committed calibration",
+                                    include_hidden=True)).to_have_count(0)
+            expect(page.get_by_role("group", name="Adjust calibration",
+                                    include_hidden=True)).to_have_count(0)
 
 
 def test_sources_render_name_rev_with_refresh(page, registry):
@@ -243,8 +264,7 @@ def test_sources_render_name_rev_with_refresh(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "sources")
 
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
@@ -274,18 +294,36 @@ def test_sources_have_no_immich_or_album_language(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "sources")
 
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # The Source must be present, so this is not vacuously true.
         expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
 
-        copy = sources.inner_text().lower()
-        assert "immich" not in copy
-        assert "album" not in copy
-        assert "open in" not in copy
+        # The intro says what a Source is, in neutral library words (flow design §2 req 4).
+        expect(sources.get_by_text(
+            "Photo Wall selects media that lives in your photo library. It never uploads, "
+            "edits or deletes anything there.", exact=True)).to_be_visible()
+        _assert_neutral(sources)
+
+        # Bead 3: every step of the Source flow, Advanced open, says the same.
+        form = start_source(page)
+        _assert_neutral(sources)
+        source_continue(page, "Name")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        _assert_neutral(sources)
+        source_continue(page, "Review")
+        _assert_neutral(sources)
+
+
+def _assert_neutral(region):
+    """No vendor, album or "open in" words in what `region` shows (design D-e)."""
+    copy = region.inner_text().lower()
+    assert "immich" not in copy
+    assert "album" not in copy
+    assert "open in" not in copy
 
 
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
@@ -310,26 +348,14 @@ def test_source_configuration_creates_source_awaiting_refresh(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "sources")
 
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # Not vacuously true: the new Source does not exist before the create.
         expect(sources.get_by_text(NEW_SOURCE, exact=True)).to_have_count(0)
 
-        form = sources.get_by_role("form", name="Configure a Source", exact=True)
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
-        form.get_by_label("Connection name", exact=True).fill("fixture-library")
-        form.get_by_label("Media type", exact=True).select_option("image")
-
-        with page.expect_response(
-            lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
-            and r.request.method == "PUT"
-        ) as info:
-            form.get_by_role("button", name="Save source", exact=True).click()
-
-        response = info.value
+        response = add_source(page, NEW_SOURCE, "fixture-library", media_type="image")
         assert response.status == 200
         # The saved query carries its identity, connection and chosen kind.
         body = response.request.post_data_json
@@ -361,29 +387,15 @@ def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
 
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         expect(scenes).to_be_visible()
         # No scenes exist yet, so the appearance below is not vacuously true.
         expect(scenes.get_by_label(f"Scene {SCENE_ID}", exact=True)).to_have_count(0)
 
-        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
         # Target one or more EXPLICIT Frames.
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
-        form.get_by_label("Seconds per cycle", exact=True).fill("45")
-
-        with page.expect_response(
-            lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}")
-            and r.request.method == "PUT"
-        ) as info:
-            form.get_by_role("button", name="Save Scene", exact=True).click()
-
-        response = info.value
+        response = author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME, INVALID_FRAME), seconds=45)
         assert response.status == 200
         # The scene saved in ONE request whose body carries the live source and
         # every explicit target Frame as a media Contribution.
@@ -417,19 +429,20 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
     portrait_a, portrait_b, _landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, _landscape))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
 
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
         # Not vacuously true: the scene must not already exist.
         expect(scenes.get_by_label(f"Scene {AUTHORED_SCENE_ID}", exact=True)).to_have_count(0)
 
-        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        # The flow: Kind (hand-picked) → Photos → Frames → Media per frame → Playback →
+        # Review, with the same field labels the single form had.
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
 
         # Each Frame's chooser loads its (profile-filtered) candidates: two
         # portrait candidates each, plus the placeholder option.
@@ -441,7 +454,10 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         # A DISTINCT asset per Frame — the essence of per-frame authoring.
         valid_choice.select_option(portrait_a.asset.asset_id)
         invalid_choice.select_option(portrait_b.asset.asset_id)
+        scene_continue(page, "Playback")
         form.get_by_label("Seconds per cycle", exact=True).fill("20")
+        scene_continue(page, "Review")
+        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
 
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{AUTHORED_SCENE_ID}/authored")
@@ -485,14 +501,13 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
     portrait_a, portrait_b, landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
 
-        scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
 
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         # Both portrait candidates are eligible and offered.
@@ -508,13 +523,10 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
     _seed(registry)
     queue = _seed_source(registry, _authored_photos(registry))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-            "form", name="Author a Scene", exact=True)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
 
         reads = RequestGate(page, "**/v1/operator/inventory")
         reads.holding = True
@@ -523,8 +535,10 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         reads.holding = False
         expect(page.get_by_text(re.compile(r"updated 5 s ago"))).to_be_visible()
 
-        # The candidates GET, through apiWrite, while the poll is in flight.
+        # The candidates GET, through apiWrite, while the poll is in flight: the flow
+        # reads them as soon as a frame is targeted, whichever step shows.
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option", name=re.compile(r"^Photo 108×192"))).to_have_count(1)
 
@@ -540,47 +554,7 @@ PROGRAM_PRIORITY = 5
 # them to POSIX-epoch seconds for the stored Program window (starts_at/ends_at).
 WINDOW_START = "2027-03-01T09:00"
 WINDOW_END = "2027-03-01T11:00"
-
-
-def _author_live_scene(page, scene_id):
-    """Author a LIVE-source Scene through the Scenes region so a real Scene exists
-    to bind a Program to (a Program can only reference a stored Scene —
-    central/runtime.py:298). Reuses the SceneAuthoring form; the seeded SOURCE and
-    VALID_FRAME must already exist.
-    """
-    scenes = page.get_by_role("region", name="Scenes", exact=True)
-    form = scenes.get_by_role("form", name="Author a Scene", exact=True)
-    form.get_by_label("Scene name", exact=True).fill(scene_id)
-    form.get_by_label("Source", exact=True).select_option(SOURCE)
-    form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-    form.get_by_label("Seconds per cycle", exact=True).fill("30")
-    with page.expect_response(
-        lambda r: r.url.endswith(f"/v1/operator/scenes/{scene_id}")
-        and r.request.method == "PUT"
-    ):
-        form.get_by_role("button", name="Save Scene", exact=True).click()
-    # The Scene must be listed before it can be bound (proves the refresh landed).
-    expect(scenes.get_by_label(f"Scene {scene_id}", exact=True)).to_be_visible()
-
-
-def _schedule_program(page, program, scene_id, start=WINDOW_START, end=WINDOW_END,
-                      priority=PROGRAM_PRIORITY, *, submit=True):
-    """Fill the Programs region's Schedule form (the one place its field names live) and,
-    with `submit`, schedule it and return the PUT response."""
-    programs = page.get_by_role("region", name="Programs", exact=True)
-    form = programs.get_by_role("form", name="Schedule a Program", exact=True)
-    form.get_by_label("Program name", exact=True).fill(program)
-    form.get_by_label("Scene", exact=True).select_option(scene_id)
-    form.get_by_label("Window start", exact=True).fill(start)
-    form.get_by_label("Window end", exact=True).fill(end)
-    form.get_by_label("Priority", exact=True).fill(str(priority))
-    if not submit:
-        return None
-    with page.expect_response(
-        lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
-    ) as info:
-        form.get_by_role("button", name="Schedule Program", exact=True).click()
-    return info.value
+WINDOW = (WINDOW_START, WINDOW_END, PROGRAM_PRIORITY)
 
 
 def test_program_schedules_single_window_and_lists(page, registry):
@@ -591,16 +565,16 @@ def test_program_schedules_single_window_and_lists(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
+        go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_be_visible()
         # Not vacuously true: no Program exists yet.
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
-        response = _schedule_program(page, PROGRAM_ID, SCENE_ID)
+        response = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
         assert response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
         assert response.status == 200
         # A single-window Program: the body is exactly one Scene bound to ONE
@@ -626,12 +600,11 @@ def test_program_remove_deletes_it(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        _schedule_program(page, PROGRAM_ID, SCENE_ID)
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
 
         row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(row).to_be_visible()
@@ -656,15 +629,13 @@ def test_n_window_helper_creates_separate_programs(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
         programs = page.get_by_role("region", name="Programs", exact=True)
-        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
-
-        multi = programs.get_by_role("group", name="Create separate windows", exact=True)
-        multi.get_by_label("Number of windows", exact=True).fill("3")
+        # Bead 4: "Number of windows" sits under the When step's Advanced, and the write
+        # is Review's "Add separate windows".
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
 
         # The helper fans out into N discrete PUTs — one stored Program each.
         seen = []
@@ -672,7 +643,7 @@ def test_n_window_helper_creates_separate_programs(page, registry):
             seen.append(req.url)
             if req.method == "PUT" and "/v1/operator/programs/" in req.url
             else None))
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
 
         # Three separate Programs are now listed, by three distinct ids.
         for index in (1, 2, 3):
@@ -692,46 +663,36 @@ def test_programs_region_implies_no_recurrence_rule(page, registry):
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "schedule")
 
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_be_visible()
 
-        # The honest N-window copy is present (so the negative assertions below
-        # are not vacuously true): separate windows / individual Programs.
-        copy = programs.inner_text().lower()
-        assert "separate windows" in copy
-        assert "individual programs" in copy
+        # Bead 4: the helper lives under the When step's Advanced; the Schedule page
+        # names it, and so does the helper itself. Both are held to the same honesty.
+        visit(page, "#/schedule/new/when")
+        schedule_form(page).get_by_role("button", name="Advanced", exact=True).click()
+        expect(programs.get_by_role("group", name="Create separate windows", exact=True)
+               ).to_be_visible()
+        helper_copy = programs.inner_text().lower()
+        go(page, "schedule")
+        page_copy = programs.inner_text().lower()
 
-        # No recurrence language anywhere in the region.
-        assert "recurring" not in copy
-        assert "recurrence" not in copy
+        for copy in (page_copy, helper_copy):
+            # The honest N-window copy is present (so the negative assertions below
+            # are not vacuously true): separate windows / individual Programs.
+            assert "separate windows" in copy
+            assert "individual programs" in copy
+
+            # No recurrence language anywhere in the region.
+            assert "recurring" not in copy
+            assert "recurrence" not in copy
 
 
 # Bead 16 — Run control + activation outcome + "why" panel (SR-runs).
 
 WHY_HIGH = "why-high"
 WHY_LOW = "why-low"
-
-
-def _activate(page, scene_id, priority, repeat="Leave it running"):
-    """Activate a Scene NOW through the Runs region's Activate form and return the
-    synchronous POST /v1/operator/activations response. The server answers with an
-    Admission ({status, reason}) that the console shows AT THE MOMENT. The console
-    mints the activation id; the operator never types one.
-    """
-    runs = page.get_by_role("region", name="Runs", exact=True)
-    form = runs.get_by_role("form", name="Activate a Scene", exact=True)
-    form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
-    form.get_by_label("Activation priority", exact=True).fill(str(priority))
-    form.get_by_label(repeat, exact=True).check()
-    with page.expect_response(
-        lambda r: r.url.endswith("/v1/operator/activations")
-        and r.request.method == "POST"
-    ) as info:
-        form.get_by_role("button", name="Activate now", exact=True).click()
-    return info.value
 
 
 def test_activation_shows_synchronous_outcome_truthfully(page, registry):
@@ -744,16 +705,16 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
+        go(page, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         outcome = runs.get_by_label("Activation outcome", exact=True)
         # No outcome is shown before an activation — it is synchronous only.
         expect(outcome).to_have_count(0)
 
-        response = _activate(page, SCENE_ID, 0)
+        response = show_now(page, SCENE_ID, 0)
         assert response.status == 200
         # The server admitted it; the console says exactly that.
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
@@ -761,7 +722,7 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
 
         # Activating the SAME running Scene again (new activation id,
         # repeat=ignore) is IGNORED — shown truthfully, not as a success.
-        _activate(page, SCENE_ID, 0)
+        show_now(page, SCENE_ID, 0)
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
             f"Not started: {SCENE_ID} is already running, left as is.")
 
@@ -788,13 +749,15 @@ def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, regi
         program_id="slept", scene_id=SCENE_ID, starts_at=now + 60, ends_at=now + 120))
     registry.clock.advance(300)  # Central is down across "slept"
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
 
         runs = page.get_by_role("region", name="Runs", exact=True)
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_count(0)
 
+        go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
+        # Past Programs are collapsed until asked for.
+        expect(programs.get_by_label("Program late", exact=True)).not_to_be_visible()
         programs.get_by_text("Past (2)", exact=True).click()
         missed = "Missed: its window had ended before Central first scheduled it."
         expect(programs.get_by_label("Program late", exact=True)).to_contain_text(missed)
@@ -804,7 +767,7 @@ def test_runs_region_shows_only_synchronous_outcomes_no_missed_window(page, regi
         expect(slept).not_to_contain_text("Missed")
 
         # The outcome appears ONLY at the synchronous moment of activation.
-        response = _activate(page, SCENE_ID, 0)
+        response = show_now(page, SCENE_ID, 0)
         assert response.status == 200
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
             f"Started: Central admitted a Run of {SCENE_ID}.")
@@ -818,15 +781,15 @@ def test_cancel_removes_live_run(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
+        go(page, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         # Not vacuous: no live Runs before activation.
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
 
-        _activate(page, SCENE_ID, 0)
+        show_now(page, SCENE_ID, 0)
 
         run_row = runs.get_by_role("listitem").first
         expect(run_row).to_be_visible()
@@ -844,7 +807,7 @@ def test_cancel_removes_live_run(page, registry):
         assert info.value.status == 200
 
         # After the useMutate() refresh the cancelled Run is gone.
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
 
 
 def test_finish_live_run_posts(page, registry):
@@ -853,12 +816,11 @@ def test_finish_live_run_posts(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
 
         runs = page.get_by_role("region", name="Runs", exact=True)
-        _activate(page, SCENE_ID, 0)
+        show_now(page, SCENE_ID, 0)
 
         run_row = runs.get_by_role("listitem").first
         expect(run_row).to_be_visible()
@@ -883,20 +845,19 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin)
         # Two Scenes, both targeting VALID_FRAME.
-        _author_live_scene(page, WHY_LOW)
-        _author_live_scene(page, WHY_HIGH)
+        author_scene(page, WHY_LOW, SOURCE, (VALID_FRAME,))
+        author_scene(page, WHY_HIGH, SOURCE, (VALID_FRAME,))
 
         # Activate the LOW priority first, the HIGH priority second — so ordering
         # cannot be an accident of activation order.
-        _activate(page, WHY_LOW, 1)
-        _activate(page, WHY_HIGH, 5)
+        show_now(page, WHY_LOW, 1)
+        show_now(page, WHY_HIGH, 5)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
 
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)
@@ -911,8 +872,7 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
 
 
 def _scenes_form(page):
-    return page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-        "form", name="Author a Scene", exact=True)
+    return scene_form(page)
 
 
 def _epoch(page, local):
@@ -924,23 +884,30 @@ def _epoch(page, local):
 
 def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
     """§15 tracer: the operator names a Scene, sees the id it saves under, keeps
-    "Keep playing" on and saves; the form clears and the list shows the id. A
-    Program 18:00–20:00 with Central 5 min past 18:00 still holds its Run live —
-    a Scene no longer plays one cycle and stops (the P1)."""
+    "Keep playing" on and saves; the flow's draft is discarded and the list shows the id.
+    A Program 18:00–20:00 with Central 5 min past 18:00 still holds its Run live — a
+    Scene no longer plays one cycle and stops (the P1).
+
+    Bead 2: the Scene form is a flow. "Keep playing" is on by default under Playback's
+    Advanced, the name is asked on Review, and "the form clears" is now "the draft is
+    discarded": the flow returns to the cards, which offer a fresh "New Scene" and no
+    "Resume draft"."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = _scenes_form(page)
-
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
+        scene_continue(page, "Review")
         name = form.get_by_label("Scene name", exact=True)
         name.fill("Family Evening")
         expect(name).to_have_accessible_description(re.compile("Saved as family-evening"))
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/family-evening")
             and r.request.method == "PUT"
@@ -950,39 +917,66 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
         assert info.value.status == 200
         assert body["scene_id"] == "family-evening" and body["loop"] is True
 
-        # The form clears, so the saved Scene never reads as a collision.
+        # The draft is discarded, so the saved Scene never reads as a collision.
         expect(scenes.get_by_label("Scene family-evening", exact=True)).to_be_visible()
-        expect(name).to_have_value("")
-        expect(form.get_by_text(re.compile("already exists"))).to_have_count(0)
+        expect(scenes.get_by_role("button", name="New Scene", exact=True)).to_be_visible()
+        expect(scenes.get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
+        expect(scenes.get_by_text(re.compile("already exists"))).to_have_count(0)
 
         start = _epoch(page, "2027-03-01T18:00")
         registry.clock.advance(start + 300 - registry.clock.utc())
         # A wall-clock jump of years ends the 30-day session (pass A §8): sign in again.
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _schedule_program(page, "evening-show", "family-evening",
-                          "2027-03-01T18:00", "2027-03-01T20:00", 0)
+        connect(page, origin)
+        schedule_program(page, "evening-show", "family-evening",
+                         "2027-03-01T18:00", "2027-03-01T20:00", 0)
+        go(page, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         expect(runs.get_by_text("Scene family-evening", exact=True)).to_be_visible()
 
 
 def test_a_name_without_a_latin_letter_asks_for_an_id(page, registry):
+    """Bead 2: the Id sits under Review's Advanced; a name with no usable id opens it at
+    once with the reason (it used to appear beside the name in the single form)."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill("夕方")
+        connect(page, origin, "scenes")
+        form = author_scene(page, "夕方", SOURCE, (VALID_FRAME,), submit=False)
         identifier = form.get_by_label("Id", exact=True)
         expect(identifier).to_be_visible()
+        # Held open while the id must be typed: the toggle says so and cannot close it.
+        advanced = form.get_by_role("button", name="Advanced", exact=True)
+        expect(advanced).to_have_attribute("aria-expanded", "true")
+        expect(advanced).to_be_disabled()
         expect(identifier).to_have_accessible_description(
             "This name needs a Latin letter or digit for its id; type an id.")
         identifier.fill("yugata")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/yugata") and r.request.method == "PUT"
+        ) as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+
+
+def test_the_id_is_derived_from_the_name_under_advanced_and_can_be_changed(page, registry):
+    """Bead 2, slice 3 §5: Review's Advanced says the id the name saves under; "Change"
+    in the name's hint opens it at the Id field, and a typed id is what is saved."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "Family Evening", SOURCE, (VALID_FRAME,), submit=False)
+        advanced = form.get_by_role("button", name="Advanced", exact=True)
+        expect(advanced).to_have_attribute("aria-expanded", "false")
+        expect(advanced).to_have_accessible_description("Id: family-evening")
+        form.get_by_role("button", name="Change", exact=True).click()
+        identifier = form.get_by_label("Id", exact=True)
+        expect(identifier).to_be_focused()
+        expect(identifier).to_have_value("family-evening")
+        identifier.fill("evening-2")
+        expect(advanced).to_have_accessible_description("Id: evening-2")
+        with page.expect_response(
+            lambda r: r.url.endswith("/v1/operator/scenes/evening-2") and r.request.method == "PUT"
         ) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert info.value.status == 200
@@ -992,19 +986,15 @@ def test_a_colliding_name_is_refused_before_any_request(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, "family-evening")
-        form = _scenes_form(page)
+        connect(page, origin)
+        author_scene(page, "family-evening", SOURCE, (VALID_FRAME,))
         puts = []
         page.on("request", lambda request: puts.append(request.url)
                 if request.method == "PUT" else None)
+        form = author_scene(page, "Family Evening", SOURCE, (VALID_FRAME,), submit=False)
         name = form.get_by_label("Scene name", exact=True)
-        name.fill("Family Evening")
         collision = "A Scene called family-evening already exists; choose another name."
         expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_role("button", name="Save Scene", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(collision)
         expect(name).to_be_focused()
@@ -1014,13 +1004,16 @@ def test_a_colliding_name_is_refused_before_any_request(page, registry):
 def test_the_problem_summary_is_frozen_at_submit(page, registry):
     """§6: submitting with problems sends nothing and freezes a summary; a poll
     that changes the live problems (another operator saves "evening") updates
-    the field's reason but never rewrites the summary under the reader."""
+    the field's reason but never rewrites the summary under the reader.
+
+    Bead 2: Review is reached by a typed URL with the Source and frames unanswered, so
+    Save lists problems that live on earlier steps; focus goes to the summary (its first
+    entry opens the Photos step), not to a Source field that Review does not show."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        visit(page, "#/scenes/new/review")
         form = _scenes_form(page)
         name = form.get_by_label("Scene name", exact=True)
         name.fill("Evening")
@@ -1028,7 +1021,7 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
         summary = form.get_by_role("alert")
         expect(summary).to_contain_text("Choose a Source.")
         expect(summary).to_contain_text("Choose at least one frame.")
-        expect(form.get_by_label("Source", exact=True)).to_be_focused()
+        expect(summary).to_be_focused()
 
         _runtime(registry).command("set_scene", Scene(
             scene_id="evening",
@@ -1043,12 +1036,6 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
 # §12 layout.
 
 LONG_ID = "reception" + "northwallleftofthemainentrance" * 3  # no break opportunity
-
-_OFFENDERS = """() => [...document.querySelectorAll("body *")]
-    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
-    .map((el) => el.tagName + "." + [...el.classList].join("."))
-    .slice(0, 12)"""
-
 
 def _seed_long_ids(registry):
     """A Source, Scene, Program and live Run whose ids are long unbroken strings."""
@@ -1068,25 +1055,30 @@ def _box(page, region):
     return page.get_by_role("region", name=region, exact=True).bounding_box()
 
 
-def test_the_showrunner_is_two_columns_wide_and_runs_first_narrow(page, registry):
+def test_each_show_region_is_a_page_beside_the_sidebar_wide_and_full_width_narrow(
+        page, registry):
+    # Bead 1b replaced the two-column Showrunner with one page per section: wide, the
+    # sidebar sits beside the page and every Show region starts at the same place;
+    # narrow, the sidebar becomes a drawer and each region spans the page.
     _seed(registry)
     queue = _seed_source(registry)
     page.set_viewport_size({"width": 1440, "height": 900})
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        expect(page.get_by_role("region", name="Runs", exact=True)).to_be_visible()
-        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
-        programs, sources = _box(page, "Programs"), _box(page, "Sources")
-        # Now (Runs) beside the Library (Scenes, Programs, Sources), at the same top.
-        assert runs["x"] + runs["width"] <= scenes["x"]
-        assert abs(runs["y"] - scenes["y"]) < 1
-        assert scenes["x"] == programs["x"] == sources["x"]
-        assert scenes["y"] < programs["y"] < sources["y"]
+        connect(page, origin, "now")
+        nav = page.get_by_role("navigation", name="Sections", exact=True).bounding_box()
+        boxes = {}
+        for section, region in (("now", "Runs"), ("scenes", "Scenes"),
+                                ("schedule", "Programs"), ("sources", "Sources")):
+            go(page, section)
+            boxes[region] = _box(page, region)
+            assert nav["x"] + nav["width"] <= boxes[region]["x"], region
+        assert len({round(box["x"]) for box in boxes.values()}) == 1, boxes
 
         page.set_viewport_size({"width": 390, "height": 844})
-        runs, scenes = _box(page, "Runs"), _box(page, "Scenes")
-        assert abs(runs["x"] - scenes["x"]) < 1 and runs["y"] < scenes["y"]
+        for section, region in (("now", "Runs"), ("scenes", "Scenes")):
+            go(page, section)
+            box = _box(page, region)
+            assert box["x"] <= 16.5 and box["x"] + box["width"] >= 390 - 16.5, (region, box)
 
 
 def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, registry):
@@ -1095,14 +1087,13 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
     _seed_long_ids(registry)
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        expect(page.get_by_role("region", name="Runs", exact=True).get_by_text(
-            f"Scene {LONG_ID}", exact=True)).to_be_visible()
-        expect(page.get_by_role("region", name="Sources", exact=True).get_by_text(
-            LONG_ID + ":1", exact=True)).to_be_visible()
-        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
-        assert fits, f"overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+        connect(page, origin, "now")
+        # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
+        for section, text in (
+                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID + ":1")):
+            go(page, section)
+            expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
+            assert_fits_width(page, section)
 
 
 # §9 rows and §10 precedence.
@@ -1141,12 +1132,12 @@ def test_a_refused_program_names_its_protector(page, registry):
     # An edit (revision 2): the Scene now reaches only INVALID_FRAME.
     runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME, revision=2))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "schedule")
         row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
             "Program blocked", exact=True)
         expect(row).to_contain_text(
             f"Did not start: {VALID_FRAME} was protected by the Run of guard.")
+        go(page, "now")
         guard = page.get_by_role("region", name="Runs", exact=True).get_by_role(
             "listitem").filter(has_text="Scene guard")
         expect(guard).to_contain_text(f"protects {VALID_FRAME}")
@@ -1164,8 +1155,7 @@ def test_a_refused_program_whose_protector_is_no_longer_served_names_none(page, 
     runtime.command("cancel", guard, registry.clock.utc())  # refuses "blocked" at +60 first
     registry.clock.advance(86400 + 60)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "schedule")
         row = page.get_by_role("region", name="Programs", exact=True).get_by_label(
             "Program blocked", exact=True)
         expect(row).to_contain_text(
@@ -1177,13 +1167,10 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        form.get_by_label("Keep playing until the Program ends", exact=True).uncheck()
+        connect(page, origin, "scenes")
+        form = author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,), loop=False, submit=False)
+        # Review lists the advanced value too.
+        expect(form.get_by_text("No, it plays one cycle", exact=True)).to_be_visible()
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
@@ -1192,7 +1179,7 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
         once = "plays one 30 s cycle, then ends"
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_label(
             f"Scene {SCENE_ID}", exact=True)).to_contain_text(once)
-        _activate(page, SCENE_ID, 0)
+        show_now(page, SCENE_ID, 0)
         run_row = page.get_by_role("region", name="Runs", exact=True).get_by_role("listitem").first
         expect(run_row).to_contain_text(once)
         expect(run_row).to_contain_text("activated directly")
@@ -1208,11 +1195,10 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
         children=(Child(scene=_scene("intro")),)))
     runtime.command("activate", "evening", "evening-act", registry.clock.utc())
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
             "group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: intro (priority 0, activated directly) on top.")
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
@@ -1241,11 +1227,10 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
     runtime.command("activate", "morning", "morning-act", now, priority=1)
     registry.clock.advance(60)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         why = runs.get_by_role("group", name="Why", exact=True)
-        why.get_by_label("Frame for why", exact=True).select_option(VALID_FRAME)
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
             f"Central's plan for {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
@@ -1253,6 +1238,7 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
             "Program weekday-evenings")
 
+        go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
         row = programs.get_by_label("Program weekday-evenings", exact=True)
         expect(row).to_contain_text(re.compile(r"Running since \d\d:\d\d"))
@@ -1271,9 +1257,10 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
     _add_lobby_frame(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = _scenes_form(page)
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         lobby = form.get_by_role("group", name="Frames on lobby", exact=True)
         wall = form.get_by_role("group", name="Frames on wall", exact=True)
         picked = lobby.get_by_role("checkbox", name=f"Target frame {LOBBY_FRAME}", exact=True)
@@ -1290,12 +1277,10 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
     _add_lobby_frame(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
+        form = start_scene(page)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
 
@@ -1304,6 +1289,9 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
         expect(form.get_by_role("status")).to_have_text(
             f"{LOBBY_FRAME} was deleted and removed from this Scene.")
         expect(form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)).to_have_count(0)
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
@@ -1331,8 +1319,7 @@ def _retry_after_unknown(page, registry, answer):
     queue = _seed_source(registry)
     _runtime(registry).command("set_scene", _scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         sent = []
         page.on("request", lambda request: sent.append(request.post_data_json["activation_id"])
                 if request.url.endswith("/v1/operator/activations")
@@ -1341,12 +1328,12 @@ def _retry_after_unknown(page, registry, answer):
         def first_attempt(route):
             route.fetch()  # the write reaches Central and commits
             answer(route)
-        page.route("**/v1/operator/activations", first_attempt, times=1)
+        answer_first(page, "**/v1/operator/activations", first_attempt)
 
         runs = page.get_by_role("region", name="Runs", exact=True)
-        form = runs.get_by_role("form", name="Activate a Scene", exact=True)
-        form.get_by_label("Scene to activate", exact=True).select_option(SCENE_ID)
-        form.get_by_label("Restart it", exact=True).check()
+        # Bead 5: the activation is the Show-now flow; "Restart it" sits under Review's
+        # Advanced.
+        form = show_now(page, SCENE_ID, repeat="Restart it", submit=False)
         form.get_by_role("button", name="Activate now", exact=True).click()
         outcome = runs.get_by_label("Activation outcome", exact=True)
         expect(outcome).to_have_text(
@@ -1371,11 +1358,12 @@ def test_an_activation_retried_after_a_500_reuses_its_key(page, registry):
 
 def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
     _seed(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
-            "form", name="Activate a Scene", exact=True)
+        connect(page, origin, "now")
+        # Bead 5: the choice is on the Show-now flow's Review, under Advanced.
+        form = show_now(page, SCENE_ID, submit=False)
+        show_advanced(form)
         expect(form.get_by_label("Leave it running", exact=True)).to_be_checked()
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
@@ -1388,11 +1376,9 @@ def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
     _seed(registry)
     _runtime(registry).command("set_scene", _scene("once", loop=False, cycle_seconds=20))
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = page.get_by_role("region", name="Runs", exact=True).get_by_role(
-            "form", name="Activate a Scene", exact=True)
-        form.get_by_label("Scene to activate", exact=True).select_option("once")
+        connect(page, origin, "now")
+        form = show_now(page, "once", submit=False)
+        show_advanced(form)
         restart = form.get_by_label("Restart it", exact=True)
         restart.check()
         expect(restart).to_have_accessible_description(
@@ -1409,8 +1395,7 @@ def test_an_ended_protecting_run_says_protected_in_the_past(page, registry):
     registry.clock.advance(60)
     runtime.command("cancel", guard, registry.clock.utc())
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
         runs.get_by_text("Recently ended (1)", exact=True).click()
         row = runs.get_by_label("Cancelled Runs", exact=True).get_by_role("listitem")
@@ -1426,9 +1411,8 @@ def test_a_protected_refusal_names_the_protecting_run(page, registry):
     runtime.command("set_scene", _scene(SCENE_ID))
     runtime.command("activate", "guard", "guard-act", registry.clock.utc(), priority=5)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        response = _activate(page, SCENE_ID, 0)
+        connect(page, origin, "now")
+        response = show_now(page, SCENE_ID, 0)
         assert response.json()["reason"] == "protected_frames"
         expect(page.get_by_role("region", name="Runs", exact=True).get_by_label(
             "Activation outcome", exact=True)).to_have_text(
@@ -1455,19 +1439,20 @@ def test_the_windows_helper_follows_the_weekday_mask(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         # 1 March 2027 is a Monday.
-        _schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
-                          "2027-03-01T20:00", 0, submit=False)
-        multi = _windows(page)
-        repeat = multi.get_by_role("group", name="Repeat on", exact=True)
+        form = schedule_program(page, "Weekday Show", SCENE_ID, "2027-03-01T18:00",
+                                "2027-03-01T20:00", 0, windows=6, submit=False)
+        # Review's Change opens When's Advanced at the mask (bead 4).
+        form.get_by_role("button", name="Change Repeat on", exact=True).click()
+        repeat = _windows(page).get_by_role("group", name="Repeat on", exact=True)
+        expect(repeat.get_by_label("Monday", exact=True)).to_be_focused()
         for day in ("Saturday", "Sunday"):
             repeat.get_by_label(day, exact=True).uncheck()
-        multi.get_by_label("Number of windows", exact=True).fill("6")
+        schedule_continue(page, "Review")
         bodies = _program_puts(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs.get_by_role("status")).to_have_text("Created 6 separate Programs.")
         days = ("01", "02", "03", "04", "05", "08")
@@ -1481,17 +1466,18 @@ def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry)
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
+        go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
         expect(programs).to_contain_text("Times in Europe/London")
         # British Summer Time starts at 01:00 UTC on Sunday 28 March 2027.
-        _schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
-                          "2027-03-27T20:00", 0, submit=False)
-        _windows(page).get_by_label("Number of windows", exact=True).fill("2")
+        form = schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
+                                "2027-03-27T20:00", 0, windows=2, submit=False)
+        # Review names the zone too, beside the times it lists (bead 4).
+        expect(form).to_contain_text("Times in Europe/London")
         bodies = _program_puts(page)
-        _windows(page).get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(programs.get_by_label("Program evening-2", exact=True)).to_be_visible()
         first, second = sorted(bodies, key=lambda body: body["program_id"])
         # 18:00 GMT then 18:00 BST: 23 hours apart, not 24.
@@ -1503,25 +1489,30 @@ def test_the_windows_helper_refuses_overlap_and_overlong_ids(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         bodies = _program_puts(page)
-        form = page.get_by_role("region", name="Programs", exact=True).get_by_role(
-            "form", name="Schedule a Program", exact=True)
+        # Bead 4: the overlap is the When step's (it asks the window and the helper), so
+        # its Continue refuses it before the name is asked.
+        form = start_schedule(page)
+        form.get_by_label("Scene", exact=True).select_option(SCENE_ID)
+        schedule_continue(page, "When")
         # A 25 h window repeated daily: each would overlap the next.
-        _schedule_program(page, "Marathon", SCENE_ID, "2027-03-01T18:00",
-                          "2027-03-02T19:00", 0, submit=False)
-        multi = _windows(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_label("Window start", exact=True).fill("2027-03-01T18:00")
+        form.get_by_label("Window end", exact=True).fill("2027-03-02T19:00")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        _windows(page).get_by_label("Number of windows", exact=True).fill("3")
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(
             "Each window must end before the next starts.")
 
         # An id whose window ids pass 128 characters.
+        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
+        schedule_continue(page, "Review")
+        form.get_by_label("Program name", exact=True).fill("Marathon")
         form.get_by_role("button", name="Change", exact=True).click()
         form.get_by_label("Id", exact=True).fill("x" * 127)
-        form.get_by_label("Window end", exact=True).fill("2027-03-01T20:00")
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text(
             f"Name too long: {'x' * 127}-3 must be at most 128 characters.")
         assert bodies == []
@@ -1534,24 +1525,31 @@ def test_the_windows_helper_retries_only_the_unconfirmed_windows(page, registry)
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         programs = page.get_by_role("region", name="Programs", exact=True)
-        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
-        multi = _windows(page)
-        multi.get_by_label("Number of windows", exact=True).fill("3")
-        page.route(f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
-            status=500, content_type="application/json", body='{"error": "internal"}'), times=1)
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, windows=3, submit=False)
+        answer_first(page, f"**/v1/operator/programs/{PROGRAM_ID}-2", lambda route: route.fulfill(
+            status=500, content_type="application/json", body='{"error": "internal"}'))
         bodies = _program_puts(page)
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        send = form.get_by_role("button", name="Add separate windows", exact=True)
+        send.click()
         expect(programs.get_by_role("status")).to_have_text(
             f"Created 2 of 3 separate Programs. Not confirmed: {PROGRAM_ID}-2; Central did "
             "not answer. Add separate windows again to send only these.")
+        # Bead 4: the flow stays on Review with the draft, so it can be sent again.
+        expect(send).to_be_enabled()
+        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
+        # The cards, shown beside the kept draft, list the stored windows only.
+        go(page, "schedule")
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-1", exact=True)).to_be_visible()
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}-3", exact=True)).to_be_visible()
         expect(programs.get_by_label(f"Program {PROGRAM_ID}-2", exact=True)).to_have_count(0)
+        programs.get_by_role("button", name="Resume draft (Draft)", exact=True).click()
+        assert page.evaluate("window.location.hash") == "#/schedule/new/review"
 
         bodies.clear()
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        send.click()
         expect(programs.get_by_role("status")).to_have_text("Created 3 separate Programs.")
         assert [body["program_id"] for body in bodies] == [f"{PROGRAM_ID}-2"]
         for index in (1, 2, 3):
@@ -1562,16 +1560,17 @@ def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registr
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        _author_live_scene(page, SCENE_ID)
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         bodies = _program_puts(page)
-        _schedule_program(page, PROGRAM_ID, SCENE_ID, submit=False)
-        multi = _windows(page)
-        count = multi.get_by_label("Number of windows", exact=True)
+        form = schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW, submit=False)
+        # Bead 4: the count is When's (under Advanced); its Continue refuses it.
+        form.get_by_role("button", name="Change Number of windows", exact=True).click()
+        count = _windows(page).get_by_label("Number of windows", exact=True)
+        expect(count).to_be_focused()
         count.fill("0")
         expect(count).to_have_accessible_description("Between 1 and 60 windows.")
-        multi.get_by_role("button", name="Add separate windows", exact=True).click()
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(count).to_have_value("0")
         expect(count).to_be_focused()
         count.fill("61")
@@ -1582,12 +1581,9 @@ def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registr
 def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = page.get_by_role("region", name="Sources", exact=True).get_by_role(
-            "form", name="Configure a Source", exact=True)
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
-        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        connect(page, origin)
+        # Bead 3: the filters are the Source flow's first step, "What to include".
+        form = start_source(page)
         form.get_by_label("Favourites", exact=True).select_option("only")
         until = form.get_by_label("Taken until", exact=True)
         form.get_by_label("Taken from", exact=True).fill("2024-01-01")
@@ -1595,6 +1591,10 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
         expect(until).to_have_accessible_description(
             re.compile("'Taken until' must be after 'Taken from'."))
         until.fill("2025-01-01")
+        source_continue(page, "Name")
+        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        source_continue(page, "Review")
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
             and r.request.method == "PUT"
@@ -1617,9 +1617,7 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
     runtime.command("set_scene", _scene(SCENE_ID))
     runtime.command("activate", SCENE_ID, "gone-act", registry.clock.utc())
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now", paused_at=registry.clock.utc())
         runs = page.get_by_role("region", name="Runs", exact=True)
         opener = runs.get_by_role("button", name=re.compile(r"^Cancel run "))
         opener.click()
@@ -1631,7 +1629,7 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
                       if run.scene_id == SCENE_ID)
         runtime.command("cancel", run_id, registry.clock.utc())
         page.clock.run_for(5000)
-        expect(runs.get_by_text("No live Runs.", exact=True)).to_be_visible()
+        expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
         expect(opener).to_have_count(0)
 
         dialog.get_by_role("button", name="Cancel", exact=True).click()
@@ -1653,24 +1651,27 @@ def _console_scene(scene_id, frame=VALID_FRAME, **fields):
 
 
 def _scene_row(page, scene_id):
-    """A Scene's row, its disclosure opened."""
-    row = page.get_by_role("region", name="Scenes", exact=True).get_by_label(
+    """A Scene's card (bead 2: a summary card, no longer a disclosure to open)."""
+    return page.get_by_role("region", name="Scenes", exact=True).get_by_label(
         f"Scene {scene_id}", exact=True)
-    row.get_by_text(f"Scene {scene_id}", exact=True).click()
-    return row
+
 
 
 def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(page, registry):
     """§13: a Scene saved with its other fields at their defaults stays editable
     (mutation probe: compare without filling defaults); Edit shows the stored id and
     never re-derives it (mutation probe: the name rule would send lobby-loop-v2); Replace
-    is confirmed and sends revision + 1."""
+    is confirmed and sends revision + 1.
+
+    Bead 2: Edit opens the flow at Review, which lists the stored values (they used to be
+    the filled form's fields); "Change" opens the value's step and focuses it, and
+    Continue returns to Review. After Replace the flow returns to the cards (#/scenes)
+    instead of an emptied form."""
     _seed(registry)
     queue = _seed_source(registry)
     _runtime(registry).command("set_scene", _console_scene(STORED_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
         row = _scene_row(page, STORED_ID)
         expect(row).to_contain_text("live from " + SOURCE)
         expect(row).to_contain_text("revision 1")
@@ -1679,11 +1680,27 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 
         form = _scenes_form(page)
         expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
+        assert current_hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
+        # The stored values, exactly, where each is asked: every Change link opens its
+        # step, and Continue returns to Review.
+        form.get_by_role("button", name="Change Photos", exact=True).click()
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
-        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        expect(form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)).not_to_be_checked()
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Keep playing until the Program ends",
+                         exact=True).click()
+        expect(form.get_by_label("Keep playing until the Program ends", exact=True)
+               ).to_be_checked()
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
+        seconds = form.get_by_label("Seconds per cycle", exact=True)
+        expect(seconds).to_be_focused()
+        seconds.fill("45")
+        scene_continue(page, "Review")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
 
         dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
@@ -1701,7 +1718,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
             "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
         expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
-        expect(form.get_by_label("Scene name", exact=True)).to_be_visible()
+        assert current_hash(page) == "#/scenes"
 
 
 def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, registry):
@@ -1713,8 +1730,7 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         contributions=_console_scene("x").contributions,
         children=(Child(scene=_console_scene("intro")),)))
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
         # Not vacuous: a Scene the console can author offers Edit.
         expect(_scene_row(page, "plain").get_by_role("button", name="Edit Scene plain")).to_be_visible()
         evening = _scene_row(page, "evening")
@@ -1751,22 +1767,31 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _put_authored(page, origin, AUTHORED_SCENE_ID, {VALID_FRAME: a, INVALID_FRAME: b})
         _drop_member(registry, b)
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
         row = _scene_row(page, AUTHORED_SCENE_ID)
         expect(row).to_contain_text("authored: 2 chosen items")
         row.get_by_role("button", name=f"Edit Scene {AUTHORED_SCENE_ID}", exact=True).click()
 
+        # Bead 2: the Kind is on Review ("Hand-picked per frame", the old "Authored
+        # per-frame"), and the choosers are on the Media per frame step.
         form = _scenes_form(page)
-        expect(form.get_by_label("Authored per-frame", exact=True)).to_be_checked()
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text("Hand-picked per frame")
         # An authored Scene does not store its Source: the operator picks it.
+        expect(answers).to_contain_text("Not chosen")
+        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
+            "button", name="Photos", exact=True).click()
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        scene_continue(page, "Media per frame")
         expect(form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)).to_have_value(a)
         # b left the Source, so it is no longer a candidate and is not kept.
         invalid_choice = form.get_by_label(f"Media for frame {INVALID_FRAME}", exact=True)
         expect(invalid_choice.get_by_role("option")).to_have_count(2)
         expect(invalid_choice).to_have_value("")
         invalid_choice.select_option(a)
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
         with page.expect_response(
             lambda r: r.url.endswith(f"/scenes/{AUTHORED_SCENE_ID}/authored")
@@ -1778,14 +1803,6 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
         assert (body["scene"]["revision"], body["asset_ids"]) == (2, [a])
 
 
-def _author_authored(form, asset_id):
-    form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
-    form.get_by_label("Authored per-frame", exact=True).check()
-    form.get_by_label("Source", exact=True).select_option(SOURCE)
-    form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-    form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(asset_id)
-
-
 def test_authored_save_refusals_are_said_in_plain_words(page, registry):
     """§13: the authored PUT's two 409s, each as its sentence."""
     _seed(registry)
@@ -1793,15 +1810,13 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
     a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-        form = _scenes_form(page)
 
         with registry.db.transaction() as conn:  # the last refresh failed
             conn.execute("UPDATE media_sources SET status='unavailable' WHERE source_ref=%s",
                          (SOURCE,))
-        _author_authored(form, a)
+        form = author_scene(page, AUTHORED_SCENE_ID, SOURCE, {VALID_FRAME: a}, submit=False)
         with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
         assert (info.value.status, info.value.json()["error"]) == (409, "source_not_fresh")
@@ -1811,7 +1826,10 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
 
         with registry.db.transaction() as conn:
             conn.execute("UPDATE media_sources SET status='ok' WHERE source_ref=%s", (SOURCE,))
+        # Bead 2: the chooser is on the Media per frame step; Continue returns to Review.
+        form.get_by_role("button", name="Change Media per frame", exact=True).click()
         form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(b)
+        scene_continue(page, "Review")
         _drop_member(registry, b)
         with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
@@ -1819,6 +1837,7 @@ def test_authored_save_refusals_are_said_in_plain_words(page, registry):
         expect(scenes).to_contain_text(
             "Could not save Scene. That item is no longer in the Source; choose again.")
         # The choosers read their candidates again: b is no longer offered.
+        form.get_by_role("button", name="Change Media per frame", exact=True).click()
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option")).to_have_count(2)
         expect(choice).to_have_value("")
@@ -1834,12 +1853,12 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", _console_scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scene_row(page, SCENE_ID).get_by_role("button", name=f"Edit Scene {SCENE_ID}").click()
         form = _scenes_form(page)
+        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
         form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        scene_continue(page, "Review")
 
         # The other editor replaces it meanwhile, as the console saves; no poll has
         # shown it here yet.
@@ -1855,10 +1874,16 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
             dialog.get_by_role("button", name="Confirm replace", exact=True).click()
         assert (info.value.status, info.value.json()) == (409, {"error": "scene_revision_conflict"})
         expect(dialog.get_by_role("status")).to_have_text(
-            "Changed since you opened this. Reopen to review.")
+            "This Scene was changed since you opened it; nothing was replaced. "
+            "Review now offers Reload.")
         expect(dialog.get_by_role("button", name="Confirm replace")).to_have_count(0)
         stored = _runtime(registry).read().export_state()["scenes"][SCENE_ID]
         assert (stored["revision"], stored["cycle_seconds"]) == (2, 20)
+        # The refresh after the write shows revision 2: Replace is withheld, so closing
+        # the dialog moves focus to Reload rather than to the disabled Replace.
+        expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        expect(form.get_by_role("button", name="Reload", exact=True)).to_be_focused()
 
 
 # Pass 2 slice 3B (§14): the media pipeline and "why nothing new?".
@@ -1900,9 +1925,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
     _set_source(registry, "empty:1", next_refresh=now + 30, last_success=now, status="ok",
                 counts={"valid": 0})
     with operator_server(registry.db, registry.clock) as origin:
-        pause_page_clock(page, now)
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now", paused_at=now)
         pipeline = _pipeline(page)
 
         def state(ref):
@@ -1931,9 +1954,7 @@ def test_the_media_pipeline_states_each_worker_state(page, registry):
     repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue())
     repository.health()  # the settings row, as Central's first media read makes it
     with operator_server(registry.db, registry.clock) as origin:
-        pause_page_clock(page, registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now", paused_at=registry.clock.utc())
         worker = _pipeline(page).get_by_label("Media worker", exact=True)
         expect(worker).to_have_text("never checked in")
         expect(worker).to_have_class(re.compile(r"\bhealth--alarm\b"))
@@ -1956,9 +1977,11 @@ def test_the_media_pipeline_states_each_worker_state(page, registry):
 
 
 def _why_chain(page, frame_id=VALID_FRAME):
+    """Open "Why nothing new?" on `frame_id`'s row of the Why group (bead 5: a disclosure
+    per frame, where a "Frame for why" chooser used to show both explanations at once)."""
     why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
         "group", name="Why", exact=True)
-    why.get_by_label("Frame for why", exact=True).select_option(frame_id)
+    why.get_by_role("button", name=f"Why nothing new? {frame_id}", exact=True).click()
     return why.get_by_role("group", name=f"Why nothing new on {frame_id}?", exact=True)
 
 
@@ -1984,8 +2007,7 @@ def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page,
     runtime.command("activate", SCENE_ID, "once-act", registry.clock.utc())
     registry.clock.advance(45)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         chain = _why_chain(page)
         expect(_stop(chain)).to_have_count(1)
         expect(_stop(chain)).to_contain_text(re.compile(
@@ -2004,14 +2026,14 @@ def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _put_authored(page, origin, AUTHORED_SCENE_ID, {VALID_FRAME: portrait_a.asset.asset_id})
         _runtime(registry).command("activate", AUTHORED_SCENE_ID, "fixed-act", registry.clock.utc())
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         chain = _why_chain(page)
         expect(_stop(chain)).to_contain_text(
             "Authored? Fixed, hand-picked media; new photos never appear by design.")
         expect(chain.get_by_role("button", name="Check this frame")).to_have_count(0)
         # Ranked beside it, unchanged: one layer.
         why = page.get_by_role("region", name="Runs", exact=True).get_by_role("group", name="Why")
+        why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role(
             "listitem")).to_have_count(1)
 
@@ -2029,9 +2051,7 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
                      (Jsonb({"valid": 3, "discovered": 3}), SOURCE))
     _run_now(registry, _console_scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, now)
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
         expect(chain).to_contain_text(
             f"The Source {SOURCE}: refreshed 0 s ago · 3 valid in the last refresh.")
@@ -2082,9 +2102,7 @@ def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(p
     _run_now(registry, Scene(scene_id=SCENE_ID, loop=True, contributions=(Contribution(
         target=f"frame:{VALID_FRAME}", source_refs=(SOURCE, "shared:1", "down:1")),)))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        pause_page_clock(page, now)
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
@@ -2101,8 +2119,7 @@ def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, reg
     until = datetime(2024, 4, 1, tzinfo=london).timestamp()
     _set_source(registry, "spring:1", spec={"captured_from": start, "captured_until": until})
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
+        connect(page, origin, "now")
         expect(_pipeline(page).get_by_label("Refresh of spring:1", exact=True)).to_contain_text(
             re.compile(r"taken (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
 
@@ -2116,19 +2133,20 @@ def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, regi
                                                         captured_at=now))
     queue = _seed_source(registry, photos)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        sign_in(page, origin)
-        _to_showrunner(page)
-        form = _scenes_form(page)
-        form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
-        form.get_by_label("Authored per-frame", exact=True).check()
+        connect(page, origin, "scenes")
+        # Bead 2: the chooser is on the Media per frame step, whose Continue (the old
+        # Save) reports the loading state.
+        form = start_scene(page, hand_picked=True)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
         reads = RequestGate(page, "**/candidates*")
         reads.holding = True
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         reads.wait_held()
+        scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option")).to_have_text(["Loading compatible media…"])
-        form.get_by_role("button", name="Save Scene", exact=True).click()
+        form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text("Loading compatible media…")
 
         reads.holding = False

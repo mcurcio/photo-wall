@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
@@ -391,6 +392,9 @@ def create_app(
         # working now that `/` serves the same shell.
         return console_shell()
 
+    # Python 3.12's built-in table has no .woff2, and the image's /etc/mime.types is not
+    # relied on: the console font must be served as font/woff2 (pass C §5).
+    mimetypes.add_type("font/woff2", ".woff2")
     app.mount(
         "/console/assets",
         StaticFiles(directory=console_dist / "assets", check_dir=False),

@@ -1,0 +1,33 @@
+import React from "react";
+
+import { frameHealth } from "./health.js";
+
+/**
+ * Frame-health badges on the Now showing page: one per Frame, labelled by the one
+ * classifier (health.js) exactly as the Wall labels it.
+ *
+ * A badge is a STATUS, never a control: a Frame that cannot present matters to the
+ * showrunner, but every Display CONTROL stays behind the Wall's Commissioning facet
+ * (R4, J4). This module imports no Wall component.
+ *
+ * @param {{snapshot: object|null}} props
+ */
+export function FrameHealthBadges({ snapshot }) {
+  const frames = snapshot?.inventory?.frames ?? [];
+  return (
+    <section className="showrunner__health" role="group" aria-label="Frame health">
+      {frames.map((frame) => {
+        const health = frameHealth(snapshot, frame.id);
+        return (
+          <span
+            key={frame.id}
+            className={`showrunner__badge health--${health.severity}`}
+            aria-label={`Frame ${frame.id}: ${health.label}`}
+          >
+            {`${frame.id}: ${health.label}`}
+          </span>
+        );
+      })}
+    </section>
+  );
+}

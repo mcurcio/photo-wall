@@ -1,221 +1,192 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import {
-  draftId,
-  MAX_WINDOWS,
-  planWindows,
-  programProblems,
-  timeZoneName,
-  toEpochSeconds,
-  windowProblems,
-} from "./authoring.js";
+import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { Field, IdentityFields, PriorityField, ProblemSummary, useProblems } from "./Field.jsx";
-import { ScenePicker } from "./ScenePicker.jsx";
-import { programState, windowLabel } from "./showState.js";
+import { useProblems } from "./Field.jsx";
+import { FlowFrame } from "./flow/FlowFrame.jsx";
+import { inStepOrder } from "./flow/steps.js";
+import { SummaryCard } from "./flow/SummaryCard.jsx";
+import { useFlowDraft } from "./flow/useFlowDraft.js";
+import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
+import { NOT_CONFIRMED, useFlowWrite } from "./flow/useFlowWrite.js";
+import { useSceneHandOver } from "./flow/useSceneHandOver.js";
+import {
+  buildProgram,
+  NEW_PROGRAM_DRAFT,
+  programDraftProblems,
+  SCHEDULE_ADVANCED_FIELDS,
+  SCHEDULE_FIELD_STEP,
+  SCHEDULE_KEYS,
+  SCHEDULE_STEPS,
+  seedSchedule,
+  separateWindows,
+} from "./scheduleFlowModel.js";
+import { ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./ScheduleSteps.jsx";
+import { isPastProgram, programState, windowLabel } from "./showState.js";
 import { useMutate } from "./useMutate.js";
 
-/**
- * The Programs region (moved out of Showrunner.jsx, pass 2 slice 3 §3).
- *
- * @param {{snapshot: object|null}} props
- */
-export function ProgramsRegion({ snapshot }) {
-  const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
-  // After a removal, or when its opener is gone, the Programs region takes focus.
-  const focusRegion = () => regionRef.current?.focus();
-  const confirm = useConfirm(focusRegion, focusRegion);
-  return (
-    <section
-      ref={regionRef}
-      tabIndex={-1}
-      className="showrunner__region"
-      role="region"
-      aria-label="Programs"
-    >
-      <h2 className="showrunner__region-title">Programs</h2>
-      {/* A Program binds a Scene to a SINGLE time window with a priority
-          (PUT …/programs/{id}). The optional helper creates N SEPARATE
-          windows — N individual, independently-stored Programs — and is never
-          described as a recurring rule: central stores no recurrence model
-          (design R2, Q2), so the UI implies none. */}
-      <ProgramScheduling snapshot={snapshot} confirm={confirm} />
-      {confirm.confirmation("program-scheduling__status-line")}
-    </section>
-  );
-}
+const EMPTY = {};
+
+// Each step's heading: the one question it asks.
+const HEADINGS = {
+  scene: "Which Scene?",
+  when: "When should it show?",
+  review: "Check your Program",
+};
 
 /**
- * The body of a single-window Program write: exactly the stored `Program` shape
- * (central/runtime.py:114-125) — a Scene bound to ONE `[starts_at, ends_at)`
- * window with a priority. There is deliberately no recurrence field: central
- * stores single windows only (design Q2), so N-window scheduling is N of THESE,
- * never one recurring rule.
+ * The Schedule section (flow design §7 J6, "Schedule it"): the region "Programs", with
+ * the Program cards and the Schedule flow, Scene → When → Review.
  *
- * @param {{programId: string, sceneId: string, startsAt: number, endsAt: number, priority: number}} draft
- * @returns {{program_id: string, scene_id: string, starts_at: number, ends_at: number, priority: number}}
+ * A Program binds a Scene to a SINGLE time window with a priority (design J4; `PUT
+ * /v1/operator/programs/{id}`). The optional helper (When's Advanced) creates N
+ * SEPARATE windows in one action: N independent Programs `<id>-<n>`, window 1 the
+ * entered one and each later one on the next ticked weekday at the same local clock
+ * times, each a real single-window `PUT`, managed and removed one by one. Nothing here
+ * is a recurring rule: central stores none (design R2/Q2). Times are entered and shown
+ * in the browser's time zone, which is named.
+ *
+ * THE CONTAINER. This component owns the flow's one draft (`useFlowDraft`) and never
+ * unmounts (the shell keeps Show sections mounted, rule 2), so a step change, a section
+ * change, a poll or the sign-in overlay cannot lose the draft. The step views
+ * (ScheduleSteps.jsx) hold no draft state.
+ *
+ * ROUTES AND STEPS are the flow kit's (flow/useFlowInstance.js): `#/schedule` shows the
+ * cards; `#/schedule/new/<step>` a step (scheduleFlowModel.js `SCHEDULE_KEYS`). Continue
+ * checks its own step; Review's write checks every value and routes each problem
+ * through `SCHEDULE_FIELD_STEP` to its step, opening its Advanced ("Repeat on", "Number
+ * of windows", "Priority", "Id").
+ *
+ * PREFILL. A new draft's Scene is the shell's `recentScene` while it is stored: the Scene just saved, or
+ * picked with a Scene card's "Schedule it". A later hand-over refills a draft the
+ * operator has not changed; a changed draft is kept, and its Scene step offers the
+ * handed-over Scene instead (the kit's `useSceneHandOver`, shared with Show now).
+ *
+ * THE WRITE (authoring.js owns every rule). One window: ONE `PUT` of `<id>`, "Schedule
+ * Program". More: "Add separate windows" sends one `PUT` per window. A partial failure
+ * names the ids refused (4xx) and those not confirmed (5xx or no answer: they may be
+ * saved), keeps the flow on Review, and sending the same draft again sends only the
+ * windows not yet confirmed (a `PUT` of the same body is idempotent), so its own windows
+ * never read as collisions. One window Central did not answer "may have been saved" in
+ * the same way, and Schedule Program again confirms it (the kit's `attempt`). Writes wrap the shared `useMutate()` (one Plane A refresh
+ * after a write); a write that stores everything ends the flow (`finish`).
+ *
+ * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
+ *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
+ *          recentScene: {sceneId: string, seq: number}|null,
+ *          markDraft: (section: string, dirty: boolean) => void}} props
  */
-export function buildProgram({ programId, sceneId, startsAt, endsAt, priority }) {
-  return {
-    program_id: programId,
-    scene_id: sceneId,
-    starts_at: startsAt,
-    ends_at: endsAt,
-    priority,
-  };
-}
-
-// Weekdays in display order, each with its `Date.getDay()` index.
-const WEEKDAYS = [
-  ["Monday", 1],
-  ["Tuesday", 2],
-  ["Wednesday", 3],
-  ["Thursday", 4],
-  ["Friday", 5],
-  ["Saturday", 6],
-  ["Sunday", 0],
-];
-
-const EVERY_DAY = [true, true, true, true, true, true, true];
-
-/**
- * The Programs region body (Bead 15; pass 2 slice 3 §5–§7, §9).
- *
- * A Program binds a Scene to a SINGLE time window with a priority (design J4).
- * The operator names it and the id is derived (authoring.js). The form saves
- * one Program via `PUT /v1/operator/programs/{id}`; the helper creates N
- * SEPARATE windows in one action — N independent Programs `<id>-<n>`, window 1
- * the entered one and each later one on the next ticked weekday at the same
- * local clock times — each a real single-window `PUT`, managed and removed one
- * by one. Nothing here is a recurring rule: central stores none (design R2/Q2).
- * Times are entered and shown in the browser's time zone, which is named.
- *
- * All writes wrap the shared `useMutate()` hook (primitive #7), so Plane A —
- * and the Programs list below — refreshes exactly once after a write.
- *
- * @param {{snapshot: object|null, confirm: ReturnType<typeof useConfirm>}} props
- */
-function ProgramScheduling({ snapshot, confirm }) {
-  const definitions = snapshot?.runtime?.definitions ?? {};
+export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDraft }) {
+  const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   // Stored Programs are the runtime programs map, keyed by program_id
   // (central/app.py -> runtime.export_state()["programs"]).
-  const programsMap = snapshot?.runtime?.programs ?? {};
+  const programsMap = snapshot?.runtime?.programs ?? EMPTY;
   const programs = useMemo(() => Object.values(programsMap), [programsMap]);
   const programIds = useMemo(() => new Set(Object.keys(programsMap)), [programsMap]);
   const now = snapshot?.runtime?.current?.now;
-
   const mutate = useMutate();
 
-  // Plane B: component-local scheduling draft.
-  const [name, setName] = useState("");
-  const [idOverride, setIdOverride] = useState(/** @type {string|null} */ (null));
-  const [sceneId, setSceneId] = useState("");
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
-  const [priority, setPriority] = useState(/** @type {string|number} */ (0));
-  // The helper: how many SEPARATE windows, and on which weekdays.
-  const [windowCount, setWindowCount] = useState(/** @type {string|number} */ (3));
-  const [weekdays, setWeekdays] = useState(EVERY_DAY);
-  // Which action the reasons beside the fields describe: the last one tried.
-  const [action, setAction] = useState(/** @type {"single"|"windows"} */ ("single"));
-  const [status, setStatus] = useState(/** @type {string|null} */ (null));
-  const [saving, setSaving] = useState(false);
-  // A helper action that did not confirm every window: the draft it was sent
-  // from, its window ids and those confirmed. Adding the same draft again sends
-  // only the rest (a PUT of the same body is idempotent), so its own windows
-  // never read as collisions.
-  const [batch, setBatch] = useState(
-    /** @type {{draft: string, ids: string[], confirmed: string[]}|null} */ (null),
-  );
+  const draft = useFlowDraft(seedSchedule(recentScene?.sceneId ?? null, definitions));
+  const value = draft.value ?? NEW_PROGRAM_DRAFT;
 
-  const draft = { name, idOverride, sceneId, start, end, priority, weekdays, count: windowCount };
-  const signature = JSON.stringify(draft);
-  const pending = batch !== null && batch.draft === signature ? batch : null;
-  const single = programProblems(draft, programIds, now);
-  const windows = windowProblems(
+  const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
+  const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const refs = useFlowRefs();
+
+  // PREFILL: a Scene handed over after the draft opened (a new draft is seeded with it).
+  const handOver = useSceneHandOver({
+    recentScene,
     draft,
-    pending === null ? programIds : new Set([...programIds].filter((id) => !pending.ids.includes(id))),
-    now,
+    sceneId: value.sceneId,
+    accepts: (sceneId) => definitions[sceneId] !== undefined,
+    choose: (sceneId) => draft.patch({ sceneId }),
+  });
+
+  // One confirmation (ConfirmAction) for this section: removing a running or due
+  // Program, and discarding the draft. A request's `after` runs once it is done; after a
+  // removal, or when its opener is gone, the region takes focus.
+  const focusRegion = () => regionRef.current?.focus();
+  const confirm = useConfirm(focusRegion, (_result, request) =>
+    request.after !== undefined ? request.after() : focusRegion(),
   );
-  const problems = useProblems(
-    action === "windows"
-      ? windows
-      : [...single, ...windows.filter((p) => p.field === "count" || p.field === "weekdays")],
+
+  // A write that did not confirm every id it sent (flow/useFlowWrite.js NOT CONFIRMED).
+  const write = useFlowWrite({ draft, confirm, failure: "Could not schedule Program" });
+  const pending = write.attempt;
+  const problemList = useMemo(
+    () =>
+      inStepOrder(
+        programDraftProblems(value, programIds, now, pending?.ids),
+        SCHEDULE_FIELD_STEP,
+        SCHEDULE_STEPS,
+      ),
+    [value, programIds, now, pending],
   );
-  const count = Number(windowCount);
-  const countShown = Number.isInteger(count) && count >= 1 && count <= MAX_WINDOWS;
+  const problems = useProblems(problemList);
 
-  const field = (setter, key) => (value) => {
-    setter(value);
-    problems.touch(key);
-  };
+  const flow = useFlowInstance({
+    section: "schedule",
+    draft,
+    route,
+    navigate,
+    markDraft,
+    keys: SCHEDULE_KEYS,
+    refs,
+    steps: SCHEDULE_STEPS,
+    fieldStep: SCHEDULE_FIELD_STEP,
+    advancedFields: SCHEDULE_ADVANCED_FIELDS,
+    problemList,
+    problems,
+    confirm,
+    onOpened: () => handOver.clear(),
+  });
+  const { step } = flow;
 
-  // A successful save clears the form, so the saved Program never reads as a
-  // collision with itself (§5).
-  const clear = () => {
-    setName("");
-    setIdOverride(null);
-    setSceneId("");
-    setStart("");
-    setEnd("");
-    setPriority(0);
-    setWindowCount(3);
-    setWeekdays(EVERY_DAY);
-    setAction("single");
-    setBatch(null);
-    problems.reset();
-  };
-
+  // --- The write.
   const put = (programId, startsAt, endsAt) =>
     apiWrite(`/v1/operator/programs/${encodeURIComponent(programId)}`, {
       method: "PUT",
-      body: buildProgram({ programId, sceneId, startsAt, endsAt, priority: Number(priority) }),
+      body: buildProgram({
+        programId,
+        sceneId: value.sceneId,
+        startsAt,
+        endsAt,
+        priority: Number(value.priority),
+      }),
     });
 
-  const saveProgram = async () => {
-    setAction("single");
-    if (saving || !problems.check(single)) {
-      return;
-    }
-    const id = draftId(draft);
-    setSaving(true);
-    setStatus(null);
-    try {
-      const result = await mutate(() => put(id, toEpochSeconds(start), toEpochSeconds(end)));
-      if (result.ok) {
-        clear();
-        setStatus(`Scheduled Program ${id}.`);
-      } else {
-        setStatus(`Could not schedule Program: ${result.error ?? result.status}.`);
-      }
-    } catch {
-      setStatus("Could not schedule Program: the request did not complete.");
-    } finally {
-      setSaving(false);
+  /** Everything is stored: say so on the cards and end the flow. */
+  const stored = (sent, message) => {
+    sent.say(message);
+    handOver.clear();
+    sent.finish();
+  };
+
+  const scheduleOne = async (sent, id) => {
+    const result = await sent.request(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
+    if (result === null || result.status >= 500) {
+      // It may have been stored: scheduling the same draft again confirms it.
+      sent.attempted([id]);
+      sent.say(`Program ${id} ${NOT_CONFIRMED} Schedule Program again to confirm.`);
+    } else if (result.ok) {
+      stored(sent, `Scheduled Program ${id}.`);
+    } else {
+      sent.refused(result);
     }
   };
 
-  // The helper: `count` SEPARATE Programs in one action, each a real stored
-  // single-window Program `<id>-<n>`. A partial failure names the ids refused
-  // (4xx) and those not confirmed (5xx or no answer: they may be saved), and
-  // adding again sends only the windows not yet confirmed.
-  const addSeparateWindows = async () => {
-    setAction("windows");
-    if (saving || !problems.check(windows)) {
-      return;
-    }
-    const id = draftId(draft);
-    const planned = planWindows({ start, end, weekdays, count }).map((window, index) => ({
+  const addSeparateWindows = async (sent, id) => {
+    const count = Number(value.count);
+    const planned = planWindows({ ...value, count }).map((window, index) => ({
       ...window,
       programId: `${id}-${index + 1}`,
     }));
     const confirmed = new Set(pending?.confirmed ?? []);
     const sending = planned.filter((window) => !confirmed.has(window.programId));
-    setSaving(true);
-    setStatus(null);
-    const results = await mutate(() =>
+    // A write that did not complete leaves every window unconfirmed.
+    const results = (await sent.request(() =>
       Promise.all(
         sending.map(({ programId, startsAt, endsAt }) =>
           put(programId, startsAt, endsAt).then(
@@ -224,30 +195,37 @@ function ProgramScheduling({ snapshot, confirm }) {
           ),
         ),
       ),
-    );
+    )) ?? sending.map(() => "unknown");
     const outcome = (kind) =>
       sending.filter((_window, index) => results[index] === kind).map((window) => window.programId);
     outcome("created").forEach((programId) => confirmed.add(programId));
     if (confirmed.size === planned.length) {
-      clear();
-      setStatus(`Created ${planned.length} separate Programs.`);
-    } else {
-      const [refused, unknown] = [outcome("refused"), outcome("unknown")];
-      setBatch({ draft: signature, ids: planned.map((window) => window.programId), confirmed: [...confirmed] });
-      setStatus(
-        [
-          `Created ${confirmed.size} of ${planned.length} separate Programs.`,
-          refused.length > 0 ? `Not created: ${refused.join(", ")}.` : null,
-          unknown.length > 0 ? `Not confirmed: ${unknown.join(", ")}; Central did not answer.` : null,
-          "Add separate windows again to send only these.",
-        ]
-          .filter((part) => part !== null)
-          .join(" "),
-      );
+      stored(sent, `Created ${planned.length} separate Programs.`);
+      return;
     }
-    setSaving(false);
+    const [refused, unknown] = [outcome("refused"), outcome("unknown")];
+    sent.attempted(
+      planned.map((window) => window.programId),
+      [...confirmed],
+    );
+    sent.say(
+      [
+        `Created ${confirmed.size} of ${planned.length} separate Programs.`,
+        refused.length > 0 ? `Not created: ${refused.join(", ")}.` : null,
+        unknown.length > 0 ? `Not confirmed: ${unknown.join(", ")}; Central did not answer.` : null,
+        "Add separate windows again to send only these.",
+      ]
+        .filter((part) => part !== null)
+        .join(" "),
+    );
   };
 
+  const onSave = () =>
+    write.send(flow, (sent) =>
+      (separateWindows(value) ? addSeparateWindows : scheduleOne)(sent, draftId(value)),
+    );
+
+  // --- Removing a Program.
   const removeProgram = useCallback(
     async (id) => {
       await mutate(() =>
@@ -271,203 +249,136 @@ function ProgramScheduling({ snapshot, confirm }) {
     }
   };
 
-  const past = programs.filter((program) => program.ends_at <= now);
-  const current = programs.filter((program) => !(program.ends_at <= now));
+  // "Past": the window has ended and the Program is neither running nor due.
+  const past = programs.filter((program) => isPastProgram(snapshot, program));
+  const current = programs.filter((program) => !isPastProgram(snapshot, program));
 
-  const dateField = (key, label, value, setter) => (
-    <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
-      {(props) => (
-        <input
-          {...props}
-          type="datetime-local"
-          value={value}
-          onChange={(event) => field(setter, key)(event.target.value)}
-        />
-      )}
-    </Field>
-  );
+  // --- Views.
+  const stepProps = { value, patch: draft.patch, problems };
+  const { advanced } = flow;
+  const views = {
+    scene: () => (
+      <SceneStep
+        {...stepProps}
+        definitions={definitions}
+        offered={handOver.offered}
+        onUseOffered={handOver.take}
+      />
+    ),
+    when: () => <WhenStep {...stepProps} advanced={advanced("when")} />,
+    review: () => <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField} />,
+  };
 
   return (
-    <div className="program-scheduling">
-      <form
-        className="program-scheduling__form"
-        role="form"
-        aria-label="Schedule a Program"
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault();
-          saveProgram();
-        }}
+    <section
+      ref={regionRef}
+      tabIndex={-1}
+      className="showrunner__region"
+      role="region"
+      aria-label="Programs"
+    >
+      <h2 className="showrunner__region-title">Programs</h2>
+      <FlowFrame
+        flow={flow}
+        draft={draft}
+        keys={SCHEDULE_KEYS}
+        noun="Program"
+        sectionLabel="Schedule"
+        confirm={confirm}
+        problems={problems}
+        writeRef={saveRef}
+        newLabel="Schedule a Program"
+        cards={
+          <>
+            <p className="field__hint program-flow__intro">
+              Each Program shows one Scene during one window. Several separate windows —
+              individual Programs, each stored and removed on its own — can be added at once
+              under Advanced on the When step.
+            </p>
+            <TimeZoneNote />
+            {programs.length === 0 ? (
+              <p className="program-scheduling__empty">No Programs yet.</p>
+            ) : (
+              <>
+                {/* Every stored Program by its program_id, each one discrete window with
+                    its display state (showState.js); past windows sit under a closed
+                    "Past (N)" disclosure. */}
+                <ProgramCards programs={current} snapshot={snapshot} onRemove={onRemove} />
+                {past.length > 0 && (
+                  <details className="program-cards__past">
+                    <summary>{`Past (${past.length})`}</summary>
+                    <ProgramCards programs={past} snapshot={snapshot} onRemove={onRemove} />
+                  </details>
+                )}
+              </>
+            )}
+          </>
+        }
+        title="New Program"
+        steps={SCHEDULE_STEPS}
+        formLabel="Schedule a Program"
+        heading={HEADINGS[step]}
+        busy={write.busy}
+        onWrite={onSave}
+        writeLabel={separateWindows(value) ? "Add separate windows" : "Schedule Program"}
+        writeDisabled={write.busy}
+        problemsLabel="Program problems"
       >
-        <ProblemSummary summary={problems.summary} label="Program problems" />
-        <IdentityFields
-          kind="Program"
-          name={name}
-          idOverride={idOverride}
-          onName={setName}
-          onIdOverride={setIdOverride}
-          problems={problems}
-        />
-        <ScenePicker
-          id={problems.idFor("scene")}
-          label="Scene"
-          reason={problems.reasonFor("scene")}
-          definitions={definitions}
-          value={sceneId}
-          onChange={field(setSceneId, "scene")}
-        />
-        <p className="program-scheduling__zone">{`Times in ${timeZoneName()}`}</p>
-        {dateField("start", "Window start", start, setStart)}
-        {dateField("end", "Window end", end, setEnd)}
-        <PriorityField
-          label="Priority"
-          problems={problems}
-          value={priority}
-          onChange={field(setPriority, "priority")}
-        />
-
-        <button type="submit" className="program-scheduling__save" disabled={saving}>
-          Schedule Program
-        </button>
-
-        {/* Optional helper (design Q2): create N SEPARATE windows at once. Each is
-            a real, independently-stored single-window Program — N discrete
-            Programs to manage individually, never a rule that repeats itself. */}
-        <fieldset className="program-scheduling__multi" aria-label="Create separate windows">
-          <legend>Create separate windows</legend>
-          <p className="program-scheduling__multi-note">
-            {countShown
-              ? `Creates ${count} separate windows — ${count} individual Programs, each stored ` +
-                "on its own and removed one by one below. Window 1 is the one above; each " +
-                "later one falls on the next ticked day at the same local times."
-              : "Creates separate windows — individual Programs, each stored on its own and " +
-                "removed one by one below."}
-          </p>
-          <fieldset
-            id={problems.idFor("weekdays")}
-            className="program-scheduling__weekdays"
-            aria-label="Repeat on"
-            aria-describedby={
-              problems.reasonFor("weekdays") !== null ? `${problems.idFor("weekdays")}-reason` : undefined
-            }
-          >
-            <legend>Repeat on</legend>
-            {WEEKDAYS.map(([day, index]) => (
-              <label key={day} className="program-scheduling__weekday">
-                <input
-                  type="checkbox"
-                  checked={weekdays[index]}
-                  onChange={(event) => {
-                    const next = [...weekdays];
-                    next[index] = event.target.checked;
-                    field(setWeekdays, "weekdays")(next);
-                  }}
-                />
-                {day}
-              </label>
-            ))}
-            {problems.reasonFor("weekdays") !== null && (
-              <p id={`${problems.idFor("weekdays")}-reason`} className="field__reason">
-                {problems.reasonFor("weekdays")}
-              </p>
-            )}
-          </fieldset>
-          <Field
-            id={problems.idFor("count")}
-            label="Number of windows"
-            reason={problems.reasonFor("count")}
-          >
-            {(props) => (
-              <input
-                {...props}
-                type="number"
-                min="1"
-                max={MAX_WINDOWS}
-                className="program-scheduling__count"
-                value={windowCount}
-                onChange={(event) => field(setWindowCount, "count")(event.target.value)}
-              />
-            )}
-          </Field>
-          <button
-            type="button"
-            className="program-scheduling__multi-add"
-            aria-label="Add separate windows"
-            disabled={saving}
-            onClick={addSeparateWindows}
-          >
-            {countShown ? `Add ${count} separate windows` : "Add separate windows"}
-          </button>
-        </fieldset>
-      </form>
-
-      {status !== null ? (
-        <p className="program-scheduling__status" role="status">
-          {status}
-        </p>
-      ) : null}
-
-      {programs.length === 0 ? (
-        <p className="program-scheduling__empty">No Programs yet.</p>
-      ) : (
-        <>
-          {/* Every stored Program by its program_id, each one discrete window with
-              its display state (showState.js); past windows sit under a closed
-              "Past (N)" disclosure. */}
-          <ProgramList programs={current} snapshot={snapshot} onRemove={onRemove} />
-          {past.length > 0 && (
-            <details className="program-scheduling__past">
-              <summary>{`Past (${past.length})`}</summary>
-              <ProgramList programs={past} snapshot={snapshot} onRemove={onRemove} />
-            </details>
-          )}
-        </>
-      )}
-    </div>
+        {step !== null && views[step]()}
+      </FlowFrame>
+    </section>
   );
 }
 
+// A Program state's chip (SummaryCard): the states that ask for a look, each with its
+// word; the others read on the State line alone.
+const STATE_CHIPS = {
+  running: { tone: "ok", text: "Running" },
+  refused: { tone: "alarm", text: "Refused" },
+  missed: { tone: "todo", text: "Missed" },
+};
+
 /**
- * Stored Programs as records: the Scene, the window in local time, the
- * priority, and the display state with its hint (§9).
+ * Stored Programs as summary cards named `Program X`: the Scene, the window in local
+ * time, the priority, and the display state with its hint (slice 3 §9); Remove.
  */
-function ProgramList({ programs, snapshot, onRemove }) {
+function ProgramCards({ programs, snapshot, onRemove }) {
   return (
-    <ul className="program-scheduling__programs" role="list">
+    <ul className="card-grid" role="list">
       {programs.map((program) => {
-        const state = programState(snapshot, program.program_id);
+        const id = program.program_id;
+        const state = programState(snapshot, id);
         return (
-          <li
-            key={program.program_id}
-            className="program-scheduling__program"
-            aria-label={`Program ${program.program_id}`}
-          >
-            <p className="program-scheduling__program-id-text">{program.program_id}</p>
-            <dl className="record">
-              <dt>Scene</dt>
-              <dd className="program-scheduling__program-scene">{`Scene ${program.scene_id}`}</dd>
-              <dt>Window</dt>
-              <dd className="program-scheduling__program-window">{windowLabel(program)}</dd>
-              <dt>Priority</dt>
-              <dd className="program-scheduling__program-priority">{`Priority ${program.priority}`}</dd>
-              <dt>State</dt>
-              <dd className={`program-scheduling__program-state health--${state.severity}`}>
-                {state.label}
-                {state.hint !== null && (
-                  <span className="program-scheduling__program-hint">{` ${state.hint}`}</span>
-                )}
-              </dd>
-            </dl>
-            <div className="record__actions">
-              <button
-                type="button"
-                className="program-scheduling__remove"
-                aria-label={`Remove program ${program.program_id}`}
-                onClick={(event) => onRemove(event, program)}
-              >
-                Remove
-              </button>
-            </div>
+          <li key={id} className="card-grid__item">
+            <SummaryCard
+              title={`Program ${id}`}
+              chip={STATE_CHIPS[state.state] ?? null}
+              lines={[
+                { label: "Scene", value: `Scene ${program.scene_id}` },
+                { label: "Window", value: windowLabel(program) },
+                { label: "Priority", value: `Priority ${program.priority}` },
+                {
+                  label: "State",
+                  value: (
+                    <>
+                      {state.label}
+                      {state.hint !== null && (
+                        <span className="program-scheduling__program-hint">{` ${state.hint}`}</span>
+                      )}
+                    </>
+                  ),
+                },
+              ]}
+              actions={
+                <button
+                  type="button"
+                  aria-label={`Remove program ${id}`}
+                  onClick={(event) => onRemove(event, program)}
+                >
+                  Remove
+                </button>
+              }
+            />
           </li>
         );
       })}

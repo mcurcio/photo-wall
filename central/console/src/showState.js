@@ -1,5 +1,5 @@
 import { ageAt, formatAge } from "./health.js";
-import { frameOf, LIVE_PHASES } from "./join.js";
+import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
 
 /**
  * Program and Run display states (pass 2 slice 3 §9). Pure reads of the served
@@ -130,6 +130,23 @@ export function programState(snapshot, programId) {
   return state("refused", `Did not start: ${outcome.reason ?? outcome.status}.`, "alarm");
 }
 
+/**
+ * Whether a stored Program is filed under "Past" (§9, flow design §7 J6): its window has
+ * ended on Central's clock and it is neither running (its Run is asked to finish at the
+ * window's end and may play on to the end of its cycle and its outro) nor due.
+ *
+ * @param {object|null} snapshot
+ * @param {{program_id: string, ends_at: number}} program
+ * @returns {boolean}
+ */
+export function isPastProgram(snapshot, program) {
+  if (!(program.ends_at <= snapshot?.runtime?.current?.now)) {
+    return false;
+  }
+  const state = programState(snapshot, program.program_id)?.state;
+  return state !== "running" && state !== "due";
+}
+
 const REFUSALS = {
   protected_frames: ({ run, frames }) =>
     run !== null
@@ -209,4 +226,162 @@ export function runRows(snapshot) {
     completed: ended("completed"),
     cancelled: ended("cancelled"),
   };
+}
+
+/**
+ * The frames a stored Scene reaches: its own and its outro's Contributions and, through
+ * its child Scenes, theirs (central/runtime.py `Scene.participants`), sorted.
+ *
+ * @param {object|null|undefined} scene a served Scene definition
+ * @returns {string[]}
+ */
+export function sceneFrames(scene) {
+  const frames = new Set();
+  const visit = (node) => {
+    for (const entry of [...(node?.contributions ?? []), ...(node?.outro_contributions ?? [])]) {
+      const frameId = frameOf(entry.target);
+      if (frameId !== null) {
+        frames.add(frameId);
+      }
+    }
+    for (const child of node?.children ?? []) {
+      visit(child.scene);
+    }
+  };
+  visit(scene);
+  return [...frames].sort();
+}
+
+/**
+ * The frames a stored Scene protects (central/runtime.py `Scene.protected_frames`): all
+ * of its frames when it protects them (`protect_frames`), otherwise those its child
+ * Scenes protect, sorted.
+ *
+ * @param {object|null|undefined} scene a served Scene definition
+ * @returns {string[]}
+ */
+export function sceneProtectedFrames(scene) {
+  if (scene?.protect_frames === true) {
+    return sceneFrames(scene);
+  }
+  const frames = new Set((scene?.children ?? []).flatMap((child) => sceneProtectedFrames(child.scene)));
+  return [...frames].sort();
+}
+
+/**
+ * The live root Runs covering any of `frameIds`, each with the frames of `frameIds` it
+ * covers, highest priority first (at equal priority the later admission first: the
+ * served order is admission order). Only roots: a child Run carries its root's
+ * priority and root order, and a root's `participants` include its children's targets
+ * (central/runtime.py `_admit`, `Scene.participants`), so roots decide who is on top.
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {{run: object, frames: string[]}[]}
+ */
+export function coveringRuns(snapshot, frameIds) {
+  const runs = snapshot?.runtime?.current?.runs ?? [];
+  return runs
+    .map((run, order) => ({
+      run,
+      order,
+      frames: frameIds.filter((frameId) => run.participants.includes(toTarget(frameId))),
+    }))
+    .filter(({ run, frames }) => run.parent_id === null && LIVE_PHASES.has(run.phase) && frames.length > 0)
+    .sort((a, b) => b.run.priority - a.run.priority || b.order - a.order)
+    .map(({ run, frames }) => ({ run, frames }));
+}
+
+/**
+ * The priority a new activation on `frameIds` needs to show on top (flow design §6
+ * frozen surface, §7 J7): the highest priority among the live root Runs covering any
+ * of the frames; 0 when none does.
+ *
+ * Max, not max + 1: precedence is `(priority, root_order, admission_order)`
+ * (central/runtime.py `Intent.precedence`), the visible winner needs a strictly
+ * greater tuple (`_view`), and a new root's `root_order` is the admission sequence,
+ * which rises with every admission (`_admit`). At equal priority the later admission
+ * wins, so the highest covering priority already puts the new Run on top.
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {number}
+ */
+export function coveringPriority(snapshot, frameIds) {
+  const [top] = coveringRuns(snapshot, frameIds);
+  return top === undefined ? 0 : top.run.priority;
+}
+
+/**
+ * The live root Runs covering any of `frameIds` whose Scene protects some of them, each
+ * with those frames, highest first: Central refuses an activation there at ANY priority
+ * (central/runtime.py `_protected_conflict`, `protected_frames`; the console never sends
+ * `force`). The served `protected_frames` map says what each Run protects (the Scene it
+ * started with, not the one stored now).
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @returns {{run: object, frames: string[]}[]}
+ */
+export function protectingRuns(snapshot, frameIds) {
+  const served = snapshot?.runtime?.protected_frames ?? {};
+  return coveringRuns(snapshot, frameIds)
+    .map(({ run, frames }) => ({
+      run,
+      frames: frames.filter((frameId) => (served[run.run_id] ?? []).includes(toTarget(frameId))),
+    }))
+    .filter(({ frames }) => frames.length > 0);
+}
+
+/**
+ * What happens to an activation on `frameIds` at `priority` (§7 J7), or null when it
+ * shows on top as asked.
+ *
+ * A live Run whose Scene protects any of the frames refuses it at any priority
+ * ({@link protectingRuns}): "Central will refuse this at any priority: a is protected by
+ * the Run of X." Otherwise the live root Runs of a strictly higher priority covering its
+ * frames, highest first, decide:
+ *
+ * A Scene that protects frames (`protectedFrames`, {@link sceneProtectedFrames}) is
+ * refused when such a Run covers any of them (central/runtime.py `_protected_conflict`,
+ * `protection_not_visible`): "At priority P Central will refuse this: it protects a,
+ * which the Run of X (priority Q) covers. Use priority at least Q." Otherwise it stays
+ * underneath them: "At priority P this stays underneath the Run of X (priority Q) on a,
+ * b."
+ *
+ * @param {object|null} snapshot
+ * @param {ReadonlyArray<string>} frameIds
+ * @param {number} priority
+ * @param {ReadonlyArray<string>} [protectedFrames] the frames the Scene protects
+ * @returns {string|null}
+ */
+export function underneathSentence(snapshot, frameIds, priority, protectedFrames = []) {
+  const protecting = protectingRuns(snapshot, frameIds);
+  if (protecting.length > 0) {
+    const parts = protecting.map(
+      ({ run, frames }) => `${frames.join(", ")} ${frames.length === 1 ? "is" : "are"} protected by the Run of ${run.scene_id}`,
+    );
+    return `Central will refuse this at any priority: ${parts.join("; ")}.`;
+  }
+  const above = coveringRuns(snapshot, frameIds).filter(({ run }) => run.priority > priority);
+  if (above.length === 0) {
+    return null;
+  }
+  const refusing = above
+    .map(({ run, frames }) => ({ run, frames: frames.filter((frameId) => protectedFrames.includes(frameId)) }))
+    .filter(({ frames }) => frames.length > 0);
+  if (refusing.length > 0) {
+    const covers = refusing.map(
+      ({ run, frames }) =>
+        `${frames.join(", ")}, which the Run of ${run.scene_id} (priority ${run.priority}) covers`,
+    );
+    return (
+      `At priority ${priority} Central will refuse this: it protects ${covers.join(", and ")}. ` +
+      `Use priority at least ${refusing[0].run.priority}.`
+    );
+  }
+  const parts = above.map(
+    ({ run, frames }) => `the Run of ${run.scene_id} (priority ${run.priority}) on ${frames.join(", ")}`,
+  );
+  return `At priority ${priority} this stays underneath ${parts.join("; and ")}.`;
 }

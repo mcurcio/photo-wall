@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 
 import uvicorn
+from playwright.sync_api import expect
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -59,6 +60,12 @@ def sign_in(page, origin, token=ADMIN):
     """
     page.context.clear_cookies()
     page.goto(origin + "/console")
+    submit_sign_in(page, token)
+
+
+def submit_sign_in(page, token=ADMIN):
+    """Sign in through the sign-in screen already on the page, without loading it again:
+    after a session ends mid-use the screen overlays the console, which keeps its state."""
     page.get_by_label("Operator token").fill(token)
     page.get_by_role("button", name="Sign in", exact=True).click()
 
@@ -95,6 +102,39 @@ def tile_health(page, frame_id):
     """A plan tile's health: its visible text is the short tile label, and its accessible
     name is the full label with the age (health.js `tileLabel` / `label`)."""
     return tile_status(page, frame_id).get_by_role("img")
+
+
+INVENTORY = "**/v1/operator/inventory"
+
+
+def drive_poll(page):
+    """Run the paused page clock one poll interval and wait until that poll has finished.
+
+    The console's poller is single-flight: a tick that finds the previous poll still
+    settling (its runtime or media read in flight, or its result not yet applied) is
+    skipped. So waiting for the inventory response alone races the next tick. The
+    snapshot status is `aria-busy` while any Plane A read is in flight and clears only
+    once the read has been applied, which is when the poller's slot frees. Use this
+    wherever a test drives polls back to back.
+    """
+    status = page.get_by_role("group", name="Snapshot status", exact=True)
+    with page.expect_response(INVENTORY):
+        page.clock.run_for(5000)
+    expect(status).not_to_have_attribute("aria-busy", "true")
+
+
+_OFFENDERS = """() => [...document.querySelectorAll("body *")]
+    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
+    .map((el) => el.tagName + "." + [...el.classList].join("."))
+    .slice(0, 12)"""
+
+
+def assert_fits_width(page, where):
+    """The page shown never scrolls sideways; otherwise name what sticks out, as
+    `where: overflows at <width> px: [elements]`."""
+    fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+    width = page.evaluate("() => window.innerWidth")
+    assert fits, f"{where}: overflows at {width} px: {page.evaluate(_OFFENDERS)}"
 
 
 def pause_page_clock(page, at):
@@ -137,3 +177,26 @@ class RequestGate:
             route.fulfill(**fulfill)
         else:
             route.continue_()
+
+
+def answer_first(page, pattern, answer):
+    """Answer the first request matching `pattern` with `answer(route)`; every later one
+    passes through. Returns the list of answered URLs.
+
+    Use this, never `page.route(..., times=1)`: when a `times` route runs out, Playwright
+    turns request interception off asynchronously (`setNetworkInterceptionPatterns`),
+    and a request the page sends at that moment -- the refresh `useMutate` starts right
+    after a write's answer -- can stall until the console's 15 s fetch timeout. This
+    route stays registered for the page's life, so interception never changes mid-test.
+    """
+    answered = []
+
+    def handle(route):
+        if answered:
+            route.fallback()
+            return
+        answered.append(route.request.url)
+        answer(route)
+
+    page.route(pattern, handle)
+    return answered

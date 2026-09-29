@@ -12,13 +12,10 @@
 
 import { formatAge } from "./health.js";
 import { frameOf, toTarget } from "./join.js";
+import { IDENTIFIER_PATTERN } from "./routes.js";
 
-/**
- * The API identifier rule: contracts/models.py `IDENTIFIER_PATTERN` (Scene,
- * Program and Source ids are path parameters under it). A pytest pins the two
- * equal, so there is one rule.
- */
-export const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+// The API identifier rule is routes.js `IDENTIFIER_PATTERN` (re-exported here).
+export { IDENTIFIER_PATTERN };
 
 // A derived id is cut here, leaving room for a window suffix `-NN` (§7).
 const DERIVED_ID_LENGTH = 96;
@@ -96,12 +93,25 @@ export function identityProblems(kind, draft, existingIds) {
 }
 
 /**
+ * The labels of a Scene's playback fields (slice 3 §4): the one wording wherever they
+ * are asked (CycleInput.jsx), answered (the Scene flow's Review) or named (Reload).
+ */
+export const PLAYBACK_LABELS = Object.freeze({
+  cycle: "Seconds per cycle",
+  loop: "Keep playing until the Program ends",
+});
+
+/**
  * A Scene draft's problems (§6 Scene), in form order. Editing a stored Scene
  * (§13) keeps its stored id, so there is no name, id or collision to check.
  *
+ * A hand-picked frame whose candidates were read and are empty (`noMedia`) has
+ * nothing to choose: its problem belongs to the frame choice (field `targets`).
+ *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
  *          sourceRef: string, targets: string[], cycleSeconds: string|number,
- *          selections: Record<string, string>, loadingMedia?: boolean}} draft
+ *          selections: Record<string, string>, loadingMedia?: boolean,
+ *          noMedia?: string[]}} draft
  * @param {Set<string>} existingIds the stored Scene ids
  * @param {{editing?: boolean}} [options]
  * @returns {Problem[]}
@@ -115,14 +125,25 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
     problems.push({ field: "targets", message: "Choose at least one frame." });
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
-    problems.push({ field: "cycle", message: "Seconds per cycle must be more than 0." });
+    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle} must be more than 0.` });
   }
   if (draft.mode === "authored") {
     for (const frameId of draft.targets) {
-      if (!draft.selections[frameId]) {
+      if (draft.selections[frameId]) {
+        continue;
+      }
+      if (draft.loadingMedia) {
         // While a frame's candidates are read, that is the state to say (§6).
-        const message = draft.loadingMedia ? "Loading compatible media…" : `Choose media for ${frameId}.`;
-        problems.push({ field: `media:${frameId}`, message });
+        problems.push({ field: `media:${frameId}`, message: "Loading compatible media…" });
+      } else if (draft.noMedia?.includes(frameId)) {
+        problems.push({
+          field: "targets",
+          message:
+            `No compatible media for ${frameId} in ${draft.sourceRef}. ` +
+            "Choose another frame, or another Source.",
+        });
+      } else {
+        problems.push({ field: `media:${frameId}`, message: `Choose media for ${frameId}.` });
       }
     }
   }
@@ -282,6 +303,51 @@ export function editableDraft(scene) {
   return comparable(rebuilt) === comparable(scene) ? draft : null;
 }
 
+/**
+ * A Scene draft (flow design §7 J4): its kind (`mode`), name and id, Source, target
+ * frames, per-frame choices, cycle and loop, and the stored `revision` it was seeded
+ * from (null for a new Scene; the flow's `baseRevision`).
+ *
+ * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
+ *            sourceRef: string, targets: string[], selections: Record<string, string>,
+ *            cycleSeconds: string|number, loop: boolean, revision: number|null}} SceneDraft
+ */
+
+/**
+ * A new Scene's defaults, each with its source: live from a photo source; 30 s per
+ * cycle; loop on, so a Scene keeps playing until its Program ends (slice 3 Question 1).
+ *
+ * @type {Readonly<SceneDraft>}
+ */
+export const NEW_SCENE_DRAFT = Object.freeze({
+  mode: "live",
+  name: "",
+  idOverride: null,
+  sourceRef: "",
+  targets: Object.freeze([]),
+  selections: Object.freeze({}),
+  cycleSeconds: 30,
+  loop: true,
+  revision: null,
+});
+
+/**
+ * The draft to edit a stored Scene with, under its stored revision, or null when the
+ * console cannot author it losslessly ({@link editableDraft}). The name is not
+ * stored, so it stays empty: an edit keeps the stored id.
+ *
+ * @param {object} scene a served Scene definition
+ * @returns {SceneDraft|null}
+ */
+export function sceneEditDraft(scene) {
+  const draft = editableDraft(scene);
+  if (draft === null) {
+    return null;
+  }
+  const { targetIds, ...rest } = draft;
+  return { ...NEW_SCENE_DRAFT, ...rest, targets: targetIds, revision: normalizeScene(scene).revision };
+}
+
 /** Whether a field value is a whole number (a priority). */
 function isWhole(value) {
   return String(value).trim() !== "" && Number.isInteger(Number(value));
@@ -427,10 +493,16 @@ export function planWindows({ start, end, weekdays, count }) {
   return windows;
 }
 
+// The fields the helper's windows are planned from.
+const PLANNED_FROM = new Set(["start", "end", "weekdays", "count"]);
+
 /**
  * The helper's problems (§6 Windows): the Program problems without the base
- * id's collision (it is never stored), then the mask, the count, and — once
- * those are sound — each window id's length and collision, and no overlap.
+ * id's collision (it is never stored), then the mask, the count; once the
+ * windows can be planned (start, end, mask and count sound), no overlap; and
+ * once the name gives an id too, each window id's length and collision. The
+ * overlap does not wait for the name, so the step that asks the window (the
+ * Schedule flow's When) can say so before the name is asked.
  *
  * @param {{name: string, idOverride: string|null, sceneId: string, start: string,
  *          end: string, priority: string|number, weekdays: boolean[],
@@ -440,7 +512,8 @@ export function planWindows({ start, end, weekdays, count }) {
  * @returns {Problem[]}
  */
 export function windowProblems(draft, existingIds, now) {
-  const problems = [...identityProblems("Program", draft, new Set()), ...scheduleProblems(draft, now)];
+  const identity = identityProblems("Program", draft, new Set());
+  const problems = [...identity, ...scheduleProblems(draft, now)];
   if (!draft.weekdays.some(Boolean)) {
     problems.push({ field: "weekdays", message: "Tick at least one weekday." });
   }
@@ -448,7 +521,14 @@ export function windowProblems(draft, existingIds, now) {
   if (!(Number.isInteger(count) && count >= 1 && count <= MAX_WINDOWS)) {
     problems.push({ field: "count", message: `Between 1 and ${MAX_WINDOWS} windows.` });
   }
-  if (problems.length > 0) {
+  if (problems.some((problem) => PLANNED_FROM.has(problem.field))) {
+    return problems;
+  }
+  const windows = planWindows({ ...draft, count });
+  if (windows.some((window, index) => index > 0 && windows[index - 1].endsAt > window.startsAt)) {
+    problems.push({ field: "weekdays", message: "Each window must end before the next starts." });
+  }
+  if (identity.length > 0) {
     return problems;
   }
   const id = draftId(draft);
@@ -461,16 +541,12 @@ export function windowProblems(draft, existingIds, now) {
     });
     return problems;
   }
-  const windows = planWindows({ ...draft, count });
   windows.forEach((_window, index) => {
     const windowId = `${id}-${index + 1}`;
     if (existingIds.has(windowId)) {
       problems.push({ field: idField, message: `${windowId} already exists.` });
     }
   });
-  if (windows.some((window, index) => index > 0 && windows[index - 1].endsAt > window.startsAt)) {
-    problems.push({ field: "weekdays", message: "Each window must end before the next starts." });
-  }
   return problems;
 }
 

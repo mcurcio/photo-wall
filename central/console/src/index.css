@@ -1,24 +1,64 @@
-/* Colour tokens (pass 2 §6). Dark is the default; the light block below
-   overrides the same tokens, so every rule — SVG fills included — follows the
-   operator's colour scheme. Only an alarm uses --alarm; a to-do is --todo. */
+/* Look and feel (pass C, docs/operator-console-ux-pass2-flow.md §5). Values are
+   re-expressed from the photo library's published theme; no code, markup or asset
+   is copied. Dark is written first; the light block overrides the same tokens, so
+   every rule, SVG fills included, follows the operator's colour scheme.
+   tests/test_console_look.py parses both blocks and checks every contrast pair.
+   Only an alarm uses --alarm; a to-do is --todo. Older names keep their meaning:
+   --fg-subtle is now --fg-muted (no text below 4.5:1), --accent-soft is --accent
+   (strokes and tints), and --shadow is the card shadow's colour. */
+@font-face {
+  /* The Google Sans variable font, subset and renamed (OFL; fonts/README.md). The
+     two overrides are the photo library's, so the line boxes match. */
+  font-family: "Console Sans";
+  src: url("./fonts/ConsoleSans.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  size-adjust: 106.25%;
+  ascent-override: 106.25%;
+}
+
 :root {
-  --bg: #111b22;
-  --bg-raised: #17232c;
-  --bg-sunken: #0b131a;
-  --fg: #e9edf0;
-  --fg-muted: #9dabb5;
-  --fg-subtle: #8b98a4;
-  --border: #32404a;
-  --accent: #2d6cdf;
-  --accent-soft: #7fb3ff;
-  --on-accent: #ffffff;
-  --ok: #4caf7d;
-  --todo: #8fb3d9;
-  --alarm: #e0685a;
-  --warn: #f5a623;
-  --focus: #7fb3ff;
-  --shadow: rgba(0, 0, 0, 0.4);
-  font-family: system-ui, sans-serif;
+  --bg: #0a0a0a;
+  --bg-raised: #171717;
+  --bg-sunken: #101116;
+  --fg: #dbdbdb;
+  --fg-muted: #9ca3af;
+  --fg-subtle: var(--fg-muted);
+  --fg-label: #d1d5db;
+  --border: #262626;
+  --input-bg: #1f2937;
+  --input-ring: #737373;
+  --accent: #accbfa;
+  --accent-soft: var(--accent);
+  --accent-tint: color-mix(in srgb, var(--accent) 10%, transparent);
+  --on-accent: #000000;
+  --focus: var(--accent);
+  --ok: #48ed98;
+  --todo: #7ab7ff;
+  --alarm: #f67d7d;
+  --on-alarm: #000000;
+  --warn: #ffd198;
+  --shadow: rgba(0, 0, 0, 0.5);
+
+  /* Shape and layout. The sidebar numbers are for the navigation shell (bead 1b).
+     A custom property cannot appear in a media query, so a query repeats the
+     breakpoint's value. */
+  --radius-button: 12px;
+  --radius-input: 8px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --sidebar-width: 16rem;
+  --header-height: calc(4.5rem + 4px);
+  --breakpoint-sidebar: 850px;
+  --font-sans: "Console Sans", system-ui, sans-serif;
+
+  /* The font's licence ships beside it: this reference makes the build emit
+     OFL.txt into dist/assets/. The property is never used, so never fetched. */
+  --font-licence: url("./fonts/OFL.txt");
+
+  font-family: var(--font-sans);
+  letter-spacing: 0.1px;
   color: var(--fg);
   background: var(--bg);
   color-scheme: light dark;
@@ -26,22 +66,23 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f8fa;
-    --bg-raised: #ffffff;
-    --bg-sunken: #e9eef2;
-    --fg: #16212a;
-    --fg-muted: #4d5d6a;
-    --fg-subtle: #66757f;
-    --border: #c4ced6;
-    --accent: #2459c2;
-    --accent-soft: #2d6cdf;
+    --bg: #ffffff;
+    --bg-raised: #fafafa;
+    --bg-sunken: #f5f5f5;
+    --fg: #3d3d3d;
+    --fg-muted: #4b5563;
+    --fg-label: #5f6672;
+    --border: #d4d4d4;
+    --input-bg: #f3f4f6;
+    --input-ring: #737373;
+    --accent: #4250af;
     --on-accent: #ffffff;
-    --ok: #1f7a4d;
-    --todo: #2f5f8f;
-    --alarm: #b53a2a;
-    --warn: #9a5b00;
-    --focus: #2459c2;
-    --shadow: rgba(0, 0, 0, 0.15);
+    --ok: #07702a;
+    --todo: #0a4e8e;
+    --alarm: #b91c1c;
+    --on-alarm: #ffffff;
+    --warn: #805700;
+    --shadow: rgba(0, 0, 0, 0.1);
   }
 }
 
@@ -70,10 +111,91 @@ label {
   outline-offset: 2px;
 }
 
-.console {
-  margin: 0 auto;
-  padding: 40px 24px;
-  max-width: 1440px;
+/* Components (§5), in our own CSS on today's markup. Each base rule has zero
+   specificity (:where), so a region's own class rule still wins. */
+
+/* Buttons: outline (border and tint) by default, for secondary actions; filled
+   primary for a form's one forward action, its submit; ghost for a record's
+   actions other than a submit; danger only for the confirmation dialog's confirm. */
+:where(button) {
+  padding: 8px 20px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+}
+
+:where(button[type="submit"]) {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+:where(.record__actions button:not([type="submit"])) {
+  background: transparent;
+  border-color: transparent;
+}
+
+:where(.record__actions button:not([type="submit"]):hover) {
+  background: var(--accent-tint);
+}
+
+:where(.confirm__confirm) {
+  color: var(--on-alarm);
+  background: var(--alarm);
+  border-color: var(--alarm);
+}
+
+:where(button:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Inputs: filled, with a 1 px ring that turns to the accent on focus. */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea) {
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 0;
+  border-radius: var(--radius-input);
+  box-shadow: inset 0 0 0 1px var(--input-ring);
+}
+
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):focus {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+:where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--accent);
+}
+
+/* The labels of text fields. */
+.field__label,
+.console__token-field,
+.console__surface-field,
+.plan__new-frame-field,
+.calib__control,
+.confirm__typed {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+/* Cards: the regions, groups and panels that hold one subject. */
+.console__guidance,
+.plan,
+.inspector,
+.roster__group,
+.showrunner__region,
+.confirm {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 3px var(--shadow);
 }
 
 /* Layout (pass 2 §6). Narrow screens: one column, the Inspector after the plan
@@ -103,12 +225,6 @@ label {
   }
 }
 
-@media (max-width: 600px) {
-  .console {
-    padding: 20px 12px;
-  }
-}
-
 /* Identifiers (player, frame and scene ids) are long unbroken strings; let them
    wrap rather than widen the page. */
 .roster__player,
@@ -124,35 +240,11 @@ label {
   overflow-wrap: anywhere;
 }
 
-.console__header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 24px;
-  margin-bottom: 28px;
-}
-
-.console__title {
-  font-size: 28px;
-  letter-spacing: -1px;
-  margin: 0;
-}
-
 .console__body {
   color: var(--fg-muted);
   line-height: 1.5;
 }
 
-.console__token {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px;
-  margin-bottom: 24px;
-}
 
 .console__token-field,
 .console__surface-field {
@@ -161,24 +253,6 @@ label {
   gap: 4px;
   font-size: 13px;
   color: var(--fg-muted);
-}
-
-.console__token input,
-.console__surface-field select {
-  padding: 6px 8px;
-  background: var(--bg-sunken);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-
-.console__token button {
-  padding: 7px 16px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 .console__statusbar {
@@ -194,19 +268,12 @@ label {
 /* A quiet secondary button: the status bar's Refresh, the strip's toggle. */
 .console__button {
   padding: 4px 12px;
-  background: var(--bg-raised);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 /* The Central pill; its colour is the shared .health--* severity. */
 .console__health {
   margin-left: auto;
   padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 11px;
@@ -242,19 +309,42 @@ label {
   margin-left: auto;
 }
 
-.attention__list {
+.attention__panel {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
   right: 0;
   z-index: 10;
-  margin: 0;
   padding: 8px;
-  list-style: none;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: 0 8px 24px var(--shadow);
+}
+
+.attention__list,
+.attention-page__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attention__all {
+  display: inline-block;
+  margin: 6px 6px 0;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+/* The Needs attention page: the same list, full width, one row per entry. */
+.attention-page__list .attention__item {
+  padding: 10px 12px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.attention-page__link {
+  color: inherit;
 }
 
 .attention__item {
@@ -288,9 +378,6 @@ label {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 6px;
   padding: 12px 16px;
   margin-bottom: 20px;
 }
@@ -302,11 +389,6 @@ label {
 
 .console__guidance-dismiss {
   padding: 4px 12px;
-  background: transparent;
-  color: var(--fg-muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
 }
 
 .console__surface-filter {
@@ -314,9 +396,7 @@ label {
 }
 
 .plan {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px;
+  padding: 16px;
   margin-bottom: 24px;
 }
 
@@ -416,18 +496,56 @@ label {
 /* Health severity (health.js): one modifier per severity, shared by every
    surface. Only an alarm uses the alarm colour; a to-do is not an alarm. */
 .health--ok {
-  color: var(--ok);
-  fill: var(--ok);
+  --status: var(--ok);
 }
 
 .health--todo {
-  color: var(--todo);
-  fill: var(--todo);
+  --status: var(--todo);
 }
 
 .health--alarm {
-  color: var(--alarm);
-  fill: var(--alarm);
+  --status: var(--alarm);
+}
+
+.health--ok,
+.health--todo,
+.health--alarm {
+  color: var(--status);
+  fill: var(--status);
+}
+
+/* Status chips never rely on colour alone (§5). A chip's words carry its state,
+   in --fg over its status colour at 12 %, inside a 1 px status border. Every
+   status mark in HTML also carries a shape: ▲ alarm, ■ to-do, ● OK. The shape's
+   alternative text is empty, so it adds nothing to an accessible name. (SVG text
+   has no ::before; a plan tile says its state in its label.) */
+.console__health,
+.showrunner__badge,
+.run-control__frame,
+.card__chip {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--status, var(--border)) 12%, var(--bg-raised));
+  border: 1px solid var(--status, var(--border));
+  border-radius: var(--radius-pill);
+}
+
+.health--ok::before,
+.health--todo::before,
+.health--alarm::before {
+  margin-right: 0.35em;
+  font-size: 0.85em;
+}
+
+.health--ok::before {
+  content: "●" / "";
+}
+
+.health--todo::before {
+  content: "■" / "";
+}
+
+.health--alarm::before {
+  content: "▲" / "";
 }
 
 .plan__health {
@@ -443,7 +561,6 @@ label {
 .tray__health {
   font-size: 12px;
 }
-
 
 .tray__list {
   list-style: none;
@@ -464,8 +581,6 @@ label {
 }
 
 .inspector {
-  border: 1px solid var(--border);
-  border-radius: 6px;
   margin-top: 24px;
 }
 
@@ -508,11 +623,6 @@ label {
   margin: 0;
   padding: 16px;
   color: var(--fg-subtle);
-}
-
-.inspector__stub {
-  color: var(--fg-subtle);
-  font-style: italic;
 }
 
 .facet__title {
@@ -700,8 +810,6 @@ label {
 .roster__group {
   min-width: 0;
   padding: 12px 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }
 
 .roster__group-title {
@@ -823,34 +931,7 @@ label {
   font-weight: 600;
 }
 
-/* Top-level Wall/Showrunner mode toggle (Bead 12). */
-.console__mode-toggle {
-  display: flex;
-  gap: 8px;
-}
-
-.console__mode {
-  background: var(--bg-raised);
-  color: var(--fg-muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 14px;
-  cursor: pointer;
-}
-
-.console__mode--active {
-  background: var(--accent);
-  color: var(--fg);
-  border-color: var(--accent);
-}
-
-/* Showrunner shell (Bead 12): Frame-health badges + region shells. */
-.showrunner {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
+/* Show pages: Frame-health badges + region shells. */
 .showrunner__health {
   display: flex;
   flex-wrap: wrap;
@@ -860,55 +941,12 @@ label {
 .showrunner__badge {
   font-size: 12px;
   padding: 4px 10px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
 }
 
 .showrunner__region {
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
   padding: 16px;
   overflow-wrap: anywhere;
-}
-
-/* Layout (pass 2 slice 3 §12): one column, the Runs first; from 1024 px, Now
-   (Runs with Why) beside the Library (Scenes, Programs, Sources). */
-.showrunner__columns,
-.showrunner__column {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  min-width: 0;
-}
-
-@media (min-width: 1024px) {
-  .showrunner__columns {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    align-items: start;
-  }
-}
-
-.showrunner__sources,
-.run-control__runs,
-.program-scheduling__programs,
-.scene-authoring__scenes {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.showrunner__source,
-.run-control__run,
-.program-scheduling__program,
-.scene-authoring__scene {
-  min-width: 0;
-  padding: 8px 0 0;
-  border-top: 1px solid var(--border);
 }
 
 /* One record (§12): label/value pairs in a grid whose values wrap anywhere, so
@@ -997,11 +1035,7 @@ label {
   width: min(32rem, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: 16px 20px;
-  background: var(--bg-raised);
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .confirm::backdrop {
@@ -1153,13 +1187,6 @@ label {
 }
 
 /* Run rows (slice 3 §9): frame chips carry the plan tile's health label. */
-.run-control__run-title,
-.program-scheduling__program-id-text {
-  margin: 0 0 4px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
 .run-control__frames {
   display: flex;
   flex-wrap: wrap;
@@ -1168,21 +1195,11 @@ label {
 
 .run-control__frame {
   padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
 
-.run-control__children {
-  margin: 8px 0 0;
-  padding-left: 16px;
-  list-style: none;
-  border-left: 2px solid var(--border);
-}
-
-.run-control__ended,
-.program-scheduling__past {
+.run-control__ended {
   margin-top: 12px;
 }
 
@@ -1208,29 +1225,502 @@ label {
   margin: 4px 0 0;
 }
 
-.run-control__status-line:empty,
-.program-scheduling__status-line:empty {
+.run-control__status-line:empty {
   display: none;
 }
 
-/* Scene rows (slice 3 §13): a disclosure per Scene; edit mode names the stored id. */
-.scene-list__summary {
+/* The Schedule section (flow design §7 J6, bead 4): Program cards, then the Schedule
+   flow (Scene → When → Review). */
+.program-flow__intro,
+.program-scheduling__zone {
+  margin: 0;
+}
+
+.program-scheduling__zone {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.program-flow__windows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.program-scheduling__multi-note {
+  margin: 0 0 8px;
+  color: var(--fg-muted);
+}
+
+.program-scheduling__weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.program-scheduling__weekday {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.program-cards__past > summary {
+  font-weight: 500;
   cursor: pointer;
-  overflow-wrap: anywhere;
 }
 
-.scene-list__details[open] > .record {
-  margin-top: 6px;
+.program-cards__past > .card-grid {
+  margin-top: 12px;
 }
 
-.scene-authoring__editing {
-  margin: 8px 0;
+/* A flow's section (flow design §6, §7; flow/FlowFrame.jsx), the same for every flow:
+   the said region, the draft bar and cards, then the flow's step. */
+.flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.flow__saved:focus {
+  outline: none;
+}
+
+/* Nothing to say yet: the empty live region stays rendered (so a later message is
+   announced) and takes back the gap it would add. What a flow says besides the status
+   line (an outcome, the next actions) carries `flow__said`. */
+.flow__saved:not(:has(.flow__status-line:not(:empty), .flow__said)) {
+  margin-bottom: -16px;
+}
+
+.flow__status-line {
+  margin: 0;
+}
+
+.flow__status-line:empty {
+  display: none;
+}
+
+.flow__saved > .record__actions {
+  margin-top: 8px;
+}
+
+.flow__title {
+  margin: 0;
+  font-size: 20px;
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 
-.scene-authoring__status-line:empty {
+/* Summary cards (flow/SummaryCard.jsx) in a grid: Scenes, Programs, Sources and Runs. */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card-grid__item {
+  display: flex;
+  min-width: 0;
+}
+
+.card-grid__item > .card {
+  flex: 1;
+}
+
+/* The Scenes section (flow design §7 J4): cards, then the Scene flow. */
+.scene-list {
+  margin-top: 16px;
+}
+
+.flow__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.flow__draft-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.scene-flow__editing {
+  margin: 0 0 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scene-flow__chosen {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin: 8px 0 0;
+}
+
+.scene-flow__chosen-label {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+/* A notice: a sentence and its actions in a tinted, bordered box; the warn tone for
+   something the operator must decide (a changed Scene, a draft in the way). */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  overflow-wrap: anywhere;
+}
+
+.notice > p {
+  margin: 0;
+}
+
+.notice--warn {
+  border-color: var(--warn);
+}
+
+/* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
+:where(.button--primary) {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+.flow__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.flow__step-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.flow__step-title:focus {
+  outline: none;
+}
+
+.flow__body {
+  min-width: 0;
+}
+
+/* The step's fields and footer; disabled while the flow's write is in flight. */
+.flow__fields {
+  display: contents;
+}
+
+.flow__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.flow__back {
+  margin-right: auto;
+}
+
+.stepper__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stepper__link,
+.stepper__text {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px 6px 6px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-pill);
+}
+
+.stepper__link {
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.stepper__link:hover {
+  background: var(--accent-tint);
+}
+
+.stepper__text {
+  color: var(--fg-muted);
+}
+
+.stepper__item--current .stepper__text {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-tint);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.stepper__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.stepper__mark .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.stepper__item--done .stepper__mark {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.stepper__compact {
   display: none;
+  margin: 0;
+  font-weight: 600;
+  color: var(--fg-label);
+}
+
+.advanced {
+  margin: 8px 0;
+}
+
+.advanced__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+}
+
+.advanced__toggle {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 12px 6px 6px;
+  color: var(--accent);
+  background: transparent;
+  border-color: transparent;
+}
+
+.advanced__toggle:hover {
+  background: var(--accent-tint);
+}
+
+.advanced__toggle .icon {
+  width: 20px;
+  height: 20px;
+  transition: transform 120ms ease-out;
+}
+
+.advanced__toggle[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.advanced__summary {
+  font-size: 13px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.advanced__panel {
+  margin: 4px 0 0;
+  padding: 4px 0 0 16px;
+  border-left: 2px solid var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .advanced__toggle .icon {
+    transition: none;
+  }
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 3px var(--shadow);
+  overflow-wrap: anywhere;
+}
+
+.card__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.card__chip {
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.card__actions {
+  margin-top: auto;
+}
+
+/* Review, a check-answers list: each value with a Change button. */
+.review {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  margin: 0 0 8px;
+}
+
+.review__row {
+  display: contents;
+}
+
+.review__key,
+.review__value,
+.review__change {
+  margin: 0;
+  padding: 10px 12px 10px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.review__key {
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.review__change {
+  padding-right: 0;
+  text-align: right;
+}
+
+.review__change-button {
+  padding: 2px 8px;
+  background: transparent;
+  border-color: transparent;
+}
+
+.review__change-button:hover {
+  background: var(--accent-tint);
+}
+
+.review__missing {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.review__media {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The Kind step's choices: each a radio with its hint beneath. */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.choices__legend {
+  padding: 0 4px;
+  color: var(--fg-label);
+  font-weight: 500;
+}
+
+.choices__label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-weight: 500;
+}
+
+.choices__hint {
+  margin-left: 24px;
+}
+
+.problems__link {
+  padding: 0;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  text-decoration: underline;
+  background: transparent;
+  border: 0;
+}
+
+/* The sidebar's draft marker: a word, never a dot alone. */
+.nav__draft {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-raised));
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-pill);
+}
+
+@media (max-width: 849.98px) {
+  .stepper__list {
+    display: none;
+  }
+
+  .stepper__compact {
+    display: block;
+  }
+
+  /* Back and Continue stay in reach at the bottom of the screen. */
+  .flow__footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    margin: 0 -16px;
+    padding: 12px 16px;
+    background: var(--bg-raised);
+    box-shadow: 0 -2px 8px var(--shadow);
+  }
+
+  .review {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .review__key {
+    grid-column: 1 / -1;
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
 }
 
 /* The media pipeline and "why nothing new?" (slice 3 §14). */
@@ -1278,4 +1768,416 @@ label {
 
 .why-chain__step button {
   margin-left: 8px;
+}
+
+/* Navigation shell (flow design §6): the header, the sidebar (a modal drawer under
+   850 px, which is --breakpoint-sidebar; a media query cannot read a custom
+   property) and the current page. */
+
+/* `hidden` always hides, whatever a class sets: a hidden Show page and the shell
+   under the sign-in overlay rely on it. */
+[hidden] {
+  display: none !important;
+}
+
+.console {
+  min-height: 100vh;
+}
+
+.console > .console__auth-error {
+  margin: 12px 16px 0;
+}
+
+.icon {
+  display: block;
+}
+
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 30;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: none;
+}
+
+.shell__header {
+  padding: 0 24px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.shell__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  min-height: var(--header-height);
+  padding: 8px 0;
+}
+
+.shell__menu,
+.drawer__close {
+  display: inline-flex;
+  padding: 8px;
+  color: var(--fg);
+  background: transparent;
+  border-color: transparent;
+  border-radius: var(--radius-pill);
+}
+
+.shell__menu:hover,
+.drawer__close:hover {
+  background: var(--bg-sunken);
+}
+
+.shell__menu {
+  display: none;
+}
+
+.shell__wordmark {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.shell__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-left: auto;
+}
+
+.shell__status .console__statusbar {
+  margin: 0;
+}
+
+.shell__status .console__health {
+  margin-left: 0;
+}
+
+.shell__header .attention {
+  margin-bottom: 12px;
+}
+
+.shell__body {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  align-items: start;
+}
+
+.shell__sidebar {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 16px 16px 16px 0;
+}
+
+.shell__main {
+  min-width: 0;
+  max-width: 1440px;
+  padding: 24px 24px 48px;
+}
+
+/* Focus targets that are not controls: the skip link's <main> and each page's
+   heading. */
+.shell__main:focus,
+.page__title:focus {
+  outline: none;
+}
+
+/* Nav items (§5): 14 px medium, a pill on the trailing edge. The current section is
+   tinted, semibold and carries a 3 px accent bar on its leading edge, so it is never
+   marked by tint alone. */
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nav__group {
+  margin: 0;
+  padding: 0 0 12px;
+  list-style: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.nav__group:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.nav__link {
+  display: block;
+  padding: 12px 20px 12px 17px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+}
+
+.nav__link:hover {
+  background: var(--bg-sunken);
+}
+
+.nav__link[aria-current="page"] {
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-left-color: var(--accent);
+}
+
+.page__title {
+  margin: 0 0 20px;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.page__content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.page__loading,
+.page__empty {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+/* A region whose title repeats its page's heading keeps it for assistive
+   technology only. */
+.page--scenes .showrunner__region-title,
+.page--equipment .roster__title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.page--equipment .roster {
+  margin-top: 0;
+}
+
+/* The drawer: a native modal <dialog> sliding in from the leading edge. */
+.drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: min(var(--sidebar-width), 85vw);
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0 16px 16px 0;
+  color: var(--fg);
+  background: var(--bg);
+  border: 0;
+  border-radius: 0 var(--radius-card) var(--radius-card) 0;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.drawer[open] {
+  animation: drawer-in 160ms ease-out;
+}
+
+.drawer::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer[open] {
+    animation: none;
+  }
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: var(--header-height);
+  padding-left: 20px;
+}
+
+@media (max-width: 849.98px) {
+  .shell__menu {
+    display: inline-flex;
+  }
+
+  .shell__header {
+    padding: 0 16px;
+  }
+
+  .shell__status {
+    order: 1;
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .shell__logout {
+    margin-left: auto;
+  }
+
+  .shell__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell__sidebar {
+    display: none;
+  }
+
+  .shell__main {
+    padding: 16px 16px 40px;
+  }
+}
+
+/* The sign-in screen (pass A §7): the whole page on a first load, an overlay over
+   the hidden shell when a session ends. A modal <dialog> covering the viewport, so
+   it sits in the top layer above anything the shell had open. */
+.signin {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--fg);
+  background: var(--bg);
+  border: 0;
+}
+
+.signin > .console__auth-error {
+  margin: 12px 16px 0;
+}
+
+.signin__center {
+  display: grid;
+  place-items: center;
+  min-height: 70vh;
+  padding: 24px 16px;
+}
+
+.signin__card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(100%, 24rem);
+  padding: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 3px var(--shadow);
+}
+
+.signin__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.signin__kept {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+/* The Photo sources section (flow design §7 J5; bead 3): Source cards, then the
+   Source flow, What to include → Name → Review. */
+/* Pass B's slots (SourceSteps.jsx `LibrarySlot`): out of the layout while empty. */
+.source-flow__slot:empty {
+  display: none;
+}
+
+
+/* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
+   per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
+.show-now {
+  margin-top: 12px;
+}
+
+.show-now__underneath {
+  margin: 8px 0;
+}
+
+.run-cards {
+  margin-top: 16px;
+}
+
+.run-cards__list {
+  margin-top: 12px;
+}
+
+.run-cards__children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.why-frames {
+  margin-top: 24px;
+}
+
+.why-frames__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.why-frames__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.why-frames__item {
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.why-frames__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+}
+
+.why-frames__frame {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.why-frames__panel {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  border-left: 2px solid var(--border);
 }

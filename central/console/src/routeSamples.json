@@ -1,0 +1,33 @@
+{
+  "show": {
+    "now": ["#/now", "#/now/show/scene", "#/now/show/review"],
+    "scenes": [
+      "#/scenes",
+      "#/scenes/new/kind",
+      "#/scenes/new/photos",
+      "#/scenes/new/frames",
+      "#/scenes/new/playback",
+      "#/scenes/new/review",
+      "#/scenes/sample-scene/edit/review"
+    ],
+    "schedule": [
+      "#/schedule",
+      "#/schedule/new/scene",
+      "#/schedule/new/when",
+      "#/schedule/new/review"
+    ],
+    "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review"]
+  },
+  "wall": {
+    "wall": [
+      "#/wall",
+      "#/wall/frames/sample-frame/commissioning",
+      "#/wall/frames/sample-frame/binding",
+      "#/wall/frames/sample-frame/nowshowing"
+    ],
+    "equipment": ["#/equipment"]
+  },
+  "neutral": {
+    "attention": ["#/attention"]
+  }
+}

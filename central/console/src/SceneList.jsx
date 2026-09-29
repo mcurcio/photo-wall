@@ -1,43 +1,52 @@
 import React from "react";
 
 import { editableDraft, normalizeScene, UNAUTHORABLE_REASON } from "./authoring.js";
+import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { frameOf, LIVE_PHASES } from "./join.js";
 import { cycleWording } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
 
 /**
- * The stored Scenes (pass 2 slice 3 §13), each a disclosure named `Scene X`:
- * what feeds it (live Sources, or the number of hand-picked items), its target
- * frames with their health, its cycle and loop wording, its revision, the
- * Programs that name it and whether a Run of it is live. Every fact is read
- * from the served runtime payload (`definitions`, `programs`, `current.runs`).
+ * The stored Scenes as cards (pass 2 slice 3 §13; flow design §7): each a summary
+ * card named `Scene X` with what feeds it (live Sources, or the number of hand-picked
+ * items), its target frames with their health, its cycle and loop wording, its
+ * revision and the Programs that name it; a "Running now" chip while a Run of it is
+ * live. Every fact is read from the served runtime payload (`definitions`,
+ * `programs`, `current.runs`).
  *
- * Edit is offered only when the console can save the Scene back without loss
- * (authoring.js `editableDraft`); otherwise it is withheld with the reason.
- * Delete is not offered (slice 3 Question 3).
+ * Actions: Edit, offered only when the console can save the Scene back without loss
+ * (authoring.js `editableDraft`; otherwise withheld with the reason); Show now; and
+ * Schedule it. Delete is not offered (slice 3 Question 3). Edit is disabled while
+ * `editDisabled` (the Scene flow's write is in flight: its draft is held).
  *
- * @param {{snapshot: object|null,
- *          onEdit: (scene: object, draft: ReturnType<typeof editableDraft>) => void}} props
+ * @param {{snapshot: object|null, editDisabled?: boolean,
+ *          onEdit: (sceneId: string, event: React.MouseEvent) => void,
+ *          onShowNow: (sceneId: string) => void,
+ *          onSchedule: (sceneId: string) => void}} props
  */
-export function SceneList({ snapshot, onEdit }) {
+export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, onSchedule }) {
   const runtime = snapshot?.runtime;
   const scenes = Object.values(runtime?.definitions ?? {});
   if (scenes.length === 0) {
-    return <p className="scene-authoring__empty">No Scenes yet.</p>;
+    return <p className="scene-list__empty">No Scenes yet.</p>;
   }
   const programs = Object.values(runtime?.programs ?? {});
   const live = (runtime?.current?.runs ?? []).filter((run) => LIVE_PHASES.has(run.phase));
   return (
-    <ul className="scene-authoring__scenes" role="list">
+    <ul className="card-grid scene-list" role="list">
       {scenes.map((scene) => (
-        <SceneRow
-          key={scene.scene_id}
-          scene={scene}
-          snapshot={snapshot}
-          usedBy={programs.filter((program) => program.scene_id === scene.scene_id)}
-          running={live.some((run) => run.scene_id === scene.scene_id)}
-          onEdit={onEdit}
-        />
+        <li key={scene.scene_id} className="card-grid__item">
+          <SceneCard
+            scene={scene}
+            snapshot={snapshot}
+            usedBy={programs.filter((program) => program.scene_id === scene.scene_id)}
+            running={live.some((run) => run.scene_id === scene.scene_id)}
+            editDisabled={editDisabled}
+            onEdit={onEdit}
+            onShowNow={onShowNow}
+            onSchedule={onSchedule}
+          />
+        </li>
       ))}
     </ul>
   );
@@ -53,59 +62,62 @@ function feedWording(contributions) {
   return sources.length > 0 ? `live from ${sources.join(", ")}` : "no media";
 }
 
-function SceneRow({ scene, snapshot, usedBy, running, onEdit }) {
+function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onShowNow, onSchedule }) {
+  const id = scene.scene_id;
   const filled = normalizeScene(scene);
   const once = cycleWording(scene);
-  const draft = editableDraft(scene);
+  const editable = editableDraft(scene) !== null;
   const frames = filled.contributions
     .map((entry) => frameOf(entry.target))
     .filter((frameId) => frameId !== null);
   return (
-    <li className="scene-authoring__scene" aria-label={`Scene ${scene.scene_id}`}>
-      <details className="scene-list__details">
-        <summary className="scene-list__summary">
-          <span className="scene-authoring__scene-id">{`Scene ${scene.scene_id}`}</span>
-          {once !== null && <span className="scene-authoring__scene-cycle">{` · ${once}`}</span>}
-          {running && <span className="scene-list__running">{" · Running now"}</span>}
-        </summary>
-        <dl className="record">
-          <dt>Media</dt>
-          <dd>{feedWording(filled.contributions)}</dd>
-          <dt>Frames</dt>
-          <dd>
-            {frames.length > 0 ? <FrameChips snapshot={snapshot} frameIds={frames} /> : "none"}
-          </dd>
-          <dt>Cycle</dt>
-          <dd>
-            {once ??
-              `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends ` +
-                "or, when started by hand, until you Finish or Cancel it"}
-          </dd>
-          <dt>Revision</dt>
-          <dd>{`revision ${filled.revision}`}</dd>
-          <dt>Used by</dt>
-          <dd>
-            {usedBy.length > 0
+    <SummaryCard
+      title={`Scene ${id}`}
+      chip={running ? { tone: "ok", text: "Running now" } : null}
+      lines={[
+        { label: "Media", value: feedWording(filled.contributions) },
+        {
+          label: "Frames",
+          value: frames.length > 0 ? <FrameChips snapshot={snapshot} frameIds={frames} /> : "none",
+        },
+        {
+          label: "Cycle",
+          value:
+            once ??
+            `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends ` +
+              "or, when started by hand, until you Finish or Cancel it",
+        },
+        { label: "Revision", value: `revision ${filled.revision}` },
+        {
+          label: "Used by",
+          value:
+            usedBy.length > 0
               ? `Programs ${usedBy.map((program) => program.program_id).join(", ")}`
-              : "no Program"}
-          </dd>
-          <dt>Now</dt>
-          <dd>{running ? "Running now" : "Not running"}</dd>
-        </dl>
-        {draft !== null ? (
-          <div className="record__actions">
+              : "no Program",
+        },
+      ]}
+      actions={
+        <>
+          {editable ? (
             <button
               type="button"
-              aria-label={`Edit Scene ${scene.scene_id}`}
-              onClick={() => onEdit(scene, draft)}
+              aria-label={`Edit Scene ${id}`}
+              disabled={editDisabled}
+              onClick={(event) => onEdit(id, event)}
             >
               Edit
             </button>
-          </div>
-        ) : (
-          <p className="field__hint scene-list__withheld">{`Edit unavailable: ${UNAUTHORABLE_REASON}`}</p>
-        )}
-      </details>
-    </li>
+          ) : (
+            <p className="field__hint scene-list__withheld">{`Edit unavailable: ${UNAUTHORABLE_REASON}`}</p>
+          )}
+          <button type="button" aria-label={`Show Scene ${id} now`} onClick={() => onShowNow(id)}>
+            Show now
+          </button>
+          <button type="button" aria-label={`Schedule Scene ${id}`} onClick={() => onSchedule(id)}>
+            Schedule it
+          </button>
+        </>
+      }
+    />
   );
 }
