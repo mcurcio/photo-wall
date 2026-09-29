@@ -30,7 +30,7 @@ Cold boot requires reachable trusted time, provisioning/release, enrollment, con
 
 ## Failure visibility and recovery
 
-The owner stated these expectations on 2026-09-27. [Decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules) records the related rules for reaching Central (U3, U7, U8), the deferred U5, and which change delivers each expectation.
+The owner stated U1–U8 on 2026-09-27 and added U9 on 2026-09-29. [Decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules) records the related rules for reaching Central (U3, U7, U8), the deferred U5, and which change delivers the earlier expectations. The [v0.13.0 intake](production-readiness-v0.13.md) tracks implementation of the newer calibration and fleet requirements.
 
 | ID | Requirement |
 |---|---|
@@ -38,6 +38,7 @@ The owner stated these expectations on 2026-09-27. [Decision 0014](decisions/001
 | U2 | **Recovery time.** After a whole-house power restore, every Frame shows photos within a couple of hours. The slowest link is gigabit. |
 | U4 | **Media that cannot be fetched.** The Player adds its debug overlay to its output, showing the error, and may continue showing the image it had. Central notices when any enrolled Player, bound to a Frame or not, has not connected for a while. |
 | U6 | **Error detail.** A Frame shows a short status: the error page or the debug overlay. The Central console shows the detailed, named cause. Cost: while a Player cannot reach Central, the console can show only "not seen since …"; the detail is unavailable until the Player reconnects. |
+| U9 | **Live calibration diagnostics.** During an operator-enabled calibration session, the Player shows the virtual Frame edges and readable Frame name/ID, position, corner coordinates, actual Output mode/resolution, brightness, and pending-versus-committed state. Moving a corner changes the pending geometry visible on the physical Player before commit. The diagnostic expires or is disabled independently of authored Scene output. |
 
 Assumption, not an owner statement: before the operating system is up, the text stage 1 prints on the screen is enough for U1.
 
@@ -119,6 +120,8 @@ Players must be plug-and-play. In a centrally prepared deployment providing PXE,
 
 Automatic registration and visibility precede Frame binding for unknown equipment. Recognized returning equipment receives its existing centrally assigned Frames; an unknown or replacement device receives no automatic Frame authority. Release selection, trial consumption, promotion, and rollback records remain central.
 
+The common base OS keeps a minimal, versioned Central check-in running independently of the replaceable Player application package, including while that package is missing, installing, restarting, or incompatible. Central distinguishes base reachability, application enrollment/reporting, and observed output; a base check-in does not grant application or Frame authority. An operator can select the desired Player application version centrally, see desired versus installed/running versions and update outcomes, and activate or queue an update without device-local setup.
+
 ## Experience model
 
 | Term | Meaning and boundary |
@@ -168,6 +171,8 @@ Calibration determines how content appears correctly within an aperture. Spatial
 Scene configuration owns its AssetSource references, selection preferences, durations, and transitions. A Christmas Scene therefore uses its holiday source even when manually activated in July. A December Program schedules that Scene.
 
 Immich query results can change asynchronously during a Run. New holiday photos should enter upcoming December playback without restarting the Scene. Authored configuration edits default to the next Run. Editing a saved query is a configuration change; new results matching that query are live data.
+
+An AssetSource has no fixed upstream membership ceiling. Central discovers and revisits large or changing matches incrementally, with bounded requests, work, preparation, and storage. A large result is not itself an incompatible Source; incomplete discovery, upstream failure, and a truly empty result remain distinct. Before entering filters, the operator chooses the upstream connection and can inspect actual matching photos/videos through a paged operator view before and after saving. These views do not put upstream credentials or direct upstream access in Players.
 
 **Enforce compatibility before preference-based selection.** Frames may differ in aspect ratio, physical size, resolution, and playback capability.
 
