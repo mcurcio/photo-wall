@@ -401,8 +401,10 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
 
 
 def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, registry):
-    """§6 history: Save replaces the flow entry with #/scenes, so Back never re-enters the
-    finished flow; the next actions are Show now and Schedule it."""
+    """§6 history: Save returns the flow's entry to #/scenes, so Back never re-enters the
+    finished flow, and one Back leaves the section (no second #/scenes entry); the next
+    actions are Show now and Schedule it. Mutation probe: replace the flow's entry with
+    the section again (Back then shows #/scenes twice)."""
     _seed(registry)
     queue = _seed_source(registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -417,7 +419,7 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it"])
 
         page.go_back()
-        assert not _hash(page).startswith("#/scenes/new")
+        assert not _hash(page).startswith("#/scenes"), _hash(page)
         go(page, "scenes")
         next_actions.get_by_role("button", name="Schedule it", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Schedule", exact=True)).to_be_visible()

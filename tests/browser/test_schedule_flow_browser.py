@@ -251,8 +251,8 @@ def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, regis
         expect(card.get_by_role("button")).to_have_text(["Remove"])
         expect(_schedule_link(page)).to_have_accessible_description("")
 
-        page.go_back()
-        assert not _hash(page).startswith("#/schedule/new")
+        page.go_back()  # one Back leaves the section: no second #/schedule entry
+        assert not _hash(page).startswith("#/schedule"), _hash(page)
         expect(schedule_form(page)).to_have_count(0)
         go(page, "schedule")
         expect(programs.get_by_role("button", name="Schedule a Program", exact=True)

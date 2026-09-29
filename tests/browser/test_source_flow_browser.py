@@ -226,8 +226,8 @@ def test_saving_returns_to_the_cards_and_back_never_reenters(page, registry):
         expect(card.get_by_role("button", name=f"Refresh {NEW_SOURCE}", exact=True)).to_be_visible()
         expect(_link(page, "Photo sources")).to_have_accessible_description("")
 
-        page.go_back()
-        assert not _hash(page).startswith("#/sources/new")
+        page.go_back()  # one Back leaves the section: no second #/sources entry
+        assert not _hash(page).startswith("#/sources"), _hash(page)
         expect(source_form(page)).to_have_count(0)
 
 

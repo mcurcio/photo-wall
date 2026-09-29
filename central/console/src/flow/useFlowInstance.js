@@ -1,6 +1,7 @@
 import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { fieldControl } from "../Field.jsx";
+import { formatRoute } from "../routes.js";
 import {
   editedId,
   flowView,
@@ -12,6 +13,21 @@ import {
 } from "./instance.js";
 import { nextStep, previousStep, problemsOf, stepOfField } from "./steps.js";
 import { useFlowFocus } from "./useFlowFocus.js";
+
+// The history entry a flow was pushed onto from its section's own entry carries this
+// key in `history.state`, naming the section (see SECTION ENTRY). Steps replace the
+// entry keeping its state (useRoute.js), so the mark lasts the flow.
+const FLOW_FROM = "photoWallFlowFrom";
+
+/** Whether the current history entry is a flow pushed from `section`'s own entry. */
+function pushedFrom(section) {
+  return window.history.state?.[FLOW_FROM] === section;
+}
+
+/** Mark (or, with null, unmark) the current history entry as pushed from `section`. */
+function markEntry(section) {
+  window.history.replaceState({ ...(window.history.state ?? {}), [FLOW_FROM]: section }, "");
+}
 
 /** Every instance can show: the default `availability` (a flow without edits). */
 const available = () => "ok";
@@ -52,10 +68,16 @@ export function useFlowRefs() {
  *
  * FINISH. After the write, `finish(focusAfter?)` closes the draft. Only if the location
  * still names this instance (read at that moment: the operator may have left while
- * the write was in flight) does it replace the flow's history entry with the section
- * (and focus `focusAfter()` there); otherwise history is left alone, and the flow's
- * entry, if Back or Forward reaches it, is replaced with the section instead of
- * opening a fresh draft (§6 History: Back after Save never re-enters a finished flow).
+ * the write was in flight) does it return to the section (and focus `focusAfter()`
+ * there); otherwise history is left alone. Either way the flow's entry, if Back or
+ * Forward reaches it, is replaced with the section instead of opening a fresh draft
+ * (§6 History: Back after Save never re-enters a finished flow).
+ *
+ * SECTION ENTRY. Returning to the section (`finish`, and `leave` from the first step)
+ * goes BACK to the section's own history entry when the flow was pushed onto it (New,
+ * Edit or Resume on the section: the entry is marked in `history.state`), so one Back
+ * afterwards leaves the section instead of showing it twice; otherwise (a typed URL,
+ * Show now's `replace`) it replaces the flow's entry with the section.
  *
  * OPENING. `start(key, event)` is the in-app way in (New, Edit): a dirty draft of the
  * same instance resumes; another is opened, or, while the draft is dirty, the
@@ -185,6 +207,7 @@ export function useFlowInstance({
       finishedRef.current = null;
       if (finished !== null && finished.key === routeKey && finished.step === route.step) {
         navigate({ section }, { replace: true }); // Back onto a finished flow's entry
+        markEntry(null); // it is the section's own entry now
       } else {
         open(routeKey);
       }
@@ -201,9 +224,16 @@ export function useFlowInstance({
     lastStepRef.current = step;
   }
 
-  /** Show `target` (a step route) and, when it can show, move focus to its heading. */
+  /**
+   * Show `target` (a step route) and, when it can show, move focus to its heading. A
+   * push from the section's own entry marks the flow's entry (SECTION ENTRY).
+   */
   const enter = (target, options) => {
+    const fromSection = options?.replace !== true && window.location.hash === formatRoute({ section });
     navigate(target, options);
+    if (fromSection && window.location.hash === formatRoute(target)) {
+      markEntry(section);
+    }
     const key = keys.fromRoute(target);
     if (key !== null && availability(key) === "ok") {
       focus.focusStep(stepView(key, target.step));
@@ -270,12 +300,26 @@ export function useFlowInstance({
   });
 
   /**
+   * Return from the flow's entry to the section (SECTION ENTRY): back to the section's
+   * own entry when the flow was pushed onto it; otherwise the section replaces it.
+   * True when it went back.
+   */
+  const toSection = () => {
+    if (pushedFrom(section)) {
+      window.history.back();
+      return true;
+    }
+    navigate({ section }, { replace: true });
+    return false;
+  };
+
+  /**
    * Leave the flow without its write: back to a hand-off's origin (settled with null),
    * else to the section. The draft is kept.
    */
   const leave = () => {
     if (handOff === null || !handOff.settle(null, { show: true })) {
-      navigate({ section }, { replace: true });
+      toSection();
     }
   };
 
@@ -348,7 +392,8 @@ export function useFlowInstance({
   const finish = (focusAfter = () => refs.savedRef.current, result = null) => {
     const key = draft.key;
     const here = hashNamesInstance(keys, window.location.hash, key);
-    finishedRef.current = here ? null : { key, step: lastStepRef.current };
+    const finished = { key, step: lastStepRef.current };
+    finishedRef.current = here ? null : finished;
     draft.discard();
     problems.reset();
     focus.reset();
@@ -359,7 +404,9 @@ export function useFlowInstance({
       return here;
     }
     if (here) {
-      navigate({ section }, { replace: true });
+      if (toSection()) {
+        finishedRef.current = finished; // Forward reaches the flow's entry again
+      }
       if (focusAfter !== null) {
         focus.focusWhenShown(focusAfter, flowView({ shown: true, place: "list", routeKey: null }));
       }
