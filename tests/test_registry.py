@@ -549,27 +549,28 @@ def test_frame_create_still_rejects_an_incoherent_profile(registry):
                     profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24))
 
 
-def test_delete_frame_removes_a_clear_frame(registry):
+def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, monkeypatch):
     frame(registry)
     assert [f.id for f in registry.inventory().frames] == ["portrait"]
-    assert registry.delete_frame("portrait") == {"status": "deleted"}
-    assert [f.id for f in registry.inventory().frames] == []
-
-
-def test_delete_frame_refuses_a_bound_frame_with_a_clean_409(registry):
-    # The bindings FK on frame_id (001_registry.sql:37) is the only FK into
-    # frames(id); the explicit guard turns what would be a raw FK 500 into a 409.
-    identity, _, _ = enroll(registry)
-    frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    with pytest.raises(RegistryError) as excinfo:
+    monkeypatch.setattr(
+        registry.db,
+        "transaction",
+        lambda: pytest.fail("delete_frame opened a transaction without its required inputs"),
+    )
+    with pytest.raises(TypeError):
         registry.delete_frame("portrait")
-    assert (excinfo.value.code, excinfo.value.status) == ("frame_bound", 409)
-    # The frame (and its binding) survive the refused delete.
+    monkeypatch.undo()
+    with registry.db.transaction() as conn:
+        with pytest.raises(RegistryError) as excinfo:
+            registry.delete_frame("portrait", conn=conn, references={})
+    assert (excinfo.value.code, excinfo.value.status) == (
+        "frame_reference_snapshot_required", 500)
+    with registry.db.transaction() as conn:
+        with pytest.raises(RegistryError) as excinfo:
+            registry.delete_frame("portrait", conn=conn, references={
+                "scene_ids": (), "program_ids": (),
+                "queued_activation_ids": (), "run_ids": (),
+            })
+    assert (excinfo.value.code, excinfo.value.status) == (
+        "frame_reference_snapshot_required", 500)
     assert [f.id for f in registry.inventory().frames] == ["portrait"]
-
-
-def test_delete_frame_unknown_id_is_a_404(registry):
-    with pytest.raises(RegistryError) as excinfo:
-        registry.delete_frame("nope")
-    assert (excinfo.value.code, excinfo.value.status) == ("unknown_frame", 404)

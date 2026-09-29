@@ -136,7 +136,8 @@ const DELETE_MESSAGES = {
  * the call site so the plan refreshes once the delete lands.
  *
  * @param {string} frameId
- * @returns {Promise<{ok:true}|{ok:false, code:string, message:string}>}
+ * @returns {Promise<{ok:true}|{ok:false, code:string, message:string,
+ *   scene_ids:string[], program_ids:string[], queued_activation_ids:string[], run_ids:string[]}>}
  */
 export async function deleteFrame(frameId) {
   const result = await apiWrite(`/v1/operator/frames/${frameId}`, {
@@ -146,7 +147,17 @@ export async function deleteFrame(frameId) {
     return { ok: true };
   }
   const code = result.error ?? String(result.status);
-  return { ok: false, code, message: DELETE_MESSAGES[code] ?? "Could not delete the frame." };
+  const ids = (key) => Array.isArray(result.data?.[key])
+    ? result.data[key].filter((id) => typeof id === "string") : [];
+  return {
+    ok: false,
+    code,
+    message: DELETE_MESSAGES[code] ?? "Could not delete the frame.",
+    scene_ids: ids("scene_ids"),
+    program_ids: ids("program_ids"),
+    queued_activation_ids: ids("queued_activation_ids"),
+    run_ids: ids("run_ids"),
+  };
 }
 
 /**

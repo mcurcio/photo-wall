@@ -518,7 +518,11 @@ def test_a_frame_deleted_mid_draft_is_announced_on_the_current_step_and_on_revie
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
         scene_continue(page, "Playback")
 
-        registry.delete_frame(LOBBY_FRAME)
+        response = page.request.delete(
+            f"{origin}/v1/operator/frames/{LOBBY_FRAME}",
+            headers={"Authorization": f"Bearer {ADMIN}"},
+        )
+        assert response.status == 200
         page.clock.run_for(5000)
         notice = f"{LOBBY_FRAME} was deleted and removed from this Scene."
         expect(form.get_by_role("status")).to_have_text(notice)

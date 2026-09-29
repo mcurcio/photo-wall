@@ -27,7 +27,7 @@ from playwright.sync_api import expect
 from test_registry import enroll
 
 from central.registry import FrameCreate
-from central.runtime import Contribution, Scene
+from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
 
@@ -563,6 +563,8 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         # Select the clear frame on the plan, then delete it via its control.
         page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        expect(page.get_by_role("dialog")).to_contain_text(
+            "No saved Scenes reference this Frame in this snapshot")
         _confirm_delete(page)
 
         # Gone by identity from the plan AND from server inventory (real removal).
@@ -574,6 +576,79 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         expect(page.get_by_role("dialog")).to_have_count(0)
         expect(plan).to_be_focused()
         expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
+
+
+def test_delete_frame_lists_stored_scene_roots_and_upcoming_programs(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    store = RuntimeStore(registry.db, registry.clock)
+    store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
+        scene_id="inline", contributions=(Contribution(
+            target="frame:" + CLEAR, kind="black"),))),)))
+    now = registry.clock.utc()
+    store.command("set_program", Program(
+        program_id="morning-show", scene_id="nested-gallery",
+        starts_at=now + 60, ends_at=now + 120))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        expect(dialog).to_contain_text("Saved Scenes targeting this Frame must be edited or removed")
+        expect(dialog.get_by_text("nested-gallery", exact=True)).to_be_visible()
+        expect(dialog).to_contain_text("Upcoming Programs using those Scenes")
+        expect(dialog.get_by_text("morning-show", exact=True)).to_be_visible()
+        expect(dialog).to_contain_text("Central checks references again when you confirm")
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("saved Scenes: nested-gallery")
+        expect(alert).to_contain_text("Programs: morning-show")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
+
+
+def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.route(f"**/v1/operator/frames/{CLEAR}", lambda route: route.fulfill(
+            status=409, content_type="application/json",
+            body='{"error":"frame_referenced","scene_ids":["new-scene"],'
+                 '"program_ids":["new-program"],'
+                 '"queued_activation_ids":["queued-show"]}'))
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("saved Scenes: new-scene")
+        expect(alert).to_contain_text("Programs: new-program")
+        expect(alert).to_contain_text("queued activations: queued-show")
+        expect(alert).to_contain_text("Refresh Equipment. Edit or remove the saved Scenes")
+        expect(alert).to_contain_text("Edit or remove the Programs")
+        expect(alert).to_contain_text("retry after Central resolves them")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
+
+
+def test_delete_frame_queue_only_refusal_does_not_suggest_editing_scenes(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.route(f"**/v1/operator/frames/{CLEAR}", lambda route: route.fulfill(
+            status=409, content_type="application/json",
+            body='{"error":"frame_referenced","scene_ids":[],"program_ids":[],'
+                 '"queued_activation_ids":["queued-only"]}'))
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("queued activations: queued-only")
+        expect(alert).to_contain_text("retry after Central resolves them")
+        expect(alert).not_to_contain_text("Edit or remove")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
 
 
 def test_delete_bound_frame_shows_unbind_guidance(page, registry):

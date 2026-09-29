@@ -57,6 +57,7 @@ SHARED_WITH_SHOW = {
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
+    "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
 

@@ -924,26 +924,26 @@ events (preview expiry, calibration) and would spuriously 409 an honest move.
 **Cost:** two operators dragging the same frame silently LWW; the plan corrects
 on the next snapshot.
 
-**`DELETE /v1/operator/frames/{frame_id}` — remove, guarded.** Two guards, both
-refuse with 409 and a plain-language message; only a clear Frame is deleted:
+**`DELETE /v1/operator/frames/{frame_id}` — remove, guarded.** The existing
+live-Run and binding guards remain, and Central now also protects Frame IDs
+referenced by stored Scene roots or queued activations:
 
 | Guard | Check (where) | Refusal (409) | Operator sees |
 |---|---|---|---|
 | Live Run targets the Frame | `coordinator.runtime.read().project(now)`; any non-ended run whose `participants` contains `"frame:<id>"` (runtime.py:179, 191) | `frame_in_use` | "A live Run is scheduled on this Frame — finish or cancel it before deleting." |
 | Frame is bound | `SELECT 1 FROM bindings WHERE frame_id=%s` under `FOR UPDATE` on the frame row (registry.py:193, 266) | `frame_bound` | "This Frame still has a bound Output — unbind it before deleting." |
+| Stored Scene root or queued activation targets the Frame | Current Runtime definitions and queued activation snapshots; Programs whose future windows use a blocking Scene are reported with it | `frame_referenced`, with sorted `scene_ids`, `program_ids`, and `queued_activation_ids` | Confirmation lists current saved Scene roots and upcoming Programs; if the references changed after the dialog opened, refusal surfaces the server-returned IDs and asks the operator to refresh, edit/remove saved references, and review queued activations. |
 
-The runtime guard is checked in the route (in-memory, cheap) before the store
-call; the binding guard is enforced **atomically inside the store transaction**
-(the `bindings` FK on `frame_id`, 001_registry.sql:37, would otherwise surface a
-raw 500 — the explicit check returns a clean 409 instead). On success:
-`DELETE FROM frames WHERE id`, audit `frame_deleted`, `200 {"status":"deleted"}`.
-**Cost / stated limit:** a TOCTOU window exists between the route's runtime check
-and the DB delete (a Program could admit a run onto the frame in between); it is
-**benign** because a deleted frame has no binding, so any run projecting onto
-`"frame:<id>"` reaches no player and runs reference frames by string, not FK — a
-dangling reference is harmless intent, not a crash. The load-bearing invariant
-the guards protect: *you cannot delete a Frame that a Player is currently bound
-to serve.*
+The live-Run check continues to return `frame_in_use` with server `run_ids`, and
+the bound-Output check continues to return `frame_bound`; their behavior and
+operator remedies are unchanged. The reference refusal carries server IDs so a
+stale confirmation can identify what now blocks deletion. On success,
+`DELETE FROM frames WHERE id`, audit `frame_deleted`, and return
+`200 {"status":"deleted"}`. Runtime still permits an explicit Scene target
+for a Frame ID that is currently absent: such content can be retained or
+authored as future recovery intent and becomes executable only after that Frame
+is recreated and centrally bound. The delete guard protects references already
+attached to the current Frame; it does not impose a permanent ID reservation.
 
 **Refresh cadence (numbers are PLACEHOLDERS pending tuning):**
 

@@ -386,6 +386,47 @@ class Runtime:
                              queued_activation_ids=queued_activation_ids, scene_ids=scene_ids)
         del self._state.scenes[scene_id]
 
+    def frame_references(self, frame_id: str, now: float | None = None) -> dict[str, tuple[str, ...]]:
+        """Return stored, queued, and live references to a Frame id.
+
+        Run and queue Scenes are snapshots, so inspect them independently of the
+        current definitions. When `now` is supplied, evaluate live state through
+        a detached projection so expired queue entries and logically ended Runs
+        do not block a delete merely because the next scheduler tick has not run.
+        Terminal Run history is deliberately excluded; the owned Runtime is not
+        advanced by this read.
+        """
+        if now is not None:
+            projected = self._copy()
+            projected.advance(now)
+            return projected._frame_references(frame_id, now)
+        return self._frame_references(frame_id, now)
+
+    def _frame_references(self, frame_id: str, now: float | None) -> dict[str, tuple[str, ...]]:
+        target = f"frame:{frame_id}"
+        scene_ids = tuple(sorted(
+            scene_id for scene_id, scene in self._state.scenes.items()
+            if target in scene.participants
+        ))
+        queued = tuple(sorted(
+            item.activation_id for item in self._state.queue
+            if target in item.scene.participants
+        ))
+        runs = tuple(sorted(
+            run.run_id for run in self._state.runs.values()
+            if run.active and target in run.scene.participants
+        ))
+        program_ids = tuple(sorted(
+            program.program_id for program in self._state.programs.values()
+            if program.scene_id in scene_ids and (now is None or program.starts_at > now)
+        ))
+        return {
+            "scene_ids": scene_ids,
+            "program_ids": program_ids,
+            "queued_activation_ids": queued,
+            "run_ids": runs,
+        }
+
     @staticmethod
     def _scene_source_refs(scene: Scene) -> set[str]:
         refs = {ref for contribution in (*scene.contributions, *scene.outro_contributions)

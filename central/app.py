@@ -314,6 +314,7 @@ def create_app(
         detail = {"error": exc.code}
         if isinstance(exc, SourceInUse):
             detail["scene_ids"] = exc.scene_ids
+        detail.update(exc.details)
         return JSONResponse(detail, status_code=exc.status)
 
     @app.exception_handler(RuntimeConflict)
@@ -651,16 +652,18 @@ def create_app(
 
     @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
     def remove_frame(frame_id: Identifier) -> dict:
-        # Guard 1 (runtime, in-route, in-memory, cheap): refuse while a live Run
-        # targets this Frame. Read the projected runtime exactly as
-        # GET /v1/operator/runtime does. run.phase is a plain str on RunView --
-        # do NOT use `.active` (that exists only on the internal _Run, not on the
-        # projected RunView). participants is built from ALL runs unfiltered, so
-        # filtering to the live phases (body, outro) is BOTH correct and required:
-        # completed/cancelled runs must not block a delete.
-        _refuse_frame_in_use(frame_id)
-        # Guard 2 (binding) is enforced atomically inside the store transaction.
-        return registry.delete_frame(frame_id)
+        # Serialize with all Runtime/Scene mutations, then take the Frame row lock,
+        # matching authored configuration's COORDINATION -> RUNTIME -> Frame order.
+        # Registry checks existence and binding before applying reference data so those
+        # established errors retain precedence over reference conflicts.
+        with coordinator.serialized_runtime_read() as (conn, runtime):
+            references = runtime.frame_references(frame_id, clock.utc())
+            if references["run_ids"]:
+                raise RegistryError("frame_in_use", 409, details={
+                    "run_ids": list(references["run_ids"]),
+                })
+
+            return registry.delete_frame(frame_id, conn=conn, references=references)
 
     @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def bind(frame_id: Identifier, binding: BindingRequest):

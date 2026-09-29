@@ -30,6 +30,85 @@ def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
 
 
+def test_frame_references_include_nested_outro_and_upcoming_program_context():
+    runtime = Runtime()
+    runtime.set_scene(Scene(
+        scene_id="parent", children=(Child(scene=Scene(
+            scene_id="child", outro_seconds=5,
+            outro_contributions=(media("frame:portrait"),),
+        )),),
+    ))
+    runtime.set_program(Program(
+        program_id="upcoming", scene_id="parent", starts_at=1100, ends_at=1200,
+    ))
+    runtime.set_program(Program(
+        program_id="past", scene_id="parent", starts_at=900, ends_at=950,
+    ))
+    refs = runtime.frame_references("portrait", now=1000)
+    assert refs == {
+        "scene_ids": ("parent",), "program_ids": ("upcoming",),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+
+
+def test_frame_references_keep_queued_snapshot_but_ignore_terminal_run_history():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", loop=True, cycle_seconds=100,
+                            contributions=(media("frame:elsewhere"),)))
+    admission = runtime.activate("show", "active", 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=2, loop=True, cycle_seconds=100,
+                            contributions=(media("frame:portrait"),)))
+    runtime.activate("show", "queued", 1000, repeat="queue", expires_at=1050)
+    runtime.set_scene(Scene(scene_id="show", revision=3, loop=True, cycle_seconds=100,
+                            contributions=(media("frame:elsewhere"),)))
+    assert runtime.frame_references("portrait", now=1000) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": ("queued",), "run_ids": (),
+    }
+
+    runtime.cancel(admission.run_id, 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=4))
+    assert runtime.frame_references("elsewhere", now=1000) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+
+
+def test_frame_references_project_expired_queue_without_mutating_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", loop=True,
+                            contributions=(media("frame:portrait"),)))
+    active_run_id = runtime.activate("show", "active", 1000).run_id
+    runtime.set_scene(Scene(scene_id="show", revision=2,
+                            contributions=(media("frame:elsewhere"),)))
+    runtime.activate("show", "queued", 1000, repeat="queue", expires_at=1010)
+    before = runtime.export_state()
+
+    refs = runtime.frame_references("portrait", now=1011)
+    assert refs == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (),
+        "run_ids": (active_run_id,),
+    }
+    assert runtime.export_state() == before
+
+
+def test_frame_references_project_logically_ended_run_without_mutating_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", duration_seconds=5,
+                            contributions=(media("frame:portrait"),)))
+    runtime.activate("show", "active", 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=2,
+                            contributions=(media("frame:elsewhere"),)))
+    before = runtime.export_state()
+
+    assert runtime.frame_references("portrait", now=1031) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+    assert runtime.export_state() == before
+
+
 def test_calendar_boundary_projection_overlay_and_current_reveal():
     midnight = datetime(2027, 1, 1, tzinfo=UTC).timestamp()
     runtime = Runtime()

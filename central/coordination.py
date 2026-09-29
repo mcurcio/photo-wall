@@ -178,6 +178,12 @@ class Coordinator:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
             yield conn
 
+    @contextmanager
+    def serialized_runtime_read(self):
+        """Hold Coordination and Runtime locks while inspecting current Runtime state."""
+        with self._transaction() as conn:
+            yield conn, self.runtime.read_locked(conn)
+
     def _players(self, conn):
         players = self.installation.active_sessions_in(conn)
         if len(players) > 128:

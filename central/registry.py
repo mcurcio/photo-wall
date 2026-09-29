@@ -6,6 +6,7 @@ import base64
 import hashlib
 import secrets
 import uuid
+from collections.abc import Mapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -35,8 +36,9 @@ from contracts.time import Clock
 
 
 class RegistryError(Exception):
-    def __init__(self, code: str, status: int = 409):
+    def __init__(self, code: str, status: int = 409, *, details: dict | None = None):
         self.code, self.status = code, status
+        self.details = details or {}
         super().__init__(code)
 
 
@@ -358,26 +360,48 @@ class Registry:
                         {"profile": profile.model_dump(), **row})
             return {"profile": profile.model_dump(), **row, "changed": True}
 
-    def delete_frame(self, frame_id: str) -> dict:
-        """Remove a clear Frame. Refuses (409 frame_bound) while a binding exists.
+    def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]]) -> dict:
+        """Remove a clear Frame within the caller's serialized reference snapshot.
 
-        The binding guard is enforced ATOMICALLY inside this transaction, under
-        FOR UPDATE on the frame row: bindings.frame_id is the ONLY FK into
-        frames(id) in the whole schema (001_registry.sql:37), so a bound frame's
-        DELETE would otherwise surface a raw 500 from the FK -- the explicit
-        check returns a clean 409 instead. The binding guard is therefore
-        necessary AND sufficient: runs reference frames by string (not FK), and
-        nothing else references frames(id), so no cascade or pre-clear is needed.
+        Callers must obtain `references` from the current Runtime while holding the
+        Coordination and Runtime locks on this same transaction connection. Requiring
+        both arguments prevents this Registry boundary from silently treating an
+        unavailable snapshot as an empty set. The row lock and binding guard remain
+        atomic here; the complete snapshot supplies the Scene/queue/live-Run guard.
         """
-        with self.db.transaction() as conn:
-            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
-            if not frame:
-                raise RegistryError("unknown_frame", 404)
-            if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
-                raise RegistryError("frame_bound")
-            conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
-            self._audit(conn, "frame_deleted", frame_id)
-            return {"status": "deleted"}
+        reference_keys = {"scene_ids", "program_ids", "queued_activation_ids", "run_ids"}
+        if conn is None or not isinstance(references, Mapping) or set(references) != reference_keys:
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        if any(not isinstance(references[key], tuple) for key in reference_keys):
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        # The caller's reference snapshot is authoritative only while both writers
+        # are excluded on this same transaction connection. Import constants here
+        # to avoid a module cycle: Coordination depends on RegistryError.
+        from central.coordination import COORDINATION_LOCK
+        from central.runtime_store import RUNTIME_LOCK
+
+        held = conn.execute(
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
+            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
+            "AND objid=ANY(%s::oid[])",
+            ([COORDINATION_LOCK, RUNTIME_LOCK],),
+        ).fetchone()["n"]
+        if held != 2:
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+        if not frame:
+            raise RegistryError("unknown_frame", 404)
+        if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+            raise RegistryError("frame_bound")
+        if references.get("scene_ids") or references.get("queued_activation_ids"):
+            raise RegistryError("frame_referenced", 409, details={
+                "scene_ids": list(references.get("scene_ids", ())),
+                "program_ids": list(references.get("program_ids", ())),
+                "queued_activation_ids": list(references.get("queued_activation_ids", ())),
+            })
+        conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
+        self._audit(conn, "frame_deleted", frame_id)
+        return {"status": "deleted"}
 
     def retire(self, player_id: str) -> None:
         """Retire a Player permanently. Refuses (409 player_bound), for every caller,
