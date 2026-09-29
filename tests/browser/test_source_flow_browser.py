@@ -321,7 +321,7 @@ def test_a_late_preview_for_old_filters_is_discarded(page, registry):
         expect(form.get_by_role("button", name="Preview matches", exact=True)).to_be_enabled()
 
 
-def test_check_again_resumes_the_same_preview_request_after_poll_limit(page, registry):
+def test_check_again_resumes_the_same_preview_request_after_elapsed_deadline(page, registry):
     _enable_preview_connection(registry)
     page.clock.install()
     with operator_server(registry.db, registry.clock) as origin:
@@ -329,6 +329,7 @@ def test_check_again_resumes_the_same_preview_request_after_poll_limit(page, reg
         form = start_source(page)
         requests = []
         polls = []
+        complete_next = [False]
 
         def post_preview(route):
             requests.append(route.request.post_data_json)
@@ -337,7 +338,7 @@ def test_check_again_resumes_the_same_preview_request_after_poll_limit(page, reg
 
         def poll_preview(route):
             polls.append(route.request.url)
-            status = "complete" if len(polls) > 80 else "pending"
+            status = "complete" if complete_next[0] else "pending"
             body = ('{"request_id":"long-running","status":"complete","count":2,'
                     '"image_count":2,"video_count":0}' if status == "complete" else
                     '{"request_id":"long-running","status":"pending"}')
@@ -351,6 +352,8 @@ def test_check_again_resumes_the_same_preview_request_after_poll_limit(page, reg
         page.clock.run_for(81000)
         check_again = form.get_by_role("button", name="Check again", exact=True)
         expect(check_again).to_be_enabled()
+        expect(form.get_by_text("The preview is still processing. You can request it again.", exact=True)).to_be_visible()
+        complete_next[0] = True
         with page.expect_response(lambda response: response.request.method == "GET"
                                   and response.url.endswith("/long-running")):
             check_again.click()

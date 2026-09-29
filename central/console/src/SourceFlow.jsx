@@ -171,10 +171,16 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     const draftId = previewRequest.draftId;
     let cancelled = false;
     let timer = null;
+    let deadlineTimer = null;
+    let deadlineExpired = false;
     let requestId = previewRequest.requestId;
     let postPending = false;
     const current = () => !cancelled && generation === previewGeneration.current && draft.isOpen(draftId);
     const publish = (state) => {
+      if (!state.busy && !state.timedOut && deadlineTimer !== null) {
+        window.clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
       if (current()) setPreviewState({ ...state, key: previewKey, draftId });
     };
     const wait = () => new Promise((resolve) => { timer = window.setTimeout(resolve, 1000); });
@@ -203,18 +209,25 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
         requestId = response.data.request_id;
       }
       publish({ busy: true, message: "Checking the photo library…", result: null, error: false });
-      for (let attempt = 0; attempt < 80; attempt += 1) {
+      deadlineTimer = window.setTimeout(() => {
+        deadlineExpired = true;
+        publish({ busy: false, timedOut: true, requestId, message: null, error: false });
+      }, 80000);
+      while (true) {
         await wait();
-        if (!current()) return;
+        if (!current() || deadlineExpired) return;
         let poll;
         try {
           poll = await apiWrite(`/v1/operator/source-previews/${encodeURIComponent(requestId)}`, { method: "GET" });
         } catch {
-          publish({ busy: false, message: "Could not read the preview result. Try again.", error: true });
-          return;
+          if (deadlineExpired) return;
+          // A read timeout is safe to retry with the same request ID. Keep trying
+          // until the independent overall deadline instead of failing early.
+          continue;
         }
-        if (!current()) return;
+        if (!current() || deadlineExpired) return;
         if (!poll.ok) {
+          if (poll.status >= 500) continue;
           const detail = poll.error ? codeWords(poll.error) : `HTTP ${poll.status}`;
           publish({ busy: false, message: `Could not read the preview result: ${detail}.`, error: true });
           return;
@@ -232,12 +245,12 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
           return;
         }
       }
-      publish({ busy: false, timedOut: true, requestId, message: null, error: false });
     };
     run();
     return () => {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
+      if (deadlineTimer !== null) window.clearTimeout(deadlineTimer);
       if (requestId !== null || postPending) {
         setPreviewState((previous) => {
           if (previous?.key !== previewKey || previous?.draftId !== draftId || !previous.busy) {
