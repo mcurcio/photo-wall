@@ -19,7 +19,7 @@ from pydantic import SecretStr
 
 from contracts.time import ManualClock
 from media.immich import ImmichClient
-from media.models import ConnectionConfig, MediaError, MediaLimits, SourceSpec
+from media.models import ConnectionConfig, MediaError, MediaLimits, SourcePreviewQuery, SourceSpec
 
 OWNER = str(UUID(int=100))
 OTHER_OWNER = str(UUID(int=101))
@@ -740,3 +740,39 @@ def test_connection_rejects_unsafe_base_urls(unsafe_url):
 def test_plain_http_requires_explicit_isolated_network_opt_in():
     with pytest.raises(ValueError):
         connection(allow_http=False)
+
+
+def test_preview_counts_complete_filtered_members_without_exif_or_downloads():
+    upstream = Upstream([
+        asset(1, kind="IMAGE", isFavorite=False),
+        asset(2, kind="IMAGE", isFavorite=True),
+        asset(3, kind="VIDEO", isFavorite=False),
+        asset(4, kind="VIDEO", isFavorite=True),
+    ])
+    query = SourcePreviewQuery(
+        connection_ref="main", media_types=("image", "video"), favorites=False,
+        captured_from=datetime(2025, 1, 1, tzinfo=UTC).timestamp(),
+        captured_until=datetime(2027, 1, 1, tzinfo=UTC).timestamp(),
+    )
+    result = asyncio.run(preview(upstream, query))
+    assert result.model_dump() == {"count": 2, "image_count": 1, "video_count": 1}
+    searches = upstream.searches
+    assert len(searches) == 2
+    assert all(not body["withExif"] and body["isFavorite"] is False for body in searches)
+    assert all("takenAfter" in body and "takenBefore" in body for body in searches)
+    assert not any(request.url.path.endswith("/original") for request in upstream.requests)
+
+
+def test_preview_refuses_incomplete_or_over_limit_membership():
+    upstream = Upstream([asset(1), asset(2)])
+    query = SourcePreviewQuery(connection_ref="main", media_types=("image",))
+    with pytest.raises(MediaError) as error:
+        asyncio.run(preview(upstream, query, limits=MediaLimits(max_candidates=1)))
+    assert error.value.code == "source_limit"
+
+
+def preview(upstream, query, *, limits=None):
+    async def run():
+        async with upstream.client(limits=limits) as client:
+            return await client.preview(query)
+    return run()

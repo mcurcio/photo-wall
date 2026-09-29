@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import uuid
 from contextlib import contextmanager
 
 from psycopg.types.json import Jsonb
@@ -16,7 +17,7 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
-from central.media_ports import RefreshReceipt
+from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
 from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
@@ -30,7 +31,13 @@ from contracts.models import (
     Variant,
 )
 from contracts.time import Clock
-from media.models import OriginalAsset, RefreshResult, SourceSpec
+from media.models import (
+    OriginalAsset,
+    RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
+    SourceSpec,
+)
 
 
 class StoreLimits(Model):
@@ -46,6 +53,8 @@ class StoreLimits(Model):
     # PlannerLimits.max_candidates is 10000; this shared bound covers source
     # snapshots and retained authored references together.
     max_authored_candidates: int = Field(default=10000, ge=1, le=10000)
+    max_pending_previews: int = Field(default=32, ge=1, le=128)
+    max_source_preview_records: int = Field(default=256, ge=1, le=1024)
 
 
 class RefreshLease(Model):
@@ -218,6 +227,103 @@ class MediaRepository:
                 completed_revision=row["refresh_completed_revision"],
                 coalesced=queued.coalesced,
             )
+
+    def request_source_preview(self, query: SourcePreviewQuery) -> SourcePreviewReceipt:
+        if self.queue is None:
+            raise RegistryError("media_queue_unconfigured", 503)
+        request_id = str(uuid.uuid4())
+        now = self.clock.utc()
+        with self.transaction() as conn:
+            conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
+                         "WHERE status='pending' AND expires_at<=%s", (now,))
+            conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
+            health = conn.execute("SELECT connection_ids FROM media_settings WHERE singleton").fetchone()
+            connection_ids = health["connection_ids"] if health else None
+            if connection_ids is not None and query.connection_ref not in connection_ids:
+                raise RegistryError("source_connection_unavailable", 409)
+            count = conn.execute("SELECT count(*) AS n FROM source_previews "
+                                 "WHERE status='pending' AND expires_at>%s",
+                                 (now,)).fetchone()["n"]
+            if count >= self.limits.max_pending_previews:
+                raise RegistryError("source_preview_capacity", 429)
+            total = conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"]
+            if total >= self.limits.max_source_preview_records:
+                conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now,))
+                total = conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"]
+                if total >= self.limits.max_source_preview_records:
+                    raise RegistryError("source_preview_capacity", 429)
+            expires_at = now + 600
+            conn.execute("INSERT INTO source_previews(request_id,query,status,created_at,expires_at) "
+                         "VALUES(%s,%s,'pending',%s,%s)",
+                         (request_id, Jsonb(query.model_dump(mode="json")), now, expires_at))
+            self.queue.enqueue_preview_in(conn, request_id)
+        return SourcePreviewReceipt(request_id=request_id)
+
+    def source_preview(self, request_id: str) -> dict:
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT status,count,image_count,video_count,error,expires_at "
+                               "FROM source_previews WHERE request_id=%s", (request_id,)).fetchone()
+        if row is None:
+            raise RegistryError("source_preview_not_found", 404)
+        if row["status"] == "pending" and row["expires_at"] <= self.clock.utc():
+            with self.transaction() as conn:
+                expired = conn.execute(
+                    "UPDATE source_previews SET status='failed',error='preview_expired' "
+                    "WHERE request_id=%s AND status='pending' RETURNING status,error",
+                    (request_id,),
+                ).fetchone()
+                if expired is None:
+                    # A worker may have completed between the initial read and
+                    # this conditional update; report its committed result.
+                    row = conn.execute(
+                        "SELECT status,count,image_count,video_count,error,expires_at "
+                        "FROM source_previews WHERE request_id=%s", (request_id,),
+                    ).fetchone()
+                else:
+                    row = {**row, **expired}
+            if row is None:
+                raise RegistryError("source_preview_not_found", 404)
+        if row["status"] == "complete":
+            return {"request_id": request_id, "status": "complete", "count": row["count"],
+                    "image_count": row["image_count"], "video_count": row["video_count"]}
+        if row["status"] == "failed":
+            return {"request_id": request_id, "status": "failed", "error": row["error"]}
+        return {"request_id": request_id, "status": "pending"}
+
+    def begin_source_preview(self, request_id: str) -> SourcePreviewQuery | None:
+        # Previewing is read-only and safe to repeat. Leave it pending until a
+        # result is committed so a retried Procrastinate task can resume after a
+        # worker crash instead of stranding a hidden running lease.
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT query FROM source_previews WHERE request_id=%s "
+                               "AND status='pending' AND expires_at>%s",
+                               (request_id, self.clock.utc())).fetchone()
+            return SourcePreviewQuery.model_validate(row["query"]) if row else None
+
+    def finish_source_preview(self, request_id: str, result: SourcePreviewResult) -> bool:
+        with self.transaction() as conn:
+            changed = conn.execute("UPDATE source_previews SET status='complete',count=%s,image_count=%s,"
+                                   "video_count=%s,error=NULL WHERE request_id=%s AND status='pending' "
+                                   "AND expires_at>%s",
+                                   (result.count, result.image_count, result.video_count,
+                                    request_id, self.clock.utc())).rowcount
+            return changed == 1
+
+    def fail_source_preview(self, request_id: str, error: str) -> bool:
+        if not re.fullmatch(r"[a-z_]{1,64}", error):
+            error = "worker_internal"
+        with self.transaction() as conn:
+            changed = conn.execute("UPDATE source_previews SET status='failed',error=%s "
+                                   "WHERE request_id=%s AND status='pending'",
+                                   (error, request_id)).rowcount
+            return changed == 1
+
+    def maintain_source_previews(self) -> None:
+        now = self.clock.utc()
+        with self.transaction() as conn:
+            conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
+                         "WHERE status='pending' AND expires_at<=%s", (now,))
+            conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
 
     def refresh_revisions(self, source_ref: str) -> tuple[int, int]:
         with self.db.transaction() as conn:

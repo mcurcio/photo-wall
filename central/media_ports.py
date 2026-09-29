@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import Field, StrictBool, model_validator
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.planner import AcquisitionRequest
 from contracts.models import FrameProfile, Identifier, Model, Variant
-from media.models import SourceSpec
+from media.models import SourcePreviewQuery, SourceSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,11 @@ class SourceConfigurationReceipt(Model):
 
     source_ref: Identifier
     created: StrictBool
+
+
+class SourcePreviewReceipt(Model):
+    request_id: Identifier
+    status: Literal["pending"] = "pending"
 
 
 class CoordinationMedia(Protocol):
@@ -77,6 +82,10 @@ class MediaApplication(Protocol):
     def configure_source(self, spec: SourceSpec) -> bool: ...
 
     def request_refresh(self, source_ref: str) -> RefreshReceipt: ...
+
+    def request_source_preview(self, query: SourcePreviewQuery) -> SourcePreviewReceipt: ...
+
+    def source_preview(self, request_id: str) -> dict: ...
 
     def sources(self) -> list[dict]: ...
 

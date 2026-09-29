@@ -10,6 +10,7 @@ from central.media_queue import (
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
+    PREVIEW_SOURCE_TASK,
     REFRESH_MEDIA_SOURCE_TASK,
 )
 
@@ -72,6 +73,10 @@ def create_worker_app(dsn: str) -> procrastinate.App:
               retry=RefreshRetryStrategy())
     async def refresh_media_source(context, source_ref: str):
         await context.additional_context["media_worker"].refresh_source(source_ref)
+
+    @app.task(name=PREVIEW_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True)
+    async def preview_source(context, request_id: str):
+        await context.additional_context["media_worker"].preview_source(request_id)
 
     @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,

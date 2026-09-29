@@ -30,6 +30,9 @@ from media.models import (
     OriginalAsset,
     RefreshCounts,
     RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
+    SourceQuery,
     SourceSpec,
     asset_identity,
     canonical_uuid,
@@ -334,7 +337,7 @@ class ImmichClient:
             file_size=size, duration=duration,
         )
 
-    async def _walk(self, spec: SourceSpec, kind: str, with_exif: bool,
+    async def _walk(self, spec: SourceQuery, kind: str, with_exif: bool,
                     budget: _Budget, version: tuple[int, int, int]) -> dict[str, _Member]:
         ceiling = min(self.limits.max_candidates + 1, 1000)
         body = dict(size=min(self.limits.page_size, ceiling), order="desc", type=kind.upper(),
@@ -471,6 +474,30 @@ class ImmichClient:
                                  search_requests=budget.search_requests if budget else 0,
                                  json_bytes=budget.json_bytes if budget else 0),
         )
+
+    async def preview(self, query: SourcePreviewQuery) -> SourcePreviewResult:
+        """Count a complete, bounded query observation without acquiring or saving media."""
+        budget = self._budget(self.limits.refresh_seconds)
+        try:
+            if query.connection_ref != self.config.connection_id:
+                raise MediaError("connection_mismatch", "incompatible")
+            async with asyncio.timeout(self.limits.refresh_seconds):
+                version = await self._check(budget)
+                counts = {"image": 0, "video": 0}
+                total = 0
+                for kind in query.media_types:
+                    members = await self._walk(query, kind, False, budget, version)
+                    counts[kind] = len(members)
+                    total += len(members)
+                    if total > self.limits.max_candidates:
+                        raise MediaError("source_limit", "incompatible")
+                return SourcePreviewResult(
+                    count=total,
+                    image_count=counts["image"],
+                    video_count=counts["video"],
+                )
+        except TimeoutError:
+            raise MediaError("upstream_timeout") from None
 
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal:
         """Recheck revision, then exclusively create/verify a caller-owned staging file.

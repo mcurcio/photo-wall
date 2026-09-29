@@ -189,6 +189,219 @@ def test_reported_worker_connections_drive_source_choices(page, registry):
         expect(form).not_to_contain_text("Another connection")
 
 
+def _enable_preview_connection(registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["fixture-library"])
+
+
+def test_include_preview_sends_current_filters_and_reports_matches_without_dirtying_draft(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        form.get_by_label("Media type", exact=True).select_option("image")
+        form.get_by_label("Favourites", exact=True).select_option("only")
+        form.get_by_label("Taken from", exact=True).fill("2025-01-02")
+        form.get_by_label("Taken until", exact=True).fill("2025-02-03")
+        expected_from, expected_until = form.evaluate("""() => [
+          new Date(2025, 0, 2).getTime() / 1000,
+          new Date(2025, 1, 3).getTime() / 1000,
+        ]""")
+        preview = form.get_by_role("button", name="Preview matches", exact=True)
+        assert preview.is_enabled()
+
+        def request(route):
+            assert route.request.method == "POST"
+            assert route.request.post_data_json == {
+                "connection_ref": "fixture-library",
+                "media_types": ["image"],
+                "favorites": True,
+                "captured_from": expected_from,
+                "captured_until": expected_until,
+            }
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"preview-1","status":"pending"}')
+
+        page.route("**/v1/operator/source-previews", request)
+        page.route("**/v1/operator/source-previews/preview-1", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"preview-1","status":"complete","count":4,"image_count":4,"video_count":0}'))
+        preview.click()
+        expect(form.get_by_role("status").filter(has_text="4 matching items: 4 images and 0 videos.")).to_be_visible()
+        expect(_link(page, "Photo sources")).to_have_accessible_description("Draft")
+
+
+def test_previewing_default_source_does_not_mark_draft_dirty(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        page.route("**/v1/operator/source-previews", lambda route: route.fulfill(
+            status=202, content_type="application/json",
+            body='{"request_id":"preview-2","status":"pending"}'))
+        page.route("**/v1/operator/source-previews/preview-2", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"preview-2","status":"complete","count":0,"image_count":0,"video_count":0}'))
+        form.get_by_role("button", name="Preview matches", exact=True).click()
+        expect(form.get_by_role("status").filter(has_text="No photos or videos match these filters.")).to_be_visible()
+        expect(_link(page, "Photo sources")).to_have_accessible_description("")
+
+
+def test_include_preview_distinguishes_empty_and_failed_results(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        request_ids = []
+
+        def post_preview(route):
+            request_id = "empty" if not request_ids else "failed"
+            request_ids.append(request_id)
+            route.fulfill(status=202, content_type="application/json",
+                          body=f'{{"request_id":"{request_id}","status":"pending"}}')
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/empty", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"empty","status":"complete","count":0,"image_count":0,"video_count":0}'))
+        page.route("**/v1/operator/source-previews/failed", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"failed","status":"failed","error":"connection_unknown"}'))
+        button = form.get_by_role("button", name="Preview matches", exact=True)
+        button.click()
+        expect(form.get_by_role("status").filter(has_text="No photos or videos match these filters.")).to_be_visible()
+        button.click()
+        expect(form.get_by_role("alert")).to_have_text("The preview failed: connection unknown.")
+
+
+def test_preview_requires_a_connection_when_worker_reports_several(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["fixture-library", "second-library"])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        button = form.get_by_role("button", name="Preview matches", exact=True)
+        expect(button).to_be_disabled()
+        chooser = form.get_by_label("Connection name", exact=True)
+        chooser.select_option("second-library")
+        expect(button).to_be_enabled()
+
+
+def test_invalid_capture_range_disables_preview(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        form.get_by_label("Taken from", exact=True).fill("2025-02-01")
+        form.get_by_label("Taken until", exact=True).fill("2025-01-01")
+        expect(form.get_by_role("button", name="Preview matches", exact=True)).to_be_disabled()
+        expect(form.get_by_text("Correct the capture date range before previewing.", exact=True)).to_be_visible()
+
+
+def test_a_late_preview_for_old_filters_is_discarded(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        page.route("**/v1/operator/source-previews", lambda route: route.fulfill(
+            status=202, content_type="application/json",
+            body='{"request_id":"old-filters","status":"pending"}'))
+        gate = RequestGate(page, "**/v1/operator/source-previews/old-filters")
+        gate.holding = True
+        form.get_by_role("button", name="Preview matches", exact=True).click()
+        gate.wait_held()
+        form.get_by_label("Media type", exact=True).select_option("video")
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/old-filters")):
+            gate.release(status=200, content_type="application/json",
+                         body='{"request_id":"old-filters","status":"complete","count":9,"image_count":0,"video_count":9}')
+        expect(form.get_by_text("9 matching items: 0 images and 9 videos.", exact=True)).to_have_count(0)
+        expect(form.get_by_role("button", name="Preview matches", exact=True)).to_be_enabled()
+
+
+def test_check_again_resumes_the_same_preview_request_after_poll_limit(page, registry):
+    _enable_preview_connection(registry)
+    page.clock.install()
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        requests = []
+        polls = []
+
+        def post_preview(route):
+            requests.append(route.request.post_data_json)
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"long-running","status":"pending"}')
+
+        def poll_preview(route):
+            polls.append(route.request.url)
+            status = "complete" if len(polls) > 80 else "pending"
+            body = ('{"request_id":"long-running","status":"complete","count":2,'
+                    '"image_count":2,"video_count":0}' if status == "complete" else
+                    '{"request_id":"long-running","status":"pending"}')
+            route.fulfill(status=200, content_type="application/json", body=body)
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/long-running", poll_preview)
+        with page.expect_response(lambda response: response.request.method == "POST"
+                                  and response.url.endswith("/v1/operator/source-previews")):
+            form.get_by_role("button", name="Preview matches", exact=True).click()
+        page.clock.run_for(81000)
+        check_again = form.get_by_role("button", name="Check again", exact=True)
+        expect(check_again).to_be_enabled()
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/long-running")):
+            check_again.click()
+        expect(form.get_by_role("status").filter(has_text="2 matching items: 2 images and 0 videos.")).to_be_visible()
+        assert len(requests) == 1
+
+
+def test_leaving_include_resumes_the_accepted_request_on_return(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        posts = []
+        held = []
+        polls = []
+
+        def post_preview(route):
+            posts.append(route.request.post_data_json)
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"navigation-preview","status":"pending"}')
+
+        def poll_preview(route):
+            polls.append(route)
+            if len(polls) == 1:
+                held.append(route)
+                return
+            route.fulfill(status=200, content_type="application/json",
+                          body='{"request_id":"navigation-preview","status":"complete","count":1,"image_count":1,"video_count":0}')
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/navigation-preview", poll_preview)
+        with page.expect_response(lambda response: response.request.method == "POST"
+                                  and response.url.endswith("/v1/operator/source-previews")):
+            form.get_by_role("button", name="Preview matches", exact=True).click()
+        with page.expect_request("**/navigation-preview"):
+            page.wait_for_timeout(1100)
+        assert held
+
+        source_continue(page, "Name")
+        form.get_by_role("button", name="Back", exact=True).click()
+        check_again = form.get_by_role("button", name="Check again", exact=True)
+        expect(check_again).to_be_enabled()
+        held.pop().fulfill(status=200, content_type="application/json",
+                           body='{"request_id":"navigation-preview","status":"pending"}')
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/navigation-preview")):
+            check_again.click()
+        expect(form.get_by_role("status").filter(has_text="1 matching item: 1 image and 0 videos.")).to_be_visible()
+        assert len(posts) == 1
+
+
 def test_reported_empty_worker_connections_explains_setup_prerequisite(page, registry):
     _seed(registry)
     MediaRepository(registry.db, registry.clock).worker_status(None, connection_ids=[])

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
@@ -102,6 +102,40 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   }, [value, editingName, rule]);
   const problems = useProblems(problemList);
 
+  // Preview is deliberately transient: it belongs to this open draft and exact
+  // filter payload, never to the saved Source draft itself.
+  const previewPayload = useMemo(() => {
+    const originalCapturedFrom = editingName !== null && value.capturedFrom === draft.seeded?.capturedFrom
+      ? stored?.spec?.captured_from ?? null : undefined;
+    const originalCapturedUntil = editingName !== null && value.capturedUntil === draft.seeded?.capturedUntil
+      ? stored?.spec?.captured_until ?? null : undefined;
+    const spec = buildSourceSpec({
+      ...value,
+      connectionRef: value.connectionRef.trim(),
+      expectedRevision: null,
+      originalCapturedFrom,
+      originalCapturedUntil,
+    });
+    const { expected_revision: _revision, new_name: _newName, ...payload } = spec;
+    return payload;
+  }, [value, editingName, draft.seeded, stored]);
+  const previewKey = JSON.stringify(previewPayload);
+  const [previewRequest, setPreviewRequest] = useState(null);
+  const [previewState, setPreviewState] = useState(null);
+  const previewGeneration = useRef(0);
+  const startedPreviewRequest = useRef(0);
+  const previewRequestId = useRef(0);
+  const requestPreview = useCallback((requestId = null) => {
+    previewRequestId.current += 1;
+    setPreviewRequest({
+      id: previewRequestId.current,
+      key: previewKey,
+      draftId: draft.id,
+      payload: previewPayload,
+      requestId,
+    });
+  }, [previewKey, draft.id, previewPayload]);
+
   // One confirmation for this section (discarding a draft); its `after` runs once done.
   const confirm = useConfirm(
     () => refs.newRef.current?.focus(),
@@ -127,6 +161,96 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   });
   const { step } = flow;
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Source" });
+
+  useEffect(() => {
+    if (previewRequest === null || previewRequest.id <= startedPreviewRequest.current ||
+        previewRequest.key !== previewKey || previewRequest.draftId !== draft.id ||
+        step !== "include" || draft.id === null) return undefined;
+    startedPreviewRequest.current = previewRequest.id;
+    const generation = ++previewGeneration.current;
+    const draftId = previewRequest.draftId;
+    let cancelled = false;
+    let timer = null;
+    let requestId = previewRequest.requestId;
+    let postPending = false;
+    const current = () => !cancelled && generation === previewGeneration.current && draft.isOpen(draftId);
+    const publish = (state) => {
+      if (current()) setPreviewState({ ...state, key: previewKey, draftId });
+    };
+    const wait = () => new Promise((resolve) => { timer = window.setTimeout(resolve, 1000); });
+    const run = async () => {
+      if (requestId === null) {
+        postPending = true;
+        publish({ busy: true, message: "Requesting a match preview…", result: null, error: false });
+        let response;
+        try {
+          response = await apiWrite("/v1/operator/source-previews", {
+            method: "POST",
+            body: previewRequest.payload,
+          });
+        } catch {
+          postPending = false;
+          publish({ busy: false, message: "The preview request outcome is unknown. Try again.", error: true });
+          return;
+        }
+        postPending = false;
+        if (!current()) return;
+        if (!response.ok || response.status !== 202 || !response.data?.request_id) {
+          const detail = response.error ? codeWords(response.error) : `HTTP ${response.status}`;
+          publish({ busy: false, message: `Could not request a preview: ${detail}.`, error: true });
+          return;
+        }
+        requestId = response.data.request_id;
+      }
+      publish({ busy: true, message: "Checking the photo library…", result: null, error: false });
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        await wait();
+        if (!current()) return;
+        let poll;
+        try {
+          poll = await apiWrite(`/v1/operator/source-previews/${encodeURIComponent(requestId)}`, { method: "GET" });
+        } catch {
+          publish({ busy: false, message: "Could not read the preview result. Try again.", error: true });
+          return;
+        }
+        if (!current()) return;
+        if (!poll.ok) {
+          const detail = poll.error ? codeWords(poll.error) : `HTTP ${poll.status}`;
+          publish({ busy: false, message: `Could not read the preview result: ${detail}.`, error: true });
+          return;
+        }
+        if (poll.data?.status === "complete") {
+          publish({ busy: false, result: poll.data, message: null, error: false });
+          return;
+        }
+        if (poll.data?.status === "failed") {
+          publish({ busy: false, message: `The preview failed: ${codeWords(poll.data.error ?? "unknown_error")}.`, error: true });
+          return;
+        }
+        if (poll.data?.status !== "pending") {
+          publish({ busy: false, message: "The preview returned an unknown status. Try again.", error: true });
+          return;
+        }
+      }
+      publish({ busy: false, timedOut: true, requestId, message: null, error: false });
+    };
+    run();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+      if (requestId !== null || postPending) {
+        setPreviewState((previous) => {
+          if (previous?.key !== previewKey || previous?.draftId !== draftId || !previous.busy) {
+            return previous;
+          }
+          return requestId !== null
+            ? { ...previous, busy: false, timedOut: true, requestId, message: null }
+            : { ...previous, busy: false, timedOut: false,
+              message: "The preview request outcome is unknown. Request a new preview when ready.", error: true };
+        });
+      }
+    };
+  }, [previewRequest, previewKey, step, draft.id]);
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) through the shared
   // card mutation, so the cards refresh exactly once after the write.
@@ -212,9 +336,34 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     });
   };
 
+  const previewMatches = previewState?.key === previewKey && previewState?.draftId === draft.id
+    ? previewState : null;
+  const invalidWindow = sourceProblems(value).some(({ field }) => field === "from" || field === "until");
+  const canPreview = value.connectionRef.trim() !== "" && !rule.selectedUnavailable &&
+    rule.shown !== "blocked" && !invalidWindow;
+  const previewHint = rule.selectedUnavailable
+    ? "Choose a connection currently configured in the media worker."
+    : rule.shown === "blocked"
+      ? "Configure a connection in the media worker before previewing."
+      : value.connectionRef.trim() === ""
+        ? rule.shown === "chooser"
+          ? "Choose a configured connection above before previewing."
+          : "Choose or enter a connection on the Name step before previewing."
+        : invalidWindow ? "Correct the capture date range before previewing." : null;
   const stepProps = { value, patch: draft.patch, problems };
   const views = {
-    include: () => <IncludeStep {...stepProps} />,
+    include: () => (
+      <IncludeStep
+        {...stepProps}
+        rule={rule}
+        preview={{
+          ...(previewMatches ?? {}),
+          canRequest: canPreview,
+          hint: previewHint,
+          onRequest: () => requestPreview(previewMatches?.timedOut ? previewMatches.requestId : null),
+        }}
+      />
+    ),
     name: () => (
       <NameStep
         {...stepProps}

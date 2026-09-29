@@ -249,6 +249,33 @@ def test_legacy_versions_group_and_api_reports_dependent_scene_ids(registry):
     assert runtime.read().export_state()["scenes"]["old"]["contributions"][0]["source_refs"] == ["legacy:3"]
 
 
+def test_source_preview_api_is_authenticated_and_only_enqueues_unsaved_query(registry):
+    queue = RecordingMediaQueue()
+    repository = MediaRepository(registry.db, registry.clock, queue=queue)
+    repository.worker_status(None, ("immich-main",))
+    app = create_app(registry.db, registry.clock, "a" * 32, media_queue=queue)
+    headers = {"Authorization": "Bearer " + "a" * 32}
+    query = {"connection_ref": "immich-main", "media_types": ["image"], "favorites": True}
+    with TestClient(app) as client:
+        refused = client.post("/v1/operator/source-previews", json=query)
+        assert refused.status_code == 401
+        accepted = client.post("/v1/operator/source-previews", headers=headers, json=query)
+        assert accepted.status_code == 202
+        receipt = accepted.json()
+        assert receipt["status"] == "pending"
+        result = client.get(f"/v1/operator/source-previews/{receipt['request_id']}", headers=headers)
+        assert result.status_code == 200
+        assert result.json() == {"request_id": receipt["request_id"], "status": "pending"}
+        unavailable = client.post("/v1/operator/source-previews", headers=headers,
+                                  json={**query, "connection_ref": "removed"})
+        assert unavailable.status_code == 409
+        assert unavailable.json() == {"error": "source_connection_unavailable"}
+    assert queue.previews[0][1] == receipt["request_id"]
+    assert repository.sources() == []
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"] == 1
+
+
 def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry):
     refs = ("foo", "foo:1", "foo:bar", "large:" + "9" * 22)
     with registry.db.transaction() as conn:

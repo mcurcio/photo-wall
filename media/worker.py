@@ -43,6 +43,8 @@ from media.models import (
     MediaLimits,
     OriginalAsset,
     RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
     SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
@@ -113,6 +115,7 @@ class WorkerLimits(Model):
 
 class SourceClient(Protocol):
     async def refresh(self, spec: SourceSpec) -> RefreshResult: ...
+    async def preview(self, query: SourcePreviewQuery) -> SourcePreviewResult: ...
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal: ...
     async def close(self) -> None: ...
 
@@ -330,7 +333,27 @@ class MediaWorker:
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
+        await _blocking(self.repository.maintain_source_previews)
         await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+
+    async def preview_source(self, request_id: str) -> None:
+        """Evaluate one unsaved query through the worker-owned Immich connection."""
+        query = await _blocking(self.repository.begin_source_preview, request_id)
+        if query is None:
+            return
+        try:
+            if query.connection_ref not in self.connections:
+                raise MediaError("connection_unknown", "incompatible")
+            async with asyncio.timeout(self.limits.refresh_seconds):
+                result = await self._client(query.connection_ref).preview(query)
+            await _blocking(self.repository.finish_source_preview, request_id, result)
+        except asyncio.CancelledError:
+            await _blocking(self.repository.fail_source_preview, request_id, "worker_cancelled")
+            raise
+        except Exception as error:
+            await _blocking(self.repository.fail_source_preview, request_id, self._code(error))
+        finally:
+            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def _close_clients(self):
         async def close(client):

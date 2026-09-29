@@ -29,7 +29,12 @@ from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
 from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
-from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigurationReceipt
+from central.media_ports import (
+    MediaApplication,
+    RefreshReceipt,
+    SourceConfigurationReceipt,
+    SourcePreviewReceipt,
+)
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
@@ -57,7 +62,7 @@ from contracts.models import (
     Readiness,
 )
 from contracts.time import Clock, SystemClock
-from media.models import SourceSpec
+from media.models import SourcePreviewQuery, SourceSpec
 
 LOG = logging.getLogger("central.app")
 
@@ -729,6 +734,15 @@ def create_app(
     )
     def refresh_source(source_ref: Identifier):
         return media_application.request_refresh(source_ref)
+
+    @app.post("/v1/operator/source-previews", dependencies=[Depends(admin)],
+              status_code=202, response_model=SourcePreviewReceipt)
+    def request_source_preview(query: SourcePreviewQuery):
+        return media_application.request_source_preview(query)
+
+    @app.get("/v1/operator/source-previews/{request_id}", dependencies=[Depends(admin)])
+    def source_preview(request_id: Identifier):
+        return media_application.source_preview(request_id)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):

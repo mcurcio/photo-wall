@@ -29,10 +29,8 @@ def canonical_uuid(value: str) -> str:
         raise ValueError("invalid UUID") from None
 
 
-class SourceSpec(Model):
+class SourceQuery(Model):
     model_config = ConfigDict(populate_by_name=True)
-    schema_version: Literal[1] = Field(default=1, alias="schema")
-    source_ref: Identifier
     connection_ref: Identifier
     favorites: StrictBool | None = None
     captured_from: Instant | None = None
@@ -58,6 +56,29 @@ class SourceSpec(Model):
         if (self.captured_from is not None and self.captured_until is not None
                 and self.captured_from >= self.captured_until):
             raise ValueError("capture interval must increase")
+        return self
+
+
+class SourceSpec(SourceQuery):
+    """A persistent Source identity plus its validated live query."""
+
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    source_ref: Identifier
+
+
+class SourcePreviewQuery(SourceQuery):
+    """An unsaved query that may be evaluated without a persistent Source."""
+
+
+class SourcePreviewResult(Model):
+    count: Count
+    image_count: Count
+    video_count: Count
+
+    @model_validator(mode="after")
+    def totals_match(self) -> Self:
+        if self.count != self.image_count + self.video_count:
+            raise ValueError("preview counts do not add up")
         return self
 
 

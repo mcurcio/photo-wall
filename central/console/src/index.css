@@ -2159,6 +2159,26 @@ label {
   display: none;
 }
 
+.source-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.source-preview h3,
+.source-preview p {
+  margin: 0;
+}
+
+.source-preview__note {
+  color: var(--fg-muted);
+  font-size: 0.9em;
+}
+
 
 /* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
    per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */

@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 Unsaved Source match preview](2026-09-29-unsaved-source-preview.md):
+  worker-backed bounded match counts before save, distinct failure and empty
+  states, draft-safe console polling, and local verification limits.
 - [2026-09-29 Frame-to-Scene handoff and refreshed candidates](2026-09-29-frame-to-scene-and-candidates.md):
   commissioned Frame content action, explicit fresh Scene target, preserved
   existing drafts, and post-refresh compatible media rereads, with local

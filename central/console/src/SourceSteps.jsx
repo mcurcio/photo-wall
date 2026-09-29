@@ -93,8 +93,8 @@ function InputField({
  *
  * @param {{name: "criteria"|"preview"}} props
  */
-export function LibrarySlot({ name }) {
-  return <div className={`source-flow__slot source-flow__slot--${name}`} data-slot={name} />;
+export function LibrarySlot({ name, children = null }) {
+  return <div className={`source-flow__slot source-flow__slot--${name}`} data-slot={name}>{children}</div>;
 }
 
 /**
@@ -104,7 +104,7 @@ export function LibrarySlot({ name }) {
  *
  * @param {StepProps} props
  */
-export function IncludeStep({ value, patch, problems }) {
+export function IncludeStep({ value, patch, problems, preview, rule }) {
   return (
     <>
       <div className="source-flow__criteria">
@@ -143,7 +143,31 @@ export function IncludeStep({ value, patch, problems }) {
         />
         <LibrarySlot name="criteria" />
       </div>
-      <LibrarySlot name="preview" />
+      <LibrarySlot name="preview">
+        <section className="source-preview" aria-label="Photo match preview">
+          <h3>Preview matches</h3>
+          {rule?.shown === "chooser" && (
+            <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
+          )}
+          {preview?.message && <p role={preview.error ? "alert" : "status"}>{preview.message}</p>}
+          {preview?.result && (
+            <p role="status">
+              {preview.result.count === 0
+                ? "No photos or videos match these filters."
+                : `${preview.result.count} matching ${preview.result.count === 1 ? "item" : "items"}: ${preview.result.image_count} ${preview.result.image_count === 1 ? "image" : "images"} and ${preview.result.video_count} ${preview.result.video_count === 1 ? "video" : "videos"}.`}
+            </p>
+          )}
+          {preview?.timedOut && <p role="status">The preview is still processing. You can request it again.</p>}
+          <p className="source-preview__note">A match preview checks the library query. It does not mean the items are prepared or ready to show.</p>
+          <button type="button" disabled={preview?.busy || !preview?.canRequest} onClick={preview?.onRequest}>
+            {preview?.busy ? "Checking matches…" : preview?.timedOut ? "Check again" : "Preview matches"}
+          </button>
+          {!preview?.canRequest && !preview?.message && preview?.hint && <p>{preview.hint}</p>}
+          {rule?.shown === "field" && value.connectionRef.trim() !== "" && (
+            <p className="source-preview__note">Central cannot verify this connection name yet; the worker will check it.</p>
+          )}
+        </section>
+      </LibrarySlot>
     </>
   );
 }
@@ -156,7 +180,7 @@ export function IncludeStep({ value, patch, problems }) {
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
  */
-function ConnectionChooser({ value, patch, problems, rule }) {
+export function ConnectionChooser({ value, patch, problems, rule }) {
   // A worker report can arrive while a legacy manual-entry draft is open.
   // Once the list is known, keep its saved value visible as unavailable and
   // make the chooser usable again instead of selecting a removed "Another" option.
