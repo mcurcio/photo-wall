@@ -721,6 +721,8 @@ def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, m
             await asyncio.wait_for(steady.wait(), 10)
             assert find.calls == 2
             assert len(server.proofs) == 1
+            assert "retrying" in service.renderer.central_link_history
+            assert service.renderer.central_link_history[-1] == "reachable"
         finally:
             service.stop()
             await asyncio.wait_for(task, 10)
@@ -803,6 +805,8 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             websocket_connect=False, health_path=None, boot_context=boot_context(),
         )
         try:
+            assert service.central_link_state == service.renderer.central_link_state == "connecting"
+            assert service.renderer.configuration_received is False
             await service.locate_central()
             await service.enroll()
             assert service.renderer.unbound_outputs == ()
@@ -818,6 +822,19 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             await service.poll_state()
             assert service.renderer.unbound_outputs == ("hdmi1",)
             assert service.renderer.enrolled_player_id == server.player_id
+            assert service.central_link_state == service.renderer.central_link_state == "reachable"
+            assert service.renderer.configuration_received is True
+
+            service._set_central_link_state("retrying")
+            assert service.renderer.central_link_state == "retrying"
+            assert service.renderer.unbound_outputs == ("hdmi1",)
+            service.config = service.config.model_copy(update={"base_running_tag": "a" * 64})
+            await service._report_base_health()
+            assert any(request.url.path == "/v1/player/base-health" for request in server.requests)
+            assert service.renderer.central_link_state == "retrying"
+            await service.poll_state()
+            assert service.central_link_state == service.renderer.central_link_state == "reachable"
+
             readiness, _ = service._feedback()
             assert readiness.prepared == readiness.secured == ()
             assert service.renderer.presentations == []

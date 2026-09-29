@@ -3,6 +3,9 @@
 - [2026-09-29 Output identification request](2026-09-29-output-identification.md):
   15-second central request and Player banner contract, with focused
   PostgreSQL-backed REST/WebSocket tests and explicit physical/Kubernetes limits.
+- [2026-09-29 Show now Source freshness and Player Central-link diagnostic](2026-09-29-show-now-source-freshness-and-player-link.md):
+  Central catalog freshness and request-receipt wording, plus unbound Player
+  link-state diagnostics, with focused browser/Player results and qualification limits.
 - [2026-09-29 Unsaved Source match preview](2026-09-29-unsaved-source-preview.md):
   worker-backed bounded match counts before save, distinct failure and empty
   states, draft-safe console polling, and local verification limits.

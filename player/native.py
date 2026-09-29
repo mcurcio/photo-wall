@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from player.geometry import cover_rect, homography, inverse
 from player.rendering import (
@@ -109,13 +109,23 @@ def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
 
 
 def diagnostic_text(output_id: str, player_id: str | None = None,
-                    serial: str | None = None) -> str:
+                    serial: str | None = None,
+                    central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting",
+                    configuration_received: bool = False) -> str:
     """Local equipment status, never an authored Scene or playback claim."""
     lines = ["PHOTO WALL", "OS and Player running", f"Output {output_id}"]
-    if player_id is None:
-        lines.append("Central: connecting")
+    if central_link_state == "retrying":
+        link = ("Central: retrying; last configuration received" if configuration_received
+                else "Central: retrying; no configuration received")
+    elif central_link_state == "reachable":
+        link = ("Central: reachable; configuration received" if configuration_received
+                else "Central: reachable; awaiting configuration")
     else:
-        lines.extend(("Central: enrolled; configuration received", "No Frame assigned"))
+        link = ("Central: connecting; last configuration received" if configuration_received
+                else "Central: connecting")
+    lines.append(link)
+    if player_id is not None:
+        lines.append("No Frame assigned")
         lines.append(f"Player p-…{player_id[-8:]}")
     if serial:
         lines.append(f"Serial {serial}")
@@ -323,14 +333,17 @@ class NativeRenderer:
             window.fullscreen()
             area.queue_render()
 
-    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str) -> None:
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
+                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
+                            configuration_received: bool = True) -> None:
         """Show enrollment diagnostics only on connected Outputs without a binding."""
         self._thread()
         unbound = set(output_ids)
         for output_id, surface in self._surfaces.items():
             if output_id in unbound:
                 surface.diagnostic_label.set_text(diagnostic_text(
-                    output_id, player_id, self._serial_label))
+                    output_id, player_id, self._serial_label, central_link_state,
+                    configuration_received))
                 surface.diagnostic.show()
             else:
                 surface.diagnostic.hide()

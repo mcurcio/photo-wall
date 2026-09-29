@@ -418,6 +418,9 @@ class PlayerService:
         self._base_health_epoch: int | None = None
         self._base_health_sequence_epoch: int | None = None
         self._base_health_sequence = 0
+        self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
+        self._configuration_received = False
+        self._unbound_outputs = tuple(output.output_id for output in outputs if output.connected)
         self._identify_key: tuple[str, int] | None = None
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
@@ -426,6 +429,22 @@ class PlayerService:
         if self.last_fault != code:
             LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
         self.last_fault, self.last_fault_detail = code, detail
+
+    def _render_unbound_diagnostic(self) -> None:
+        """Publish Central-link context only on known unbound outputs."""
+        self._main()
+        registration = self.registration
+        self.renderer.set_unbound_outputs(
+            self._unbound_outputs,
+            registration.player_id if registration is not None else None,
+            self.central_link_state,
+            self._configuration_received,
+        )
+
+    def _set_central_link_state(self, state: Literal["connecting", "reachable", "retrying"]):
+        self._main()
+        self.central_link_state = state
+        self._render_unbound_diagnostic()
 
     def _uplink_fault(self, code: str, error: UplinkError) -> None:
         """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
@@ -449,6 +468,13 @@ class PlayerService:
 
     async def dispatch(self, callback):
         return await asyncio.wrap_future(self.dispatcher(callback))
+
+    async def _mark_central_retrying(self) -> None:
+        """Best-effort UI update; never let a diagnostic dispatch replace a cycle error."""
+        try:
+            await self.dispatch(lambda: self._set_central_link_state("retrying"))
+        except Exception as error:
+            LOG.debug("player: could not publish Central retry state: %s", type(error).__name__)
 
     @property
     def session(self) -> Session:
@@ -658,9 +684,12 @@ class PlayerService:
                     self.fault("stale_commit")
                 self._seen_commits.append(commit)
             bound = {binding.output_id for binding in configuration.bindings}
-            unbound = tuple(output.output_id for output in self.outputs
-                            if output.connected and output.output_id not in bound)
-            self.renderer.set_unbound_outputs(unbound, configuration.player_id)
+            self._unbound_outputs = tuple(output.output_id for output in self.outputs
+                                          if output.connected and output.output_id not in bound)
+            self._configuration_received = True
+            self.central_link_state = "reachable"
+            self._render_unbound_diagnostic()
+            unbound = self._unbound_outputs
             self._apply_identify_output(state.identify_output, unbound,
                                         configuration.authority_epoch)
             self.tick_main()
@@ -1004,9 +1033,13 @@ class PlayerService:
                     if self._session is not None:
                         self._session = self._session.unregistered()
                     self.fault("registration_required")
+                    if not self._stop.is_set():
+                        await self._mark_central_retrying()
                 except Exception as error:
                     self._located = False
                     self._fault_for(error)
+                    if not self._stop.is_set():
+                        await self._mark_central_retrying()
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
@@ -1055,7 +1088,8 @@ class UnavailableRenderer:
     def prepare(self, layer):
         return PrepareResult("failed", "capacity")
 
-    def set_unbound_outputs(self, output_ids, player_id):
+    def set_unbound_outputs(self, output_ids, player_id, central_link_state,
+                            configuration_received):
         pass
 
     def set_identify_output(self, output_id):

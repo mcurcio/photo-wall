@@ -2207,6 +2207,24 @@ label {
   margin: 8px 0;
 }
 
+.show-now__source-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.show-now__source-list li + li {
+  margin-top: 8px;
+}
+
+.show-now__source-list button {
+  margin-left: 8px;
+  padding: 4px 8px;
+}
+
+.show-now__source-list p {
+  margin: 4px 0 0;
+}
+
 .run-cards {
   margin-top: 16px;
 }

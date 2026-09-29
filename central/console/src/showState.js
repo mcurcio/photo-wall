@@ -228,6 +228,13 @@ export function runRows(snapshot) {
   };
 }
 
+/** Walk every stored contribution, including the outro and inline child Scenes. */
+function visitSceneContributions(scene, visit) {
+  for (const entry of scene?.contributions ?? []) visit(entry);
+  for (const entry of scene?.outro_contributions ?? []) visit(entry);
+  for (const child of scene?.children ?? []) visitSceneContributions(child.scene, visit);
+}
+
 /**
  * The frames a stored Scene reaches: its own and its outro's Contributions and, through
  * its child Scenes, theirs (central/runtime.py `Scene.participants`), sorted.
@@ -237,19 +244,29 @@ export function runRows(snapshot) {
  */
 export function sceneFrames(scene) {
   const frames = new Set();
-  const visit = (node) => {
-    for (const entry of [...(node?.contributions ?? []), ...(node?.outro_contributions ?? [])]) {
-      const frameId = frameOf(entry.target);
-      if (frameId !== null) {
-        frames.add(frameId);
-      }
-    }
-    for (const child of node?.children ?? []) {
-      visit(child.scene);
-    }
-  };
-  visit(scene);
+  visitSceneContributions(scene, (entry) => {
+    const frameId = frameOf(entry.target);
+    if (frameId !== null) frames.add(frameId);
+  });
   return [...frames].sort();
+}
+
+/** Saved live Source refs throughout a Scene, unique and sorted. Authored media has none. */
+export function sceneSourceRefs(scene) {
+  const refs = new Set();
+  visitSceneContributions(scene, (entry) => {
+    for (const ref of entry.source_refs ?? []) refs.add(ref);
+  });
+  return [...refs].sort();
+}
+
+/** Whether any contribution keeps hand-picked asset references. */
+export function sceneHasAuthoredMedia(scene) {
+  let authored = false;
+  visitSceneContributions(scene, (entry) => {
+    if ((entry.asset_refs ?? []).length > 0) authored = true;
+  });
+  return authored;
 }
 
 /**

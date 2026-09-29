@@ -34,13 +34,19 @@ The existing readiness thresholds remain: uncertainty is `RTT/2 + abs(offset)` a
 
 After current configuration is reconciled, the service atomically writes `/run/photo-wall/player/service-health.json`. The public sample includes Linux boot ID, monotonic sample time, current player/session identity, a `persistence` field, health and reason, and clock diagnostics. It contains no key or token. As implemented, the health sample's `persistence` field is currently always published as `volatile`, independent of the boot context's own `persistence` (which is `persistent` for a flashed D0 Player — see [Startup and enrollment](#startup-and-enrollment)); this is a known discrepancy worth verifying against intent rather than a documented guarantee. Healthy requires an Executor, reconciled configuration, a safe current clock mapping, and available renderer capacity; an unbound Player with healthy connected Outputs may be healthy.
 
-The service sends each accepted configuration's connected, unbound Output IDs to
-the Renderer before the next Executor tick. The Renderer owns the local status
-page and never treats it as Scene content or playback evidence. When the Pi
-provisioner hands forward a base-running tag on the per-device `.deb` path, the
-service posts base-health; a response with `accepted: false` does not count as
-reported and a retry uses a higher sequence number. The default global `.deb`
-path hands forward no tag and sends no base-health report.
+The service sends connected, unbound Output IDs and its local Central-link
+diagnostic state to the Renderer on the Player's owning thread. The state is
+`connecting` before configuration has been applied, `reachable` after a
+successful state exchange, or `retrying` following a failed control exchange.
+The retrying wording records whether this process has received configuration
+before. It describes the last observed control exchange; it is not boot health,
+current readiness, or evidence that the panel displays content. Only connected
+unbound Outputs show the diagnostic, so bound content is unaffected. The
+Renderer owns the local status page's presentation but not link-state decisions.
+When the Pi provisioner hands forward a base-running tag on the per-device
+`.deb` path, the service posts base-health; a response with `accepted: false`
+does not count as reported and a retry uses a higher sequence number. The
+default global `.deb` path hands forward no tag and sends no base-health report.
 
 The journal line for faults is `player fault: <code> <detail>`, logged once per change of code. Network failures use `<cause>_<reason>` codes (e.g. `tls_untrusted`, `time_not_yet_valid`, `redirect_unexpected`, `connect_refused`, `dns_failed`, `central_error`, `http_status`, `transfer_short`), and the detail is `cause=... reason=... host=... detail=...` plus the stage-1 clock record for time and untrusted-TLS failures. Service codes (e.g. `registration_required`, `media_download`, `clock_probe`) are unchanged.
 

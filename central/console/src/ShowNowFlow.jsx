@@ -13,6 +13,7 @@ import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
+import { mediaNow, sourceState } from "./mediaHealth.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
@@ -32,10 +33,14 @@ import {
   protectingRuns,
   protectorOf,
   sceneFrames,
+  sceneHasAuthoredMedia,
   sceneProtectedFrames,
+  sceneSourceRefs,
   underneathSentence,
 } from "./showState.js";
+import { sourceName } from "./sourceNames.js";
 import { FrameChips } from "./TargetPicker.jsx";
+import { sourceRefreshMessage, useSourceRefresh } from "./useSourceRefresh.js";
 
 const EMPTY = {};
 
@@ -91,7 +96,11 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const refs = useFlowRefs();
   const unknown = outcome !== null && "unknown" in outcome;
 
-  const frames = useMemo(() => sceneFrames(definitions[value.sceneId]), [definitions, value.sceneId]);
+  const scene = definitions[value.sceneId];
+  const frames = useMemo(() => sceneFrames(scene), [scene]);
+  const sourceRefs = useMemo(() => sceneSourceRefs(scene), [scene]);
+  const authoredMedia = useMemo(() => sceneHasAuthoredMedia(scene), [scene]);
+  const sourceRefresh = useSourceRefresh(JSON.stringify([value.sceneId, scene?.revision ?? null]));
   const covering = coveringPriority(snapshot, frames);
   // Whether a live Run covers the frames at all: one may itself have priority 0.
   const covered = coveringRuns(snapshot, frames).length > 0;
@@ -189,7 +198,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
     });
 
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
-  const stepProps = { value, problems, edit, snapshot, frames };
+  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh };
   const views = {
     scene: () => (
       <SceneStep
@@ -264,7 +273,7 @@ function SceneFramesValue({ snapshot, frames }) {
  * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
  * is a Scene handed over while the draft keeps its own: a button offers it instead.
  */
-function SceneStep({ value, problems, edit, snapshot, frames, definitions, offered, onTake }) {
+function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh, definitions, offered, onTake }) {
   return (
     <>
       <OfferedScene
@@ -283,12 +292,15 @@ function SceneStep({ value, problems, edit, snapshot, frames, definitions, offer
         onChange={(sceneId) => edit({ sceneId }, "scene")}
       />
       {value.sceneId !== "" && (
-        <dl className="record">
-          <dt>Frames</dt>
-          <dd>
-            <SceneFramesValue snapshot={snapshot} frames={frames} />
-          </dd>
-        </dl>
+        <>
+          <dl className="record">
+            <dt>Frames</dt>
+            <dd>
+              <SceneFramesValue snapshot={snapshot} frames={frames} />
+            </dd>
+          </dl>
+          <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+        </>
       )}
     </>
   );
@@ -324,6 +336,9 @@ function ReviewStep({
   edit,
   snapshot,
   frames,
+  sourceRefs,
+  authoredMedia,
+  sourceRefresh,
   definitions,
   covering,
   covered,
@@ -359,6 +374,9 @@ function ReviewStep({
           { label: "If it is already running", field: "repeat", value: REPEAT_LABELS[value.repeat] },
         ]}
       />
+      {value.sceneId !== "" && (
+        <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+      )}
       <Advanced
         summary={`Priority ${priority} · ${REPEAT_LABELS[value.repeat]}`}
         open={advanced.open}
@@ -403,6 +421,53 @@ function ReviewStep({
         </fieldset>
       </Advanced>
     </>
+  );
+}
+
+/** Current catalog freshness for the selected Scene's saved live Source refs. */
+function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
+  const sources = snapshot?.media?.sources ?? [];
+  const now = mediaNow(snapshot);
+  const rows = refs.map((ref) => {
+    const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
+    return { ref, source, state: source === null ? null : sourceState(source, now, false) };
+  });
+  const needsAttention = rows.some(({ state }) => state === null || state.severity !== "ok");
+  return (
+    <section
+      className={`notice show-now__sources${needsAttention ? " notice--warn" : ""}`}
+      aria-label="Saved Source freshness"
+    >
+      <p><strong>Saved Source freshness</strong> is Central's latest catalog status. It does not confirm prepared media or visible playback.</p>
+      {refs.length === 0 ? (
+        <p>{authoredMedia
+          ? "This Scene uses hand-picked media; refreshing a Source does not change its chosen items."
+          : "This Scene has no live Sources to refresh."}</p>
+      ) : (
+        <ul className="show-now__source-list">
+          {rows.map(({ ref, source, state }) => {
+            const feedback = refresh.feedback[ref] ?? null;
+            const message = sourceRefreshMessage(feedback, source, state);
+            return (
+              <li key={ref}>
+                <span>{sourceName(source ?? ref)}: {state?.label ?? "Current Source status is unavailable."}</span>
+                {state !== null && state.state !== "ok" && (
+                  <button
+                    type="button"
+                    disabled={refresh.pending !== null}
+                    aria-label={`Refresh ${sourceName(source)}`}
+                    onClick={() => refresh.run(ref)}
+                  >
+                    {refresh.pending === ref ? "Requesting refresh…" : "Refresh Source"}
+                  </button>
+                )}
+                {message !== null && <p role="status">{message}</p>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 

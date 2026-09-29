@@ -27,12 +27,19 @@ def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
     assert "Central: connecting" in startup
     assert "enrolled" not in startup
     enrolled = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
-                               serial="0123456789abcdef")
-    assert "Central: enrolled; configuration received" in enrolled
+                               serial="0123456789abcdef", central_link_state="reachable",
+                               configuration_received=True)
+    assert "Central: reachable; configuration received" in enrolled
     assert "No Frame assigned" in enrolled
     assert "Output HDMI-A-1" in enrolled
     assert "Player p-…aaaaaaaa" in enrolled
     assert "Serial 0123456789abcdef" in enrolled
+    retrying = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+        central_link_state="retrying", configuration_received=True)
+    assert "Central: retrying; last configuration received" in retrying
+    before_first_config = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+        central_link_state="retrying", configuration_received=False)
+    assert "Central: retrying; no configuration received" in before_first_config
 
 
 def test_native_diagnostic_is_hidden_for_bound_outputs():
@@ -59,11 +66,11 @@ def test_native_diagnostic_is_hidden_for_bound_outputs():
         "HDMI-A-1": SimpleNamespace(diagnostic=first, diagnostic_label=Widget()),
         "HDMI-A-2": SimpleNamespace(diagnostic=second, diagnostic_label=Widget()),
     }
-    renderer.set_unbound_outputs(("HDMI-A-1",), "p-" + "a" * 32)
+    renderer.set_unbound_outputs(("HDMI-A-1",), "p-" + "a" * 32, "reachable", True)
     assert first.visible
     assert not second.visible
     assert "No Frame assigned" in renderer._surfaces["HDMI-A-1"].diagnostic_label.text
-    renderer.set_unbound_outputs((), "p-" + "a" * 32)
+    renderer.set_unbound_outputs((), "p-" + "a" * 32, "reachable", True)
     assert not first.visible and not second.visible
 
 

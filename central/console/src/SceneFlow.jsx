@@ -31,9 +31,8 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
-import { sourceRefreshPath } from "./mediaApi.js";
-import { useMutate } from "./useMutate.js";
-import { codeWords, mediaNow } from "./mediaHealth.js";
+import { mediaNow } from "./mediaHealth.js";
+import { useSourceRefresh } from "./useSourceRefresh.js";
 
 const EMPTY = {};
 
@@ -116,9 +115,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
-  const [refreshingSource, setRefreshingSource] = useState(/** @type {string|null} */ (null));
-  const [refreshFeedback, setRefreshFeedback] = useState(/** @type {object|null} */ (null));
-  const refreshRequest = useRef(0);
+  const sourceRefresh = useSourceRefresh(JSON.stringify([draft.id, value.sourceRef]));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const refs = useFlowRefs();
@@ -187,46 +184,14 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   );
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
-  const mutate = useMutate();
   const sourceReadiness = {
     source: currentSource,
     historicalRef: value.sourceRef !== "" && currentSource === null,
     now,
-    feedback: refreshFeedback?.sourceRef === value.sourceRef ? refreshFeedback : null,
-    refreshing: refreshingSource === value.sourceRef,
+    feedback: sourceRefresh.feedback[value.sourceRef] ?? null,
+    refreshing: sourceRefresh.pending === value.sourceRef,
     onManage: () => navigate({ section: "sources" }),
-    onRefresh: async () => {
-      const sourceRef = value.sourceRef;
-      const requestId = ++refreshRequest.current;
-      setRefreshingSource(sourceRef);
-      setRefreshFeedback(null);
-      try {
-        // Convert transport failures into a result so useMutate still performs its
-        // single Plane A refresh and the caller can report the outcome as unknown.
-        const result = await mutate(async () => {
-          try {
-            return await apiWrite(sourceRefreshPath(sourceRef), { method: "POST" });
-          } catch {
-            return { ok: false, status: 0, error: null, data: null };
-          }
-        });
-        // A later Scene draft or request owns the status line now.
-        if (requestId !== refreshRequest.current) return;
-        if (result.ok && result.status === 202) {
-          setRefreshFeedback({
-            sourceRef,
-            requestedRevision: result.data?.requested_revision ?? null,
-            message: "Refresh requested. The status will update when the media worker finishes.",
-          });
-        } else if (result.status === 0 || result.status >= 500) {
-          setRefreshFeedback({ sourceRef, message: "The refresh request outcome is unknown. Check the Source status before retrying." });
-        } else {
-          setRefreshFeedback({ sourceRef, message: `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.` });
-        }
-      } finally {
-        if (requestId === refreshRequest.current) setRefreshingSource(null);
-      }
-    },
+    onRefresh: () => sourceRefresh.run(value.sourceRef),
   };
 
   // A Save Central did not answer may have stored its id: while the draft is the one it
@@ -277,12 +242,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     problems,
     confirm,
     onOpened: () => {
-      refreshRequest.current += 1;
       setVanished(null);
       setReloaded(null);
       setSaved(null);
-      setRefreshFeedback(null);
-      setRefreshingSource(null);
     },
   });
   const { place, step, focus } = flow;

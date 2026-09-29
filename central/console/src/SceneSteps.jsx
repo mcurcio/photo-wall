@@ -10,6 +10,7 @@ import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
+import { sourceRefreshMessage } from "./useSourceRefresh.js";
 
 /**
  * The Scene flow's step views (flow design §7 J4): views over the draft that
@@ -346,11 +347,7 @@ function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onR
           : state.state === "overdue"
             ? "The catalog may be stale, so this Scene may not show the latest media."
             : "No catalog has been loaded yet, so this Scene may have nothing to show.";
-  const completed = source !== null && feedback?.requestedRevision != null &&
-    Number(source.refresh_completed_revision ?? 0) >= feedback.requestedRevision;
-  let message = feedback?.message ?? null;
-  if (state?.state === "ok" && feedback?.requestedRevision == null) message = null;
-  if (completed) message = `Refresh finished. Current Source status: ${state.label}.`;
+  const message = sourceRefreshMessage(feedback, source, state);
   return (
     <section className={`notice scene-flow__source-readiness${state !== null && state.severity !== "ok" ? " notice--warn" : ""}`} aria-label="Source media status">
       <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>

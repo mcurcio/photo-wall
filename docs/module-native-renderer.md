@@ -20,12 +20,15 @@ IDs before their first content buffer. Application code applies a complete contr
 immediate Executor tick in one GLib callback.
 
 Each connected Output starts with an opaque, full-Output Photo Wall diagnostic
-above the GLArea. Before enrollment it says the OS and Player are running and
-Central is connecting. After an authenticated configuration arrives,
+above the GLArea. PlayerService supplies the link label and configuration-history
+flag: `connecting`, `reachable` with configuration received, or `retrying` with
+either "last configuration received" or "no configuration received." The label
+describes that Player process's last observed control exchange; it does not say
+the Player is boot-healthy or ready, and it is not evidence of visible content.
 `set_unbound_outputs` keeps the diagnostic only on connected Outputs absent from
-that configuration's bindings and identifies their Output and Player. Bound
-Outputs hide it before the Executor's next tick, including when authored content
-is black. This equipment diagnostic is not a Scene layer or presentation
+the accepted configuration's bindings and identifies their Output and Player.
+Bound Outputs hide it before the Executor's next tick, including when authored
+content is black. This equipment diagnostic is not a Scene layer or presentation
 acknowledgment. Central can also direct an unbound Output to show a short-lived,
 high-contrast yellow **IDENTIFY THIS OUTPUT • `<output id>`** banner. The banner
 is visible only on the requested surface. PlayerService owns its local monotonic
