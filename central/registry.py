@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import uuid
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -81,6 +82,8 @@ class FrameProfileReplacement(Model):
 
 
 class Registry:
+    IDENTIFY_OUTPUT_TTL_SECONDS = 15
+
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
 
@@ -176,6 +179,43 @@ class Registry:
             if not row:
                 raise RegistryError("unauthorized", 401)
             return row
+
+    def identify_output(self, player_id: str, output_id: str) -> dict:
+        """Ask one active, connected, unbound Output to identify itself briefly."""
+        now = self.clock.utc()
+        request_id = uuid.uuid4()
+        expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
+        with self.db.transaction() as conn:
+            player = conn.execute(
+                "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
+                (player_id,),
+            ).fetchone()
+            if not player:
+                raise RegistryError("unknown_or_retired_player", 404)
+            output = conn.execute(
+                "SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s FOR UPDATE",
+                (player_id, output_id),
+            ).fetchone()
+            if not output:
+                raise RegistryError("unknown_output", 404)
+            if not output["observation"].get("connected", False):
+                raise RegistryError("output_disconnected")
+            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s AND output_id=%s",
+                            (player_id, output_id)).fetchone():
+                raise RegistryError("output_bound")
+            conn.execute(
+                "INSERT INTO player_output_identification(player_id,request_id,output_id,"
+                "authority_epoch,created_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(player_id) DO UPDATE SET request_id=EXCLUDED.request_id,"
+                "output_id=EXCLUDED.output_id,authority_epoch=EXCLUDED.authority_epoch,"
+                "created_at=EXCLUDED.created_at,expires_at=EXCLUDED.expires_at",
+                (player_id, request_id, output_id, player["authority_epoch"], now, expires_at),
+            )
+            self._audit(conn, "output_identification_requested", player_id,
+                        {"request_id": str(request_id), "output_id": output_id,
+                         "authority_epoch": player["authority_epoch"]})
+        return {"request_id": str(request_id), "output_id": output_id,
+                "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
         try:

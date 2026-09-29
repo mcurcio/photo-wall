@@ -111,6 +111,67 @@ def test_pending_player_appears_in_the_pending_rail(page, registry):
         ).to_be_visible()
 
 
+def test_pending_output_identify_requests_exact_output_and_explains_no_display(page, registry):
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    _disconnect_output(registry, player_id, "HDMI-A-2")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        outputs = pending.get_by_role("list", name=f"Outputs of {player_id}", exact=True)
+        identify = outputs.get_by_role(
+            "button", name="Identify display HDMI-A-1", exact=True)
+        no_display = outputs.get_by_role(
+            "button", name="Identify display HDMI-A-2", exact=True)
+        expect(identify).to_be_enabled()
+        expect(no_display).to_be_disabled()
+        expect(no_display).to_have_accessible_description(
+            "Connect a display and restart the Player, then Refresh Equipment.")
+
+        gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
+        gate.holding = True
+        identify.click()
+        gate.wait_held()
+        assert gate.seen == 1
+        assert gate.held[0].request.url.endswith(
+            f"/v1/operator/players/{player_id}/outputs/HDMI-A-1/identify")
+        expect(identify).to_be_disabled()  # a second click cannot duplicate the request
+        gate.release(status=202, content_type="application/json", body=json.dumps({
+            "request_id": "synthetic-request", "output_id": "HDMI-A-1",
+            "expires_at": registry.clock.utc() + 15,
+        }))
+        expect(outputs.get_by_role("status")).to_have_text(
+            "Identify requested for HDMI-A-1. Check the display; "
+            "this request expires in 15 seconds.")
+        expect(identify).to_be_enabled()
+
+
+@pytest.mark.parametrize("status, expected", [
+    (404, "This Output changed or the Player is no longer eligible. "
+          "Refresh Equipment before trying again."),
+    (409, "This Output changed or the Player is no longer eligible. "
+          "Refresh Equipment before trying again."),
+    (503, "The request outcome is unknown. Check the display before trying again."),
+])
+def test_pending_output_identify_failure_is_honest(page, registry, status, expected):
+    enroll(registry, count=1)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        identify = pending.get_by_role(
+            "button", name="Identify display HDMI-A-1", exact=True)
+        gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
+        gate.holding = True
+        identify.click()
+        gate.wait_held()
+        gate.release(status=status, content_type="application/json", body=json.dumps({
+            "error": {404: "unknown_output", 409: "output_disconnected"}.get(
+                status, "server_unavailable"),
+        }))
+        expect(pending.get_by_role("alert")).to_have_text(expected)
+        expect(identify).to_be_enabled()
+
+
 def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
     identity, _, _ = enroll(registry, count=1)  # a pending Player with HDMI-A-1
     _placed_frame(registry, "wall-1")

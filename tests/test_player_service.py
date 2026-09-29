@@ -41,6 +41,7 @@ from player.service import (
     MAX_JSON,
     BootContext,
     GLibDispatcher,
+    IdentifyOutput,
     PlayerConfig,
     PlayerService,
     ServiceError,
@@ -330,6 +331,53 @@ async def close(service):
     if service.cache:
         service.cache.close()
     service._worker.shutdown(wait=True, cancel_futures=True)
+
+
+def test_identify_output_deduplicates_deadline_and_clears_on_vanish_or_epoch(tmp_path):
+    asyncio.run(_identify_output_scenario(tmp_path))
+
+
+async def _identify_output_scenario(tmp_path):
+    service, _ = await rig(tmp_path)
+    try:
+        service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
+                                        height_px=1080, connected=True),)
+        config = PlayerConfiguration(player_id=service.registration.player_id,
+            authority_epoch=service.registration.authority_epoch,
+            configuration_revision=2, bindings=(), enabled_outputs=())
+        cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
+            authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
+        state = State(configuration=config, plan=None, commits=(), revocations=(),
+                      identify_output=cue)
+        service._apply_state(state)
+        renderer = service.renderer
+        deadline = service._identify_deadline
+        assert renderer.identify_output == "hdmi2"
+        assert deadline == service.clock.monotonic() + 10
+
+        service.clock.advance(3)
+        repeated = state.model_copy(update={
+            "identify_output": cue.model_copy(update={"remaining_seconds": 15})
+        })
+        service._apply_state(repeated)
+        assert service._identify_deadline == deadline
+
+        service.clock.advance(7)
+        service.tick_main()
+        assert renderer.identify_output is None
+        assert service._identify_deadline is None
+        service._apply_state(repeated)
+        assert renderer.identify_output is None
+        assert service._identify_deadline is None
+
+        service._apply_state(state.model_copy(update={"identify_output": None}))
+        service._apply_state(state)
+        assert renderer.identify_output == "hdmi2"
+
+        service._apply_identify_output(cue, ("hdmi2",), config.authority_epoch + 1)
+        assert renderer.identify_output is None
+    finally:
+        await close(service)
 
 
 # --- R1: the Player finds Central through find_central (design §2.3) -------------

@@ -37,6 +37,7 @@ from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from contracts.models import (
     Commit,
+    IdentifyOutput,
     Layer,
     Model,
     Observation,
@@ -531,6 +532,37 @@ class Coordinator:
         with self._transaction() as conn:
             self._players(conn)
             config = self._configuration(conn, player_id, epoch)
+            now = self.clock.utc()
+            identify = conn.execute(
+                "SELECT i.request_id,i.output_id,i.authority_epoch,i.expires_at,p.authority_epoch "
+                "AS current_epoch,p.retired_at,o.observation,"
+                "EXISTS(SELECT 1 FROM bindings b WHERE b.player_id=i.player_id "
+                "AND b.output_id=i.output_id) AS is_bound "
+                "FROM player_output_identification i JOIN players p ON p.id=i.player_id "
+                "LEFT JOIN outputs o ON o.player_id=i.player_id AND o.output_id=i.output_id "
+                "WHERE i.player_id=%s",
+                (player_id,),
+            ).fetchone()
+            identify_output = None
+            if identify:
+                remaining = identify["expires_at"] - now
+                connected = bool(identify["observation"] and
+                                 identify["observation"].get("connected", False))
+                if (identify["retired_at"] is None and identify["current_epoch"] == epoch
+                        and identify["authority_epoch"] == epoch and remaining > 0
+                        and connected and not identify["is_bound"]):
+                    identify_output = IdentifyOutput(
+                        request_id=str(identify["request_id"]),
+                        output_id=identify["output_id"],
+                        authority_epoch=identify["authority_epoch"],
+                        remaining_seconds=min(15.0, remaining),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM player_output_identification WHERE player_id=%s "
+                        "AND request_id=%s",
+                        (player_id, identify["request_id"]),
+                    )
             plan = self._current_plan(conn, player_id, epoch)
             if plan and (
                 plan.valid_until <= self.clock.utc()
@@ -591,6 +623,7 @@ class Coordinator:
                 "plan": plan,
                 "commits": commits,
                 "revocations": revocations,
+                "identify_output": identify_output,
             }
 
     def player_reports_lock_free(self) -> PlayerReports:

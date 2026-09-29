@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 Output identification request](2026-09-29-output-identification.md):
+  15-second central request and Player banner contract, with focused
+  PostgreSQL-backed REST/WebSocket tests and explicit physical/Kubernetes limits.
 - [2026-09-29 Unsaved Source match preview](2026-09-29-unsaved-source-preview.md):
   worker-backed bounded match counts before save, distinct failure and empty
   states, draft-safe console polling, and local verification limits.

@@ -538,6 +538,8 @@ def create_app(
                         "plan": state["plan"].model_dump(mode="json") if state["plan"] else None,
                         "commits": [c.model_dump(mode="json") for c in state["commits"]],
                         "revocations": [r.model_dump(mode="json") for r in state["revocations"]],
+                        "identify_output": (state["identify_output"].model_dump(mode="json")
+                                           if state["identify_output"] else None),
                     }
                 )
                 try:
@@ -687,6 +689,11 @@ def create_app(
     def retire(player_id: Identifier):
         registry.retire(player_id)
         return {"status": "retired"}
+
+    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify",
+              dependencies=[Depends(admin)])
+    def identify_output(player_id: Identifier, output_id: Identifier):
+        return registry.identify_output(player_id, output_id)
 
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():

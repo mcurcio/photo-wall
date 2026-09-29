@@ -509,9 +509,11 @@ Each group heading is a toggle showing its count, and its open or closed state s
 
 The serial and boot outcome come from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the roster says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
 
-### Bind one Pi at a time
+### Identify an Output and bind it
 
-**Power on and bind one Pi at a time.** Connect and power the panel first, then power on the Pi, wait for it to appear under Pending, and bind it before powering on the next. Two Pis on the roster look alike apart from their reported serial and enrolment order, and the console has no "identify this screen" flash yet (deferred), so this ordering is how you tell them apart.
+You can power on more than one Pi before binding. In **Equipment**, each Pending Player's connected, free Output has an **Identify display** action. Use it to match a roster entry to the physical screen: Central queues a request for that exact Output, and the Player briefly shows a high-contrast **IDENTIFY THIS OUTPUT • `<output id>`** banner on it. The banner lasts at most 15 seconds. A new request for the same Player replaces its previous request.
+
+The console reports that the request was accepted by Central; it cannot confirm that a banner reached the panel. Check the physical screen yourself, then bind that Output to its persistent Frame. Identification requests expire, and Central stops delivering one if its Output becomes bound, disconnected, or the Player's authority changes. The action is disabled when the last enrollment report says no display was detected. Connect and power the display, restart the Player, and refresh Equipment before identifying or binding it.
 
 **Outputs with no display are not offered.** Displays are detected only when the Player starts. An Output whose panel was off or unplugged at that moment reads "No display detected at last Player start" and cannot be bound. Connect and power the display, then restart the Player; the Output becomes Free.
 

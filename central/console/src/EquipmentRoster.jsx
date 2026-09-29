@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
 import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
-import { bind } from "./equipmentApi.js";
+import { bind, identifyOutput } from "./equipmentApi.js";
 import {
   BOOT_FACTS_UNAVAILABLE,
   bootOutcomeLabel,
@@ -45,6 +45,9 @@ const NO_FRAMES = "No unbound frames. Draw one on the plan first.";
  *    Bind button. Choosing a Frame captures its generation, which the bind
  *    carries (the live snapshot is never read at click time). Once the write
  *    and its refresh land, `onNavigate` opens that Frame (App `navigateToFrame`).
+ *  - a pending Player's connected free Output offers Identify display even
+ *    before a Frame exists. No-display Outputs show a disabled action and a
+ *    reason; a response confirms only request acceptance, never presentation.
  *
  * Plane B (group and card disclosure, the Output-first picks, the open dialog)
  * lives here and survives polls. The ONE dialog sits at the roster's top
@@ -148,8 +151,29 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
     if (result.outcome === "done") {
       setNavigateTo(chosen.frameId);
     } else {
-      setKeyed(setMessages, key, result.message);
+      setKeyed(setMessages, key, { kind: "alert", text: result.message });
     }
+  };
+
+  const doIdentify = async (playerId, outputId) => {
+    const key = `${playerId}/${outputId}`;
+    if (busy !== null) {
+      return;
+    }
+    setBusy(key);
+    setKeyed(setMessages, key, null);
+    const result = await mutate(() => identifyOutput(playerId, outputId));
+    setBusy(null);
+    setKeyed(
+      setMessages,
+      key,
+      result.outcome === "done"
+        ? {
+            kind: "status",
+            text: `Identify requested for ${outputId}. Check the display; this request expires in 15 seconds.`,
+          }
+        : { kind: "alert", text: result.message },
+    );
   };
 
   const toggleCard = (playerId) =>
@@ -163,14 +187,34 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
       return next;
     });
 
-  const renderOutput = (player, entry) => {
+  const renderOutput = (player, entry, standing, cardIndex, outputIndex) => {
     const key = `${player.id}/${entry.outputId}`;
     const label = outputLabel(snapshot, bootFacts, player.id, entry.outputId);
     const chosen = picks.get(key);
     const message = messages.get(key);
+    const noDisplay = standing.state === "pending" && entry.state === "no-display";
+    const canIdentify = standing.state === "pending" && entry.state === "free";
+    const reasonId = `${ids}-identify-${cardIndex}-${outputIndex}`;
     return (
       <li key={entry.outputId} className={`roster__output roster__output--${entry.state}`}>
         <span className="roster__output-label">{label}</span>
+        {(canIdentify || noDisplay) && (
+          <span className="roster__identify">
+            <button
+              type="button"
+              disabled={noDisplay || busy !== null}
+              aria-describedby={noDisplay ? reasonId : undefined}
+              onClick={() => doIdentify(player.id, entry.outputId)}
+            >
+              Identify display<span className="visually-hidden">{` ${entry.outputId}`}</span>
+            </button>
+            {noDisplay && (
+              <span id={reasonId} className="roster__note">
+                Connect a display and restart the Player, then Refresh Equipment.
+              </span>
+            )}
+          </span>
+        )}
         {entry.state === "free" &&
           (unbound.length === 0 ? (
             <span className="roster__empty">{NO_FRAMES}</span>
@@ -198,8 +242,8 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
             </span>
           ))}
         {message !== undefined && (
-          <p className="roster__alert" role="alert">
-            {message}
+          <p className={message.kind === "alert" ? "roster__alert" : "roster__notice"} role={message.kind}>
+            {message.text}
           </p>
         )}
       </li>
@@ -252,7 +296,8 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
               <p className="roster__empty">No outputs reported</p>
             ) : (
               <ul className="roster__outputs" aria-label={`Outputs of ${player.id}`}>
-                {outputs.map((entry) => renderOutput(player, entry))}
+                {outputs.map((entry, outputIndex) =>
+                  renderOutput(player, entry, standing, index, outputIndex))}
               </ul>
             )}
             {standing.state === "pending" && (

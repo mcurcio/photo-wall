@@ -159,6 +159,7 @@ class _Surface:
     area: Any
     diagnostic: Any = None
     diagnostic_label: Any = None
+    identify_banner: Any = None
     pending: _Draw | None = None
     acknowledged: _Draw | None = None
     failure: str | None = None
@@ -259,6 +260,11 @@ class NativeRenderer:
                 font-size: 22px;
             }
         """)
+        identify_style = self.Gtk.CssProvider()
+        identify_style.load_from_data(b"""
+            .photo-wall-identify { background-color: #ffea00; padding: 12px; }
+            .photo-wall-identify label { color: #000000; font-size: 30px; font-weight: bold; }
+        """)
         for output in outputs:
             window = self.Gtk.Window(type=self.Gtk.WindowType.TOPLEVEL)
             window.set_title(output.app_id)
@@ -287,8 +293,21 @@ class NativeRenderer:
             label.get_style_context().add_provider(
                 diagnostic_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             overlay.add_overlay(diagnostic)
+            identify = self.Gtk.EventBox()
+            identify.set_visible_window(True)
+            identify.set_halign(self.Gtk.Align.FILL)
+            identify.set_valign(self.Gtk.Align.START)
+            identify_label = self.Gtk.Label(label="IDENTIFY THIS OUTPUT")
+            identify.add(identify_label)
+            identify.get_style_context().add_class("photo-wall-identify")
+            identify.get_style_context().add_provider(
+                identify_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            identify_label.get_style_context().add_provider(
+                identify_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            overlay.add_overlay(identify)
+            identify.hide()
             window.add(overlay)
-            surface = _Surface(output, window, area, diagnostic, label)
+            surface = _Surface(output, window, area, diagnostic, label, identify)
             self._surfaces[output.output_id] = surface
             area.connect("render", self._render, surface)
             area.connect("unrealize", self._unrealize, surface)
@@ -315,6 +334,16 @@ class NativeRenderer:
                 surface.diagnostic.show()
             else:
                 surface.diagnostic.hide()
+
+    def set_identify_output(self, output_id: str | None) -> None:
+        """Show or hide the conspicuous banner on one Output."""
+        self._thread()
+        for key, surface in self._surfaces.items():
+            if key == output_id:
+                surface.identify_banner.get_child().set_text("IDENTIFY THIS OUTPUT  •  " + key)
+                surface.identify_banner.show_all()
+            else:
+                surface.identify_banner.hide()
 
     def _load_native(self) -> None:
         import gi

@@ -26,8 +26,14 @@ Central is connecting. After an authenticated configuration arrives,
 that configuration's bindings and identifies their Output and Player. Bound
 Outputs hide it before the Executor's next tick, including when authored content
 is black. This equipment diagnostic is not a Scene layer or presentation
-acknowledgment. A Linux GTK smoke has checked widget visibility transitions;
-actual pixels and physical HDMI visibility still require Pi verification.
+acknowledgment. Central can also direct an unbound Output to show a short-lived,
+high-contrast yellow **IDENTIFY THIS OUTPUT • `<output id>`** banner. The banner
+is visible only on the requested surface. PlayerService owns its local monotonic
+deadline and clears the banner when the request expires or unbound status
+disappears. NativeRenderer only shows or hides the banner; it owns no identify
+timer. It is an operator aid, not Scene content or evidence of scanout.
+Software tests cover target selection and expiry; actual pixels and physical
+HDMI visibility still require Pi verification.
 
 `prepare(LocalLayer)` creates an explicit local-file JPEG, PNG or silent H.264 MP4
 pipeline, returns pending until preroll/seek and a matching RGBA sample complete,

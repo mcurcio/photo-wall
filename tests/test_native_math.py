@@ -67,6 +67,31 @@ def test_native_diagnostic_is_hidden_for_bound_outputs():
     assert not first.visible and not second.visible
 
 
+def test_native_identify_banner_is_high_contrast_and_target_only():
+    class Widget:
+        def __init__(self):
+            self.visible = False
+            self.text = ""
+        def show_all(self): self.visible = True
+        def hide(self): self.visible = False
+        def get_child(self): return self
+        def set_text(self, value): self.text = value
+
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._owner = threading.get_ident()
+    renderer._closed = False
+    first, second = Widget(), Widget()
+    renderer._surfaces = {
+        "HDMI-A-1": SimpleNamespace(identify_banner=first),
+        "HDMI-A-2": SimpleNamespace(identify_banner=second),
+    }
+    renderer.set_identify_output("HDMI-A-1")
+    assert first.visible and not second.visible
+    assert "IDENTIFY THIS OUTPUT" in first.text
+    renderer.set_identify_output(None)
+    assert not first.visible and not second.visible
+
+
 def test_projective_corners_and_interior_roundtrip():
     corners = ((.15, .1), (.9, .2), (.8, .95), (.05, .7))
     forward = homography(corners)

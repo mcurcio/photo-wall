@@ -924,6 +924,23 @@ label {
   min-width: 0;
 }
 
+.roster__identify {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.roster__identify button {
+  padding: 5px 10px;
+}
+
+.roster__notice {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--ok);
+}
+
 .roster__action {
   margin-top: 8px;
   color: var(--warn);

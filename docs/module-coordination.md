@@ -29,6 +29,16 @@ Player still needs a freshly rotated epoch even when the stored configuration is
 unchanged. `Layer.retain_on_expiry` is an explicit central decision limited to opaque
 stills. It is false by default, including temporary overlays.
 
+Short output-identification requests are operational registry state, separate
+from Frame and Scene content. Central stores at most one request per Player,
+with its Output, current authority epoch and fixed 15-second expiry; a new
+request supersedes the prior one. On each delivery, Central includes the cue
+only while the Player epoch is current and the Output remains connected and
+unbound. Expired or no-longer-eligible requests are removed. The cue appears in
+both the REST state and WebSocket state envelope, and its remaining duration is
+computed by Central for that response. Acceptance means the request was queued;
+it is not a playback observation or proof of visible output.
+
 Offers use a stable per-epoch plan ID and increasing revisions, retaining exact
 manifests until their execution lease expires. At most 64 outstanding offers are
 allowed per Player epoch; missing acknowledgment produces backpressure and degraded

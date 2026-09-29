@@ -33,6 +33,7 @@ from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
     Commit,
+    IdentifyOutput,
     Instant,
     Layer,
     Model,
@@ -167,6 +168,7 @@ class State(Model):
     plan: Plan | None
     commits: tuple[Commit, ...] = Field(max_length=1024)
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
+    identify_output: IdentifyOutput | None = None
 
 
 class BootContext(Model):
@@ -416,6 +418,9 @@ class PlayerService:
         self._base_health_epoch: int | None = None
         self._base_health_sequence_epoch: int | None = None
         self._base_health_sequence = 0
+        self._identify_key: tuple[str, int] | None = None
+        self._identify_output: str | None = None
+        self._identify_deadline: float | None = None
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
@@ -656,10 +661,38 @@ class PlayerService:
             unbound = tuple(output.output_id for output in self.outputs
                             if output.connected and output.output_id not in bound)
             self.renderer.set_unbound_outputs(unbound, configuration.player_id)
+            self._apply_identify_output(state.identify_output, unbound,
+                                        configuration.authority_epoch)
             self.tick_main()
+
+    def _apply_identify_output(self, cue: IdentifyOutput | None,
+                               unbound: tuple[str, ...], authority_epoch: int) -> None:
+        now = self.clock.monotonic()
+        key = None if cue is None else (cue.request_id, cue.authority_epoch)
+        if cue is None or cue.authority_epoch != authority_epoch or cue.output_id not in unbound:
+            self._identify_key = None
+            self._identify_output = None
+            self._identify_deadline = None
+        else:
+            if key != self._identify_key:
+                self._identify_key = key
+                self._identify_deadline = now + min(cue.remaining_seconds, 15.0)
+            if self._identify_deadline is not None and now >= self._identify_deadline:
+                self._identify_output = None
+                self._identify_deadline = None
+            elif self._identify_deadline is not None:
+                self._identify_output = cue.output_id
+        self._sync_identify_output()
+
+    def _sync_identify_output(self) -> None:
+        self.renderer.set_identify_output(self._identify_output)
 
     def tick_main(self):
         self._main()
+        if self._identify_deadline is not None and self.clock.monotonic() >= self._identify_deadline:
+            self._identify_output = None
+            self._identify_deadline = None
+            self._sync_identify_output()
         if self.executor is not None:
             self.executor.prepare_imminent()
             observations = self.executor.tick()
@@ -1023,6 +1056,9 @@ class UnavailableRenderer:
         return PrepareResult("failed", "capacity")
 
     def set_unbound_outputs(self, output_ids, player_id):
+        pass
+
+    def set_identify_output(self, output_id):
         pass
 
     def capacity(self, compositions):
