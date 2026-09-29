@@ -1,6 +1,6 @@
 # Adversarial review: Player control and fleet architecture
 
-**Status:** proposed design corrections for review; no implementation or deployed qualification. **Scope:** F0–F4/F6 in the [v0.13 readiness intake](production-readiness-v0.13.md). This review challenges the [control-protocol](player-protocol-compatibility-design.md) and [fleet-control](player-fleet-control-design.md) proposals against current source and failure traces. It records cross-boundary invariants and module contracts; those proposals own their specific wire and rollout choices.
+**Status:** proposed design corrections for review; no implementation or deployed qualification. **Scope:** F0–F4/F6 in the [v0.13 readiness intake](production-readiness-v0.13.md). This review challenges the [control-protocol](player-protocol-compatibility-design.md) and [fleet-control](player-fleet-control-design.md) proposals against current source and failure traces. It records the first cross-boundary invariants and module contracts; the subsequent [red/blue refinement](player-fleet-red-blue-refinement.md) tightens trust, transactions, maintenance and qualification. The linked proposals own their feature-specific wire and rollout choices.
 
 ## Counterexamples the design must survive
 

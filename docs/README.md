@@ -4,7 +4,7 @@ Photo Wall separates product behavior, implementation design, delivery work, and
 
 Implementation status and commands: [delivery checklist](implementation-checklist.md), [runbook](runbook.md), and [evidence](evidence/README.md).
 
-The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are in the [production-readiness intake](production-readiness-v0.13.md). Its observations are not release qualification. The [Player control-protocol](player-protocol-compatibility-design.md) and [base-owned fleet-control](player-fleet-control-design.md) proposals address F0 and F1–F4/F6. The [adversarial architecture review](player-fleet-adversarial-review.md) records counterexamples, channel separation and cross-boundary invariants; all await review.
+The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are in the [production-readiness intake](production-readiness-v0.13.md). Its observations are not release qualification. The [Player control-protocol](player-protocol-compatibility-design.md) and [base-owned fleet-control](player-fleet-control-design.md) proposals address F0 and F1–F4/F6. The [adversarial architecture review](player-fleet-adversarial-review.md) and [red/blue refinement](player-fleet-red-blue-refinement.md) record counterexamples, channel separation, cross-boundary invariants and remaining decisions; all await review.
 
 ## Reading order and ownership
 
