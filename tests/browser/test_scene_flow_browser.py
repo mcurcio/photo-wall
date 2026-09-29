@@ -201,8 +201,17 @@ def test_completed_source_refresh_reloads_authored_candidates_once(page, registr
             assets=tuple(photo.asset for photo in (first, second, incompatible)),
         ))
 
-        drive_poll(page)
+        # The source revision is applied by the snapshot poll; useCandidates then
+        # schedules its reload in a React effect. Waiting only for the refresh
+        # message can observe the new source revision before that request reaches
+        # the browser, so synchronize on the candidate response itself.
+        with page.expect_response(
+            lambda item: "/candidates?" in item.url
+            and f"frame_id={VALID_FRAME}" in item.url
+        ) as refreshed_candidates:
+            drive_poll(page)
         expect(readiness).to_contain_text("Refresh finished.")
+        assert refreshed_candidates.value.status == 200
         assert len(candidate_responses) == 2, [
             (item.status, item.url, item.text()) for item in candidate_responses
         ]

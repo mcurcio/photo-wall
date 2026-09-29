@@ -2059,8 +2059,8 @@ def test_the_media_pipeline_states_each_source(page, registry):
             return pipeline.get_by_label(f"Refresh of {ref.rsplit(':', 1)[0]}", exact=True)
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
-            "refreshed 1 min ago · 790 valid in the last refresh · photos only · only favourites"
-            " · taken 2024")
+            "refreshed 1 min ago · 790 valid in the last refresh · 10 items pending or rejected"
+            " · photos only · only favourites · taken 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
         expect(state("failing:1")).to_contain_text("Library unreachable · last good 2 h ago")
         expect(state("failing:1")).to_contain_text("source unavailable")
