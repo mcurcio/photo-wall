@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 Source refresh and Show now Frame recovery](2026-09-29-refresh-and-frame-recovery.md):
+  per-card request feedback and direct recovery routes from unhealthy Show now
+  Frame chips, with local browser verification and deployment limits.
 - [2026-09-29 Scene Source readiness and commissioning resolution check](2026-09-29-scene-readiness-and-display-check.md):
   selected Source health and recovery inside Scene authoring, plus a
   rotation-aware check of declared versus reported display resolution.

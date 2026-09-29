@@ -20,6 +20,7 @@ from console_tasks import (
     show_form,
     show_now,
     visible_page,
+    visit,
 )
 from operator_harness import (
     INVENTORY,
@@ -27,6 +28,7 @@ from operator_harness import (
     answer_first,
     drive_poll,
     operator_server,
+    report_readiness,
     submit_sign_in,
 )
 from playwright.sync_api import expect
@@ -120,6 +122,54 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(form).to_contain_text("0 (the default: no Run covers its frames)")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
+
+
+def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(page, registry):
+    """Show-now frame health offers the existing Wall recovery route, while an
+    informational healthy chip stays plain text and the mounted activation draft/key
+    survives a Wall visit."""
+    players = _seed(registry)
+    _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME))
+    runtime.command("set_scene", _scene("healthy", frame=VALID_FRAME))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now", paused_at=registry.clock.utc())
+        form = show_now(page, SCENE_ID, submit=False)
+        expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
+        expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
+            "href", f"#/wall/frames/{INVALID_FRAME}/binding")
+
+        for player_id in players:
+            report_readiness(registry, player_id)
+        drive_poll(page)
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
+        expect(recovery).to_have_attribute(
+            "href", f"#/wall/frames/{INVALID_FRAME}/commissioning")
+        expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
+
+        recovery.click()
+        inspector = page.get_by_role("region", name=f"Frame {INVALID_FRAME} inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+
+        # Ordinary route navigation away and back leaves Show now's values and
+        # activation identity intact because its flow remains mounted in the shell.
+        go(page, "now")
+        visit(page, "#/now/show/review")
+        form = show_form(page)
+        expect(form.get_by_text(SCENE_ID, exact=True)).to_be_visible()
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        show_advanced(form)
+        expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
+
+        # Selecting a healthy Frame leaves its chip informational.
+        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
+            "button", name="Scene", exact=True).click()
+        form.get_by_label("Scene to activate", exact=True).select_option("healthy")
+        expect(form).to_contain_text(f"{VALID_FRAME}: Heard recently")
+        expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
 
 def test_a_priority_below_the_default_opens_advanced_and_says_where_it_stays_underneath(

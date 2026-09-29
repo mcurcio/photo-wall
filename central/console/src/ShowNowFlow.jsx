@@ -255,7 +255,9 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
 
 /** The Scene's frames with their health, or why there are none. */
 function SceneFramesValue({ snapshot, frames }) {
-  return frames.length > 0 ? <FrameChips snapshot={snapshot} frameIds={frames} /> : "none";
+  return frames.length > 0 ? (
+    <FrameChips snapshot={snapshot} frameIds={frames} recoveryLinks />
+  ) : "none";
 }
 
 /**

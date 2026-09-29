@@ -24,7 +24,7 @@ from console_tasks import (
     start_source,
     visit,
 )
-from operator_harness import operator_server, submit_sign_in
+from operator_harness import RequestGate, answer_first, operator_server, submit_sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     SCENE_ID,
@@ -111,6 +111,66 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         expect(card).to_contain_text(
             "This Photo Wall release does not support the Immich version.")
         expect(card).not_to_contain_text("Awaiting refresh")
+
+
+def test_card_refresh_reports_accepted_request_and_blocks_duplicate_clicks(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        gate = RequestGate(page, "**/v1/operator/sources/holiday%3A1/refresh")
+        gate.holding = True
+        refresh = card.get_by_role("button", name="Refresh holiday", exact=True)
+        refresh.click()
+        gate.wait_held()
+        expect(refresh).to_be_disabled()
+        expect(refresh).to_have_text("Requesting refresh…")
+        gate.release(status=202, content_type="application/json",
+                     body='{"requested_revision": 1}')
+        expect(card.get_by_role("status")).to_have_text(
+            "Refresh requested. Check Status for the worker's latest result.")
+        expect(card.get_by_text("refreshed", exact=False)).to_be_visible()
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ((409, '{"error":"source_not_found"}'), "Refresh request failed: source not found."),
+        ((503, '{"error":"internal"}'),
+         "The refresh request outcome is unknown. Check the Source status before retrying."),
+    ],
+)
+def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, expected):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        status, body = response
+        answer_first(
+            page,
+            "**/v1/operator/sources/holiday%3A1/refresh",
+            lambda route: route.fulfill(status=status, content_type="application/json", body=body),
+        )
+        card.get_by_role("button", name="Refresh holiday", exact=True).click()
+        expect(card.get_by_role("status")).to_have_text(expected)
+
+
+def test_card_refresh_reports_unknown_transport_outcome(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        answer_first(page, "**/v1/operator/sources/holiday%3A1/refresh",
+                     lambda route: route.abort())
+        card.get_by_role("button", name="Refresh holiday", exact=True).click()
+        expect(card.get_by_role("status")).to_have_text(
+            "The refresh request outcome is unknown. Check the Source status before retrying.")
 
 
 def test_reported_worker_connections_drive_source_choices(page, registry):

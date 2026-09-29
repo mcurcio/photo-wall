@@ -1243,6 +1243,10 @@ label {
   overflow-wrap: anywhere;
 }
 
+.run-control__frame a {
+  margin-inline-start: 0.5em;
+}
+
 .run-control__ended {
   margin-top: 12px;
 }

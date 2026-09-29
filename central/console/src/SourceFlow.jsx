@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
@@ -82,6 +82,9 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     [connectionIds, sources, value.connectionRef],
   );
   const now = mediaNow(snapshot);
+  const [refreshingSources, setRefreshingSources] = useState(() => new Set());
+  const [refreshFeedback, setRefreshFeedback] = useState({});
+  const refreshInFlight = useRef(new Set());
   const editingName = editedId(draft.key);
   const stored = editingName === null ? null : namedSource(sources, editingName);
   const stale = editingName !== null && stored !== undefined && stored !== null &&
@@ -130,13 +133,44 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
   // the cards refresh exactly once after the write.
-  const refreshSource = useCallback(
-    (sourceRef) =>
-      mutate(() =>
-        apiWrite(sourceRefreshPath(sourceRef), { method: "POST" }),
-      ),
-    [mutate],
-  );
+  const refreshSource = useCallback(async (sourceRef) => {
+    // Guard synchronously so a second click cannot enqueue a duplicate while React
+    // is still rendering the disabled state.
+    if (refreshInFlight.current.has(sourceRef)) return;
+    refreshInFlight.current.add(sourceRef);
+    setRefreshingSources(new Set(refreshInFlight.current));
+    setRefreshFeedback((current) => ({ ...current, [sourceRef]: null }));
+    try {
+      // Keep useMutate's single Plane A refresh even when the request outcome is
+      // unknown. The refreshed snapshot, not the 202 receipt, owns worker status.
+      const result = await mutate(async () => {
+        try {
+          return await apiWrite(sourceRefreshPath(sourceRef), { method: "POST" });
+        } catch {
+          return { ok: false, status: 0, error: null, data: null };
+        }
+      });
+      if (result.ok && result.status === 202) {
+        setRefreshFeedback((current) => ({
+          ...current,
+          [sourceRef]: "Refresh requested. Check Status for the worker's latest result.",
+        }));
+      } else if (result.status === 0 || result.status >= 500) {
+        setRefreshFeedback((current) => ({
+          ...current,
+          [sourceRef]: "The refresh request outcome is unknown. Check the Source status before retrying.",
+        }));
+      } else {
+        setRefreshFeedback((current) => ({
+          ...current,
+          [sourceRef]: `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.`,
+        }));
+      }
+    } finally {
+      refreshInFlight.current.delete(sourceRef);
+      setRefreshingSources(new Set(refreshInFlight.current));
+    }
+  }, [mutate]);
 
   const onSave = () =>
     write.send(flow, async (sent) => {
@@ -244,7 +278,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       problems={problems}
       handOff={handOff}
       newLabel="New source"
-      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
+      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} refreshingSources={refreshingSources} refreshFeedback={refreshFeedback} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
       title={editingName === null ? "New photo source" : `Edit Source ${editingName}`}
       steps={SOURCE_STEPS}
       formLabel="Configure a Source"
@@ -265,9 +299,10 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
  * last succeeded (or that no refresh has succeeded), what it includes
  * and its connection, and Refresh ("Refresh <ref>").
  *
- * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void}} props
+ * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void,
+ *          refreshingSources: Set<string>, refreshFeedback: Record<string, string|null>}} props
  */
-function SourceCards({ sources, now, onRefresh, onEdit, onDelete, busy }) {
+function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedback, onEdit, onDelete, busy }) {
   if (sources.length === 0) {
     return <p className="showrunner__empty">No Sources yet.</p>;
   }
@@ -275,6 +310,7 @@ function SourceCards({ sources, now, onRefresh, onEdit, onDelete, busy }) {
     <ul className="card-grid" role="list">
       {sources.map((source) => {
         const state = sourceState(source, now, false);
+        const refreshing = refreshingSources.has(source.source_ref);
         return <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={sourceName(source)}
@@ -289,13 +325,19 @@ function SourceCards({ sources, now, onRefresh, onEdit, onDelete, busy }) {
               ...(source.status !== "ok" && source.diagnostics?.length
                 ? [{ label: "Issue", value: sourceIssue(source.diagnostics) }]
                 : []),
+              ...(refreshFeedback[source.source_ref]
+                ? [{
+                    label: "Refresh request",
+                    value: <span role="status" aria-live="polite">{refreshFeedback[source.source_ref]}</span>,
+                  }]
+                : []),
               { label: "Includes", value: includesWords(source.spec) },
               { label: "Connection", value: source.spec?.connection_ref ?? "" },
             ]}
             actions={
               <>
-                <button type="button" aria-label={`Refresh ${sourceName(source)}`} onClick={() => onRefresh(source.source_ref)}>
-                  Refresh
+                <button type="button" aria-label={`Refresh ${sourceName(source)}`} disabled={refreshing} onClick={() => onRefresh(source.source_ref)}>
+                  {refreshing ? "Requesting refresh…" : "Refresh"}
                 </button>
                 <button type="button" aria-label={`Edit Source ${sourceName(source)}`} disabled={busy} onClick={(event) => onEdit(sourceName(source), event)}>
                   Edit
