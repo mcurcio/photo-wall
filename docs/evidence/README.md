@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-28 operator UX loop](2026-09-28-operator-ux-loop.md): local
+  Program edit and measured Frame placement verification at `e6d12a7`, with
+  browser/database results and remaining live-hardware limits.
 - [2026-09-28 Kubernetes Player onboarding](2026-09-28-kubernetes-player-onboarding.md): read-only Central request trace of a newly enrolled Player on the default global `.deb` path; it distinguishes accepted requests from base-health and visible-output qualification.
 
 - [2026-09-28 service image cache](2026-09-28-service-image-cache.md): cause of
