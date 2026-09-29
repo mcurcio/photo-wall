@@ -108,9 +108,7 @@ export function programEditDraft(program) {
     const minute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
     const secondsPart = `${pad(date.getSeconds())}${date.getMilliseconds() === 0 ? "" : `.${String(date.getMilliseconds()).padStart(3, "0")}`}`;
     const value = date.getSeconds() === 0 && date.getMilliseconds() === 0 ? minute : `${minute}:${secondsPart}`;
-    // A repeated local hour during a daylight-saving fallback has two UTC
-    // instants. The input cannot distinguish them, so do not silently move one.
-    return toEpochSeconds(value) === seconds ? value : null;
+    return value;
   };
   const start = local(program.starts_at);
   const end = local(program.ends_at);
@@ -124,6 +122,21 @@ export function programEditDraft(program) {
     name: program.program_id,
     idOverride: program.program_id,
     expected: { ...program },
+  };
+}
+
+/** Resolve the exact instants an edit will save. Untouched local fields retain their
+ * original instant, including the later side of a repeated daylight-saving hour.
+ * Changed fields follow the browser's normal local datetime interpretation. */
+export function effectiveProgramTimes(draft) {
+  const expected = draft.expected;
+  const unchangedStart = expected !== undefined && draft.start === programEditDraft(expected)?.start;
+  const unchangedEnd = expected !== undefined && draft.end === programEditDraft(expected)?.end;
+  return {
+    startsAt: unchangedStart ? expected.starts_at : toEpochSeconds(draft.start),
+    endsAt: unchangedEnd ? expected.ends_at : toEpochSeconds(draft.end),
+    retainedStart: unchangedStart && toEpochSeconds(draft.start) !== expected.starts_at,
+    retainedEnd: unchangedEnd && toEpochSeconds(draft.end) !== expected.ends_at,
   };
 }
 
@@ -153,8 +166,10 @@ export function separateWindows(draft) {
 export function programDraftProblems(draft, programIds, now, pendingIds = [], editing = false) {
   const pending = new Set(pendingIds);
   const taken = new Set([...programIds].filter((id) => id !== draft.expected?.program_id && !pending.has(id)));
-  const problems = separateWindows(draft) ? windowProblems(draft, taken, now) : programProblems(draft, taken, now);
-  if (editing && Number.isFinite(toEpochSeconds(draft.start)) && toEpochSeconds(draft.start) <= now) {
+  const times = effectiveProgramTimes(draft);
+  const problems = separateWindows(draft) ? windowProblems(draft, taken, now) :
+    programProblems(draft, taken, now, editing ? times : null);
+  if (editing && Number.isFinite(times.startsAt) && times.startsAt <= now) {
     problems.push({ field: "start", message: "A replacement Program must start in the future." });
   }
   return problems;

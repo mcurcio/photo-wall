@@ -424,3 +424,35 @@ console.log(JSON.stringify([
     assert states[0]["label"] == "Awaiting refresh"
     assert states[1]["state"] == "failing"
     assert states[1]["label"] == "Library unsupported · never refreshed successfully"
+
+
+def test_program_edit_retains_later_repeated_hour_occurrence():
+    _require_node()
+    script = r"""
+const model = await import(process.argv[1]);
+const source = { program_id: "fold", scene_id: "night", starts_at: 1793525400,
+                 ends_at: 1793526300, priority: 0 };
+const draft = model.programEditDraft(source);
+const retained = model.effectiveProgramTimes(draft);
+const changed = model.effectiveProgramTimes({ ...draft, start: "2026-11-01T01:15" });
+const invalidChange = { ...draft, start: "2026-11-01T02:45" };
+console.log(JSON.stringify({ draft, retained, changed,
+  problems: model.programDraftProblems(draft, new Set(["fold"]), 1000, [], true),
+  changedProblems: model.programDraftProblems(invalidChange, new Set(["fold"]), 1000, [], true) }));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "scheduleFlowModel.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True,
+        env={**os.environ, "TZ": "America/Los_Angeles"})
+    out = json.loads(result.stdout)
+    assert out["draft"]["start"] == "2026-11-01T01:30"
+    assert out["retained"]["startsAt"] == 1793525400
+    assert out["retained"]["endsAt"] == 1793526300
+    assert out["retained"]["retainedStart"] is True
+    assert out["retained"]["retainedEnd"] is True
+    assert out["changed"]["startsAt"] == 1793520900
+    assert out["changed"]["retainedStart"] is False
+    assert not any(problem["field"] == "end" and "before it starts" in problem["message"]
+                   for problem in out["problems"])
+    assert any(problem["field"] == "end" and "before it starts" in problem["message"]
+               for problem in out["changedProblems"])

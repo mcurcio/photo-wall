@@ -140,9 +140,10 @@ def test_future_program_edit_posts_exact_expected_program_and_keeps_its_id(page,
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", _console_scene("evening"))
-    now = registry.clock.utc()
-    baseline = Program(program_id="editable", scene_id="evening", starts_at=now + 3600,
-                       ends_at=now + 7200, priority=2)
+    # These are the later occurrence of 01:30 in the 2026 Los Angeles fallback,
+    # then 02:30 PST. The browser suite runs with TZ=America/Los_Angeles.
+    baseline = Program(program_id="editable", scene_id="evening", starts_at=1793525400,
+                       ends_at=1793529000, priority=2)
     runtime.command("set_program", baseline)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
@@ -151,6 +152,7 @@ def test_future_program_edit_posts_exact_expected_program_and_keeps_its_id(page,
         assert current_hash(page) == "#/schedule/editable/edit/review"
         form = _programs(page).get_by_role("form", name="Edit Program editable", exact=True)
         expect(form.get_by_role("heading", name="Check your Program", exact=True)).to_be_visible()
+        expect(form.get_by_role("note")).to_contain_text("Saved start occurrence: 1:30 AM PST (GMT-08:00)")
         expect(form.get_by_label("Create separate windows", exact=True)).to_have_count(0)
         form.get_by_role("button", name="Change Priority", exact=True).click()
         form.get_by_label("Priority", exact=True).fill("8")

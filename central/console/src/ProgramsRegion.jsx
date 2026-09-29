@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
+import { draftId, planWindows } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { useProblems } from "./Field.jsx";
@@ -19,6 +19,7 @@ import {
   NEW_PROGRAM_DRAFT,
   programEditDraft,
   programDraftProblems,
+  effectiveProgramTimes,
   SCHEDULE_ADVANCED_FIELDS,
   SCHEDULE_FIELD_STEP,
   SCHEDULE_KEYS,
@@ -178,7 +179,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   };
 
   const scheduleOne = async (sent, id) => {
-    const result = await sent.request(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
+    const times = effectiveProgramTimes(value);
+    const result = await sent.request(() => put(id, times.startsAt, times.endsAt));
     if (result === null || result.status >= 500) {
       // It may have been stored: scheduling the same draft again confirms it.
       sent.attempted([id]);
@@ -248,8 +250,9 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     if (editingId !== null) {
       if (stale || !flow.checkAll()) return;
       write.send(flow, async (sent) => {
+        const times = effectiveProgramTimes(value);
         const program = buildProgram({ programId: editingId, sceneId: value.sceneId,
-          startsAt: toEpochSeconds(value.start), endsAt: toEpochSeconds(value.end), priority: Number(value.priority) });
+          startsAt: times.startsAt, endsAt: times.endsAt, priority: Number(value.priority) });
         const result = await sent.request(() => apiWrite(
           `/v1/operator/programs/${encodeURIComponent(editingId)}/replace`,
           { method: "POST", body: { expected: value.expected, program } },
@@ -301,7 +304,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   const current = programs.filter((program) => !isPastProgram(snapshot, program));
 
   // --- Views.
-  const stepProps = { value, patch: draft.patch, problems };
+  const stepProps = { value, patch: draft.patch, problems, editing: editingId !== null };
   const { advanced } = flow;
   const views = {
     scene: () => (

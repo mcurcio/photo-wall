@@ -53,7 +53,8 @@ def test_private_connection_file_keeps_keys_out_of_models_and_repr(tmp_path):
 def test_worker_reports_only_sorted_connection_ids(worker_storage):
     instance = MediaWorker(worker_storage.repository, worker_storage,
         {"zeta": ConnectionConfig(**{**configuration(), "connection_id": "zeta"}),
-         "alpha": ConnectionConfig(**{**configuration(), "connection_id": "alpha"})})
+         "alpha": ConnectionConfig(**{**configuration(), "connection_id": "alpha"})},
+        preparer=FakePreparer())
     instance.store.recover = lambda: None
 
     async def exercise():
@@ -67,7 +68,7 @@ def test_worker_reports_only_sorted_connection_ids(worker_storage):
 
 
 def test_worker_reports_valid_empty_connection_list(worker_storage):
-    instance = MediaWorker(worker_storage.repository, worker_storage, {})
+    instance = MediaWorker(worker_storage.repository, worker_storage, {}, preparer=FakePreparer())
     instance.store.recover = lambda: None
 
     async def exercise():

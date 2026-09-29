@@ -405,13 +405,13 @@ export function timeZoneName() {
 }
 
 /** Scene, window and priority problems shared by one Program and the helper. */
-function scheduleProblems({ sceneId, start, end, priority }, now) {
+function scheduleProblems({ sceneId, start, end, priority }, now, effectiveTimes = null) {
   const problems = [];
   if (sceneId === "") {
     problems.push({ field: "scene", message: "Choose a Scene." });
   }
-  const startsAt = toEpochSeconds(start);
-  const endsAt = toEpochSeconds(end);
+  const startsAt = effectiveTimes?.startsAt ?? toEpochSeconds(start);
+  const endsAt = effectiveTimes?.endsAt ?? toEpochSeconds(end);
   if (!Number.isFinite(startsAt)) {
     problems.push({ field: "start", message: "Enter when the window starts." });
   }
@@ -446,8 +446,8 @@ function scheduleProblems({ sceneId, start, end, priority }, now) {
  * @param {number} now Central's clock (`current.now`)
  * @returns {Problem[]}
  */
-export function programProblems(draft, existingIds, now) {
-  return [...identityProblems("Program", draft, existingIds), ...scheduleProblems(draft, now)];
+export function programProblems(draft, existingIds, now, effectiveTimes = null) {
+  return [...identityProblems("Program", draft, existingIds), ...scheduleProblems(draft, now, effectiveTimes)];
 }
 
 export const MAX_WINDOWS = 60;

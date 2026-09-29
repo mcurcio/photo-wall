@@ -1,5 +1,8 @@
 # Acceptance evidence
 
+- [2026-09-29 repeated-hour Program edit](2026-09-29-program-repeated-hour-edit.md):
+  exact saved-instants retained while editing an upcoming Program across a
+  daylight-saving fallback, with model/browser proof and deployment limits.
 - [2026-09-29 Source connection discovery and first-run action](2026-09-29-source-connection-discovery.md):
   worker-reported connection names in the Photo Sources flow, guarded edits
   after connection removal, clearer refresh status and a direct first-Frame
