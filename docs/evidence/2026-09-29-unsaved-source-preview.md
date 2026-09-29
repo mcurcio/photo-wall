@@ -40,7 +40,7 @@ the Source draft dirty.
   Preview browser cases use synthetic endpoint replies and cover exact filters,
   empty/failure/unknown outcomes, connection choice, invalid dates, stale
   answers, and resuming the same accepted request after navigation.
-- Ruff, production console build, documentation links, and `git diff --check`
+- Ruff, production console build, documentation links (102 Markdown files), and `git diff --check`
   passed.
 
 The synthetic adapter and browser checks do not establish behavior against the
