@@ -757,6 +757,7 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
         # The server admitted it; the console says exactly that.
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
             f"Started: Central admitted a Run of {SCENE_ID}.")
+        expect(runs.get_by_text("Revision", exact=True)).to_have_count(0)
 
         # Activating the SAME running Scene again (new activation id,
         # repeat=ignore) is IGNORED — shown truthfully, not as a success.
@@ -1712,12 +1713,12 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         connect(page, origin, "scenes")
         row = _scene_row(page, STORED_ID)
         expect(row).to_contain_text("live from holiday")
-        expect(row).to_contain_text("revision 1")
+        expect(row.get_by_text("Revision", exact=True)).to_have_count(0)
         expect(row).to_contain_text("no Program")
         row.get_by_role("button", name=f"Edit Scene {STORED_ID}", exact=True).click()
 
         form = _scenes_form(page)
-        expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
+        expect(form).to_contain_text(f"Editing {STORED_ID}. Its name stays the same.")
         assert current_hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
         # The stored values, exactly, where each is asked: every Change link opens its
@@ -1743,8 +1744,8 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 
         dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
         expect(dialog).to_contain_text(
-            "Runs already going keep the version they started with; Programs that start later "
-            "use the new one.")
+            "Runs already going keep what they started with; Programs that start later use "
+            "the saved changes.")
         with page.expect_response(
             lambda r: "/v1/operator/scenes/" in r.url and r.request.method == "PUT"
         ) as info:
@@ -1754,8 +1755,8 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         body = info.value.request.post_data_json
         assert (body["scene_id"], body["revision"], body["cycle_seconds"]) == (STORED_ID, 2, 45)
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-            "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
-        expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
+            "status")).to_have_text(f"Scene {STORED_ID} saved.")
+        expect(_scene_row(page, STORED_ID).get_by_text("Revision", exact=True)).to_have_count(0)
         assert current_hash(page) == "#/scenes"
 
 

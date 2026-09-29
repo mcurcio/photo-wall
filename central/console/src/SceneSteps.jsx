@@ -287,7 +287,7 @@ export function ReviewStep({
         <p className="scene-flow__editing">
           {"Editing "}
           <code>{editingId}</code>
-          {` · revision ${value.revision}. Its id stays; Replace saves revision ${value.revision + 1}.`}
+          {`. Its name stays the same.`}
         </p>
       )}
       <CheckAnswers rows={rows} onChange={onChange} />

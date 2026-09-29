@@ -12,8 +12,8 @@ import { sourceName } from "./sourceNames.js";
 /**
  * The stored Scenes as cards (pass 2 slice 3 §13; flow design §7): each a summary
  * card named `Scene X` with what feeds it (live Sources, or the number of hand-picked
- * items), its target frames with their health, its cycle and loop wording, its
- * revision and the Programs that name it; a "Running now" chip while a Run of it is
+ * items), its target frames with their health, its cycle and loop wording, and the
+ * Programs that name it; a "Running now" chip while a Run of it is
  * live. Every fact is read from the served runtime payload (`definitions`,
  * `programs`, `current.runs`).
  *
@@ -139,7 +139,6 @@ function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onS
             `${Number(filled.cycle_seconds)} s per cycle, keeps playing until its Program ends ` +
               "or, when started by hand, until you Finish or Cancel it",
         },
-        { label: "Revision", value: `revision ${filled.revision}` },
         {
           label: "Used by",
           value:

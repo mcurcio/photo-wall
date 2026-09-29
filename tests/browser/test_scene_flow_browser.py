@@ -252,7 +252,7 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         form = scene_form(page)
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         # The stored Scene answers every step, so each is ticked.
         expect(_steps(page).get_by_role("listitem")).to_have_text(
             ["Kind", "Photos", "Frames", "Playback", "5Review"])
@@ -267,7 +267,7 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         puts = _puts(page)
         page.clock.run_for(5000)
         expect(_scenes(page)).to_contain_text(
-            "This Scene was changed (revision 2) since you opened it.")
+            "This Scene changed since you opened it.")
         expect(replace).to_be_disabled()
         form.evaluate("(element) => element.requestSubmit()")  # Enter, in effect
         page.wait_for_timeout(200)
@@ -277,9 +277,9 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
 
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
         expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
-            "Reloaded revision 2. Changed: Seconds per cycle.")
+            "Reloaded the latest saved Scene. Changed: Seconds per cycle.")
         expect(_scenes(page).get_by_text(re.compile("was changed"))).to_have_count(0)
-        expect(form).to_contain_text("Editing evening · revision 2.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         expect(replace).to_be_enabled()
         replace.click()
         with page.expect_response(
@@ -372,7 +372,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
         visit(page, "#/scenes/evening/edit/review")
         _scenes(page).get_by_role("button", name="Discard", exact=True).click()
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
 
         # In the app: Edit on another card asks first; Cancel keeps the draft.
         form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
@@ -386,7 +386,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
                ).to_be_visible()
         _scenes(page).get_by_role("button", name="Edit Scene morning", exact=True).click()
         dialog.get_by_role("button", name="Discard draft", exact=True).click()
-        expect(form).to_contain_text("Editing morning · revision 1.")
+        expect(form).to_contain_text("Editing morning. Its name stays the same.")
         assert current_hash(page) == "#/scenes/morning/edit/review"
         # The discard is said, and opening the next instance does not silence it.
         expect(_scenes(page).get_by_role("status").filter(has_text="Discarded")).to_have_text(
@@ -565,11 +565,10 @@ def test_a_replace_in_flight_on_a_hidden_page_neither_blocks_nor_moves_the_opera
         expect(page.get_by_role("dialog")).to_have_count(0)
 
         go(page, "scenes")
-        expect(_scenes(page).get_by_role("status").filter(has_text="Replaced")).to_have_text(
-            "Replaced Scene evening: now revision 2.")
+        expect(_scenes(page).get_by_role("status")).to_have_text("Scene evening saved.")
         expect(scene_form(page)).to_have_count(0)
-        expect(_scenes(page).get_by_label("Scene evening", exact=True)).to_contain_text(
-            "revision 2")
+        expect(_scenes(page).get_by_label("Scene evening", exact=True)
+               .get_by_text("Revision", exact=True)).to_have_count(0)
 
 
 def test_a_focus_request_dies_with_the_view_it_was_made_for(page, registry):
@@ -640,14 +639,14 @@ def test_a_scene_restored_at_a_lower_revision_is_stale_too(page, registry):
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         form = scene_form(page)
-        expect(form).to_contain_text("Editing evening · revision 3.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         _restore_scene(registry, _console_scene("evening", cycle_seconds=20))
         drive_poll(page)
         expect(_scenes(page)).to_contain_text(
-            "This Scene was changed (revision 1) since you opened it.")
+            "This Scene changed since you opened it.")
         expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/evening") and r.request.method == "PUT"
@@ -674,7 +673,7 @@ def test_reload_names_what_storage_changed_and_the_changes_it_replaced(page, reg
         drive_poll(page)
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
         expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
-            "Reloaded revision 2. Changed: Keep playing until the Program ends. "
+            "Reloaded the latest saved Scene. Changed: Keep playing until the Program ends. "
             "Your unsaved changes to Scene evening were replaced.")
         answers = form.get_by_label("Your answers", exact=True)
         expect(answers).to_contain_text("No, it plays one cycle")

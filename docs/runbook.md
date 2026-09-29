@@ -634,7 +634,7 @@ Queueing an activation and overriding protection ("force") are not offered: desi
 
 ### Now showing: Runs and Central's plan
 
-Now showing starts with each Frame's health label, then the **Runs**: "Central's plan: what each frame is meant to show now, not a readback of the panels." Each live Run is a card named `Scene X`, with a **Running** or **Finishing** chip and its state ("Running", "Ending (outro)" or "Finishing: requested …"), where it came from ("Program Y", "activated directly" or "part of Z"), when it started, its cycle, its priority, the frames it protects, its revision, its frames with their health, and its child Scenes. With none, it reads "No Run is running." **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Runs that ended in the last day are under a closed "Recently ended (N)", as Completed and Cancelled.
+Now showing starts with each Frame's health label, then the **Runs**: "Central's plan: what each frame is meant to show now, not a readback of the panels." Each live Run is a card named `Scene X`, with a **Running** or **Finishing** chip and its state ("Running", "Ending (outro)" or "Finishing: requested …"), where it came from ("Program Y", "activated directly" or "part of Z"), when it started, its cycle, its priority, the frames it protects, its frames with their health, and its child Scenes. With none, it reads "No Run is running." **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Runs that ended in the last day are under a closed "Recently ended (N)", as Completed and Cancelled.
 
 Below them, **Why each frame shows what it does** has one row per frame with two disclosures. **Why?** (and the Frame Inspector's Now-showing facet on the Wall) states **Central's plan** for that frame, for example "Central's plan for lobby-left: evening (priority 5, Program weekday-evenings) on top." Each layer underneath gets one sentence, always with its **priority N**:
 - a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
@@ -700,28 +700,28 @@ A Scene is a per-frame composition. Scenes lists every stored Scene as a card, t
 
 ### Viewing and editing a Scene
 
-Each Scene card, `Scene X`, shows what feeds it ("live from `family`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), its **revision**, the Programs that use it, and a **Running now** chip while a Run of it is live. Its actions are **Edit**, **Show now**, **Schedule it** and **Delete**.
+Each Scene card, `Scene X`, shows what feeds it ("live from `family`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), the Programs that use it, and a **Running now** chip while a Run of it is live. Its actions are **Edit**, **Show now**, **Schedule it** and **Delete**. Saved revision numbers are used by Central to protect concurrent work, but are not shown on Scene or Run cards.
 
 **Delete** confirms removal from future choices. It does not stop a Run or erase completed Run history. Central refuses deletion while a Program refers to the Scene, a live Run or queued activation has captured it, or another stored Scene embeds it. The refusal names the blockers; remove or edit those references first. The console checks that the Scene has not changed since its card was loaded. If the Scene being edited has unsaved changes, the confirmation says they will be discarded; a successful deletion closes that draft.
 
 **Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, an outro, fades, and similar) reads "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
 
 To edit:
-1. Press **Edit**. The flow opens at **Review** (`#/scenes/<id>/edit/review`), filled from the stored Scene: "Editing `evening` · revision 4. Its id stays; Replace saves revision 5." The id cannot change; to make a Scene with a new id, make a new one. Back from Review goes to Playback.
+1. Press **Edit**. The flow opens at **Review** (`#/scenes/<id>/edit/review`), filled from the saved Scene: "Editing `evening`. Its name stays the same." To use a different name, make a new Scene. Back from Review goes to Playback.
 2. Use **Change** for any answer. For a hand-picked Scene, each frame's stored item is pre-selected while it is still in the Source; a frame whose item left the Source has no choice, so pick again.
 3. Press **Replace Scene**, then **Confirm replace** in the dialog.
 
-**Stale: Reload.** When a refresh shows that someone stored another revision since you opened the edit, Review reads "This Scene was changed (revision N) since you opened it. Reload it to review the stored version; Replace waits until you do." and Replace is disabled. **Reload** refills the draft from storage and names what storage changed ("Reloaded revision 6. Changed: Frames."), adding when it replaced your unsaved changes.
+**Stale: Reload.** When a refresh shows that someone saved the Scene since you opened the edit, Review reads "This Scene changed since you opened it. Reload it to review the latest saved Scene; Replace waits until you do." and Replace is disabled. **Reload** refills the draft from storage and names what changed ("Reloaded the latest saved Scene. Changed: Frames."), adding when it replaced your unsaved changes.
 
-**What Replace changes.** It stores the Scene as the next revision. **Runs already going keep the version they started with**, and so do activations already queued: each captured its Scene when Central admitted or queued it. Programs that start later, and new activations, use the new revision. Replace does not touch Programs, Sources or other Scenes.
+**What Replace changes.** It saves the new Scene definition for future starts. **Runs already going keep what they started with**, and so do activations already queued: each captured its Scene when Central admitted or queued it. Programs that start later, and new activations, use the saved changes. Replace does not touch Programs, Sources or other Scenes.
 
 | The dialog ends | Means | What to do |
 |---|---|---|
-| "Replaced Scene evening: now revision 5." | Stored. | Nothing. |
+| "Scene evening saved." | Stored. | Nothing. |
 | "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload." | Someone replaced this Scene between two refreshes. Central refused yours (409 `scene_revision_conflict`), so their version stands. | Close; focus moves to **Reload**. Reload, then redo your change if it still applies. |
 | "Not replaced. The Source's last refresh failed; authored choices can be saved once it succeeds." | A hand-picked Scene's Source is failing. | Fix the Source (see [the media pipeline](#the-media-pipeline)), Refresh it, then try again. |
 | "Not replaced. That item is no longer in the Source; choose again." | A chosen item left the Source. The choosers reload. | Pick again and Replace. |
-| "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, read the Scene's revision on its card: if it moved to yours, it was stored. |
+| "Central did not answer. Check this after the next refresh." | Central answered with a server error, so the save may or may not have been stored. | After the next refresh, review the Scene card and its saved answers. An identical retry is safe if the outcome is still unclear. |
 
 Pressing Replace again with exactly the same Scene after an outcome you did not see is safe: Central accepts an identical save of the stored revision.
 

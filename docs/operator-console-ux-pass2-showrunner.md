@@ -201,6 +201,11 @@ The Runtime keeps the highest `(priority, root_order, admission_order)` (`runtim
 
 ## 13. Scene view and lossless edit (3B)
 
+The current [runbook](runbook.md#viewing-and-editing-a-scene) supersedes this
+section's numeric revision wording. The console still sends and checks revisions,
+but its cards and edit messages describe saved changes and Reload actions without
+showing revision numbers.
+
 - **`SceneList`:** each row is a disclosure named `Scene X`, showing kind ("live from <Sources>", or "authored: N chosen items"), targets as `FrameChips` with health, cycle, loop wording (a looping Scene "keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it"), revision, "Used by Programs …" and "Running now".
 - **Lossless check.** Both sides are normalized by filling the model defaults (`SCENE_DEFAULTS` / `CONTRIBUTION_DEFAULTS` in `authoring.js`, from `runtime.py:43-55` Contribution and `:76-86` Scene; a pytest in `tests/test_operator_runtime.py` pins the tables to the models). The Scene must equal `buildSave(decodeScene(Scene))`, apart from `revision` (`editableDraft`). Otherwise Edit is withheld with the reason: "Uses features the console can't author (child Scenes, outro, fades…)."
 - **Edit** loads the Scene into the same form under its **stored id** (never re-derived): "Editing `evening` · revision 4. Its id stays; Replace saves revision 5."

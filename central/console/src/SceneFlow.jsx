@@ -309,7 +309,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     draft.reseed();
     problems.reset();
     setReloaded(
-      `Reloaded revision ${fresh.revision}. ` +
+      "Reloaded the latest saved Scene. " +
         (changed.length === 0
           ? "None of its stored values changed."
           : `Changed: ${changed.join(", ")}.`) +
@@ -390,8 +390,8 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       <>
         {stale && (
           <div className="notice notice--warn" role="status">
-            <p>{`This Scene was changed (revision ${storedRevision}) since you opened it.`}</p>
-            <p>Reload it to review the stored version; Replace waits until you do.</p>
+            <p>This Scene changed since you opened it.</p>
+            <p>Reload it to review the latest saved Scene; Replace waits until you do.</p>
             <button ref={reloadRef} type="button" onClick={reload}>
               Reload
             </button>
@@ -525,14 +525,14 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
     confirmLabel: "Confirm replace",
     body: (
       <p>
-        {`Saves it as revision ${revision + 1}. Runs already going keep the version they ` +
-          "started with; Programs that start later use the new one."}
+        {"Runs already going keep what they started with; Programs that start later use " +
+          "the saved changes."}
       </p>
     ),
     run: async () => {
       const result = await apiWrite(path, { method: "PUT", body });
       if (result.ok) {
-        return { state: "done", message: `Replaced Scene ${sceneId}: now revision ${revision + 1}.` };
+        return { state: "done", message: `Scene ${sceneId} saved.` };
       }
       if (result.error === "scene_revision_conflict") {
         return { state: "changed", message: REPLACE_CHANGED };

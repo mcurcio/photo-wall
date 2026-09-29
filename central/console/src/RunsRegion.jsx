@@ -147,7 +147,7 @@ function runChip(row) {
 
 /**
  * One Run as a card (§9; flow design §7): `Scene X`, its state, origin, age, one-cycle
- * wording, priority, protection, revision and its frames with their health. Roots carry
+ * wording, priority, protection and its frames with their health. Roots carry
  * Finish and Cancel; their child Scenes are nested beneath as cards of their own.
  */
 function RunCard({ row, snapshot, actions = null }) {
@@ -160,7 +160,6 @@ function RunCard({ row, snapshot, actions = null }) {
     ...(row.cycle !== null ? [{ label: "Cycle", value: row.cycle }] : []),
     { label: "Priority", value: `priority ${run.priority}` },
     ...(row.protection !== null ? [{ label: "Protection", value: row.protection }] : []),
-    { label: "Revision", value: `revision ${run.scene_revision}` },
     { label: "Frames", value: <FrameChips snapshot={snapshot} frameIds={row.frames} /> },
   ];
   if (row.children.length > 0) {

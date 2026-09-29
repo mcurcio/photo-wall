@@ -320,7 +320,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
             serverConflict !== null ? `Central refused the replacement (${serverConflict.replaceAll("_", " ")}).` :
               `Program ${editingId} changed since you opened it.`}</p>
         <p>{editState !== "upcoming" ? "Changes cannot alter a Program after its window starts." :
-          "Reload it to review the stored version; Replace Program waits until you do."}</p>
+          "Reload it to review the latest saved Program; Replace Program waits until you do."}</p>
         {storedProgram !== undefined && editState === "upcoming" && <button type="button" onClick={reload}>Reload</button>}
         {editState !== "upcoming" && <button type="button" onClick={flow.leave}>Return to Programs</button>}
       </div>}

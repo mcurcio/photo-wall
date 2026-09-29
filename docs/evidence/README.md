@@ -1,7 +1,8 @@
 # Acceptance evidence
 
 - [2026-09-29 operator UX cleanup](2026-09-29-operator-ux-cleanup.md): guarded
-  Scene deletion and persistent Frame profile editing, with local database and
+  Scene deletion, persistent Frame profile editing and plain revision-free
+  operator copy, with local database and
   browser evidence and explicit hardware/deployment limits.
 - [2026-09-28 operator UX loop](2026-09-28-operator-ux-loop.md): local
   Program edit and measured Frame placement verification at `e6d12a7`, with
