@@ -40,12 +40,14 @@ from console_tasks import (
     start_scene,
     start_schedule,
     start_source,
+    visible_page,
     visit,
 )
 from media_queue import RecordingMediaQueue
 from operator_harness import (
     RequestGate,
     answer_first,
+    assert_fits_width,
     operator_server,
     report_readiness,
     tile_health,
@@ -1034,12 +1036,6 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
 
 LONG_ID = "reception" + "northwallleftofthemainentrance" * 3  # no break opportunity
 
-_OFFENDERS = """() => [...document.querySelectorAll("body *")]
-    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
-    .map((el) => el.tagName + "." + [...el.classList].join("."))
-    .slice(0, 12)"""
-
-
 def _seed_long_ids(registry):
     """A Source, Scene, Program and live Run whose ids are long unbroken strings."""
     MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue()).configure_source(
@@ -1091,13 +1087,12 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
-        expect(page.get_by_role("region", name="Runs", exact=True).get_by_text(
-            f"Scene {LONG_ID}", exact=True)).to_be_visible()
-        go(page, "sources")
-        expect(page.get_by_role("region", name="Sources", exact=True).get_by_text(
-            LONG_ID + ":1", exact=True)).to_be_visible()
-        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
-        assert fits, f"overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+        # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
+        for section, text in (
+                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID + ":1")):
+            go(page, section)
+            expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
+            assert_fits_width(page, section)
 
 
 # §9 rows and §10 precedence.

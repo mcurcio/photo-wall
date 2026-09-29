@@ -123,6 +123,20 @@ def drive_poll(page):
     expect(status).not_to_have_attribute("aria-busy", "true")
 
 
+_OFFENDERS = """() => [...document.querySelectorAll("body *")]
+    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
+    .map((el) => el.tagName + "." + [...el.classList].join("."))
+    .slice(0, 12)"""
+
+
+def assert_fits_width(page, where):
+    """The page shown never scrolls sideways; otherwise name what sticks out, as
+    `where: overflows at <width> px: [elements]`."""
+    fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+    width = page.evaluate("() => window.innerWidth")
+    assert fits, f"{where}: overflows at {width} px: {page.evaluate(_OFFENDERS)}"
+
+
 def pause_page_clock(page, at):
     """Install Playwright's fake clock at `at` (Unix seconds) and pause it, before navigation:
     the console's timers (the 5 s poll, the age ticker, the lease countdown) then fire only

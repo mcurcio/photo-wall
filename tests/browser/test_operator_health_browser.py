@@ -17,6 +17,7 @@ import pytest
 from console_tasks import connect, go, open_frame
 from operator_harness import (
     RequestGate,
+    assert_fits_width,
     operator_server,
     report_readiness,
     sign_in,
@@ -482,12 +483,6 @@ def test_first_run_has_no_strip(page, registry):
 
 LONG_ID = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
 
-_OFFENDERS = """() => [...document.querySelectorAll("body *")]
-    .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 0.5)
-    .map((el) => el.tagName + "." + [...el.classList].join("."))
-    .slice(0, 12)"""
-
-
 def _seed_layout(registry):
     _seed_attention(registry)
     enroll(registry, count=1)  # a pending Player on the rail
@@ -519,12 +514,11 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
         _open_list(page)
         for facet in ("Commissioning", "Binding", "Now-showing"):
             page.get_by_role("tab", name=facet, exact=True).click()
-            fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
-            assert fits, f"{facet}: overflows at 390 px: {page.evaluate(_OFFENDERS)}"
-        go(page, "sources")
-        expect(page.get_by_role("region", name="Sources", exact=True)).to_be_visible()
-        fits = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
-        assert fits, f"Showrunner: overflows at 390 px: {page.evaluate(_OFFENDERS)}"
+            assert_fits_width(page, facet)
+        # Every Show page too, not only the last one visited.
+        for section in ("now", "scenes", "schedule", "sources"):
+            go(page, section)
+            assert_fits_width(page, section)
 
 
 def test_the_console_follows_a_light_colour_scheme(page, registry):
