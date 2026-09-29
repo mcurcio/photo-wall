@@ -40,6 +40,7 @@ from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.operator_auth import OperatorAuth
+from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -161,7 +162,11 @@ def create_app(
         ),
         media=media_repository,
     )
-    source_names = SourceNameService(db, media_repository, RuntimeStore(db, clock))
+    runtime_store = RuntimeStore(db, clock)
+    operator_snapshot = OperatorSnapshotReader(
+        db, clock, registry, runtime_store, media_repository, coordinator
+    )
+    source_names = SourceNameService(db, media_repository, runtime_store)
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
@@ -295,6 +300,8 @@ def create_app(
     )
     app.state.registry = registry
     app.state.coordinator = coordinator
+    app.state.operator_snapshot = operator_snapshot
+    app.state.media_repository = media_repository
     app.state.content = content
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
@@ -578,6 +585,14 @@ def create_app(
         # The reports are read after the inventory, so read_at bounds every timestamp in it.
         return registry.inventory().with_liveness(coordinator.player_reports_lock_free())
 
+    @app.get(
+        "/v1/operator/snapshot",
+        dependencies=[Depends(admin)],
+        response_model=OperatorSnapshot,
+    )
+    def operator_state_snapshot():
+        return operator_snapshot.read()
+
     def _content() -> ContentServices:
         if content is None:
             raise RegistryError("content_unavailable", 503)
@@ -700,16 +715,8 @@ def create_app(
 
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
-        runtime = coordinator.runtime.read()
-        state = runtime.export_state()
-        projection = runtime.operator_projection(clock.utc())
-        return {
-            "definitions": state["scenes"],
-            "programs": state["programs"],
-            "current": projection.current,
-            "protected_frames": projection.protected_frames,
-            "program_outcomes": projection.program_outcomes,
-        }
+        read_at = clock.utc()
+        return runtime_document(coordinator.runtime.read(), read_at)
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])
     def media_state():

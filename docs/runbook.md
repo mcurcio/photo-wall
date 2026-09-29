@@ -19,6 +19,19 @@ Open `http://127.0.0.1:8000`. Read the operator token from the private `.env` fi
 
 The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and previews/commits/reverts calibration. It creates and edits Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Configure the private upstream connection on the worker before creating a Source; after the worker checks in, the Source flow offers its configured connection name. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
 
+When a commissioned Frame shows a current readiness failure, follow the
+Frame-specific guidance in Commissioning: reduce concurrent video/effect work
+or use lighter media for `capacity`; check time synchronization for `clock`;
+check supported media or choose another item for `decode`; inspect Player
+storage/network and Central delivery for `download`; inspect the Player cache
+and Central delivery path for `integrity`. Unknown codes receive generic
+diagnostic guidance. If the Player is silent, restore its Central connection
+and wait for a fresh accepted report before acting on an older failure. These
+reports describe preparation/readiness; neither they nor the enrollment
+connected-Output observation confirm visible pixels. See the
+[readiness projection contract](operator-console-ux-design.md#current-player-readiness-failures)
+for the epoch, offer, binding and time filters.
+
 The worker starts with an empty private connection list and remains healthy while idle. Its configuration is described in [the worker module](module-media-worker.md); a deployment must provision that file as UID 10001, mode 0600 in the `connections` volume and restart `worker`. Never put an upstream API key in operator forms, Source definitions, Player configuration, Git or command-line arguments. The [Immich fixture](module-immich-fixture.md) generates its own synthetic media and disposable private configuration for reproducible adapter tests.
 
 To provision a real worker connection, use the Compose service's mounted

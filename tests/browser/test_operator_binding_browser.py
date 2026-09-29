@@ -591,7 +591,7 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         inspector, dialog = _open_unbind(page)
-        page.route("**/v1/operator/inventory", lambda route: route.fulfill(
+        page.route("**/v1/operator/snapshot", lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "boom"}'))
         dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
 

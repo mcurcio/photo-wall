@@ -34,7 +34,12 @@ class RuntimeStore:
 
     def read(self) -> Runtime:
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+            return self.read_in(conn)
+
+    @staticmethod
+    def read_in(conn) -> Runtime:
+        """Restore Runtime from a caller-owned transaction without acquiring locks."""
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
         return Runtime.restore(row["snapshot"]) if row else Runtime()
 
     def read_locked(self, conn) -> Runtime:

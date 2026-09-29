@@ -35,7 +35,7 @@ from console_tasks import (
     visit,
 )
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     drive_poll,
     operator_server,
@@ -52,7 +52,7 @@ from test_operator_showrunner_browser import (
     _seed,
     _seed_source,
 )
-from test_registry import enroll
+from test_registry import ADMIN, enroll
 
 from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
@@ -191,7 +191,7 @@ def test_a_deep_link_survives_sign_in_and_waits_for_the_snapshot(page, registry)
         expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_be_visible()
         # The first read after sign-in is held: the route is already parsed, and the page
         # says "Loading…" until the snapshot arrives.
-        gate = RequestGate(page, INVENTORY)
+        gate = RequestGate(page, SNAPSHOT)
         gate.holding = True
         submit_sign_in(page)
         gate.wait_held()
@@ -251,8 +251,16 @@ def test_the_poll_keeps_running_across_sections(page, registry):
     _frame(registry, "first")
     registry.bind("first", identity["player_id"], "HDMI-A-1", expected_generation=0)
     reads = []
-    page.on("request", lambda request: reads.append(request.url)
-            if request.url.endswith("/v1/operator/inventory") else None)
+    legacy_reads = []
+
+    def record_read(request):
+        if request.url.endswith("/v1/operator/snapshot"):
+            reads.append(request.url)
+        elif request.url.endswith(("/v1/operator/inventory", "/v1/operator/runtime",
+                                   "/v1/operator/media")):
+            legacy_reads.append(request.url)
+
+    page.on("request", record_read)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, paused_at=registry.clock.utc())
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
@@ -263,11 +271,30 @@ def test_the_poll_keeps_running_across_sections(page, registry):
             count = len(reads)
             drive_poll(page)
             assert len(reads) == count + 1, section
+        assert legacy_reads == [], "the console polled a separate domain read"
         # A poll applied while Now showing is hidden is there when it is shown again.
         report_readiness(registry, identity["player_id"])
         drive_poll(page)
         go(page, "now")
         expect(badge).to_have_accessible_name("Frame first: Needs commissioning")
+
+
+def test_a_malformed_aggregate_keeps_the_last_whole_snapshot(page, registry):
+    _frame(registry, "first")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        expect(page.get_by_role("button", name="Frame first", exact=True)).to_be_visible()
+        response = page.request.get(origin + "/v1/operator/snapshot",
+                                    headers={"Authorization": "Bearer " + ADMIN})
+        assert response.status == 200, response.text()
+        malformed = response.json()
+        malformed["readiness_diagnostics"] = {"unexpected": "object"}
+        page.route(SNAPSHOT, lambda route: route.fulfill(json=malformed))
+        page.get_by_role("group", name="Snapshot status", exact=True).get_by_role(
+            "button", name="Refresh", exact=True).click()
+        expect(page.get_by_text("last refresh failed", exact=False)).to_be_visible()
+        expect(page.get_by_role("button", name="Frame first", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_have_count(0)
 
 
 def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page, registry):
@@ -486,9 +513,9 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         form, valid, invalid = _fill_hand_picked_draft(page, portrait_a, portrait_b)
 
         # The session ends: the next poll answers 401.
-        page.route(INVENTORY, lambda route: route.fulfill(
+        page.route(SNAPSHOT, lambda route: route.fulfill(
             status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-        with page.expect_response(INVENTORY):
+        with page.expect_response(SNAPSHOT):
             page.clock.run_for(5000)
         expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_be_visible()
         expect(page.get_by_role("alert")).to_contain_text("Signed out: the session expired")
@@ -502,12 +529,12 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         # The poll pauses until sign-in.
         seen = []
         page.on("request", lambda request: seen.append(request.url)
-                if request.url.endswith("/v1/operator/inventory") else None)
+                if request.url.endswith("/v1/operator/snapshot") else None)
         page.clock.run_for(20000)
         page.wait_for_timeout(200)
         assert seen == []
 
-        page.unroute(INVENTORY)
+        page.unroute(SNAPSHOT)
         submit_sign_in(page)
         _expect_on(page, "scenes")
         # Bead 2: the draft is back on the step it was left on, and the earlier steps

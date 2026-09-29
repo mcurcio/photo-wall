@@ -639,13 +639,18 @@ class Coordinator:
         it. A report from an earlier authority epoch, or from a retired Player, is not counted:
         a Player is only heard once it reports on its current session."""
         with self.db.transaction() as conn:
-            rows = conn.execute(
-                "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
-                "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
-                "WHERE p.retired_at IS NULL"
-            ).fetchall()
+            return self.player_reports_in(conn, self.clock.utc())
+
+    @staticmethod
+    def player_reports_in(conn, read_at: float) -> PlayerReports:
+        """Read accepted reports from a caller-owned transaction and label their read time."""
+        rows = conn.execute(
+            "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
+            "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
+            "WHERE p.retired_at IS NULL"
+        ).fetchall()
         reports = {row["player_id"]: row["received_at"] for row in rows}
-        return PlayerReports(read_at=max((self.clock.utc(), *reports.values())), reports=reports)
+        return PlayerReports(read_at=max((read_at, *reports.values())), reports=reports)
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()

@@ -4,6 +4,7 @@ import { BindingFacet } from "./BindingFacet.jsx";
 import { Commissioning } from "./Commissioning.jsx";
 import { frameHealth } from "./health.js";
 import { NowShowingFacet } from "./NowShowingFacet.jsx";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
 
 /**
  * Frame Inspector shell (Bead 3, read-only) — shared primitive #6.
@@ -96,6 +97,7 @@ export function Inspector({
       {health !== null && (
         <p className={`inspector__health health--${health.severity}`}>{health.label}</p>
       )}
+      <ReadinessNotice snapshot={snapshot} frameId={frameId} />
       <div className="inspector__tabs" role="tablist" aria-label="Inspector facets">
         {FACETS.map(({ key, label }) => {
           const selected = key === active;

@@ -26,7 +26,7 @@ from console_tasks import (
     visit,
 )
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     answer_first,
     drive_poll,
@@ -1031,7 +1031,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         assert current_hash(page) == "#/scenes/new/photos"
 
         # The answer lands, then its one refresh: the flow would end right after it.
-        with page.expect_response(INVENTORY):
+        with page.expect_response(SNAPSHOT):
             with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
                                       and r.request.method == "PUT") as info:
                 gate.release()

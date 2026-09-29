@@ -4,14 +4,15 @@ import { apiWrite } from "./apiWrite.js";
 import { editableDraft, normalizeScene, UNAUTHORABLE_REASON } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
-import { frameOf, LIVE_PHASES } from "./join.js";
+import { LIVE_PHASES } from "./join.js";
+import { sceneContentSummary } from "./sceneTargets.js";
 import { cycleWording } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
 import { sourceName } from "./sourceNames.js";
 
 /**
  * The stored Scenes as cards (pass 2 slice 3 §13; flow design §7): each a summary
- * card named `Scene X` with what feeds it (live Sources, or the number of hand-picked
+ * card named `Scene X` with what feeds it (live Sources and hand-picked
  * items), its target frames with their health, its cycle and loop wording, and the
  * Programs that name it; a "Running now" chip while a Run of it is
  * live. Every fact is read from the served runtime payload (`definitions`,
@@ -104,30 +105,29 @@ export function SceneList({ snapshot, editDisabled = false, onEdit, onShowNow, o
   );
 }
 
-/** What feeds a Scene: its live Sources, or how many items were hand-picked. */
-function feedWording(contributions) {
-  const assets = new Set(contributions.flatMap((entry) => entry.asset_refs));
-  const sources = [...new Set(contributions.flatMap((entry) => entry.source_refs))];
-  if (assets.size > 0) {
-    return `authored: ${assets.size} chosen ${assets.size === 1 ? "item" : "items"}`;
-  }
-  return sources.length > 0 ? `live from ${sources.map(sourceName).join(", ")}` : "no media";
+/** What feeds a Scene anywhere in its body, outro, or inline children. */
+function feedWording(summary) {
+  const sources = [...new Set(summary.sourceRefs.map(sourceName))];
+  const assets = summary.assetRefs.length;
+  const parts = [];
+  if (sources.length > 0) parts.push(`live from ${sources.join(", ")}`);
+  if (assets > 0) parts.push(`authored: ${assets} chosen ${assets === 1 ? "item" : "items"}`);
+  return parts.join(" · ") || "no media";
 }
 
 function SceneCard({ scene, snapshot, usedBy, running, editDisabled, onEdit, onShowNow, onSchedule, onDelete }) {
   const id = scene.scene_id;
+  const summary = sceneContentSummary(scene);
   const filled = normalizeScene(scene);
   const once = cycleWording(scene);
   const editable = editableDraft(scene) !== null;
-  const frames = filled.contributions
-    .map((entry) => frameOf(entry.target))
-    .filter((frameId) => frameId !== null);
+  const frames = summary.frames;
   return (
     <SummaryCard
       title={`Scene ${id}`}
       chip={running ? { tone: "ok", text: "Running now" } : null}
       lines={[
-        { label: "Media", value: feedWording(filled.contributions) },
+        { label: "Media", value: feedWording(summary) },
         {
           label: "Frames",
           value: frames.length > 0 ? <FrameChips snapshot={snapshot} frameIds={frames} /> : "none",

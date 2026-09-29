@@ -2,6 +2,7 @@ import React, { useState } from "react";
 
 import { readCandidates } from "./candidatesApi.js";
 import { rankedContributions } from "./join.js";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { sourceName } from "./sourceNames.js";
 import {
   checkCounts,
@@ -147,6 +148,7 @@ export function WhyNothingNew({ snapshot, frameId }) {
           </li>
         ))}
       </ol>
+      <ReadinessNotice snapshot={snapshot} frameId={frameId} />
     </div>
   );
 }

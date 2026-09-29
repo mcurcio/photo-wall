@@ -16,7 +16,7 @@ import time
 import pytest
 from console_tasks import connect, go, open_frame
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     assert_fits_width,
     operator_server,
@@ -127,15 +127,19 @@ def test_a_missing_read_time_fails_closed_and_never_prints_an_age(page, registry
     report_readiness(registry, player_id)
     _bound_frame(registry, "fresh", x_mm=500)
 
-    def without_read_at(route):
-        response = route.fetch()
-        body = response.json()
-        body["read_at"] = None
-        route.fulfill(response=response, json=body)
-
-    page.route(INVENTORY, without_read_at)
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "wall")
+        sign_in(page, origin)
+        status = page.get_by_role("group", name="Snapshot status", exact=True)
+        expect(status).not_to_have_attribute("aria-busy", "true")
+        response = page.request.get(origin + "/v1/operator/snapshot",
+                                    headers={"Authorization": "Bearer " + ADMIN})
+        assert response.status == 200, response.text()
+        body = response.json()
+        body["inventory"]["read_at"] = None
+        page.route(SNAPSHOT, lambda route: route.fulfill(json=body))
+        with page.expect_response(SNAPSHOT):
+            status.get_by_role("button", name="Refresh", exact=True).click()
+        go(page, "wall")
         # With no Central read time there is no age: silence is assumed, never health.
         expect(_health(page)).to_have_accessible_name("Player silent")
         expect(_health(page)).to_have_class(_severity("alarm"))
@@ -201,11 +205,11 @@ def test_a_hidden_tab_does_not_poll_and_refreshes_on_return(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
         expect(_tile(page)).to_be_visible()
-        gate = RequestGate(page, INVENTORY)
+        gate = RequestGate(page, SNAPSHOT)
         _set_visibility(page, "hidden")
         page.clock.run_for(30000)
         _settle(page)
-        assert gate.seen == 0, "a hidden tab polled the inventory"
+        assert gate.seen == 0, "a hidden tab polled the snapshot"
         _set_visibility(page, "visible")
         deadline = time.monotonic() + 5
         while gate.seen == 0 and time.monotonic() < deadline:
@@ -218,9 +222,9 @@ def test_a_stale_poll_is_dropped_after_a_newer_refresh(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
         expect(_health(page)).to_have_accessible_name("Enrolled 0 s ago, no report yet")
-        stale = page.request.get(origin + "/v1/operator/inventory",
+        stale = page.request.get(origin + "/v1/operator/snapshot",
                                  headers={"Authorization": "Bearer " + ADMIN}).text()
-        gate = RequestGate(page, INVENTORY)
+        gate = RequestGate(page, SNAPSHOT)
         gate.holding = True
         page.clock.run_for(5000)
         gate.wait_held()
@@ -241,7 +245,7 @@ def test_a_stale_401_does_not_log_the_operator_out(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
         expect(_tile(page)).to_be_visible()
-        gate = RequestGate(page, INVENTORY)
+        gate = RequestGate(page, SNAPSHOT)
         gate.holding = True
         page.clock.run_for(5000)
         gate.wait_held()
@@ -273,7 +277,7 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         inspector = open_frame(page, FRAME, "binding")
 
         writes = RequestGate(page, "**/v1/operator/frames/*/binding")
-        reads = RequestGate(page, INVENTORY)
+        reads = RequestGate(page, SNAPSHOT)
         writes.holding = True
         handle = identity["player_id"][-6:]
         inspector.get_by_role("radio", name=f"{handle} · HDMI-A-1 · Free", exact=True).check()

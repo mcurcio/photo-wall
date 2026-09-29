@@ -124,10 +124,17 @@ class MediaRepository:
 
     def sources(self) -> list[dict]:
         with self.db.transaction() as conn:
-            return conn.execute("SELECT n.name,n.revision,s.source_ref,s.spec,s.next_refresh,s.last_success,s.status,s.diagnostics,s.counts,"
-                                "refresh_requested_revision,refresh_completed_revision "
-                                "FROM media_source_names n JOIN media_sources s ON s.source_ref=n.current_ref "
-                                "WHERE NOT n.deleted ORDER BY n.name").fetchall()
+            return self.sources_in(conn)
+
+    @staticmethod
+    def sources_in(conn) -> list[dict]:
+        """Read configured Source state through a caller-owned transaction."""
+        return conn.execute(
+            "SELECT n.name,n.revision,s.source_ref,s.spec,s.next_refresh,s.last_success,s.status,"
+            "s.diagnostics,s.counts,refresh_requested_revision,refresh_completed_revision "
+            "FROM media_source_names n JOIN media_sources s ON s.source_ref=n.current_ref "
+            "WHERE NOT n.deleted ORDER BY n.name"
+        ).fetchall()
 
     def named_versions_in(self, conn, name: str) -> tuple[dict | None, tuple[str, ...]]:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
@@ -741,8 +748,24 @@ class MediaRepository:
         (`recipe_changed`) and planning requests the asset again under the new one.
         """
         with self.transaction() as conn:
-            state = conn.execute("SELECT recipe_id,max_bytes,worker_seen,worker_error,connection_ids "
-                                 "FROM media_settings WHERE singleton").fetchone()
-            return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
-                "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
-                "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}
+            return self.health_in(conn)
+
+    def health_in(self, conn) -> dict:
+        """Read worker/cache health through a caller-owned transaction."""
+        state = conn.execute(
+            "SELECT recipe_id,max_bytes,worker_seen,worker_error,connection_ids "
+            "FROM media_settings WHERE singleton"
+        ).fetchone()
+        if state is None:
+            # The operator read endpoint is strictly read-only, so it cannot use
+            # transaction()'s lazy settings-row initialization.
+            state = {
+                "recipe_id": None,
+                "max_bytes": self.limits.max_bytes,
+                "worker_seen": None,
+                "worker_error": None,
+                "connection_ids": None,
+            }
+        return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
+            "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
+            "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}

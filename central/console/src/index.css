@@ -1004,6 +1004,26 @@ label {
   padding: 4px 10px;
 }
 
+.showrunner__badge-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.readiness-notice {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.readiness-notice p,
+.readiness-notice ul {
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
 .showrunner__region {
   min-width: 0;
   padding: 16px;

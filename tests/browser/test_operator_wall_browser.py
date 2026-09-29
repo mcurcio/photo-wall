@@ -509,7 +509,7 @@ def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
         page.mouse.move(box["x"] + 360 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
                         steps=4)
         # A poll lands mid-drag.
-        with page.expect_response("**/v1/operator/inventory"):
+        with page.expect_response("**/v1/operator/snapshot"):
             page.clock.run_for(5000)
         page.wait_for_timeout(200)
         page.mouse.move(box["x"] + 540 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],

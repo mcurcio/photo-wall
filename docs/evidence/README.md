@@ -1,5 +1,13 @@
 # Acceptance evidence
 
+- [2026-09-29 current Player readiness diagnostics](2026-09-29-current-readiness-diagnostics.md):
+  current-authority assignment failures with epoch, offer, binding, layer-time
+  and silence filters; focused PostgreSQL results, with UI/browser verification
+  pending and no visible-output qualification claimed.
+- [2026-09-29 operator snapshot and recursive Scene cards](2026-09-29-operator-snapshot-and-scene-cards.md): one repeatable-read
+  inventory/Runtime/media view with distinct report timing, legacy GET
+  compatibility, and recursive Scene content summaries; focused checks only,
+  with final frontend integration and full gates pending.
 - [2026-09-29 Frame deletion reference guard](2026-09-29-frame-delete-reference-guard.md):
   serialized refusal for saved Scene/Program and queued-activation references,
   stale server IDs in the confirmation flow, and local software/database limits.

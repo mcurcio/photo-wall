@@ -57,6 +57,8 @@ SHARED_WITH_SHOW = {
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
+    "ReadinessNotice.jsx",  # shared read-only Player failure explanation
+    "readinessRecovery.js",  # plain-language failure mapping; no controls
     "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
@@ -438,6 +440,13 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     shown = reachable(graph, TABLES["show"]) | reachable(graph, TABLES["neutral"])
     assert wall & shown == SHARED_WITH_SHOW
     assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
+
+
+@pytest.mark.parametrize("table", ["show", "neutral"])
+def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, table):
+    modules = reachable(graph, TABLES[table])
+    assert {"ReadinessNotice.jsx", "readinessRecovery.js"} <= modules
+    assert not modules & DISPLAY_CONTROLS
 
 
 def test_the_wall_routes_do_reach_display_controls(graph):

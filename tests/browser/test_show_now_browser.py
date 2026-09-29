@@ -25,7 +25,7 @@ from console_tasks import (
     visit,
 )
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     answer_first,
     drive_poll,
@@ -320,12 +320,12 @@ def test_the_activation_key_outlives_steps_sections_the_wall_and_the_overlay(pag
         go(page, "scenes")
         go(page, "wall")
         # The session ends: the overlay keeps the shell, and the draft, mounted.
-        page.route(INVENTORY, lambda route: route.fulfill(
+        page.route(SNAPSHOT, lambda route: route.fulfill(
             status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-        with page.expect_response(INVENTORY):
+        with page.expect_response(SNAPSHOT):
             page.clock.run_for(5000)
         expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_be_visible()
-        page.unroute(INVENTORY)
+        page.unroute(SNAPSHOT)
         submit_sign_in(page)
 
         go(page, "now")

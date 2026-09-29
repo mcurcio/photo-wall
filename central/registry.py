@@ -492,23 +492,32 @@ class Registry:
 
     def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:
+            now = self.clock.utc()
             self._expire_previews(conn)
-            players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
-                                   "FROM players ORDER BY registered_at,id").fetchall()
-            outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
-                                   "ORDER BY player_id,output_id").fetchall()
-            frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
-                                  "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
-                                  "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
-                                  "ON b.frame_id=f.id ORDER BY f.id").fetchall()
-            for frame in frames:
-                if frame["preview_expires"] is not None and frame["preview_expires"] <= self.clock.utc():
-                    frame["preview"] = None
-                    frame["preview_expires"] = None
-            bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
-            return InstallationInventory(
-                players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
-                             for row in players),
-                outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
-                frames=tuple(FrameInventory.model_validate(row) for row in frames),
-            )
+            return self.inventory_in(conn, now)
+
+    def inventory_in(self, conn, now: float) -> InstallationInventory:
+        """Read inventory in a caller-owned transaction without writing expiry cleanup.
+
+        Expired previews are omitted from the returned view. A later mutating registry
+        operation may persist their expiry; this method is safe in read-only snapshots.
+        """
+        players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
+                               "FROM players ORDER BY registered_at,id").fetchall()
+        outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
+                               "ORDER BY player_id,output_id").fetchall()
+        frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
+                              "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
+                              "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
+                              "ON b.frame_id=f.id ORDER BY f.id").fetchall()
+        for frame in frames:
+            if frame["preview_expires"] is not None and frame["preview_expires"] <= now:
+                frame["preview"] = None
+                frame["preview_expires"] = None
+        bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
+        return InstallationInventory(
+            players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
+                         for row in players),
+            outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
+            frames=tuple(FrameInventory.model_validate(row) for row in frames),
+        )

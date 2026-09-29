@@ -2,6 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 
 import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import {
   BOOT_FACTS_UNAVAILABLE,
   bootOutcomeLabel,
@@ -190,6 +191,9 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
   const renderOutput = (player, entry, standing, cardIndex, outputIndex) => {
     const key = `${player.id}/${entry.outputId}`;
     const label = outputLabel(snapshot, bootFacts, player.id, entry.outputId);
+    const frame = frames.find(
+      (candidate) => candidate.player_id === player.id && candidate.output_id === entry.outputId,
+    );
     const chosen = picks.get(key);
     const message = messages.get(key);
     const noDisplay = standing.state === "pending" && entry.state === "no-display";
@@ -198,6 +202,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
     return (
       <li key={entry.outputId} className={`roster__output roster__output--${entry.state}`}>
         <span className="roster__output-label">{label}</span>
+        {frame !== undefined && <ReadinessNotice snapshot={snapshot} frameId={frame.id} />}
         {(canIdentify || noDisplay) && (
           <span className="roster__identify">
             <button

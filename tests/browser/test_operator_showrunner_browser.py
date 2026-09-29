@@ -529,7 +529,7 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         scene_continue(page, "Frames")
 
-        reads = RequestGate(page, "**/v1/operator/inventory")
+        reads = RequestGate(page, "**/v1/operator/snapshot")
         reads.holding = True
         page.clock.run_for(5000)
         reads.wait_held()
@@ -1836,6 +1836,34 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         expect(evening).to_contain_text(
             "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
         expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
+
+
+def test_scene_cards_summarize_inline_and_outro_frames_and_media(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene("plain"))
+    runtime.command("set_scene", Scene(
+        scene_id="layered", loop=True, outro_seconds=5,
+        children=(Child(scene=Scene(scene_id="inline", contributions=(
+            Contribution(target=f"frame:{INVALID_FRAME}", source_refs=(SOURCE,)),
+        ))),),
+        outro_contributions=(Contribution(
+            target=f"frame:{VALID_FRAME}", asset_refs=("chosen-still",)),),
+    ))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        layered = _scene_row(page, "layered")
+        expect(layered).to_contain_text("live from holiday")
+        expect(layered).to_contain_text("authored: 1 chosen item")
+        expect(layered.get_by_text(re.compile(r"^valid-frame:"))).to_have_count(1)
+        expect(layered.get_by_text(re.compile(r"^invalid-frame:"))).to_have_count(1)
+        expect(layered).not_to_contain_text("no media")
+        expect(layered).not_to_contain_text("Frames none")
+        expect(layered.get_by_role("button", name="Edit Scene layered")).to_have_count(0)
+        plain = _scene_row(page, "plain")
+        expect(plain).to_contain_text("live from holiday")
+        expect(plain).not_to_contain_text("authored:")
 
 
 def _put_authored(page, origin, scene_id, choices):

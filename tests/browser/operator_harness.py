@@ -105,20 +105,20 @@ def tile_health(page, frame_id):
 
 
 INVENTORY = "**/v1/operator/inventory"
+SNAPSHOT = "**/v1/operator/snapshot"
 
 
 def drive_poll(page):
     """Run the paused page clock one poll interval and wait until that poll has finished.
 
-    The console's poller is single-flight: a tick that finds the previous poll still
-    settling (its runtime or media read in flight, or its result not yet applied) is
-    skipped. So waiting for the inventory response alone races the next tick. The
+    The console's poller is single-flight: a tick that finds the previous aggregate
+    read in flight, or its result not yet applied, is skipped. The
     snapshot status is `aria-busy` while any Plane A read is in flight and clears only
     once the read has been applied, which is when the poller's slot frees. Use this
     wherever a test drives polls back to back.
     """
     status = page.get_by_role("group", name="Snapshot status", exact=True)
-    with page.expect_response(INVENTORY):
+    with page.expect_response(SNAPSHOT):
         page.clock.run_for(5000)
     expect(status).not_to_have_attribute("aria-busy", "true")
 
