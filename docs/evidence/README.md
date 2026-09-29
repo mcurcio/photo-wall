@@ -1,5 +1,9 @@
 # Acceptance evidence
 
+- [2026-09-29 Frame profile serialization and partial Source refresh](2026-09-29-frame-profile-and-source-partial-refresh.md): atomic profile
+  replacement under coordination/Runtime locks and successful-but-partial
+  Source refresh status with bounded item diagnostics; focused PostgreSQL,
+  console, and Chromium evidence only.
 - [2026-09-29 current Player readiness diagnostics](2026-09-29-current-readiness-diagnostics.md):
   current-authority assignment failures with epoch, offer, binding, layer-time
   and silence filters; focused PostgreSQL results, with UI/browser verification

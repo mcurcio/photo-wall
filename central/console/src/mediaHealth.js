@@ -199,14 +199,17 @@ export function sourceState(source, now, includeFilters = true) {
     return said("overdue", "alarm", `Refresh overdue by ${age(late)}`);
   }
   const valid = Number(source.counts?.valid ?? 0);
+  const pending = Number(source.counts?.pending ?? 0);
+  const rejected = Number(source.counts?.rejected ?? 0);
+  const partialCount = Math.max(0, pending) + Math.max(0, rejected);
   if (!(valid > 0)) {
     return said("empty", "todo", "nothing valid in the last refresh");
   }
-  return said(
-    "ok",
-    "ok",
-    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh`,
-  );
+  const qualifier = partialCount > 0
+    ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
+    : "";
+  return said("ok", "ok",
+    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh${qualifier}`);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.

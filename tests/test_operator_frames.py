@@ -185,6 +185,54 @@ def test_put_profile_unknown_frame_is_404(registry):
     assert response.status_code == 404 and response.json() == {"error": "unknown_frame"}
 
 
+def test_profile_replacement_serializes_with_concurrent_run_activation(registry):
+    _portrait(registry)
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
+    runtime = app.state.coordinator.runtime
+    runtime.command("set_scene", _scene_targeting("portrait", "profile-race"))
+    entered_registry = Event()
+    release_registry = Event()
+    activation_started = Event()
+    activation_done = Event()
+    replace = app.state.registry.replace_frame_profile
+
+    def pause_after_runtime_guard(*args, **kwargs):
+        entered_registry.set()
+        assert release_registry.wait(5)
+        return replace(*args, **kwargs)
+
+    app.state.registry.replace_frame_profile = pause_after_runtime_guard
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        profile_future = pool.submit(
+            client.put,
+            "/v1/operator/frames/portrait/profile",
+            json={"profile": _replacement_portrait_profile(), "expected_generation": 0},
+            headers=AUTH,
+        )
+        assert entered_registry.wait(5)
+
+        def activate():
+            activation_started.set()
+            result = runtime.command("activate", "profile-race", "profile-race-run", registry.clock.utc())
+            activation_done.set()
+            return result
+
+        activation_future = pool.submit(activate)
+        assert activation_started.wait(5)
+        # The profile route holds both coordination and Runtime locks while it
+        # pauses between the live-Run check and the Frame write. Activation must
+        # wait for that transaction to finish.
+        assert not activation_done.wait(0.2)
+        release_registry.set()
+        response = profile_future.result(timeout=5)
+        admission = activation_future.result(timeout=5)
+
+    assert response.status_code == 200
+    assert admission.status == "admitted"
+    assert activation_done.is_set()
+    assert registry.inventory().frames[0].generation == 1
+
+
 def test_delete_clear_frame_returns_200_deleted(registry):
     _portrait(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:

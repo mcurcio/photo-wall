@@ -113,6 +113,44 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         expect(card).not_to_contain_text("Awaiting refresh")
 
 
+def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_details(page, registry):
+    _seed(registry)
+    now = registry.clock.utc()
+    _set_source(
+        registry, "mixed:1", status="ok", next_refresh=now + 30, last_success=now - 60,
+        refresh_requested_revision=1, refresh_completed_revision=1,
+        counts={"discovered": 6, "valid": 3, "pending": 2, "rejected": 1},
+        diagnostics=[
+            {"code": "metadata_invalid", "asset_id": "asset-safe-id"},
+            {"code": "metadata_pending_or_changed", "asset_id": "other-safe-id"},
+            {"code": "metadata_invalid", "asset_id": "third-safe-id"},
+        ],
+    )
+    _set_source(
+        registry, "clean:1", status="ok", next_refresh=now + 30, last_success=now - 60,
+        refresh_requested_revision=1, refresh_completed_revision=1,
+        counts={"discovered": 3, "valid": 3, "pending": 0, "rejected": 0},
+        diagnostics=[],
+    )
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        mixed = _sources(page).get_by_role("article", name="mixed")
+        expect(mixed.get_by_text(
+            "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+        )).to_be_visible()
+        expect(mixed.get_by_text(
+            "Refresh succeeded with 3 items pending or rejected: metadata invalid · "
+            "metadata pending or changed. Usable items remain available."
+        )).to_be_visible()
+        clean = _sources(page).get_by_role("article", name="clean")
+        expect(clean.get_by_text(
+            "refreshed 1 min ago · 3 valid in the last refresh"
+        )).to_be_visible()
+        expect(clean.get_by_text("Partial refresh")).to_have_count(0)
+        expect(mixed).not_to_contain_text("asset-safe-id")
+
+
 def test_card_refresh_reports_accepted_request_and_blocks_duplicate_clicks(page, registry):
     _seed(registry)
     _seed_source(registry)

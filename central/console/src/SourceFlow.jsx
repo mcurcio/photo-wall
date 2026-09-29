@@ -458,8 +458,9 @@ function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedba
                   ? `Last refreshed ${new Date(source.last_success * 1000).toLocaleString()}`
                   : "No successful refresh",
               }]),
-              ...(source.status !== "ok" && source.diagnostics?.length
-                ? [{ label: "Issue", value: sourceIssue(source.diagnostics) }]
+              ...(source.diagnostics?.length
+                ? [{ label: source.status === "ok" ? "Partial refresh" : "Issue",
+                    value: sourceIssue(source, now) }]
                 : []),
               ...(feedback
                 ? [{
@@ -497,11 +498,19 @@ const SOURCE_ISSUES = {
   connection_unknown: "Connection is not configured in the media worker.",
 };
 
-function sourceIssue(diagnostics) {
-  return [...new Set(diagnostics.map((entry) => entry.code))]
+function sourceIssue(source, now) {
+  const diagnostics = source.diagnostics ?? [];
+  const details = [...new Set(diagnostics.map((entry) => entry.code))]
     .slice(0, 3)
     .map((code) => SOURCE_ISSUES[code] ?? codeWords(code))
     .join(" · ");
+  if (source.status !== "ok") return details;
+  const state = sourceState(source, now, false);
+  const affected = Number(source.counts?.pending ?? 0) + Number(source.counts?.rejected ?? 0);
+  const count = Number.isFinite(affected) && affected > 0 ? affected : diagnostics.length;
+  return `Refresh succeeded with ${count} item${count === 1 ? "" : "s"} pending or rejected` +
+    (details === "" ? "." : `: ${details}.`) +
+    (state.state === "ok" ? " Usable items remain available." : "");
 }
 
 /** What a stored spec includes, in words: its filters, or everything. */

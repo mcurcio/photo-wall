@@ -660,10 +660,16 @@ def create_app(
 
     @app.put("/v1/operator/frames/{frame_id}/profile", dependencies=[Depends(admin)])
     def replace_frame_profile(frame_id: Identifier, request: FrameProfileReplacement) -> dict:
-        _refuse_frame_in_use(frame_id)
-        return registry.replace_frame_profile(
-            frame_id, request.profile, expected_generation=request.expected_generation
-        )
+        # Keep the live-Run check and Frame update in one serialized transaction.
+        # Otherwise an activation could commit between the check and profile write.
+        with coordinator.serialized_runtime_read() as (conn, runtime):
+            references = runtime.frame_references(frame_id, clock.utc())
+            if references["run_ids"]:
+                raise RegistryError("frame_in_use", 409)
+            return registry.replace_frame_profile(
+                frame_id, request.profile, expected_generation=request.expected_generation,
+                conn=conn,
+            )
 
     @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
     def remove_frame(frame_id: Identifier) -> dict:

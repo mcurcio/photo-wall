@@ -432,6 +432,29 @@ console.log(JSON.stringify([
     assert states[1]["label"] == "Library unsupported · never refreshed successfully"
 
 
+def test_source_health_qualifies_partial_refresh_without_marking_it_failed():
+    _require_node()
+    script = r"""
+const health = await import(process.argv[1]);
+const base = { spec: {}, next_refresh: 1100, last_success: 940,
+  status: "ok", refresh_completed_revision: 1 };
+console.log(JSON.stringify([
+  health.sourceState({ ...base, counts: { valid: 3, pending: 2, rejected: 1 },
+    diagnostics: [{ code: "metadata_invalid" }, { code: "metadata_pending_or_changed" }] }, 1000, false),
+  health.sourceState({ ...base, counts: { valid: 3, pending: 0, rejected: 0 }, diagnostics: [] }, 1000, false),
+]));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    partial, healthy = json.loads(result.stdout)
+    assert partial["state"] == "ok"
+    assert partial["severity"] == "ok"
+    assert partial["label"] == "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+    assert healthy["state"] == "ok"
+    assert healthy["label"] == "refreshed 1 min ago · 3 valid in the last refresh"
+
+
 def test_program_edit_retains_later_repeated_hour_occurrence():
     _require_node()
     script = r"""
