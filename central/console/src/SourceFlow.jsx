@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
@@ -26,7 +26,7 @@ import {
 import { IncludeStep, NameStep, SourceReview } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
 import { sourceRefreshPath } from "./mediaApi.js";
-import { useMutate } from "./useMutate.js";
+import { useCardMutation } from "./useCardMutation.js";
 
 const EMPTY = [];
 
@@ -82,15 +82,12 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     [connectionIds, sources, value.connectionRef],
   );
   const now = mediaNow(snapshot);
-  const [refreshingSources, setRefreshingSources] = useState(() => new Set());
-  const [refreshFeedback, setRefreshFeedback] = useState({});
-  const refreshInFlight = useRef(new Set());
+  const sourceRefresh = useCardMutation();
   const editingName = editedId(draft.key);
   const stored = editingName === null ? null : namedSource(sources, editingName);
   const stale = editingName !== null && stored !== undefined && stored !== null &&
     draft.baseRevision !== null && stored.revision !== draft.baseRevision;
   const handOff = useHandOffTo(handOffs, "sources");
-  const mutate = useMutate();
 
   const refs = useFlowRefs();
 
@@ -131,46 +128,21 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   const { step } = flow;
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Source" });
 
-  // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) inside useMutate(), so
-  // the cards refresh exactly once after the write.
-  const refreshSource = useCallback(async (sourceRef) => {
-    // Guard synchronously so a second click cannot enqueue a duplicate while React
-    // is still rendering the disabled state.
-    if (refreshInFlight.current.has(sourceRef)) return;
-    refreshInFlight.current.add(sourceRef);
-    setRefreshingSources(new Set(refreshInFlight.current));
-    setRefreshFeedback((current) => ({ ...current, [sourceRef]: null }));
-    try {
-      // Keep useMutate's single Plane A refresh even when the request outcome is
-      // unknown. The refreshed snapshot, not the 202 receipt, owns worker status.
-      const result = await mutate(async () => {
-        try {
-          return await apiWrite(sourceRefreshPath(sourceRef), { method: "POST" });
-        } catch {
-          return { ok: false, status: 0, error: null, data: null };
-        }
-      });
+  // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) through the shared
+  // card mutation, so the cards refresh exactly once after the write.
+  const refreshSource = useCallback((sourceRef) => sourceRefresh.run(
+    sourceRef,
+    () => apiWrite(sourceRefreshPath(sourceRef), { method: "POST" }),
+    (result) => {
       if (result.ok && result.status === 202) {
-        setRefreshFeedback((current) => ({
-          ...current,
-          [sourceRef]: "Refresh requested. Check Status for the worker's latest result.",
-        }));
-      } else if (result.status === 0 || result.status >= 500) {
-        setRefreshFeedback((current) => ({
-          ...current,
-          [sourceRef]: "The refresh request outcome is unknown. Check the Source status before retrying.",
-        }));
-      } else {
-        setRefreshFeedback((current) => ({
-          ...current,
-          [sourceRef]: `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.`,
-        }));
+        return "Refresh requested. Check Status for the worker's latest result.";
       }
-    } finally {
-      refreshInFlight.current.delete(sourceRef);
-      setRefreshingSources(new Set(refreshInFlight.current));
-    }
-  }, [mutate]);
+      if (result.status === 0 || result.status >= 500) {
+        return "The refresh request outcome is unknown. Check the Source status before retrying.";
+      }
+      return `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.`;
+    },
+  ), [sourceRefresh]);
 
   const onSave = () =>
     write.send(flow, async (sent) => {
@@ -278,7 +250,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       problems={problems}
       handOff={handOff}
       newLabel="New source"
-      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} refreshingSources={refreshingSources} refreshFeedback={refreshFeedback} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
+      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} refreshingSources={sourceRefresh.pending} refreshFeedback={sourceRefresh.feedback} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
       title={editingName === null ? "New photo source" : `Edit Source ${editingName}`}
       steps={SOURCE_STEPS}
       formLabel="Configure a Source"
@@ -311,6 +283,8 @@ function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedba
       {sources.map((source) => {
         const state = sourceState(source, now, false);
         const refreshing = refreshingSources.has(source.source_ref);
+        const feedback = Object.hasOwn(refreshFeedback, source.source_ref)
+          ? refreshFeedback[source.source_ref] : null;
         return <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={sourceName(source)}
@@ -325,10 +299,10 @@ function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedba
               ...(source.status !== "ok" && source.diagnostics?.length
                 ? [{ label: "Issue", value: sourceIssue(source.diagnostics) }]
                 : []),
-              ...(refreshFeedback[source.source_ref]
+              ...(feedback
                 ? [{
                     label: "Refresh request",
-                    value: <span role="status" aria-live="polite">{refreshFeedback[source.source_ref]}</span>,
+                    value: <span role="status" aria-live="polite">{feedback}</span>,
                   }]
                 : []),
               { label: "Includes", value: includesWords(source.spec) },

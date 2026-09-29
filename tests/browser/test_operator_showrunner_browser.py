@@ -622,6 +622,62 @@ def test_program_remove_deletes_it(page, registry):
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
 
 
+def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registry):
+    """A refusal explains that nothing was removed; a server error stays unknown,
+    refreshes the list, and allows an explicit retry. Mutation probe: drop outcome
+    feedback or treat a 5xx as success."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        remove_url = f"**/v1/operator/programs/{PROGRAM_ID}"
+        responses = iter((409, 500, None))
+
+        def fail_then_delete(route):
+            if route.request.method != "DELETE":
+                route.continue_()
+                return
+            status = next(responses)
+            if status is None:
+                route.continue_()
+            elif status == 409:
+                route.fulfill(status=status, content_type="application/json",
+                              body='{"error":"program_started"}')
+            else:
+                route.fulfill(status=status, content_type="application/json",
+                              body='{"error":"temporary_failure"}')
+
+        page.route(remove_url, fail_then_delete)
+        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        expect(row.get_by_role("status")).to_have_text(
+            f"Program {PROGRAM_ID} was not removed: program started. Check the current Program state before retrying.")
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+
+        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        expect(row.get_by_role("status")).to_have_text(
+            f"Removal outcome for Program {PROGRAM_ID} is unknown. Check the current Program state before retrying.")
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+
+        with page.expect_response(
+            lambda response: response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            and response.request.method == "DELETE"
+        ) as info:
+            row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        assert info.value.status == 200
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
+
+        # A later Program may reuse the plain id; the old accepted receipt must
+        # not disable its Remove control or appear on the new card.
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+        expect(row.get_by_role("status")).to_have_count(0)
+
+
 def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
     _seed(registry)
     queue = _seed_source(registry)

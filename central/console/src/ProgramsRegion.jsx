@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { draftId, planWindows } from "./authoring.js";
@@ -29,7 +29,7 @@ import {
 } from "./scheduleFlowModel.js";
 import { ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./ScheduleSteps.jsx";
 import { isPastProgram, programState, windowLabel } from "./showState.js";
-import { useMutate } from "./useMutate.js";
+import { useCardMutation } from "./useCardMutation.js";
 
 const EMPTY = {};
 
@@ -90,7 +90,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   const programs = useMemo(() => Object.values(programsMap), [programsMap]);
   const programIds = useMemo(() => new Set(Object.keys(programsMap)), [programsMap]);
   const now = snapshot?.runtime?.current?.now;
-  const mutate = useMutate();
+  const removal = useCardMutation();
+  // A removed Program id may be used again. Forget its old card receipt once a
+  // snapshot has shown it absent, so a newly scheduled Program starts clean.
+  useEffect(() => removal.retain(programIds), [programIds, removal.feedback, removal.retain]);
 
   const draft = useFlowDraft(seedSchedule(recentScene?.sceneId ?? null, definitions, programsMap));
   const value = draft.value ?? NEW_PROGRAM_DRAFT;
@@ -277,14 +280,26 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
 
   // --- Removing a Program.
   const removeProgram = useCallback(
-    async (id) => {
-      await mutate(() =>
-        apiWrite(`/v1/operator/programs/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-        }),
-      );
-    },
-    [mutate],
+    (id) => removal.run(
+      id,
+      () => apiWrite(`/v1/operator/programs/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      (result) => {
+        if (result.ok) {
+          return { kind: "accepted", message: `Central accepted removal of Program ${id}. Waiting for the Program list to update.` };
+        }
+        if (result.status === 0 || result.status >= 500) {
+          return {
+            kind: "unknown",
+            message: `Removal outcome for Program ${id} is unknown. Check the current Program state before retrying.`,
+          };
+        }
+        return {
+          kind: "refused",
+          message: `Program ${id} was not removed: ${result.error?.replaceAll("_", " ") ?? `HTTP ${result.status}`}. Check the current Program state before retrying.`,
+        };
+      },
+    ),
+    [removal],
   );
 
   // Removing a RUNNING Program ends its Run, and removing a DUE one starts
@@ -367,11 +382,11 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
                 {/* Every stored Program by its program_id, each one discrete window with
                     its display state (showState.js); past windows sit under a closed
                     "Past (N)" disclosure. */}
-                <ProgramCards programs={current} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} />
+                <ProgramCards programs={current} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} removing={removal.pending} removalFeedback={removal.feedback} />
                 {past.length > 0 && (
                   <details className="program-cards__past">
                     <summary>{`Past (${past.length})`}</summary>
-                    <ProgramCards programs={past} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} />
+                    <ProgramCards programs={past} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} removing={removal.pending} removalFeedback={removal.feedback} />
                   </details>
                 )}
               </>
@@ -407,13 +422,14 @@ const STATE_CHIPS = {
  * Stored Programs as summary cards named `Program X`: the Scene, the window in local
  * time, the priority, and the display state with its hint (slice 3 §9); Remove.
  */
-function ProgramCards({ programs, snapshot, onRemove, onEdit }) {
+function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set(), removalFeedback = {} }) {
   return (
     <ul className="card-grid" role="list">
       {programs.map((program) => {
         const id = program.program_id;
         const state = programState(snapshot, id);
         const editableTime = programEditDraft(program) !== null;
+        const feedback = Object.hasOwn(removalFeedback, id) ? removalFeedback[id] : null;
         return (
           <li key={id} className="card-grid__item">
             <SummaryCard
@@ -434,6 +450,10 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit }) {
                     </>
                   ),
                 },
+                ...(feedback ? [{
+                  label: "Removal",
+                  value: <span role="status" aria-live="polite">{feedback.message}</span>,
+                }] : []),
               ]}
               actions={
                 <>
@@ -449,7 +469,15 @@ function ProgramCards({ programs, snapshot, onRemove, onEdit }) {
                               "Editing is available before the Program window starts."}
                     </p>
                   )}
-                  <button type="button" aria-label={`Remove program ${id}`} onClick={(event) => onRemove(event, program)}>Remove</button>
+                  <button
+                    type="button"
+                    aria-label={`Remove program ${id}`}
+                    aria-busy={removing.has(id)}
+                    disabled={removing.has(id) || feedback?.kind === "accepted"}
+                    onClick={(event) => onRemove(event, program)}
+                  >
+                    {removing.has(id) ? "Removing…" : "Remove"}
+                  </button>
                 </>
               }
             />
