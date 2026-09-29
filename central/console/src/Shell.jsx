@@ -20,12 +20,14 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
  *            wall: import("./wallState.js").WallMemory,
  *            recovery: {recovered: string[], dismiss: () => void},
- *            recentSceneId: string|null, rememberScene: (sceneId: string) => void,
+ *            recentScene: {sceneId: string, seq: number}|null,
+ *            rememberScene: (sceneId: string) => void,
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
  *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>}} RouteContext
- *   `recentSceneId` is the Scene the operator last saved or picked on a Scene card
+ *   `recentScene` is the Scene the operator last saved or picked on a Scene card
  *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
- *   prefill their Scene step from it. `markDraft` is how a Show section's flow says
+ *   prefill their Scene step from its `sceneId`. Each hand-over is an event with its own
+ *   `seq`, so handing over the same Scene again offers it again. `markDraft` is how a Show section's flow says
  *   it holds an unsaved draft; the sidebar then marks that section "Draft".
  *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
  *   Scene flow's "New selection from your photo library" runs the Source flow inline).
@@ -186,7 +188,13 @@ export function Shell({ hidden = false }) {
   const recovery = useRecovery(snapshot);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
-  const [recentSceneId, rememberScene] = useState(/** @type {string|null} */ (null));
+  const [recentScene, setRecentScene] = useState(
+    /** @type {{sceneId: string, seq: number}|null} */ (null),
+  );
+  const rememberScene = useCallback(
+    (sceneId) => setRecentScene((previous) => ({ sceneId, seq: (previous?.seq ?? 0) + 1 })),
+    [],
+  );
   const [drafts, setDrafts] = useState(() => new Set());
   const markDraft = useCallback((section, dirty) => {
     setDrafts((previous) => {
@@ -302,12 +310,12 @@ export function Shell({ hidden = false }) {
       navigate,
       wall,
       recovery,
-      recentSceneId,
+      recentScene,
       rememberScene,
       markDraft,
       handOffs,
     }),
-    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentSceneId, rememberScene, markDraft,
+    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentScene, rememberScene, markDraft,
       handOffs],
   );
 

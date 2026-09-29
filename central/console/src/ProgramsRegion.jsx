@@ -78,7 +78,7 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
  * through `SCHEDULE_FIELD_STEP` to its step, opening its Advanced ("Repeat on", "Number
  * of windows", "Priority", "Id").
  *
- * PREFILL. A new draft's Scene is the shell's `recentSceneId`: the Scene just saved, or
+ * PREFILL. A new draft's Scene is the shell's `recentScene` while it is stored: the Scene just saved, or
  * picked with a Scene card's "Schedule it". A later hand-over refills a draft the
  * operator has not changed; a changed draft is kept, and its Scene step offers the
  * handed-over Scene instead (the kit's `useSceneHandOver`, shared with Show now).
@@ -94,10 +94,10 @@ export function buildProgram({ programId, sceneId, startsAt, endsAt, priority })
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
- *          recentSceneId: string|null,
+ *          recentScene: {sceneId: string, seq: number}|null,
  *          markDraft: (section: string, dirty: boolean) => void}} props
  */
-export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markDraft }) {
+export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDraft }) {
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   // Stored Programs are the runtime programs map, keyed by program_id
   // (central/app.py -> runtime.export_state()["programs"]).
@@ -107,7 +107,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
   const now = snapshot?.runtime?.current?.now;
   const mutate = useMutate();
 
-  const draft = useFlowDraft(seedSchedule(recentSceneId));
+  const draft = useFlowDraft(seedSchedule(recentScene?.sceneId ?? null, definitions));
   const value = draft.value ?? NEW_PROGRAM_DRAFT;
 
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
@@ -116,9 +116,10 @@ export function ProgramsRegion({ snapshot, route, navigate, recentSceneId, markD
 
   // PREFILL: a Scene handed over after the draft opened (a new draft is seeded with it).
   const handOver = useSceneHandOver({
-    recentSceneId,
+    recentScene,
     draft,
     sceneId: value.sceneId,
+    accepts: (sceneId) => definitions[sceneId] !== undefined,
     choose: (sceneId) => draft.patch({ sceneId }),
   });
 

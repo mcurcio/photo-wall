@@ -35,10 +35,10 @@ import { useMutate } from "./useMutate.js";
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
- *          recentSceneId: string|null,
+ *          recentScene: {sceneId: string, seq: number}|null,
  *          markDraft: (section: string, dirty: boolean) => void}} props
  */
-export function RunsRegion({ snapshot, route, navigate, recentSceneId, markDraft }) {
+export function RunsRegion({ snapshot, route, navigate, recentScene, markDraft }) {
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
   // After a cancel, or when its opener is gone, the Runs region takes focus.
   const focusRegion = () => regionRef.current?.focus();
@@ -76,7 +76,7 @@ export function RunsRegion({ snapshot, route, navigate, recentSceneId, markDraft
         snapshot={snapshot}
         route={route}
         navigate={navigate}
-        recentSceneId={recentSceneId}
+        recentScene={recentScene}
         markDraft={markDraft}
       />
 

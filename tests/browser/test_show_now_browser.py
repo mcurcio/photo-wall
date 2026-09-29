@@ -432,6 +432,26 @@ def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
                ).to_have_count(0)
 
 
+def test_the_same_scene_handed_over_again_is_offered_again(page, registry):
+    """A hand-over is an event (the shell's `recentScene` carries a `seq`): the operator who
+    picked a card's Scene, changed the draft to another, and picks the same card again is
+    offered it again. Mutation probe: react to a change of the Scene id only."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        _show_scene_card(page, "elsewhere")
+        form = show_form(page)
+        scene = form.get_by_label("Scene to activate", exact=True)
+        expect(scene).to_have_value("elsewhere")
+        scene.select_option(SCENE_ID)  # a changed draft
+        _show_scene_card(page, "elsewhere")
+        expect(scene).to_have_value(SCENE_ID)
+        form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
+        expect(scene).to_have_value("elsewhere")
+
+
 def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
     """A clean draft whose last activation's outcome is unknown keeps its Scene and its key
     when a card's "Show now" names another Scene (the retry must not start twice); the

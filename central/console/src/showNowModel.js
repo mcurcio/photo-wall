@@ -60,7 +60,7 @@ export const REPEAT_LABELS = Object.freeze({ ignore: "Leave it running", restart
 
 /**
  * The Show-now seed: the Scene the operator last saved or picked (the shell's
- * `recentSceneId`) when it is still stored, the priority on its default, "Leave it
+ * `recentScene`) when it is still stored, the priority on its default, "Leave it
  * running", and a fresh activation key.
  *
  * @param {string|null} recentSceneId

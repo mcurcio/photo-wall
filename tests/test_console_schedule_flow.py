@@ -1,6 +1,6 @@
 """The Schedule flow's shape, as a pure module (flow design §7 J6; bead 4): its steps and
 problem routing, its one instance and route, its seed (the Scene prefilled from the shell's
-`recentSceneId`, priority 0, one window), which write a draft makes (one Program, or the
+`recentScene` while stored, priority 0, one window), which write a draft makes (one Program, or the
 separate-windows helper), and the helper's overlap reason not waiting for the name.
 
 Runs the modules under Node, as tests/test_console_flow.py does (same skip and fail rule).
@@ -29,8 +29,10 @@ out.keys = [
 ];
 out.route = K.toRoute("new", K.firstStep("new"));
 out.describe = K.describe("new");
-out.seedNone = model.seedSchedule(null)("new");
-out.seedRecent = model.seedSchedule("evening")("new");
+const stored = { evening: { scene_id: "evening" } };
+out.seedNone = model.seedSchedule(null, stored)("new");
+out.seedRecent = model.seedSchedule("evening", stored)("new");
+out.seedGone = model.seedSchedule("ghost", stored)("new");
 out.separate = [1, "1", " 1 ", 2, "", "abc", 0].map((count) =>
   model.separateWindows({ ...model.NEW_PROGRAM_DRAFT, count }));
 
@@ -73,6 +75,8 @@ def test_schedule_flow_shape():
         "sceneId": "", "start": "", "end": "", "count": 1, "weekdays": [True] * 7,
         "priority": 0, "name": "", "idOverride": None}
     assert out["seedRecent"] == {**out["seedNone"], "sceneId": "evening"}
+    # A Scene deleted since it was handed over prefills nothing, as in Show now.
+    assert out["seedGone"] == out["seedNone"]
     # Only exactly one window is one Program; anything else is the helper, whose count
     # reason then applies (never silently read as one).
     assert out["separate"] == [False, False, False, True, True, True, True]

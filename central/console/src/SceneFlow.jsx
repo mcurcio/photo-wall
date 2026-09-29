@@ -86,7 +86,7 @@ const HEADINGS = {
  * SAVE writes ONE request (authoring.js `buildSave`) through the kit's write
  * (flow/useFlowWrite.js: one Plane A refresh, so the new card is listed), ends the flow
  * (`finish`), remembers the Scene for the next flows (`rememberScene`, the shell's
- * `recentSceneId`) and offers "Show now" and "Schedule it".
+ * `recentScene`) and offers "Show now" and "Schedule it".
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,

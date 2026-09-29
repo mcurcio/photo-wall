@@ -60,7 +60,7 @@ const UNKNOWN_ACTIVATION =
  * start the Scene twice, and so does a refusal before the Runtime (the session, the
  * origin: showNowModel.js `activationAnswer`); a known outcome ends the flow
  * (`finish`). The Scene step is
- * prefilled from the shell's `recentSceneId`: a clean draft follows it when it changes
+ * prefilled from the shell's `recentScene`: a clean draft follows each hand-over
  * (a Scene card's or the Scene flow's "Show now"); a dirty one, or one whose outcome is
  * unknown, is kept, and its Scene step offers the handed-over Scene instead (the kit's
  * `useSceneHandOver`, shared with the Schedule flow).
@@ -75,12 +75,12 @@ const UNKNOWN_ACTIVATION =
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,
- *          recentSceneId: string|null,
+ *          recentScene: {sceneId: string, seq: number}|null,
  *          markDraft: (section: string, dirty: boolean) => void}} props
  */
-export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraft }) {
+export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft }) {
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
-  const draft = useFlowDraft(seedShowNow(recentSceneId, definitions));
+  const draft = useFlowDraft(seedShowNow(recentScene?.sceneId ?? null, definitions));
   const value = draft.value ?? seedShowNow(null, EMPTY, () => "")();
 
   // The last outcome, held here only; null until an activation. An Admission is put in
@@ -141,7 +141,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentSceneId, markDraf
   // stored; a dirty one, or one whose outcome is unknown (its key must be kept for the
   // retry), is kept and offered it instead.
   const handOver = useSceneHandOver({
-    recentSceneId,
+    recentScene,
     draft,
     sceneId: value.sceneId,
     held: unknown,

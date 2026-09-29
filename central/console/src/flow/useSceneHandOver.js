@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * The Scene handed over to a flow that schedules or shows one (flow design §7 J6, J7):
- * the shell's `recentSceneId`, set when the operator saves a Scene or picks one on a
- * Scene card ("Schedule it", "Show now"). A new draft is seeded with it (the flow's
+ * the shell's `recentScene` (`{sceneId, seq}`), set when the operator saves a Scene or
+ * picks one on a Scene card ("Schedule it", "Show now"). A new draft is seeded with it (the flow's
  * seed); this is the rule for one that is already open when another is handed over,
  * written once for the Schedule and Show-now flows:
  *
@@ -16,17 +16,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * activation key must stay for the retry), and so does a draft whose write is in flight
  * (useFlowDraft `held`: the answer belongs to it). `accepts(sceneId)` says whether the Scene can
  * be taken at all (Show now's: it is still stored); a Scene it refuses is ignored.
- * Only a change of `recentSceneId` asks for any of this. `clear()` forgets the offer
+ * Only a new hand-over (a new `seq`) asks for any of this: handing over the Scene a
+ * changed draft was offered before, or already handed, offers it again. `clear()` forgets the offer
  * (another instance opened, or the flow's write done).
  *
- * @param {{recentSceneId: string|null,
+ * @param {{recentScene: {sceneId: string, seq: number}|null,
  *          draft: {key: string|null, dirty: boolean, held: boolean, reseed: () => void},
  *          sceneId: string, held?: boolean, accepts?: (sceneId: string) => boolean,
  *          choose: (sceneId: string) => void}} options
  * @returns {{offered: string|null, take: () => void, clear: () => void}}
  */
 export function useSceneHandOver({
-  recentSceneId,
+  recentScene,
   draft,
   sceneId,
   held = false,
@@ -34,13 +35,15 @@ export function useSceneHandOver({
   choose,
 }) {
   const [offered, setOffered] = useState(/** @type {string|null} */ (null));
-  const handedRef = useRef(recentSceneId);
+  const handedRef = useRef(recentScene?.seq ?? null);
 
   useEffect(() => {
-    if (handedRef.current === recentSceneId) {
+    const seq = recentScene?.seq ?? null;
+    if (handedRef.current === seq) {
       return;
     }
-    handedRef.current = recentSceneId;
+    handedRef.current = seq;
+    const recentSceneId = recentScene?.sceneId ?? null;
     if (recentSceneId === null || draft.key === null || !accepts(recentSceneId)) {
       return;
     }

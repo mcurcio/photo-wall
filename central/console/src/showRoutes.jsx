@@ -30,14 +30,14 @@ export const showRoutes = Object.freeze(
       label: "Now showing",
       // The Show-now flow (#/now/show/<step>) lives in the Runs region; while it shows a
       // step, the media pipeline is left out (rule 1: one question on screen).
-      render: ({ snapshot, route, navigate, recentSceneId, markDraft }) => (
+      render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
         <>
           <FrameHealthBadges snapshot={snapshot} />
           <RunsRegion
             snapshot={snapshot}
             route={route}
             navigate={navigate}
-            recentSceneId={recentSceneId}
+            recentScene={recentScene}
             markDraft={markDraft}
           />
           {SHOW_KEYS.fromRoute(route) === null && <MediaPipeline snapshot={snapshot} />}
@@ -66,12 +66,12 @@ export const showRoutes = Object.freeze(
     {
       section: "schedule",
       label: "Schedule",
-      render: ({ snapshot, route, navigate, recentSceneId, markDraft }) => (
+      render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
         <ProgramsRegion
           snapshot={snapshot}
           route={route}
           navigate={navigate}
-          recentSceneId={recentSceneId}
+          recentScene={recentScene}
           markDraft={markDraft}
         />
       ),

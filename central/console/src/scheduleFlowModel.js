@@ -12,7 +12,7 @@
  * reason there, never silently read as 1).
  *
  * INSTANCES. There are no edits: a draft is keyed `new` (`#/schedule/new/<step>`) and
- * opens at the Scene step, prefilled with the shell's `recentSceneId` (the Scene just
+ * opens at the Scene step, prefilled with the shell's `recentScene` (the Scene just
  * saved, or picked on a Scene card with "Schedule it").
  */
 
@@ -78,14 +78,17 @@ export const NEW_PROGRAM_DRAFT = Object.freeze({
 });
 
 /**
- * The Schedule flow's seed: a new Program draft, its Scene prefilled with
- * `recentSceneId` when there is one.
+ * The Schedule flow's seed: a new Program draft, its Scene prefilled with the Scene the
+ * operator last saved or picked (the shell's `recentScene`) while it is still stored, as
+ * showNowModel.js `seedShowNow` does.
  *
  * @param {string|null} recentSceneId
+ * @param {Record<string, object>} definitions the stored Scenes
  * @returns {(key: string) => ProgramDraft}
  */
-export function seedSchedule(recentSceneId) {
-  const draft = recentSceneId === null ? NEW_PROGRAM_DRAFT : { ...NEW_PROGRAM_DRAFT, sceneId: recentSceneId };
+export function seedSchedule(recentSceneId, definitions) {
+  const stored = recentSceneId !== null && definitions[recentSceneId] !== undefined;
+  const draft = stored ? { ...NEW_PROGRAM_DRAFT, sceneId: recentSceneId } : NEW_PROGRAM_DRAFT;
   return () => draft;
 }
 
