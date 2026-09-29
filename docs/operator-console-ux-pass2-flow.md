@@ -91,16 +91,16 @@ flowchart LR
 | `--border` | `#d4d4d4` / `#262626` | `--immich-ui-default-border` | decorative only |
 | `--input-bg` | `#f3f4f6` / `#1f2937` | `inputContainerCommon: bg-gray-100 … dark:bg-gray-800` | `--fg` 9.9 / 10.6 |
 | `--input-ring` | `#737373` both | Immich uses `ring-gray-200` / `ring-neutral-700`, which is under 3:1; **darkened for WCAG 1.4.11** | light 4.7 / 4.5 / 4.3, dark 4.2 / 3.8 / 3.1 (bg / raised / input) |
-| `--alarm` + `--on-alarm` | `#c81c15` + `#fff` / `#f67d7d` + `#000` | danger-600 light (500 is 3.9:1) / danger-500 dark | 5.8 / 8.2 |
+| `--alarm` + `--on-alarm` | `#b91c1c` + `#fff` / `#f67d7d` + `#000` | danger-600 light (500 is 3.9:1), **darkened** to Tailwind red-700 so alarm text reads on its own 15 % tint (danger-600 `#c81c15` gave 4.31 over raised) / danger-500 dark | 6.5 / 8.2 |
 | `--ok` | `#07702a` / `#48ed98` | success-700 / success-500 | |
-| `--warn` | `#936400` / `#ffd198` | warning-700 / warning-500 | |
+| `--warn` | `#805700` / `#ffd198` | warning-700 **darkened** (`#936400` gave 4.06–4.45 as text on its 10–15 % tints and on `--accent-tint`) / warning-500 | light ≥ 4.9 on its tints over bg and raised |
 | `--todo` | `#0a4e8e` / `#7ab7ff` | info-700 / info-500 | |
 | Radii | button 12 px, input 8 px, card 16 px, nav pill on the trailing edge | Button medium `rounded-xl`; `inputRoundedSize rounded-lg`; Card `rounded-2xl shadow-sm border`; NavbarItem `rounded-e-full` | |
 | Layout | sidebar 16 rem; header 4.5 rem + 4 px; drawer under 850 px | `sidebar:w-64`; `--navbar-height`; `--breakpoint-sidebar: 850px` | |
 
 **Status chips never rely on colour alone.** **Colours:** the chip background is its status colour at 12 % over `--bg-raised`, with the text in `--fg` (8.5–10.8:1) and a 1 px border in the status colour (4.9–12.7:1 against raised). **Text and shape:** every chip starts with its state word ("Alarm", "To do", "OK") and a shape (▲, ■ or ●). **Same rule for markers:** the sidebar's draft marker is the word "Draft" and never a dot alone.
 
-**Contrast pytest.** It parses the token block in both schemes. Text pairs must be at least 4.5:1: fg, muted and label on bg, raised **and `--input-bg`**; on-accent and on-alarm; the chip text. Non-text pairs must be at least 3:1: the ring against bg, raised and input; focus against bg and raised; each status border against raised.
+**Contrast pytest.** It parses the token block in both schemes. Text pairs must be at least 4.5:1: fg, muted and label on bg, raised **and `--input-bg`**; on-accent and on-alarm; the chip text; and the composite pairs, each tint mixed over bg and raised: every status text on each status tint the stylesheet uses (read from `index.css`) and on `--accent-tint`, and accent text on `--accent-tint`. Non-text pairs must be at least 3:1: the ring against bg, raised and input; focus against bg and raised; each status border against raised.
 
 **Components, in our own CSS.** **Buttons:** 14 px medium, padding 8 × 20 px. Filled primary for the one forward action per step. Outline (border plus tint) for secondary actions. Ghost for card actions. Danger only inside `ConfirmAction`. **Inputs:** filled `--input-bg` with a 1 px `--input-ring`, turning `--accent` on focus. Labels in `--fg-label`. **Nav items:** 14 px medium, padding 12 px vertical and 20 px leading, trailing pill. The active item is tinted, **semibold, with a 3 px `--accent` bar on its leading edge** (so it is never marked by tint alone), and carries `aria-current="page"`. **Cards:** 16 px radius and padding, header (title and chip), footer (actions).
 

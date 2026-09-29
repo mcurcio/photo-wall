@@ -79,9 +79,9 @@
     --on-accent: #ffffff;
     --ok: #07702a;
     --todo: #0a4e8e;
-    --alarm: #c81c15;
+    --alarm: #b91c1c;
     --on-alarm: #ffffff;
-    --warn: #936400;
+    --warn: #805700;
     --shadow: rgba(0, 0, 0, 0.1);
   }
 }

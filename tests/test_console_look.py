@@ -88,9 +88,37 @@ def _mix(colour, base, weight):
     return tuple(weight * c + (1 - weight) * b for c, b in zip(colour, base))
 
 
+def _status_tints() -> set[float]:
+    """Every weight at which index.css tints a surface with a status colour
+    (`color-mix(in srgb, var(--warn) 15%, …)`): the status text on it must read."""
+    css = CSS.read_text()
+    weights = re.findall(
+        r"color-mix\(in srgb,\s*var\(--(?:" + "|".join(STATUSES) + r")\)\s*(\d+)%", css)
+    return {int(weight) / 100 for weight in weights}
+
+
+def _accent_tint(tokens: dict[str, str]) -> float:
+    """The weight of `--accent-tint` (`color-mix(in srgb, var(--accent) N%, transparent)`)."""
+    match = re.fullmatch(r"color-mix\(in srgb,\s*var\(--accent\)\s*(\d+)%,\s*transparent\)",
+                         tokens["--accent-tint"].strip())
+    assert match, tokens["--accent-tint"]
+    return int(match.group(1)) / 100
+
+
 def _pairs(tokens: dict[str, str]):
     """Every (description, foreground, background, minimum) pair §5 names."""
     c = {name[2:]: _rgb(v) for name, v in tokens.items() if v.startswith("#")}
+    # Composite pairs: a tint over transparent shows the surface under it, so its colour
+    # is the tint mixed over that surface (--bg or --bg-raised).
+    accent_tint = _accent_tint(tokens)
+    for surface in ("bg", "bg-raised"):
+        tint = _mix(c["accent"], c[surface], accent_tint)
+        yield f"--accent text on --accent-tint over --{surface}", c["accent"], tint, TEXT
+        for status in STATUSES:
+            yield (f"--{status} text on --accent-tint over --{surface}", c[status], tint, TEXT)
+            for weight in sorted(_status_tints()):
+                yield (f"--{status} text on its {weight:.0%} tint over --{surface}", c[status],
+                       _mix(c[status], c[surface], weight), TEXT)
     surfaces = ("bg", "bg-raised", "input-bg")
     for text in ("fg", "fg-muted", "fg-subtle", "fg-label"):
         for surface in surfaces:
@@ -132,6 +160,11 @@ def test_token_pairs_meet_wcag_contrast(scheme):
         if (ratio := _ratio(fg, bg)) < minimum
     ]
     assert not failures, f"{scheme} scheme:\n" + "\n".join(failures)
+
+
+def test_the_status_tints_are_read_from_the_stylesheet():
+    # Guards the composite pairs: the tints index.css uses today are among them.
+    assert {0.12, 0.15} <= _status_tints()
 
 
 def test_contrast_formula_matches_known_values():
