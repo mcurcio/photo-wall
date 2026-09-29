@@ -152,6 +152,9 @@ const stored = { evening: { scene_id: "evening", revision: 3, cycle_seconds: 20,
                     source_refs: ["holiday:1"], retain_on_expiry: true }] } };
 const seedOf = scene.seedScene(stored);
 out.seedNew = seedOf("new");
+out.seedNewTarget = scene.seedScene(stored, "frame_one")("new");
+out.seedNewBadTarget = scene.seedScene(stored, "old:frame")("new");
+out.seedEditWithTarget = scene.seedScene(stored, "frame_one")("edit/evening");
 out.seedEdit = seedOf("edit/evening");
 out.seedMissing = seedOf("edit/ghost");
 out.changed = scene.changedSceneFields(seedOf("edit/evening"),
@@ -263,6 +266,9 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["seedNew"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "", "targets": [],
         "selections": {}, "cycleSeconds": 30, "loop": True, "revision": None}
+    assert out["seedNewTarget"]["targets"] == ["frame_one"]
+    assert out["seedNewBadTarget"]["targets"] == []
+    assert out["seedEditWithTarget"] == out["seedEdit"]
     assert out["seedEdit"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "holiday:1",
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True, "revision": 3}
@@ -281,7 +287,7 @@ def test_flow_kit_and_scene_flow_shape():
     # A hand-picked frame with nothing to choose is a frame problem, said with its Source;
     # while candidates load, that is what each frame says.
     assert out["noMedia"] == [
-        ["targets", "No compatible media for lobby in holiday:1. "
+            ["targets", "No compatible media for lobby in holiday. "
                     "Choose another frame, or another Source."],
         ["media:hall", "Choose media for hall."]]
     assert out["loadingMedia"] == ["media:lobby", "media:hall"]
@@ -322,26 +328,32 @@ out.fieldSteps = ["type", "favorites", "from", "until", "ref", "connection"]
   .map((field) => steps.stepOfField(source.SOURCE_FIELD_STEP, field));
 const K = source.SOURCE_KEYS;
 out.keys = [K.fromRoute({ section: "sources", flow: "new", step: "name" }),
+            K.fromRoute({ section: "sources", id: "spring", flow: "edit", step: "review" }),
             K.fromRoute({ section: "sources" }),
             K.fromRoute({ section: "scenes", flow: "new", step: "kind" })];
 out.route = K.toRoute("new", K.firstStep("new"));
 out.describe = K.describe("new");
+out.editRoute = K.toRoute("edit/spring", K.firstStep("edit/spring"));
 const spec = (ref) => ({ source_ref: "x", spec: ref === undefined ? {} : { connection_ref: ref } });
 out.rules = [
-  source.connectionRule([]),
-  source.connectionRule([spec("home"), spec("home"), spec(undefined)]),
-  source.connectionRule([spec("work"), spec("home")]),
+  source.connectionRule(null, []),
+  source.connectionRule(null, [spec("home"), spec("home"), spec(undefined)]),
+  source.connectionRule(null, [spec("work"), spec("home")]),
+  source.connectionRule([], []),
+  source.connectionRule(["home"], [], "removed"),
 ];
 out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
-  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(sources))]);
-out.seeds = [source.seedSource([])("new"), source.seedSource([spec("home")])("new").connectionRef,
+  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(null, sources))]);
+out.seeds = [source.seedSource([], null)("new"), source.seedSource([spec("home")], null)("new").connectionRef,
              source.seedSource([spec("a"), spec("b")])("new").connectionRef];
+out.seedEdit = source.seedSource([{ name: "spring", revision: 3, source_ref: "spring:3",
+  spec: { connection_ref: "home", media_types: ["image"], favorites: true } }])("edit/spring");
 out.answers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, favorites: "only",
-                                     capturedFrom: "2024-01-01", sourceRef: " spring:1 " });
+                                     capturedFrom: "2024-01-01", sourceName: " spring " });
 out.problems = authoring.sourceProblems(source.NEW_SOURCE_DRAFT).map((p) => p.field);
-out.spec = source.buildSourceSpec({ sourceRef: "spring:1", connectionRef: "home",
+out.spec = source.buildSourceSpec({ expectedRevision: 2, connectionRef: "home",
                                     mediaType: "image", favorites: "not" });
-out.specBoth = source.buildSourceSpec({ sourceRef: "s:1", connectionRef: "h", mediaType: "both" });
+out.specBoth = source.buildSourceSpec({ connectionRef: "h", mediaType: "both" });
 console.log(JSON.stringify(out));
 """
 
@@ -367,28 +379,109 @@ def test_hand_offs_and_source_flow_shape():
 
     assert out["steps"] == [["include", "What to include"], ["name", "Name"], ["review", "Review"]]
     assert out["fieldSteps"] == ["include", "include", "include", "include", "name", "name"]
-    assert out["keys"] == ["new", None, None]
+    assert out["keys"] == ["new", "edit/spring", None, None]
     assert out["route"] == {"section": "sources", "flow": "new", "step": "include"}
+    assert out["editRoute"] == {"section": "sources", "id": "spring", "flow": "edit", "step": "review"}
     assert out["describe"] == "a new photo source"
-    # The connection rule: none -> a visible field; one value -> prefilled under Advanced
-    # (a Source without one adds no value); several -> a chooser, none chosen.
+    # The legacy connection rule keeps manual entry until the worker reports. Explicit
+    # empty and removed saved connections are represented separately from unknown.
     assert out["rules"] == [
-        {"shown": "field", "values": [], "prefill": ""},
-        {"shown": "advanced", "values": ["home"], "prefill": "home"},
-        {"shown": "chooser", "values": ["home", "work"], "prefill": ""}]
+        {"shown": "field", "values": [], "prefill": "", "reported": False, "selectedUnavailable": False},
+        {"shown": "advanced", "values": ["home"], "prefill": "home", "reported": False, "selectedUnavailable": False},
+        {"shown": "chooser", "values": ["home", "work"], "prefill": "", "reported": False, "selectedUnavailable": False},
+        {"shown": "blocked", "values": [], "prefill": "", "reported": True, "selectedUnavailable": False},
+        {"shown": "chooser", "values": ["home"], "prefill": "", "reported": True, "selectedUnavailable": True}]
     assert out["advanced"] == [[], ["connection"], []]
     assert out["seeds"] == [
         {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
-         "sourceRef": "", "connectionRef": "", "newConnection": False}, "home", ""]
+         "sourceName": "", "connectionRef": "", "newConnection": False}, "home", ""]
+    assert out["seedEdit"] == {
+        "mediaType": "image", "favorites": "only", "capturedFrom": "", "capturedUntil": "",
+        "sourceName": "spring", "connectionRef": "home", "newConnection": False, "revision": 3}
     assert out["answers"] == [
         {"label": "Media type", "field": "type", "value": "Images and video"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
         {"label": "Taken from", "field": "from", "value": "2024-01-01"},
         {"label": "Taken until", "field": "until", "value": "No limit"},
-        {"label": "Source name and revision", "field": "ref", "value": "spring:1"},
+        {"label": "Source name", "field": "ref", "value": "spring"},
         {"label": "Connection name", "field": "connection", "value": None}]
     assert out["problems"] == ["ref", "connection"]
-    assert out["spec"] == {"schema": 1, "source_ref": "spring:1", "connection_ref": "home",
+    assert out["spec"] == {"expected_revision": 2, "connection_ref": "home",
                            "media_types": ["image"], "favorites": False}
     assert out["specBoth"]["media_types"] == ["image", "video"]
     assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]
+
+
+def test_source_health_separates_unattempted_from_failed_first_refresh():
+    _require_node()
+    script = r"""
+const health = await import(process.argv[1]);
+const base = { spec: {}, next_refresh: 0, last_success: null };
+console.log(JSON.stringify([
+  health.sourceState({ ...base, status: "unavailable", refresh_completed_revision: 0 }, 1000, false),
+  health.sourceState({ ...base, status: "incompatible", refresh_completed_revision: 1 }, 1000, false),
+]));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    states = json.loads(result.stdout)
+    assert states[0]["state"] == "never-refreshed"
+    assert states[0]["label"] == "Awaiting refresh"
+    assert states[1]["state"] == "failing"
+    assert states[1]["label"] == "Library unsupported · never refreshed successfully"
+
+
+def test_source_health_qualifies_partial_refresh_without_marking_it_failed():
+    _require_node()
+    script = r"""
+const health = await import(process.argv[1]);
+const base = { spec: {}, next_refresh: 1100, last_success: 940,
+  status: "ok", refresh_completed_revision: 1 };
+console.log(JSON.stringify([
+  health.sourceState({ ...base, counts: { valid: 3, pending: 2, rejected: 1 },
+    diagnostics: [{ code: "metadata_invalid" }, { code: "metadata_pending_or_changed" }] }, 1000, false),
+  health.sourceState({ ...base, counts: { valid: 3, pending: 0, rejected: 0 }, diagnostics: [] }, 1000, false),
+]));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    partial, healthy = json.loads(result.stdout)
+    assert partial["state"] == "ok"
+    assert partial["severity"] == "ok"
+    assert partial["label"] == "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+    assert healthy["state"] == "ok"
+    assert healthy["label"] == "refreshed 1 min ago · 3 valid in the last refresh"
+
+
+def test_program_edit_retains_later_repeated_hour_occurrence():
+    _require_node()
+    script = r"""
+const model = await import(process.argv[1]);
+const source = { program_id: "fold", scene_id: "night", starts_at: 1793525400,
+                 ends_at: 1793526300, priority: 0 };
+const draft = model.programEditDraft(source);
+const retained = model.effectiveProgramTimes(draft);
+const changed = model.effectiveProgramTimes({ ...draft, start: "2026-11-01T01:15" });
+const invalidChange = { ...draft, start: "2026-11-01T02:45" };
+console.log(JSON.stringify({ draft, retained, changed,
+  problems: model.programDraftProblems(draft, new Set(["fold"]), 1000, [], true),
+  changedProblems: model.programDraftProblems(invalidChange, new Set(["fold"]), 1000, [], true) }));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "scheduleFlowModel.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True,
+        env={**os.environ, "TZ": "America/Los_Angeles"})
+    out = json.loads(result.stdout)
+    assert out["draft"]["start"] == "2026-11-01T01:30"
+    assert out["retained"]["startsAt"] == 1793525400
+    assert out["retained"]["endsAt"] == 1793526300
+    assert out["retained"]["retainedStart"] is True
+    assert out["retained"]["retainedEnd"] is True
+    assert out["changed"]["startsAt"] == 1793520900
+    assert out["changed"]["retainedStart"] is False
+    assert not any(problem["field"] == "end" and "before it starts" in problem["message"]
+                   for problem in out["problems"])
+    assert any(problem["field"] == "end" and "before it starts" in problem["message"]
+               for problem in out["changedProblems"])

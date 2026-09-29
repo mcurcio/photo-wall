@@ -13,6 +13,7 @@
 import { formatAge } from "./health.js";
 import { frameOf, toTarget } from "./join.js";
 import { IDENTIFIER_PATTERN } from "./routes.js";
+import { sourceName } from "./sourceNames.js";
 
 // The API identifier rule is routes.js `IDENTIFIER_PATTERN` (re-exported here).
 export { IDENTIFIER_PATTERN };
@@ -139,7 +140,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
         problems.push({
           field: "targets",
           message:
-            `No compatible media for ${frameId} in ${draft.sourceRef}. ` +
+            `No compatible media for ${frameId} in ${sourceName(draft.sourceRef)}. ` +
             "Choose another frame, or another Source.",
         });
       } else {
@@ -404,13 +405,13 @@ export function timeZoneName() {
 }
 
 /** Scene, window and priority problems shared by one Program and the helper. */
-function scheduleProblems({ sceneId, start, end, priority }, now) {
+function scheduleProblems({ sceneId, start, end, priority }, now, effectiveTimes = null) {
   const problems = [];
   if (sceneId === "") {
     problems.push({ field: "scene", message: "Choose a Scene." });
   }
-  const startsAt = toEpochSeconds(start);
-  const endsAt = toEpochSeconds(end);
+  const startsAt = effectiveTimes?.startsAt ?? toEpochSeconds(start);
+  const endsAt = effectiveTimes?.endsAt ?? toEpochSeconds(end);
   if (!Number.isFinite(startsAt)) {
     problems.push({ field: "start", message: "Enter when the window starts." });
   }
@@ -445,8 +446,8 @@ function scheduleProblems({ sceneId, start, end, priority }, now) {
  * @param {number} now Central's clock (`current.now`)
  * @returns {Problem[]}
  */
-export function programProblems(draft, existingIds, now) {
-  return [...identityProblems("Program", draft, existingIds), ...scheduleProblems(draft, now)];
+export function programProblems(draft, existingIds, now, effectiveTimes = null) {
+  return [...identityProblems("Program", draft, existingIds), ...scheduleProblems(draft, now, effectiveTimes)];
 }
 
 export const MAX_WINDOWS = 60;
@@ -570,18 +571,16 @@ export function localDayStart(value) {
 /**
  * A Source draft's problems (§6 Source).
  *
- * @param {{sourceRef: string, connectionRef: string, capturedFrom: string,
+ * @param {{sourceName: string, connectionRef: string, capturedFrom: string,
  *          capturedUntil: string}} draft
  * @returns {Problem[]}
  */
-export function sourceProblems({ sourceRef, connectionRef, capturedFrom, capturedUntil }) {
+export function sourceProblems({ sourceName, connectionRef, capturedFrom, capturedUntil }) {
   const problems = [];
-  if (!IDENTIFIER_PATTERN.test(sourceRef.trim())) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(sourceName.trim())) {
     problems.push({
       field: "ref",
-      message:
-        "Name and revision, like holiday:1: a letter or digit, then letters, digits, " +
-        "-, _, . or :; up to 128.",
+      message: "Choose a Source name of up to 120 letters, digits, hyphens, underscores or dots, starting with a letter or digit.",
     });
   }
   if (connectionRef.trim() === "") {

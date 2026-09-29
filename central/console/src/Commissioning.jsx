@@ -7,6 +7,10 @@ import { GatedArea } from "./GatedArea.jsx";
 import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
+import { frameProfileProblem, updateFrameProfile } from "./framesApi.js";
+import { useMutate } from "./useMutate.js";
+import { formatRoute, sceneCreationRoute } from "./routes.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
 
 // Operator-facing lease/conflict copy, verbatim from design §4b / J2 (the
 // authoritative decision table). The countdown banner is display; the panel's
@@ -73,9 +77,9 @@ function matchesCommitted(trying, calibration) {
  * Commissioning facet — read-only readback (Bead 4) + calibration draft editing
  * (Bead 7, design §J2/§4a/§6b).
  *
- * The Display↔Frame hardware relationship. The upper sections show four honest
- * READ-ONLY things (committed calibration, Frame facts, the Display as detected
- * at the last Player start, bound equipment) and gate the hardware areas off; see the section comments
+ * The Display↔Frame hardware relationship. The upper sections show committed
+ * calibration, editable Frame profile facts, the Display as detected
+ * at the last Player start, and bound equipment; they gate unavailable hardware areas; see the section comments
  * below and design §7.
  *
  * The lower **Adjust calibration** section is Plane B (design §4a): the operator
@@ -105,6 +109,13 @@ export function Commissioning({ snapshot, frameId }) {
   // overtaken) are read from `status` and need no extra bookkeeping.
   const [conflict, setConflict] = useState(/** @type {string|null} */ (null));
   const [error, setError] = useState(/** @type {string|null} */ (null));
+  const [profileDraft, setProfileDraft] = useState(/** @type {object|null} */ (null));
+  const [profileGeneration, setProfileGeneration] = useState(/** @type {number|null} */ (null));
+  const [profileError, setProfileError] = useState(/** @type {string|null} */ (null));
+  const [profileStatus, setProfileStatus] = useState(/** @type {string|null} */ (null));
+  const [profileSaving, setProfileSaving] = useState(false);
+  const mutate = useMutate();
+  const profileEditButtonRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const svgRef = useRef(/** @type {SVGSVGElement|null} */ (null));
   const dragRef = useRef(/** @type {{kind: string, index?: number}|null} */ (null));
 
@@ -121,6 +132,72 @@ export function Commissioning({ snapshot, frameId }) {
   const output = boundOutput(snapshot, frameId);
   const observation = output?.observation ?? null;
   const bound = isBound(frame);
+  const rotation = calibration.rotation ?? 0;
+  const hasUsableResolutions = (dimensions) =>
+    Number.isFinite(dimensions?.width_px) && dimensions.width_px > 0 &&
+    Number.isFinite(dimensions?.height_px) && dimensions.height_px > 0;
+  const quarterTurn = frame.calibration_valid === true && (rotation === 90 || rotation === 270);
+  const reportedProfileMismatch =
+    bound && observation?.connected === true &&
+    hasUsableResolutions(profile) && hasUsableResolutions(observation) &&
+    (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
+      profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
+
+  const beginProfileEdit = () => {
+    setProfileDraft({
+      width_px: String(profile.width_px ?? ""),
+      height_px: String(profile.height_px ?? ""),
+      diagonal_inches: String(profile.diagonal_inches ?? ""),
+      video: Boolean(profile.video),
+    });
+    setProfileGeneration(frame.generation ?? 0);
+    setProfileError(null);
+    setProfileStatus(null);
+  };
+
+  const saveProfile = async (event) => {
+    event.preventDefault();
+    if (profileDraft == null) return;
+    const problem = frameProfileProblem(profileDraft, frame);
+    if (problem) {
+      setProfileError(problem);
+      return;
+    }
+    setProfileSaving(true);
+    setProfileError(null);
+    const submitted = {
+      width_px: Number(profileDraft.width_px),
+      height_px: Number(profileDraft.height_px),
+      diagonal_inches: Number(profileDraft.diagonal_inches),
+      video: profileDraft.video,
+    };
+    try {
+      const result = await mutate(() => updateFrameProfile(frameId, submitted, profileGeneration));
+      if (result.ok) {
+        setProfileDraft(null);
+        setProfileStatus(result.changed
+          ? "Display profile saved. Recalibrate this Frame before showing content."
+          : "Display profile already matches; calibration was not changed.");
+        requestAnimationFrame(() => profileEditButtonRef.current?.focus());
+      } else if (result.code === "binding_generation_conflict") {
+        setProfileError("This Frame's equipment changed while you were editing. Reload its facts before retrying.");
+      } else if (result.code === "frame_bound") {
+        setProfileError("Unbind this Frame before changing its display profile. Your draft is preserved.");
+      } else if (result.code === "frame_in_use") {
+        setProfileError("Finish or cancel the active Run targeting this Frame, then retry. Your draft is preserved.");
+      } else if (result.code === "oriented_profile") {
+        setProfileError("Display profile must match the frame's orientation. Your draft is preserved.");
+      } else if (result.code === "unknown_frame") {
+        setProfileError("This Frame no longer exists. Reload the wall to continue.");
+      } else {
+        setProfileError(`Could not save the display profile (${result.code}). Your draft is preserved.`);
+      }
+    } catch (failure) {
+      setProfileError(`Could not save the display profile: ${failure?.message ?? "server error"}. Your draft is preserved.`);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
 
   const cornerText = Array.isArray(calibration.corners)
     ? calibration.corners.map((point) => `(${point[0]}, ${point[1]})`).join(" ")
@@ -244,6 +321,23 @@ export function Commissioning({ snapshot, frameId }) {
           </div>
         </dl>
       </section>
+
+      {bound && frame.calibration_valid === true && FRAME_ID_PATTERN.test(frameId) && (
+        <section className="facet__section facet__section--content" role="group" aria-label="Choose content">
+          <h4 className="facet__subtitle">Ready to choose content?</h4>
+          <p className="facet__note">
+            Make a Scene and choose this Frame explicitly. Saving the Scene does not start playback.
+          </p>
+          <a className="facet__cta" href={formatRoute(sceneCreationRoute(frameId))}>
+            Choose content for this Frame
+          </a>
+        </section>
+      )}
+      {bound && frame.calibration_valid === true && !FRAME_ID_PATTERN.test(frameId) && (
+        <p className="facet__note" role="status">
+          This Frame is commissioned, but its id cannot be targeted by a Scene. Scene targets need an id of 96 characters or fewer without a colon.
+        </p>
+      )}
 
       <section className="facet__section facet__section--editor" role="group" aria-label="Adjust calibration">
         <h4 className="facet__subtitle">Adjust calibration</h4>
@@ -466,6 +560,44 @@ export function Commissioning({ snapshot, frameId }) {
             <dd>{profile.video ? "yes" : "no"}</dd>
           </div>
         </dl>
+        {reportedProfileMismatch ? (
+          <p className="facet__note" role="status">
+            {`The Player reported ${observation.width_px} × ${observation.height_px} at its last start; this observation may be stale. The Frame profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `Committed rotation ${rotation}° was considered.` : "Calibration is not yet valid for this binding."} Verify the display and intended rotation, and restart the Player if the display changed. If the profile is wrong, unbind this Frame, edit its profile, then bind and calibrate it.`}
+          </p>
+        ) : null}
+        {profileDraft == null ? (
+          <>
+            <button ref={profileEditButtonRef} type="button" onClick={beginProfileEdit}>Edit profile</button>
+            {profileStatus ? <p className="facet__draft-status" role="status">{profileStatus}</p> : null}
+          </>
+        ) : (
+          <form className="facet__profile-form" onSubmit={saveProfile} aria-label="Edit display profile">
+            <p className="facet__note">
+              Changing the persistent display profile requires this Frame to be unbound and any active Run to finish or be cancelled. The change clears calibration; recalibrate before showing content.
+            </p>
+            <label>Pixel width
+              <input autoFocus type="number" min="1" max="16384" step="1" value={profileDraft.width_px}
+                onChange={(event) => setProfileDraft({ ...profileDraft, width_px: event.target.value })} />
+            </label>
+            <label>Pixel height
+              <input type="number" min="1" max="16384" step="1" value={profileDraft.height_px}
+                onChange={(event) => setProfileDraft({ ...profileDraft, height_px: event.target.value })} />
+            </label>
+            <label>Diagonal (inches)
+              <input type="number" min="0" step="any" value={profileDraft.diagonal_inches}
+                onChange={(event) => setProfileDraft({ ...profileDraft, diagonal_inches: event.target.value })} />
+            </label>
+            <label><input type="checkbox" checked={profileDraft.video}
+              onChange={(event) => setProfileDraft({ ...profileDraft, video: event.target.checked })} /> Video capable</label>
+            {profileError ? <p role="alert">{profileError}</p> : null}
+            <button type="submit" disabled={profileSaving}>{profileSaving ? "Saving…" : "Save profile"}</button>
+            <button type="button" disabled={profileSaving} onClick={() => {
+              setProfileDraft(null);
+              setProfileError(null);
+              requestAnimationFrame(() => profileEditButtonRef.current?.focus());
+            }}>Cancel</button>
+          </form>
+        )}
       </section>
 
       <section className="facet__section" role="group" aria-label="Display at last Player start">

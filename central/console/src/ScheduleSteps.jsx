@@ -5,7 +5,7 @@ import { Field, IdField, idNeeded, NameField, PriorityField } from "./Field.jsx"
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { OfferedScene } from "./flow/InstanceNotice.jsx";
-import { separateWindows } from "./scheduleFlowModel.js";
+import { effectiveProgramTimes, separateWindows } from "./scheduleFlowModel.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import { windowLabel } from "./showState.js";
 
@@ -127,13 +127,15 @@ function windowsSummary(value) {
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void}}} props
  */
-export function WhenStep({ value, patch, problems, advanced }) {
+export function WhenStep({ value, patch, problems, advanced, editableWindows = true }) {
+  const savedOccurrences = repeatedOccurrenceCopy(value);
   const date = (key, label) => (
     <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
       {(props) => (
         <input
           {...props}
           type="datetime-local"
+          step="any"
           value={value[key]}
           onChange={(event) => {
             patch({ [key]: event.target.value });
@@ -146,11 +148,14 @@ export function WhenStep({ value, patch, problems, advanced }) {
   return (
     <>
       <TimeZoneNote />
+      {savedOccurrences.length > 0 && <p className="field__hint" role="note">{savedOccurrences.join(" · ")}. Leaving these fields unchanged keeps the saved occurrence; changing a time uses the normal local-time interpretation.</p>}
       {date("start", "Window start")}
       {date("end", "Window end")}
-      <Advanced summary={windowsSummary(value)} open={advanced.open} onToggle={advanced.onToggle}>
-        <SeparateWindows value={value} patch={patch} problems={problems} />
-      </Advanced>
+      {editableWindows && (
+        <Advanced summary={windowsSummary(value)} open={advanced.open} onToggle={advanced.onToggle}>
+          <SeparateWindows value={value} patch={patch} problems={problems} />
+        </Advanced>
+      )}
     </>
   );
 }
@@ -247,8 +252,9 @@ function PlannedWindows({ value, count }) {
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void},
  *          onChange: (field: string) => void}} props
  */
-export function ReviewStep({ value, patch, problems, advanced, onChange }) {
-  const separate = separateWindows(value);
+export function ReviewStep({ value, patch, problems, advanced, onChange, editableWindows = true, editing = false }) {
+  const savedOccurrences = repeatedOccurrenceCopy(value);
+  const separate = editableWindows && separateWindows(value);
   const count = windowCount(value);
   const id = draftId(value);
   const derived = idFromName(value.name);
@@ -264,14 +270,14 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
     { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : `Scene ${value.sceneId}` },
     { label: "Window start", field: "start", value: value.start === "" ? <NotChosen /> : localWords(value.start) },
     { label: "Window end", field: "end", value: value.end === "" ? <NotChosen /> : localWords(value.end) },
-    { label: "Number of windows", field: "count", value: windows },
-    {
+    ...(editableWindows ? [{ label: "Number of windows", field: "count", value: windows }] : []),
+    ...(editableWindows ? [{
       label: "Repeat on",
       field: "weekdays",
       value: separate ? weekdayWords(value.weekdays) : "Not used for one window",
-    },
+    }] : []),
     { label: "Priority", field: "priority", value: String(value.priority) },
-    {
+    editing ? { label: "Program id", value: id } : {
       label: "Id",
       field: "id",
       value: !id ? <NotChosen /> : separate && count !== null ? `${id}-1 … ${id}-${count}` : id,
@@ -280,8 +286,9 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
   return (
     <>
       <TimeZoneNote />
+      {savedOccurrences.length > 0 && <p className="field__hint" role="note">{savedOccurrences.join(" · ")}. The saved occurrence is kept only while the corresponding time remains unchanged.</p>}
       <CheckAnswers rows={rows} onChange={onChange} />
-      <NameField
+      {editing ? <p className="field__hint">Program id: {value.idOverride}</p> : <NameField
         kind="Program"
         name={value.name}
         idShown={value.idOverride !== null || idNeeded(value.name)}
@@ -291,7 +298,7 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
           onChange("id");
         }}
         problems={problems}
-      />
+      />}
       <Advanced
         summary={`Priority: ${value.priority} · Id: ${id || "none yet"}`}
         open={advanced.open}
@@ -307,12 +314,28 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
             problems.touch("priority");
           }}
         />
-        <IdField
+        {!editing && <IdField
           value={value.idOverride ?? derived ?? ""}
           onIdOverride={(idOverride) => patch({ idOverride })}
           problems={problems}
-        />
+        />}
       </Advanced>
     </>
   );
+}
+
+function repeatedOccurrenceCopy(value) {
+  if (!value.expected) return [];
+  const times = effectiveProgramTimes(value);
+  const format = (seconds) => {
+    const date = new Date(seconds * 1000);
+    const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(date);
+    const offset = new Intl.DateTimeFormat(undefined, { timeZoneName: "longOffset" })
+      .formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? "local time";
+    return `${clock} (${offset})`;
+  };
+  return [
+    times.retainedStart ? `Saved start occurrence: ${format(value.expected.starts_at)}` : null,
+    times.retainedEnd ? `Saved end occurrence: ${format(value.expected.ends_at)}` : null,
+  ].filter(Boolean);
 }

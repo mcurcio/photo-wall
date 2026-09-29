@@ -16,6 +16,7 @@ SRC = Path(__file__).parents[1] / "central/console/src"
 SCRIPT = r"""
 const show = await import(process.argv[1]);
 const model = await import(process.argv[2]);
+const refresh = await import(process.argv[3]);
 const out = {};
 
 // Served Runs in admission order (central/runtime.py `_view`: sorted by `order`).
@@ -82,6 +83,42 @@ out.sceneFrames = [
                      children: [{ scene: { contributions: [{ target: "frame:c" }, { target: "frame:b" }] } }] }),
   show.sceneFrames(undefined),
 ];
+out.sceneSourceRefs = [
+  show.sceneSourceRefs({
+    contributions: [{ target: "frame:b", source_refs: ["z:2", "a:1"] },
+                    { target: "actuator:x" }],
+    outro_contributions: [{ target: "frame:a", source_refs: ["a:1", "outro:1"] }],
+    children: [{ scene: {
+      contributions: [{ target: "frame:c", source_refs: ["child:1", "z:2"] }],
+      children: [{ scene: { outro_contributions: [
+        { target: "frame:d", source_refs: ["nested:1"] }] } }],
+    } }],
+  }),
+  show.sceneSourceRefs({ contributions: [{ target: "frame:a", asset_refs: ["fixed-photo"] }] }),
+  show.sceneSourceRefs(undefined),
+];
+out.authoredMedia = [
+  show.sceneHasAuthoredMedia({ contributions: [{ target: "frame:a", asset_refs: ["fixed"] }] }),
+  show.sceneHasAuthoredMedia({ children: [{ scene: {
+    outro_contributions: [{ target: "frame:a", asset_refs: ["fixed"] }] } }] }),
+  show.sceneHasAuthoredMedia({ contributions: [{ target: "frame:a", source_refs: ["live:1"] }] }),
+  show.sceneHasAuthoredMedia(undefined),
+];
+const healthySource = { refresh_completed_revision: 7 };
+const healthyState = { state: "ok", label: "refreshed recently" };
+out.refreshFeedback = {
+  unknown: refresh.sourceRefreshMessage(
+    refresh.sourceRefreshResult({ ok: false, status: 503 }), healthySource, healthyState),
+  failed: refresh.sourceRefreshMessage(
+    refresh.sourceRefreshResult({ ok: false, status: 409, error: "refresh_conflict" }),
+    healthySource, healthyState),
+  requestedWithoutRevision: refresh.sourceRefreshMessage(
+    refresh.sourceRefreshResult({ ok: true, status: 202, data: {} }),
+    healthySource, healthyState),
+  completed: refresh.sourceRefreshMessage(
+    refresh.sourceRefreshResult({ ok: true, status: 202,
+      data: { requested_revision: 7 } }), healthySource, healthyState),
+};
 
 // The flow's shape.
 out.steps = model.SHOW_STEPS.map((step) => step.id);
@@ -136,7 +173,8 @@ def test_covering_priority_and_the_show_now_model():
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
-         (SRC / "showState.js").as_uri(), (SRC / "showNowModel.js").as_uri()],
+         (SRC / "showState.js").as_uri(), (SRC / "showNowModel.js").as_uri(),
+         (SRC / "useSourceRefresh.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -181,6 +219,14 @@ def test_covering_priority_and_the_show_now_model():
     assert out["protectedFrames"] == [["a", "b", "c"], ["c"], [], []]
     # A Scene reaches its own, its outro's and its children's frames.
     assert out["sceneFrames"] == [["a", "b", "c"], []]
+    assert out["sceneSourceRefs"] == [["a:1", "child:1", "nested:1", "outro:1", "z:2"], [], []]
+    assert out["authoredMedia"] == [True, True, False, False]
+    assert out["refreshFeedback"] == {
+        "unknown": "The refresh request outcome is unknown. Check the Source status before retrying.",
+        "failed": "Refresh request failed: refresh conflict.",
+        "requestedWithoutRevision": "Refresh requested. The status will update when the media worker finishes.",
+        "completed": "Refresh finished. Current Source status: refreshed recently.",
+    }
 
     assert out["steps"] == ["scene", "review"]
     assert out["fieldSteps"] == ["scene", "review", "review"]

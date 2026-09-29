@@ -18,10 +18,11 @@ import React from "react";
  * Wall page mounts only while it is current (flow design §6): leaving the Wall
  * must not undo a dismissal either.
  *
- * @param {{snapshot: object|null, dismissed: boolean, onDismiss: () => void}} props
+ * @param {{snapshot: object|null, dismissed: boolean, onAddFirstFrame: () => void,
+ *          onDismiss: () => void}} props
  * @returns {JSX.Element|null}
  */
-export function Guidance({ snapshot, dismissed, onDismiss }) {
+export function Guidance({ snapshot, dismissed, onAddFirstFrame, onDismiss }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const firstRun = frames.length === 0;
   if (!firstRun || dismissed) {
@@ -35,9 +36,13 @@ export function Guidance({ snapshot, dismissed, onDismiss }) {
       aria-label="Getting started"
     >
       <p className="console__guidance-text">
-        Draw a frame, power on one Pi, bind the frame to one of its outputs, then
-        commission the display.
+        Add a frame, power on one Pi, bind the frame to one of its outputs, then
+        commission the display. To show photos, make a Scene targeting that Frame,
+        then Show now or Schedule it.
       </p>
+      <button type="button" onClick={onAddFirstFrame}>
+        Add first frame
+      </button>
       <button
         type="button"
         className="console__guidance-dismiss"

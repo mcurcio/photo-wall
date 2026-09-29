@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import uuid
+from collections.abc import Mapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -34,8 +36,9 @@ from contracts.time import Clock
 
 
 class RegistryError(Exception):
-    def __init__(self, code: str, status: int = 409):
+    def __init__(self, code: str, status: int = 409, *, details: dict | None = None):
         self.code, self.status = code, status
+        self.details = details or {}
         super().__init__(code)
 
 
@@ -75,7 +78,14 @@ class FramePlacement(Model):
     height_mm: float | None = Field(default=None, gt=0)
 
 
+class FrameProfileReplacement(Model):
+    profile: FrameProfile
+    expected_generation: int = Field(ge=0)
+
+
 class Registry:
+    IDENTIFY_OUTPUT_TTL_SECONDS = 15
+
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
 
@@ -171,6 +181,43 @@ class Registry:
             if not row:
                 raise RegistryError("unauthorized", 401)
             return row
+
+    def identify_output(self, player_id: str, output_id: str) -> dict:
+        """Ask one active, connected, unbound Output to identify itself briefly."""
+        now = self.clock.utc()
+        request_id = uuid.uuid4()
+        expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
+        with self.db.transaction() as conn:
+            player = conn.execute(
+                "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
+                (player_id,),
+            ).fetchone()
+            if not player:
+                raise RegistryError("unknown_or_retired_player", 404)
+            output = conn.execute(
+                "SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s FOR UPDATE",
+                (player_id, output_id),
+            ).fetchone()
+            if not output:
+                raise RegistryError("unknown_output", 404)
+            if not output["observation"].get("connected", False):
+                raise RegistryError("output_disconnected")
+            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s AND output_id=%s",
+                            (player_id, output_id)).fetchone():
+                raise RegistryError("output_bound")
+            conn.execute(
+                "INSERT INTO player_output_identification(player_id,request_id,output_id,"
+                "authority_epoch,created_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(player_id) DO UPDATE SET request_id=EXCLUDED.request_id,"
+                "output_id=EXCLUDED.output_id,authority_epoch=EXCLUDED.authority_epoch,"
+                "created_at=EXCLUDED.created_at,expires_at=EXCLUDED.expires_at",
+                (player_id, request_id, output_id, player["authority_epoch"], now, expires_at),
+            )
+            self._audit(conn, "output_identification_requested", player_id,
+                        {"request_id": str(request_id), "output_id": output_id,
+                         "authority_epoch": player["authority_epoch"]})
+        return {"request_id": str(request_id), "output_id": output_id,
+                "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
         try:
@@ -276,26 +323,95 @@ class Registry:
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
 
-    def delete_frame(self, frame_id: str) -> dict:
-        """Remove a clear Frame. Refuses (409 frame_bound) while a binding exists.
+    def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
+                              expected_generation: int, conn) -> dict:
+        """Replace display dimensions after an optimistic generation check.
 
-        The binding guard is enforced ATOMICALLY inside this transaction, under
-        FOR UPDATE on the frame row: bindings.frame_id is the ONLY FK into
-        frames(id) in the whole schema (001_registry.sql:37), so a bound frame's
-        DELETE would otherwise surface a raw 500 from the FK -- the explicit
-        check returns a clean 409 instead. The binding guard is therefore
-        necessary AND sufficient: runs reference frames by string (not FK), and
-        nothing else references frames(id), so no cascade or pre-clear is needed.
+        The persistent Frame and its placement remain the same. A changed display
+        profile invalidates committed calibration and any outstanding preview.
         """
-        with self.db.transaction() as conn:
-            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
-            if not frame:
-                raise RegistryError("unknown_frame", 404)
-            if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
-                raise RegistryError("frame_bound")
-            conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
-            self._audit(conn, "frame_deleted", frame_id)
-            return {"status": "deleted"}
+        from central.coordination import COORDINATION_LOCK
+        from central.runtime_store import RUNTIME_LOCK
+
+        held = conn.execute(
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
+            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
+            "AND objid=ANY(%s::oid[])",
+            ([COORDINATION_LOCK, RUNTIME_LOCK],),
+        ).fetchone()["n"]
+        if held != 2:
+            raise RegistryError("frame_runtime_snapshot_required", 500)
+        frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+        if not frame:
+            raise RegistryError("unknown_frame", 404)
+        # Check the token before idempotency so an old tab cannot silently
+        # succeed merely because another operator chose the same profile.
+        if frame["generation"] != expected_generation:
+            raise RegistryError("binding_generation_conflict")
+        current = FrameProfile.model_validate(frame["profile"])
+        if current == profile:
+            return {"profile": current.model_dump(), "generation": frame["generation"],
+                    "changed": False}
+        if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+            raise RegistryError("frame_bound")
+        if not _orientation_coherent(frame["width_mm"], frame["height_mm"],
+                                     profile.width_px, profile.height_px):
+            raise RegistryError("oriented_profile", 422)
+        calibration = Calibration.model_validate(frame["calibration"])
+        invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
+        row = conn.execute(
+            "UPDATE frames SET profile=%s,calibration=%s,calibration_valid=false,"
+            "preview=NULL,preview_expires=NULL,generation=generation+1,"
+            "configuration_revision=configuration_revision+1 WHERE id=%s "
+            "RETURNING generation",
+            (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump()), frame_id),
+        ).fetchone()
+        self._audit(conn, "frame_profile_changed", frame_id,
+                    {"profile": profile.model_dump(), **row})
+        return {"profile": profile.model_dump(), **row, "changed": True}
+
+    def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]]) -> dict:
+        """Remove a clear Frame within the caller's serialized reference snapshot.
+
+        Callers must obtain `references` from the current Runtime while holding the
+        Coordination and Runtime locks on this same transaction connection. Requiring
+        both arguments prevents this Registry boundary from silently treating an
+        unavailable snapshot as an empty set. The row lock and binding guard remain
+        atomic here; the complete snapshot supplies the Scene/queue/live-Run guard.
+        """
+        reference_keys = {"scene_ids", "program_ids", "queued_activation_ids", "run_ids"}
+        if conn is None or not isinstance(references, Mapping) or set(references) != reference_keys:
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        if any(not isinstance(references[key], tuple) for key in reference_keys):
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        # The caller's reference snapshot is authoritative only while both writers
+        # are excluded on this same transaction connection. Import constants here
+        # to avoid a module cycle: Coordination depends on RegistryError.
+        from central.coordination import COORDINATION_LOCK
+        from central.runtime_store import RUNTIME_LOCK
+
+        held = conn.execute(
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
+            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
+            "AND objid=ANY(%s::oid[])",
+            ([COORDINATION_LOCK, RUNTIME_LOCK],),
+        ).fetchone()["n"]
+        if held != 2:
+            raise RegistryError("frame_reference_snapshot_required", 500)
+        frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+        if not frame:
+            raise RegistryError("unknown_frame", 404)
+        if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+            raise RegistryError("frame_bound")
+        if references.get("scene_ids") or references.get("queued_activation_ids"):
+            raise RegistryError("frame_referenced", 409, details={
+                "scene_ids": list(references.get("scene_ids", ())),
+                "program_ids": list(references.get("program_ids", ())),
+                "queued_activation_ids": list(references.get("queued_activation_ids", ())),
+            })
+        conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
+        self._audit(conn, "frame_deleted", frame_id)
+        return {"status": "deleted"}
 
     def retire(self, player_id: str) -> None:
         """Retire a Player permanently. Refuses (409 player_bound), for every caller,
@@ -386,23 +502,32 @@ class Registry:
 
     def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:
+            now = self.clock.utc()
             self._expire_previews(conn)
-            players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
-                                   "FROM players ORDER BY registered_at,id").fetchall()
-            outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
-                                   "ORDER BY player_id,output_id").fetchall()
-            frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
-                                  "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
-                                  "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
-                                  "ON b.frame_id=f.id ORDER BY f.id").fetchall()
-            for frame in frames:
-                if frame["preview_expires"] is not None and frame["preview_expires"] <= self.clock.utc():
-                    frame["preview"] = None
-                    frame["preview_expires"] = None
-            bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
-            return InstallationInventory(
-                players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
-                             for row in players),
-                outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
-                frames=tuple(FrameInventory.model_validate(row) for row in frames),
-            )
+            return self.inventory_in(conn, now)
+
+    def inventory_in(self, conn, now: float) -> InstallationInventory:
+        """Read inventory in a caller-owned transaction without writing expiry cleanup.
+
+        Expired previews are omitted from the returned view. A later mutating registry
+        operation may persist their expiry; this method is safe in read-only snapshots.
+        """
+        players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
+                               "FROM players ORDER BY registered_at,id").fetchall()
+        outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
+                               "ORDER BY player_id,output_id").fetchall()
+        frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
+                              "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
+                              "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
+                              "ON b.frame_id=f.id ORDER BY f.id").fetchall()
+        for frame in frames:
+            if frame["preview_expires"] is not None and frame["preview_expires"] <= now:
+                frame["preview"] = None
+                frame["preview_expires"] = None
+        bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
+        return InstallationInventory(
+            players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
+                         for row in players),
+            outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
+            frames=tuple(FrameInventory.model_validate(row) for row in frames),
+        )

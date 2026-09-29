@@ -37,7 +37,7 @@ OUTPUT = "HDMI-A-1"
 GAIN = 1.5
 
 
-def _seed(registry):
+def _seed(registry, profile=PORTRAIT, rotation=0):
     """Bind a frame to a connected output and commit a distinctive SDR gain.
 
     enroll(count=1) reports HDMI-A-1 connected=True, giving a Display report to
@@ -48,15 +48,17 @@ def _seed(registry):
     identity, _key, _request = enroll(registry, count=1)
     player_id = identity["player_id"]
 
+    landscape = profile.width_px > profile.height_px
     registry.create_frame(FrameCreate(
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+        width_mm=500 if landscape else 300,
+        height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, player_id, OUTPUT, expected_generation=0)
     # Commit a calibration with a distinctive SDR gain against the current
     # (post-bind) generation/revision so the committed value is read-back real.
     registry.calibrate(
         FRAME, "commit", expected_revision=1,
-        calibration=Calibration(gain=GAIN), expected_generation=1)
+        calibration=Calibration(gain=GAIN, rotation=rotation), expected_generation=1)
     return player_id
 
 
@@ -83,12 +85,33 @@ def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registr
         expect(equipment).to_contain_text(player_id)
         expect(equipment).to_contain_text(OUTPUT)
 
+        # A committed calibration on this binding hands directly into Scene
+        # authoring with the persistent Frame explicitly selected.
+        content_link = inspector.get_by_role(
+            "link", name="Choose content for this Frame", exact=True)
+        expect(content_link).to_be_visible()
+        expect(content_link).to_have_attribute(
+            "href", "#/scenes/new/kind?target=commission-frame")
+
         # The two hardware areas render "not yet available" and NO enabled
         # control — the default-closed capability gate (§7.6). The would-be
         # controls do not exist in the DOM.
         expect(inspector.get_by_text("not yet available")).to_have_count(2)
         expect(inspector.get_by_role("button", name="Adjust panel color correction")).to_have_count(0)
         expect(inspector.get_by_role("button", name="Set display power")).to_have_count(0)
+
+
+def test_commissioning_handoff_waits_for_valid_calibration(page, registry):
+    identity, _key, _request = enroll(registry, count=1)
+    registry.create_frame(FrameCreate(
+        id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+        expect(inspector.get_by_role(
+            "link", name="Choose content for this Frame", exact=True)).to_have_count(0)
 
 
 def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry):
@@ -139,6 +162,73 @@ def test_commissioning_provenance_frame_facts_vs_display_at_player_start(page, r
         expect(display).not_to_contain_text("24")
 
 
+def test_commissioning_warns_on_reported_resolution_mismatch_without_mutating_profile(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+
+        warning = inspector.get_by_role("status").filter(
+            has_text="The Player reported 1920 × 1080 at its last start"
+        )
+        expect(warning).to_be_visible()
+        expect(warning).to_contain_text("this observation may be stale")
+        expect(warning).to_contain_text("restart the Player")
+        expect(warning).to_contain_text("The Frame profile is 1080 × 1920")
+        expect(warning).to_contain_text("Committed rotation 0° was considered")
+        expect(warning).to_contain_text("unbind this Frame, edit its profile, then bind and calibrate it")
+
+        facts = inspector.get_by_role("group", name="Frame facts")
+        expect(facts).to_contain_text("1080 px")
+        expect(facts).to_contain_text("1920 px")
+        expect(inspector.get_by_role("group", name="Adjust calibration")).to_be_visible()
+        stored = next(frame for frame in inventory(page, origin).frames if frame.id == FRAME)
+        assert (stored.profile.width_px, stored.profile.height_px) == (1080, 1920)
+
+
+def test_commissioning_does_not_warn_when_reported_resolution_matches(page, registry):
+    _seed(registry, FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24))
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+
+        expect(inspector.get_by_role("status").filter(
+            has_text="The Player reported 1920 × 1080 at its last start"
+        )).to_have_count(0)
+        expect(inspector.get_by_role("group", name="Adjust calibration")).to_be_visible()
+        stored = next(frame for frame in inventory(page, origin).frames if frame.id == FRAME)
+        assert (stored.profile.width_px, stored.profile.height_px) == (1920, 1080)
+
+
+def test_commissioning_accepts_reported_resolution_swapped_by_quarter_turn(page, registry):
+    _seed(registry, rotation=90)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+
+        expect(inspector.get_by_role("status").filter(
+            has_text="The Player reported 1920 × 1080 at its last start"
+        )).to_have_count(0)
+        expect(inspector.get_by_role("group", name="Committed calibration")).to_contain_text("90°")
+        expect(inspector.get_by_role("group", name="Adjust calibration")).to_be_visible()
+        stored = next(frame for frame in inventory(page, origin).frames if frame.id == FRAME)
+        assert (stored.profile.width_px, stored.profile.height_px) == (1080, 1920)
+
+
+def test_commissioning_does_not_trust_rotation_after_binding_invalidates_calibration(page, registry):
+    player_id = _seed(registry, rotation=90)
+    registry.unbind(FRAME, expected_generation=1)
+    registry.bind(FRAME, player_id, OUTPUT, expected_generation=2)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+        warning = inspector.get_by_role("status").filter(
+            has_text="The Player reported 1920 × 1080 at its last start"
+        )
+        expect(warning).to_contain_text("Calibration is not yet valid for this binding")
+        expect(inspector.get_by_role("group", name="Adjust calibration")).to_be_visible()
+
+
 # --- Bead 7: calibration direct-manipulation + client convex guard (Plane B) ---
 #
 # The Commissioning facet gains an "Adjust calibration" draft editor (design
@@ -167,6 +257,7 @@ def test_calibration_drag_to_convex_updates_draft(page, registry):
         # padded top-left; the drag ACTION uses coordinates, the ASSERTION does
         # not. (0,0) -> ~ (0.2, 0.2) stays convex.
         svg = inspector.get_by_role("img", name="Calibration editor")
+        svg.scroll_into_view_if_needed()
         box = svg.bounding_box()
         start_x, start_y = box["x"] + 16, box["y"] + 16
         page.mouse.move(start_x, start_y)

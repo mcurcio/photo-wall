@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +18,85 @@ from player.geometry import (
     source_uv,
     transform,
 )
-from player.native import NativeOutput, SampleMailbox, packed_rgba
+from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
+
+
+def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
+    startup = diagnostic_text("HDMI-A-1", serial="0123456789abcdef")
+    assert "OS and Player running" in startup
+    assert "Central: connecting" in startup
+    assert "enrolled" not in startup
+    enrolled = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+                               serial="0123456789abcdef", central_link_state="reachable",
+                               configuration_received=True)
+    assert "Central: reachable; configuration received" in enrolled
+    assert "No Frame assigned" in enrolled
+    assert "Output HDMI-A-1" in enrolled
+    assert "Player p-…aaaaaaaa" in enrolled
+    assert "Serial 0123456789abcdef" in enrolled
+    retrying = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+        central_link_state="retrying", configuration_received=True)
+    assert "Central: retrying; last configuration received" in retrying
+    before_first_config = diagnostic_text("HDMI-A-1", "p-" + "a" * 32,
+        central_link_state="retrying", configuration_received=False)
+    assert "Central: retrying; no configuration received" in before_first_config
+
+
+def test_native_diagnostic_is_hidden_for_bound_outputs():
+    class Widget:
+        def __init__(self):
+            self.visible = True
+            self.text = ""
+
+        def show(self):
+            self.visible = True
+
+        def hide(self):
+            self.visible = False
+
+        def set_text(self, value):
+            self.text = value
+
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._owner = threading.get_ident()
+    renderer._closed = False
+    renderer._serial_label = "0123456789abcdef"
+    first, second = Widget(), Widget()
+    renderer._surfaces = {
+        "HDMI-A-1": SimpleNamespace(diagnostic=first, diagnostic_label=Widget()),
+        "HDMI-A-2": SimpleNamespace(diagnostic=second, diagnostic_label=Widget()),
+    }
+    renderer.set_unbound_outputs(("HDMI-A-1",), "p-" + "a" * 32, "reachable", True)
+    assert first.visible
+    assert not second.visible
+    assert "No Frame assigned" in renderer._surfaces["HDMI-A-1"].diagnostic_label.text
+    renderer.set_unbound_outputs((), "p-" + "a" * 32, "reachable", True)
+    assert not first.visible and not second.visible
+
+
+def test_native_identify_banner_is_high_contrast_and_target_only():
+    class Widget:
+        def __init__(self):
+            self.visible = False
+            self.text = ""
+        def show_all(self): self.visible = True
+        def hide(self): self.visible = False
+        def get_child(self): return self
+        def set_text(self, value): self.text = value
+
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._owner = threading.get_ident()
+    renderer._closed = False
+    first, second = Widget(), Widget()
+    renderer._surfaces = {
+        "HDMI-A-1": SimpleNamespace(identify_banner=first),
+        "HDMI-A-2": SimpleNamespace(identify_banner=second),
+    }
+    renderer.set_identify_output("HDMI-A-1")
+    assert first.visible and not second.visible
+    assert "IDENTIFY THIS OUTPUT" in first.text
+    renderer.set_identify_output(None)
+    assert not first.visible and not second.visible
 
 
 def test_projective_corners_and_interior_roundtrip():

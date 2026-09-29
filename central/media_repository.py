@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import uuid
 from contextlib import contextmanager
 
 from psycopg.types.json import Jsonb
@@ -16,13 +17,27 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database
-from central.media_ports import RefreshReceipt
+from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
 from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
-from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
+from contracts.models import (
+    IDENTIFIER_PATTERN,
+    Digest,
+    FrameProfile,
+    Identifier,
+    Instant,
+    Model,
+    Variant,
+)
 from contracts.time import Clock
-from media.models import OriginalAsset, RefreshResult, SourceSpec
+from media.models import (
+    OriginalAsset,
+    RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
+    SourceSpec,
+)
 
 
 class StoreLimits(Model):
@@ -38,6 +53,8 @@ class StoreLimits(Model):
     # PlannerLimits.max_candidates is 10000; this shared bound covers source
     # snapshots and retained authored references together.
     max_authored_candidates: int = Field(default=10000, ge=1, le=10000)
+    max_pending_previews: int = Field(default=32, ge=1, le=128)
+    max_source_preview_records: int = Field(default=256, ge=1, le=1024)
 
 
 class RefreshLease(Model):
@@ -81,18 +98,118 @@ class MediaRepository:
                 if old["spec"] != encoded:
                     raise RegistryError("source_revision_immutable")
                 return False
-            if conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"] >= self.limits.max_sources:
+            # The legacy exact-ref API remains available; expose its first
+            # revision through the same logical-name read path as new writes.
+            match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*):([1-9][0-9]{0,17})", spec.source_ref)
+            name, revision = (match.group(1), int(match.group(2))) if match else (spec.source_ref, 1)
+            head = conn.execute("SELECT revision FROM media_source_names WHERE name=%s FOR UPDATE", (name,)).fetchone()
+            if head is None and conn.execute(
+                    "SELECT count(*) AS n FROM media_source_names WHERE NOT deleted").fetchone()["n"] >= self.limits.max_sources:
                 raise RegistryError("source_limit")
+            if conn.execute("SELECT 1 FROM media_source_name_versions WHERE name=%s AND revision=%s",
+                            (name, revision)).fetchone():
+                revision = head["revision"] + 1
             conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)", (spec.source_ref, Jsonb(encoded)))
             conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s)", (spec.source_ref, Jsonb(CatalogSnapshot(
                 source_ref=spec.source_ref, refreshed_at=self.clock.utc(), status="unavailable").model_dump(mode="json"))))
+            if head is None:
+                conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES(%s,%s,%s)",
+                             (name, spec.source_ref, revision))
+            elif revision > head["revision"]:
+                conn.execute("UPDATE media_source_names SET current_ref=%s,revision=%s,deleted=FALSE WHERE name=%s",
+                             (spec.source_ref, revision, name))
+            conn.execute("INSERT INTO media_source_name_versions(source_ref,name,revision) VALUES(%s,%s,%s)",
+                         (spec.source_ref, name, revision))
             return True
 
     def sources(self) -> list[dict]:
         with self.db.transaction() as conn:
-            return conn.execute("SELECT source_ref,spec,next_refresh,last_success,status,diagnostics,counts,"
-                                "refresh_requested_revision,refresh_completed_revision "
-                                "FROM media_sources ORDER BY source_ref").fetchall()
+            return self.sources_in(conn)
+
+    @staticmethod
+    def sources_in(conn) -> list[dict]:
+        """Read configured Source state through a caller-owned transaction."""
+        return conn.execute(
+            "SELECT n.name,n.revision,s.source_ref,s.spec,s.next_refresh,s.last_success,s.status,"
+            "s.diagnostics,s.counts,refresh_requested_revision,refresh_completed_revision "
+            "FROM media_source_names n JOIN media_sources s ON s.source_ref=n.current_ref "
+            "WHERE NOT n.deleted ORDER BY n.name"
+        ).fetchall()
+
+    def named_versions_in(self, conn, name: str) -> tuple[dict | None, tuple[str, ...]]:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+        head = conn.execute("SELECT * FROM media_source_names WHERE name=%s FOR UPDATE", (name,)).fetchone()
+        refs = tuple(row["source_ref"] for row in conn.execute(
+            "SELECT source_ref FROM media_source_name_versions WHERE name=%s ORDER BY revision", (name,)).fetchall())
+        return head, refs
+
+    def configure_named_in(self, conn, name: str, revision: int, spec: SourceSpec) -> None:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+        if revision == 1 and conn.execute("SELECT count(*) AS n FROM media_source_names WHERE NOT deleted").fetchone()["n"] >= self.limits.max_sources:
+            raise RegistryError("source_limit", 409)
+        conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)",
+                     (spec.source_ref, Jsonb(spec.model_dump(mode="json", by_alias=True))))
+        conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s)", (spec.source_ref, Jsonb(CatalogSnapshot(
+            source_ref=spec.source_ref, refreshed_at=self.clock.utc(), status="unavailable").model_dump(mode="json"))))
+        if revision == 1:
+            conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES(%s,%s,%s)",
+                         (name, spec.source_ref, revision))
+        else:
+            conn.execute("UPDATE media_source_names SET current_ref=%s,revision=%s,deleted=FALSE WHERE name=%s",
+                         (spec.source_ref, revision, name))
+        conn.execute("INSERT INTO media_source_name_versions(source_ref,name,revision) VALUES(%s,%s,%s)",
+                     (spec.source_ref, name, revision))
+        if self.queue is not None:
+            conn.execute("UPDATE media_sources SET refresh_requested_revision=1 WHERE source_ref=%s", (spec.source_ref,))
+            self.queue.enqueue_refresh_in(conn, spec.source_ref)
+
+    @staticmethod
+    def delete_named_in(conn, name: str) -> None:
+        conn.execute("UPDATE media_source_names SET deleted=TRUE WHERE name=%s", (name,))
+
+    @staticmethod
+    def rename_named_in(conn, old_name: str, new_name: str) -> None:
+        conn.execute("UPDATE media_source_names SET deleted=TRUE,renamed_to=%s WHERE name=%s",
+                     (new_name, old_name))
+
+    def reconcile_source_activity_in(self, conn, runtime_refs: set[str]) -> None:
+        """Retire only revisions not needed by authoring or current execution.
+
+        The caller holds Runtime's lock before taking MEDIA_LOCK here. A leased
+        or explicitly requested refresh finishes first. A dormant revision's
+        working set is cleared, while its immutable definition and acquired
+        assets remain for historical/provenance and existing content locks.
+        """
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
+        heads = {row["current_ref"] for row in conn.execute(
+            "SELECT current_ref FROM media_source_names WHERE NOT deleted").fetchall()}
+        needed = runtime_refs | heads
+        now = self.clock.utc()
+        rows = conn.execute("SELECT source_ref,refresh_active,refresh_started,refresh_lease_until,"
+                            "refresh_requested_revision,refresh_completed_revision "
+                            "FROM media_sources WHERE refresh_active OR source_ref=ANY(%s)",
+                            (list(needed),)).fetchall()
+        for row in rows:
+            ref = row["source_ref"]
+            if ref in needed:
+                if not row["refresh_active"]:
+                    conn.execute("UPDATE media_sources SET refresh_active=TRUE,next_refresh=0,"
+                                 "status='unavailable',diagnostics='[]' WHERE source_ref=%s", (ref,))
+                    self.refresh_catalog_in(conn, ref, now, "unavailable")
+                continue
+            if not row["refresh_active"]:
+                continue
+            if row["refresh_requested_revision"] > row["refresh_completed_revision"]:
+                continue
+            if row["refresh_started"] is not None and (row["refresh_lease_until"] or 0) > now:
+                continue
+            # An expired lease is fenced by changing generation. No task can
+            # publish into a retired working set after this transaction.
+            conn.execute("UPDATE media_sources SET refresh_active=FALSE,generation=generation+1,"
+                         "refresh_started=NULL,refresh_lease_until=NULL,status='unavailable',"
+                         "diagnostics='[]',counts='{}' WHERE source_ref=%s", (ref,))
+            conn.execute("DELETE FROM source_members WHERE source_ref=%s", (ref,))
+            self.refresh_catalog_in(conn, ref, now, "unavailable")
 
     def request_refresh(self, source_ref: str) -> RefreshReceipt:
         with self.transaction() as conn:
@@ -104,6 +221,7 @@ class MediaRepository:
                 raise RegistryError("source_not_found", 404)
             if self.queue is None:
                 raise RegistryError("media_queue_unconfigured", 503)
+            conn.execute("UPDATE media_sources SET refresh_active=TRUE WHERE source_ref=%s", (source_ref,))
             revision = row["refresh_requested_revision"] + 1
             conn.execute(
                 "UPDATE media_sources SET refresh_requested_revision=%s WHERE source_ref=%s",
@@ -116,6 +234,103 @@ class MediaRepository:
                 completed_revision=row["refresh_completed_revision"],
                 coalesced=queued.coalesced,
             )
+
+    def request_source_preview(self, query: SourcePreviewQuery) -> SourcePreviewReceipt:
+        if self.queue is None:
+            raise RegistryError("media_queue_unconfigured", 503)
+        request_id = str(uuid.uuid4())
+        now = self.clock.utc()
+        with self.transaction() as conn:
+            conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
+                         "WHERE status='pending' AND expires_at<=%s", (now,))
+            conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
+            health = conn.execute("SELECT connection_ids FROM media_settings WHERE singleton").fetchone()
+            connection_ids = health["connection_ids"] if health else None
+            if connection_ids is not None and query.connection_ref not in connection_ids:
+                raise RegistryError("source_connection_unavailable", 409)
+            count = conn.execute("SELECT count(*) AS n FROM source_previews "
+                                 "WHERE status='pending' AND expires_at>%s",
+                                 (now,)).fetchone()["n"]
+            if count >= self.limits.max_pending_previews:
+                raise RegistryError("source_preview_capacity", 429)
+            total = conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"]
+            if total >= self.limits.max_source_preview_records:
+                conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now,))
+                total = conn.execute("SELECT count(*) AS n FROM source_previews").fetchone()["n"]
+                if total >= self.limits.max_source_preview_records:
+                    raise RegistryError("source_preview_capacity", 429)
+            expires_at = now + 600
+            conn.execute("INSERT INTO source_previews(request_id,query,status,created_at,expires_at) "
+                         "VALUES(%s,%s,'pending',%s,%s)",
+                         (request_id, Jsonb(query.model_dump(mode="json")), now, expires_at))
+            self.queue.enqueue_preview_in(conn, request_id)
+        return SourcePreviewReceipt(request_id=request_id)
+
+    def source_preview(self, request_id: str) -> dict:
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT status,count,image_count,video_count,error,expires_at "
+                               "FROM source_previews WHERE request_id=%s", (request_id,)).fetchone()
+        if row is None:
+            raise RegistryError("source_preview_not_found", 404)
+        if row["status"] == "pending" and row["expires_at"] <= self.clock.utc():
+            with self.transaction() as conn:
+                expired = conn.execute(
+                    "UPDATE source_previews SET status='failed',error='preview_expired' "
+                    "WHERE request_id=%s AND status='pending' RETURNING status,error",
+                    (request_id,),
+                ).fetchone()
+                if expired is None:
+                    # A worker may have completed between the initial read and
+                    # this conditional update; report its committed result.
+                    row = conn.execute(
+                        "SELECT status,count,image_count,video_count,error,expires_at "
+                        "FROM source_previews WHERE request_id=%s", (request_id,),
+                    ).fetchone()
+                else:
+                    row = {**row, **expired}
+            if row is None:
+                raise RegistryError("source_preview_not_found", 404)
+        if row["status"] == "complete":
+            return {"request_id": request_id, "status": "complete", "count": row["count"],
+                    "image_count": row["image_count"], "video_count": row["video_count"]}
+        if row["status"] == "failed":
+            return {"request_id": request_id, "status": "failed", "error": row["error"]}
+        return {"request_id": request_id, "status": "pending"}
+
+    def begin_source_preview(self, request_id: str) -> SourcePreviewQuery | None:
+        # Previewing is read-only and safe to repeat. Leave it pending until a
+        # result is committed so a retried Procrastinate task can resume after a
+        # worker crash instead of stranding a hidden running lease.
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT query FROM source_previews WHERE request_id=%s "
+                               "AND status='pending' AND expires_at>%s",
+                               (request_id, self.clock.utc())).fetchone()
+            return SourcePreviewQuery.model_validate(row["query"]) if row else None
+
+    def finish_source_preview(self, request_id: str, result: SourcePreviewResult) -> bool:
+        with self.transaction() as conn:
+            changed = conn.execute("UPDATE source_previews SET status='complete',count=%s,image_count=%s,"
+                                   "video_count=%s,error=NULL WHERE request_id=%s AND status='pending' "
+                                   "AND expires_at>%s",
+                                   (result.count, result.image_count, result.video_count,
+                                    request_id, self.clock.utc())).rowcount
+            return changed == 1
+
+    def fail_source_preview(self, request_id: str, error: str) -> bool:
+        if not re.fullmatch(r"[a-z_]{1,64}", error):
+            error = "worker_internal"
+        with self.transaction() as conn:
+            changed = conn.execute("UPDATE source_previews SET status='failed',error=%s "
+                                   "WHERE request_id=%s AND status='pending'",
+                                   (error, request_id)).rowcount
+            return changed == 1
+
+    def maintain_source_previews(self) -> None:
+        now = self.clock.utc()
+        with self.transaction() as conn:
+            conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
+                         "WHERE status='pending' AND expires_at<=%s", (now,))
+            conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
 
     def refresh_revisions(self, source_ref: str) -> tuple[int, int]:
         with self.db.transaction() as conn:
@@ -139,6 +354,7 @@ class MediaRepository:
             if source_ref is None:
                 row = conn.execute(
                     "SELECT * FROM media_sources WHERE "
+                    "refresh_active AND "
                     "(next_refresh<=%s OR refresh_requested_revision>refresh_completed_revision) "
                     "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
                     "ORDER BY next_refresh,source_ref LIMIT 1 FOR UPDATE SKIP LOCKED",
@@ -146,7 +362,7 @@ class MediaRepository:
                 ).fetchone()
             else:
                 row = conn.execute(
-                    "SELECT * FROM media_sources WHERE source_ref=%s "
+                    "SELECT * FROM media_sources WHERE source_ref=%s AND refresh_active "
                     "AND refresh_requested_revision>refresh_completed_revision "
                     "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
                     "FOR UPDATE SKIP LOCKED",
@@ -302,7 +518,9 @@ class MediaRepository:
 
     def _candidate_capacity(self, conn) -> int:
         source_count = conn.execute(
-            "SELECT COALESCE(sum(jsonb_array_length(snapshot->'candidates')),0) AS n FROM catalog_snapshots"
+            "SELECT COALESCE(sum(jsonb_array_length(c.snapshot->'candidates')),0) AS n "
+            "FROM catalog_snapshots c JOIN media_sources s ON s.source_ref=c.source_ref "
+            "WHERE s.refresh_active"
         ).fetchone()["n"]
         authored_count = conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
         return source_count + authored_count
@@ -400,12 +618,24 @@ class MediaRepository:
                 for source in conn.execute("SELECT source_ref,status FROM media_sources").fetchall():
                     self.refresh_catalog_in(conn, source["source_ref"], self.clock.utc(), source["status"])
 
-    def worker_status(self, code: str | None = None):
+    def worker_status(self, code: str | None = None,
+                      connection_ids: tuple[str, ...] | list[str] | None = None):
         if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,64}", code)):
             raise ValueError("invalid worker status code")
+        if connection_ids is not None:
+            if (not isinstance(connection_ids, (tuple, list)) or len(connection_ids) > 128
+                    or any(not isinstance(value, str)
+                           or not re.fullmatch(IDENTIFIER_PATTERN, value)
+                           for value in connection_ids)
+                    or len(set(connection_ids)) != len(connection_ids)):
+                raise ValueError("invalid worker connection identifiers")
         with self.transaction() as conn:
-            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s WHERE singleton",
-                         (self.clock.utc(), code))
+            # A status-only check-in comes from an older worker. Clear the prior
+            # projection so its timestamp cannot make retired IDs look current.
+            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s,connection_ids=%s "
+                         "WHERE singleton",
+                         (self.clock.utc(), code,
+                          Jsonb(list(connection_ids)) if connection_ids is not None else None))
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int:
         now, inserted = self.clock.utc(), 0
@@ -489,12 +719,15 @@ class MediaRepository:
             raise RegistryError("stale_job")
         return row
 
-    def catalog_in(self, conn, now):
+    def catalog_in(self, conn, now, source_refs: set[str] | None = None):
         """Exclude known impossible unsecured candidates during cooldown; locks bypass this pool."""
         if self._candidate_capacity(conn) > self.limits.max_authored_candidates:
             raise RegistryError("authored_candidate_limit", 409)
         snapshots = {}
-        for row in conn.execute("SELECT * FROM catalog_snapshots").fetchall():
+        rows = (conn.execute("SELECT * FROM catalog_snapshots").fetchall() if source_refs is None
+                else conn.execute("SELECT * FROM catalog_snapshots WHERE source_ref=ANY(%s)",
+                                  (list(source_refs),)).fetchall())
+        for row in rows:
             snapshot = CatalogSnapshot.model_validate(row["snapshot"])
             snapshots[row["source_ref"]] = snapshot.model_copy(update={
                 "candidates": self._hydrate_candidates(conn, snapshot.candidates, now)})
@@ -515,7 +748,24 @@ class MediaRepository:
         (`recipe_changed`) and planning requests the asset again under the new one.
         """
         with self.transaction() as conn:
-            state = conn.execute("SELECT recipe_id,max_bytes,worker_seen,worker_error FROM media_settings WHERE singleton").fetchone()
-            return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
-                "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
-                "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}
+            return self.health_in(conn)
+
+    def health_in(self, conn) -> dict:
+        """Read worker/cache health through a caller-owned transaction."""
+        state = conn.execute(
+            "SELECT recipe_id,max_bytes,worker_seen,worker_error,connection_ids "
+            "FROM media_settings WHERE singleton"
+        ).fetchone()
+        if state is None:
+            # The operator read endpoint is strictly read-only, so it cannot use
+            # transaction()'s lazy settings-row initialization.
+            state = {
+                "recipe_id": None,
+                "max_bytes": self.limits.max_bytes,
+                "worker_seen": None,
+                "worker_error": None,
+                "connection_ids": None,
+            }
+        return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
+            "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
+            "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}

@@ -43,6 +43,8 @@ from media.models import (
     MediaLimits,
     OriginalAsset,
     RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
     SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
@@ -113,6 +115,7 @@ class WorkerLimits(Model):
 
 class SourceClient(Protocol):
     async def refresh(self, spec: SourceSpec) -> RefreshResult: ...
+    async def preview(self, query: SourcePreviewQuery) -> SourcePreviewResult: ...
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal: ...
     async def close(self) -> None: ...
 
@@ -224,7 +227,7 @@ class MediaWorker:
             self._error = None
         else:
             self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
-        await _blocking(self.repository.worker_status, self._error)
+        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def refresh_once(self) -> bool:
         lease = await _blocking(self.repository.begin_scheduled_refresh)
@@ -237,6 +240,10 @@ class MediaWorker:
         if completed < requested:
             await self._refresh_source(lease.source.source_ref, retry_busy=False)
         return True
+
+    def _connection_ids(self) -> tuple[str, ...]:
+        """Return only the bounded identifiers safe for the central operator view."""
+        return tuple(sorted(self.connections))
 
     async def refresh_source(self, source_ref: str) -> None:
         """Complete every persisted request revision for one source."""
@@ -322,11 +329,31 @@ class MediaWorker:
                 raise RetryableMediaTask(self._error) from None
             raise MediaTaskFailed(self._error) from None
         finally:
-            await _blocking(self.repository.worker_status, self._error)
+            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
-        await _blocking(self.repository.worker_status, self._error)
+        await _blocking(self.repository.maintain_source_previews)
+        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+
+    async def preview_source(self, request_id: str) -> None:
+        """Evaluate one unsaved query through the worker-owned Immich connection."""
+        query = await _blocking(self.repository.begin_source_preview, request_id)
+        if query is None:
+            return
+        try:
+            if query.connection_ref not in self.connections:
+                raise MediaError("connection_unknown", "incompatible")
+            async with asyncio.timeout(self.limits.refresh_seconds):
+                result = await self._client(query.connection_ref).preview(query)
+            await _blocking(self.repository.finish_source_preview, request_id, result)
+        except asyncio.CancelledError:
+            await _blocking(self.repository.fail_source_preview, request_id, "worker_cancelled")
+            raise
+        except Exception as error:
+            await _blocking(self.repository.fail_source_preview, request_id, self._code(error))
+        finally:
+            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def _close_clients(self):
         async def close(client):

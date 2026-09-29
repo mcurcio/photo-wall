@@ -1,7 +1,7 @@
 import { apiWrite } from "./apiWrite.js";
 
 /**
- * The one equipment write module (slice 2 §6): bind, unbind and retire, each
+ * The one equipment write module (slice 2 §6): bind, unbind, retire and identify, each
  * with its message table. Every write goes through {@link apiWrite} (the write
  * fence) and answers ONE result shape, so the Binding facet, the Equipment
  * roster and the confirmation dialogs read the same outcomes:
@@ -136,6 +136,43 @@ export function retirePlayer(playerId) {
     new Set(),
     "Retire failed — please retry.",
   );
+}
+
+/**
+ * Ask a pending Player to briefly identify one connected, unbound Output.
+ * Acceptance means Central queued the request, not that anything was observed
+ * on the display. The roster owns the success wording and never claims output.
+ *
+ * @param {string} playerId
+ * @param {string} outputId
+ * @returns {Promise<EquipmentResult>}
+ */
+export async function identifyOutput(playerId, outputId) {
+  const unknown =
+    "The request outcome is unknown. Check the display before trying again.";
+  let result;
+  try {
+    result = await apiWrite(
+      `/v1/operator/players/${encodeURIComponent(playerId)}/outputs/${encodeURIComponent(outputId)}/identify`,
+      { method: "POST" },
+    );
+  } catch {
+    return { outcome: "unknown", code: null, message: unknown };
+  }
+  if (result.ok) {
+    return { outcome: "done", code: null, message: null };
+  }
+  if (result.status >= 500) {
+    return { outcome: "unknown", code: null, message: unknown };
+  }
+  return {
+    outcome: "refused",
+    code: result.error ?? String(result.status),
+    message:
+      result.status === 404 || result.status === 409
+        ? "This Output changed or the Player is no longer eligible. Refresh Equipment before trying again."
+        : "Identify was refused. Refresh Equipment and try again.",
+  };
 }
 
 // Each Frame's result in an "Unbind all" sequence, in plain words.

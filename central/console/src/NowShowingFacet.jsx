@@ -1,6 +1,8 @@
 import React from "react";
 
 import { explainPrecedence, nowShowing } from "./join.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
+import { formatRoute, sceneCreationRoute } from "./routes.js";
 
 /**
  * Now-showing facet (Bead 3, read-only).
@@ -31,6 +33,25 @@ export function NowShowingFacet({ snapshot, frameId }) {
           {`Intended scene: ${now.scene_id} (phase ${now.phase})`}
         </p>
       )}
+
+      <div className="facet__content-path">
+        <h4 className="facet__subtitle">Put content on this Frame</h4>
+        <p>
+          Make a Scene; Frame {frameId} starts selected on its Frames step, and you can
+          change the target Frames there. The Scene chooses the photos or videos; after
+          saving it, choose Show now or Schedule it to put the Scene on screen.
+        </p>
+        <div className="record__actions">
+          {FRAME_ID_PATTERN.test(frameId) ? (
+            <a href={formatRoute(sceneCreationRoute(frameId))}>Make a Scene</a>
+          ) : (
+            <p role="status">
+              This Frame id cannot be targeted by a Scene. Scene targets need an id of 96 characters or fewer without a colon.
+            </p>
+          )}
+          <a href={formatRoute({ section: "scenes" })}>Browse Scenes</a>
+        </div>
+      </div>
 
       <h4 className="facet__subtitle">Why</h4>
       <PrecedenceExplanation

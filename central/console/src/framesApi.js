@@ -1,5 +1,8 @@
 import { apiWrite } from "./apiWrite.js";
-import { dragToPlacement } from "./projection.js";
+import { dragToPlacement, orientationCoherent } from "./projection.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
+
+export { FRAME_ID_PATTERN } from "./frameIds.js";
 
 /**
  * Low-level Frame write module (bead R-apiwrite). Holds the four Frame mutations
@@ -16,7 +19,6 @@ import { dragToPlacement } from "./projection.js";
  * contracts/models.py `TARGET_ID_PATTERN` (which `FrameCreate.id` enforces); a
  * pytest pins the two equal, so there is one rule.
  */
-export const FRAME_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/;
 
 /**
  * Normalize a create/move `apiWrite` result to the frame-write shape. On success
@@ -52,6 +54,46 @@ export async function createFrame(id, placement, profile) {
     body: { id, ...placement, profile },
   });
   return interpretFrame(result);
+}
+
+/**
+ * Replace a Frame's persistent display profile. The generation is captured when
+ * the editor opens so a concurrent equipment change cannot silently authorize
+ * this edit. Bound Frames and Frames targeted by a live Run are refused by the
+ * server. A successful change also invalidates the committed calibration.
+ *
+ * @param {string} frameId
+ * @param {{width_px:number, height_px:number, diagonal_inches:number, video:boolean}} profile
+ * @param {number} expectedGeneration
+ * @returns {Promise<{ok:true, changed:boolean, frame:object}|{ok:false, code:string, status:number}>}
+ */
+export async function updateFrameProfile(frameId, profile, expectedGeneration) {
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/profile`, {
+    method: "PUT",
+    body: { profile, expected_generation: expectedGeneration },
+  });
+  if (result.ok) {
+    return { ok: true, changed: result.data?.changed === true, frame: result.data };
+  }
+  return { ok: false, code: result.error ?? String(result.status), status: result.status };
+}
+
+/** Validate the shared FrameProfile contract and its orientation against a Frame. */
+export function frameProfileProblem(profile, frame) {
+  const width = Number(profile.width_px);
+  const height = Number(profile.height_px);
+  const diagonal = Number(profile.diagonal_inches);
+  if (!Number.isInteger(width) || width < 1 || width > 16384 ||
+      !Number.isInteger(height) || height < 1 || height > 16384) {
+    return "Pixel width and height must be whole numbers from 1 to 16384.";
+  }
+  if (!Number.isFinite(diagonal) || diagonal <= 0) {
+    return "Diagonal must be a positive number.";
+  }
+  if (!orientationCoherent(frame.width_mm, frame.height_mm, width, height)) {
+    return "Display profile must match the frame's orientation.";
+  }
+  return null;
 }
 
 /**
@@ -94,7 +136,8 @@ const DELETE_MESSAGES = {
  * the call site so the plan refreshes once the delete lands.
  *
  * @param {string} frameId
- * @returns {Promise<{ok:true}|{ok:false, code:string, message:string}>}
+ * @returns {Promise<{ok:true}|{ok:false, code:string, message:string,
+ *   scene_ids:string[], program_ids:string[], queued_activation_ids:string[], run_ids:string[]}>}
  */
 export async function deleteFrame(frameId) {
   const result = await apiWrite(`/v1/operator/frames/${frameId}`, {
@@ -104,7 +147,17 @@ export async function deleteFrame(frameId) {
     return { ok: true };
   }
   const code = result.error ?? String(result.status);
-  return { ok: false, code, message: DELETE_MESSAGES[code] ?? "Could not delete the frame." };
+  const ids = (key) => Array.isArray(result.data?.[key])
+    ? result.data[key].filter((id) => typeof id === "string") : [];
+  return {
+    ok: false,
+    code,
+    message: DELETE_MESSAGES[code] ?? "Could not delete the frame.",
+    scene_ids: ids("scene_ids"),
+    program_ids: ids("program_ids"),
+    queued_activation_ids: ids("queued_activation_ids"),
+    run_ids: ids("run_ids"),
+  };
 }
 
 /**

@@ -134,6 +134,42 @@ def test_priority_defaults_to_zero_shown_on_review_and_changes_under_advanced(pa
             "Priority 7")
 
 
+@pytest.mark.browser_context_args(timezone_id="America/Los_Angeles")
+def test_future_program_edit_posts_exact_expected_program_and_keeps_its_id(page, registry):
+    """Editing opens at Review, disables the multi-window helper and replaces against
+    the exact stored Program; the id stays fixed and only future Runs use the change."""
+    _seed(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene("evening"))
+    # These are the later occurrence of 01:30 in the 2026 Los Angeles fallback,
+    # then 02:30 PST. The Playwright context uses America/Los_Angeles in CI too.
+    baseline = Program(program_id="editable", scene_id="evening", starts_at=1793525400,
+                       ends_at=1793529000, priority=2)
+    runtime.command("set_program", baseline)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "schedule")
+        card = _programs(page).get_by_label("Program editable", exact=True)
+        card.get_by_role("button", name="Edit program editable", exact=True).click()
+        assert current_hash(page) == "#/schedule/editable/edit/review"
+        form = _programs(page).get_by_role("form", name="Edit Program editable", exact=True)
+        expect(form.get_by_role("heading", name="Check your Program", exact=True)).to_be_visible()
+        expect(form.get_by_role("note")).to_contain_text("Saved start occurrence: 1:30 AM PST (GMT-08:00)")
+        expect(form.get_by_label("Create separate windows", exact=True)).to_have_count(0)
+        form.get_by_role("button", name="Change Priority", exact=True).click()
+        form.get_by_label("Priority", exact=True).fill("8")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/programs/editable/replace") and r.request.method == "POST") as response:
+            form.get_by_role("button", name="Replace Program", exact=True).click()
+        request = response.value.request.post_data_json
+        assert request == {
+            "expected": {"program_id": "editable", "scene_id": "evening", "starts_at": baseline.starts_at,
+                         "ends_at": baseline.ends_at, "priority": 2},
+            "program": {"program_id": "editable", "scene_id": "evening", "starts_at": baseline.starts_at,
+                        "ends_at": baseline.ends_at, "priority": 8},
+        }
+        expect(_programs(page).get_by_role("status")).to_have_text(
+            "Replaced Program editable. Changes apply to future Runs; an active Run keeps its secured assignment.")
+
+
 def test_continue_checks_only_its_own_step(page, registry):
     """§7 mechanics: Continue validates the current step and shows only its reasons; a
     later step shows none until its own Continue. Mutation probe: check every step."""
@@ -246,7 +282,7 @@ def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, regis
         assert current_hash(page) == "#/schedule"
         card = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
         expect(card).to_contain_text("Scene evening")
-        expect(card.get_by_role("button")).to_have_text(["Remove"])
+        expect(card.get_by_role("button")).to_have_text(["Edit", "Remove"])
         expect(_schedule_link(page)).to_have_accessible_description("")
 
         page.go_back()  # one Back leaves the section: no second #/schedule entry

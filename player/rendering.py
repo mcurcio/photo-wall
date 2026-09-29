@@ -54,6 +54,12 @@ class PresentationResult:
 
 
 class Renderer(Protocol):
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
+                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
+                            configuration_received: bool = True) -> None: ...
+
+    def set_identify_output(self, output_id: str | None) -> None: ...
+
     def prepare(self, layer: LocalLayer) -> PrepareResult: ...
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
@@ -84,6 +90,24 @@ class RecordingRenderer:
         self.presentations: list[OutputComposition] = []
         self.outputs: dict[str, OutputComposition] = {}
         self.resident: dict[str, LocalLayer] = {}
+        self.unbound_outputs: tuple[str, ...] = ()
+        self.enrolled_player_id: str | None = None
+        self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
+        self.configuration_received = False
+        self.central_link_history: list[str] = ["connecting"]
+        self.identify_output: str | None = None
+
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
+                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
+                            configuration_received: bool = True) -> None:
+        self.unbound_outputs = output_ids
+        self.enrolled_player_id = player_id
+        self.central_link_state = central_link_state
+        self.configuration_received = configuration_received
+        self.central_link_history.append(central_link_state)
+
+    def set_identify_output(self, output_id: str | None) -> None:
+        self.identify_output = output_id
 
     def prepare(self, layer: LocalLayer) -> PrepareResult:
         self.preparations.append(layer)

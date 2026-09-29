@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from test_operator_frames import ADMIN, AUTH, _portrait
 
 from central.app import create_app
-from central.runtime import Contribution, Program, Scene
+from central.runtime import Child, Contribution, Program, Scene
 
 
 def test_the_runtime_read_serves_protection_and_program_outcomes(registry):
@@ -54,6 +54,30 @@ def test_a_stale_scene_put_is_refused_with_409_and_an_identical_retry_is_not(reg
         assert put({**scene, "revision": 2, "cycle_seconds": 45}).status_code == 200
         stored = client.get("/v1/operator/runtime", headers=AUTH).json()["definitions"]["night"]
     assert (stored["revision"], stored["cycle_seconds"]) == (2, 45)
+
+
+def test_scene_delete_route_checks_revision_and_returns_sorted_dependencies(registry):
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
+    runtime = app.state.coordinator.runtime
+    runtime.command("set_scene", Scene(scene_id="to-delete", revision=2))
+    runtime.command("set_scene", Scene(scene_id="a-parent", children=(
+        Child(scene=Scene(scene_id="to-delete")),
+    )))
+    runtime.command("set_program", Program(
+        program_id="z-program", scene_id="to-delete", starts_at=100, ends_at=200))
+    runtime.command("set_program", Program(
+        program_id="a-program", scene_id="to-delete", starts_at=300, ends_at=400))
+    with TestClient(app) as client:
+        stale = client.delete("/v1/operator/scenes/to-delete?expected_revision=1", headers=AUTH)
+        in_use = client.delete("/v1/operator/scenes/to-delete?expected_revision=2", headers=AUTH)
+        missing = client.delete("/v1/operator/scenes/missing?expected_revision=1", headers=AUTH)
+    assert (stale.status_code, stale.json()) == (409, {"error": "scene_revision_conflict"})
+    assert in_use.status_code == 409
+    assert in_use.json() == {
+        "error": "scene_in_use", "program_ids": ["a-program", "z-program"],
+        "run_ids": [], "queued_activation_ids": [], "scene_ids": ["a-parent"],
+    }
+    assert (missing.status_code, missing.json()) == (409, {"error": "scene_missing"})
 
 
 def _console_literal(name):

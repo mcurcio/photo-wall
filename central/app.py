@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,14 +29,29 @@ from central.execution_repository import PostgresExecutionRepository
 from central.installation_models import InstallationInventory
 from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
-from central.media_ports import MediaApplication, RefreshReceipt, SourceConfigurationReceipt
+from central.media_ports import (
+    MediaApplication,
+    RefreshReceipt,
+    SourceConfigurationReceipt,
+    SourcePreviewReceipt,
+)
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.operator_auth import OperatorAuth
-from central.registry import Enrollment, FrameCreate, FramePlacement, Registry, RegistryError
-from central.runtime import Program, RuntimeConflict, Scene
+from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.registry import (
+    Enrollment,
+    FrameCreate,
+    FramePlacement,
+    FrameProfileReplacement,
+    Registry,
+    RegistryError,
+)
+from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
+from central.runtime_store import RuntimeStore
+from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     BaseHealth,
@@ -48,7 +63,7 @@ from contracts.models import (
     Readiness,
 )
 from contracts.time import Clock, SystemClock
-from media.models import SourceSpec
+from media.models import SourcePreviewQuery, SourceSpec
 
 LOG = logging.getLogger("central.app")
 
@@ -69,6 +84,11 @@ class BindingRequest(Model):
 
 class UnbindRequest(Model):
     expected_generation: int = Field(ge=0)
+
+
+class ProgramReplacementRequest(Model):
+    expected: Program
+    program: Program
 
 
 class CalibrationRequest(Model):
@@ -142,6 +162,11 @@ def create_app(
         ),
         media=media_repository,
     )
+    runtime_store = RuntimeStore(db, clock)
+    operator_snapshot = OperatorSnapshotReader(
+        db, clock, registry, runtime_store, media_repository, coordinator
+    )
+    source_names = SourceNameService(db, media_repository, runtime_store)
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
@@ -275,6 +300,8 @@ def create_app(
     )
     app.state.registry = registry
     app.state.coordinator = coordinator
+    app.state.operator_snapshot = operator_snapshot
+    app.state.media_repository = media_repository
     app.state.content = content
     app.state.mdns_advertiser = mdns_advertiser
     bearer = HTTPBearer(auto_error=False)
@@ -291,11 +318,25 @@ def create_app(
 
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=exc.status)
+        detail = {"error": exc.code}
+        if isinstance(exc, SourceInUse):
+            detail["scene_ids"] = exc.scene_ids
+        detail.update(exc.details)
+        return JSONResponse(detail, status_code=exc.status)
 
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
         return JSONResponse({"error": exc.code}, status_code=409)
+
+    @app.exception_handler(SceneInUse)
+    async def scene_in_use(request, exc):
+        return JSONResponse({
+            "error": exc.code,
+            "program_ids": exc.program_ids,
+            "run_ids": exc.run_ids,
+            "queued_activation_ids": exc.queued_activation_ids,
+            "scene_ids": exc.scene_ids,
+        }, status_code=409)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(request, exc):
@@ -505,6 +546,8 @@ def create_app(
                         "plan": state["plan"].model_dump(mode="json") if state["plan"] else None,
                         "commits": [c.model_dump(mode="json") for c in state["commits"]],
                         "revocations": [r.model_dump(mode="json") for r in state["revocations"]],
+                        "identify_output": (state["identify_output"].model_dump(mode="json")
+                                           if state["identify_output"] else None),
                     }
                 )
                 try:
@@ -541,6 +584,14 @@ def create_app(
     def inventory():
         # The reports are read after the inventory, so read_at bounds every timestamp in it.
         return registry.inventory().with_liveness(coordinator.player_reports_lock_free())
+
+    @app.get(
+        "/v1/operator/snapshot",
+        dependencies=[Depends(admin)],
+        response_model=OperatorSnapshot,
+    )
+    def operator_state_snapshot():
+        return operator_snapshot.read()
 
     def _content() -> ContentServices:
         if content is None:
@@ -599,21 +650,41 @@ def create_app(
     def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
         return registry.place_frame(frame_id, placement)
 
-    @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
-    def remove_frame(frame_id: Identifier) -> dict:
-        # Guard 1 (runtime, in-route, in-memory, cheap): refuse while a live Run
-        # targets this Frame. Read the projected runtime exactly as
-        # GET /v1/operator/runtime does. run.phase is a plain str on RunView --
-        # do NOT use `.active` (that exists only on the internal _Run, not on the
-        # projected RunView). participants is built from ALL runs unfiltered, so
-        # filtering to the live phases (body, outro) is BOTH correct and required:
-        # completed/cancelled runs must not block a delete.
+    def _refuse_frame_in_use(frame_id: str) -> None:
+        # Runs refer to Frame ids by string, so keep destructive/reconfiguring
+        # operator actions away from a target while its projected Run is live.
         view = coordinator.runtime.read().project(clock.utc())
         target = f"frame:{frame_id}"
         if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
             raise RegistryError("frame_in_use", 409)
-        # Guard 2 (binding) is enforced atomically inside the store transaction.
-        return registry.delete_frame(frame_id)
+
+    @app.put("/v1/operator/frames/{frame_id}/profile", dependencies=[Depends(admin)])
+    def replace_frame_profile(frame_id: Identifier, request: FrameProfileReplacement) -> dict:
+        # Keep the live-Run check and Frame update in one serialized transaction.
+        # Otherwise an activation could commit between the check and profile write.
+        with coordinator.serialized_runtime_read() as (conn, runtime):
+            references = runtime.frame_references(frame_id, clock.utc())
+            if references["run_ids"]:
+                raise RegistryError("frame_in_use", 409)
+            return registry.replace_frame_profile(
+                frame_id, request.profile, expected_generation=request.expected_generation,
+                conn=conn,
+            )
+
+    @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
+    def remove_frame(frame_id: Identifier) -> dict:
+        # Serialize with all Runtime/Scene mutations, then take the Frame row lock,
+        # matching authored configuration's COORDINATION -> RUNTIME -> Frame order.
+        # Registry checks existence and binding before applying reference data so those
+        # established errors retain precedence over reference conflicts.
+        with coordinator.serialized_runtime_read() as (conn, runtime):
+            references = runtime.frame_references(frame_id, clock.utc())
+            if references["run_ids"]:
+                raise RegistryError("frame_in_use", 409, details={
+                    "run_ids": list(references["run_ids"]),
+                })
+
+            return registry.delete_frame(frame_id, conn=conn, references=references)
 
     @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def bind(frame_id: Identifier, binding: BindingRequest):
@@ -643,22 +714,27 @@ def create_app(
         registry.retire(player_id)
         return {"status": "retired"}
 
+    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify",
+              dependencies=[Depends(admin)])
+    def identify_output(player_id: Identifier, output_id: Identifier):
+        return registry.identify_output(player_id, output_id)
+
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
-        runtime = coordinator.runtime.read()
-        state = runtime.export_state()
-        projection = runtime.operator_projection(clock.utc())
-        return {
-            "definitions": state["scenes"],
-            "programs": state["programs"],
-            "current": projection.current,
-            "protected_frames": projection.protected_frames,
-            "program_outcomes": projection.program_outcomes,
-        }
+        read_at = clock.utc()
+        return runtime_document(coordinator.runtime.read(), read_at)
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])
     def media_state():
         return {"sources": media_application.sources(), "health": media_application.health()}
+
+    @app.put("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
+    def configure_source_name(name: str, request: NamedSourceWrite):
+        return source_names.put(name, request)
+
+    @app.delete("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
+    def delete_source_name(name: str, expected_revision: int = Query(ge=1)):
+        return source_names.delete(name, expected_revision)
 
     @app.put(
         "/v1/operator/sources/{source_ref}",
@@ -681,6 +757,15 @@ def create_app(
     )
     def refresh_source(source_ref: Identifier):
         return media_application.request_refresh(source_ref)
+
+    @app.post("/v1/operator/source-previews", dependencies=[Depends(admin)],
+              status_code=202, response_model=SourcePreviewReceipt)
+    def request_source_preview(query: SourcePreviewQuery):
+        return media_application.request_source_preview(query)
+
+    @app.get("/v1/operator/source-previews/{request_id}", dependencies=[Depends(admin)])
+    def source_preview(request_id: Identifier):
+        return media_application.source_preview(request_id)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):
@@ -706,11 +791,25 @@ def create_app(
         coordinator.runtime.command("set_scene", scene)
         return {"status": "configured"}
 
+    @app.delete("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
+    def delete_scene(scene_id: Identifier, expected_revision: int = Query(ge=1)):
+        coordinator.runtime.command("delete_scene", scene_id, expected_revision)
+        return {"status": "deleted"}
+
     @app.put("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
     def configure_program(program_id: Identifier, program: Program):
         if program.program_id != program_id:
             raise ValueError("Program identity mismatch")
         coordinator.runtime.command("set_program", program)
+        return {"status": "configured"}
+
+    @app.post("/v1/operator/programs/{program_id}/replace", dependencies=[Depends(admin)])
+    def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
+        if request.expected.program_id != program_id or request.program.program_id != program_id:
+            raise ValueError("Program identity mismatch")
+        coordinator.runtime.command(
+            "replace_program", request.expected, request.program, clock.utc()
+        )
         return {"status": "configured"}
 
     @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])

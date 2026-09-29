@@ -12,6 +12,7 @@ from central.media_queue import (
     MEDIA_REFRESH_LOCK_PREFIX,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
+    PREVIEW_SOURCE_TASK,
     REFRESH_MEDIA_SOURCE_TASK,
     ProcrastinateMediaQueue,
 )
@@ -154,6 +155,7 @@ def test_worker_app_registers_only_domain_work_and_maintenance_tasks():
         name for name in app.tasks if name.startswith("photo_wall.")
     } == {
         PREPARE_MEDIA_TASK,
+        PREVIEW_SOURCE_TASK,
         REFRESH_MEDIA_SOURCE_TASK,
         "photo_wall.media.refresh",
         "photo_wall.media.maintenance",

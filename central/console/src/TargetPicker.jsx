@@ -2,6 +2,7 @@ import React from "react";
 
 import { FRAME_ID_PATTERN } from "./framesApi.js";
 import { frameHealth } from "./health.js";
+import { formatRoute } from "./routes.js";
 
 /**
  * The one target-frame picker (pass 2 slice 3 §3), in both authoring modes:
@@ -79,16 +80,22 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle })
  * `tileLabel`): the one rendering of "which frames, and are they alright" in
  * Run rows (§9) and Scene rows (§13).
  *
- * @param {{snapshot: object|null, frameIds: string[]}} props
+ * @param {{snapshot: object|null, frameIds: string[], recoveryLinks?: boolean}} props
  */
-export function FrameChips({ snapshot, frameIds }) {
+export function FrameChips({ snapshot, frameIds, recoveryLinks = false }) {
   return (
     <span className="run-control__frames">
       {frameIds.map((frameId) => {
         const health = frameHealth(snapshot, frameId);
+        const recoveryFacet = recoveryLinks ? health?.facet : null;
         return (
           <span key={frameId} className={`run-control__frame health--${health?.severity ?? "todo"}`}>
             {health === null ? `${frameId}: not in the inventory` : `${frameId}: ${health.tileLabel}`}
+            {recoveryFacet !== null && recoveryFacet !== undefined && (
+              <a href={formatRoute({ section: "wall", id: frameId, facet: recoveryFacet })}>
+                {`Open Frame ${frameId}`}
+              </a>
+            )}
           </span>
         );
       })}

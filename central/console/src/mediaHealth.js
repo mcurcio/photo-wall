@@ -1,6 +1,7 @@
 import { ageAt, formatAge, frameHealth } from "./health.js";
 import { LIVE_PHASES, rankedContributions, toTarget } from "./join.js";
 import { clockTime, cycleWording, runScene } from "./showState.js";
+import { sourceName } from "./sourceNames.js";
 
 /**
  * The media pipeline in words (pass 2 slice 3 §14). Pure reads of the served
@@ -75,6 +76,7 @@ export function workerLoad(health) {
  *
  * @param {object|null} health `/v1/operator/media` `health`
  * @param {number} now Central's clock
+ * @param {boolean} includeFilters include the Source's criteria in the label (default true)
  * @returns {Classified|null} null when the media read carried no health
  */
 export function workerState(health, now) {
@@ -168,14 +170,18 @@ export function sourceFilters(spec) {
  * @param {number} now Central's clock
  * @returns {Classified}
  */
-export function sourceState(source, now) {
+export function sourceState(source, now, includeFilters = true) {
   const filters = sourceFilters(source.spec);
   const said = (state, severity, label) => ({
     state,
     severity,
-    label: [label, ...filters].join(" · "),
+    label: includeFilters ? [label, ...filters].join(" · ") : label,
   });
-  if (!source.next_refresh) {
+  // A newly configured Source starts as unavailable before any refresh attempt.
+  // A failed periodic refresh can leave the explicit request revision at zero, so
+  // an absent next_refresh is the reliable signal that no attempt has run yet.
+  if (!source.next_refresh && Number(source.refresh_completed_revision ?? 0) === 0 &&
+      !source.diagnostics?.length) {
     return said("never-refreshed", "todo", "Awaiting refresh");
   }
   if (source.status !== "ok") {
@@ -185,19 +191,25 @@ export function sourceState(source, now) {
     const failure = SOURCE_FAILURES[source.status] ?? `Library ${codeWords(source.status)}`;
     return said("failing", "alarm", `${failure} · ${good}`);
   }
+  if (!source.next_refresh) {
+    return said("never-refreshed", "todo", "Awaiting refresh");
+  }
   const late = ageAt(now, source.next_refresh);
   if (!(late <= REFRESH_OVERDUE_AFTER)) {
     return said("overdue", "alarm", `Refresh overdue by ${age(late)}`);
   }
   const valid = Number(source.counts?.valid ?? 0);
+  const pending = Number(source.counts?.pending ?? 0);
+  const rejected = Number(source.counts?.rejected ?? 0);
+  const partialCount = Math.max(0, pending) + Math.max(0, rejected);
   if (!(valid > 0)) {
     return said("empty", "todo", "nothing valid in the last refresh");
   }
-  return said(
-    "ok",
-    "ok",
-    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh`,
-  );
+  const qualifier = partialCount > 0
+    ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
+    : "";
+  return said("ok", "ok",
+    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh${qualifier}`);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.
@@ -354,7 +366,7 @@ export function whyNothingNew(snapshot, frameId, check = null) {
       text: "Fixed, hand-picked media; new photos never appear by design.",
     });
   } else {
-    steps.push({ title: "Authored?", state: "ok", text: `No: live from ${winner.source_refs.join(", ")}.` });
+    steps.push({ title: "Authored?", state: "ok", text: `No: live from ${winner.source_refs.map(sourceName).join(", ")}.` });
   }
 
   if (live) {
@@ -362,14 +374,14 @@ export function whyNothingNew(snapshot, frameId, check = null) {
     const read = winner.source_refs.map((ref) => {
       const source = sources.find((candidate) => candidate.source_ref === ref);
       return source === undefined
-        ? { ok: false, text: `${ref}: not configured` }
-        : (({ severity, label }) => ({ ok: severity === "ok", text: `${ref}: ${label}` }))(
+        ? { ok: false, saved: true, text: `${sourceName(ref)}: this Run uses saved Source settings; their current status is not shown here` }
+        : (({ severity, label }) => ({ ok: severity === "ok", text: `${sourceName(source)}: ${label}` }))(
           sourceState(source, now),
         );
     });
     steps.push({
       title: "The Source",
-      state: read.some((entry) => entry.ok) ? "ok" : "stop",
+      state: read.some((entry) => entry.ok) ? "ok" : read.some((entry) => entry.saved) ? "info" : "stop",
       text: `${read.map((entry) => entry.text).join("; ")}.`,
     });
     steps.push({ title: "Check this frame", ...checkStep(frameId, check) });

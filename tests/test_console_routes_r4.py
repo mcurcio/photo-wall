@@ -57,6 +57,9 @@ SHARED_WITH_SHOW = {
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
+    "ReadinessNotice.jsx",  # shared read-only Player failure explanation
+    "readinessRecovery.js",  # plain-language failure mapping; no controls
+    "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
 
@@ -439,6 +442,13 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
 
 
+@pytest.mark.parametrize("table", ["show", "neutral"])
+def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, table):
+    modules = reachable(graph, TABLES[table])
+    assert {"ReadinessNotice.jsx", "readinessRecovery.js"} <= modules
+    assert not modules & DISPLAY_CONTROLS
+
+
 def test_the_wall_routes_do_reach_display_controls(graph):
     # Positive control: the closure holds Commissioning and the calibration write, where
     # they are meant to be.
@@ -480,6 +490,11 @@ out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
 out.landing = [landingRoute(0), landingRoute(3)];
+out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
+                                initialTarget: "frame_one" });
+out.badTargetRoute = (() => { try {
+  return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
+} catch { return "refused"; } })();
 console.log(JSON.stringify(out));
 """
 
@@ -489,19 +504,25 @@ ROUTES = [
 ] + [
     {"section": "now", "flow": "show", "step": "review"},
     {"section": "scenes", "flow": "new", "step": "kind"},
+    {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "portrait-1"},
     {"section": "scenes", "flow": "new", "step": "edit"},
     {"section": "scenes", "id": "new", "flow": "edit", "step": "review"},
     {"section": "scenes", "id": "lobby/evening ç?#%", "flow": "edit", "step": "frames"},
     {"section": "sources", "flow": "new", "step": "name"},
+    {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
+    {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
     {"section": "wall", "id": "reception north", "facet": "commissioning"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
     {"section": "wall", "id": "frames", "facet": "nowshowing"},
 ]
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/sources/x/edit/y",
+    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
+    "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
+    "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
+    "#/sources/new/name?target=frame",
 ]
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
@@ -534,3 +555,5 @@ def test_routes_parse_format_and_round_trip():
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
     assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
+    assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
+    assert out["badTargetRoute"] == "refused"

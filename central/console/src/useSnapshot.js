@@ -12,7 +12,9 @@ import { apiWrite } from "./apiWrite.js";
 import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 
 /**
- * @typedef {{inventory: object, runtime: object, media: object|null, at: number}} Snapshot
+ * @typedef {{inventory: object, runtime: object, media: object|null, at: number,
+ *            readAt: number, playerReportsReadAt: number,
+ *            readinessDiagnostics: object[]}} Snapshot
  * @typedef {"checking"|"signedIn"|"signedOut"} Auth
  * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|null} AuthNotice
  */
@@ -47,10 +49,10 @@ const POLL_MS = 5000;
 
 /**
  * Holds Plane A near the top of the tree and provides {snapshot, refresh} to
- * the whole subtree. `refresh` performs ONE atomic, timestamped fetch of
- * inventory + runtime (+ media) and replaces Plane A wholesale — inventory and
- * runtime are swapped together so a frame's binding row and its now-showing chip
- * always share one age (design §4a). It never merges into Plane B (useDraft).
+ * the whole subtree. `refresh` fetches Central's aggregate operator snapshot,
+ * whose inventory, runtime, and media share one database read view, and replaces
+ * Plane A wholesale. Accepted Player reports carry their own read timestamp.
+ * It never merges into Plane B (useDraft).
  *
  * SIGN-IN (pass A §7). `auth` starts "checking": the first Plane A read decides
  * it (2xx signed in, 401 signed out; a network error or 5xx keeps checking and
@@ -114,20 +116,29 @@ export function SnapshotProvider({ children }) {
   const read = useCallback(async () => {
     const ticket = ++issuedRef.current;
     const writesAtStart = writeCount();
-    // Fetch every plane concurrently, then swap in ONE atomic snapshot; a
-    // partial failure rejects and leaves the prior snapshot untouched. Media is
-    // part of Plane A (design §4a) — inventory, runtime and the Source catalog
-    // are swapped together so the Showrunner's Sources region and the wall's
-    // now-showing chip always share one age.
+    // Central reads inventory, runtime, and media under one database snapshot.
+    // Keep its envelope intact until the whole request succeeds, then replace
+    // Plane A in one state update. The local `at` is for UI staleness; `readAt`
+    // and `playerReportsReadAt` retain Central's distinct timing facts.
     let next = null;
     let failure = null;
     try {
-      const [inventory, runtime, media] = await Promise.all([
-        fetchJson("/v1/operator/inventory"),
-        fetchJson("/v1/operator/runtime"),
-        fetchJson("/v1/operator/media"),
-      ]);
-      next = { inventory, runtime, media, at: Date.now() };
+      const aggregate = await fetchJson("/v1/operator/snapshot");
+      if (!aggregate?.inventory || !aggregate?.runtime || !aggregate?.media ||
+          !Number.isFinite(aggregate.read_at) ||
+          !Number.isFinite(aggregate.player_reports_read_at) ||
+          !Array.isArray(aggregate.readiness_diagnostics)) {
+        throw new Error("Invalid operator snapshot response");
+      }
+      next = {
+        inventory: aggregate.inventory,
+        runtime: aggregate.runtime,
+        media: aggregate.media,
+        at: Date.now(),
+        readAt: aggregate.read_at,
+        playerReportsReadAt: aggregate.player_reports_read_at,
+        readinessDiagnostics: aggregate.readiness_diagnostics,
+      };
     } catch (error) {
       failure = error;
     }

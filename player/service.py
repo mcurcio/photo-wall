@@ -33,6 +33,7 @@ from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
     Commit,
+    IdentifyOutput,
     Instant,
     Layer,
     Model,
@@ -167,6 +168,7 @@ class State(Model):
     plan: Plan | None
     commits: tuple[Commit, ...] = Field(max_length=1024)
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
+    identify_output: IdentifyOutput | None = None
 
 
 class BootContext(Model):
@@ -232,6 +234,17 @@ def read_pi_serial() -> bytes | None:
     except OSError:
         pass
     return None
+
+
+def display_serial(raw: bytes | None) -> str | None:
+    """Only put a bounded hardware serial on the local diagnostic display."""
+    if raw is None:
+        return None
+    try:
+        serial = raw.decode("ascii").strip(" \t\r\n\x00").lower()
+    except UnicodeDecodeError:
+        return None
+    return serial if re.fullmatch(r"[a-f0-9]{8,32}", serial) else None
 
 
 def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
@@ -403,11 +416,35 @@ class PlayerService:
         # None until a check-in lands, then one report per epoch (a re-enroll
         # bumps the epoch and re-reports; central is monotonic per epoch).
         self._base_health_epoch: int | None = None
+        self._base_health_sequence_epoch: int | None = None
+        self._base_health_sequence = 0
+        self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
+        self._configuration_received = False
+        self._unbound_outputs = tuple(output.output_id for output in outputs if output.connected)
+        self._identify_key: tuple[str, int] | None = None
+        self._identify_output: str | None = None
+        self._identify_deadline: float | None = None
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
             LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
         self.last_fault, self.last_fault_detail = code, detail
+
+    def _render_unbound_diagnostic(self) -> None:
+        """Publish Central-link context only on known unbound outputs."""
+        self._main()
+        registration = self.registration
+        self.renderer.set_unbound_outputs(
+            self._unbound_outputs,
+            registration.player_id if registration is not None else None,
+            self.central_link_state,
+            self._configuration_received,
+        )
+
+    def _set_central_link_state(self, state: Literal["connecting", "reachable", "retrying"]):
+        self._main()
+        self.central_link_state = state
+        self._render_unbound_diagnostic()
 
     def _uplink_fault(self, code: str, error: UplinkError) -> None:
         """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
@@ -431,6 +468,13 @@ class PlayerService:
 
     async def dispatch(self, callback):
         return await asyncio.wrap_future(self.dispatcher(callback))
+
+    async def _mark_central_retrying(self) -> None:
+        """Best-effort UI update; never let a diagnostic dispatch replace a cycle error."""
+        try:
+            await self.dispatch(lambda: self._set_central_link_state("retrying"))
+        except Exception as error:
+            LOG.debug("player: could not publish Central retry state: %s", type(error).__name__)
 
     @property
     def session(self) -> Session:
@@ -576,14 +620,21 @@ class PlayerService:
             return
         if self._base_health_epoch == self.registration.authority_epoch:
             return
+        epoch = self.registration.authority_epoch
+        if self._base_health_sequence_epoch != epoch:
+            self._base_health_sequence_epoch = epoch
+            self._base_health_sequence = 0
+        self._base_health_sequence += 1
         try:
-            await self.request("POST", "/v1/player/base-health", body={
-                "authority_epoch": self.registration.authority_epoch,
-                "sequence": 1,
+            response = await self.request("POST", "/v1/player/base-health", body={
+                "authority_epoch": epoch,
+                "sequence": self._base_health_sequence,
                 "running_tag": tag,
                 "healthy": True,
             })
-            self._base_health_epoch = self.registration.authority_epoch
+            if response.get("accepted") is not True:
+                raise ServiceError("base_health_rejected")
+            self._base_health_epoch = epoch
         except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
                 UplinkError, asyncio.TimeoutError) as error:
             LOG.info("player base-health check-in deferred: %s",
@@ -632,10 +683,45 @@ class PlayerService:
                     # A fresh report is required; never infer replacement authority.
                     self.fault("stale_commit")
                 self._seen_commits.append(commit)
+            bound = {binding.output_id for binding in configuration.bindings}
+            self._unbound_outputs = tuple(output.output_id for output in self.outputs
+                                          if output.connected and output.output_id not in bound)
+            self._configuration_received = True
+            self.central_link_state = "reachable"
+            self._render_unbound_diagnostic()
+            unbound = self._unbound_outputs
+            self._apply_identify_output(state.identify_output, unbound,
+                                        configuration.authority_epoch)
             self.tick_main()
+
+    def _apply_identify_output(self, cue: IdentifyOutput | None,
+                               unbound: tuple[str, ...], authority_epoch: int) -> None:
+        now = self.clock.monotonic()
+        key = None if cue is None else (cue.request_id, cue.authority_epoch)
+        if cue is None or cue.authority_epoch != authority_epoch or cue.output_id not in unbound:
+            self._identify_key = None
+            self._identify_output = None
+            self._identify_deadline = None
+        else:
+            if key != self._identify_key:
+                self._identify_key = key
+                self._identify_deadline = now + min(cue.remaining_seconds, 15.0)
+            if self._identify_deadline is not None and now >= self._identify_deadline:
+                self._identify_output = None
+                self._identify_deadline = None
+            elif self._identify_deadline is not None:
+                self._identify_output = cue.output_id
+        self._sync_identify_output()
+
+    def _sync_identify_output(self) -> None:
+        self.renderer.set_identify_output(self._identify_output)
 
     def tick_main(self):
         self._main()
+        if self._identify_deadline is not None and self.clock.monotonic() >= self._identify_deadline:
+            self._identify_output = None
+            self._identify_deadline = None
+            self._sync_identify_output()
         if self.executor is not None:
             self.executor.prepare_imminent()
             observations = self.executor.tick()
@@ -947,9 +1033,13 @@ class PlayerService:
                     if self._session is not None:
                         self._session = self._session.unregistered()
                     self.fault("registration_required")
+                    if not self._stop.is_set():
+                        await self._mark_central_retrying()
                 except Exception as error:
                     self._located = False
                     self._fault_for(error)
+                    if not self._stop.is_set():
+                        await self._mark_central_retrying()
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
@@ -997,6 +1087,13 @@ class UnavailableRenderer:
 
     def prepare(self, layer):
         return PrepareResult("failed", "capacity")
+
+    def set_unbound_outputs(self, output_ids, player_id, central_link_state,
+                            configuration_received):
+        pass
+
+    def set_identify_output(self, output_id):
+        pass
 
     def capacity(self, compositions):
         return CapacityResult(False)
@@ -1074,7 +1171,8 @@ def main():
             renderer = NativeRenderer(tuple(NativeOutput(output.output_id,
                 output_app_id(output.output_id), output.width_px or 1920,
                 output.height_px or 1080) for output in connected_outputs),
-                decoder_limit=config.decoder_limit, texture_budget=config.texture_budget)
+                decoder_limit=config.decoder_limit, texture_budget=config.texture_budget,
+                serial=display_serial(read_pi_serial()))
         except Exception:
             native_fault = "native_initialization"
     service = PlayerService(

@@ -27,7 +27,7 @@ from playwright.sync_api import expect
 from test_registry import enroll
 
 from central.registry import FrameCreate
-from central.runtime import Contribution, Scene
+from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
 
@@ -190,6 +190,29 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
 
 
+def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, registry):
+    registry.create_frame(FrameCreate(
+        id="new-frame", surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name="Frame new-frame", exact=True).click()
+        inspector = page.get_by_role(
+            "region", name="Frame new-frame inspector", exact=True)
+        inspector.get_by_role("tab", name="Now-showing", exact=True).click()
+
+        expect(inspector).to_contain_text("Nothing scheduled.")
+        expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
+        expect(inspector).to_contain_text("Show now or Schedule it")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
+
+        expect(page.get_by_role(
+            "heading", level=1, name="Scenes", exact=True)).to_be_visible()
+        expect(page.get_by_role(
+            "heading", name="What kind of Scene?", exact=True)).to_be_visible()
+        assert page.evaluate("window.location.hash") == "#/scenes/new/kind?target=new-frame"
+
+
 def test_surface_filter_switches_the_plan(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -272,6 +295,42 @@ def _fill_landscape_profile(page):
     page.get_by_label("Display width (px)").fill("1920")
     page.get_by_label("Display height (px)").fill("1080")
     page.get_by_label("Diagonal (inches)").fill("24")
+
+
+def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry):
+    assert not registry.inventory().frames
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        expect(page.get_by_label("Surface", exact=True)).to_have_value("wall")
+        expect(page.get_by_text("Drag on this plan to place a Frame")).to_be_visible()
+        _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
+        form = page.get_by_role("form", name="New frame")
+        expect(form).to_be_visible()
+        form.get_by_label("Frame id", exact=True).fill("first-frame")
+        _fill_landscape_profile(page)
+        form.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Frame first-frame", exact=True)
+               ).to_be_visible()
+        assert {frame.id for frame in registry.inventory().frames} == {"first-frame"}
+
+
+def test_first_run_guidance_opens_measured_frame_form_with_focus(page, registry):
+    assert not registry.inventory().frames
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        guidance = page.get_by_role("note", name="Getting started")
+        expect(guidance).to_be_visible()
+        guidance.get_by_role("button", name="Add first frame", exact=True).click()
+
+        form = page.get_by_role("form", name="New frame")
+        expect(form).to_be_visible()
+        frame_id = form.get_by_label("Frame id", exact=True)
+        expect(frame_id).to_be_focused()
+        # Opening the action leaves the dismissible guidance and its draft state
+        # intact while the existing measured create flow owns the form.
+        expect(guidance).to_be_visible()
+        expect(page.get_by_role("button", name="Add frame with measurements", exact=True)
+               ).to_be_disabled()
 
 
 def test_drag_create_posts_frame_with_scaled_placement(page, registry):
@@ -373,6 +432,38 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         expect(tray.get_by_role("button", name=frame.id, exact=True)).to_have_count(0)
 
 
+def test_measured_create_and_numeric_reposition(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name="Add frame with measurements", exact=True).click()
+        form = page.get_by_role("form", name="New frame")
+        form.get_by_label("Frame id", exact=True).fill("measured-frame")
+        form.get_by_label("X position (mm)").fill("125")
+        form.get_by_label("Y position (mm)").fill("75")
+        form.get_by_label("Frame width (mm)").fill("400")
+        form.get_by_label("Frame height (mm)").fill("225")
+        form.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Frame measured-frame", exact=True)).to_be_visible()
+        created = next(frame for frame in registry.inventory().frames if frame.id == "measured-frame")
+        assert (created.x_mm, created.y_mm, created.width_mm, created.height_mm) == (125, 75, 400, 225)
+
+        page.get_by_role("button", name="Frame measured-frame", exact=True).click()
+        page.get_by_role("button", name="Edit placement for measured-frame", exact=True).click()
+        form = page.get_by_role("form", name="Place frame measured-frame")
+        form.get_by_label("X position (mm)").fill("850")
+        form.get_by_label("Y position (mm)").fill("260")
+        form.get_by_label("Frame width (mm)").fill("420")
+        form.get_by_label("Frame height (mm)").fill("236.25")
+        form.get_by_role("button", name="Save placement", exact=True).click()
+        def _repositioned():
+            frame = next(f for f in registry.inventory().frames if f.id == "measured-frame")
+            return frame if (frame.x_mm, frame.y_mm, frame.width_mm, frame.height_mm) == (
+                850, 260, 420, 236.25) else None
+
+        _wait_for(_repositioned)
+
+
 def test_drag_move_existing_frame_patches_placement(page, registry):
     registry.create_frame(FrameCreate(
         id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
@@ -418,7 +509,7 @@ def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
         page.mouse.move(box["x"] + 360 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
                         steps=4)
         # A poll lands mid-drag.
-        with page.expect_response("**/v1/operator/inventory"):
+        with page.expect_response("**/v1/operator/snapshot"):
             page.clock.run_for(5000)
         page.wait_for_timeout(200)
         page.mouse.move(box["x"] + 540 / 960 * box["width"], box["y"] + 300 / 600 * box["height"],
@@ -472,6 +563,8 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         # Select the clear frame on the plan, then delete it via its control.
         page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
         page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        expect(page.get_by_role("dialog")).to_contain_text(
+            "No saved Scenes reference this Frame in this snapshot")
         _confirm_delete(page)
 
         # Gone by identity from the plan AND from server inventory (real removal).
@@ -483,6 +576,79 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
         expect(page.get_by_role("dialog")).to_have_count(0)
         expect(plan).to_be_focused()
         expect(plan.get_by_role("status")).to_have_text(f"Frame {CLEAR} deleted.")
+
+
+def test_delete_frame_lists_stored_scene_roots_and_upcoming_programs(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    store = RuntimeStore(registry.db, registry.clock)
+    store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
+        scene_id="inline", contributions=(Contribution(
+            target="frame:" + CLEAR, kind="black"),))),)))
+    now = registry.clock.utc()
+    store.command("set_program", Program(
+        program_id="morning-show", scene_id="nested-gallery",
+        starts_at=now + 60, ends_at=now + 120))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        expect(dialog).to_contain_text("Saved Scenes targeting this Frame must be edited or removed")
+        expect(dialog.get_by_text("nested-gallery", exact=True)).to_be_visible()
+        expect(dialog).to_contain_text("Upcoming Programs using those Scenes")
+        expect(dialog.get_by_text("morning-show", exact=True)).to_be_visible()
+        expect(dialog).to_contain_text("Central checks references again when you confirm")
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("saved Scenes: nested-gallery")
+        expect(alert).to_contain_text("Programs: morning-show")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
+
+
+def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.route(f"**/v1/operator/frames/{CLEAR}", lambda route: route.fulfill(
+            status=409, content_type="application/json",
+            body='{"error":"frame_referenced","scene_ids":["new-scene"],'
+                 '"program_ids":["new-program"],'
+                 '"queued_activation_ids":["queued-show"]}'))
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("saved Scenes: new-scene")
+        expect(alert).to_contain_text("Programs: new-program")
+        expect(alert).to_contain_text("queued activations: queued-show")
+        expect(alert).to_contain_text("Refresh Equipment. Edit or remove the saved Scenes")
+        expect(alert).to_contain_text("Edit or remove the Programs")
+        expect(alert).to_contain_text("retry after Central resolves them")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
+
+
+def test_delete_frame_queue_only_refusal_does_not_suggest_editing_scenes(page, registry):
+    registry.create_frame(FrameCreate(
+        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.route(f"**/v1/operator/frames/{CLEAR}", lambda route: route.fulfill(
+            status=409, content_type="application/json",
+            body='{"error":"frame_referenced","scene_ids":[],"program_ids":[],'
+                 '"queued_activation_ids":["queued-only"]}'))
+        page.get_by_role("button", name=f"Frame {CLEAR}", exact=True).click()
+        page.get_by_role("button", name=f"Delete frame {CLEAR}", exact=True).click()
+        _confirm_delete(page)
+        alert = _plan(page).get_by_role("alert")
+        expect(alert).to_contain_text("queued activations: queued-only")
+        expect(alert).to_contain_text("retry after Central resolves them")
+        expect(alert).not_to_contain_text("Edit or remove")
+        assert any(frame.id == CLEAR for frame in registry.inventory().frames)
 
 
 def test_delete_bound_frame_shows_unbind_guidance(page, registry):

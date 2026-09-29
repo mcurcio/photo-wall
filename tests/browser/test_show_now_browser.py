@@ -10,6 +10,7 @@ outcome, and new whenever the form changes (slice 3B §11).
 
 import os
 import re
+from urllib.parse import quote
 
 import pytest
 from console_tasks import (
@@ -19,20 +20,24 @@ from console_tasks import (
     show_advanced,
     show_form,
     show_now,
+    start_show_now,
     visible_page,
+    visit,
 )
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     answer_first,
     drive_poll,
     operator_server,
+    report_readiness,
     submit_sign_in,
 )
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
+    SOURCE,
     VALID_FRAME,
     _runs_of,
     _runtime,
@@ -40,6 +45,8 @@ from test_operator_showrunner_browser import (
     _seed,
     _seed_source,
 )
+
+from central.runtime import Contribution, Scene
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -78,6 +85,81 @@ def _covered(registry):
     runtime.command("set_scene", _scene("elsewhere", frame=INVALID_FRAME))
     runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
     return runtime
+
+
+def test_show_now_reports_saved_source_freshness_and_refresh_receipt(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, SCENE_ID)
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        expect(freshness).to_contain_text("holiday: Awaiting refresh")
+        expect(freshness).to_contain_text("does not confirm prepared media or visible playback")
+        expect(freshness).not_to_contain_text(SOURCE)
+
+        with page.expect_response(lambda response: response.url.endswith(
+                f"/v1/operator/sources/{quote(SOURCE, safe='')}/refresh") and
+                response.request.method == "POST") as info:
+            freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
+        assert info.value.status == 202
+        expect(freshness).to_contain_text(
+            "Refresh requested. The status will update when the media worker finishes.")
+        form.get_by_role("button", name="Continue", exact=True).click()
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        expect(freshness).to_contain_text("holiday: Awaiting refresh")
+        expect(freshness).to_contain_text("Refresh requested.")
+        expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_enabled()
+
+
+def test_show_now_handles_historical_and_authored_scenes_without_refresh(page, registry):
+    _seed(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", Scene(scene_id="historical", contributions=(
+        Contribution(target=f"frame:{VALID_FRAME}", source_refs=("gone:1",)),)))
+    runtime.command("set_scene", Scene(scene_id="fixed", contributions=(
+        Contribution(target=f"frame:{VALID_FRAME}", asset_refs=("fixed-item",)),)))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, "historical")
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        expect(freshness).to_contain_text("gone: Current Source status is unavailable.")
+        expect(freshness).not_to_contain_text("gone:1")
+        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
+        form.get_by_role("button", name="Continue", exact=True).click()
+        expect(form.get_by_role("region", name="Saved Source freshness", exact=True)).to_contain_text(
+            "Current Source status is unavailable.")
+        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
+            "button", name="Scene", exact=True).click()
+        form.get_by_label("Scene to activate", exact=True).select_option("fixed")
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        expect(freshness).to_contain_text(
+            "This Scene uses hand-picked media; refreshing a Source does not change its chosen items.")
+        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
+
+
+def test_show_now_ignores_refresh_receipt_after_scene_change(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene("first"))
+    runtime.command("set_scene", _scene("second"))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, "first")
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        gate = RequestGate(page, "**/v1/operator/sources/*/refresh")
+        gate.holding = True
+        freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
+        gate.wait_held()
+        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_disabled()
+        form.get_by_label("Scene to activate", exact=True).select_option("second")
+        gate.release(status=202, content_type="application/json", body='{"requested_revision": 1}')
+        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
+        expect(freshness).to_contain_text("holiday: Awaiting refresh")
+        expect(freshness).not_to_contain_text("Refresh requested.")
+        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_enabled()
 
 
 def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(page, registry):
@@ -120,6 +202,54 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(form).to_contain_text("0 (the default: no Run covers its frames)")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
+
+
+def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(page, registry):
+    """Show-now frame health offers the existing Wall recovery route, while an
+    informational healthy chip stays plain text and the mounted activation draft/key
+    survives a Wall visit."""
+    players = _seed(registry)
+    _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME))
+    runtime.command("set_scene", _scene("healthy", frame=VALID_FRAME))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now", paused_at=registry.clock.utc())
+        form = show_now(page, SCENE_ID, submit=False)
+        expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
+        expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
+            "href", f"#/wall/frames/{INVALID_FRAME}/binding")
+
+        for player_id in players:
+            report_readiness(registry, player_id)
+        drive_poll(page)
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
+        expect(recovery).to_have_attribute(
+            "href", f"#/wall/frames/{INVALID_FRAME}/commissioning")
+        expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
+
+        recovery.click()
+        inspector = page.get_by_role("region", name=f"Frame {INVALID_FRAME} inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+
+        # Ordinary route navigation away and back leaves Show now's values and
+        # activation identity intact because its flow remains mounted in the shell.
+        go(page, "now")
+        visit(page, "#/now/show/review")
+        form = show_form(page)
+        expect(form.get_by_text(SCENE_ID, exact=True)).to_be_visible()
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        show_advanced(form)
+        expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
+
+        # Selecting a healthy Frame leaves its chip informational.
+        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
+            "button", name="Scene", exact=True).click()
+        form.get_by_label("Scene to activate", exact=True).select_option("healthy")
+        expect(form).to_contain_text(f"{VALID_FRAME}: Heard recently")
+        expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
 
 def test_a_priority_below_the_default_opens_advanced_and_says_where_it_stays_underneath(
@@ -190,12 +320,12 @@ def test_the_activation_key_outlives_steps_sections_the_wall_and_the_overlay(pag
         go(page, "scenes")
         go(page, "wall")
         # The session ends: the overlay keeps the shell, and the draft, mounted.
-        page.route(INVENTORY, lambda route: route.fulfill(
+        page.route(SNAPSHOT, lambda route: route.fulfill(
             status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-        with page.expect_response(INVENTORY):
+        with page.expect_response(SNAPSHOT):
             page.clock.run_for(5000)
         expect(page.get_by_role("heading", name="Sign in to Photo Wall")).to_be_visible()
-        page.unroute(INVENTORY)
+        page.unroute(SNAPSHOT)
         submit_sign_in(page)
 
         go(page, "now")

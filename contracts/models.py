@@ -88,6 +88,14 @@ class OutputBinding(Model):
         return self.calibration
 
 
+class IdentifyOutput(Model):
+    """Short-lived operational request for a Player to identify one physical Output."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    output_id: Identifier
+    authority_epoch: int = Field(ge=1)
+    remaining_seconds: float = Field(gt=0, le=15, allow_inf_nan=False)
+
 class Variant(Model):
     sha256: Digest
     size: int = Field(gt=0, le=4 * 1024**3)

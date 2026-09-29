@@ -314,6 +314,17 @@ class RuntimeConflict(Exception):
         super().__init__(code)
 
 
+class SceneInUse(RuntimeConflict):
+    """A stored Scene definition is still referenced by durable runtime state."""
+
+    def __init__(self, *, program_ids=(), run_ids=(), queued_activation_ids=(), scene_ids=()) -> None:
+        self.program_ids = tuple(sorted(program_ids))
+        self.run_ids = tuple(sorted(run_ids))
+        self.queued_activation_ids = tuple(sorted(queued_activation_ids))
+        self.scene_ids = tuple(sorted(scene_ids))
+        super().__init__("scene_in_use")
+
+
 class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
@@ -348,6 +359,124 @@ class Runtime:
             raise RuntimeConflict("scene_revision_conflict")
         self._state.scenes[scene.scene_id] = scene
 
+    @staticmethod
+    def _scene_ids(scene: Scene) -> set[str]:
+        ids = {scene.scene_id}
+        for child in scene.children:
+            ids.update(Runtime._scene_ids(child.scene))
+        return ids
+
+    def delete_scene(self, scene_id: str, expected_revision: int) -> None:
+        """Delete an unused authored Scene with optimistic revision checking."""
+        stored = self._state.scenes.get(scene_id)
+        if stored is None:
+            raise RuntimeConflict("scene_missing")
+        if stored.revision != expected_revision:
+            raise RuntimeConflict("scene_revision_conflict")
+
+        program_ids = [p.program_id for p in self._state.programs.values() if p.scene_id == scene_id]
+        run_ids = [r.run_id for r in self._state.runs.values()
+                   if r.active and scene_id in self._scene_ids(r.scene)]
+        queued_activation_ids = [q.activation_id for q in self._state.queue
+                                 if scene_id in self._scene_ids(q.scene)]
+        scene_ids = [parent_id for parent_id, scene in self._state.scenes.items()
+                     if parent_id != scene_id and scene_id in self._scene_ids(scene)]
+        if program_ids or run_ids or queued_activation_ids or scene_ids:
+            raise SceneInUse(program_ids=program_ids, run_ids=run_ids,
+                             queued_activation_ids=queued_activation_ids, scene_ids=scene_ids)
+        del self._state.scenes[scene_id]
+
+    def frame_references(self, frame_id: str, now: float | None = None) -> dict[str, tuple[str, ...]]:
+        """Return stored, queued, and live references to a Frame id.
+
+        Run and queue Scenes are snapshots, so inspect them independently of the
+        current definitions. When `now` is supplied, evaluate live state through
+        a detached projection so expired queue entries and logically ended Runs
+        do not block a delete merely because the next scheduler tick has not run.
+        Terminal Run history is deliberately excluded; the owned Runtime is not
+        advanced by this read.
+        """
+        if now is not None:
+            projected = self._copy()
+            projected.advance(now)
+            return projected._frame_references(frame_id, now)
+        return self._frame_references(frame_id, now)
+
+    def _frame_references(self, frame_id: str, now: float | None) -> dict[str, tuple[str, ...]]:
+        target = f"frame:{frame_id}"
+        scene_ids = tuple(sorted(
+            scene_id for scene_id, scene in self._state.scenes.items()
+            if target in scene.participants
+        ))
+        queued = tuple(sorted(
+            item.activation_id for item in self._state.queue
+            if target in item.scene.participants
+        ))
+        runs = tuple(sorted(
+            run.run_id for run in self._state.runs.values()
+            if run.active and target in run.scene.participants
+        ))
+        program_ids = tuple(sorted(
+            program.program_id for program in self._state.programs.values()
+            if program.scene_id in scene_ids and (now is None or program.starts_at > now)
+        ))
+        return {
+            "scene_ids": scene_ids,
+            "program_ids": program_ids,
+            "queued_activation_ids": queued,
+            "run_ids": runs,
+        }
+
+    @staticmethod
+    def _scene_source_refs(scene: Scene) -> set[str]:
+        refs = {ref for contribution in (*scene.contributions, *scene.outro_contributions)
+                for ref in contribution.source_refs}
+        for child in scene.children:
+            refs.update(Runtime._scene_source_refs(child.scene))
+        return refs
+
+    def scenes_using_sources(self, refs: set[str]) -> tuple[str, ...]:
+        return tuple(sorted(scene_id for scene_id, scene in self._state.scenes.items()
+                            if self._scene_source_refs(scene) & refs))
+
+    def planning_source_refs(self) -> set[str]:
+        """Refs that can contribute to a current or future Run projection."""
+        refs = set()
+        for scene in self._state.scenes.values():
+            refs.update(self._scene_source_refs(scene))
+        for run in self._state.runs.values():
+            if run.active:
+                refs.update(self._scene_source_refs(run.scene))
+        for queued in self._state.queue:
+            refs.update(self._scene_source_refs(queued.scene))
+        return refs
+
+    def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
+        """Revise future Scene definitions; admitted and queued snapshots stay intact."""
+        def revise(scene: Scene) -> Scene:
+            def contributions(items):
+                return tuple(item.model_copy(update={
+                    "source_refs": tuple(new_ref if ref in old_refs else ref for ref in item.source_refs)
+                }) if any(ref in old_refs for ref in item.source_refs) else item for item in items)
+
+            body = contributions(scene.contributions)
+            outro = contributions(scene.outro_contributions)
+            children = tuple(child.model_copy(update={"scene": revise(child.scene)})
+                             for child in scene.children)
+            if (body, outro, children) == (scene.contributions, scene.outro_contributions, scene.children):
+                return scene
+            return scene.model_copy(update={"revision": scene.revision + 1,
+                                            "contributions": body, "outro_contributions": outro,
+                                            "children": children})
+
+        changed = []
+        for scene_id, scene in self._state.scenes.items():
+            updated = revise(scene)
+            if updated is not scene:
+                self._state.scenes[scene_id] = updated
+                changed.append(scene_id)
+        return tuple(sorted(changed))
+
     def set_program(self, program: Program) -> None:
         if program.scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {program.scene_id}")
@@ -356,6 +485,30 @@ class Runtime:
             self._state.admissions.setdefault(program.activation_id, Admission(
                 activation_id=program.activation_id, status="expired", reason="missed_window"
             ))
+
+    def replace_program(self, expected: Program, replacement: Program, now: float) -> None:
+        """Compare and replace a future Program without reconciling Runtime time.
+
+        `expected` is the complete version the editor loaded. A matching stored
+        replacement is an idempotent retry, including after its start time.
+        """
+        now = max(_finite(now), self._state.now or 0.0)
+        if expected.program_id != replacement.program_id:
+            raise ValueError("Program identity mismatch")
+        stored = self._state.programs.get(expected.program_id)
+        if stored is None:
+            raise RuntimeConflict("program_missing")
+        if stored == replacement:
+            return
+        if stored != expected:
+            raise RuntimeConflict("program_changed")
+        if stored.starts_at <= now:
+            raise RuntimeConflict("program_started")
+        if replacement.starts_at <= now:
+            raise RuntimeConflict("program_window_started")
+        if replacement.scene_id not in self._state.scenes:
+            raise ValueError(f"unknown Scene: {replacement.scene_id}")
+        self._state.programs[replacement.program_id] = replacement
 
     def remove_program(self, program_id: str, now: float) -> RuntimeView:
         now = _finite(now)

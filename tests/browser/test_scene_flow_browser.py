@@ -19,13 +19,14 @@ from console_tasks import (
     connect,
     current_hash,
     go,
+    open_frame,
     scene_continue,
     scene_form,
     start_scene,
     visit,
 )
 from operator_harness import (
-    INVENTORY,
+    SNAPSHOT,
     RequestGate,
     answer_first,
     drive_poll,
@@ -35,6 +36,7 @@ from operator_harness import (
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from test_operator_showrunner_browser import (
+    INVALID_FRAME,
     LOBBY_FRAME,
     SOURCE,
     VALID_FRAME,
@@ -44,8 +46,13 @@ from test_operator_showrunner_browser import (
     _runtime,
     _seed,
     _seed_source,
+    _set_source,
 )
 from test_registry import ADMIN
+
+from central.catalog import CatalogSnapshot
+from central.media_repository import MediaRepository
+from media.models import RefreshResult
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -62,6 +69,218 @@ def _scenes(page):
 
 def _steps(page):
     return page.get_by_role("navigation", name="Steps", exact=True)
+
+
+@pytest.mark.parametrize(
+    ("state", "setup", "expected", "consequence"),
+    [
+        ("awaiting", lambda registry, now: None, "Awaiting refresh", "No catalog has been loaded yet"),
+        ("failed", lambda registry, now: _set_source(
+            registry, SOURCE, status="unavailable", next_refresh=now + 30,
+            refresh_completed_revision=0, refresh_requested_revision=1,
+            diagnostics=[{"code": "source_unavailable"}],
+        ), "Library unreachable", "last refresh failed"),
+        ("empty", lambda registry, now: _set_source(
+            registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,
+            counts={"valid": 0, "discovered": 0, "pending": 0, "rejected": 0},
+        ), "nothing valid in the last refresh", "found no valid items"),
+    ],
+)
+def test_scene_photos_and_review_explain_source_readiness(
+    page, registry, state, setup, expected, consequence,
+):
+    _seed(registry)
+    _seed_source(registry)
+    now = registry.clock.utc()
+    setup(registry, now)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text(expected)
+        expect(readiness).to_contain_text(consequence)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text(expected)
+        expect(readiness).to_contain_text(consequence)
+
+
+def test_refresh_source_from_scene_photos_preserves_draft_and_reports_request(
+    page, registry,
+):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        readiness = form.get_by_role("region", name="Source media status")
+        expect(readiness).to_contain_text("Awaiting refresh")
+        with page.expect_response(
+            lambda response: response.url.endswith("/refresh")
+            and response.request.method == "POST"
+        ) as info:
+            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
+        assert info.value.status == 202
+        expect(readiness).to_contain_text(
+            "Refresh requested. The status will update when the media worker finishes."
+        )
+        assert info.value.json()["requested_revision"] == 1
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("holiday")
+        form.get_by_label("Scene name", exact=True).fill("source-refresh-keeps-draft")
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
+            "source-refresh-keeps-draft"
+        )
+        expect(form.get_by_role("region", name="Source media status")).to_contain_text(
+            "Refresh requested."
+        )
+        form.get_by_role("region", name="Source media status").get_by_role(
+            "button", name="Manage in Photo sources", exact=True
+        ).click()
+        expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)).to_be_visible()
+        expect(page.get_by_role("region", name="Sources", exact=True)).to_contain_text("holiday")
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
+        assert current_hash(page) == "#/scenes/new/review"
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
+            "source-refresh-keeps-draft"
+        )
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text("holiday")
+        expect(answers).to_contain_text(VALID_FRAME)
+
+
+def test_completed_source_refresh_reloads_authored_candidates_once(page, registry):
+    _seed(registry)
+    first, second, incompatible = _authored_photos(registry)
+    queue = _seed_source(registry, (first,))
+    _set_source(registry, SOURCE, next_refresh=registry.clock.utc() - 1000)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        candidate_responses = []
+        page.on("response", lambda response: candidate_responses.append(response)
+                if "/candidates?" in response.url else None)
+        form = start_scene(page, hand_picked=True)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Media per frame")
+        chooser = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(chooser.locator("option")).to_have_count(2)
+        selected_before = chooser.locator("option").nth(1).get_attribute("value")
+        chooser.select_option(selected_before)
+        assert len(candidate_responses) == 1
+
+        _steps(page).get_by_role("button", name="Photos", exact=True).click()
+        readiness = form.get_by_role("region", name="Source media status")
+        with page.expect_response(
+            lambda response: response.url.endswith("/refresh")
+            and response.request.method == "POST"
+        ) as response:
+            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
+        assert response.value.status == 202
+        requested_revision = response.value.json()["requested_revision"]
+
+        repository = MediaRepository(registry.db, registry.clock, queue=queue)
+        lease = repository.begin_requested_refresh(SOURCE)
+        assert lease is not None and lease.request_revision == requested_revision
+        assert repository.publish_refresh(lease, RefreshResult(
+            snapshot=CatalogSnapshot(
+                source_ref=SOURCE,
+                refreshed_at=registry.clock.utc(),
+                candidates=tuple(photo.asset.candidate for photo in (first, second, incompatible)),
+            ),
+            assets=tuple(photo.asset for photo in (first, second, incompatible)),
+        ))
+
+        # The source revision is applied by the snapshot poll; useCandidates then
+        # schedules its reload in a React effect. Waiting only for the refresh
+        # message can observe the new source revision before that request reaches
+        # the browser, so synchronize on the candidate response itself.
+        with page.expect_response(
+            lambda item: "/candidates?" in item.url
+            and f"frame_id={VALID_FRAME}" in item.url
+        ) as refreshed_candidates:
+            drive_poll(page)
+        expect(readiness).to_contain_text("Refresh finished.")
+        assert refreshed_candidates.value.status == 200
+        assert len(candidate_responses) == 2, [
+            (item.status, item.url, item.text()) for item in candidate_responses
+        ]
+        scene_continue(page, "Frames")
+        scene_continue(page, "Media per frame")
+        expect(chooser.locator("option")).to_have_count(3)
+        expect(chooser).to_have_value(selected_before)
+        labels = chooser.locator("option").all_inner_texts()
+        assert any("Photo 120×200" in label for label in labels), labels
+        assert not any("Photo 192×108" in label for label in labels), labels
+        assert len(candidate_responses) == 2
+
+        drive_poll(page)
+        assert len(candidate_responses) == 2
+
+
+def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        inspector = open_frame(page, VALID_FRAME, "commissioning")
+        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        assert current_hash(page) == f"#/scenes/new/kind?target={VALID_FRAME}"
+        form = scene_form(page)
+        expect(form.get_by_role("heading", name="What kind of Scene?", exact=True)).to_be_visible()
+        scene_continue(page, "Photos")
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        chosen = form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)
+        other = form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)
+        expect(chosen).to_be_checked()
+        expect(other).not_to_be_checked()
+        chosen.uncheck()
+        expect(chosen).not_to_be_checked()
+        chosen.check()
+        other.check()
+        other.uncheck()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        answers = form.get_by_label("Your answers", exact=True)
+        expect(answers).to_contain_text(VALID_FRAME)
+        expect(answers).not_to_contain_text(INVALID_FRAME)
+        form.get_by_label("Scene name", exact=True).fill("commissioned-content")
+        with page.expect_response(lambda response: response.request.method == "PUT"
+                                  and response.url.endswith("/v1/operator/scenes/commissioned-content")):
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        next_actions = _scenes(page).get_by_role("group", name="Next for Scene commissioned-content")
+        expect(next_actions).to_be_visible()
+        next_actions.get_by_role("button", name="Show now", exact=True).click()
+        assert current_hash(page) == "#/now/show/scene"
+
+
+def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        go(page, "wall")
+        inspector = open_frame(page, VALID_FRAME, "commissioning")
+        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        expect(form.get_by_role("status")).to_contain_text(
+            f"Your open Scene draft was kept. Frame {VALID_FRAME} was not added.")
+        form.get_by_role("button", name="Choose Frames", exact=True).click()
+        expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).not_to_be_checked()
+        _steps(page).get_by_role("button", name="Photos", exact=True).click()
+        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
 
 
 def _scenes_link(page):
@@ -252,7 +471,7 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         form = scene_form(page)
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         # The stored Scene answers every step, so each is ticked.
         expect(_steps(page).get_by_role("listitem")).to_have_text(
             ["Kind", "Photos", "Frames", "Playback", "5Review"])
@@ -267,7 +486,7 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
         puts = _puts(page)
         page.clock.run_for(5000)
         expect(_scenes(page)).to_contain_text(
-            "This Scene was changed (revision 2) since you opened it.")
+            "This Scene changed since you opened it.")
         expect(replace).to_be_disabled()
         form.evaluate("(element) => element.requestSubmit()")  # Enter, in effect
         page.wait_for_timeout(200)
@@ -277,9 +496,9 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
 
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
         expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
-            "Reloaded revision 2. Changed: Seconds per cycle.")
+            "Reloaded the latest saved Scene. Changed: Seconds per cycle.")
         expect(_scenes(page).get_by_text(re.compile("was changed"))).to_have_count(0)
-        expect(form).to_contain_text("Editing evening · revision 2.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         expect(replace).to_be_enabled()
         replace.click()
         with page.expect_response(
@@ -308,7 +527,11 @@ def test_a_frame_deleted_mid_draft_is_announced_on_the_current_step_and_on_revie
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
         scene_continue(page, "Playback")
 
-        registry.delete_frame(LOBBY_FRAME)
+        response = page.request.delete(
+            f"{origin}/v1/operator/frames/{LOBBY_FRAME}",
+            headers={"Authorization": f"Bearer {ADMIN}"},
+        )
+        assert response.status == 200
         page.clock.run_for(5000)
         notice = f"{LOBBY_FRAME} was deleted and removed from this Scene."
         expect(form.get_by_role("status")).to_have_text(notice)
@@ -372,7 +595,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
         visit(page, "#/scenes/evening/edit/review")
         _scenes(page).get_by_role("button", name="Discard", exact=True).click()
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
 
         # In the app: Edit on another card asks first; Cancel keeps the draft.
         form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
@@ -386,7 +609,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
                ).to_be_visible()
         _scenes(page).get_by_role("button", name="Edit Scene morning", exact=True).click()
         dialog.get_by_role("button", name="Discard draft", exact=True).click()
-        expect(form).to_contain_text("Editing morning · revision 1.")
+        expect(form).to_contain_text("Editing morning. Its name stays the same.")
         assert current_hash(page) == "#/scenes/morning/edit/review"
         # The discard is said, and opening the next instance does not silence it.
         expect(_scenes(page).get_by_role("status").filter(has_text="Discarded")).to_have_text(
@@ -419,7 +642,7 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
         next_actions = scenes.get_by_role("group", name="Next for Scene saved-scene")
         expect(next_actions.get_by_role("button")).to_have_text(["Show now", "Schedule it"])
         card = scenes.get_by_label("Scene saved-scene", exact=True)
-        expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it"])
+        expect(card.get_by_role("button")).to_have_text(["Edit", "Show now", "Schedule it", "Delete"])
 
         page.go_back()
         assert not current_hash(page).startswith("#/scenes"), current_hash(page)
@@ -565,11 +788,10 @@ def test_a_replace_in_flight_on_a_hidden_page_neither_blocks_nor_moves_the_opera
         expect(page.get_by_role("dialog")).to_have_count(0)
 
         go(page, "scenes")
-        expect(_scenes(page).get_by_role("status").filter(has_text="Replaced")).to_have_text(
-            "Replaced Scene evening: now revision 2.")
+        expect(_scenes(page).get_by_role("status")).to_have_text("Scene evening saved.")
         expect(scene_form(page)).to_have_count(0)
-        expect(_scenes(page).get_by_label("Scene evening", exact=True)).to_contain_text(
-            "revision 2")
+        expect(_scenes(page).get_by_label("Scene evening", exact=True)
+               .get_by_text("Revision", exact=True)).to_have_count(0)
 
 
 def test_a_focus_request_dies_with_the_view_it_was_made_for(page, registry):
@@ -640,14 +862,14 @@ def test_a_scene_restored_at_a_lower_revision_is_stale_too(page, registry):
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
         form = scene_form(page)
-        expect(form).to_contain_text("Editing evening · revision 3.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         _restore_scene(registry, _console_scene("evening", cycle_seconds=20))
         drive_poll(page)
         expect(_scenes(page)).to_contain_text(
-            "This Scene was changed (revision 1) since you opened it.")
+            "This Scene changed since you opened it.")
         expect(form.get_by_role("button", name="Replace Scene", exact=True)).to_be_disabled()
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
-        expect(form).to_contain_text("Editing evening · revision 1.")
+        expect(form).to_contain_text("Editing evening. Its name stays the same.")
         form.get_by_role("button", name="Replace Scene", exact=True).click()
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/scenes/evening") and r.request.method == "PUT"
@@ -674,7 +896,7 @@ def test_reload_names_what_storage_changed_and_the_changes_it_replaced(page, reg
         drive_poll(page)
         _scenes(page).get_by_role("button", name="Reload", exact=True).click()
         expect(_scenes(page).get_by_role("status").filter(has_text="Reloaded")).to_have_text(
-            "Reloaded revision 2. Changed: Keep playing until the Program ends. "
+            "Reloaded the latest saved Scene. Changed: Keep playing until the Program ends. "
             "Your unsaved changes to Scene evening were replaced.")
         answers = form.get_by_label("Your answers", exact=True)
         expect(answers).to_contain_text("No, it plays one cycle")
@@ -711,7 +933,7 @@ def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
-        message = (f"No compatible media for {VALID_FRAME} in {SOURCE}. "
+        message = (f"No compatible media for {VALID_FRAME} in holiday. "
                    "Choose another frame, or another Source.")
         targets = form.get_by_role("group", name="Target frames", exact=True)
         expect(targets).to_have_accessible_description(message)
@@ -818,7 +1040,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         assert current_hash(page) == "#/scenes/new/photos"
 
         # The answer lands, then its one refresh: the flow would end right after it.
-        with page.expect_response(INVENTORY):
+        with page.expect_response(SNAPSHOT):
             with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/inflight")
                                       and r.request.method == "PUT") as info:
                 gate.release()

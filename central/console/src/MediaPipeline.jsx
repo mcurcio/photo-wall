@@ -2,6 +2,8 @@ import React, { useState } from "react";
 
 import { readCandidates } from "./candidatesApi.js";
 import { rankedContributions } from "./join.js";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
+import { sourceName } from "./sourceNames.js";
 import {
   checkCounts,
   codeWords,
@@ -64,10 +66,10 @@ function SourceRefresh({ source, now }) {
   const reported = [...new Set((source.diagnostics ?? []).map((entry) => entry.code))];
   const next = source.next_refresh ? source.next_refresh - now : null;
   return (
-    <li className="media-pipeline__source" aria-label={`Refresh of ${source.source_ref}`}>
+    <li className="media-pipeline__source" aria-label={`Refresh of ${sourceName(source)}`}>
       <dl className="record">
         <dt>Source</dt>
-        <dd>{source.source_ref}</dd>
+        <dd>{sourceName(source)}</dd>
         <dt>State</dt>
         <dd className={`health--${state.severity}`}>{state.label}</dd>
         {counts.discovered !== undefined && (
@@ -146,6 +148,7 @@ export function WhyNothingNew({ snapshot, frameId }) {
           </li>
         ))}
       </ol>
+      <ReadinessNotice snapshot={snapshot} frameId={frameId} />
     </div>
   );
 }

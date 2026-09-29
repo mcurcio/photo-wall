@@ -1,6 +1,7 @@
 import React from "react";
 
 import { frameHealth } from "./health.js";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
 
 /**
  * Frame-health badges on the Now showing page: one per Frame, labelled by the one
@@ -19,13 +20,15 @@ export function FrameHealthBadges({ snapshot }) {
       {frames.map((frame) => {
         const health = frameHealth(snapshot, frame.id);
         return (
-          <span
-            key={frame.id}
-            className={`showrunner__badge health--${health.severity}`}
-            aria-label={`Frame ${frame.id}: ${health.label}`}
-          >
-            {`${frame.id}: ${health.label}`}
-          </span>
+          <div key={frame.id} className="showrunner__badge-item">
+            <span
+              className={`showrunner__badge health--${health.severity}`}
+              aria-label={`Frame ${frame.id}: ${health.label}`}
+            >
+              {`${frame.id}: ${health.label}`}
+            </span>
+            <ReadinessNotice snapshot={snapshot} frameId={frame.id} />
+          </div>
         );
       })}
     </section>

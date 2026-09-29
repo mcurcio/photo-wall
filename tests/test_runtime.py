@@ -30,6 +30,85 @@ def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
 
 
+def test_frame_references_include_nested_outro_and_upcoming_program_context():
+    runtime = Runtime()
+    runtime.set_scene(Scene(
+        scene_id="parent", children=(Child(scene=Scene(
+            scene_id="child", outro_seconds=5,
+            outro_contributions=(media("frame:portrait"),),
+        )),),
+    ))
+    runtime.set_program(Program(
+        program_id="upcoming", scene_id="parent", starts_at=1100, ends_at=1200,
+    ))
+    runtime.set_program(Program(
+        program_id="past", scene_id="parent", starts_at=900, ends_at=950,
+    ))
+    refs = runtime.frame_references("portrait", now=1000)
+    assert refs == {
+        "scene_ids": ("parent",), "program_ids": ("upcoming",),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+
+
+def test_frame_references_keep_queued_snapshot_but_ignore_terminal_run_history():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", loop=True, cycle_seconds=100,
+                            contributions=(media("frame:elsewhere"),)))
+    admission = runtime.activate("show", "active", 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=2, loop=True, cycle_seconds=100,
+                            contributions=(media("frame:portrait"),)))
+    runtime.activate("show", "queued", 1000, repeat="queue", expires_at=1050)
+    runtime.set_scene(Scene(scene_id="show", revision=3, loop=True, cycle_seconds=100,
+                            contributions=(media("frame:elsewhere"),)))
+    assert runtime.frame_references("portrait", now=1000) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": ("queued",), "run_ids": (),
+    }
+
+    runtime.cancel(admission.run_id, 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=4))
+    assert runtime.frame_references("elsewhere", now=1000) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+
+
+def test_frame_references_project_expired_queue_without_mutating_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", loop=True,
+                            contributions=(media("frame:portrait"),)))
+    active_run_id = runtime.activate("show", "active", 1000).run_id
+    runtime.set_scene(Scene(scene_id="show", revision=2,
+                            contributions=(media("frame:elsewhere"),)))
+    runtime.activate("show", "queued", 1000, repeat="queue", expires_at=1010)
+    before = runtime.export_state()
+
+    refs = runtime.frame_references("portrait", now=1011)
+    assert refs == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (),
+        "run_ids": (active_run_id,),
+    }
+    assert runtime.export_state() == before
+
+
+def test_frame_references_project_logically_ended_run_without_mutating_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="show", duration_seconds=5,
+                            contributions=(media("frame:portrait"),)))
+    runtime.activate("show", "active", 1000)
+    runtime.set_scene(Scene(scene_id="show", revision=2,
+                            contributions=(media("frame:elsewhere"),)))
+    before = runtime.export_state()
+
+    assert runtime.frame_references("portrait", now=1031) == {
+        "scene_ids": (), "program_ids": (),
+        "queued_activation_ids": (), "run_ids": (),
+    }
+    assert runtime.export_state() == before
+
+
 def test_calendar_boundary_projection_overlay_and_current_reveal():
     midnight = datetime(2027, 1, 1, tzinfo=UTC).timestamp()
     runtime = Runtime()
@@ -429,6 +508,47 @@ def test_program_definition_updates_next_window_removal_stops_all_owned_roots():
     assert runtime.advance(18).contributions == ()
 
 
+def test_replace_program_uses_expected_version_and_does_not_advance_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="first", cycle_seconds=10, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="second", cycle_seconds=10, loop=True,
+                           contributions=(media(source="second:v1"),)))
+    runtime.set_program(Program(program_id="schedule", scene_id="first", starts_at=20, ends_at=40))
+    runtime.advance(5)
+    expected = runtime.export_state()
+    original = runtime._state.programs["schedule"]
+    replacement = Program(program_id="schedule", scene_id="second", starts_at=30, ends_at=50)
+
+    runtime.replace_program(original, replacement, now=10)
+    assert runtime._state.programs["schedule"] == replacement
+    assert runtime._state.now == 5
+    assert runtime._state.runs == Runtime.restore(expected)._state.runs
+    assert runtime.replace_program(original, replacement, now=30) is None
+    assert runtime.advance(30).for_target("frame:left").scene_id == "second"
+
+
+@pytest.mark.parametrize("starts_at", [10, 9])
+def test_replace_program_refuses_due_or_running_program_without_mutation(starts_at):
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
+    expected = Program(program_id="schedule", scene_id="scene", starts_at=starts_at, ends_at=20)
+    runtime.set_program(expected)
+    before = runtime.export_state()
+    replacement = expected.model_copy(update={"ends_at": 30})
+    with pytest.raises(RuntimeConflict, match="program_started"):
+        runtime.replace_program(expected, replacement, now=10)
+    assert runtime.export_state() == before
+
+
+def test_replace_program_refuses_a_new_window_that_has_started():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
+    expected = Program(program_id="schedule", scene_id="scene", starts_at=20, ends_at=40)
+    runtime.set_program(expected)
+    with pytest.raises(RuntimeConflict, match="program_window_started"):
+        runtime.replace_program(expected, expected.model_copy(update={"starts_at": 10, "ends_at": 30}), 10)
+
+
 def test_backdated_already_missed_program_is_not_replayed():
     runtime = Runtime()
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
@@ -768,3 +888,52 @@ def test_the_operator_read_serves_a_day_of_history_and_stores_everything():
     # A read filter only: stored state and every other read keep the old Run.
     assert runtime.export_state() == before
     assert old in {run.run_id for run in runtime.project(now).runs}
+
+
+def test_delete_scene_checks_revision_and_removes_only_an_unused_definition():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="unused", revision=3))
+    before = runtime.export_state()
+    with pytest.raises(RuntimeConflict, match="scene_revision_conflict"):
+        runtime.delete_scene("unused", 2)
+    assert runtime.export_state() == before
+    runtime.delete_scene("unused", 3)
+    assert "unused" not in runtime.export_state()["scenes"]
+    with pytest.raises(RuntimeConflict, match="scene_missing"):
+        runtime.delete_scene("unused", 3)
+
+
+@pytest.mark.parametrize("dependency", ["program", "run", "queued", "child"])
+def test_delete_scene_refuses_each_live_or_authored_dependency(dependency):
+    runtime = Runtime()
+    target = Scene(scene_id="target", loop=True, contributions=(media(),))
+    runtime.set_scene(target)
+    if dependency == "program":
+        runtime.set_program(Program(program_id="uses-target", scene_id="target", starts_at=10, ends_at=20))
+    elif dependency == "run":
+        runtime.activate("target", "active", 0)
+    elif dependency == "queued":
+        runtime.activate("target", "active", 0)
+        runtime.activate("target", "queued", 1, repeat="queue", expires_at=30)
+    else:
+        runtime.set_scene(Scene(scene_id="parent", children=(Child(scene=target),)))
+
+    before = runtime.export_state()
+    with pytest.raises(RuntimeConflict) as raised:
+        runtime.delete_scene("target", 1)
+    assert raised.value.code == "scene_in_use"
+    assert runtime.export_state() == before
+    assert ("uses-target" in getattr(raised.value, "program_ids", ())) == (dependency == "program")
+    assert bool(getattr(raised.value, "run_ids", ())) == (dependency in {"run", "queued"})
+    assert bool(getattr(raised.value, "queued_activation_ids", ())) == (dependency == "queued")
+    assert ("parent" in getattr(raised.value, "scene_ids", ())) == (dependency == "child")
+
+
+def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="historical", loop=True, contributions=(media(),)))
+    run_id = runtime.activate("historical", "historical-activation", 0).run_id
+    runtime.cancel(run_id, 1)
+    snapshot = runtime.export_state()["runs"][run_id]["scene"]
+    runtime.delete_scene("historical", 1)
+    assert runtime.export_state()["runs"][run_id]["scene"] == snapshot

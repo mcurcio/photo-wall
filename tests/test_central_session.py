@@ -52,6 +52,58 @@ def test_operator_source_scene_program_workflow_and_player_originated_session(re
         assert client.delete("/v1/operator/programs/evening", headers=operator).status_code == 200
 
 
+def test_program_replace_endpoint_is_optimistic_and_retryable(registry):
+    app = create_app(registry.db, registry.clock, ADMIN)
+    operator = {"Authorization": "Bearer " + ADMIN}
+    with TestClient(app) as client:
+        for scene_id in ("first", "second"):
+            scene = {"scene_id": scene_id, "loop": True, "cycle_seconds": 30,
+                     "contributions": [{"target": "frame:frame-0", "kind": "black"}]}
+            assert client.put(f"/v1/operator/scenes/{scene_id}", json=scene,
+                              headers=operator).status_code == 200
+        original = {"program_id": "schedule", "scene_id": "first",
+                    "starts_at": 1010, "ends_at": 1200}
+        assert client.put("/v1/operator/programs/schedule", json=original,
+                          headers=operator).status_code == 200
+
+        externally_changed = {**original, "priority": 1}
+        assert client.put("/v1/operator/programs/schedule", json=externally_changed,
+                          headers=operator).status_code == 200
+        stale = {"expected": original,
+                 "program": {**original, "scene_id": "second"}}
+        response = client.post("/v1/operator/programs/schedule/replace", json=stale,
+                               headers=operator)
+        assert response.status_code == 409 and response.json() == {"error": "program_changed"}
+
+        replacement = {**externally_changed, "scene_id": "second", "starts_at": 1020}
+        request = {"expected": externally_changed, "program": replacement}
+        response = client.post("/v1/operator/programs/schedule/replace", json=request,
+                               headers=operator)
+        assert response.status_code == 200
+        registry.clock.advance(25)
+        retry = client.post("/v1/operator/programs/schedule/replace", json=request,
+                            headers=operator)
+        assert retry.status_code == 200
+
+        due = {"program_id": "due", "scene_id": "first", "starts_at": 1025, "ends_at": 1100}
+        assert client.put("/v1/operator/programs/due", json=due, headers=operator).status_code == 200
+        changed_due = {**due, "priority": 2}
+        refused = client.post("/v1/operator/programs/due/replace",
+                             json={"expected": due, "program": changed_due}, headers=operator)
+        assert refused.status_code == 409 and refused.json() == {"error": "program_started"}
+
+
+def test_program_replace_endpoint_checks_both_path_identities(registry):
+    app = create_app(registry.db, registry.clock, ADMIN)
+    response = TestClient(app).post(
+        "/v1/operator/programs/path-id/replace",
+        json={"expected": {"program_id": "other", "scene_id": "s", "starts_at": 10, "ends_at": 20},
+              "program": {"program_id": "path-id", "scene_id": "s", "starts_at": 11, "ends_at": 21}},
+        headers={"Authorization": "Bearer " + ADMIN},
+    )
+    assert response.status_code == 422
+
+
 def test_operator_unbind_endpoint_reverses_binding_and_updates_pending_queue(registry):
     player, _, _ = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)

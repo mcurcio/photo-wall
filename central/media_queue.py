@@ -10,6 +10,8 @@ import psycopg
 
 PREPARE_MEDIA_TASK = "photo_wall.media.prepare"
 REFRESH_MEDIA_SOURCE_TASK = "photo_wall.media.refresh_source"
+PREVIEW_SOURCE_TASK = "photo_wall.media.preview_source"
+MEDIA_PREVIEW_LOCK_PREFIX = "photo-wall-media-preview:"
 MEDIA_QUEUE = "photo-wall-media"
 MEDIA_STORAGE_LOCK = "photo-wall-media-storage"
 MEDIA_REFRESH_LOCK_PREFIX = "photo-wall-media-refresh:"
@@ -19,6 +21,7 @@ _SCHEMA_LOCK = 734118326
 class MediaTaskQueue(Protocol):
     def enqueue_in(self, conn: Any, job_id: str) -> int: ...
     def enqueue_refresh_in(self, conn: Any, source_ref: str) -> "QueueReceipt": ...
+    def enqueue_preview_in(self, conn: Any, request_id: str) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +62,15 @@ class ProcrastinateMediaQueue:
             return QueueReceipt(coalesced=False)
         except procrastinate.exceptions.AlreadyEnqueued:
             return QueueReceipt(coalesced=True)
+
+    def enqueue_preview_in(self, conn: Any, request_id: str) -> int:
+        return self.app.configure_task(
+            PREVIEW_SOURCE_TASK,
+            queue=MEDIA_QUEUE,
+            lock=MEDIA_PREVIEW_LOCK_PREFIX + request_id,
+            queueing_lock=MEDIA_PREVIEW_LOCK_PREFIX + request_id,
+            connection=conn,
+        ).defer(request_id=request_id)
 
     @classmethod
     def apply_schema(cls, dsn: str) -> None:

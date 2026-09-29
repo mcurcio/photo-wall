@@ -10,7 +10,7 @@ control messages or operate the compositor service.
 
 ## API and ownership
 
-`NativeRenderer(outputs, *, decoder_limit=4, texture_budget=512*1024**2, prepare_timeout=5)` accepts
+`NativeRenderer(outputs, *, decoder_limit=4, texture_budget=512*1024**2, prepare_timeout=5, serial=None)` accepts
 fixed `NativeOutput(output_id, app_id, width, height)` surfaces. Construct it and
 call `prepare`, `capacity`, `present`, `release`, `close` and `diagnostics` on the
 GTK/GLib owning thread. Native imports are lazy so the neutral package and pure
@@ -18,6 +18,25 @@ reference tests remain usable without GI or a display. Each persistent GTK3
 window contains a GLArea; production Wayland windows receive their distinct app
 IDs before their first content buffer. Application code applies a complete control snapshot and the
 immediate Executor tick in one GLib callback.
+
+Each connected Output starts with an opaque, full-Output Photo Wall diagnostic
+above the GLArea. PlayerService supplies the link label and configuration-history
+flag: `connecting`, `reachable` with configuration received, or `retrying` with
+either "last configuration received" or "no configuration received." The label
+describes that Player process's last observed control exchange; it does not say
+the Player is boot-healthy or ready, and it is not evidence of visible content.
+`set_unbound_outputs` keeps the diagnostic only on connected Outputs absent from
+the accepted configuration's bindings and identifies their Output and Player.
+Bound Outputs hide it before the Executor's next tick, including when authored
+content is black. This equipment diagnostic is not a Scene layer or presentation
+acknowledgment. Central can also direct an unbound Output to show a short-lived,
+high-contrast yellow **IDENTIFY THIS OUTPUT • `<output id>`** banner. The banner
+is visible only on the requested surface. PlayerService owns its local monotonic
+deadline and clears the banner when the request expires or unbound status
+disappears. NativeRenderer only shows or hides the banner; it owns no identify
+timer. It is an operator aid, not Scene content or evidence of scanout.
+Software tests cover target selection and expiry; actual pixels and physical
+HDMI visibility still require Pi verification.
 
 `prepare(LocalLayer)` creates an explicit local-file JPEG, PNG or silent H.264 MP4
 pipeline, returns pending until preroll/seek and a matching RGBA sample complete,

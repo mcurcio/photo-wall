@@ -93,8 +93,8 @@ function InputField({
  *
  * @param {{name: "criteria"|"preview"}} props
  */
-export function LibrarySlot({ name }) {
-  return <div className={`source-flow__slot source-flow__slot--${name}`} data-slot={name} />;
+export function LibrarySlot({ name, children = null }) {
+  return <div className={`source-flow__slot source-flow__slot--${name}`} data-slot={name}>{children}</div>;
 }
 
 /**
@@ -104,7 +104,7 @@ export function LibrarySlot({ name }) {
  *
  * @param {StepProps} props
  */
-export function IncludeStep({ value, patch, problems }) {
+export function IncludeStep({ value, patch, problems, preview, rule }) {
   return (
     <>
       <div className="source-flow__criteria">
@@ -143,22 +143,49 @@ export function IncludeStep({ value, patch, problems }) {
         />
         <LibrarySlot name="criteria" />
       </div>
-      <LibrarySlot name="preview" />
+      <LibrarySlot name="preview">
+        <section className="source-preview" aria-label="Photo match preview">
+          <h3>Preview matches</h3>
+          {rule?.shown === "chooser" && (
+            <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
+          )}
+          {preview?.message && <p role={preview.error ? "alert" : "status"}>{preview.message}</p>}
+          {preview?.result && (
+            <p role="status">
+              {preview.result.count === 0
+                ? "No photos or videos match these filters."
+                : `${preview.result.count} matching ${preview.result.count === 1 ? "item" : "items"}: ${preview.result.image_count} ${preview.result.image_count === 1 ? "image" : "images"} and ${preview.result.video_count} ${preview.result.video_count === 1 ? "video" : "videos"}.`}
+            </p>
+          )}
+          {preview?.timedOut && <p role="status">The preview is still processing. You can request it again.</p>}
+          <p className="source-preview__note">A match preview checks the library query. It does not mean the items are prepared or ready to show.</p>
+          <button type="button" disabled={preview?.busy || !preview?.canRequest} onClick={preview?.onRequest}>
+            {preview?.busy ? "Checking matches…" : preview?.timedOut ? "Check again" : "Preview matches"}
+          </button>
+          {!preview?.canRequest && !preview?.message && preview?.hint && <p>{preview.hint}</p>}
+          {rule?.shown === "field" && value.connectionRef.trim() !== "" && (
+            <p className="source-preview__note">Central cannot verify this connection name yet; the worker will check it.</p>
+          )}
+        </section>
+      </LibrarySlot>
     </>
   );
 }
 
 /**
- * The connection rule's chooser (several connections): "Connection name" offers each
- * served connection and, last, "Another connection…", which shows "New connection name"
- * for one no Source uses yet. The connection's problem is then said, and focused,
- * beside the typed field.
+ * The connection rule's chooser offers each reported connection. A saved name
+ * removed from the worker appears disabled until replaced. "Another connection…"
+ * is available only before the worker reports its list; then the operator must
+ * type a name that is already configured there.
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
  */
-function ConnectionChooser({ value, patch, problems, rule }) {
-  const typed = value.newConnection;
-  const served = [...new Set([...rule.values, typed ? "" : value.connectionRef])]
+export function ConnectionChooser({ value, patch, problems, rule }) {
+  // A worker report can arrive while a legacy manual-entry draft is open.
+  // Once the list is known, keep its saved value visible as unavailable and
+  // make the chooser usable again instead of selecting a removed "Another" option.
+  const typed = value.newConnection && !rule.reported;
+  const served = [...new Set([...rule.values, rule.selectedUnavailable ? value.connectionRef : ""])]
     .filter((ref) => ref !== "")
     .sort();
   const id = problems.idFor("connection");
@@ -183,13 +210,13 @@ function ConnectionChooser({ value, patch, problems, rule }) {
               }
             }}
           >
-            <option value="">Choose a connection</option>
+            <option value="">Choose a configured connection</option>
             {served.map((ref) => (
-              <option key={ref} value={ref}>
-                {ref}
+              <option key={ref} value={ref} disabled={rule.reported && !rule.values.includes(ref)}>
+                {rule.reported && !rule.values.includes(ref) ? `${ref} (no longer configured)` : ref}
               </option>
             ))}
-            <option value={ANOTHER_CONNECTION.value}>{ANOTHER_CONNECTION.words}</option>
+            {!rule.reported && <option value={ANOTHER_CONNECTION.value}>{ANOTHER_CONNECTION.words}</option>}
           </select>
         )}
       </Field>
@@ -197,7 +224,7 @@ function ConnectionChooser({ value, patch, problems, rule }) {
         <InputField
           field="connection"
           label={ANOTHER_CONNECTION.label}
-          hint="A library connection no photo source uses yet."
+          hint="The media worker has not reported its configured connections yet. Enter a name only if it is already configured there; this form does not set the Immich URL or API key."
           value={value.connectionRef}
           onChange={(connectionRef) => patch({ connectionRef })}
           problems={problems}
@@ -208,22 +235,51 @@ function ConnectionChooser({ value, patch, problems, rule }) {
 }
 
 /**
- * Step 2, Name: "Source name and revision" (required), then "Connection name" as the
- * connection rule says (sourceFlowModel.js `connectionRule`): a visible text field
- * while no Source names one; under Advanced, prefilled, when every Source names the
- * same one; a visible chooser of them, and of another one, when they name several.
+ * Step 2, Name: a plain Source name (required), then "Connection name" as the
+ * connection rule says (sourceFlowModel.js `connectionRule`): an explicit setup
+ * prerequisite when the worker reports none; one known connection under Advanced;
+ * a chooser for several or a removed saved name; or an uncertain manual fallback
+ * until the worker reports its list.
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
  *          advanced: {open: boolean, onToggle: () => void}}} props
  */
-export function NameStep({ value, patch, problems, rule, advanced }) {
-  const connection =
-    rule.shown === "chooser" ? (
+export function NameStep({ value, patch, problems, rule, advanced, editing = false }) {
+  const connection = rule.shown === "blocked" ? (
+    <>
+      <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
+        {(props) => (
+          <select {...props} value="" disabled>
+            <option value="">No connections configured</option>
+          </select>
+        )}
+      </Field>
+      <p role="status">Add a connection to the media worker's private configuration and restart the worker. Then return here to create the Source.</p>
+    </>
+  ) : rule.shown === "chooser" ? (
       <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
+    ) : rule.reported ? (
+      <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
+        {(props) => (
+          <select
+            {...props}
+            value={value.connectionRef}
+            onChange={(event) => {
+              patch({ connectionRef: event.target.value });
+              problems.touch("connection");
+            }}
+          >
+            {value.connectionRef === "" && <option value="">Choose the configured connection</option>}
+            {rule.values.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
+          </select>
+        )}
+      </Field>
     ) : (
       <InputField
         field="connection"
-        hint={rule.shown === "field" ? "The library connection this Source reads from." : null}
+        hint={rule.shown === "field"
+          ? "The media worker has not reported its configured connections yet. You can enter a name, but Central cannot verify it. This form does not set the Immich URL or API key."
+          : "Central has not received the worker's connection list yet. This saved name may need checking in the worker configuration."}
         value={value.connectionRef}
         onChange={(connectionRef) => patch({ connectionRef })}
         problems={problems}
@@ -233,9 +289,11 @@ export function NameStep({ value, patch, problems, rule, advanced }) {
     <>
       <InputField
         field="ref"
-        hint="Like holiday:1."
-        value={value.sourceRef}
-        onChange={(sourceRef) => patch({ sourceRef })}
+        hint={editing
+          ? "Renaming also updates the Scenes that use this Source for future Runs."
+          : "For example, all-photos."}
+        value={value.sourceName}
+        onChange={(sourceName) => patch({ sourceName })}
         problems={problems}
       />
       {rule.shown === "advanced" ? (

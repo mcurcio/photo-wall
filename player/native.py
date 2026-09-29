@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from player.geometry import cover_rect, homography, inverse
 from player.rendering import (
@@ -108,6 +108,30 @@ def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
     return tuple(reversed(layers))
 
 
+def diagnostic_text(output_id: str, player_id: str | None = None,
+                    serial: str | None = None,
+                    central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting",
+                    configuration_received: bool = False) -> str:
+    """Local equipment status, never an authored Scene or playback claim."""
+    lines = ["PHOTO WALL", "OS and Player running", f"Output {output_id}"]
+    if central_link_state == "retrying":
+        link = ("Central: retrying; last configuration received" if configuration_received
+                else "Central: retrying; no configuration received")
+    elif central_link_state == "reachable":
+        link = ("Central: reachable; configuration received" if configuration_received
+                else "Central: reachable; awaiting configuration")
+    else:
+        link = ("Central: connecting; last configuration received" if configuration_received
+                else "Central: connecting")
+    lines.append(link)
+    if player_id is not None:
+        lines.append("No Frame assigned")
+        lines.append(f"Player p-…{player_id[-8:]}")
+    if serial:
+        lines.append(f"Serial {serial}")
+    return "\n".join(lines)
+
+
 @dataclass
 class _Decoder:
     local: LocalLayer
@@ -143,6 +167,9 @@ class _Surface:
     output: NativeOutput
     window: Any
     area: Any
+    diagnostic: Any = None
+    diagnostic_label: Any = None
+    identify_banner: Any = None
     pending: _Draw | None = None
     acknowledged: _Draw | None = None
     failure: str | None = None
@@ -214,7 +241,8 @@ class NativeRenderer:
     """Persistent GLArea surfaces; four software slots are deliberately unqualified."""
 
     def __init__(self, outputs: tuple[NativeOutput, ...], *, decoder_limit: int = 4,
-                 texture_budget: int = 512*1024**2, prepare_timeout: float = 5):
+                 texture_budget: int = 512*1024**2, prepare_timeout: float = 5,
+                 serial: str | None = None):
         if (not outputs or len({o.output_id for o in outputs}) != len(outputs)
                 or len({o.app_id for o in outputs}) != len(outputs)):
             raise ValueError("unique Output and app IDs required")
@@ -222,6 +250,7 @@ class NativeRenderer:
             raise ValueError("positive native resource limits required")
         self._owner = threading.get_ident()
         self._closed = False
+        self._serial_label = serial
         self.decoder_limit, self.texture_budget = decoder_limit, texture_budget
         self.prepare_timeout = prepare_timeout
         self._decoders: dict[str, _Decoder] = {}
@@ -231,6 +260,21 @@ class NativeRenderer:
         if not self.Gtk.init_check()[0]:
             raise RuntimeError("GTK cannot open the configured display")
         self.Gst.init(None)
+        diagnostic_style = self.Gtk.CssProvider()
+        diagnostic_style.load_from_data(b"""
+            .photo-wall-diagnostic {
+                background-color: #0c141c;
+            }
+            .photo-wall-diagnostic label {
+                color: #ffffff;
+                font-size: 22px;
+            }
+        """)
+        identify_style = self.Gtk.CssProvider()
+        identify_style.load_from_data(b"""
+            .photo-wall-identify { background-color: #ffea00; padding: 12px; }
+            .photo-wall-identify label { color: #000000; font-size: 30px; font-weight: bold; }
+        """)
         for output in outputs:
             window = self.Gtk.Window(type=self.Gtk.WindowType.TOPLEVEL)
             window.set_title(output.app_id)
@@ -242,8 +286,38 @@ class NativeRenderer:
             area.set_auto_render(False)
             area.set_has_depth_buffer(False)
             area.set_has_stencil_buffer(False)
-            window.add(area)
-            surface = _Surface(output, window, area)
+            overlay = self.Gtk.Overlay()
+            overlay.add(area)
+            diagnostic = self.Gtk.EventBox()
+            diagnostic.set_visible_window(True)
+            diagnostic.set_halign(self.Gtk.Align.FILL)
+            diagnostic.set_valign(self.Gtk.Align.FILL)
+            diagnostic.set_hexpand(True)
+            diagnostic.set_vexpand(True)
+            label = self.Gtk.Label(label=diagnostic_text(output.output_id, serial=serial))
+            label.set_justify(self.Gtk.Justification.CENTER)
+            diagnostic.add(label)
+            diagnostic.get_style_context().add_class("photo-wall-diagnostic")
+            diagnostic.get_style_context().add_provider(
+                diagnostic_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            label.get_style_context().add_provider(
+                diagnostic_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            overlay.add_overlay(diagnostic)
+            identify = self.Gtk.EventBox()
+            identify.set_visible_window(True)
+            identify.set_halign(self.Gtk.Align.FILL)
+            identify.set_valign(self.Gtk.Align.START)
+            identify_label = self.Gtk.Label(label="IDENTIFY THIS OUTPUT")
+            identify.add(identify_label)
+            identify.get_style_context().add_class("photo-wall-identify")
+            identify.get_style_context().add_provider(
+                identify_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            identify_label.get_style_context().add_provider(
+                identify_style, self.Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            overlay.add_overlay(identify)
+            identify.hide()
+            window.add(overlay)
+            surface = _Surface(output, window, area, diagnostic, label, identify)
             self._surfaces[output.output_id] = surface
             area.connect("render", self._render, surface)
             area.connect("unrealize", self._unrealize, surface)
@@ -258,6 +332,31 @@ class NativeRenderer:
                 raise RuntimeError("cannot establish per-Output Wayland placement")
             window.fullscreen()
             area.queue_render()
+
+    def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
+                            central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
+                            configuration_received: bool = True) -> None:
+        """Show enrollment diagnostics only on connected Outputs without a binding."""
+        self._thread()
+        unbound = set(output_ids)
+        for output_id, surface in self._surfaces.items():
+            if output_id in unbound:
+                surface.diagnostic_label.set_text(diagnostic_text(
+                    output_id, player_id, self._serial_label, central_link_state,
+                    configuration_received))
+                surface.diagnostic.show()
+            else:
+                surface.diagnostic.hide()
+
+    def set_identify_output(self, output_id: str | None) -> None:
+        """Show or hide the conspicuous banner on one Output."""
+        self._thread()
+        for key, surface in self._surfaces.items():
+            if key == output_id:
+                surface.identify_banner.get_child().set_text("IDENTIFY THIS OUTPUT  •  " + key)
+                surface.identify_banner.show_all()
+            else:
+                surface.identify_banner.hide()
 
     def _load_native(self) -> None:
         import gi

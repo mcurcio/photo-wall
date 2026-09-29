@@ -1,11 +1,13 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { draftId, planWindows, toEpochSeconds } from "./authoring.js";
+import { draftId, planWindows } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
 import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
+import { editKey, editedId } from "./flow/instance.js";
+import { sameValue } from "./flow/draftState.js";
 import { inStepOrder } from "./flow/steps.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useFlowDraft } from "./flow/useFlowDraft.js";
@@ -15,7 +17,9 @@ import { useSceneHandOver } from "./flow/useSceneHandOver.js";
 import {
   buildProgram,
   NEW_PROGRAM_DRAFT,
+  programEditDraft,
   programDraftProblems,
+  effectiveProgramTimes,
   SCHEDULE_ADVANCED_FIELDS,
   SCHEDULE_FIELD_STEP,
   SCHEDULE_KEYS,
@@ -25,7 +29,7 @@ import {
 } from "./scheduleFlowModel.js";
 import { ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./ScheduleSteps.jsx";
 import { isPastProgram, programState, windowLabel } from "./showState.js";
-import { useMutate } from "./useMutate.js";
+import { useCardMutation } from "./useCardMutation.js";
 
 const EMPTY = {};
 
@@ -86,10 +90,16 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   const programs = useMemo(() => Object.values(programsMap), [programsMap]);
   const programIds = useMemo(() => new Set(Object.keys(programsMap)), [programsMap]);
   const now = snapshot?.runtime?.current?.now;
-  const mutate = useMutate();
+  const removal = useCardMutation();
+  // A removed Program id may be used again. Forget its old card receipt once a
+  // snapshot has shown it absent, so a newly scheduled Program starts clean.
+  useEffect(() => removal.retain(programIds), [programIds, removal.feedback, removal.retain]);
 
-  const draft = useFlowDraft(seedSchedule(recentScene?.sceneId ?? null, definitions));
+  const draft = useFlowDraft(seedSchedule(recentScene?.sceneId ?? null, definitions, programsMap));
   const value = draft.value ?? NEW_PROGRAM_DRAFT;
+  const editingId = editedId(draft.key);
+  const [reloaded, setReloaded] = useState(null);
+  const [serverConflict, setServerConflict] = useState(null);
 
   const regionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
@@ -118,11 +128,11 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   const problemList = useMemo(
     () =>
       inStepOrder(
-        programDraftProblems(value, programIds, now, pending?.ids),
+        programDraftProblems(value, programIds, now, pending?.ids, editingId !== null),
         SCHEDULE_FIELD_STEP,
         SCHEDULE_STEPS,
       ),
-    [value, programIds, now, pending],
+    [value, programIds, now, pending, editingId],
   );
   const problems = useProblems(problemList);
 
@@ -134,13 +144,20 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     markDraft,
     keys: SCHEDULE_KEYS,
     refs,
+    availability: (key) => {
+      const id = editedId(key);
+      if (id === null) return "ok";
+      if (programsMap[id] === undefined) return "missing";
+      if (programEditDraft(programsMap[id]) === null || programState(snapshot, id)?.state !== "upcoming") return "unavailable";
+      return "ok";
+    },
     steps: SCHEDULE_STEPS,
     fieldStep: SCHEDULE_FIELD_STEP,
     advancedFields: SCHEDULE_ADVANCED_FIELDS,
     problemList,
     problems,
     confirm,
-    onOpened: () => handOver.clear(),
+    onOpened: () => { handOver.clear(); setReloaded(null); setServerConflict(null); },
   });
   const { step } = flow;
 
@@ -165,7 +182,8 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   };
 
   const scheduleOne = async (sent, id) => {
-    const result = await sent.request(() => put(id, toEpochSeconds(value.start), toEpochSeconds(value.end)));
+    const times = effectiveProgramTimes(value);
+    const result = await sent.request(() => put(id, times.startsAt, times.endsAt));
     if (result === null || result.status >= 500) {
       // It may have been stored: scheduling the same draft again confirms it.
       sent.attempted([id]);
@@ -220,21 +238,68 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
     );
   };
 
-  const onSave = () =>
+  const storedProgram = editingId === null ? null : programsMap[editingId];
+  const editState = editingId === null ? null : programState(snapshot, editingId)?.state;
+  const stale = editingId !== null && (
+    storedProgram === undefined || !sameValue(storedProgram, value.expected) || editState !== "upcoming" || serverConflict !== null
+  );
+  const reload = () => {
+    draft.reseed();
+    problems.reset();
+    setServerConflict(null);
+    setReloaded(`Reloaded Program ${editingId} from the current snapshot.`);
+  };
+  const onSave = () => {
+    if (editingId !== null) {
+      if (stale || !flow.checkAll()) return;
+      write.send(flow, async (sent) => {
+        const times = effectiveProgramTimes(value);
+        const program = buildProgram({ programId: editingId, sceneId: value.sceneId,
+          startsAt: times.startsAt, endsAt: times.endsAt, priority: Number(value.priority) });
+        const result = await sent.request(() => apiWrite(
+          `/v1/operator/programs/${encodeURIComponent(editingId)}/replace`,
+          { method: "POST", body: { expected: value.expected, program } },
+        ));
+        if (result?.ok) {
+          sent.say(`Replaced Program ${editingId}. Changes apply to future Runs; an active Run keeps its secured assignment.`);
+          sent.finish();
+        } else if (["program_changed", "program_missing", "program_started", "program_window_started"].includes(result?.error)) {
+          setServerConflict(result.error);
+          sent.say(`Program ${editingId} changed or started before it could be replaced. Reload the stored Program before editing again.`);
+        } else if (result === null || result.status >= 500) {
+          sent.attempted([editingId]);
+          sent.say(`Program ${editingId} may have been replaced: Central did not answer. Save again to confirm.`);
+        } else sent.refused(result);
+      });
+      return;
+    }
     write.send(flow, (sent) =>
       (separateWindows(value) ? addSeparateWindows : scheduleOne)(sent, draftId(value)),
     );
+  };
 
   // --- Removing a Program.
   const removeProgram = useCallback(
-    async (id) => {
-      await mutate(() =>
-        apiWrite(`/v1/operator/programs/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-        }),
-      );
-    },
-    [mutate],
+    (id) => removal.run(
+      id,
+      () => apiWrite(`/v1/operator/programs/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      (result) => {
+        if (result.ok) {
+          return { kind: "accepted", message: `Central accepted removal of Program ${id}. Waiting for the Program list to update.` };
+        }
+        if (result.status === 0 || result.status >= 500) {
+          return {
+            kind: "unknown",
+            message: `Removal outcome for Program ${id} is unknown. Check the current Program state before retrying.`,
+          };
+        }
+        return {
+          kind: "refused",
+          message: `Program ${id} was not removed: ${result.error?.replaceAll("_", " ") ?? `HTTP ${result.status}`}. Check the current Program state before retrying.`,
+        };
+      },
+    ),
+    [removal],
   );
 
   // Removing a RUNNING Program ends its Run, and removing a DUE one starts
@@ -254,7 +319,7 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
   const current = programs.filter((program) => !isPastProgram(snapshot, program));
 
   // --- Views.
-  const stepProps = { value, patch: draft.patch, problems };
+  const stepProps = { value, patch: draft.patch, problems, editing: editingId !== null };
   const { advanced } = flow;
   const views = {
     scene: () => (
@@ -265,8 +330,22 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
         onUseOffered={handOver.take}
       />
     ),
-    when: () => <WhenStep {...stepProps} advanced={advanced("when")} />,
-    review: () => <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField} />,
+    when: () => <WhenStep {...stepProps} advanced={advanced("when")} editableWindows={editingId === null} />,
+    review: () => <>
+      {stale && <div className="notice notice--warn" role="status">
+        <p>{storedProgram === undefined ? `Program ${editingId} no longer exists.` :
+          editState !== "upcoming" ? `Program ${editingId} is no longer upcoming; it cannot be edited.` :
+            serverConflict !== null ? `Central refused the replacement (${serverConflict.replaceAll("_", " ")}).` :
+              `Program ${editingId} changed since you opened it.`}</p>
+        <p>{editState !== "upcoming" ? "Changes cannot alter a Program after its window starts." :
+          "Reload it to review the latest saved Program; Replace Program waits until you do."}</p>
+        {storedProgram !== undefined && editState === "upcoming" && <button type="button" onClick={reload}>Reload</button>}
+        {editState !== "upcoming" && <button type="button" onClick={flow.leave}>Return to Programs</button>}
+      </div>}
+      {reloaded !== null && <p role="status">{reloaded}</p>}
+      <ReviewStep {...stepProps} advanced={advanced("review")} onChange={flow.openField}
+        editableWindows={editingId === null} editing={editingId !== null} />
+    </>,
   };
 
   return (
@@ -303,25 +382,26 @@ export function ProgramsRegion({ snapshot, route, navigate, recentScene, markDra
                 {/* Every stored Program by its program_id, each one discrete window with
                     its display state (showState.js); past windows sit under a closed
                     "Past (N)" disclosure. */}
-                <ProgramCards programs={current} snapshot={snapshot} onRemove={onRemove} />
+                <ProgramCards programs={current} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} removing={removal.pending} removalFeedback={removal.feedback} />
                 {past.length > 0 && (
                   <details className="program-cards__past">
                     <summary>{`Past (${past.length})`}</summary>
-                    <ProgramCards programs={past} snapshot={snapshot} onRemove={onRemove} />
+                    <ProgramCards programs={past} snapshot={snapshot} onRemove={onRemove} onEdit={(id, event) => flow.start(editKey(id), event)} removing={removal.pending} removalFeedback={removal.feedback} />
                   </details>
                 )}
               </>
             )}
           </>
         }
-        title="New Program"
+        unavailableReason="only upcoming Programs with supported stored times can be edited"
+        title={editingId === null ? "New Program" : `Edit Program ${editingId}`}
         steps={SCHEDULE_STEPS}
-        formLabel="Schedule a Program"
+        formLabel={editingId === null ? "Schedule a Program" : `Edit Program ${editingId}`}
         heading={HEADINGS[step]}
         busy={write.busy}
         onWrite={onSave}
-        writeLabel={separateWindows(value) ? "Add separate windows" : "Schedule Program"}
-        writeDisabled={write.busy}
+        writeLabel={editingId !== null ? "Replace Program" : separateWindows(value) ? "Add separate windows" : "Schedule Program"}
+        writeDisabled={write.busy || stale}
         problemsLabel="Program problems"
       >
         {step !== null && views[step]()}
@@ -342,12 +422,14 @@ const STATE_CHIPS = {
  * Stored Programs as summary cards named `Program X`: the Scene, the window in local
  * time, the priority, and the display state with its hint (slice 3 §9); Remove.
  */
-function ProgramCards({ programs, snapshot, onRemove }) {
+function ProgramCards({ programs, snapshot, onRemove, onEdit, removing = new Set(), removalFeedback = {} }) {
   return (
     <ul className="card-grid" role="list">
       {programs.map((program) => {
         const id = program.program_id;
         const state = programState(snapshot, id);
+        const editableTime = programEditDraft(program) !== null;
+        const feedback = Object.hasOwn(removalFeedback, id) ? removalFeedback[id] : null;
         return (
           <li key={id} className="card-grid__item">
             <SummaryCard
@@ -368,15 +450,35 @@ function ProgramCards({ programs, snapshot, onRemove }) {
                     </>
                   ),
                 },
+                ...(feedback ? [{
+                  label: "Removal",
+                  value: <span role="status" aria-live="polite">{feedback.message}</span>,
+                }] : []),
               ]}
               actions={
-                <button
-                  type="button"
-                  aria-label={`Remove program ${id}`}
-                  onClick={(event) => onRemove(event, program)}
-                >
-                  Remove
-                </button>
+                <>
+                  {state.state === "upcoming" && editableTime ? (
+                    <button type="button" aria-label={`Edit program ${id}`} onClick={(event) => onEdit(id, event)}>Edit</button>
+                  ) : (
+                    <p className="field__hint program-list__edit-hint">
+                      {state.state === "running" ? "Editing unavailable: this Program has an active Run; changes cannot alter it." :
+                        state.state === "due" ? "Editing unavailable: its window has started." :
+                        !editableTime ? "Editing unavailable: its times are outside this editor's supported range." :
+                          state.state === "old" ? "Editing unavailable: its outcome details have expired." :
+                            state.state === "missed" || state.state === "ran" ? "Editing unavailable: this Program has already ended." :
+                              "Editing is available before the Program window starts."}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    aria-label={`Remove program ${id}`}
+                    aria-busy={removing.has(id)}
+                    disabled={removing.has(id) || feedback?.kind === "accepted"}
+                    onClick={(event) => onRemove(event, program)}
+                  >
+                    {removing.has(id) ? "Removing…" : "Remove"}
+                  </button>
+                </>
               }
             />
           </li>

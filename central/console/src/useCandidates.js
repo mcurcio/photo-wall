@@ -17,13 +17,15 @@ const EMPTY = {};
  *
  * @param {string} sourceRef "" reads nothing
  * @param {string[]} targetIds
+ * @param {number} catalogRevision the Source's served completed refresh revision
  * @returns {{byFrame: Record<string, Array<object>>, loading: boolean,
  *            error: string|null, ready: boolean, reload: () => void}}
  */
-export function useCandidates(sourceRef, targetIds) {
+export function useCandidates(sourceRef, targetIds, catalogRevision = 0) {
   const [nonce, setNonce] = useState(0);
   const targetKey = targetIds.join(" ");
-  const key = sourceRef === "" || targetKey === "" ? "" : `${nonce}\n${sourceRef}\n${targetKey}`;
+  const key = sourceRef === "" || targetKey === "" ? "" :
+    `${nonce}\n${sourceRef}\n${targetKey}\n${catalogRevision}`;
   const [loaded, setLoaded] = useState(
     /** @type {{key: string, byFrame: Record<string, Array<object>>, error: string|null}} */ ({
       key: "",

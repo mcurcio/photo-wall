@@ -10,10 +10,11 @@ ephemeral loopback listener, the disposable-schema `registry` fixture and the au
 
 import os
 import re
+import sys
 
 import pytest
 from console_tasks import LABELS, author_scene, connect, current_hash, go, show_now, visit
-from operator_harness import INVENTORY, RequestGate, operator_server, sign_in
+from operator_harness import SNAPSHOT, RequestGate, operator_server, sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import SCENE_ID, SOURCE, VALID_FRAME, _seed, _seed_source
 from test_registry import ADMIN, enroll
@@ -73,13 +74,13 @@ def test_a_section_chosen_as_the_first_snapshot_renders_is_not_replaced_by_landi
 
 
 def _expire_on_next_poll(page):
-    """The session ends: the next poll's inventory read answers 401 (the test runs the
+    """The session ends: the next poll's snapshot read answers 401 (the test runs the
     paused clock to the poll). Returns the undo."""
-    page.route(INVENTORY, lambda route: route.fulfill(
+    page.route(SNAPSHOT, lambda route: route.fulfill(
         status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-    with page.expect_response(INVENTORY):
+    with page.expect_response(SNAPSHOT):
         page.clock.run_for(5000)
-    return lambda: page.unroute(INVENTORY)
+    return lambda: page.unroute(SNAPSHOT)
 
 
 def _expect_overlay(page):
@@ -314,8 +315,10 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         menu = page.get_by_role("button", name="Menu", exact=True)
         menu.click()
         drawer = page.get_by_role("dialog", name="Menu", exact=True)
+        new_tab_modifier = "Meta" if sys.platform == "darwin" else "Control"
         with page.context.expect_page() as other:
-            drawer.get_by_role("link", name="Scenes", exact=True).click(modifiers=["Control"])
+            drawer.get_by_role("link", name="Scenes", exact=True).click(
+                modifiers=[new_tab_modifier])
         other.value.close()
         # This tab did not follow the link: still on Now showing, the drawer still open.
         assert current_hash(page) == "#/now"
@@ -340,11 +343,11 @@ def test_the_snapshot_status_is_busy_exactly_while_a_read_is_in_flight(page, reg
         connect(page, origin, "now")
         status = page.get_by_role("group", name="Snapshot status", exact=True)
         expect(status).not_to_have_attribute("aria-busy", "true")
-        gate = RequestGate(page, "**/v1/operator/media")
+        gate = RequestGate(page, SNAPSHOT)
         gate.holding = True
         status.get_by_role("button", name="Refresh", exact=True).click()
         gate.wait_held()
-        # The inventory read has answered, but the refresh is not settled until media has.
+        # The aggregate read is held, so the refresh is not settled yet.
         expect(status).to_have_attribute("aria-busy", "true")
         gate.holding = False
         gate.release()

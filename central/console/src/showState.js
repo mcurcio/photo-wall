@@ -1,5 +1,8 @@
 import { ageAt, formatAge } from "./health.js";
 import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
+import { sceneFrames } from "./sceneTargets.js";
+
+export { sceneFrames, sceneSourceRefs, sceneHasAuthoredMedia } from "./sceneTargets.js";
 
 /**
  * Program and Run display states (pass 2 slice 3 §9). Pure reads of the served
@@ -226,30 +229,6 @@ export function runRows(snapshot) {
     completed: ended("completed"),
     cancelled: ended("cancelled"),
   };
-}
-
-/**
- * The frames a stored Scene reaches: its own and its outro's Contributions and, through
- * its child Scenes, theirs (central/runtime.py `Scene.participants`), sorted.
- *
- * @param {object|null|undefined} scene a served Scene definition
- * @returns {string[]}
- */
-export function sceneFrames(scene) {
-  const frames = new Set();
-  const visit = (node) => {
-    for (const entry of [...(node?.contributions ?? []), ...(node?.outro_contributions ?? [])]) {
-      const frameId = frameOf(entry.target);
-      if (frameId !== null) {
-        frames.add(frameId);
-      }
-    }
-    for (const child of node?.children ?? []) {
-      visit(child.scene);
-    }
-  };
-  visit(scene);
-  return [...frames].sort();
 }
 
 /**

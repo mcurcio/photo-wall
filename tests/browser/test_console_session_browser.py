@@ -141,7 +141,7 @@ def test_a_sign_in_whose_first_read_fails_keeps_checking_until_a_poll_recovers(p
         page.context.clear_cookies()
         page.goto(origin + "/console")
         expect(_sign_in_button(page)).to_be_visible()
-        failed = answer_first(page, "**/v1/operator/inventory",
+        failed = answer_first(page, "**/v1/operator/snapshot",
                               lambda route: route.fulfill(status=500))
         page.get_by_label("Operator token").fill(ADMIN)
         _sign_in_button(page).click()

@@ -11,6 +11,7 @@
 import { NEW_SCENE_DRAFT, PLAYBACK_LABELS, sceneEditDraft } from "./authoring.js";
 import { sameValue } from "./flow/draftState.js";
 import { editedId, flowKeys } from "./flow/instance.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { routeIdName } from "./routes.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
@@ -68,11 +69,18 @@ export const SCENE_KEYS = flowKeys({
  * @param {Record<string, object>} definitions
  * @returns {(key: string) => import("./authoring.js").SceneDraft|null}
  */
-export function seedScene(definitions) {
+export function seedScene(definitions, initialTarget = null) {
+  const target = typeof initialTarget === "string" && FRAME_ID_PATTERN.test(initialTarget)
+    ? initialTarget
+    : null;
   return (key) => {
     const id = editedId(key);
     if (id === null) {
-      return NEW_SCENE_DRAFT;
+      // The Frame is an initial answer for a newly seeded draft only. Returning a
+      // fresh object keeps the shared default immutable and edits remain untouched.
+      return target === null
+        ? NEW_SCENE_DRAFT
+        : { ...NEW_SCENE_DRAFT, targets: [target] };
     }
     const scene = definitions[id];
     return scene === undefined ? null : sceneEditDraft(scene);

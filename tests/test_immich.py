@@ -1,4 +1,4 @@
-"""Synthetic, offline tests of the pinned Immich transport boundary.
+"""Synthetic, offline tests of the qualified Immich transport boundary.
 
 All identifiers, metadata, keys, and original bytes in this file are public fixtures.
 These tests establish adapter behavior, not real Immich or image-decoder compatibility.
@@ -19,7 +19,7 @@ from pydantic import SecretStr
 
 from contracts.time import ManualClock
 from media.immich import ImmichClient
-from media.models import ConnectionConfig, MediaError, MediaLimits, SourceSpec
+from media.models import ConnectionConfig, MediaError, MediaLimits, SourcePreviewQuery, SourceSpec
 
 OWNER = str(UUID(int=100))
 OTHER_OWNER = str(UUID(int=101))
@@ -87,9 +87,10 @@ def source(**changes):
 class Upstream:
     """A route-aware server double which deliberately leaves filtering to the adapter."""
 
-    def __init__(self, rows=(), *, metadata_rows=None):
+    def __init__(self, rows=(), *, metadata_rows=None, version=(2, 5, 6)):
         self.rows = list(rows)
         self.metadata_rows = metadata_rows
+        self.version = version
         self.requests = []
         self.searches = []
         self.overrides = {}
@@ -106,7 +107,7 @@ class Upstream:
             return override(request) if callable(override) else override
         if path == "/api/server/version":
             assert request.method == "GET"
-            return httpx.Response(200, json={"major": 2, "minor": 5, "patch": 6})
+            return httpx.Response(200, json=dict(zip(("major", "minor", "patch"), self.version)))
         if path == "/api/users/me":
             assert request.method == "GET"
             return httpx.Response(200, json={"id": OWNER})
@@ -187,6 +188,34 @@ def test_tagged_pagination_refetches_complete_first_page_and_uses_narrow_request
         assert request.url.host == "immich.test"
         assert request.headers["x-api-key"] == SYNTHETIC_KEY
         assert request.headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize("version,duration", [((2, 5, 6), "0:00:10.250"), ((3, 1, 0), 10_250)])
+def test_qualified_video_duration_is_normalized_and_rechecked_on_download(tmp_path, version, duration):
+    upstream = Upstream([asset(kind="VIDEO", duration=duration)], version=version)
+    result = refresh(upstream, source(media_types=("video",)))
+    assert result.snapshot.status == "ok"
+    assert result.assets[0].duration == 10.25
+
+    async def perform():
+        async with upstream.client() as client:
+            return await client.download_original(result.assets[0], tmp_path / "original")
+
+    downloaded = asyncio.run(perform())
+    assert downloaded.path.read_bytes() == ORIGINAL
+    assert sum(request.url.path == "/api/server/version" for request in upstream.requests) == 2
+
+
+@pytest.mark.parametrize("version,duration", [
+    ((2, 5, 6), 10_250), ((3, 1, 0), "0:00:10.250"),
+    ((3, 1, 0), None), ((3, 1, 0), True), ((3, 1, 0), 10.25),
+    ((3, 1, 0), 0), ((3, 1, 0), -1), ((3, 1, 0), 300_001),
+])
+def test_video_duration_rejects_wrong_version_shape_and_out_of_bounds(version, duration):
+    upstream = Upstream([asset(kind="VIDEO", duration=duration)], version=version)
+    result = refresh(upstream, source(media_types=("video",)))
+    assert_failed(result, "incompatible", "metadata_pending_or_invalid")
+    assert "metadata_invalid" in codes(result)
 
 
 def test_empty_discovery_is_success_but_missing_exif_is_pending():
@@ -356,6 +385,7 @@ def test_malformed_required_asset_identity_rejects_the_complete_walk(changes):
 
 @pytest.mark.parametrize("version", [
     {"major": 2, "minor": 5, "patch": 7}, {"major": 2, "minor": 6, "patch": 0},
+    {"major": 3, "minor": 0, "patch": 3}, {"major": 3, "minor": 1, "patch": 1},
     {"major": "2", "minor": 5, "patch": 6}, {"major": 2, "minor": 5},
 ])
 def test_connection_refuses_unsupported_or_malformed_version(version):
@@ -710,3 +740,39 @@ def test_connection_rejects_unsafe_base_urls(unsafe_url):
 def test_plain_http_requires_explicit_isolated_network_opt_in():
     with pytest.raises(ValueError):
         connection(allow_http=False)
+
+
+def test_preview_counts_complete_filtered_members_without_exif_or_downloads():
+    upstream = Upstream([
+        asset(1, kind="IMAGE", isFavorite=False),
+        asset(2, kind="IMAGE", isFavorite=True),
+        asset(3, kind="VIDEO", isFavorite=False),
+        asset(4, kind="VIDEO", isFavorite=True),
+    ])
+    query = SourcePreviewQuery(
+        connection_ref="main", media_types=("image", "video"), favorites=False,
+        captured_from=datetime(2025, 1, 1, tzinfo=UTC).timestamp(),
+        captured_until=datetime(2027, 1, 1, tzinfo=UTC).timestamp(),
+    )
+    result = asyncio.run(preview(upstream, query))
+    assert result.model_dump() == {"count": 2, "image_count": 1, "video_count": 1}
+    searches = upstream.searches
+    assert len(searches) == 2
+    assert all(not body["withExif"] and body["isFavorite"] is False for body in searches)
+    assert all("takenAfter" in body and "takenBefore" in body for body in searches)
+    assert not any(request.url.path.endswith("/original") for request in upstream.requests)
+
+
+def test_preview_refuses_incomplete_or_over_limit_membership():
+    upstream = Upstream([asset(1), asset(2)])
+    query = SourcePreviewQuery(connection_ref="main", media_types=("image",))
+    with pytest.raises(MediaError) as error:
+        asyncio.run(preview(upstream, query, limits=MediaLimits(max_candidates=1)))
+    assert error.value.code == "source_limit"
+
+
+def preview(upstream, query, *, limits=None):
+    async def run():
+        async with upstream.client(limits=limits) as client:
+            return await client.preview(query)
+    return run()

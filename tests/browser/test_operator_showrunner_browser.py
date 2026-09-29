@@ -269,10 +269,10 @@ def test_sources_render_name_rev_with_refresh(page, registry):
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # The Source is identified by its `name:rev` string, not an album title.
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
         refresh = sources.get_by_role(
-            "button", name=f"Refresh {SOURCE}", exact=True)
+            "button", name="Refresh holiday", exact=True)
         with page.expect_response(
             lambda r: r.url.endswith("/refresh")
             and "/v1/operator/sources/" in r.url
@@ -283,7 +283,7 @@ def test_sources_render_name_rev_with_refresh(page, registry):
 
         # After the useMutate() refresh, the Source is still listed (Plane A —
         # including the media catalog — was re-fetched, not dropped).
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
 
 def test_sources_have_no_immich_or_album_language(page, registry):
@@ -299,7 +299,7 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
         # The Source must be present, so this is not vacuously true.
-        expect(sources.get_by_text(SOURCE, exact=True)).to_be_visible()
+        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
         # The intro says what a Source is, in neutral library words (flow design §2 req 4).
         expect(sources.get_by_text(
@@ -312,7 +312,7 @@ def test_sources_have_no_immich_or_album_language(page, registry):
         _assert_neutral(sources)
         source_continue(page, "Name")
         form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         _assert_neutral(sources)
         source_continue(page, "Review")
         _assert_neutral(sources)
@@ -329,7 +329,7 @@ def _assert_neutral(region):
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
 # GAP 2). A distinct name:rev the seeded SOURCE does not use, so its appearance
 # below is caused by THIS create, not the fixture.
-NEW_SOURCE = "spring:1"
+NEW_SOURCE = "spring"
 
 
 def test_source_configuration_creates_source_awaiting_refresh(page, registry):
@@ -359,12 +359,13 @@ def test_source_configuration_creates_source_awaiting_refresh(page, registry):
         assert response.status == 200
         # The saved query carries its identity, connection and chosen kind.
         body = response.request.post_data_json
-        assert body["source_ref"] == NEW_SOURCE
+        assert body["expected_revision"] is None
         assert body["connection_ref"] == "fixture-library"
         assert body["media_types"] == ["image"]
         # The server reports the Source as CREATED.
         receipt = response.json()
-        assert receipt["source_ref"] == NEW_SOURCE and receipt["created"] is True
+        assert receipt["name"] == NEW_SOURCE and receipt["source_ref"] == NEW_SOURCE + ":1"
+        assert receipt["created"] is True
 
         # After the useMutate() refresh the new Source is listed by name:rev, and
         # — never having been refreshed — shows the honest "Awaiting refresh".
@@ -528,7 +529,7 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         scene_continue(page, "Frames")
 
-        reads = RequestGate(page, "**/v1/operator/inventory")
+        reads = RequestGate(page, "**/v1/operator/snapshot")
         reads.holding = True
         page.clock.run_for(5000)
         reads.wait_held()
@@ -619,6 +620,99 @@ def test_program_remove_deletes_it(page, registry):
 
         # After the refresh the Program is gone.
         expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
+
+
+def test_program_remove_refusal_and_unknown_outcome_can_be_retried(page, registry):
+    """A refusal explains that nothing was removed; a server error stays unknown,
+    refreshes the list, and allows an explicit retry. Mutation probe: drop outcome
+    feedback or treat a 5xx as success."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
+        programs = page.get_by_role("region", name="Programs", exact=True)
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        remove_url = f"**/v1/operator/programs/{PROGRAM_ID}"
+        responses = iter((409, 500, None))
+
+        def fail_then_delete(route):
+            if route.request.method != "DELETE":
+                route.continue_()
+                return
+            status = next(responses)
+            if status is None:
+                route.continue_()
+            elif status == 409:
+                route.fulfill(status=status, content_type="application/json",
+                              body='{"error":"program_started"}')
+            else:
+                route.fulfill(status=status, content_type="application/json",
+                              body='{"error":"temporary_failure"}')
+
+        page.route(remove_url, fail_then_delete)
+        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        expect(row.get_by_role("status")).to_have_text(
+            f"Program {PROGRAM_ID} was not removed: program started. Check the current Program state before retrying.")
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+
+        row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        expect(row.get_by_role("status")).to_have_text(
+            f"Removal outcome for Program {PROGRAM_ID} is unknown. Check the current Program state before retrying.")
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+
+        with page.expect_response(
+            lambda response: response.url.endswith(f"/v1/operator/programs/{PROGRAM_ID}")
+            and response.request.method == "DELETE"
+        ) as info:
+            row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True).click()
+        assert info.value.status == 200
+        expect(programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)).to_have_count(0)
+
+        # A later Program may reuse the plain id; the old accepted receipt must
+        # not disable its Remove control or appear on the new card.
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        row = programs.get_by_label(f"Program {PROGRAM_ID}", exact=True)
+        expect(row.get_by_role("button", name=f"Remove program {PROGRAM_ID}", exact=True)).to_be_enabled()
+        expect(row.get_by_role("status")).to_have_count(0)
+
+
+def test_scene_delete_removes_unused_scene_with_revision_guard(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        author_scene(page, "delete-unused", SOURCE, (VALID_FRAME,))
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and "/v1/operator/scenes/delete-unused?" in r.url) as info:
+            scenes.get_by_role("button", name="Delete Scene delete-unused", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            expect(dialog).to_contain_text("removes Scene delete-unused from future choices")
+            expect(dialog).to_contain_text("never stops a Run")
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert info.value.status == 200
+        assert info.value.request.url.endswith("expected_revision=1")
+        expect(scenes.get_by_role("heading", name="Scene delete-unused", exact=True)).to_have_count(0)
+
+
+def test_scene_delete_refusal_names_dependent_program(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
+        go(page, "schedule")
+        schedule_program(page, PROGRAM_ID, SCENE_ID, *WINDOW)
+        go(page, "scenes")
+        scenes = page.get_by_role("region", name="Scenes", exact=True)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and f"/v1/operator/scenes/{SCENE_ID}?" in r.url) as info:
+            scenes.get_by_role("button", name=f"Delete Scene {SCENE_ID}", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            expect(dialog).to_contain_text(f"Program {PROGRAM_ID}")
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert info.value.status == 409
+        expect(page.get_by_role("alert")).to_contain_text(f"Program {PROGRAM_ID}")
 
 
 def test_n_window_helper_creates_separate_programs(page, registry):
@@ -719,6 +813,7 @@ def test_activation_shows_synchronous_outcome_truthfully(page, registry):
         # The server admitted it; the console says exactly that.
         expect(runs.get_by_label("Activation outcome", exact=True)).to_have_text(
             f"Started: Central admitted a Run of {SCENE_ID}.")
+        expect(runs.get_by_text("Revision", exact=True)).to_have_count(0)
 
         # Activating the SAME running Scene again (new activation id,
         # repeat=ignore) is IGNORED — shown truthfully, not as a success.
@@ -1090,7 +1185,7 @@ def test_long_ids_never_scroll_the_showrunner_sideways_at_phone_width(page, regi
         connect(page, origin, "now")
         # Every Show page, each showing a long id: a Run, a Scene, a Program, a Source.
         for section, text in (
-                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID + ":1")):
+                              ("schedule", f"Program {LONG_ID}"), ("sources", LONG_ID)):
             go(page, section)
             expect(visible_page(page).get_by_text(text, exact=True).first).to_be_visible()
             assert_fits_width(page, section)
@@ -1284,7 +1379,11 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
 
-        registry.delete_frame(LOBBY_FRAME)
+        response = page.request.delete(
+            f"{origin}/v1/operator/frames/{LOBBY_FRAME}",
+            headers={"Authorization": f"Bearer {ADMIN}"},
+        )
+        assert response.status == 200
         page.clock.run_for(5000)
         expect(form.get_by_role("status")).to_have_text(
             f"{LOBBY_FRAME} was deleted and removed from this Scene.")
@@ -1592,11 +1691,11 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
             re.compile("'Taken until' must be after 'Taken from'."))
         until.fill("2025-01-01")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         form.get_by_label("Connection name", exact=True).fill("fixture-library")
         source_continue(page, "Review")
         with page.expect_response(
-            lambda r: r.url.endswith("/v1/operator/sources/" + quote(NEW_SOURCE, safe=""))
+            lambda r: r.url.endswith("/v1/operator/source-names/" + quote(NEW_SOURCE, safe=""))
             and r.request.method == "PUT"
         ) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
@@ -1673,13 +1772,13 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         row = _scene_row(page, STORED_ID)
-        expect(row).to_contain_text("live from " + SOURCE)
-        expect(row).to_contain_text("revision 1")
+        expect(row).to_contain_text("live from holiday")
+        expect(row.get_by_text("Revision", exact=True)).to_have_count(0)
         expect(row).to_contain_text("no Program")
         row.get_by_role("button", name=f"Edit Scene {STORED_ID}", exact=True).click()
 
         form = _scenes_form(page)
-        expect(form).to_contain_text(f"Editing {STORED_ID} · revision 1.")
+        expect(form).to_contain_text(f"Editing {STORED_ID}. Its name stays the same.")
         assert current_hash(page) == f"#/scenes/{STORED_ID}/edit/review"
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
         # The stored values, exactly, where each is asked: every Change link opens its
@@ -1705,8 +1804,8 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 
         dialog = page.get_by_role("dialog", name=f"Replace Scene {STORED_ID}?")
         expect(dialog).to_contain_text(
-            "Runs already going keep the version they started with; Programs that start later "
-            "use the new one.")
+            "Runs already going keep what they started with; Programs that start later use "
+            "the saved changes.")
         with page.expect_response(
             lambda r: "/v1/operator/scenes/" in r.url and r.request.method == "PUT"
         ) as info:
@@ -1716,8 +1815,8 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         body = info.value.request.post_data_json
         assert (body["scene_id"], body["revision"], body["cycle_seconds"]) == (STORED_ID, 2, 45)
         expect(page.get_by_role("region", name="Scenes", exact=True).get_by_role(
-            "status")).to_have_text(f"Replaced Scene {STORED_ID}: now revision 2.")
-        expect(_scene_row(page, STORED_ID)).to_contain_text("revision 2")
+            "status")).to_have_text(f"Scene {STORED_ID} saved.")
+        expect(_scene_row(page, STORED_ID).get_by_text("Revision", exact=True)).to_have_count(0)
         assert current_hash(page) == "#/scenes"
 
 
@@ -1737,6 +1836,34 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         expect(evening).to_contain_text(
             "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
         expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
+
+
+def test_scene_cards_summarize_inline_and_outro_frames_and_media(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _console_scene("plain"))
+    runtime.command("set_scene", Scene(
+        scene_id="layered", loop=True, outro_seconds=5,
+        children=(Child(scene=Scene(scene_id="inline", contributions=(
+            Contribution(target=f"frame:{INVALID_FRAME}", source_refs=(SOURCE,)),
+        ))),),
+        outro_contributions=(Contribution(
+            target=f"frame:{VALID_FRAME}", asset_refs=("chosen-still",)),),
+    ))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        layered = _scene_row(page, "layered")
+        expect(layered).to_contain_text("live from holiday")
+        expect(layered).to_contain_text("authored: 1 chosen item")
+        expect(layered.get_by_text(re.compile(r"^valid-frame:"))).to_have_count(1)
+        expect(layered.get_by_text(re.compile(r"^invalid-frame:"))).to_have_count(1)
+        expect(layered).not_to_contain_text("no media")
+        expect(layered).not_to_contain_text("Frames none")
+        expect(layered.get_by_role("button", name="Edit Scene layered")).to_have_count(0)
+        plain = _scene_row(page, "plain")
+        expect(plain).to_contain_text("live from holiday")
+        expect(plain).not_to_contain_text("authored:")
 
 
 def _put_authored(page, origin, scene_id, choices):
@@ -1929,11 +2056,11 @@ def test_the_media_pipeline_states_each_source(page, registry):
         pipeline = _pipeline(page)
 
         def state(ref):
-            return pipeline.get_by_label(f"Refresh of {ref}", exact=True)
+            return pipeline.get_by_label(f"Refresh of {ref.rsplit(':', 1)[0]}", exact=True)
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
-            "refreshed 1 min ago · 790 valid in the last refresh · photos only · only favourites"
-            " · taken 2024")
+            "refreshed 1 min ago · 790 valid in the last refresh · 10 items pending or rejected"
+            " · photos only · only favourites · taken 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
         expect(state("failing:1")).to_contain_text("Library unreachable · last good 2 h ago")
         expect(state("failing:1")).to_contain_text("source unavailable")
@@ -2054,7 +2181,7 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
         expect(chain).to_contain_text(
-            f"The Source {SOURCE}: refreshed 0 s ago · 3 valid in the last refresh.")
+            "The Source holiday: refreshed 0 s ago · 3 valid in the last refresh.")
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")
@@ -2120,7 +2247,7 @@ def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, reg
     _set_source(registry, "spring:1", spec={"captured_from": start, "captured_until": until})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
-        expect(_pipeline(page).get_by_label("Refresh of spring:1", exact=True)).to_contain_text(
+        expect(_pipeline(page).get_by_label("Refresh of spring", exact=True)).to_contain_text(
             re.compile(r"taken (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
 
 

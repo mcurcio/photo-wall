@@ -12,6 +12,7 @@ import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
+import { frameStoredReferences } from "./sceneTargets.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -313,9 +314,7 @@ export function useConfirm(successor, onDone = null) {
 
   const confirmation = (statusClass) => (
     <>
-      <p className={statusClass} role="status">
-        {status}
-      </p>
+      {status !== null && <p className={statusClass} role="status">{status}</p>}
       {request !== null && <ConfirmAction key={request.key} request={request} onClose={onClosed} />}
     </>
   );
@@ -362,8 +361,28 @@ function RunList({ runs, lead }) {
   );
 }
 
+function frameReferenceRefusal(result) {
+  const details = [
+    ["saved Scenes", result.scene_ids],
+    ["Programs", result.program_ids],
+    ["queued activations", result.queued_activation_ids],
+  ].filter(([, ids]) => ids.length > 0)
+    .map(([label, ids]) => `${label}: ${ids.join(", ")}`);
+  const reported = details.length > 0 ? ` Central reports ${details.join("; ")}.` : "";
+  const actions = [];
+  if (result.scene_ids.length > 0) actions.push("Edit or remove the saved Scenes.");
+  if (result.program_ids.length > 0) actions.push("Edit or remove the Programs.");
+  if (result.queued_activation_ids.length > 0) {
+    actions.push("Review the queued activations and retry after Central resolves them.");
+  }
+  const guidance = actions.length > 0
+    ? ` Refresh Equipment. ${actions.join(" ")}`
+    : " Refresh Equipment to see the current references before retrying.";
+  return `This Frame is still referenced.${reported}${guidance}`;
+}
+
 /**
- * Delete a Frame (plan and tray). Captures its binding and live Runs.
+ * Delete a Frame (plan and tray). Captures its binding, live Runs, and stored references.
  *
  * @param {object} snapshot
  * @param {string} frameId
@@ -372,6 +391,7 @@ function RunList({ runs, lead }) {
 export function deleteFrameRequest(snapshot, frameId) {
   const frame = (snapshot?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
   const runs = liveRunsFor(snapshot?.runtime, frameId);
+  const { scenes, programs } = frameStoredReferences(snapshot, frameId);
   return {
     key: `delete:${frameId}`,
     title: `Delete frame ${frameId}?`,
@@ -383,6 +403,25 @@ export function deleteFrameRequest(snapshot, frameId) {
           <p>It is bound to an output; the delete is refused until it is unbound.</p>
         )}
         <RunList runs={runs} lead="Live Runs on it — the delete is refused until they finish:" />
+        {scenes.length > 0 ? (
+          <>
+            <p>Saved Scenes targeting this Frame must be edited or removed before deletion:</p>
+            <ul className="confirm__runs">
+              {scenes.map((sceneId) => <li key={sceneId}>{sceneId}</li>)}
+            </ul>
+          </>
+        ) : (
+          <p>No saved Scenes reference this Frame in this snapshot.</p>
+        )}
+        {programs.length > 0 && (
+          <>
+            <p>Upcoming Programs using those Scenes also need review:</p>
+            <ul className="confirm__runs">
+              {programs.map((programId) => <li key={programId}>{programId}</li>)}
+            </ul>
+          </>
+        )}
+        <p>Central checks references again when you confirm.</p>
         <p>Cannot be undone: recreating the id starts uncommissioned.</p>
       </>
     ),
@@ -393,6 +432,12 @@ export function deleteFrameRequest(snapshot, frameId) {
       }
       if (result.code === "unknown_frame") {
         return { state: "already", message: ALREADY_MESSAGE };
+      }
+      if (result.code === "frame_referenced") {
+        return {
+          state: "refused",
+          message: frameReferenceRefusal(result),
+        };
       }
       return { state: "refused", message: result.message };
     },

@@ -7,6 +7,7 @@ class RecordingMediaQueue:
     def __init__(self):
         self.enqueued = []
         self.refreshes = []
+        self.previews = []
 
     def enqueue_in(self, conn, job_id):
         self.enqueued.append((conn, job_id))
@@ -16,3 +17,7 @@ class RecordingMediaQueue:
         coalesced = any(item[1] == source_ref for item in self.refreshes)
         self.refreshes.append((conn, source_ref))
         return QueueReceipt(coalesced=coalesced)
+
+    def enqueue_preview_in(self, conn, request_id):
+        self.previews.append((conn, request_id))
+        return len(self.previews)

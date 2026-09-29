@@ -98,6 +98,7 @@ export function Plan({
   trayDragRef,
   onTrayDrop,
   regionRef,
+  addFrameButtonRef,
 }) {
   const mutate = useMutate();
   const svgRef = useRef(null);
@@ -119,7 +120,8 @@ export function Plan({
   const dragRef = useRef(/** @type {object|null} */ (null));
   const [draft, setDraft] = useState(/** @type {object|null} */ (null));
   // The pending new-frame drag rect awaiting a profile from the form (px).
-  const [newFrame, setNewFrame] = useState(/** @type {{pxRect: object}|null} */ (null));
+  const [placementForm, setPlacementForm] = useState(/** @type {{mode: "create"|"edit", frameId?: string}|null} */ (null));
+  const [placement, setPlacement] = useState({ x_mm: "1", y_mm: "0", width_mm: "400", height_mm: "225" });
   const [profile, setProfile] = useState(PROFILE_DEFAULTS);
   const [frameId, setFrameId] = useState("");
   const hintId = useId();
@@ -133,7 +135,7 @@ export function Plan({
   const { placed } = project(frames, surfaceId, VIEWPORT);
 
   const beginCreate = (event) => {
-    if (surfaceId == null || newFrame != null) {
+    if (surfaceId == null || placementForm != null) {
       return;
     }
     const svg = svgRef.current;
@@ -231,7 +233,9 @@ export function Plan({
       setFormError(null);
       setProfile(PROFILE_DEFAULTS);
       setFrameId("");
-      setNewFrame({ pxRect: normRect(finished.start, finished.cur) });
+      const measured = dragToPlacement(normRect(finished.start, finished.cur), VIEWPORT, surfaceId);
+      setPlacement({ x_mm: String(measured.x_mm), y_mm: String(measured.y_mm), width_mm: String(measured.width_mm), height_mm: String(measured.height_mm) });
+      setPlacementForm({ mode: "create" });
       return;
     }
     // Move: translate the frame's rendered rect by the drag delta, invert to mm,
@@ -259,17 +263,43 @@ export function Plan({
     ).catch(() => {});
   };
 
-  const submitNewFrame = (event) => {
+  const openMeasuredCreate = () => {
+    setFormError(null);
+    setProfile(PROFILE_DEFAULTS);
+    setFrameId("");
+    setPlacement({ x_mm: "1", y_mm: "0", width_mm: "400", height_mm: "225" });
+    setPlacementForm({ mode: "create" });
+  };
+
+  const openPlacementEdit = () => {
+    const frame = framesById.get(selection);
+    if (frame == null) return;
+    setFormError(null);
+    setPlacement({ x_mm: String(frame.x_mm), y_mm: String(frame.y_mm), width_mm: String(frame.width_mm), height_mm: String(frame.height_mm) });
+    setPlacementForm({ mode: "edit", frameId: frame.id });
+  };
+
+  const submitPlacement = (event) => {
     event.preventDefault();
-    if (newFrame == null || surfaceId == null) {
+    if (placementForm == null || surfaceId == null) {
       return;
     }
-    const idProblem = frameIdProblem(frameId);
-    if (idProblem !== null) {
-      setFormError(idProblem);
-      return;
+    const numeric = Object.fromEntries(Object.entries(placement).map(([key, value]) => [key, Number(value)]));
+    if (Object.values(placement).some((value) => String(value).trim() === "") ||
+        Object.values(numeric).some((value) => !Number.isFinite(value))) {
+      setFormError("Enter finite numbers for all placement measurements."); return;
     }
-    const placement = dragToPlacement(newFrame.pxRect, VIEWPORT, surfaceId);
+    if (!(numeric.width_mm > 0 && numeric.height_mm > 0)) {
+      setFormError("Frame width and height must be positive."); return;
+    }
+    if (numeric.x_mm === 0 && numeric.y_mm === 0) {
+      setFormError("Position (0, 0) is reserved for Unplaced frames. Choose a different x or y."); return;
+    }
+    if (placementForm.mode === "create") {
+      const idProblem = frameIdProblem(frameId);
+      if (idProblem !== null) { setFormError(idProblem); return; }
+    }
+    const framePlacement = { surface_id: surfaceId, ...numeric };
     const widthPx = Number(profile.width_px);
     const heightPx = Number(profile.height_px);
     const diagonal = Number(profile.diagonal_inches);
@@ -279,13 +309,24 @@ export function Plan({
     }
     // Reject an incoherent profile client-side (design §J2: inline reason, no
     // request) — the server enforces the same guard as a 422 backstop.
-    if (!orientationCoherent(placement.width_mm, placement.height_mm, widthPx, heightPx)) {
+    const frame = placementForm.mode === "edit" ? framesById.get(placementForm.frameId) : null;
+    const effectiveProfile = placementForm.mode === "edit" ? frame?.profile : null;
+    const checkedWidth = placementForm.mode === "edit" ? Number(effectiveProfile?.width_px) : widthPx;
+    const checkedHeight = placementForm.mode === "edit" ? Number(effectiveProfile?.height_px) : heightPx;
+    if (!orientationCoherent(numeric.width_mm, numeric.height_mm, checkedWidth, checkedHeight)) {
       setFormError("Display profile must match the frame's orientation.");
+      return;
+    }
+    if (placementForm.mode === "edit") {
+      mutate(() => moveFrame(placementForm.frameId, framePlacement)).then((result) => {
+        if (result.ok) { setPlacementForm(null); setFormError(null); }
+        else setFormError(`Could not save placement: ${result.error}`);
+      }).catch((error) => setFormError(`Could not save placement: ${error?.message ?? "server error"}`));
       return;
     }
     const id = frameId;
     mutate(() =>
-      createFrame(id, placement, {
+      createFrame(id, framePlacement, {
         width_px: widthPx,
         height_px: heightPx,
         diagonal_inches: diagonal,
@@ -294,15 +335,15 @@ export function Plan({
     )
       .then((result) => {
         if (result.ok) {
-          setNewFrame(null);
+          setPlacementForm(null);
           setFormError(null);
         } else if (result.error === "frame_exists") {
           setFormError(`A frame named ${id} already exists.`);
         } else {
-          setFormError("Could not create the frame — check the profile.");
+          setFormError(`Could not create the frame: ${result.error}`);
         }
       })
-      .catch(() => setFormError("Could not create the frame."));
+      .catch((error) => setFormError(`Could not create the frame: ${error?.message ?? "server error"}`));
   };
 
   const onDelete = (event) => {
@@ -333,6 +374,16 @@ export function Plan({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
+        {placed.length === 0 && draftRect == null && (
+          <text
+            x={VIEWPORT.width / 2}
+            y={VIEWPORT.height / 2}
+            textAnchor="middle"
+            className="plan__empty-hint"
+          >
+            Drag on this plan to place a Frame
+          </text>
+        )}
         {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
           const now = nowShowing(snapshot?.runtime, id);
@@ -424,14 +475,20 @@ export function Plan({
         )}
       </svg>
 
-      {newFrame != null && (
-        <form className="plan__new-frame" aria-label="New frame" onSubmit={submitNewFrame}>
-          <h3 className="plan__new-frame-title">New frame</h3>
+      <button ref={addFrameButtonRef} type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
+        Add frame with measurements
+      </button>
+
+      {placementForm != null && (
+        <form className="plan__new-frame" aria-label={placementForm.mode === "create" ? "New frame" : `Place frame ${placementForm.frameId}`} onSubmit={submitPlacement}>
+          <h3 className="plan__new-frame-title">{placementForm.mode === "create" ? "New frame" : `Edit placement for ${placementForm.frameId}`}</h3>
+          {placementForm.mode === "create" && <>
           <label className="plan__new-frame-field">
             Frame id
             <input
               type="text"
               required
+              autoFocus
               value={frameId}
               aria-describedby={hintId}
               aria-invalid={frameId !== "" && frameIdProblem(frameId) !== null}
@@ -449,6 +506,20 @@ export function Plan({
               ? `Not usable. ${FRAME_ID_HINT}`
               : FRAME_ID_HINT}
           </p>
+          </>}
+          <label className="plan__new-frame-field">X position (mm)
+            <input required autoFocus={placementForm.mode === "edit"} type="number" step="any" value={placement.x_mm} onChange={(event) => setPlacement({ ...placement, x_mm: event.target.value })} />
+          </label>
+          <label className="plan__new-frame-field">Y position (mm)
+            <input required type="number" step="any" value={placement.y_mm} onChange={(event) => setPlacement({ ...placement, y_mm: event.target.value })} />
+          </label>
+          <label className="plan__new-frame-field">Frame width (mm)
+            <input required type="number" min="0.000001" step="any" value={placement.width_mm} onChange={(event) => setPlacement({ ...placement, width_mm: event.target.value })} />
+          </label>
+          <label className="plan__new-frame-field">Frame height (mm)
+            <input required type="number" min="0.000001" step="any" value={placement.height_mm} onChange={(event) => setPlacement({ ...placement, height_mm: event.target.value })} />
+          </label>
+          {placementForm.mode === "create" && <>
           <label className="plan__new-frame-field">
             Display width (px)
             <input
@@ -485,9 +556,10 @@ export function Plan({
             />
             Video capable
           </label>
+          </>}
           <div className="plan__new-frame-actions">
-            <button type="submit">Create frame</button>
-            <button type="button" onClick={() => setNewFrame(null)}>
+            <button type="submit">{placementForm.mode === "create" ? "Create frame" : "Save placement"}</button>
+            <button type="button" onClick={() => { setPlacementForm(null); setFormError(null); }}>
               Cancel
             </button>
           </div>
@@ -505,6 +577,9 @@ export function Plan({
           role="group"
           aria-label={`Selected frame ${selection}`}
         >
+          <button type="button" onClick={openPlacementEdit} disabled={placementForm != null}>
+            {`Edit placement for ${selection}`}
+          </button>
           <button type="button" className="plan__delete" onClick={onDelete}>
             {`Delete frame ${selection}`}
           </button>

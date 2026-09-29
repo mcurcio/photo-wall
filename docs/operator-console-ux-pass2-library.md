@@ -4,12 +4,17 @@
 **Builds on:** [pass C+D](operator-console-ux-pass2-flow.md) §7 J5 (the Source step's reserved "Tags" and preview slot), [slice 3](operator-console-ux-pass2-showrunner.md) (candidates, served `standing`), [pass A](operator-console-ux-pass2-session.md) (cookie sign-in: GETs need no marker), [central system architecture](central-system-architecture.md) (read-through, typed jobs, one worker kind).
 **Owner is asked:** approve this revision. Q1 (tags are all-of), Q2 (shape A) and Q3 (widen the key) are answered.
 
+**Current implementation note (2026-09-29):** a separate, count-only unsaved
+Source preview now uses bounded worker queries; see the [evidence](evidence/2026-09-29-unsaved-source-preview.md).
+The tag picker, media thumbnails, shared query observations, and other designs
+below remain proposals awaiting approval.
+
 ## 1. Today
 
 | Gap | Evidence |
 | --- | --- |
 | A Source can filter only by favourites, capture window and media type. There is no tag. | `media/models.py:31-38` `SourceSpec` |
-| The operator cannot see what a Source selects, before or after saving. Choosers say "Photo 108×192". | `SceneAuthoring.jsx`; showrunner doc §16 "Deferred: thumbnails" |
+| The operator can see a count-only preview before saving, but cannot inspect the selected media visually. Choosers say "Photo 108×192". | [Count-only preview evidence](evidence/2026-09-29-unsaved-source-preview.md); `SceneAuthoring.jsx`; showrunner doc §16 "Deferred: thumbnails" |
 | Re-sending an unchanged stored Source would break if a field were simply added: the stored JSON is compared byte-for-byte with the new dump. | `central/media_repository.py:81` |
 
 ## 2. Requirements (binding)

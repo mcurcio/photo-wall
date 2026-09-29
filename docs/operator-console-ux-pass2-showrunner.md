@@ -201,6 +201,11 @@ The Runtime keeps the highest `(priority, root_order, admission_order)` (`runtim
 
 ## 13. Scene view and lossless edit (3B)
 
+The current [runbook](runbook.md#viewing-and-editing-a-scene) supersedes this
+section's numeric revision wording. The console still sends and checks revisions,
+but its cards and edit messages describe saved changes and Reload actions without
+showing revision numbers.
+
 - **`SceneList`:** each row is a disclosure named `Scene X`, showing kind ("live from <Sources>", or "authored: N chosen items"), targets as `FrameChips` with health, cycle, loop wording (a looping Scene "keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it"), revision, "Used by Programs …" and "Running now".
 - **Lossless check.** Both sides are normalized by filling the model defaults (`SCENE_DEFAULTS` / `CONTRIBUTION_DEFAULTS` in `authoring.js`, from `runtime.py:43-55` Contribution and `:76-86` Scene; a pytest in `tests/test_operator_runtime.py` pins the tables to the models). The Scene must equal `buildSave(decodeScene(Scene))`, apart from `revision` (`editableDraft`). Otherwise Edit is withheld with the reason: "Uses features the console can't author (child Scenes, outro, fades…)."
 - **Edit** loads the Scene into the same form under its **stored id** (never re-derived): "Editing `evening` · revision 4. Its id stays; Replace saves revision 5."
@@ -313,7 +318,7 @@ Tests are in `tests/browser/test_operator_showrunner_browser.py` unless named. N
 ## 18. Costs, deferrals and questions
 
 - **Costs:** names are not kept; confirm clicks for Cancel, Replace and removing a running Program; forms always visible; media alarms stay out of the strip; thresholds are console constants pinned by pytest; **albums are not supported** (`SourceSpec` has no album field); Programs and admissions are never pruned in stored state; the planner's per-candidate standing is served, but what planning concluded for a frame is not ("Check this frame" is a tally of standings, not the pool order or cycle pick). A stored protection refusal pins the rollback floor at this build unless its `blocking_run_id` is stripped first (runbook SQL).
-- **Deferred:** thumbnails, Scene delete, display names, media alarms in the strip; queue and force (3B-3, pending Question 6).
+- **Deferred at the time of this design:** thumbnails, Scene delete, display names, media alarms in the strip; queue and force (3B-3, pending Question 6). Scene delete was subsequently implemented in the [operator UX loop](evidence/2026-09-28-operator-ux-loop.md); the original Question 3 below records the earlier decision.
 - **Residual (not built):** serve the planner's own per-frame `projection.diagnostics` (`coordination.py:403`), so "Check this frame" reports what planning actually concluded (pool order, cycle pick, `no_eligible_candidates`) instead of a tally of per-candidate standings.
 - **Question 1:** new Scenes default "Keep playing until the Program ends" to on? Build proceeds on the default: on.
 - **Question 2:** should `operator_projection` serve only live Runs plus Runs ended in the last 24 h (read-only), bounding the 5 s payload? Build proceeds on the default: yes (3A-3).

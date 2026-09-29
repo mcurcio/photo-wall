@@ -111,6 +111,67 @@ def test_pending_player_appears_in_the_pending_rail(page, registry):
         ).to_be_visible()
 
 
+def test_pending_output_identify_requests_exact_output_and_explains_no_display(page, registry):
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    _disconnect_output(registry, player_id, "HDMI-A-2")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        outputs = pending.get_by_role("list", name=f"Outputs of {player_id}", exact=True)
+        identify = outputs.get_by_role(
+            "button", name="Identify display HDMI-A-1", exact=True)
+        no_display = outputs.get_by_role(
+            "button", name="Identify display HDMI-A-2", exact=True)
+        expect(identify).to_be_enabled()
+        expect(no_display).to_be_disabled()
+        expect(no_display).to_have_accessible_description(
+            "Connect a display and restart the Player, then Refresh Equipment.")
+
+        gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
+        gate.holding = True
+        identify.click()
+        gate.wait_held()
+        assert gate.seen == 1
+        assert gate.held[0].request.url.endswith(
+            f"/v1/operator/players/{player_id}/outputs/HDMI-A-1/identify")
+        expect(identify).to_be_disabled()  # a second click cannot duplicate the request
+        gate.release(status=202, content_type="application/json", body=json.dumps({
+            "request_id": "synthetic-request", "output_id": "HDMI-A-1",
+            "expires_at": registry.clock.utc() + 15,
+        }))
+        expect(outputs.get_by_role("status")).to_have_text(
+            "Identify requested for HDMI-A-1. Check the display; "
+            "this request expires in 15 seconds.")
+        expect(identify).to_be_enabled()
+
+
+@pytest.mark.parametrize("status, expected", [
+    (404, "This Output changed or the Player is no longer eligible. "
+          "Refresh Equipment before trying again."),
+    (409, "This Output changed or the Player is no longer eligible. "
+          "Refresh Equipment before trying again."),
+    (503, "The request outcome is unknown. Check the display before trying again."),
+])
+def test_pending_output_identify_failure_is_honest(page, registry, status, expected):
+    enroll(registry, count=1)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = page.get_by_role("group", name="Pending players", exact=True)
+        identify = pending.get_by_role(
+            "button", name="Identify display HDMI-A-1", exact=True)
+        gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
+        gate.holding = True
+        identify.click()
+        gate.wait_held()
+        gate.release(status=status, content_type="application/json", body=json.dumps({
+            "error": {404: "unknown_output", 409: "output_disconnected"}.get(
+                status, "server_unavailable"),
+        }))
+        expect(pending.get_by_role("alert")).to_have_text(expected)
+        expect(identify).to_be_enabled()
+
+
 def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
     identity, _, _ = enroll(registry, count=1)  # a pending Player with HDMI-A-1
     _placed_frame(registry, "wall-1")
@@ -530,7 +591,7 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         inspector, dialog = _open_unbind(page)
-        page.route("**/v1/operator/inventory", lambda route: route.fulfill(
+        page.route("**/v1/operator/snapshot", lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "boom"}'))
         dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
 
@@ -581,6 +642,56 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
 
 
+def test_collapsed_pending_cards_show_distinct_reported_serial_handles(page, registry):
+    first_serial = SERIAL
+    second_serial = "10000000c0ffee93"
+    first_player = _netbooted_player(registry, first_serial)
+    second_player = _netbooted_player(registry, second_serial)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = _group(page, "Pending players")
+        first = pending.get_by_role("button", name=first_player, exact=True)
+        second = pending.get_by_role("button", name=second_player, exact=True)
+        expect(first).to_be_visible()
+        expect(second).to_be_visible()
+
+        # The disclosure name remains the Player ID; the description carries the
+        # serial suffix so the two newly enrolled devices are distinguishable.
+        expect(first).to_have_accessible_description(re.compile(r"Serial …ffee42"))
+        expect(second).to_have_accessible_description(re.compile(r"Serial …ffee93"))
+        first.click()
+        second.click()
+        expect(first).to_have_attribute("aria-expanded", "false")
+        expect(second).to_have_attribute("aria-expanded", "false")
+        expect(first).to_have_accessible_name(first_player)
+        expect(second).to_have_accessible_name(second_player)
+        expect(first).to_have_accessible_description(re.compile(r"Serial …ffee42"))
+        expect(second).to_have_accessible_description(re.compile(r"Serial …ffee93"))
+
+        # Expanding still exposes the full serial and the existing commissioning action.
+        first.click()
+        expect(pending.get_by_text(f"Reported serial {first_serial}", exact=False)).to_be_visible()
+        expect(pending.get_by_role("button", name=f"Retire player {first_player}", exact=True)
+               ).to_be_visible()
+
+
+def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry):
+    identity, _, _ = enroll(registry, count=1)
+    player_id = identity["player_id"]
+    page.route(NETBOOT, lambda route: route.fulfill(
+        status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "equipment")
+        pending = _group(page, "Pending players")
+        player = pending.get_by_role("button", name=player_id, exact=True)
+        expect(player).to_be_visible()
+        expect(pending).to_contain_text("Boot records unavailable")
+        expect(pending.get_by_text(re.compile(r"Serial …"))).to_have_count(0)
+        # The existing action remains available even when serial enrichment fails.
+        expect(pending.get_by_role("button", name=f"Retire player {player_id}", exact=True)
+               ).to_be_visible()
+
+
 def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")
@@ -601,9 +712,9 @@ OLD, NEW = "v1.4.2", "v1.5.0"
     ("healthy", OLD, OLD, None, f"Last netboot healthy on {OLD}"),
     ("healthy", OLD, OLD, NEW, f"Rolled back from {NEW} · last netboot healthy on {OLD}"),
     # pending: record_served moved last_served and left known_good behind.
-    ("pending", NEW, OLD, None, f"Netboot served {NEW}, not yet healthy · last healthy on {OLD}"),
-    ("pending", NEW, None, None, f"Netboot served {NEW}, not yet healthy"),
-    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, not yet healthy"),
+    ("pending", NEW, OLD, None, f"Netboot served {NEW}, base health not reported · last healthy on {OLD}"),
+    ("pending", NEW, None, None, f"Netboot served {NEW}, base health not reported"),
+    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, base health not reported"),
     # fenced with no known-good: the failed tag is served again (boot_policy.py).
     ("pending", NEW, None, NEW,
      f"Retrying {NEW} after a failed netboot · no healthy version to roll back to"),
@@ -625,6 +736,9 @@ def test_the_boot_outcome_names_each_tag_by_what_central_recorded(
         expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
         expect(pending.get_by_text(f"Reported serial {SERIAL} · {label}", exact=True)
                ).to_be_visible()
+        if outcome == "pending":
+            expect(pending).to_contain_text(
+                "Base health is separate from Player connection")
 
 
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):

@@ -22,6 +22,8 @@ from media.models import (
     MediaError,
     OriginalAsset,
     RefreshResult,
+    SourcePreviewQuery,
+    SourcePreviewResult,
     SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparedMedia
@@ -48,6 +50,34 @@ def test_private_connection_file_keeps_keys_out_of_models_and_repr(tmp_path):
     assert connections["fixture"].api_key.get_secret_value() == SECRET
     assert SECRET not in repr(connections)
     assert SECRET not in connections["fixture"].model_dump_json()
+
+
+def test_worker_reports_only_sorted_connection_ids(worker_storage):
+    instance = MediaWorker(worker_storage.repository, worker_storage,
+        {"zeta": ConnectionConfig(**{**configuration(), "connection_id": "zeta"}),
+         "alpha": ConnectionConfig(**{**configuration(), "connection_id": "alpha"})},
+        preparer=FakePreparer())
+    instance.store.recover = lambda: None
+
+    async def exercise():
+        await instance.maintain()
+
+    asyncio.run(exercise())
+    health = worker_storage.repository.health()
+    assert health["connection_ids"] == ["alpha", "zeta"]
+    assert SECRET not in repr(health)
+    assert "immich.invalid" not in repr(health)
+
+
+def test_worker_reports_valid_empty_connection_list(worker_storage):
+    instance = MediaWorker(worker_storage.repository, worker_storage, {}, preparer=FakePreparer())
+    instance.store.recover = lambda: None
+
+    async def exercise():
+        await instance.maintain()
+
+    asyncio.run(exercise())
+    assert worker_storage.repository.health()["connection_ids"] == []
 
 
 @pytest.mark.parametrize("fault", [
@@ -110,6 +140,8 @@ class FakeSource:
         self.refresh_entered = asyncio.Event()
         self.entered = asyncio.Event()
         self.cancelled = False
+        self.preview_queries = []
+        self.preview_fault = None
 
     async def refresh(self, spec):
         self.refreshes += 1
@@ -121,6 +153,12 @@ class FakeSource:
         return RefreshResult(snapshot=CatalogSnapshot(source_ref=spec.source_ref,
             refreshed_at=self.clock.utc(), candidates=tuple(a.candidate for a in self.assets)),
             assets=self.assets)
+
+    async def preview(self, query):
+        self.preview_queries.append(query)
+        if self.preview_fault:
+            raise self.preview_fault
+        return SourcePreviewResult(count=2, image_count=1, video_count=1)
 
     async def download_original(self, asset, destination):
         self.downloads += 1
@@ -612,3 +650,74 @@ def test_command_reports_the_job_runtime_exit_code(monkeypatch, capsys, error, c
     output = capsys.readouterr()
     assert json.loads(output.err) == {"error": code}
     assert not output.out
+
+
+def test_worker_evaluates_unsaved_source_preview_without_refresh_side_effects(worker_storage):
+    source = FakeSource(worker_storage.clock)
+    instance = worker(worker_storage, source)
+    query = SourcePreviewQuery(connection_ref="fixture", media_types=("image", "video"), favorites=True)
+    receipt = worker_storage.repository.request_source_preview(query)
+
+    asyncio.run(instance.preview_source(receipt.request_id))
+
+    assert source.preview_queries == [query]
+    assert source.refreshes == 0 and source.downloads == 0
+    assert worker_storage.repository.source_preview(receipt.request_id) == {
+        "request_id": receipt.request_id, "status": "complete",
+        "count": 2, "image_count": 1, "video_count": 1,
+    }
+    with worker_storage.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM asset_revisions").fetchone()["n"] == 0
+
+
+def test_worker_records_unknown_connection_as_bounded_preview_failure(worker_storage):
+    source = FakeSource(worker_storage.clock)
+    instance = worker(worker_storage, source)
+    query = SourcePreviewQuery(connection_ref="removed")
+    receipt = worker_storage.repository.request_source_preview(query)
+
+    asyncio.run(instance.preview_source(receipt.request_id))
+
+    assert source.preview_queries == []
+    assert worker_storage.repository.source_preview(receipt.request_id) == {
+        "request_id": receipt.request_id, "status": "failed", "error": "connection_unknown",
+    }
+
+
+def test_procrastinate_worker_completes_deferred_source_preview(worker_storage):
+    queue = ProcrastinateMediaQueue(worker_storage.db.dsn)
+    queue.apply_schema(worker_storage.db.dsn)
+    worker_storage.repository.queue = queue
+    source = FakeSource(worker_storage.clock)
+    instance = worker(worker_storage, source)
+    query = SourcePreviewQuery(connection_ref="fixture", media_types=("image",))
+    receipt = worker_storage.repository.request_source_preview(query)
+
+    async def exercise():
+        app = create_worker_app(worker_storage.db.dsn)
+        try:
+            with worker_storage.worker_lock():
+                async with app.open_async():
+                    await app.run_worker_async(
+                        queues=[MEDIA_QUEUE], concurrency=1, wait=False,
+                        additional_context={"media_worker": instance},
+                    )
+        finally:
+            await close(instance)
+
+    asyncio.run(exercise())
+    assert source.preview_queries == [query]
+    assert worker_storage.repository.source_preview(receipt.request_id) == {
+        "request_id": receipt.request_id, "status": "complete",
+        "count": 2, "image_count": 1, "video_count": 1,
+    }
+    with worker_storage.db.transaction() as conn:
+        job = conn.execute(
+            "SELECT status FROM procrastinate_jobs WHERE task_name=%s "
+            "AND args->>'request_id'=%s",
+            ("photo_wall.media.preview_source", receipt.request_id),
+        ).fetchone()
+        source_count = conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"]
+    assert job == {"status": "succeeded"}
+    assert source_count == 0

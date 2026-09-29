@@ -37,6 +37,7 @@ from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from contracts.models import (
     Commit,
+    IdentifyOutput,
     Layer,
     Model,
     Observation,
@@ -177,6 +178,12 @@ class Coordinator:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
             yield conn
 
+    @contextmanager
+    def serialized_runtime_read(self):
+        """Hold Coordination and Runtime locks while inspecting current Runtime state."""
+        with self._transaction() as conn:
+            yield conn, self.runtime.read_locked(conn)
+
     def _players(self, conn):
         players = self.installation.active_sessions_in(conn)
         if len(players) > 128:
@@ -257,8 +264,8 @@ class Coordinator:
             result[layer.assignment_id] = layer
         return result
 
-    def _catalog(self, conn):
-        return self.media.catalog_in(conn, self.clock.utc())
+    def _catalog(self, conn, runtime):
+        return self.media.catalog_in(conn, self.clock.utc(), runtime.planning_source_refs())
 
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
@@ -393,7 +400,8 @@ class Coordinator:
                 for p in self._players(conn)
             }
             offers = self._offers(conn, configurations)
-            snapshots, authored = self._catalog(conn)
+            self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
+            snapshots, authored = self._catalog(conn, runtime)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
@@ -530,6 +538,37 @@ class Coordinator:
         with self._transaction() as conn:
             self._players(conn)
             config = self._configuration(conn, player_id, epoch)
+            now = self.clock.utc()
+            identify = conn.execute(
+                "SELECT i.request_id,i.output_id,i.authority_epoch,i.expires_at,p.authority_epoch "
+                "AS current_epoch,p.retired_at,o.observation,"
+                "EXISTS(SELECT 1 FROM bindings b WHERE b.player_id=i.player_id "
+                "AND b.output_id=i.output_id) AS is_bound "
+                "FROM player_output_identification i JOIN players p ON p.id=i.player_id "
+                "LEFT JOIN outputs o ON o.player_id=i.player_id AND o.output_id=i.output_id "
+                "WHERE i.player_id=%s",
+                (player_id,),
+            ).fetchone()
+            identify_output = None
+            if identify:
+                remaining = identify["expires_at"] - now
+                connected = bool(identify["observation"] and
+                                 identify["observation"].get("connected", False))
+                if (identify["retired_at"] is None and identify["current_epoch"] == epoch
+                        and identify["authority_epoch"] == epoch and remaining > 0
+                        and connected and not identify["is_bound"]):
+                    identify_output = IdentifyOutput(
+                        request_id=str(identify["request_id"]),
+                        output_id=identify["output_id"],
+                        authority_epoch=identify["authority_epoch"],
+                        remaining_seconds=min(15.0, remaining),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM player_output_identification WHERE player_id=%s "
+                        "AND request_id=%s",
+                        (player_id, identify["request_id"]),
+                    )
             plan = self._current_plan(conn, player_id, epoch)
             if plan and (
                 plan.valid_until <= self.clock.utc()
@@ -590,6 +629,7 @@ class Coordinator:
                 "plan": plan,
                 "commits": commits,
                 "revocations": revocations,
+                "identify_output": identify_output,
             }
 
     def player_reports_lock_free(self) -> PlayerReports:
@@ -599,13 +639,18 @@ class Coordinator:
         it. A report from an earlier authority epoch, or from a retired Player, is not counted:
         a Player is only heard once it reports on its current session."""
         with self.db.transaction() as conn:
-            rows = conn.execute(
-                "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
-                "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
-                "WHERE p.retired_at IS NULL"
-            ).fetchall()
+            return self.player_reports_in(conn, self.clock.utc())
+
+    @staticmethod
+    def player_reports_in(conn, read_at: float) -> PlayerReports:
+        """Read accepted reports from a caller-owned transaction and label their read time."""
+        rows = conn.execute(
+            "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
+            "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
+            "WHERE p.retired_at IS NULL"
+        ).fetchall()
         reports = {row["player_id"]: row["received_at"] for row in rows}
-        return PlayerReports(read_at=max((self.clock.utc(), *reports.values())), reports=reports)
+        return PlayerReports(read_at=max((read_at, *reports.values())), reports=reports)
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()

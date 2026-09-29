@@ -3,7 +3,8 @@
  * (`FIELD_STEP`), its instance and route, its seed, and which of the Program rules
  * applies to a draft. Pure: no React; tests/test_console_schedule_flow.py drives it
  * under Node. The Program rules themselves (window, priority, the separate-windows
- * helper) stay in authoring.js.
+ * helper) stay in authoring.js. Edits retain an exact expected Program snapshot and are
+ * always one Program, never the multi-window helper.
  *
  * ONE WRITE, TWO SHAPES. A draft with "Number of windows" 1 (the default) schedules
  * ONE Program under its id; any other number is the separate-windows helper: that many
@@ -11,13 +12,12 @@
  * design R2/Q2), checked by authoring.js `windowProblems` (an invalid number is its
  * reason there, never silently read as 1).
  *
- * INSTANCES. There are no edits: a draft is keyed `new` (`#/schedule/new/<step>`) and
- * opens at the Scene step, prefilled with the shell's `recentScene` (the Scene just
- * saved, or picked on a Scene card with "Schedule it").
+ * INSTANCES. New drafts open at Scene with the shell's `recentScene`; edits are keyed by
+ * Program id and open at Review.
  */
 
-import { programProblems, windowProblems } from "./authoring.js";
-import { flowKeys } from "./flow/instance.js";
+import { programProblems, toEpochSeconds, windowProblems } from "./authoring.js";
+import { editedId, flowKeys } from "./flow/instance.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -51,8 +51,8 @@ export const SCHEDULE_ADVANCED_FIELDS = Object.freeze(new Set(["weekdays", "coun
 /** The Schedule flow's instance and its routes (flow/instance.js `flowKeys`). */
 export const SCHEDULE_KEYS = flowKeys({
   section: "schedule",
-  firstStep: { create: SCENE.id },
-  describe: { create: "a new Program" },
+  firstStep: { create: SCENE.id, edit: REVIEW.id },
+  describe: { create: "a new Program", edit: (id) => `Program ${id}` },
 });
 
 /** Every weekday ticked, indexed like `Date.getDay()` (0 = Sunday). */
@@ -64,7 +64,7 @@ export const EVERY_DAY = Object.freeze([true, true, true, true, true, true, true
  *
  * @typedef {{sceneId: string, start: string, end: string, count: string|number,
  *            weekdays: ReadonlyArray<boolean>, priority: string|number,
- *            name: string, idOverride: string|null}} ProgramDraft
+ *            name: string, idOverride: string|null, expected?: object}} ProgramDraft
  */
 export const NEW_PROGRAM_DRAFT = Object.freeze({
   sceneId: "",
@@ -86,10 +86,58 @@ export const NEW_PROGRAM_DRAFT = Object.freeze({
  * @param {Record<string, object>} definitions the stored Scenes
  * @returns {(key: string) => ProgramDraft}
  */
-export function seedSchedule(recentSceneId, definitions) {
+export function seedSchedule(recentSceneId, definitions, programs = {}) {
   const stored = recentSceneId !== null && definitions[recentSceneId] !== undefined;
   const draft = stored ? { ...NEW_PROGRAM_DRAFT, sceneId: recentSceneId } : NEW_PROGRAM_DRAFT;
-  return () => draft;
+  return (key) => {
+    const id = editedId(key);
+    if (id === null) return draft;
+    const program = programs[id];
+    return program === undefined ? null : programEditDraft(program);
+  };
+}
+
+/** Editable local-time view of a stored Program, retaining its exact optimistic baseline. */
+export function programEditDraft(program) {
+  const local = (seconds) => {
+    const milliseconds = Math.round(seconds * 1000);
+    if (milliseconds / 1000 !== seconds) return null;
+    const date = new Date(milliseconds);
+    if (!Number.isFinite(date.getTime())) return null;
+    const pad = (part) => String(part).padStart(2, "0");
+    const minute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    const secondsPart = `${pad(date.getSeconds())}${date.getMilliseconds() === 0 ? "" : `.${String(date.getMilliseconds()).padStart(3, "0")}`}`;
+    const value = date.getSeconds() === 0 && date.getMilliseconds() === 0 ? minute : `${minute}:${secondsPart}`;
+    return value;
+  };
+  const start = local(program.starts_at);
+  const end = local(program.ends_at);
+  if (start === null || end === null) return null;
+  return {
+    ...NEW_PROGRAM_DRAFT,
+    sceneId: program.scene_id,
+    start,
+    end,
+    priority: program.priority,
+    name: program.program_id,
+    idOverride: program.program_id,
+    expected: { ...program },
+  };
+}
+
+/** Resolve the exact instants an edit will save. Untouched local fields retain their
+ * original instant, including the later side of a repeated daylight-saving hour.
+ * Changed fields follow the browser's normal local datetime interpretation. */
+export function effectiveProgramTimes(draft) {
+  const expected = draft.expected;
+  const unchangedStart = expected !== undefined && draft.start === programEditDraft(expected)?.start;
+  const unchangedEnd = expected !== undefined && draft.end === programEditDraft(expected)?.end;
+  return {
+    startsAt: unchangedStart ? expected.starts_at : toEpochSeconds(draft.start),
+    endsAt: unchangedEnd ? expected.ends_at : toEpochSeconds(draft.end),
+    retainedStart: unchangedStart && toEpochSeconds(draft.start) !== expected.starts_at,
+    retainedEnd: unchangedEnd && toEpochSeconds(draft.end) !== expected.ends_at,
+  };
 }
 
 /**
@@ -115,10 +163,16 @@ export function separateWindows(draft) {
  * @param {ReadonlyArray<string>} [pendingIds]
  * @returns {import("./authoring.js").Problem[]}
  */
-export function programDraftProblems(draft, programIds, now, pendingIds = []) {
+export function programDraftProblems(draft, programIds, now, pendingIds = [], editing = false) {
   const pending = new Set(pendingIds);
-  const taken = new Set([...programIds].filter((id) => !pending.has(id)));
-  return separateWindows(draft) ? windowProblems(draft, taken, now) : programProblems(draft, taken, now);
+  const taken = new Set([...programIds].filter((id) => id !== draft.expected?.program_id && !pending.has(id)));
+  const times = effectiveProgramTimes(draft);
+  const problems = separateWindows(draft) ? windowProblems(draft, taken, now) :
+    programProblems(draft, taken, now, editing ? times : null);
+  if (editing && Number.isFinite(times.startsAt) && times.startsAt <= now) {
+    problems.push({ field: "start", message: "A replacement Program must start in the future." });
+  }
+  return problems;
 }
 
 /**

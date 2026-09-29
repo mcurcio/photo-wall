@@ -31,6 +31,8 @@ import {
 import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
+import { mediaNow } from "./mediaHealth.js";
+import { useSourceRefresh } from "./useSourceRefresh.js";
 
 const EMPTY = {};
 
@@ -98,9 +100,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
   const sources = snapshot?.media?.sources ?? [];
+  const now = mediaNow(snapshot);
   const loaded = snapshot != null;
 
-  const draft = useFlowDraft(seedScene(definitions));
+  // The selected Frame is a seed for a newly opened Scene only. A route from the
+  // Wall must never patch an existing draft, even when it names the same "new" key.
+  const draft = useFlowDraft(seedScene(definitions, route?.initialTarget));
   const { patch } = draft;
   const value = draft.value ?? NEW_SCENE_DRAFT;
   const editingId = editedId(draft.key);
@@ -110,6 +115,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
+  const sourceRefresh = useSourceRefresh(JSON.stringify([draft.id, value.sourceRef]));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const refs = useFlowRefs();
@@ -136,9 +142,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     );
   }, [loaded, frameKey, value.targets, draft.key, patch]);
 
+  const currentSource = sources.find((source) => source.source_ref === value.sourceRef) ?? null;
   const candidates = useCandidates(
     draft.key !== null && value.mode === "authored" ? value.sourceRef : "",
     value.targets,
+    Number(currentSource?.refresh_completed_revision ?? 0),
   );
 
   // A per-frame choice belongs to one Source's catalog: once a frame's candidates are
@@ -176,6 +184,15 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   );
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
+  const sourceReadiness = {
+    source: currentSource,
+    historicalRef: value.sourceRef !== "" && currentSource === null,
+    now,
+    feedback: sourceRefresh.feedback[value.sourceRef] ?? null,
+    refreshing: sourceRefresh.pending === value.sourceRef,
+    onManage: () => navigate({ section: "sources" }),
+    onRefresh: () => sourceRefresh.run(value.sourceRef),
+  };
 
   // A Save Central did not answer may have stored its id: while the draft is the one it
   // sent, that id is not another Scene's (flow/useFlowWrite.js NOT CONFIRMED).
@@ -309,7 +326,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     draft.reseed();
     problems.reset();
     setReloaded(
-      `Reloaded revision ${fresh.revision}. ` +
+      "Reloaded the latest saved Scene. " +
         (changed.length === 0
           ? "None of its stored values changed."
           : `Changed: ${changed.join(", ")}.`) +
@@ -381,7 +398,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const views = {
     kind: () => <KindStep {...stepProps} />,
     photos: () => (
-      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} />
+      <PhotosStep {...stepProps} sources={sources} onNewSource={newSource} sourceReadiness={sourceReadiness} />
     ),
     frames: () => <FramesStep {...stepProps} snapshot={snapshot} onToggle={toggleTarget} />,
     media: () => <MediaStep {...stepProps} candidates={candidates} onSelect={selectMedia} />,
@@ -390,8 +407,8 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       <>
         {stale && (
           <div className="notice notice--warn" role="status">
-            <p>{`This Scene was changed (revision ${storedRevision}) since you opened it.`}</p>
-            <p>Reload it to review the stored version; Replace waits until you do.</p>
+            <p>This Scene changed since you opened it.</p>
+            <p>Reload it to review the latest saved Scene; Replace waits until you do.</p>
             <button ref={reloadRef} type="button" onClick={reload}>
               Reload
             </button>
@@ -407,6 +424,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
           snapshot={snapshot}
           editingId={editingId}
           candidates={candidates}
+          sourceReadiness={sourceReadiness}
           advanced={advanced("review")}
           onChange={flow.openField}
         />
@@ -446,9 +464,18 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
         <SceneList
           snapshot={snapshot}
           editDisabled={write.busy}
+          editingId={editingId}
+          editingDirty={draft.dirty}
           onEdit={(sceneId, event) => flow.start(editKey(sceneId), event)}
           onShowNow={showNow}
           onSchedule={schedule}
+          onDeleted={(sceneId) => {
+            if (saved === sceneId) setSaved(null);
+            if (editingId === sceneId) {
+              draft.discard();
+              flow.leave();
+            }
+          }}
         />
       }
       title={editingId === null ? "New Scene" : `Edit Scene ${editingId}`}
@@ -461,11 +488,23 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       writeDisabled={write.busy || stale}
       problemsLabel="Scene problems"
       notice={
-        vanished !== null && (
-          <p className="scene-flow__vanished notice notice--warn" role="status">
-            {vanished}
-          </p>
-        )
+        <>
+          {vanished !== null && (
+            <p className="scene-flow__vanished notice notice--warn" role="status">
+              {vanished}
+            </p>
+          )}
+          {place === "open" && route?.initialTarget !== undefined &&
+            !value.targets.includes(route.initialTarget) &&
+            !draft.seeded?.targets.includes(route.initialTarget) && (
+              <div className="notice notice--warn" role="status">
+                <p>
+                  {`Your open Scene draft was kept. Frame ${route.initialTarget} was not added.`}
+                </p>
+                <button type="button" onClick={() => flow.openField("targets")}>Choose Frames</button>
+              </div>
+            )}
+        </>
       }
     >
       {step !== null && views[step]()}
@@ -516,14 +555,14 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
     confirmLabel: "Confirm replace",
     body: (
       <p>
-        {`Saves it as revision ${revision + 1}. Runs already going keep the version they ` +
-          "started with; Programs that start later use the new one."}
+        {"Runs already going keep what they started with; Programs that start later use " +
+          "the saved changes."}
       </p>
     ),
     run: async () => {
       const result = await apiWrite(path, { method: "PUT", body });
       if (result.ok) {
-        return { state: "done", message: `Replaced Scene ${sceneId}: now revision ${revision + 1}.` };
+        return { state: "done", message: `Scene ${sceneId} saved.` };
       }
       if (result.error === "scene_revision_conflict") {
         return { state: "changed", message: REPLACE_CHANGED };

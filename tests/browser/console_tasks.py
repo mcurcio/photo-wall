@@ -243,13 +243,13 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
     if media_type is not None:
         form.get_by_label("Media type", exact=True).select_option(media_type)
     source_continue(page, "Name")
-    form.get_by_label("Source name and revision", exact=True).fill(source_ref)
+    form.get_by_label("Source name", exact=True).fill(source_ref)
     answer_connection(form, connection)
     source_continue(page, "Review")
     if not submit:
         return form
     with page.expect_response(
-        lambda r: r.url.endswith("/v1/operator/sources/" + quote(source_ref, safe=""))
+        lambda r: r.url.endswith("/v1/operator/source-names/" + quote(source_ref, safe=""))
         and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name="Save source", exact=True).click()

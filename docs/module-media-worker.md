@@ -22,9 +22,17 @@ Completion means an outcome was published. That outcome can be `ok`, `permission
 
 Periodic refresh remains the ordinary mechanism for discovering live upstream changes. It can also satisfy pending revisions through the same lease and publication boundary. Explicit requests provide deterministic observation after an operator action or acceptance fault injection; they do not replace the runtime schedule or authorize content selection.
 
+## Unsaved Source previews
+
+The authenticated operator console can request a preview for the filters and connection in an unsaved Source draft. Central validates the query and defers a worker task in the same transaction that records an opaque, short-lived preview request. The media worker uses its private connection configuration and the same bounded Immich search and eligibility checks as Source refresh. The preview reads metadata without EXIF, original downloads, preparation, or a Source/catalog write. Central then serves the request's pending, complete, or bounded failure state. The UI polls that request; queue acceptance is not a completed library observation.
+
+A complete preview reports matching images, videos, and their total only when the entire bounded search is observed. The upstream search response's `total` is a page count for the qualified Immich version, so it cannot establish a query-wide total. A search limit, permission failure, unsupported version, lost connection, timeout, or absent worker remains a non-success or pending outcome, never a zero count. A preview describes current filter matches; Source refresh and Frame compatibility still determine whether a saved Scene has usable media. Preview data expires independently of saved Source revisions and live Run assignments.
+
 ## Configuration and tasks
 
 `load_connections(path)` reads a private JSON document with `schema: 1` and at most 128 connections. It must be a nonsymlink regular file owned by the worker with mode 0600 and no larger than 1 MiB. Duplicate fields/IDs, nonfinite JSON, changed files, and unknown fields fail with bounded codes. Credentials remain only in process and adapter memory; diagnostics exclude file contents, identifiers, URLs, tokens, and raw exceptions.
+
+At each media status check-in, the worker also publishes only its configured `connection_id` values to the central media-health projection. The operator console uses those names to offer a Source connection choice. A null list means no worker has reported this projection; an empty list means a worker reported that it has no connections. This does not test upstream reachability or key permissions: Source refresh supplies that result. The projection never carries the connection document, upstream URL, owner ID, API key, or CA path. It ages with the existing worker check-in timestamp and is not a credential-management interface.
 
 `MediaWorker.process_job(job_id, attempt=...)` is the task execution seam. It registers `Preparer.describe_recipe()`, claims exactly the named domain job, validates its recipe and attempt token, uses the existing reservation, creates private staging paths, obtains the exact original, prepares it, and publishes through MediaStore. No database transaction spans upstream I/O or native preparation. Publication rechecks the attempt token, so an expired or superseded task cannot publish or clean up a newer attempt.
 
@@ -33,6 +41,7 @@ Periodic refresh remains the ordinary mechanism for discovering live upstream ch
 - `photo_wall.media.prepare`: execute one exact job ID with bounded retry.
 - `photo_wall.media.refresh`: refresh due active source metadata every 30 seconds.
 - `photo_wall.media.refresh_source`: complete persisted requests for the named Source, independently of its next periodic deadline.
+- `photo_wall.media.preview_source`: evaluate one unsaved, short-lived Source query and publish only its bounded count or failure.
 - `photo_wall.media.maintenance`: recover publication state and collect storage every five minutes under the storage lock.
 
 Photo Wall records bounded last-activity/error status when these domain tasks run; it does not maintain an independent liveness loop. Procrastinate's own worker state is the queue-worker liveness source.

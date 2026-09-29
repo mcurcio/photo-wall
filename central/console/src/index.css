@@ -412,6 +412,12 @@ label {
   cursor: pointer;
 }
 
+.plan__empty-hint {
+  fill: var(--fg-subtle);
+  font-size: 19px;
+  pointer-events: none;
+}
+
 .plan__draft {
   fill: color-mix(in srgb, var(--accent-soft) 15%, transparent);
   stroke: var(--accent-soft);
@@ -429,6 +435,11 @@ label {
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-end;
+}
+
+.plan > button {
+  margin-top: 12px;
+  min-height: 36px;
 }
 
 .plan__new-frame-title {
@@ -661,6 +672,39 @@ label {
   color: var(--fg-subtle);
 }
 
+.facet__content-path {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.facet__content-path .facet__subtitle {
+  margin-top: 0;
+}
+
+.facet__content-path p {
+  margin: 0 0 12px;
+}
+
+.facet__content-path .record__actions {
+  margin: 0;
+}
+
+.facet__content-path .record__actions a {
+  display: inline-block;
+  padding: 8px 12px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-button);
+  text-decoration: none;
+}
+
+.facet__content-path .record__actions a:hover {
+  background: var(--accent-tint);
+}
+
 .facet__why {
   margin: 0;
   padding-left: 20px;
@@ -880,6 +924,23 @@ label {
   min-width: 0;
 }
 
+.roster__identify {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.roster__identify button {
+  padding: 5px 10px;
+}
+
+.roster__notice {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--ok);
+}
+
 .roster__action {
   margin-top: 8px;
   color: var(--warn);
@@ -941,6 +1002,26 @@ label {
 .showrunner__badge {
   font-size: 12px;
   padding: 4px 10px;
+}
+
+.showrunner__badge-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.readiness-notice {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.readiness-notice p,
+.readiness-notice ul {
+  margin-top: 2px;
+  margin-bottom: 2px;
 }
 
 .showrunner__region {
@@ -1197,6 +1278,10 @@ label {
   padding: 1px 8px;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.run-control__frame a {
+  margin-inline-start: 0.5em;
 }
 
 .run-control__ended {
@@ -2111,6 +2196,26 @@ label {
   display: none;
 }
 
+.source-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.source-preview h3,
+.source-preview p {
+  margin: 0;
+}
+
+.source-preview__note {
+  color: var(--fg-muted);
+  font-size: 0.9em;
+}
+
 
 /* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
    per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
@@ -2120,6 +2225,24 @@ label {
 
 .show-now__underneath {
   margin: 8px 0;
+}
+
+.show-now__source-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.show-now__source-list li + li {
+  margin-top: 8px;
+}
+
+.show-now__source-list button {
+  margin-left: 8px;
+  padding: 4px 8px;
+}
+
+.show-now__source-list p {
+  margin: 4px 0 0;
 }
 
 .run-cards {

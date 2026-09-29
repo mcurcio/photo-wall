@@ -1,3 +1,5 @@
+import { FRAME_ID_PATTERN } from "./frameIds.js";
+
 /**
  * The console's hash routes (flow design §6): pure parsing and formatting, no React.
  *
@@ -6,9 +8,11 @@
  *   #/now                          {section: "now"}
  *   #/now/show/<step>              {section: "now", flow: "show", step}
  *   #/scenes/new/<step>            {section: "scenes", flow: "new", step}
+ *   #/scenes/new/<step>?target=<frame-id>  new Scene with an initial Frame selection
  *   #/scenes/<id>/edit/<step>      {section: "scenes", id, flow: "edit", step}
  *   #/sources/new/<step>           {section: "sources", flow: "new", step}
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
+ *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
  *   #/<section>                    {section} for every section
  *
@@ -23,7 +27,8 @@
  * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"equipment"|"attention"} Section
  * @typedef {"new"|"edit"|"show"} Flow
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
- * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet}} Route
+ * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
+ *            initialTarget?: string}} Route
  */
 
 /**
@@ -68,7 +73,7 @@ export const FACETS = Object.freeze(["commissioning", "binding", "nowshowing"]);
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet"];
+const KEYS = ["section", "id", "flow", "step", "facet", "initialTarget"];
 
 /**
  * Parse a location hash (with or without its leading "#") into a Route, or null.
@@ -80,7 +85,11 @@ export function parseRoute(hash) {
   if (typeof hash !== "string") {
     return null;
   }
-  const path = hash.startsWith("#") ? hash.slice(1) : hash;
+  const rawPath = hash.startsWith("#") ? hash.slice(1) : hash;
+  const queryAt = rawPath.indexOf("?");
+  const path = queryAt < 0 ? rawPath : rawPath.slice(0, queryAt);
+  const query = queryAt < 0 ? "" : rawPath.slice(queryAt + 1);
+  if (queryAt >= 0 && query === "") return null;
   if (!path.startsWith("/")) {
     return null;
   }
@@ -99,7 +108,11 @@ export function parseRoute(hash) {
     return null;
   }
   if (rest.length === 0) {
+    if (query !== "") return null;
     return { section };
+  }
+  if (query !== "" && !(section === "scenes" && rest.length === 2 && rest[0] === "new")) {
+    return null;
   }
   if (section === "wall" && rest.length === 3 && rest[0] === "frames" && FACETS.includes(rest[2])) {
     return { section, id: rest[1], facet: rest[2] };
@@ -108,9 +121,15 @@ export function parseRoute(hash) {
     return { section, flow: "show", step: rest[1] };
   }
   if (NEW_FLOWS.has(section) && rest.length === 2 && rest[0] === "new") {
-    return { section, flow: "new", step: rest[1] };
+    if (query === "") return { section, flow: "new", step: rest[1] };
+    const params = new URLSearchParams(query);
+    const targets = params.getAll("target");
+    if ([...params].length !== 1 || targets.length !== 1 || !FRAME_ID_PATTERN.test(targets[0])) {
+      return null;
+    }
+    return { section, flow: "new", step: rest[1], initialTarget: targets[0] };
   }
-  if (section === "scenes" && rest.length === 3 && rest[1] === "edit") {
+  if ((section === "scenes" || section === "sources" || section === "schedule") && rest.length === 3 && rest[1] === "edit") {
     return { section, id: rest[0], flow: "edit", step: rest[2] };
   }
   return null;
@@ -123,7 +142,12 @@ export function parseRoute(hash) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet } = route ?? {};
+  const { section, id, flow, step, facet, initialTarget } = route ?? {};
+  if (initialTarget !== undefined &&
+      (section !== "scenes" || flow !== "new" || facet !== undefined ||
+        !FRAME_ID_PATTERN.test(initialTarget))) {
+    throw new Error(`not a console route: ${JSON.stringify(route)}`);
+  }
   let parts;
   if (facet !== undefined) {
     parts = [section, "frames", id, facet];
@@ -134,13 +158,24 @@ export function formatRoute(route) {
   } else {
     parts = [section];
   }
-  const hash =
+  const path =
     "#/" + parts.map((part) => encodeURIComponent(typeof part === "string" ? part : "")).join("/");
+  const hash = initialTarget === undefined
+    ? path
+    : `${path}?target=${encodeURIComponent(initialTarget)}`;
   const parsed = parseRoute(hash);
   if (parsed === null || !sameRoute(parsed, route)) {
     throw new Error(`not a console route: ${JSON.stringify(route)}`);
   }
   return hash;
+}
+
+/** A new Scene route whose fresh draft starts with this Frame explicitly selected. */
+export function sceneCreationRoute(frameId) {
+  if (typeof frameId !== "string" || !FRAME_ID_PATTERN.test(frameId)) {
+    throw new Error(`not a Frame identifier: ${String(frameId)}`);
+  }
+  return { section: "scenes", flow: "new", step: "kind", initialTarget: frameId };
 }
 
 /**

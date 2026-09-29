@@ -24,12 +24,16 @@ from console_tasks import (
     start_source,
     visit,
 )
-from operator_harness import operator_server, submit_sign_in
+from operator_harness import RequestGate, answer_first, operator_server, submit_sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
+    SCENE_ID,
     SOURCE,
+    _runtime,
+    _scene,
     _seed,
     _seed_source,
+    _set_source,
 )
 
 from central.media_repository import MediaRepository
@@ -40,7 +44,7 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-NEW_SOURCE = "spring:1"
+NEW_SOURCE = "spring"
 
 
 
@@ -77,15 +81,459 @@ def test_with_no_source_the_connection_is_a_visible_required_field(page, registr
         connection = _connection(page)
         expect(connection).to_be_visible()
         expect(connection).to_have_value("")
+        expect(source_form(page)).to_contain_text(
+            "The media worker has not reported its configured connections yet.")
+        expect(source_form(page)).to_contain_text(
+            "This form does not set the Immich URL or API key.")
         assert connection.evaluate("(element) => element.tagName") == "INPUT"
         expect(_advanced(page)).to_have_count(0)
 
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(source_form(page).get_by_role("alert")).to_contain_text(
             "Connection name is required.")
         expect(connection).to_be_focused()
         assert current_hash(page) == "#/sources/new/name"
+
+
+def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry):
+    _seed(registry)
+    _set_source(registry, "all-photos:1", status="incompatible",
+                next_refresh=registry.clock.utc() + 30,
+                refresh_completed_revision=0, refresh_requested_revision=1,
+                diagnostics=[{"code": "unsupported_version"}])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="all-photos")
+        expect(card).to_contain_text("No successful refresh")
+        expect(card).to_contain_text("Library unsupported · never refreshed successfully")
+        expect(card).to_contain_text(
+            "This Photo Wall release does not support the Immich version.")
+        expect(card).not_to_contain_text("Awaiting refresh")
+
+
+def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_details(page, registry):
+    _seed(registry)
+    now = registry.clock.utc()
+    _set_source(
+        registry, "mixed:1", status="ok", next_refresh=now + 30, last_success=now - 60,
+        refresh_requested_revision=1, refresh_completed_revision=1,
+        counts={"discovered": 6, "valid": 3, "pending": 2, "rejected": 1},
+        diagnostics=[
+            {"code": "metadata_invalid", "asset_id": "asset-safe-id"},
+            {"code": "metadata_pending_or_changed", "asset_id": "other-safe-id"},
+            {"code": "metadata_invalid", "asset_id": "third-safe-id"},
+        ],
+    )
+    _set_source(
+        registry, "clean:1", status="ok", next_refresh=now + 30, last_success=now - 60,
+        refresh_requested_revision=1, refresh_completed_revision=1,
+        counts={"discovered": 3, "valid": 3, "pending": 0, "rejected": 0},
+        diagnostics=[],
+    )
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        mixed = _sources(page).get_by_role("article", name="mixed")
+        expect(mixed.get_by_text(
+            "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+        )).to_be_visible()
+        expect(mixed.get_by_text(
+            "Refresh succeeded with 3 items pending or rejected: metadata invalid · "
+            "metadata pending or changed. Usable items remain available."
+        )).to_be_visible()
+        clean = _sources(page).get_by_role("article", name="clean")
+        expect(clean.get_by_text(
+            "refreshed 1 min ago · 3 valid in the last refresh"
+        )).to_be_visible()
+        expect(clean.get_by_text("Partial refresh")).to_have_count(0)
+        expect(mixed).not_to_contain_text("asset-safe-id")
+
+
+def test_card_refresh_reports_accepted_request_and_blocks_duplicate_clicks(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        gate = RequestGate(page, "**/v1/operator/sources/holiday%3A1/refresh")
+        gate.holding = True
+        refresh = card.get_by_role("button", name="Refresh holiday", exact=True)
+        refresh.click()
+        gate.wait_held()
+        expect(refresh).to_be_disabled()
+        expect(refresh).to_have_text("Requesting refresh…")
+        gate.release(status=202, content_type="application/json",
+                     body='{"requested_revision": 1}')
+        expect(card.get_by_role("status")).to_have_text(
+            "Refresh requested. Check Status for the worker's latest result.")
+        expect(card.get_by_text("refreshed", exact=False)).to_be_visible()
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ((409, '{"error":"source_not_found"}'), "Refresh request failed: source not found."),
+        ((503, '{"error":"internal"}'),
+         "The refresh request outcome is unknown. Check the Source status before retrying."),
+    ],
+)
+def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, expected):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        status, body = response
+        answer_first(
+            page,
+            "**/v1/operator/sources/holiday%3A1/refresh",
+            lambda route: route.fulfill(status=status, content_type="application/json", body=body),
+        )
+        card.get_by_role("button", name="Refresh holiday", exact=True).click()
+        expect(card.get_by_role("status")).to_have_text(expected)
+
+
+def test_card_refresh_reports_unknown_transport_outcome(page, registry):
+    _seed(registry)
+    _seed_source(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        card = _sources(page).get_by_role("article", name="holiday")
+        answer_first(page, "**/v1/operator/sources/holiday%3A1/refresh",
+                     lambda route: route.abort())
+        card.get_by_role("button", name="Refresh holiday", exact=True).click()
+        expect(card.get_by_role("status")).to_have_text(
+            "The refresh request outcome is unknown. Check the Source status before retrying.")
+
+
+def test_reported_worker_connections_drive_source_choices(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["family-library"])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        _to_name_step(page)
+        form = source_form(page)
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        connection = form.get_by_label("Connection name", exact=True)
+        expect(connection).to_have_value("family-library")
+        assert connection.evaluate("(element) => element.tagName") == "SELECT"
+        expect(connection.locator("option")).to_have_count(1)
+        expect(form).not_to_contain_text("Another connection")
+
+
+def _enable_preview_connection(registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["fixture-library"])
+
+
+def test_include_preview_sends_current_filters_and_reports_matches_without_dirtying_draft(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        form.get_by_label("Media type", exact=True).select_option("image")
+        form.get_by_label("Favourites", exact=True).select_option("only")
+        form.get_by_label("Taken from", exact=True).fill("2025-01-02")
+        form.get_by_label("Taken until", exact=True).fill("2025-02-03")
+        expected_from, expected_until = form.evaluate("""() => [
+          new Date(2025, 0, 2).getTime() / 1000,
+          new Date(2025, 1, 3).getTime() / 1000,
+        ]""")
+        preview = form.get_by_role("button", name="Preview matches", exact=True)
+        assert preview.is_enabled()
+
+        def request(route):
+            assert route.request.method == "POST"
+            assert route.request.post_data_json == {
+                "connection_ref": "fixture-library",
+                "media_types": ["image"],
+                "favorites": True,
+                "captured_from": expected_from,
+                "captured_until": expected_until,
+            }
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"preview-1","status":"pending"}')
+
+        page.route("**/v1/operator/source-previews", request)
+        page.route("**/v1/operator/source-previews/preview-1", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"preview-1","status":"complete","count":4,"image_count":4,"video_count":0}'))
+        preview.click()
+        expect(form.get_by_role("status").filter(has_text="4 matching items: 4 images and 0 videos.")).to_be_visible()
+        expect(_link(page, "Photo sources")).to_have_accessible_description("Draft")
+
+
+def test_previewing_default_source_does_not_mark_draft_dirty(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        page.route("**/v1/operator/source-previews", lambda route: route.fulfill(
+            status=202, content_type="application/json",
+            body='{"request_id":"preview-2","status":"pending"}'))
+        page.route("**/v1/operator/source-previews/preview-2", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"preview-2","status":"complete","count":0,"image_count":0,"video_count":0}'))
+        form.get_by_role("button", name="Preview matches", exact=True).click()
+        expect(form.get_by_role("status").filter(has_text="No photos or videos match these filters.")).to_be_visible()
+        expect(_link(page, "Photo sources")).to_have_accessible_description("")
+
+
+def test_include_preview_distinguishes_empty_and_failed_results(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        request_ids = []
+
+        def post_preview(route):
+            request_id = "empty" if not request_ids else "failed"
+            request_ids.append(request_id)
+            route.fulfill(status=202, content_type="application/json",
+                          body=f'{{"request_id":"{request_id}","status":"pending"}}')
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/empty", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"empty","status":"complete","count":0,"image_count":0,"video_count":0}'))
+        page.route("**/v1/operator/source-previews/failed", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"request_id":"failed","status":"failed","error":"connection_unknown"}'))
+        button = form.get_by_role("button", name="Preview matches", exact=True)
+        button.click()
+        expect(form.get_by_role("status").filter(has_text="No photos or videos match these filters.")).to_be_visible()
+        button.click()
+        expect(form.get_by_role("alert")).to_have_text("The preview failed: connection unknown.")
+
+
+def test_preview_requires_a_connection_when_worker_reports_several(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["fixture-library", "second-library"])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        button = form.get_by_role("button", name="Preview matches", exact=True)
+        expect(button).to_be_disabled()
+        chooser = form.get_by_label("Connection name", exact=True)
+        chooser.select_option("second-library")
+        expect(button).to_be_enabled()
+
+
+def test_invalid_capture_range_disables_preview(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        form.get_by_label("Taken from", exact=True).fill("2025-02-01")
+        form.get_by_label("Taken until", exact=True).fill("2025-01-01")
+        expect(form.get_by_role("button", name="Preview matches", exact=True)).to_be_disabled()
+        expect(form.get_by_text("Correct the capture date range before previewing.", exact=True)).to_be_visible()
+
+
+def test_a_late_preview_for_old_filters_is_discarded(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        page.route("**/v1/operator/source-previews", lambda route: route.fulfill(
+            status=202, content_type="application/json",
+            body='{"request_id":"old-filters","status":"pending"}'))
+        gate = RequestGate(page, "**/v1/operator/source-previews/old-filters")
+        gate.holding = True
+        form.get_by_role("button", name="Preview matches", exact=True).click()
+        gate.wait_held()
+        form.get_by_label("Media type", exact=True).select_option("video")
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/old-filters")):
+            gate.release(status=200, content_type="application/json",
+                         body='{"request_id":"old-filters","status":"complete","count":9,"image_count":0,"video_count":9}')
+        expect(form.get_by_text("9 matching items: 0 images and 9 videos.", exact=True)).to_have_count(0)
+        expect(form.get_by_role("button", name="Preview matches", exact=True)).to_be_enabled()
+
+
+def test_check_again_resumes_the_same_preview_request_after_elapsed_deadline(page, registry):
+    _enable_preview_connection(registry)
+    page.clock.install()
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        requests = []
+        polls = []
+        complete_next = [False]
+
+        def post_preview(route):
+            requests.append(route.request.post_data_json)
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"long-running","status":"pending"}')
+
+        def poll_preview(route):
+            polls.append(route.request.url)
+            status = "complete" if complete_next[0] else "pending"
+            body = ('{"request_id":"long-running","status":"complete","count":2,'
+                    '"image_count":2,"video_count":0}' if status == "complete" else
+                    '{"request_id":"long-running","status":"pending"}')
+            route.fulfill(status=200, content_type="application/json", body=body)
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/long-running", poll_preview)
+        with page.expect_response(lambda response: response.request.method == "POST"
+                                  and response.url.endswith("/v1/operator/source-previews")):
+            form.get_by_role("button", name="Preview matches", exact=True).click()
+        page.clock.run_for(81000)
+        check_again = form.get_by_role("button", name="Check again", exact=True)
+        expect(check_again).to_be_enabled()
+        expect(form.get_by_text("The preview is still processing. You can request it again.", exact=True)).to_be_visible()
+        complete_next[0] = True
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/long-running")):
+            check_again.click()
+        expect(form.get_by_role("status").filter(has_text="2 matching items: 2 images and 0 videos.")).to_be_visible()
+        assert len(requests) == 1
+
+
+def test_leaving_include_resumes_the_accepted_request_on_return(page, registry):
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        form = start_source(page)
+        posts = []
+        held = []
+        polls = []
+
+        def post_preview(route):
+            posts.append(route.request.post_data_json)
+            route.fulfill(status=202, content_type="application/json",
+                          body='{"request_id":"navigation-preview","status":"pending"}')
+
+        def poll_preview(route):
+            polls.append(route)
+            if len(polls) == 1:
+                held.append(route)
+                return
+            route.fulfill(status=200, content_type="application/json",
+                          body='{"request_id":"navigation-preview","status":"complete","count":1,"image_count":1,"video_count":0}')
+
+        page.route("**/v1/operator/source-previews", post_preview)
+        page.route("**/v1/operator/source-previews/navigation-preview", poll_preview)
+        with page.expect_response(lambda response: response.request.method == "POST"
+                                  and response.url.endswith("/v1/operator/source-previews")):
+            form.get_by_role("button", name="Preview matches", exact=True).click()
+        with page.expect_request("**/navigation-preview"):
+            page.wait_for_timeout(1100)
+        assert held
+
+        source_continue(page, "Name")
+        form.get_by_role("button", name="Back", exact=True).click()
+        check_again = form.get_by_role("button", name="Check again", exact=True)
+        expect(check_again).to_be_enabled()
+        held.pop().fulfill(status=200, content_type="application/json",
+                           body='{"request_id":"navigation-preview","status":"pending"}')
+        with page.expect_response(lambda response: response.request.method == "GET"
+                                  and response.url.endswith("/navigation-preview")):
+            check_again.click()
+        expect(form.get_by_role("status").filter(has_text="1 matching item: 1 image and 0 videos.")).to_be_visible()
+        assert len(posts) == 1
+
+
+def test_reported_empty_worker_connections_explains_setup_prerequisite(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(None, connection_ids=[])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        _to_name_step(page)
+        form = source_form(page)
+        expect(form.get_by_label("Connection name", exact=True)).to_be_disabled()
+        expect(form).to_contain_text("No connections configured")
+        expect(form).to_contain_text(
+            "Add a connection to the media worker's private configuration and restart the worker.")
+
+
+def test_edit_marks_removed_connection_unavailable_and_requires_a_reported_choice(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["current-library"])
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        cards = _sources(page)
+        cards.get_by_role("button", name="Edit Source holiday", exact=True).click()
+        form = source_form(page)
+        form.get_by_role("button", name="Change Connection name", exact=True).click()
+        chooser = form.get_by_label("Connection name", exact=True)
+        expect(chooser).to_have_value("fixture-library")
+        expect(chooser.locator("option:checked")).to_contain_text("no longer configured")
+        expect(chooser.locator("option")).to_have_count(3)  # blank, current, saved-unavailable
+        source_continue(page)
+        expect(form.get_by_role("alert")).to_contain_text(
+            "Choose a connection currently configured in the media worker.")
+        assert current_hash(page) == "#/sources/holiday/edit/name"
+        chooser.select_option(label="current-library")
+        source_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("current-library")
+
+
+def test_edit_rename_and_delete_use_plain_names_with_revision_fencing(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        assert add_source(page, "spring", "fixture-library").status == 200
+        cards = _sources(page)
+        cards.get_by_role("button", name="Edit Source spring", exact=True).click()
+        assert current_hash(page) == "#/sources/spring/edit/review"
+        form = source_form(page)
+        form.get_by_role("button", name="Change Source name", exact=True).click()
+        form.get_by_label("Source name", exact=True).fill("spring-renamed")
+        source_continue(page, "Review")
+        with page.expect_response(lambda r: r.request.method == "PUT"
+                                  and r.url.endswith("/v1/operator/source-names/spring")) as info:
+            form.get_by_role("button", name="Save changes", exact=True).click()
+        assert info.value.status == 200
+        assert info.value.request.post_data_json["expected_revision"] == 1
+        assert info.value.request.post_data_json["new_name"] == "spring-renamed"
+        expect(cards.get_by_role("article", name="spring-renamed", exact=True)).to_be_visible()
+        expect(cards.get_by_role("article", name="spring", exact=True)).to_have_count(0)
+
+        cards.get_by_role("button", name="Delete Source spring-renamed", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Delete Source spring-renamed?")
+        with page.expect_response(lambda r: r.request.method == "DELETE"
+                                  and "/v1/operator/source-names/spring-renamed" in r.url) as deletion:
+            dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        assert deletion.value.status == 200
+        expect(dialog).to_have_count(0)
+        expect(cards.get_by_role("article", name="spring-renamed", exact=True)).to_have_count(0)
+
+
+def test_delete_names_scenes_that_still_use_the_source(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "sources")
+        _sources(page).get_by_role("button", name="Delete Source holiday", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Delete Source holiday?")
+        dialog.get_by_role("button", name="Confirm delete", exact=True).click()
+        expect(dialog.get_by_role("alert")).to_contain_text(SCENE_ID)
+        expect(_sources(page).get_by_role("article", name="holiday", exact=True)).to_be_visible()
+
+
+def test_scene_picker_shows_plain_name_but_keeps_exact_source_ref(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        form = start_scene(page)
+        picker = form.get_by_label("Source", exact=True)
+        expect(picker.get_by_role("option", name="holiday", exact=True)).to_have_attribute("value", SOURCE)
+        expect(picker.get_by_role("option", name="holiday:1")).to_have_count(0)
 
 
 def test_one_connection_among_the_sources_is_prefilled_under_advanced(page, registry):
@@ -103,12 +551,12 @@ def test_one_connection_among_the_sources_is_prefilled_under_advanced(page, regi
         expect(connection).to_have_value("fixture-library")
 
         # Saved without typing it: Review lists it, and the body carries it.
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         answers = source_form(page).get_by_role("definition").filter(has_text="fixture-library")
         expect(answers).to_have_count(1)
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             source_form(page).get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
         assert info.value.request.post_data_json["connection_ref"] == "fixture-library"
@@ -126,10 +574,10 @@ def test_several_connections_give_a_visible_chooser_with_none_chosen(page, regis
         expect(chooser).to_be_visible()
         expect(chooser).to_have_value("")
         expect(chooser.get_by_role("option")).to_have_text(
-            ["Choose a connection", "fixture-library", "second-library", "Another connection…"])
+            ["Choose a configured connection", "fixture-library", "second-library", "Another connection…"])
         expect(_advanced(page)).to_have_count(0)
 
-        source_form(page).get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(source_form(page).get_by_role("alert")).to_contain_text(
             "Connection name is required.")
@@ -159,7 +607,7 @@ def test_continue_checks_only_its_own_step(page, registry):
         until.fill("2025-01-01")
         source_continue(page, "Name")
         expect(form.get_by_role("alert")).to_have_count(0)
-        ref = form.get_by_label("Source name and revision", exact=True)
+        ref = form.get_by_label("Source name", exact=True)
         expect(ref).not_to_have_attribute("aria-invalid", "true")
         expect(_connection(page)).not_to_have_attribute("aria-invalid", "true")
 
@@ -176,13 +624,13 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
         save.click()
         summary = form.get_by_role("alert")
         expect(summary).to_be_focused()
-        problem = summary.get_by_role("button").filter(has_text="Name and revision")
+        problem = summary.get_by_role("button").filter(has_text="Source name")
         problem.click()
         assert current_hash(page) == "#/sources/new/name"
-        expect(form.get_by_label("Source name and revision", exact=True)).to_be_focused()
+        expect(form.get_by_label("Source name", exact=True)).to_be_focused()
 
         # A value under Advanced: its Change link opens Advanced on its step first.
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         form.get_by_role("button", name="Change Connection name", exact=True).click()
         assert current_hash(page) == "#/sources/new/name"
@@ -197,7 +645,7 @@ def test_the_draft_survives_a_section_change(page, registry):
         form = start_source(page)
         form.get_by_label("Media type", exact=True).select_option("video")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill("kept:1")
+        form.get_by_label("Source name", exact=True).fill("kept")
         expect(_link(page, "Photo sources")).to_have_accessible_description("Draft")
 
         go(page, "wall")
@@ -205,7 +653,7 @@ def test_the_draft_survives_a_section_change(page, registry):
         assert current_hash(page) == "#/sources"
         _sources(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
         assert current_hash(page) == "#/sources/new/name"
-        expect(form.get_by_label("Source name and revision", exact=True)).to_have_value("kept:1")
+        expect(form.get_by_label("Source name", exact=True)).to_have_value("kept")
         form.get_by_role("button", name="Back", exact=True).click()
         expect(form.get_by_label("Media type", exact=True)).to_have_value("video")
 
@@ -250,10 +698,10 @@ def test_a_new_selection_runs_inline_and_returns_with_the_new_source_chosen(page
         expect(form.get_by_role("heading", name="What to include", exact=True)).to_be_focused()
         form.get_by_label("Media type", exact=True).select_option("image")
         source_continue(page, "Name")
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page, "Review")
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
 
@@ -261,7 +709,7 @@ def test_a_new_selection_runs_inline_and_returns_with_the_new_source_chosen(page
         expect(page.get_by_role("heading", level=1, name="Scenes", exact=True)).to_be_visible()
         assert current_hash(page) == "#/scenes/new/photos"
         picker = scene_form(page).get_by_label("Source", exact=True)
-        expect(picker).to_have_value(NEW_SOURCE)
+        expect(picker).to_have_value(NEW_SOURCE + ":1")
         expect(picker).to_be_focused()
         expect(_link(page, "Photo sources")).to_have_accessible_description("")
         expect(_link(page, "Scenes")).to_have_accessible_description("Draft")
@@ -341,12 +789,12 @@ def test_a_hand_off_ends_with_the_scene_draft_it_was_begun_for(page, registry):
         expect(_sources(page).get_by_text(FOR_SCENE, exact=True)).to_have_count(0)
         expect(_sources(page).get_by_role(
             "button", name="Discard and return to your Scene", exact=True)).to_have_count(0)
-        response = add_source(page, "stale:1", "fixture-library")
+        response = add_source(page, "stale", "fixture-library")
         assert response.status == 200
         assert current_hash(page) == "#/sources"
         expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)
                ).to_be_visible()
-        expect(_sources(page).get_by_role("article", name="stale:1", exact=True)).to_be_visible()
+        expect(_sources(page).get_by_role("article", name="stale", exact=True)).to_be_visible()
 
         # B is as the operator left it.
         go(page, "scenes")
@@ -401,7 +849,7 @@ def test_with_several_connections_another_one_can_be_typed(page, registry):
         expect(other).to_be_visible()
         expect(other).to_have_value("")
 
-        form.get_by_label("Source name and revision", exact=True).fill(NEW_SOURCE)
+        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
         source_continue(page)
         expect(form.get_by_role("alert")).to_contain_text("Connection name is required.")
         expect(other).to_be_focused()
@@ -414,7 +862,7 @@ def test_with_several_connections_another_one_can_be_typed(page, registry):
         expect(other).to_have_value("third-library")
         source_continue(page, "Review")
         with page.expect_response(lambda r: r.request.method == "PUT"
-                                  and "/v1/operator/sources/" in r.url) as info:
+                                  and "/v1/operator/source-names/" in r.url) as info:
             form.get_by_role("button", name="Save source", exact=True).click()
         assert info.value.status == 200
         assert info.value.request.post_data_json["connection_ref"] == "third-library"

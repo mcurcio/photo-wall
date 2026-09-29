@@ -154,7 +154,7 @@ graph TD
   end
 
   subgraph SHOW["SHOWRUNNER MODE"]
-    SRC["Sources (name:rev, Refresh)"]
+    SRC["Sources (plain names, Refresh/Edit/Delete)"]
     SCN["Scenes (per-target authoring)"]
     PRG["Programs (single windows + priority)"]
     RUN["Runs (activate / finish / cancel)"]
@@ -281,8 +281,8 @@ Plane B and the preview lease unchanged.
 - **Scope tier (T0 / T1 / T2)** — the staged scope of the Display dimension: T0
   UX-only (this pass), T1 a photometric backend program, T2 a CEC/actuator
   cross-layer epic. The owner picks how far to go ([§10](#10-decisions-that-are-yours)).
-- **Source** — a saved, immutably-versioned Immich *query* named `name:rev` (e.g.
-  `holiday:1`): live eligibility, not a downloaded album. Players never see it.
+- **Source** — a saved Immich *query* with a plain operator name (e.g.
+  `holiday`) and internal immutable revisions: live eligibility, not a downloaded album. Players never see it.
 - **Scene / Program / Run** — a **Scene** is a per-target composition of
   contributions (media/black/actuator); a **Program** binds a Scene to a *single*
   time window with a priority; a **Run** is a live execution instance with phases
@@ -307,8 +307,8 @@ state**, so state discipline is carried by the framework rather than hand-rolled
 render discipline. It is made explicit as **two planes**:
 
 - **Plane A — READ snapshot.** One immutable object holding the last successful
-  `inventory` + `runtime` + `media` reads, with a single timestamp, held as React
-  state near the top of the tree (a `useSnapshot()` hook). Every region is a React
+  aggregate read of `inventory` + `runtime` + `media`, held as React state near
+  the top of the tree (a `useSnapshot()` hook). Every region is a React
   component that renders from it as a pure function of `(snapshot, selection)`. A
   refresh re-fetches a new snapshot and replaces the Plane A state wholesale;
   nothing patches it in place.
@@ -329,10 +329,72 @@ exception to "pure render from snapshot": the Commissioning facet reads Plane B 
 its calibration handles and Plane A only for the committed baseline and conflict
 detection.
 
-To keep the headline now-showing join honest, **inventory and runtime are fetched
-and swapped together as one atomic snapshot** — never independently — so a
-Frame's binding row and its now-showing chip always share one age and the
-snapshot clock is truthful.
+The console reads Plane A from authenticated `GET /v1/operator/snapshot`. Central
+reads inventory, Runtime and media through one short PostgreSQL
+`REPEATABLE READ READ ONLY` transaction, so related database rows come from one
+MVCC view. The envelope's `read_at` is the Central application-clock instant used
+for the Runtime projection and inventory query. Player readiness reports are
+read in that same database view, but their safe age reference is separately
+reported as `player_reports_read_at`: Central clamps it to at least every
+accepted report timestamp, and inventory liveness time also accounts for Player
+enrollment timestamps. These clocks keep report ages non-negative; neither is a
+readback of lit pixels or visible playback. The client keeps both times alongside
+the aggregate and uses its local `at` only to show how long ago it fetched that
+snapshot.
+
+### Current Player readiness failures
+
+The aggregate snapshot may include `readiness_diagnostics`, one bounded typed
+record per currently authoritative failed assignment. Central derives these
+records from the latest accepted `player_feedback` row and that Player's
+`plan_offers` manifest; it does not persist a second diagnostic table. The
+projection is read in the snapshot's same repeatable-read transaction and uses
+the snapshot's `read_at` for temporal checks.
+
+A diagnostic is exposed only when the Player is not retired and the accepted
+report's epoch equals its current epoch; the report's plan ID and revision match
+the highest offered revision; that offer is still unexpired; and the failure's
+assignment ID resolves in that exact manifest. An expired highest revision does
+not revive an older offer. Central also checks the stored current
+`PlayerConfiguration`, its authorization for the layer, and the current Frame
+inventory's Player, Output, generation, profile, calibration and configuration
+facts. Ended layers are omitted. Feedback older than
+`SILENT_AFTER_SECONDS` is omitted so old failure details cannot mask Player
+silence. The result is sorted and capped at 8,192 records; a pathological larger
+set is truncated from the end of that deterministic ordering.
+
+These are accepted Player readiness reports, not display readback. A report's
+`received_at` is when Central accepted it; `observed_at` is the Player-reported
+time. Neither means that pixels were scanned out or that the operator saw the
+image. The enrollment `OutputReport.connected` observation remains separate
+and likewise does not prove visible playback. Keep the report-age label and
+intended Runtime state distinct from any claim of visible output.
+
+The console owns the mapping from Player failure codes to recovery guidance.
+Known guidance directs operators to reduce concurrent video/effect work or use
+lighter media (`capacity`), check time synchronization (`clock`), check media
+support or choose another item (`decode`), inspect Player storage/network and
+Central media delivery (`download`), or inspect the Player cache and Central
+delivery path (`integrity`). An unknown code receives generic Player/Central
+diagnostic guidance; it is not echoed into operator copy. Silence takes
+precedence over failure guidance because a silent Player's old report cannot
+diagnose its present state.
+
+The older authenticated `GET /v1/operator/inventory`, `/runtime`, and `/media`
+routes remain available with their existing response shapes for compatibility.
+The console uses the aggregate endpoint for Plane A, because independent legacy
+requests cannot promise a shared database view. The older routes are not removed
+or repurposed.
+
+### Scene-card summaries
+
+Scene cards summarize the complete stored Scene tree. A recursive projection
+collects and de-duplicates Frame targets, live Source references, and authored
+asset references from the root's body and outro plus inline child Scenes. The
+card's Frames row therefore includes every targeted Frame, including outro and
+child targets; its Media row can name live Sources and count distinct authored
+items together. These are authored-content summaries, not a promise that every
+candidate is currently ready or that a Player has displayed it.
 
 ### 4b. Calibration commit / conflict decision table
 
@@ -549,8 +611,7 @@ and `current.runs`). "Why" = the `contributions` for a Frame ranked by the total
 precedence order — deterministic, no ties. The **synchronous** activation result
 is shown at the moment of activation; the calendar does **not** render
 "expired: missed_window" history, because that reason is not on any operator GET
-(see the cost in [§6](#6-the-hard-part)). **Superseded (pass 2 slice 3A):** `/runtime` now serves each recent Program's outcome, so Program rows show missed and refused windows; see [pass 2 slice 3, §8](operator-console-ux-pass2-showrunner.md#8-what-central-adds-read-only-frozen-for-bead-3a-3). A Source is labelled a saved query
-(`name:rev`); no "open in Immich," no album language. Showrunner **never** exposes
+(see the cost in [§6](#6-the-hard-part)). **Superseded (pass 2 slice 3A):** `/runtime` now serves each recent Program's outcome, so Program rows show missed and refused windows; see [pass 2 slice 3, §8](operator-console-ux-pass2-showrunner.md#8-what-central-adds-read-only-frozen-for-bead-3a-3). A Source is labelled a saved query by its plain name; no "open in Immich," no album language. Showrunner **never** exposes
 the Commissioning facet; the only hardware fact it sees is the
 `calibration_valid` badge (R4).
 
@@ -925,33 +986,33 @@ events (preview expiry, calibration) and would spuriously 409 an honest move.
 **Cost:** two operators dragging the same frame silently LWW; the plan corrects
 on the next snapshot.
 
-**`DELETE /v1/operator/frames/{frame_id}` — remove, guarded.** Two guards, both
-refuse with 409 and a plain-language message; only a clear Frame is deleted:
+**`DELETE /v1/operator/frames/{frame_id}` — remove, guarded.** The existing
+live-Run and binding guards remain, and Central now also protects Frame IDs
+referenced by stored Scene roots or queued activations:
 
 | Guard | Check (where) | Refusal (409) | Operator sees |
 |---|---|---|---|
 | Live Run targets the Frame | `coordinator.runtime.read().project(now)`; any non-ended run whose `participants` contains `"frame:<id>"` (runtime.py:179, 191) | `frame_in_use` | "A live Run is scheduled on this Frame — finish or cancel it before deleting." |
 | Frame is bound | `SELECT 1 FROM bindings WHERE frame_id=%s` under `FOR UPDATE` on the frame row (registry.py:193, 266) | `frame_bound` | "This Frame still has a bound Output — unbind it before deleting." |
+| Stored Scene root or queued activation targets the Frame | Current Runtime definitions and queued activation snapshots; Programs whose future windows use a blocking Scene are reported with it | `frame_referenced`, with sorted `scene_ids`, `program_ids`, and `queued_activation_ids` | Confirmation lists current saved Scene roots and upcoming Programs; if the references changed after the dialog opened, refusal surfaces the server-returned IDs and asks the operator to refresh, edit/remove saved references, and review queued activations. |
 
-The runtime guard is checked in the route (in-memory, cheap) before the store
-call; the binding guard is enforced **atomically inside the store transaction**
-(the `bindings` FK on `frame_id`, 001_registry.sql:37, would otherwise surface a
-raw 500 — the explicit check returns a clean 409 instead). On success:
-`DELETE FROM frames WHERE id`, audit `frame_deleted`, `200 {"status":"deleted"}`.
-**Cost / stated limit:** a TOCTOU window exists between the route's runtime check
-and the DB delete (a Program could admit a run onto the frame in between); it is
-**benign** because a deleted frame has no binding, so any run projecting onto
-`"frame:<id>"` reaches no player and runs reference frames by string, not FK — a
-dangling reference is harmless intent, not a crash. The load-bearing invariant
-the guards protect: *you cannot delete a Frame that a Player is currently bound
-to serve.*
+The live-Run check continues to return `frame_in_use` with server `run_ids`, and
+the bound-Output check continues to return `frame_bound`; their behavior and
+operator remedies are unchanged. The reference refusal carries server IDs so a
+stale confirmation can identify what now blocks deletion. On success,
+`DELETE FROM frames WHERE id`, audit `frame_deleted`, and return
+`200 {"status":"deleted"}`. Runtime still permits an explicit Scene target
+for a Frame ID that is currently absent: such content can be retained or
+authored as future recovery intent and becomes executable only after that Frame
+is recreated and centrally bound. The delete guard protects references already
+attached to the current Frame; it does not impose a permanent ID reservation.
 
 **Refresh cadence (numbers are PLACEHOLDERS pending tuning):**
 
 | Surface | Trigger | Staleness cost if not refreshed |
 |---|---|---|
 | `/healthz` pill | poll ~10s (matches existing health pill) | pill lags reachability by up to one interval |
-| `/inventory` + `/runtime` (atomic Plane A) | on focus/visibility-change; after every mutation; on explicit Refresh | now-showing chip and binding row drift; snapshot clock shows the age honestly |
+| `/v1/operator/snapshot` (atomic Plane A) | on focus/visibility-change; after every mutation; on explicit Refresh | now-showing chip and binding row drift; snapshot clock shows the age honestly |
 | `/inventory` (Commissioning facet open) | poll ~5s while facet is open | a preview overtake or committed-elsewhere change is detected late |
 | Now-showing chips (Wall mode, focused) | optional gentle `/runtime`-only refresh ~15–30s | chips lag scheduled intent |
 
@@ -1200,11 +1261,13 @@ drops), and a new actuator/display-command registry + endpoints + dispatcher.
 
 ### The tracer bullet — "Read the wall"
 
-Render one Surface plan from `GET /inventory` geometry, overlay
-**Intended-now-showing** from `GET /runtime` `current.visible` joined by the
-**string** `"frame:<id>"`, and open a **read-only** Inspector on Frame select.
-Touches `GET /inventory`, `GET /runtime`, and the existing `/healthz` only. No
-writes. It proves the hardest, most novel claims at once: the mm→px SVG
+Render one Surface plan from inventory geometry in
+`GET /v1/operator/snapshot`, overlay **Intended-now-showing** from its Runtime
+`current.visible` joined by the **string** `"frame:<id>"`, and open a
+**read-only** Inspector on Frame select. The older inventory, runtime and media
+GETs remain compatible for existing callers. The console's shared Plane A read
+uses the aggregate endpoint; `/healthz` remains separate. No writes. It proves
+the hardest, most novel claims at once: the mm→px SVG
 projection and Surface filtering; the Frame↔runtime join that produces "what's on
 which Frame, and why" from existing payloads; the two-plane snapshot/refresh
 honesty; and the React selection→Inspector component pattern.

@@ -34,12 +34,23 @@ class RuntimeStore:
 
     def read(self) -> Runtime:
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+            return self.read_in(conn)
+
+    @staticmethod
+    def read_in(conn) -> Runtime:
+        """Restore Runtime from a caller-owned transaction without acquiring locks."""
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
+        return Runtime.restore(row["snapshot"]) if row else Runtime()
+
+    def read_locked(self, conn) -> Runtime:
+        """Read current state while serializing with Runtime writers, without saving it."""
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (RUNTIME_LOCK,))
+        row = conn.execute("SELECT snapshot FROM runtime_state WHERE singleton").fetchone()
         return Runtime.restore(row["snapshot"]) if row else Runtime()
 
     def command(self, method: str, *args, **kwargs):
         # The HTTP adapter cannot call arbitrary object methods through operator input.
-        if method not in {"set_scene", "set_program", "remove_program", "activate", "finish", "cancel", "advance"}:
+        if method not in {"set_scene", "delete_scene", "set_program", "replace_program", "remove_program", "activate", "finish", "cancel", "advance"}:
             raise ValueError("unknown Runtime command")
         with self.edit() as runtime:
             return getattr(runtime, method)(*args, **kwargs)

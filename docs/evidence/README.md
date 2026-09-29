@@ -1,5 +1,61 @@
 # Acceptance evidence
 
+- [2026-09-29 Frame profile serialization and partial Source refresh](2026-09-29-frame-profile-and-source-partial-refresh.md): atomic profile
+  replacement under coordination/Runtime locks and successful-but-partial
+  Source refresh status with bounded item diagnostics; focused PostgreSQL,
+  console, and Chromium evidence only.
+- [2026-09-29 current Player readiness diagnostics](2026-09-29-current-readiness-diagnostics.md):
+  current-authority assignment failures with epoch, offer, binding, layer-time
+  and silence filters; focused PostgreSQL results, with UI/browser verification
+  pending and no visible-output qualification claimed.
+- [2026-09-29 operator snapshot and recursive Scene cards](2026-09-29-operator-snapshot-and-scene-cards.md): one repeatable-read
+  inventory/Runtime/media view with distinct report timing, legacy GET
+  compatibility, and recursive Scene content summaries; focused checks only,
+  with final frontend integration and full gates pending.
+- [2026-09-29 Frame deletion reference guard](2026-09-29-frame-delete-reference-guard.md):
+  serialized refusal for saved Scene/Program and queued-activation references,
+  stale server IDs in the confirmation flow, and local software/database limits.
+- [2026-09-29 Output identification request](2026-09-29-output-identification.md):
+  15-second central request and Player banner contract, with focused
+  PostgreSQL-backed REST/WebSocket tests and explicit physical/Kubernetes limits.
+- [2026-09-29 Show now Source freshness and Player Central-link diagnostic](2026-09-29-show-now-source-freshness-and-player-link.md):
+  Central catalog freshness and request-receipt wording, plus unbound Player
+  link-state diagnostics, with focused browser/Player results and qualification limits.
+- [2026-09-29 Unsaved Source match preview](2026-09-29-unsaved-source-preview.md):
+  worker-backed bounded match counts before save, distinct failure and empty
+  states, draft-safe console polling, and local verification limits.
+- [2026-09-29 Frame-to-Scene handoff and refreshed candidates](2026-09-29-frame-to-scene-and-candidates.md):
+  commissioned Frame content action, explicit fresh Scene target, preserved
+  existing drafts, and post-refresh compatible media rereads, with local
+  verification and deployment limits.
+- [2026-09-29 Program removal feedback](2026-09-29-program-removal-feedback.md):
+  accepted, refused and unknown card outcomes for ordinary Program removal,
+  with local browser evidence and deployment limits.
+- [2026-09-29 Source refresh and Show now Frame recovery](2026-09-29-refresh-and-frame-recovery.md):
+  per-card request feedback and direct recovery routes from unhealthy Show now
+  Frame chips, with local browser verification and deployment limits.
+- [2026-09-29 Scene Source readiness and commissioning resolution check](2026-09-29-scene-readiness-and-display-check.md):
+  selected Source health and recovery inside Scene authoring, plus a
+  rotation-aware check of declared versus reported display resolution.
+- [2026-09-29 Player serials on collapsed Equipment cards](2026-09-29-player-serial-summary.md):
+  pending Players remain distinguishable from their reported serial suffixes
+  without opening each card, with browser proof and identity limits.
+- [2026-09-29 repeated-hour Program edit](2026-09-29-program-repeated-hour-edit.md):
+  exact saved-instants retained while editing an upcoming Program across a
+  daylight-saving fallback, with model/browser proof and deployment limits.
+- [2026-09-29 Source connection discovery and first-run action](2026-09-29-source-connection-discovery.md):
+  worker-reported connection names in the Photo Sources flow, guarded edits
+  after connection removal, clearer refresh status and a direct first-Frame
+  action, with local verification and deployment limits.
+- [2026-09-29 operator UX cleanup](2026-09-29-operator-ux-cleanup.md): guarded
+  Scene deletion, persistent Frame profile editing and plain revision-free
+  operator copy, with local database and
+  browser evidence and explicit hardware/deployment limits.
+- [2026-09-28 operator UX loop](2026-09-28-operator-ux-loop.md): local
+  Program edit and measured Frame placement verification at `e6d12a7`, with
+  browser/database results and remaining live-hardware limits.
+- [2026-09-28 Kubernetes Player onboarding](2026-09-28-kubernetes-player-onboarding.md): read-only Central request trace of a newly enrolled Player on the default global `.deb` path; it distinguishes accepted requests from base-health and visible-output qualification.
+
 - [2026-09-28 service image cache](2026-09-28-service-image-cache.md): cause of
   the low BuildKit cache use in hosted run 36463535409, and a local, CI-shaped
   comparison of the per-target layer and cache policy: about 10 % less image

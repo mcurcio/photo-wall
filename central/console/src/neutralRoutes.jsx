@@ -1,6 +1,8 @@
 import React from "react";
 
 import { AttentionList, attentionView } from "./AttentionList.jsx";
+import { ReadinessNotice } from "./ReadinessNotice.jsx";
+import { readinessRecoveryFrames } from "./readinessRecovery.js";
 import SAMPLES from "./routeSamples.json";
 import { formatRoute, isPlainClick } from "./routes.js";
 
@@ -15,31 +17,55 @@ import { formatRoute, isPlainClick } from "./routes.js";
  */
 function AttentionPage({ snapshot, central, wall }) {
   const { frameCount, rows } = attentionView(snapshot, central);
+  const readinessFrames = readinessRecoveryFrames(snapshot);
   if (frameCount === 0) {
     return <p className="page__empty">No frames yet. Draw one on the Wall.</p>;
   }
-  if (rows.length === 0) {
+  if (rows.length === 0 && readinessFrames.length === 0) {
     return <p className="page__empty">Nothing needs attention.</p>;
   }
-  return (
-    <AttentionList
-      className="attention-page__list"
-      rows={rows}
-      entry={(row) => (
-        <a
-          className="attention-page__link"
-          href={formatRoute(wall.frameRoute(row.frameId))}
-          onClick={(event) => {
-            if (isPlainClick(event)) {
-              wall.prepareVisit(row.frameId);
-            }
-          }}
-        >
-          {row.text}
-        </a>
-      )}
-    />
-  );
+  return <>
+    {rows.length > 0 && (
+      <AttentionList
+        className="attention-page__list"
+        rows={rows}
+        entry={(row) => (
+          <a
+            className="attention-page__link"
+            href={formatRoute(wall.frameRoute(row.frameId))}
+            onClick={(event) => {
+              if (isPlainClick(event)) {
+                wall.prepareVisit(row.frameId);
+              }
+            }}
+          >
+            {row.text}
+          </a>
+        )}
+      />
+    )}
+    {readinessFrames.length > 0 && (
+      <section className="readiness-attention" aria-label="Player readiness reports">
+        <h2>Player readiness reports</h2>
+        <ul>
+          {readinessFrames.map(({ frameId }) => (
+            <li key={frameId}>
+              <a
+                className="attention-page__link"
+                href={formatRoute(wall.frameRoute(frameId))}
+                onClick={(event) => {
+                  if (isPlainClick(event)) wall.prepareVisit(frameId);
+                }}
+              >
+                {`Frame ${frameId}`}
+              </a>
+              <ReadinessNotice snapshot={snapshot} frameId={frameId} />
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+  </>;
 }
 
 /**

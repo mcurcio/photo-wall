@@ -5,10 +5,12 @@ import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
-import { candidateLabels } from "./mediaHealth.js";
+import { candidateLabels, sourceState } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
+import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
+import { sourceRefreshMessage } from "./useSourceRefresh.js";
 
 /**
  * The Scene flow's step views (flow design §7 J4): views over the draft that
@@ -77,7 +79,7 @@ export function KindStep({ value, patch, problems }) {
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
-export function PhotosStep({ value, patch, problems, sources, onNewSource }) {
+export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness }) {
   return (
     <>
       <p className="field__hint">
@@ -94,6 +96,7 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource }) {
           problems.touch("source");
         }}
       />
+      <SourceReadiness {...sourceReadiness} />
       <div className="record__actions">
         <button type="button" onClick={onNewSource}>
           New selection from your photo library
@@ -135,7 +138,8 @@ export function FramesStep({ value, problems, snapshot, onToggle }) {
  * Step 3b, Media per frame (hand-picked only): ONE item per target frame from that
  * frame's candidates (the container's `useCandidates`, profile-filtered by Central),
  * each labelled with the planner's `standing` (mediaHealth.js `candidateLabels`). A
- * failed read says so and offers Retry (`candidates.reload`).
+ * failed read says so and offers Retry (`candidates.reload`); successful reads can be
+ * explicitly refreshed after an unknown Source-refresh outcome.
  *
  * @param {StepProps & {candidates: ReturnType<typeof import("./useCandidates.js").useCandidates>,
  *          onSelect: (frameId: string, assetId: string) => void}} props
@@ -194,6 +198,11 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
           </button>
         </div>
       )}
+      {loadError === null && !loading && value.targets.length > 0 && (
+        <button type="button" onClick={candidates.reload}>
+          Reload compatible media
+        </button>
+      )}
     </fieldset>
   );
 }
@@ -244,6 +253,7 @@ export function ReviewStep({
   candidates,
   advanced,
   onChange,
+  sourceReadiness,
 }) {
   const authored = value.mode === "authored";
   const missing = <NotChosen />;
@@ -252,7 +262,7 @@ export function ReviewStep({
     {
       label: SCENE_ANSWER_LABELS.source,
       field: "source",
-      value: value.sourceRef === "" ? missing : value.sourceRef,
+      value: value.sourceRef === "" ? missing : sourceName(value.sourceRef),
     },
     {
       label: SCENE_ANSWER_LABELS.targets,
@@ -286,10 +296,11 @@ export function ReviewStep({
         <p className="scene-flow__editing">
           {"Editing "}
           <code>{editingId}</code>
-          {` · revision ${value.revision}. Its id stays; Replace saves revision ${value.revision + 1}.`}
+          {`. Its name stays the same.`}
         </p>
       )}
       <CheckAnswers rows={rows} onChange={onChange} />
+      <SourceReadiness {...sourceReadiness} />
       {editingId === null && (
         <>
           <NameField
@@ -318,6 +329,42 @@ export function ReviewStep({
         </>
       )}
     </>
+  );
+}
+
+/** Current Source health and its effect on the Scene, shared by Photos and Review. */
+function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onRefresh, onManage }) {
+  if (source === null && !historicalRef) return null;
+  const state = source === null ? null : sourceState(source, now, false);
+  const consequence = state === null
+    ? "Status is unavailable for this saved reference. Choose a current Source to check its media status."
+    : state.state === "ok"
+      ? "A recent refresh found media; each Frame still needs compatible, prepared content."
+      : state.state === "empty"
+        ? "The last refresh found no valid items, so this Scene may have nothing to show."
+        : state.state === "failing"
+          ? "The last refresh failed, so this Scene may have no current media."
+          : state.state === "overdue"
+            ? "The catalog may be stale, so this Scene may not show the latest media."
+            : "No catalog has been loaded yet, so this Scene may have nothing to show.";
+  const message = sourceRefreshMessage(feedback, source, state);
+  return (
+    <section className={`notice scene-flow__source-readiness${state !== null && state.severity !== "ok" ? " notice--warn" : ""}`} aria-label="Source media status">
+      <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>
+      <p>{consequence}</p>
+      {message !== null && <p role="status">{message}</p>}
+      {state !== null && state.state !== "ok" && (
+        <button type="button" disabled={refreshing} onClick={onRefresh}>
+          {refreshing ? "Requesting refresh…" : "Refresh Source"}
+        </button>
+      )}
+      {(state === null || state.state !== "ok") && (
+        <div className="scene-flow__source-manage">
+          <p>Your Scene draft stays open in this tab while you manage Sources.</p>
+          <button type="button" onClick={onManage}>Manage in Photo sources</button>
+        </div>
+      )}
+    </section>
   );
 }
 
