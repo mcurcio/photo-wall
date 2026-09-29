@@ -437,6 +437,11 @@ label {
   align-items: flex-end;
 }
 
+.plan > button {
+  margin-top: 12px;
+  min-height: 36px;
+}
+
 .plan__new-frame-title {
   flex-basis: 100%;
   margin: 0;

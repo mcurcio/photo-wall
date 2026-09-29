@@ -429,6 +429,47 @@ def test_program_definition_updates_next_window_removal_stops_all_owned_roots():
     assert runtime.advance(18).contributions == ()
 
 
+def test_replace_program_uses_expected_version_and_does_not_advance_runtime():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="first", cycle_seconds=10, loop=True, contributions=(media(),)))
+    runtime.set_scene(Scene(scene_id="second", cycle_seconds=10, loop=True,
+                           contributions=(media(source="second:v1"),)))
+    runtime.set_program(Program(program_id="schedule", scene_id="first", starts_at=20, ends_at=40))
+    runtime.advance(5)
+    expected = runtime.export_state()
+    original = runtime._state.programs["schedule"]
+    replacement = Program(program_id="schedule", scene_id="second", starts_at=30, ends_at=50)
+
+    runtime.replace_program(original, replacement, now=10)
+    assert runtime._state.programs["schedule"] == replacement
+    assert runtime._state.now == 5
+    assert runtime._state.runs == Runtime.restore(expected)._state.runs
+    assert runtime.replace_program(original, replacement, now=30) is None
+    assert runtime.advance(30).for_target("frame:left").scene_id == "second"
+
+
+@pytest.mark.parametrize("starts_at", [10, 9])
+def test_replace_program_refuses_due_or_running_program_without_mutation(starts_at):
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
+    expected = Program(program_id="schedule", scene_id="scene", starts_at=starts_at, ends_at=20)
+    runtime.set_program(expected)
+    before = runtime.export_state()
+    replacement = expected.model_copy(update={"ends_at": 30})
+    with pytest.raises(RuntimeConflict, match="program_started"):
+        runtime.replace_program(expected, replacement, now=10)
+    assert runtime.export_state() == before
+
+
+def test_replace_program_refuses_a_new_window_that_has_started():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))
+    expected = Program(program_id="schedule", scene_id="scene", starts_at=20, ends_at=40)
+    runtime.set_program(expected)
+    with pytest.raises(RuntimeConflict, match="program_window_started"):
+        runtime.replace_program(expected, expected.model_copy(update={"starts_at": 10, "ends_at": 30}), 10)
+
+
 def test_backdated_already_missed_program_is_not_replayed():
     runtime = Runtime()
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=10, loop=True, contributions=(media(),)))

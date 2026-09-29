@@ -39,7 +39,7 @@ class RuntimeStore:
 
     def command(self, method: str, *args, **kwargs):
         # The HTTP adapter cannot call arbitrary object methods through operator input.
-        if method not in {"set_scene", "set_program", "remove_program", "activate", "finish", "cancel", "advance"}:
+        if method not in {"set_scene", "set_program", "replace_program", "remove_program", "activate", "finish", "cancel", "advance"}:
             raise ValueError("unknown Runtime command")
         with self.edit() as runtime:
             return getattr(runtime, method)(*args, **kwargs)

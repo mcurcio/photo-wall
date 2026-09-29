@@ -407,6 +407,30 @@ class Runtime:
                 activation_id=program.activation_id, status="expired", reason="missed_window"
             ))
 
+    def replace_program(self, expected: Program, replacement: Program, now: float) -> None:
+        """Compare and replace a future Program without reconciling Runtime time.
+
+        `expected` is the complete version the editor loaded. A matching stored
+        replacement is an idempotent retry, including after its start time.
+        """
+        now = max(_finite(now), self._state.now or 0.0)
+        if expected.program_id != replacement.program_id:
+            raise ValueError("Program identity mismatch")
+        stored = self._state.programs.get(expected.program_id)
+        if stored is None:
+            raise RuntimeConflict("program_missing")
+        if stored == replacement:
+            return
+        if stored != expected:
+            raise RuntimeConflict("program_changed")
+        if stored.starts_at <= now:
+            raise RuntimeConflict("program_started")
+        if replacement.starts_at <= now:
+            raise RuntimeConflict("program_window_started")
+        if replacement.scene_id not in self._state.scenes:
+            raise ValueError(f"unknown Scene: {replacement.scene_id}")
+        self._state.programs[replacement.program_id] = replacement
+
     def remove_program(self, program_id: str, now: float) -> RuntimeView:
         now = _finite(now)
         if self._state.now is not None and now < self._state.now:

@@ -9,6 +9,7 @@
  *   #/scenes/<id>/edit/<step>      {section: "scenes", id, flow: "edit", step}
  *   #/sources/new/<step>           {section: "sources", flow: "new", step}
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
+ *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
  *   #/<section>                    {section} for every section
  *
@@ -110,7 +111,7 @@ export function parseRoute(hash) {
   if (NEW_FLOWS.has(section) && rest.length === 2 && rest[0] === "new") {
     return { section, flow: "new", step: rest[1] };
   }
-  if ((section === "scenes" || section === "sources") && rest.length === 3 && rest[1] === "edit") {
+  if ((section === "scenes" || section === "sources" || section === "schedule") && rest.length === 3 && rest[1] === "edit") {
     return { section, id: rest[0], flow: "edit", step: rest[2] };
   }
   return null;

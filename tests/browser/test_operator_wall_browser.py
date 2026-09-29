@@ -413,6 +413,38 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         expect(tray.get_by_role("button", name=frame.id, exact=True)).to_have_count(0)
 
 
+def test_measured_create_and_numeric_reposition(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        page.get_by_role("button", name="Add frame with measurements", exact=True).click()
+        form = page.get_by_role("form", name="New frame")
+        form.get_by_label("Frame id", exact=True).fill("measured-frame")
+        form.get_by_label("X position (mm)").fill("125")
+        form.get_by_label("Y position (mm)").fill("75")
+        form.get_by_label("Frame width (mm)").fill("400")
+        form.get_by_label("Frame height (mm)").fill("225")
+        form.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Frame measured-frame", exact=True)).to_be_visible()
+        created = next(frame for frame in registry.inventory().frames if frame.id == "measured-frame")
+        assert (created.x_mm, created.y_mm, created.width_mm, created.height_mm) == (125, 75, 400, 225)
+
+        page.get_by_role("button", name="Frame measured-frame", exact=True).click()
+        page.get_by_role("button", name="Edit placement for measured-frame", exact=True).click()
+        form = page.get_by_role("form", name="Place frame measured-frame")
+        form.get_by_label("X position (mm)").fill("850")
+        form.get_by_label("Y position (mm)").fill("260")
+        form.get_by_label("Frame width (mm)").fill("420")
+        form.get_by_label("Frame height (mm)").fill("236.25")
+        form.get_by_role("button", name="Save placement", exact=True).click()
+        def _repositioned():
+            frame = next(f for f in registry.inventory().frames if f.id == "measured-frame")
+            return frame if (frame.x_mm, frame.y_mm, frame.width_mm, frame.height_mm) == (
+                850, 260, 420, 236.25) else None
+
+        _wait_for(_repositioned)
+
+
 def test_drag_move_existing_frame_patches_placement(page, registry):
     registry.create_frame(FrameCreate(
         id=PLACED, surface_id="wall", x_mm=100, y_mm=100,

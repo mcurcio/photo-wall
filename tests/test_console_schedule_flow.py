@@ -15,6 +15,7 @@ from tests.test_console_flow import SRC, _require_node
 SCRIPT = r"""
 const model = await import(process.argv[1]);
 const steps = await import(process.argv[2]);
+const authoring = await import(process.argv[3]);
 const out = {};
 
 out.steps = model.SCHEDULE_STEPS.map((s) => s.id);
@@ -27,9 +28,15 @@ out.keys = [
   K.fromRoute({ section: "schedule", id: "x", flow: "edit", step: "review" }),
   K.fromRoute({ section: "schedule" }),
 ];
+out.editRoute = K.toRoute("edit/x", K.firstStep("edit/x"));
+out.editDescribe = K.describe("edit/x");
 out.route = K.toRoute("new", K.firstStep("new"));
 out.describe = K.describe("new");
 const stored = { evening: { scene_id: "evening" } };
+const programs = { p1: { program_id: "p1", scene_id: "evening", starts_at: 1800000047.125, ends_at: 1800003600.125, priority: 4 } };
+out.editSeed = model.seedSchedule(null, stored, programs)("edit/p1");
+out.editStartRoundTrip = authoring.toEpochSeconds(out.editSeed.start);
+out.unrepresentable = model.programEditDraft({ ...programs.p1, starts_at: 1800000047.1251 });
 out.seedNone = model.seedSchedule(null, stored)("new");
 out.seedRecent = model.seedSchedule("evening", stored)("new");
 out.seedGone = model.seedSchedule("ghost", stored)("new");
@@ -39,14 +46,15 @@ out.separate = [1, "1", " 1 ", 2, "", "abc", 0].map((count) =>
 const now = new Date("2027-01-01T00:00").getTime() / 1000;
 const base = { ...model.NEW_PROGRAM_DRAFT, sceneId: "evening", start: "2027-03-01T18:00",
                end: "2027-03-01T20:00", name: "Show" };
-const fields = (draft, ids = new Set(), pending = []) =>
-  model.programDraftProblems(draft, ids, now, pending).map((p) => `${p.field}: ${p.message}`);
+const fields = (draft, ids = new Set(), pending = [], editing = false) =>
+  model.programDraftProblems(draft, ids, now, pending, editing).map((p) => `${p.field}: ${p.message}`);
 out.single = fields(base);
 out.singleCollision = fields(base, new Set(["show", "show-1"]));
 out.singlePending = fields(base, new Set(["show"]), ["show"]);
 out.windows = fields({ ...base, count: 3 }, new Set(["show", "show-2"]));
 out.windowsPending = fields({ ...base, count: 3 }, new Set(["show-1", "show-2"]), ["show-1", "show-2", "show-3"]);
 out.badCount = fields({ ...base, count: "2.5" });
+out.editingPastStart = fields({ ...base, start: "2026-12-31T23:00", expected: programs.p1 }, new Set(["p1"]), [], true);
 // A 25 h window repeated daily overlaps the next, and says so before a name is given.
 out.overlapNoName = fields({ ...base, name: "", end: "2027-03-02T19:00", count: 3 });
 console.log(JSON.stringify(out));
@@ -57,7 +65,8 @@ def test_schedule_flow_shape():
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
-         (SRC / "scheduleFlowModel.js").as_uri(), (SRC / "flow/steps.js").as_uri()],
+         (SRC / "scheduleFlowModel.js").as_uri(), (SRC / "flow/steps.js").as_uri(),
+         (SRC / "authoring.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -66,8 +75,10 @@ def test_schedule_flow_shape():
     assert out["fieldSteps"] == [
         "scene", "when", "when", "when", "when", "review", "review", "review"]
     assert out["advanced"] == ["count", "id", "priority", "weekdays"]
-    # One instance, "new"; no edit routes.
-    assert out["keys"] == ["new", None, None]
+    # The new instance and keyed edit route both use the shared flow kit.
+    assert out["keys"] == ["new", "edit/x", None]
+    assert out["editRoute"] == {"section": "schedule", "id": "x", "flow": "edit", "step": "review"}
+    assert out["editDescribe"] == "Program x"
     assert out["route"] == {"section": "schedule", "flow": "new", "step": "scene"}
     assert out["describe"] == "a new Program"
     # The stated defaults: one window, every weekday, priority 0; the Scene prefilled.
@@ -77,6 +88,11 @@ def test_schedule_flow_shape():
     assert out["seedRecent"] == {**out["seedNone"], "sceneId": "evening"}
     # A Scene deleted since it was handed over prefills nothing, as in Show now.
     assert out["seedGone"] == out["seedNone"]
+    assert out["editSeed"]["sceneId"] == "evening"
+    assert out["editSeed"]["idOverride"] == "p1"
+    assert out["editSeed"]["expected"] == {"program_id": "p1", "scene_id": "evening", "starts_at": 1800000047.125, "ends_at": 1800003600.125, "priority": 4}
+    assert out["editStartRoundTrip"] == 1800000047.125
+    assert out["unrepresentable"] is None
     # Only exactly one window is one Program; anything else is the helper, whose count
     # reason then applies (never silently read as one).
     assert out["separate"] == [False, False, False, True, True, True, True]
@@ -92,5 +108,6 @@ def test_schedule_flow_shape():
     # This draft's own earlier windows are not collisions when it is sent again.
     assert out["windowsPending"] == []
     assert out["badCount"] == ["count: Between 1 and 60 windows."]
+    assert out["editingPastStart"] == ["start: A replacement Program must start in the future."]
     assert out["overlapNoName"] == [
         "name: Enter a name.", "weekdays: Each window must end before the next starts."]

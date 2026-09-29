@@ -73,6 +73,11 @@ class UnbindRequest(Model):
     expected_generation: int = Field(ge=0)
 
 
+class ProgramReplacementRequest(Model):
+    expected: Program
+    program: Program
+
+
 class CalibrationRequest(Model):
     operation: Literal["preview", "commit", "revert"]
     expected_revision: int = Field(ge=1)
@@ -725,6 +730,15 @@ def create_app(
         if program.program_id != program_id:
             raise ValueError("Program identity mismatch")
         coordinator.runtime.command("set_program", program)
+        return {"status": "configured"}
+
+    @app.post("/v1/operator/programs/{program_id}/replace", dependencies=[Depends(admin)])
+    def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
+        if request.expected.program_id != program_id or request.program.program_id != program_id:
+            raise ValueError("Program identity mismatch")
+        coordinator.runtime.command(
+            "replace_program", request.expected, request.program, clock.utc()
+        )
         return {"status": "configured"}
 
     @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])

@@ -127,13 +127,14 @@ function windowsSummary(value) {
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void}}} props
  */
-export function WhenStep({ value, patch, problems, advanced }) {
+export function WhenStep({ value, patch, problems, advanced, editableWindows = true }) {
   const date = (key, label) => (
     <Field id={problems.idFor(key)} label={label} reason={problems.reasonFor(key)}>
       {(props) => (
         <input
           {...props}
           type="datetime-local"
+          step="any"
           value={value[key]}
           onChange={(event) => {
             patch({ [key]: event.target.value });
@@ -148,9 +149,11 @@ export function WhenStep({ value, patch, problems, advanced }) {
       <TimeZoneNote />
       {date("start", "Window start")}
       {date("end", "Window end")}
-      <Advanced summary={windowsSummary(value)} open={advanced.open} onToggle={advanced.onToggle}>
-        <SeparateWindows value={value} patch={patch} problems={problems} />
-      </Advanced>
+      {editableWindows && (
+        <Advanced summary={windowsSummary(value)} open={advanced.open} onToggle={advanced.onToggle}>
+          <SeparateWindows value={value} patch={patch} problems={problems} />
+        </Advanced>
+      )}
     </>
   );
 }
@@ -247,8 +250,8 @@ function PlannedWindows({ value, count }) {
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void},
  *          onChange: (field: string) => void}} props
  */
-export function ReviewStep({ value, patch, problems, advanced, onChange }) {
-  const separate = separateWindows(value);
+export function ReviewStep({ value, patch, problems, advanced, onChange, editableWindows = true, editing = false }) {
+  const separate = editableWindows && separateWindows(value);
   const count = windowCount(value);
   const id = draftId(value);
   const derived = idFromName(value.name);
@@ -264,14 +267,14 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
     { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : `Scene ${value.sceneId}` },
     { label: "Window start", field: "start", value: value.start === "" ? <NotChosen /> : localWords(value.start) },
     { label: "Window end", field: "end", value: value.end === "" ? <NotChosen /> : localWords(value.end) },
-    { label: "Number of windows", field: "count", value: windows },
-    {
+    ...(editableWindows ? [{ label: "Number of windows", field: "count", value: windows }] : []),
+    ...(editableWindows ? [{
       label: "Repeat on",
       field: "weekdays",
       value: separate ? weekdayWords(value.weekdays) : "Not used for one window",
-    },
+    }] : []),
     { label: "Priority", field: "priority", value: String(value.priority) },
-    {
+    editing ? { label: "Program id", value: id } : {
       label: "Id",
       field: "id",
       value: !id ? <NotChosen /> : separate && count !== null ? `${id}-1 … ${id}-${count}` : id,
@@ -281,7 +284,7 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
     <>
       <TimeZoneNote />
       <CheckAnswers rows={rows} onChange={onChange} />
-      <NameField
+      {editing ? <p className="field__hint">Program id: {value.idOverride}</p> : <NameField
         kind="Program"
         name={value.name}
         idShown={value.idOverride !== null || idNeeded(value.name)}
@@ -291,7 +294,7 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
           onChange("id");
         }}
         problems={problems}
-      />
+      />}
       <Advanced
         summary={`Priority: ${value.priority} · Id: ${id || "none yet"}`}
         open={advanced.open}
@@ -307,11 +310,11 @@ export function ReviewStep({ value, patch, problems, advanced, onChange }) {
             problems.touch("priority");
           }}
         />
-        <IdField
+        {!editing && <IdField
           value={value.idOverride ?? derived ?? ""}
           onIdOverride={(idOverride) => patch({ idOverride })}
           problems={problems}
-        />
+        />}
       </Advanced>
     </>
   );

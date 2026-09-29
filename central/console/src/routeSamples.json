@@ -14,7 +14,8 @@
       "#/schedule",
       "#/schedule/new/scene",
       "#/schedule/new/when",
-      "#/schedule/new/review"
+      "#/schedule/new/review",
+      "#/schedule/sample-program/edit/review"
     ],
     "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
   },
