@@ -1,5 +1,8 @@
 import { apiWrite } from "./apiWrite.js";
 import { dragToPlacement, orientationCoherent } from "./projection.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
+
+export { FRAME_ID_PATTERN } from "./frameIds.js";
 
 /**
  * Low-level Frame write module (bead R-apiwrite). Holds the four Frame mutations
@@ -16,7 +19,6 @@ import { dragToPlacement, orientationCoherent } from "./projection.js";
  * contracts/models.py `TARGET_ID_PATTERN` (which `FrameCreate.id` enforces); a
  * pytest pins the two equal, so there is one rule.
  */
-export const FRAME_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/;
 
 /**
  * Normalize a create/move `apiWrite` result to the frame-write shape. On success

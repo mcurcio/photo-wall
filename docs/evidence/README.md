@@ -1,5 +1,9 @@
 # Acceptance evidence
 
+- [2026-09-29 Frame-to-Scene handoff and refreshed candidates](2026-09-29-frame-to-scene-and-candidates.md):
+  commissioned Frame content action, explicit fresh Scene target, preserved
+  existing drafts, and post-refresh compatible media rereads, with local
+  verification and deployment limits.
 - [2026-09-29 Program removal feedback](2026-09-29-program-removal-feedback.md):
   accepted, refused and unknown card outcomes for ordinary Program removal,
   with local browser evidence and deployment limits.

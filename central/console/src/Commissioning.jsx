@@ -9,6 +9,8 @@ import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
 import { frameProfileProblem, updateFrameProfile } from "./framesApi.js";
 import { useMutate } from "./useMutate.js";
+import { formatRoute, sceneCreationRoute } from "./routes.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
 
 // Operator-facing lease/conflict copy, verbatim from design §4b / J2 (the
 // authoritative decision table). The countdown banner is display; the panel's
@@ -319,6 +321,23 @@ export function Commissioning({ snapshot, frameId }) {
           </div>
         </dl>
       </section>
+
+      {bound && frame.calibration_valid === true && FRAME_ID_PATTERN.test(frameId) && (
+        <section className="facet__section facet__section--content" role="group" aria-label="Choose content">
+          <h4 className="facet__subtitle">Ready to choose content?</h4>
+          <p className="facet__note">
+            Make a Scene and choose this Frame explicitly. Saving the Scene does not start playback.
+          </p>
+          <a className="facet__cta" href={formatRoute(sceneCreationRoute(frameId))}>
+            Choose content for this Frame
+          </a>
+        </section>
+      )}
+      {bound && frame.calibration_valid === true && !FRAME_ID_PATTERN.test(frameId) && (
+        <p className="facet__note" role="status">
+          This Frame is commissioned, but its id cannot be targeted by a Scene. Scene targets need an id of 96 characters or fewer without a colon.
+        </p>
+      )}
 
       <section className="facet__section facet__section--editor" role="group" aria-label="Adjust calibration">
         <h4 className="facet__subtitle">Adjust calibration</h4>

@@ -85,12 +85,33 @@ def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registr
         expect(equipment).to_contain_text(player_id)
         expect(equipment).to_contain_text(OUTPUT)
 
+        # A committed calibration on this binding hands directly into Scene
+        # authoring with the persistent Frame explicitly selected.
+        content_link = inspector.get_by_role(
+            "link", name="Choose content for this Frame", exact=True)
+        expect(content_link).to_be_visible()
+        expect(content_link).to_have_attribute(
+            "href", "#/scenes/new/kind?target=commission-frame")
+
         # The two hardware areas render "not yet available" and NO enabled
         # control — the default-closed capability gate (§7.6). The would-be
         # controls do not exist in the DOM.
         expect(inspector.get_by_text("not yet available")).to_have_count(2)
         expect(inspector.get_by_role("button", name="Adjust panel color correction")).to_have_count(0)
         expect(inspector.get_by_role("button", name="Set display power")).to_have_count(0)
+
+
+def test_commissioning_handoff_waits_for_valid_calibration(page, registry):
+    identity, _key, _request = enroll(registry, count=1)
+    registry.create_frame(FrameCreate(
+        id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        inspector = open_frame(page, FRAME, "commissioning")
+        expect(inspector.get_by_role(
+            "link", name="Choose content for this Frame", exact=True)).to_have_count(0)
 
 
 def test_commissioning_hardware_areas_are_honest_no_dead_control(page, registry):
@@ -236,6 +257,7 @@ def test_calibration_drag_to_convex_updates_draft(page, registry):
         # padded top-left; the drag ACTION uses coordinates, the ASSERTION does
         # not. (0,0) -> ~ (0.2, 0.2) stays convex.
         svg = inspector.get_by_role("img", name="Calibration editor")
+        svg.scroll_into_view_if_needed()
         box = svg.bounding_box()
         start_x, start_y = box["x"] + 16, box["y"] + 16
         page.mouse.move(start_x, start_y)

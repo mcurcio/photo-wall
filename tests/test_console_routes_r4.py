@@ -480,6 +480,11 @@ out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
 out.landing = [landingRoute(0), landingRoute(3)];
+out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
+                                initialTarget: "frame_one" });
+out.badTargetRoute = (() => { try {
+  return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
+} catch { return "refused"; } })();
 console.log(JSON.stringify(out));
 """
 
@@ -489,6 +494,7 @@ ROUTES = [
 ] + [
     {"section": "now", "flow": "show", "step": "review"},
     {"section": "scenes", "flow": "new", "step": "kind"},
+    {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "portrait-1"},
     {"section": "scenes", "flow": "new", "step": "edit"},
     {"section": "scenes", "id": "new", "flow": "edit", "step": "review"},
     {"section": "scenes", "id": "lobby/evening ç?#%", "flow": "edit", "step": "frames"},
@@ -504,6 +510,9 @@ INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
     "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
+    "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
+    "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
+    "#/sources/new/name?target=frame",
 ]
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
@@ -536,3 +545,5 @@ def test_routes_parse_format_and_round_trip():
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
     assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
+    assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
+    assert out["badTargetRoute"] == "refused"

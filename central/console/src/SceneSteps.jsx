@@ -137,7 +137,8 @@ export function FramesStep({ value, problems, snapshot, onToggle }) {
  * Step 3b, Media per frame (hand-picked only): ONE item per target frame from that
  * frame's candidates (the container's `useCandidates`, profile-filtered by Central),
  * each labelled with the planner's `standing` (mediaHealth.js `candidateLabels`). A
- * failed read says so and offers Retry (`candidates.reload`).
+ * failed read says so and offers Retry (`candidates.reload`); successful reads can be
+ * explicitly refreshed after an unknown Source-refresh outcome.
  *
  * @param {StepProps & {candidates: ReturnType<typeof import("./useCandidates.js").useCandidates>,
  *          onSelect: (frameId: string, assetId: string) => void}} props
@@ -195,6 +196,11 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
             Retry
           </button>
         </div>
+      )}
+      {loadError === null && !loading && value.targets.length > 0 && (
+        <button type="button" onClick={candidates.reload}>
+          Reload compatible media
+        </button>
       )}
     </fieldset>
   );

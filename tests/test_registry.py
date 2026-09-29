@@ -528,9 +528,9 @@ def test_frame_create_ids_follow_the_one_target_id_rule():
 
 
 def test_the_console_frame_id_pattern_is_the_contracts_target_id_rule():
-    source = (Path(__file__).parents[1] / "central/console/src/framesApi.js").read_text()
+    source = (Path(__file__).parents[1] / "central/console/src/frameIds.js").read_text()
     pinned = re.search(r"^export const FRAME_ID_PATTERN = /(.+)/;$", source, re.MULTILINE)
-    assert pinned is not None, "framesApi.js no longer exports FRAME_ID_PATTERN as a literal"
+    assert pinned is not None, "frameIds.js no longer exports FRAME_ID_PATTERN as a literal"
     assert pinned.group(1) == "^" + TARGET_ID_PATTERN + "$"
 
 

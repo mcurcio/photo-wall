@@ -152,6 +152,9 @@ const stored = { evening: { scene_id: "evening", revision: 3, cycle_seconds: 20,
                     source_refs: ["holiday:1"], retain_on_expiry: true }] } };
 const seedOf = scene.seedScene(stored);
 out.seedNew = seedOf("new");
+out.seedNewTarget = scene.seedScene(stored, "frame_one")("new");
+out.seedNewBadTarget = scene.seedScene(stored, "old:frame")("new");
+out.seedEditWithTarget = scene.seedScene(stored, "frame_one")("edit/evening");
 out.seedEdit = seedOf("edit/evening");
 out.seedMissing = seedOf("edit/ghost");
 out.changed = scene.changedSceneFields(seedOf("edit/evening"),
@@ -263,6 +266,9 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["seedNew"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "", "targets": [],
         "selections": {}, "cycleSeconds": 30, "loop": True, "revision": None}
+    assert out["seedNewTarget"]["targets"] == ["frame_one"]
+    assert out["seedNewBadTarget"]["targets"] == []
+    assert out["seedEditWithTarget"] == out["seedEdit"]
     assert out["seedEdit"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "holiday:1",
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True, "revision": 3}

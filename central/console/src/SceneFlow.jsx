@@ -104,7 +104,9 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const now = mediaNow(snapshot);
   const loaded = snapshot != null;
 
-  const draft = useFlowDraft(seedScene(definitions));
+  // The selected Frame is a seed for a newly opened Scene only. A route from the
+  // Wall must never patch an existing draft, even when it names the same "new" key.
+  const draft = useFlowDraft(seedScene(definitions, route?.initialTarget));
   const { patch } = draft;
   const value = draft.value ?? NEW_SCENE_DRAFT;
   const editingId = editedId(draft.key);
@@ -143,9 +145,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     );
   }, [loaded, frameKey, value.targets, draft.key, patch]);
 
+  const currentSource = sources.find((source) => source.source_ref === value.sourceRef) ?? null;
   const candidates = useCandidates(
     draft.key !== null && value.mode === "authored" ? value.sourceRef : "",
     value.targets,
+    Number(currentSource?.refresh_completed_revision ?? 0),
   );
 
   // A per-frame choice belongs to one Source's catalog: once a frame's candidates are
@@ -184,7 +188,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
   const mutate = useMutate();
-  const currentSource = sources.find((source) => source.source_ref === value.sourceRef) ?? null;
   const sourceReadiness = {
     source: currentSource,
     historicalRef: value.sourceRef !== "" && currentSource === null,
@@ -523,11 +526,23 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       writeDisabled={write.busy || stale}
       problemsLabel="Scene problems"
       notice={
-        vanished !== null && (
-          <p className="scene-flow__vanished notice notice--warn" role="status">
-            {vanished}
-          </p>
-        )
+        <>
+          {vanished !== null && (
+            <p className="scene-flow__vanished notice notice--warn" role="status">
+              {vanished}
+            </p>
+          )}
+          {place === "open" && route?.initialTarget !== undefined &&
+            !value.targets.includes(route.initialTarget) &&
+            !draft.seeded?.targets.includes(route.initialTarget) && (
+              <div className="notice notice--warn" role="status">
+                <p>
+                  {`Your open Scene draft was kept. Frame ${route.initialTarget} was not added.`}
+                </p>
+                <button type="button" onClick={() => flow.openField("targets")}>Choose Frames</button>
+              </div>
+            )}
+        </>
       }
     >
       {step !== null && views[step]()}

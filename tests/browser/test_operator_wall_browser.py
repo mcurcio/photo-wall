@@ -202,7 +202,7 @@ def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, 
         inspector.get_by_role("tab", name="Now-showing", exact=True).click()
 
         expect(inspector).to_contain_text("Nothing scheduled.")
-        expect(inspector).to_contain_text("choose Frame new-frame on its Frames step")
+        expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
         expect(inspector).to_contain_text("Show now or Schedule it")
         inspector.get_by_role("link", name="Make a Scene", exact=True).click()
 
@@ -210,7 +210,7 @@ def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, 
             "heading", level=1, name="Scenes", exact=True)).to_be_visible()
         expect(page.get_by_role(
             "heading", name="What kind of Scene?", exact=True)).to_be_visible()
-        assert page.evaluate("window.location.hash") == "#/scenes/new/kind"
+        assert page.evaluate("window.location.hash") == "#/scenes/new/kind?target=new-frame"
 
 
 def test_surface_filter_switches_the_plan(page, registry):
