@@ -26,6 +26,31 @@
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet}} Route
  */
 
+/**
+ * The API identifier rule: contracts/models.py `IDENTIFIER_PATTERN` (Scene, Program,
+ * Source and Frame ids are path parameters under it). A pytest pins the two equal, so
+ * there is one rule; authoring.js reads it from here.
+ */
+export const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/**
+ * How a notice names the record a route's id points at: "<noun> <id>" when the id is one
+ * Central could store (`IDENTIFIER_PATTERN`), otherwise "an unknown <noun>". A typed URL
+ * may hold any text, and a notice never echoes it. `start` capitalises it to open a
+ * sentence.
+ *
+ * @param {string} noun "Scene", "Frame"
+ * @param {string} id
+ * @param {{start?: boolean}} [options]
+ * @returns {string}
+ */
+export function routeIdName(noun, id, { start = false } = {}) {
+  if (IDENTIFIER_PATTERN.test(id)) {
+    return `${noun} ${id}`;
+  }
+  return `${start ? "An" : "an"} unknown ${noun}`;
+}
+
 /** Every section, in sidebar order. */
 export const SECTIONS = Object.freeze([
   "now",

@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef } from "react";
 import { Guidance } from "./Guidance.jsx";
 import { Inspector } from "./Inspector.jsx";
 import { Plan } from "./Plan.jsx";
+import { routeIdName } from "./routes.js";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 
 /**
@@ -145,7 +146,9 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
         <aside className="console__side">
           {stale ? (
             <section className="inspector inspector--empty" role="region" aria-label="Inspector">
-              <p className="inspector__empty">{`Frame ${routeFrameId}: This no longer exists.`}</p>
+              <p className="inspector__empty">
+                {`${routeIdName("Frame", routeFrameId, { start: true })}: This no longer exists.`}
+              </p>
             </section>
           ) : (
             <Inspector

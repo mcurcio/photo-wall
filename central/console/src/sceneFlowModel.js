@@ -11,6 +11,7 @@
 import { NEW_SCENE_DRAFT, PLAYBACK_LABELS, sceneEditDraft } from "./authoring.js";
 import { sameValue } from "./flow/draftState.js";
 import { editedId, flowKeys } from "./flow/instance.js";
+import { routeIdName } from "./routes.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -56,7 +57,8 @@ export const SCENE_ADVANCED_FIELDS = Object.freeze(new Set(["loop", "id"]));
 export const SCENE_KEYS = flowKeys({
   section: "scenes",
   firstStep: { create: KIND.id, edit: REVIEW.id },
-  describe: { create: "a new Scene", edit: (id) => `Scene ${id}` },
+  // An edit route's id is named only when it is an id (a typed URL may hold any text).
+  describe: { create: "a new Scene", edit: (id) => routeIdName("Scene", id) },
 });
 
 /**

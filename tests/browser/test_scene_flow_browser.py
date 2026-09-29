@@ -398,6 +398,11 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         visit(page, "#/scenes/ghost/edit/review")
         expect(_scenes(page).get_by_text("Scene ghost: This Scene no longer exists.")
                ).to_be_visible()
+        # A typed id that is no id at all is never echoed (routes.js `routeIdName`).
+        visit(page, "#/scenes/Call%20555%20now!/edit/review")
+        expect(_scenes(page).get_by_text("An unknown Scene: This Scene no longer exists.")
+               ).to_be_visible()
+        expect(_scenes(page).get_by_text(re.compile("Call 555"))).to_have_count(0)
 
 
 def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, registry):

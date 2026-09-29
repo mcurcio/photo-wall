@@ -214,6 +214,10 @@ def test_a_stale_frame_route_says_it_no_longer_exists(page, registry):
         _expect_on(page, "wall")
         expect(page.get_by_text("Frame ghost: This no longer exists.")).to_be_visible()
         expect(page.get_by_role("tab")).to_have_count(0)
+        # A typed id that is no id at all is never echoed (routes.js `routeIdName`).
+        visit(page, "#/wall/frames/Call%20555%20now!/binding")
+        expect(page.get_by_text("An unknown Frame: This no longer exists.")).to_be_visible()
+        expect(page.get_by_text(re.compile("Call 555"))).to_have_count(0)
 
 
 # --- Sections, history and the poll.

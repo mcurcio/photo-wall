@@ -12,13 +12,10 @@
 
 import { formatAge } from "./health.js";
 import { frameOf, toTarget } from "./join.js";
+import { IDENTIFIER_PATTERN } from "./routes.js";
 
-/**
- * The API identifier rule: contracts/models.py `IDENTIFIER_PATTERN` (Scene,
- * Program and Source ids are path parameters under it). A pytest pins the two
- * equal, so there is one rule.
- */
-export const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+// The API identifier rule is routes.js `IDENTIFIER_PATTERN` (re-exported here).
+export { IDENTIFIER_PATTERN };
 
 // A derived id is cut here, leaving room for a window suffix `-NN` (§7).
 const DERIVED_ID_LENGTH = 96;

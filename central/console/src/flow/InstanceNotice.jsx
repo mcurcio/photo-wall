@@ -9,7 +9,9 @@ import React from "react";
  *  - `missing`: "Y: This <noun> no longer exists.";
  *  - `unavailable`: "Y can't be edited here: <reason>".
  *
- * The last two link back to the section. Nothing renders for any other place. While
+ * The last two link back to the section, and open with the target's name (capitalised:
+ * it may be "an unknown Scene", routes.js `routeIdName`). Nothing renders for any other
+ * place. While
  * `busy` (the draft's write in flight) Discard is disabled.
  *
  * @param {{place: import("./instance.js").Place, draftName: string, targetName: string,
@@ -48,12 +50,13 @@ export function InstanceNotice({
   if (place !== "missing" && place !== "unavailable") {
     return null;
   }
+  const named = targetName.charAt(0).toUpperCase() + targetName.slice(1);
   return (
     <div className="notice">
       <p>
         {place === "missing"
-          ? `${targetName}: This ${noun} no longer exists.`
-          : `${targetName} can't be edited here: ${unavailableReason}`}
+          ? `${named}: This ${noun} no longer exists.`
+          : `${named} can't be edited here: ${unavailableReason}`}
       </p>
       <a href={sectionHref}>{`Back to ${sectionLabel}`}</a>
     </div>
