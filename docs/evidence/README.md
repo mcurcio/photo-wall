@@ -1,5 +1,9 @@
 # Acceptance evidence
 
+- [2026-09-29 Source connection discovery and first-run action](2026-09-29-source-connection-discovery.md):
+  worker-reported connection names in the Photo Sources flow, guarded edits
+  after connection removal, clearer refresh status and a direct first-Frame
+  action, with local verification and deployment limits.
 - [2026-09-29 operator UX cleanup](2026-09-29-operator-ux-cleanup.md): guarded
   Scene deletion, persistent Frame profile editing and plain revision-free
   operator copy, with local database and

@@ -105,30 +105,41 @@ export const NEW_SOURCE_DRAFT = Object.freeze({
 });
 
 /**
- * THE CONNECTION RULE (flow design §7 J5, step 2), over the served Sources:
+ * THE CONNECTION RULE (flow design §7 J5, step 2), over the worker's reported IDs:
  *
- *  - `field`: no Source names a connection yet; "Connection name" is a visible,
- *    required text field, empty;
- *  - `advanced`: every Source's served `spec` has the same one `connection_ref`; it is
+ *  - `field`: worker IDs are not available yet (older worker / not reported); saved
+ *    Source refs guide the old manual-input behavior, explicitly marked uncertain;
+ *  - `blocked`: worker reported no configured connections;
+ *  - `advanced`: the worker reported one connection; it is
  *    prefilled and the field sits under the Name step's Advanced;
- *  - `chooser`: several values; a visible chooser of them, with none chosen, whose
- *    last choice, "Another connection…" (`ANOTHER_CONNECTION`), shows a field for a
- *    connection no Source uses yet.
+ *  - `chooser`: several known values, or an edit whose saved connection is no longer
+ *    reported. Manual entry is offered only while the worker list is unavailable.
  *
- * @param {ReadonlyArray<{spec?: {connection_ref?: string}}>} sources
- * @returns {{shown: "field"|"advanced"|"chooser", values: string[], prefill: string}}
+ * @param {string[]|null|undefined} connectionIds null until worker has reported
+ * @param {ReadonlyArray<{spec?: {connection_ref?: string}}>} sources legacy guidance
+ * @param {string} selectedRef current draft selection, to detect a removed connection
+ * @returns {{shown: "field"|"advanced"|"chooser"|"blocked", values: string[], prefill: string,
+ *            reported: boolean, selectedUnavailable: boolean}}
  */
-export function connectionRule(sources) {
-  const values = [
-    ...new Set(sources.map((source) => source.spec?.connection_ref ?? "").filter((ref) => ref !== "")),
-  ].sort();
+export function connectionRule(connectionIds, sources = [], selectedRef = "") {
+  const reported = Array.isArray(connectionIds);
+  const values = reported
+    ? [...new Set(connectionIds.filter((ref) => typeof ref === "string" && ref !== ""))].sort()
+    : [...new Set(sources.map((source) => source.spec?.connection_ref ?? "").filter((ref) => ref !== ""))].sort();
+  const selectedUnavailable = reported && selectedRef !== "" && !values.includes(selectedRef);
+  if (reported && values.length === 0) {
+    return { shown: "blocked", values, prefill: "", reported, selectedUnavailable };
+  }
+  if (selectedUnavailable) {
+    return { shown: "chooser", values, prefill: "", reported, selectedUnavailable };
+  }
   if (values.length === 0) {
-    return { shown: "field", values, prefill: "" };
+    return { shown: "field", values, prefill: "", reported, selectedUnavailable };
   }
   if (values.length === 1) {
-    return { shown: "advanced", values, prefill: values[0] };
+    return { shown: "advanced", values, prefill: values[0], reported, selectedUnavailable };
   }
-  return { shown: "chooser", values, prefill: "" };
+  return { shown: "chooser", values, prefill: "", reported, selectedUnavailable };
 }
 
 const NO_ADVANCED = Object.freeze(new Set());
@@ -150,13 +161,14 @@ export function sourceAdvancedFields(rule) {
  * the rule prefills.
  *
  * @param {ReadonlyArray<object>} sources
+ * @param {string[]|null|undefined} connectionIds
  * @returns {(key: string) => SourceDraft}
  */
-export function seedSource(sources) {
+export function seedSource(sources, connectionIds) {
   return (key) => {
     const name = editedId(key);
     if (name === null) {
-      return { ...NEW_SOURCE_DRAFT, connectionRef: connectionRule(sources).prefill };
+      return { ...NEW_SOURCE_DRAFT, connectionRef: connectionRule(connectionIds, sources).prefill };
     }
     const source = namedSource(sources, name);
     if (!source) return NEW_SOURCE_DRAFT;

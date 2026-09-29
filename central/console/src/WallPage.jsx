@@ -35,6 +35,9 @@ import { UnplacedTray } from "./UnplacedTray.jsx";
  */
 export function WallPage({ snapshot, bootFacts, route, navigate, memory, recovery }) {
   const trayDragRef = useRef(/** @type {string|null} */ (null));
+  // Reuse the Plan's measured-create action so onboarding opens the same form as
+  // the existing control, with the Plan remaining the owner of creation state.
+  const addFrameButtonRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   // The plan region: the focus successor of a delete from the plan or the tray.
   const planRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
   useEffect(() => {
@@ -100,6 +103,7 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
         <Guidance
           snapshot={snapshot}
           dismissed={memory.guidanceDismissed}
+          onAddFirstFrame={() => addFrameButtonRef.current?.click()}
           onDismiss={memory.dismissGuidance}
         />
         <div className="console__surface-filter">
@@ -128,6 +132,7 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
           onSelect={selectFrame}
           onDeleted={wallRoute}
           regionRef={planRegionRef}
+          addFrameButtonRef={addFrameButtonRef}
           trayDragRef={trayDragRef}
           onTrayDrop={() => {
             trayDragRef.current = null;

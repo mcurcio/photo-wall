@@ -98,6 +98,7 @@ export function Plan({
   trayDragRef,
   onTrayDrop,
   regionRef,
+  addFrameButtonRef,
 }) {
   const mutate = useMutate();
   const svgRef = useRef(null);
@@ -474,7 +475,7 @@ export function Plan({
         )}
       </svg>
 
-      <button type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
+      <button ref={addFrameButtonRef} type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
         Add frame with measurements
       </button>
 

@@ -20,7 +20,15 @@ from central.media_ports import RefreshReceipt
 from central.media_queue import MediaTaskQueue
 from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
-from contracts.models import Digest, FrameProfile, Identifier, Instant, Model, Variant
+from contracts.models import (
+    IDENTIFIER_PATTERN,
+    Digest,
+    FrameProfile,
+    Identifier,
+    Instant,
+    Model,
+    Variant,
+)
 from contracts.time import Clock
 from media.models import OriginalAsset, RefreshResult, SourceSpec
 
@@ -497,12 +505,24 @@ class MediaRepository:
                 for source in conn.execute("SELECT source_ref,status FROM media_sources").fetchall():
                     self.refresh_catalog_in(conn, source["source_ref"], self.clock.utc(), source["status"])
 
-    def worker_status(self, code: str | None = None):
+    def worker_status(self, code: str | None = None,
+                      connection_ids: tuple[str, ...] | list[str] | None = None):
         if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,64}", code)):
             raise ValueError("invalid worker status code")
+        if connection_ids is not None:
+            if (not isinstance(connection_ids, (tuple, list)) or len(connection_ids) > 128
+                    or any(not isinstance(value, str)
+                           or not re.fullmatch(IDENTIFIER_PATTERN, value)
+                           for value in connection_ids)
+                    or len(set(connection_ids)) != len(connection_ids)):
+                raise ValueError("invalid worker connection identifiers")
         with self.transaction() as conn:
-            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s WHERE singleton",
-                         (self.clock.utc(), code))
+            # A status-only check-in comes from an older worker. Clear the prior
+            # projection so its timestamp cannot make retired IDs look current.
+            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s,connection_ids=%s "
+                         "WHERE singleton",
+                         (self.clock.utc(), code,
+                          Jsonb(list(connection_ids)) if connection_ids is not None else None))
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int:
         now, inserted = self.clock.utc(), 0
@@ -615,7 +635,8 @@ class MediaRepository:
         (`recipe_changed`) and planning requests the asset again under the new one.
         """
         with self.transaction() as conn:
-            state = conn.execute("SELECT recipe_id,max_bytes,worker_seen,worker_error FROM media_settings WHERE singleton").fetchone()
+            state = conn.execute("SELECT recipe_id,max_bytes,worker_seen,worker_error,connection_ids "
+                                 "FROM media_settings WHERE singleton").fetchone()
             return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(
                 "SELECT state,count(*) AS count FROM media_jobs WHERE recipe_id=%s "
                 "GROUP BY state ORDER BY state", (state["recipe_id"],)).fetchall()}

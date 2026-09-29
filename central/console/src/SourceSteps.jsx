@@ -149,16 +149,19 @@ export function IncludeStep({ value, patch, problems }) {
 }
 
 /**
- * The connection rule's chooser (several connections): "Connection name" offers each
- * served connection and, last, "Another connection…", which shows "New connection name"
- * for one no Source uses yet. The connection's problem is then said, and focused,
- * beside the typed field.
+ * The connection rule's chooser offers each reported connection. A saved name
+ * removed from the worker appears disabled until replaced. "Another connection…"
+ * is available only before the worker reports its list; then the operator must
+ * type a name that is already configured there.
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
  */
 function ConnectionChooser({ value, patch, problems, rule }) {
-  const typed = value.newConnection;
-  const served = [...new Set([...rule.values, typed ? "" : value.connectionRef])]
+  // A worker report can arrive while a legacy manual-entry draft is open.
+  // Once the list is known, keep its saved value visible as unavailable and
+  // make the chooser usable again instead of selecting a removed "Another" option.
+  const typed = value.newConnection && !rule.reported;
+  const served = [...new Set([...rule.values, rule.selectedUnavailable ? value.connectionRef : ""])]
     .filter((ref) => ref !== "")
     .sort();
   const id = problems.idFor("connection");
@@ -183,13 +186,13 @@ function ConnectionChooser({ value, patch, problems, rule }) {
               }
             }}
           >
-            <option value="">Choose a connection</option>
+            <option value="">Choose a configured connection</option>
             {served.map((ref) => (
-              <option key={ref} value={ref}>
-                {ref}
+              <option key={ref} value={ref} disabled={rule.reported && !rule.values.includes(ref)}>
+                {rule.reported && !rule.values.includes(ref) ? `${ref} (no longer configured)` : ref}
               </option>
             ))}
-            <option value={ANOTHER_CONNECTION.value}>{ANOTHER_CONNECTION.words}</option>
+            {!rule.reported && <option value={ANOTHER_CONNECTION.value}>{ANOTHER_CONNECTION.words}</option>}
           </select>
         )}
       </Field>
@@ -197,7 +200,7 @@ function ConnectionChooser({ value, patch, problems, rule }) {
         <InputField
           field="connection"
           label={ANOTHER_CONNECTION.label}
-          hint="Enter a connection name already configured in the media worker. This form does not set the Immich URL or API key."
+          hint="The media worker has not reported its configured connections yet. Enter a name only if it is already configured there; this form does not set the Immich URL or API key."
           value={value.connectionRef}
           onChange={(connectionRef) => patch({ connectionRef })}
           problems={problems}
@@ -209,23 +212,50 @@ function ConnectionChooser({ value, patch, problems, rule }) {
 
 /**
  * Step 2, Name: a plain Source name (required), then "Connection name" as the
- * connection rule says (sourceFlowModel.js `connectionRule`): a visible text field
- * while no Source names one; under Advanced, prefilled, when every Source names the
- * same one; a visible chooser of them, and of another one, when they name several.
+ * connection rule says (sourceFlowModel.js `connectionRule`): an explicit setup
+ * prerequisite when the worker reports none; one known connection under Advanced;
+ * a chooser for several or a removed saved name; or an uncertain manual fallback
+ * until the worker reports its list.
  *
  * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
  *          advanced: {open: boolean, onToggle: () => void}}} props
  */
 export function NameStep({ value, patch, problems, rule, advanced, editing = false }) {
-  const connection =
-    rule.shown === "chooser" ? (
+  const connection = rule.shown === "blocked" ? (
+    <>
+      <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
+        {(props) => (
+          <select {...props} value="" disabled>
+            <option value="">No connections configured</option>
+          </select>
+        )}
+      </Field>
+      <p role="status">Add a connection to the media worker's private configuration and restart the worker. Then return here to create the Source.</p>
+    </>
+  ) : rule.shown === "chooser" ? (
       <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
+    ) : rule.reported ? (
+      <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
+        {(props) => (
+          <select
+            {...props}
+            value={value.connectionRef}
+            onChange={(event) => {
+              patch({ connectionRef: event.target.value });
+              problems.touch("connection");
+            }}
+          >
+            {value.connectionRef === "" && <option value="">Choose the configured connection</option>}
+            {rule.values.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
+          </select>
+        )}
+      </Field>
     ) : (
       <InputField
         field="connection"
         hint={rule.shown === "field"
-          ? "Enter a connection name already configured in the media worker. This form does not set the Immich URL or API key."
-          : null}
+          ? "The media worker has not reported its configured connections yet. You can enter a name, but Central cannot verify it. This form does not set the Immich URL or API key."
+          : "Central has not received the worker's connection list yet. This saved name may need checking in the worker configuration."}
         value={value.connectionRef}
         onChange={(connectionRef) => patch({ connectionRef })}
         problems={problems}

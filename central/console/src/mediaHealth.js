@@ -76,6 +76,7 @@ export function workerLoad(health) {
  *
  * @param {object|null} health `/v1/operator/media` `health`
  * @param {number} now Central's clock
+ * @param {boolean} includeFilters include the Source's criteria in the label (default true)
  * @returns {Classified|null} null when the media read carried no health
  */
 export function workerState(health, now) {
@@ -169,14 +170,18 @@ export function sourceFilters(spec) {
  * @param {number} now Central's clock
  * @returns {Classified}
  */
-export function sourceState(source, now) {
+export function sourceState(source, now, includeFilters = true) {
   const filters = sourceFilters(source.spec);
   const said = (state, severity, label) => ({
     state,
     severity,
-    label: [label, ...filters].join(" · "),
+    label: includeFilters ? [label, ...filters].join(" · ") : label,
   });
-  if (!source.next_refresh) {
+  // A newly configured Source starts as unavailable before any refresh attempt.
+  // A failed periodic refresh can leave the explicit request revision at zero, so
+  // an absent next_refresh is the reliable signal that no attempt has run yet.
+  if (!source.next_refresh && Number(source.refresh_completed_revision ?? 0) === 0 &&
+      !source.diagnostics?.length) {
     return said("never-refreshed", "todo", "Awaiting refresh");
   }
   if (source.status !== "ok") {
@@ -185,6 +190,9 @@ export function sourceState(source, now) {
       : `last good ${age(ageAt(now, source.last_success))} ago`;
     const failure = SOURCE_FAILURES[source.status] ?? `Library ${codeWords(source.status)}`;
     return said("failing", "alarm", `${failure} · ${good}`);
+  }
+  if (!source.next_refresh) {
+    return said("never-refreshed", "todo", "Awaiting refresh");
   }
   const late = ageAt(now, source.next_refresh);
   if (!(late <= REFRESH_OVERDUE_AFTER)) {

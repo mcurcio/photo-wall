@@ -50,6 +50,33 @@ def test_private_connection_file_keeps_keys_out_of_models_and_repr(tmp_path):
     assert SECRET not in connections["fixture"].model_dump_json()
 
 
+def test_worker_reports_only_sorted_connection_ids(worker_storage):
+    instance = MediaWorker(worker_storage.repository, worker_storage,
+        {"zeta": ConnectionConfig(**{**configuration(), "connection_id": "zeta"}),
+         "alpha": ConnectionConfig(**{**configuration(), "connection_id": "alpha"})})
+    instance.store.recover = lambda: None
+
+    async def exercise():
+        await instance.maintain()
+
+    asyncio.run(exercise())
+    health = worker_storage.repository.health()
+    assert health["connection_ids"] == ["alpha", "zeta"]
+    assert SECRET not in repr(health)
+    assert "immich.invalid" not in repr(health)
+
+
+def test_worker_reports_valid_empty_connection_list(worker_storage):
+    instance = MediaWorker(worker_storage.repository, worker_storage, {})
+    instance.store.recover = lambda: None
+
+    async def exercise():
+        await instance.maintain()
+
+    asyncio.run(exercise())
+    assert worker_storage.repository.health()["connection_ids"] == []
+
+
 @pytest.mark.parametrize("fault", [
     "mode", "symlink", "owner", "oversize", "empty", "json", "duplicate_key",
     "duplicate_id", "schema", "unknown", "bad_secret", "nonfinite", "fifo",

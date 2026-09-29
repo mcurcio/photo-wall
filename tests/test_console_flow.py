@@ -330,13 +330,15 @@ out.describe = K.describe("new");
 out.editRoute = K.toRoute("edit/spring", K.firstStep("edit/spring"));
 const spec = (ref) => ({ source_ref: "x", spec: ref === undefined ? {} : { connection_ref: ref } });
 out.rules = [
-  source.connectionRule([]),
-  source.connectionRule([spec("home"), spec("home"), spec(undefined)]),
-  source.connectionRule([spec("work"), spec("home")]),
+  source.connectionRule(null, []),
+  source.connectionRule(null, [spec("home"), spec("home"), spec(undefined)]),
+  source.connectionRule(null, [spec("work"), spec("home")]),
+  source.connectionRule([], []),
+  source.connectionRule(["home"], [], "removed"),
 ];
 out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
-  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(sources))]);
-out.seeds = [source.seedSource([])("new"), source.seedSource([spec("home")])("new").connectionRef,
+  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(null, sources))]);
+out.seeds = [source.seedSource([], null)("new"), source.seedSource([spec("home")], null)("new").connectionRef,
              source.seedSource([spec("a"), spec("b")])("new").connectionRef];
 out.seedEdit = source.seedSource([{ name: "spring", revision: 3, source_ref: "spring:3",
   spec: { connection_ref: "home", media_types: ["image"], favorites: true } }])("edit/spring");
@@ -375,12 +377,14 @@ def test_hand_offs_and_source_flow_shape():
     assert out["route"] == {"section": "sources", "flow": "new", "step": "include"}
     assert out["editRoute"] == {"section": "sources", "id": "spring", "flow": "edit", "step": "review"}
     assert out["describe"] == "a new photo source"
-    # The connection rule: none -> a visible field; one value -> prefilled under Advanced
-    # (a Source without one adds no value); several -> a chooser, none chosen.
+    # The legacy connection rule keeps manual entry until the worker reports. Explicit
+    # empty and removed saved connections are represented separately from unknown.
     assert out["rules"] == [
-        {"shown": "field", "values": [], "prefill": ""},
-        {"shown": "advanced", "values": ["home"], "prefill": "home"},
-        {"shown": "chooser", "values": ["home", "work"], "prefill": ""}]
+        {"shown": "field", "values": [], "prefill": "", "reported": False, "selectedUnavailable": False},
+        {"shown": "advanced", "values": ["home"], "prefill": "home", "reported": False, "selectedUnavailable": False},
+        {"shown": "chooser", "values": ["home", "work"], "prefill": "", "reported": False, "selectedUnavailable": False},
+        {"shown": "blocked", "values": [], "prefill": "", "reported": True, "selectedUnavailable": False},
+        {"shown": "chooser", "values": ["home"], "prefill": "", "reported": True, "selectedUnavailable": True}]
     assert out["advanced"] == [[], ["connection"], []]
     assert out["seeds"] == [
         {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
@@ -400,3 +404,23 @@ def test_hand_offs_and_source_flow_shape():
                            "media_types": ["image"], "favorites": False}
     assert out["specBoth"]["media_types"] == ["image", "video"]
     assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]
+
+
+def test_source_health_separates_unattempted_from_failed_first_refresh():
+    _require_node()
+    script = r"""
+const health = await import(process.argv[1]);
+const base = { spec: {}, next_refresh: 0, last_success: null };
+console.log(JSON.stringify([
+  health.sourceState({ ...base, status: "unavailable", refresh_completed_revision: 0 }, 1000, false),
+  health.sourceState({ ...base, status: "incompatible", refresh_completed_revision: 1 }, 1000, false),
+]));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    states = json.loads(result.stdout)
+    assert states[0]["state"] == "never-refreshed"
+    assert states[0]["label"] == "Awaiting refresh"
+    assert states[1]["state"] == "failing"
+    assert states[1]["label"] == "Library unsupported · never refreshed successfully"

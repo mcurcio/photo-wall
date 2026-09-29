@@ -314,6 +314,25 @@ def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry
         assert {frame.id for frame in registry.inventory().frames} == {"first-frame"}
 
 
+def test_first_run_guidance_opens_measured_frame_form_with_focus(page, registry):
+    assert not registry.inventory().frames
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        guidance = page.get_by_role("note", name="Getting started")
+        expect(guidance).to_be_visible()
+        guidance.get_by_role("button", name="Add first frame", exact=True).click()
+
+        form = page.get_by_role("form", name="New frame")
+        expect(form).to_be_visible()
+        frame_id = form.get_by_label("Frame id", exact=True)
+        expect(frame_id).to_be_focused()
+        # Opening the action leaves the dismissible guidance and its draft state
+        # intact while the existing measured create flow owns the form.
+        expect(guidance).to_be_visible()
+        expect(page.get_by_role("button", name="Add frame with measurements", exact=True)
+               ).to_be_disabled()
+
+
 def test_drag_create_posts_frame_with_scaled_placement(page, registry):
     _seed_empty_wall(registry)
     with operator_server(registry.db, registry.clock) as origin:

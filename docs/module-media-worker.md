@@ -26,6 +26,8 @@ Periodic refresh remains the ordinary mechanism for discovering live upstream ch
 
 `load_connections(path)` reads a private JSON document with `schema: 1` and at most 128 connections. It must be a nonsymlink regular file owned by the worker with mode 0600 and no larger than 1 MiB. Duplicate fields/IDs, nonfinite JSON, changed files, and unknown fields fail with bounded codes. Credentials remain only in process and adapter memory; diagnostics exclude file contents, identifiers, URLs, tokens, and raw exceptions.
 
+At each media status check-in, the worker also publishes only its configured `connection_id` values to the central media-health projection. The operator console uses those names to offer a Source connection choice. A null list means no worker has reported this projection; an empty list means a worker reported that it has no connections. This does not test upstream reachability or key permissions: Source refresh supplies that result. The projection never carries the connection document, upstream URL, owner ID, API key, or CA path. It ages with the existing worker check-in timestamp and is not a credential-management interface.
+
 `MediaWorker.process_job(job_id, attempt=...)` is the task execution seam. It registers `Preparer.describe_recipe()`, claims exactly the named domain job, validates its recipe and attempt token, uses the existing reservation, creates private staging paths, obtains the exact original, prepares it, and publishes through MediaStore. No database transaction spans upstream I/O or native preparation. Publication rechecks the attempt token, so an expired or superseded task cannot publish or clean up a newer attempt.
 
 `media.task_queue.create_worker_app(dsn)` defines these tasks:

@@ -48,6 +48,39 @@ def request(original):
     return AcquisitionRequest(asset_id=original.asset_id, assignment_ids=("assignment",), earliest_start=1005)
 
 
+def test_worker_connection_projection_distinguishes_unreported_empty_and_configured(registry):
+    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue())
+    repo.configure_source(SourceSpec(source_ref="source:1", connection_ref="fixture"))
+    assert repo.health()["connection_ids"] is None
+
+    repo.worker_status(None, ())
+    assert repo.health()["connection_ids"] == []
+
+    repo.worker_status("source_unavailable", ("immich-main", "fixture"))
+    health = repo.health()
+    assert health["connection_ids"] == ["immich-main", "fixture"]
+    assert health["worker_error"] == "source_unavailable"
+    assert health["worker_seen"] == registry.clock.utc()
+
+    # A status-only check-in from an older worker cannot renew a stale list.
+    registry.clock.advance(1)
+    repo.worker_status(None)
+    assert repo.health()["connection_ids"] is None
+
+
+@pytest.mark.parametrize("connection_ids", [
+    ("duplicate", "duplicate"),
+    ("invalid id",),
+    ("x" * 129,),
+    ("ok", 1),
+    tuple(str(index) for index in range(129)),
+])
+def test_worker_status_rejects_invalid_connection_projection(registry, connection_ids):
+    repo = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue())
+    with pytest.raises(ValueError, match="connection identifiers"):
+        repo.worker_status(None, connection_ids)
+
+
 def test_source_versions_are_immutable_and_stale_refresh_cannot_replace_members(registry):
     repo, spec, originals = setup_repository(registry)
     assert not repo.configure_source(spec)

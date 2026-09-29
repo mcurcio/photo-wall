@@ -82,7 +82,7 @@ def test_with_no_source_the_connection_is_a_visible_required_field(page, registr
         expect(connection).to_be_visible()
         expect(connection).to_have_value("")
         expect(source_form(page)).to_contain_text(
-            "Enter a connection name already configured in the media worker.")
+            "The media worker has not reported its configured connections yet.")
         expect(source_form(page)).to_contain_text(
             "This form does not set the Immich URL or API key.")
         assert connection.evaluate("(element) => element.tagName") == "INPUT"
@@ -99,16 +99,72 @@ def test_with_no_source_the_connection_is_a_visible_required_field(page, registr
 def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry):
     _seed(registry)
     _set_source(registry, "all-photos:1", status="incompatible",
-                refresh_completed_revision=1, refresh_requested_revision=1,
+                next_refresh=registry.clock.utc() + 30,
+                refresh_completed_revision=0, refresh_requested_revision=1,
                 diagnostics=[{"code": "unsupported_version"}])
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
         expect(card).to_contain_text("No successful refresh")
+        expect(card).to_contain_text("Library unsupported · never refreshed successfully")
         expect(card).to_contain_text(
             "This Photo Wall release does not support the Immich version.")
         expect(card).not_to_contain_text("Awaiting refresh")
+
+
+def test_reported_worker_connections_drive_source_choices(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["family-library"])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        _to_name_step(page)
+        form = source_form(page)
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        connection = form.get_by_label("Connection name", exact=True)
+        expect(connection).to_have_value("family-library")
+        assert connection.evaluate("(element) => element.tagName") == "SELECT"
+        expect(connection.locator("option")).to_have_count(1)
+        expect(form).not_to_contain_text("Another connection")
+
+
+def test_reported_empty_worker_connections_explains_setup_prerequisite(page, registry):
+    _seed(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(None, connection_ids=[])
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        _to_name_step(page)
+        form = source_form(page)
+        expect(form.get_by_label("Connection name", exact=True)).to_be_disabled()
+        expect(form).to_contain_text("No connections configured")
+        expect(form).to_contain_text(
+            "Add a connection to the media worker's private configuration and restart the worker.")
+
+
+def test_edit_marks_removed_connection_unavailable_and_requires_a_reported_choice(page, registry):
+    _seed(registry)
+    queue = _seed_source(registry)
+    MediaRepository(registry.db, registry.clock).worker_status(
+        None, connection_ids=["current-library"])
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin)
+        go(page, "sources")
+        cards = _sources(page)
+        cards.get_by_role("button", name="Edit Source holiday", exact=True).click()
+        form = source_form(page)
+        form.get_by_role("button", name="Change Connection name", exact=True).click()
+        chooser = form.get_by_label("Connection name", exact=True)
+        expect(chooser).to_have_value("fixture-library")
+        expect(chooser.locator("option:checked")).to_contain_text("no longer configured")
+        expect(chooser.locator("option")).to_have_count(3)  # blank, current, saved-unavailable
+        source_continue(page)
+        expect(form.get_by_role("alert")).to_contain_text(
+            "Choose a connection currently configured in the media worker.")
+        assert current_hash(page) == "#/sources/holiday/edit/name"
+        chooser.select_option(label="current-library")
+        source_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("current-library")
 
 
 def test_edit_rename_and_delete_use_plain_names_with_revision_fencing(page, registry):
@@ -204,7 +260,7 @@ def test_several_connections_give_a_visible_chooser_with_none_chosen(page, regis
         expect(chooser).to_be_visible()
         expect(chooser).to_have_value("")
         expect(chooser.get_by_role("option")).to_have_text(
-            ["Choose a connection", "fixture-library", "second-library", "Another connection…"])
+            ["Choose a configured connection", "fixture-library", "second-library", "Another connection…"])
         expect(_advanced(page)).to_have_count(0)
 
         source_form(page).get_by_label("Source name", exact=True).fill(NEW_SOURCE)

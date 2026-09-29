@@ -12,7 +12,7 @@ import { useHandOffTo } from "./flow/useHandOff.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { editedId, editKey } from "./flow/instance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
-import { codeWords, sourceFilters } from "./mediaHealth.js";
+import { codeWords, mediaNow, sourceFilters, sourceState } from "./mediaHealth.js";
 import {
   buildSourceSpec,
   connectionRule,
@@ -52,9 +52,10 @@ const HEADINGS = {
  * problem through `SOURCE_FIELD_STEP` (opening Advanced for the connection when it
  * sits there).
  *
- * THE CONNECTION RULE (sourceFlowModel.js `connectionRule`) is read from the served
- * Sources on every render, so the Name step follows the library as it is; the seed
- * prefills the one-value case.
+ * THE CONNECTION RULE (sourceFlowModel.js `connectionRule`) uses the worker's
+ * reported connection IDs on every render. Until a worker reports them, saved
+ * Sources guide a manual fallback marked as uncertain. The seed prefills a
+ * single known connection.
  *
  * INLINE (flow/handOff.js). When the Scene flow hands off to "sources", the flow opens
  * its new instance, says whom it is for, and returns there: after Save with
@@ -72,9 +73,14 @@ const HEADINGS = {
  */
 export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   const sources = snapshot?.media?.sources ?? EMPTY;
-  const rule = useMemo(() => connectionRule(sources), [sources]);
-  const draft = useFlowDraft(seedSource(sources));
+  const connectionIds = snapshot?.media?.health?.connection_ids ?? null;
+  const draft = useFlowDraft(seedSource(sources, connectionIds));
   const value = draft.value ?? NEW_SOURCE_DRAFT;
+  const rule = useMemo(
+    () => connectionRule(connectionIds, sources, value.connectionRef),
+    [connectionIds, sources, value.connectionRef],
+  );
+  const now = mediaNow(snapshot);
   const editingName = editedId(draft.key);
   const stored = editingName === null ? null : namedSource(sources, editingName);
   const stale = editingName !== null && stored !== undefined && stored !== null &&
@@ -84,10 +90,15 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
 
   const refs = useFlowRefs();
 
-  const problemList = useMemo(
-    () => inStepOrder(sourceProblems(value), SOURCE_FIELD_STEP, SOURCE_STEPS),
-    [value, editingName],
-  );
+  const problemList = useMemo(() => {
+    const found = sourceProblems(value);
+    if (rule.shown === "blocked") {
+      found.push({ field: "connection", message: "Configure a connection in the media worker before saving a Source." });
+    } else if (rule.selectedUnavailable) {
+      found.push({ field: "connection", message: "Choose a connection currently configured in the media worker." });
+    }
+    return inStepOrder(found, SOURCE_FIELD_STEP, SOURCE_STEPS);
+  }, [value, editingName, rule]);
   const problems = useProblems(problemList);
 
   // One confirmation for this section (discarding a draft); its `after` runs once done.
@@ -232,7 +243,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       problems={problems}
       handOff={handOff}
       newLabel="New source"
-      cards={<SourceCards sources={sources} onRefresh={refreshSource} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
+      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
       title={editingName === null ? "New photo source" : `Edit Source ${editingName}`}
       steps={SOURCE_STEPS}
       formLabel="Configure a Source"
@@ -255,26 +266,25 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
  *
  * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void}} props
  */
-function SourceCards({ sources, onRefresh, onEdit, onDelete, busy }) {
+function SourceCards({ sources, now, onRefresh, onEdit, onDelete, busy }) {
   if (sources.length === 0) {
     return <p className="showrunner__empty">No Sources yet.</p>;
   }
   return (
     <ul className="card-grid" role="list">
-      {sources.map((source) => (
-        <li key={source.source_ref} className="card-grid__item">
+      {sources.map((source) => {
+        const state = sourceState(source, now, false);
+        return <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={sourceName(source)}
             lines={[
-              { label: "Status", value: source.status },
-              {
+              { label: "Status", value: state.label },
+              ...(state.state === "never-refreshed" ? [] : [{
                 label: "Refreshed",
                 value: source.last_success
                   ? `Last refreshed ${new Date(source.last_success * 1000).toLocaleString()}`
-                  : source.refresh_completed_revision > 0
-                    ? "No successful refresh"
-                    : "Awaiting refresh",
-              },
+                  : "No successful refresh",
+              }]),
               ...(source.status !== "ok" && source.diagnostics?.length
                 ? [{ label: "Issue", value: sourceIssue(source.diagnostics) }]
                 : []),
@@ -296,7 +306,7 @@ function SourceCards({ sources, onRefresh, onEdit, onDelete, busy }) {
             }
           />
         </li>
-      ))}
+      })}
     </ul>
   );
 }

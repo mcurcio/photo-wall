@@ -224,7 +224,7 @@ class MediaWorker:
             self._error = None
         else:
             self._error = result.diagnostics[0].code if result.diagnostics else "source_unavailable"
-        await _blocking(self.repository.worker_status, self._error)
+        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def refresh_once(self) -> bool:
         lease = await _blocking(self.repository.begin_scheduled_refresh)
@@ -237,6 +237,10 @@ class MediaWorker:
         if completed < requested:
             await self._refresh_source(lease.source.source_ref, retry_busy=False)
         return True
+
+    def _connection_ids(self) -> tuple[str, ...]:
+        """Return only the bounded identifiers safe for the central operator view."""
+        return tuple(sorted(self.connections))
 
     async def refresh_source(self, source_ref: str) -> None:
         """Complete every persisted request revision for one source."""
@@ -322,11 +326,11 @@ class MediaWorker:
                 raise RetryableMediaTask(self._error) from None
             raise MediaTaskFailed(self._error) from None
         finally:
-            await _blocking(self.repository.worker_status, self._error)
+            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
-        await _blocking(self.repository.worker_status, self._error)
+        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
 
     async def _close_clients(self):
         async def close(client):
