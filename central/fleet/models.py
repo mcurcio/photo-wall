@@ -133,3 +133,18 @@ class RevisionWrite(WireModel):
 class BaselineWrite(WireModel):
     expected_revision: int = Field(ge=0)
     tag: str = Field(min_length=1, max_length=128)
+
+
+class MaintenanceRequestWrite(WireModel):
+    """Operator intent tied to the exact policy and device generation on screen."""
+
+    request_id: UUID
+    expected_device_generation: int = Field(strict=True, gt=0)
+    expected_policy_source: Literal["explicit", "override"]
+    expected_policy_revision: int = Field(strict=True, gt=0)
+    expected_target_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ttl_seconds: int = Field(strict=True, ge=300, le=86400)
+
+
+class MaintenanceRequestCancel(WireModel):
+    expected_revision: int = Field(strict=True, gt=0)

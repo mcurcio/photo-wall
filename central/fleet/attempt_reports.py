@@ -60,9 +60,9 @@ class AttemptReportStore:
             raise PrincipalError("current_time_invalid")
         now = self.clock.utc()
         with self.db.transaction() as conn:
-            # No transport is mounted. A caller must supply a T1/T2 verifier
-            # result; T0 observations cannot construct current authority.
-            require_current_principal_in(conn, principal, now=now)
+            # The data route requires a T1/T2 verifier result and is not
+            # mounted in production. T0 cannot construct current authority.
+            admission = require_current_principal_in(conn, principal, clock=self.clock)
             if (report.device_id != principal.device_id
                     or report.device_generation != principal.device_generation
                     or report.kernel_boot_id != principal.kernel_boot_id
@@ -95,7 +95,8 @@ class AttemptReportStore:
                     or not math.isfinite(current_monotonic)
                     or current_monotonic < started_monotonic):
                 raise PrincipalError("current_time_invalid")
-            received_at = max(current_utc, now + (current_monotonic - started_monotonic))
+            received_at = max(current_utc, admission.ensure_current(self.clock),
+                              now + (current_monotonic - started_monotonic))
             if not math.isfinite(received_at):
                 raise PrincipalError("current_time_invalid")
             if received_at >= principal.expires_at:
@@ -110,6 +111,7 @@ class AttemptReportStore:
             if existing is not None:
                 if existing["report_json"] != encoded.decode("utf-8"):
                     raise FleetError("attempt_report_replay_conflict", 409)
+                admission.ensure_current(self.clock)
                 return "replayed"
             latest = conn.execute(
                 "SELECT max(report_sequence) AS sequence FROM fleet_os_attempt_reports "
@@ -124,4 +126,5 @@ class AttemptReportStore:
                 (report.attempt_id, report.report_sequence, principal.command_session_id,
                  principal.trust_mode, encoded.decode("utf-8"), received_at),
             )
+            admission.ensure_current(self.clock)
             return "stored"

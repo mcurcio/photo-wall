@@ -136,9 +136,8 @@ class AttemptService:
                 or not _valid_digest(fallback_sha256)
                 or expected_target_sha256 == fallback_sha256):
             raise FleetError("attempt_request_invalid", 422)
-        now = self.clock.utc()
         with self.db.transaction() as conn:
-            require_current_principal_in(conn, principal, now=now)
+            admission = require_current_principal_in(conn, principal, clock=self.clock)
             existing = conn.execute(
                 "SELECT * FROM fleet_app_attempts WHERE device_id=%s AND offer_id=%s "
                 "AND desired_revision=%s FOR UPDATE",
@@ -163,6 +162,7 @@ class AttemptService:
                     raise FleetError("attempt_policy_changed")
                 if not self._rooted_in(conn, existing):
                     raise FleetError("attempt_root_unavailable", 503)
+                admission.ensure_current(self.clock)
                 return AttemptSnapshot.from_row(existing)
 
             offer = conn.execute("SELECT * FROM fleet_boot_offers WHERE offer_id=%s FOR SHARE",
@@ -228,6 +228,7 @@ class AttemptService:
                         fallback, sha256=fallback_sha256, size=accepted["size"])):
                 raise FleetError("attempt_fallback_unavailable", 503)
 
+            now = admission.ensure_current(self.clock)
             attempt_id = uuid4()
             row = conn.execute(
                 "INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
@@ -260,6 +261,7 @@ class AttemptService:
                     "VALUES('player-payload',%s,%s,%s,%s,%s,%s,%s,%s)",
                     (sha256, owner, url, sha256, size, sha256, size, now),
                 )
+            admission.ensure_current(self.clock)
             return AttemptSnapshot.from_row(row)
 
     def release_queued(self, attempt_id: UUID) -> None:

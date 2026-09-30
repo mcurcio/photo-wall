@@ -1,0 +1,154 @@
+"""Separate, data-only loader-OS HTTP seam for exact app attempts.
+
+Mounting requires a request authenticator that has already established a T1/T2
+attachment or device identity. This module neither derives authority from T0
+serial observations nor mounts itself in Central's production composition root.
+The per-operation stores recheck the current session under database locks.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import os
+from collections.abc import Awaitable, Callable
+from uuid import UUID
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from starlette.requests import ClientDisconnect
+
+from central.content_routes import ClientDisconnected, _stream, until_disconnect
+from central.content_wiring import ContentServices
+from central.db import Database
+from central.fleet.attempt_bytes import AttemptByteAccess
+from central.fleet.attempt_reports import AttemptReportStore
+from central.fleet.bytes import OfferByteReader
+from central.fleet.models import FleetError
+from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
+from contracts.os_attempt_report import MAX_ATTEMPT_REPORT_BYTES, parse_os_attempt_report
+from contracts.time import Clock
+
+OsRequestVerifier = Callable[
+    [Request], VerifiedOsPrincipal | Awaitable[VerifiedOsPrincipal]
+]
+
+
+class OsVerifierUnauthorized(Exception):
+    """The request has no acceptable loader-OS carrier credential."""
+
+
+class OsVerifierForbidden(Exception):
+    """The carrier is authenticated but cannot act as this loader OS."""
+
+
+def _error(code: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": code}, status_code=status,
+                        headers={"Cache-Control": "private, no-store"})
+
+
+async def _body_bounded(request: Request) -> bytes:
+    """Read at most the report contract's limit even when length is absent or false."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_ATTEMPT_REPORT_BYTES:
+                raise FleetError("attempt_report_too_large", 413)
+        except ValueError:
+            # A proxy may strip or rewrite a malformed length; the stream is
+            # still authoritative and bounded independently of that header.
+            pass
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > MAX_ATTEMPT_REPORT_BYTES:
+            raise FleetError("attempt_report_too_large", 413)
+        data.extend(chunk)
+    return bytes(data)
+
+
+def mount_os_fleet_data_routes(
+    app: FastAPI, *, verifier: OsRequestVerifier, db: Database,
+    clock: Clock, content: ContentServices,
+) -> None:
+    """Bind authenticated loader-OS *data* routes, without command effects.
+
+    There is deliberately no default verifier and no production call site.
+    D14 must supply a protected T1/T2 implementation before this can be mounted.
+    """
+    if not callable(verifier):
+        raise ValueError("os_request_verifier_required")
+    access = AttemptByteAccess(db, clock, OfferByteReader(content.reader))
+    reports = AttemptReportStore(db, clock)
+
+    @app.middleware("http")
+    async def os_no_store(request: Request, call_next):
+        response = await call_next(request)
+        # Also cover FastAPI's automatic 404/405/422 and disconnect responses.
+        if request.url.path.startswith("/v1/os/"):
+            response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    async def authenticated(request: Request) -> VerifiedOsPrincipal | JSONResponse:
+        try:
+            result = verifier(request)
+            principal = await result if inspect.isawaitable(result) else result
+        except OsVerifierUnauthorized:
+            return _error("os_authentication_required", 401)
+        except OsVerifierForbidden:
+            return _error("os_verifier_denied", 403)
+        except PrincipalError as exc:
+            return _error(str(exc), 403)
+        if type(principal) is not VerifiedOsPrincipal:
+            return _error("os_verifier_denied", 403)
+        return principal
+
+    @app.get("/v1/os/attempts/{attempt_id}/artifacts/{role}")
+    async def attempt_artifact(request: Request, attempt_id: UUID, role: str) -> Response:
+        principal = await authenticated(request)
+        if isinstance(principal, JSONResponse):
+            return principal
+        if role not in ("target", "fallback"):
+            return _error("attempt_artifact_request_invalid", 422)
+        try:
+            opened = await until_disconnect(
+                request, access.open_role(principal, attempt_id, role))
+        except ClientDisconnected:
+            return Response(status_code=499)
+        except PrincipalError as exc:
+            return _error(str(exc), 403)
+        except FleetError as exc:
+            return _error(exc.code, exc.status)
+        try:
+            response = _stream(opened, "application/gzip")
+            # Unlike serial-only boot assets, these bytes require a fresh
+            # authenticated session and must never be served from a shared cache.
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response
+        except BaseException:
+            os.close(opened.fd)
+            raise
+
+    @app.post("/v1/os/attempts/{attempt_id}/reports")
+    async def attempt_report(request: Request, attempt_id: UUID) -> Response:
+        principal = await authenticated(request)
+        if isinstance(principal, JSONResponse):
+            return principal
+        try:
+            raw = await _body_bounded(request)
+            try:
+                report = parse_os_attempt_report(raw)
+            except ValueError:
+                raise FleetError("attempt_report_invalid", 422) from None
+            if report.attempt_id != attempt_id:
+                raise FleetError("attempt_report_path_mismatch", 409)
+            disposition = await asyncio.to_thread(reports.record, principal, report)
+        except ClientDisconnect:
+            return Response(status_code=499)
+        except PrincipalError as exc:
+            return _error(str(exc), 403)
+        except FleetError as exc:
+            return _error(exc.code, exc.status)
+        return JSONResponse({"disposition": disposition},
+                            status_code=201 if disposition == "stored" else 200,
+                            headers={"Cache-Control": "no-store"})

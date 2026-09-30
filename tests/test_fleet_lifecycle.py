@@ -119,13 +119,14 @@ def test_retirement_revokes_same_generation_session_and_queued_attempt(registry)
                      "desired_revision,target_sha256,phase,created_at,updated_at,"
                      "device_generation) VALUES(%s,%s,%s,1,%s,'queued',900,900,1)",
                      (ATTEMPT_ID, DEVICE_ID, OFFER_ID, "d" * 64))
-        require_current_principal_in(conn, _principal(), now=1000)
+        assert require_current_principal_in(
+            conn, _principal(), clock=registry.clock).admitted_at == 1000
         assert conn.execute("SELECT count(*) AS n FROM "
                             "fleet_generation_current_app_attempts").fetchone()["n"] == 1
     registry.retire(PLAYER_ID)
     with registry.db.transaction() as conn:
         with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), now=1000)
+            require_current_principal_in(conn, _principal(), clock=registry.clock)
         assert conn.execute("SELECT count(*) AS n FROM "
                             "fleet_generation_current_os_command_sessions").fetchone()["n"] == 0
         assert conn.execute("SELECT count(*) AS n FROM "
@@ -151,9 +152,10 @@ def test_new_os_session_requires_explicit_revocation_of_previous_one(registry) -
                      "WHERE command_session_id=%s", (SESSION_ID,))
         _seed_session(conn, UUID(int=45))
         with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), now=1000)
+            require_current_principal_in(conn, _principal(), clock=registry.clock)
         require_current_principal_in(
-            conn, replace(_principal(), command_session_id=UUID(int=45)), now=1000)
+            conn, replace(_principal(), command_session_id=UUID(int=45)),
+            clock=registry.clock)
 
 
 def test_t0_offer_label_cannot_back_authenticated_os_session(registry) -> None:
@@ -162,7 +164,7 @@ def test_t0_offer_label_cannot_back_authenticated_os_session(registry) -> None:
         _seed_offer(conn, audience="photo-wall-central-t0")
         _seed_session(conn, SESSION_ID)
         with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), now=1000)
+            require_current_principal_in(conn, _principal(), clock=registry.clock)
 
 
 def test_retired_device_still_accepts_bounded_t0_observation_only(registry) -> None:

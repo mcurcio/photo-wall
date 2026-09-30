@@ -23,6 +23,8 @@ from central.fleet.models import (
     CheckIn,
     CheckInV2,
     FleetError,
+    MaintenanceRequestCancel,
+    MaintenanceRequestWrite,
     OfferRequest,
     OverrideWrite,
     PolicyWrite,
@@ -120,5 +122,16 @@ def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.put("/v1/operator/fleet/base-baseline", dependencies=[Depends(admin)])
     async def base_baseline(body: BaselineWrite) -> dict:
         return await asyncio.to_thread(service.set_base_baseline, body)
+
+    @app.post("/v1/operator/fleet/devices/{device_id}/maintenance-requests",
+              dependencies=[Depends(admin)])
+    async def request_maintenance(device_id: str, body: MaintenanceRequestWrite) -> dict:
+        return await asyncio.to_thread(service.request_maintenance, device_id, body)
+
+    @app.delete("/v1/operator/fleet/devices/{device_id}/maintenance-requests/{request_id}",
+                dependencies=[Depends(admin)])
+    async def cancel_maintenance(device_id: str, request_id: UUID,
+                                 body: MaintenanceRequestCancel) -> dict:
+        return await asyncio.to_thread(service.cancel_maintenance, device_id, request_id, body)
 
     return service

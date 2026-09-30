@@ -5,11 +5,15 @@ import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 from uuid import UUID
 
 import pytest
 from psycopg.errors import CheckViolation
 
+import central.fleet.attempt_bytes as attempt_bytes_module
+import central.fleet.attempts as attempts_module
+import central.fleet.principal as principal_module
 from central.assets.handlers import FetchPlayerPayloadHandler
 from central.assets.layout import CacheLayout
 from central.assets.production import AssetProduction
@@ -19,6 +23,7 @@ from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.attempt_bytes import AttemptByteAccess
 from central.fleet.attempts import AttemptService
 from central.fleet.bytes import OfferByteReader
+from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import FleetError
 from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
 from central.fleet.service import FleetService
@@ -108,6 +113,91 @@ def _create(registry, *, target_sha: str = TARGET_SHA, fallback_sha: str = FALLB
     return AttemptService(registry.db, registry.clock).create_queued(
         _principal(), desired_revision=1, expected_target_sha256=target_sha,
         fallback_sha256=fallback_sha)
+
+
+def _after_fleet_lock_wait(registry, monkeypatch, action, *, elapsed: float,
+                           reverse_utc: bool = False):
+    """Make a real PostgreSQL advisory lock hold the service past its first sample."""
+    waiting = Event()
+    lock = principal_module.lock_fleet_assets_in
+
+    def signalled_lock(conn):
+        waiting.set()
+        lock(conn)
+
+    monkeypatch.setattr(principal_module, "lock_fleet_assets_in", signalled_lock)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with registry.db.transaction() as blocker:
+            blocker.execute("SELECT pg_advisory_xact_lock(%s)", (FLEET_ASSET_LOCK,))
+            future = pool.submit(action)
+            assert waiting.wait(timeout=3)
+            assert not future.done()
+            registry.clock.advance(elapsed)
+            if reverse_utc:
+                registry.clock.step_utc(-elapsed)
+        return future.result(timeout=5)
+
+
+def _after_attempt_lock_wait(registry, monkeypatch, module, attempt_id, action, *,
+                             elapsed: float, reverse_utc: bool = False):
+    """Hold the attempt row after the OS session was admitted under its locks."""
+    waiting = Event()
+    guard = module.require_current_principal_in
+
+    def signalled_guard(conn, principal, *, clock):
+        admission = guard(conn, principal, clock=clock)
+        waiting.set()
+        return admission
+
+    monkeypatch.setattr(module, "require_current_principal_in", signalled_guard)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with registry.db.transaction() as blocker:
+            blocker.execute("SELECT attempt_id FROM fleet_app_attempts "
+                            "WHERE attempt_id=%s FOR UPDATE", (attempt_id,))
+            future = pool.submit(action)
+            assert waiting.wait(timeout=3)
+            assert not future.done()
+            registry.clock.advance(elapsed)
+            if reverse_utc:
+                registry.clock.step_utc(-elapsed)
+        return future.result(timeout=5)
+
+
+@pytest.mark.parametrize("reverse_utc", [False, True])
+def test_queued_attempt_rejects_session_expired_during_fleet_lock_wait(
+    registry, monkeypatch, reverse_utc,
+) -> None:
+    _seed(registry)
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        _after_fleet_lock_wait(registry, monkeypatch, lambda: _create(registry),
+                               elapsed=101, reverse_utc=reverse_utc)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM fleet_app_attempts").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM asset_references "
+                            "WHERE owner LIKE 'fleet-attempt:%'").fetchone()["n"] == 0
+
+
+def test_queued_attempt_timestamps_use_post_lock_admission_time(registry, monkeypatch) -> None:
+    _seed(registry)
+    attempt = _after_fleet_lock_wait(registry, monkeypatch, lambda: _create(registry),
+                                     elapsed=5)
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT created_at,updated_at FROM fleet_app_attempts "
+                           "WHERE attempt_id=%s", (attempt.attempt_id,)).fetchone()
+    assert row == {"created_at": 1005, "updated_at": 1005}
+
+
+@pytest.mark.parametrize("reverse_utc", [False, True])
+def test_queued_retry_rejects_expiry_during_attempt_row_lock_wait(
+    registry, monkeypatch, reverse_utc,
+) -> None:
+    _seed(registry)
+    attempt = _create(registry)
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        _after_attempt_lock_wait(
+            registry, monkeypatch, attempts_module, attempt.attempt_id,
+            lambda: _create(registry), elapsed=101, reverse_utc=reverse_utc,
+        )
 
 
 def test_queued_attempt_freezes_two_exact_roots_and_survives_release_recut(registry) -> None:
@@ -392,6 +482,36 @@ def test_attempt_byte_access_rejects_wrong_session_and_bad_bytes(registry, tmp_p
     for fd in reader.fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.parametrize("reverse_utc", [False, True])
+def test_attempt_bytes_cannot_open_after_session_expires_during_fleet_lock_wait(
+    registry, tmp_path, monkeypatch, reverse_utc,
+) -> None:
+    attempt, reader, _, _ = _seed_file_attempt(registry, tmp_path)
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        _after_fleet_lock_wait(
+            registry, monkeypatch,
+            lambda: asyncio.run(access.open_role(_principal(), attempt.attempt_id, "target")),
+            elapsed=101, reverse_utc=reverse_utc,
+        )
+    assert reader.fds == []
+
+
+@pytest.mark.parametrize("reverse_utc", [False, True])
+def test_attempt_bytes_cannot_open_after_expiry_during_attempt_row_lock_wait(
+    registry, tmp_path, monkeypatch, reverse_utc,
+) -> None:
+    attempt, reader, _, _ = _seed_file_attempt(registry, tmp_path)
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        _after_attempt_lock_wait(
+            registry, monkeypatch, attempt_bytes_module, attempt.attempt_id,
+            lambda: asyncio.run(access.open_role(_principal(), attempt.attempt_id, "target")),
+            elapsed=101, reverse_utc=reverse_utc,
+        )
+    assert reader.fds == []
 
 
 def test_attempt_open_rechecks_after_release_and_closes_fd(registry, tmp_path) -> None:

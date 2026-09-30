@@ -1,7 +1,8 @@
 """A bounded base-owned app-attempt evidence value, without transport authority.
 
-No Central route accepts this value yet. A future T1/T2 verifier must provide
-the session principal before its claims can be stored as verified evidence.
+A separate data-only route can store this value only after a T1/T2 verifier
+provides the current session principal. Production does not mount that route
+until the verifier exists; its stored contents remain claims.
 """
 
 from __future__ import annotations

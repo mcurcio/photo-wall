@@ -1,7 +1,8 @@
 """Authenticated, data-only access to one immutable AppAttempt's exact bytes.
 
 This module does not authenticate a request or authorize a stop. A T1/T2
-verifier must supply the principal; there is deliberately no HTTP route yet.
+verifier must supply the principal to the separate data-only HTTP route;
+production does not mount that route until D14 supplies a trusted verifier.
 Expired-session or cross-boot recovery needs a separate authority path. An
 already-open descriptor leases bytes for its stream after a later revocation.
 """
@@ -44,7 +45,7 @@ class AttemptByteAccess:
         with self.db.transaction() as conn:
             # Full order: Coordination → Runtime (for mutators only) → fleet
             # offer → device → lifecycle → session → attempt → artifact refs.
-            require_current_principal_in(conn, principal, now=self.clock.utc())
+            admission = require_current_principal_in(conn, principal, clock=self.clock)
             row = conn.execute("SELECT * FROM fleet_app_attempts WHERE attempt_id=%s "
                                "FOR SHARE", (attempt_id,)).fetchone()
             if (row is None or row["attempt_schema"] != 1
@@ -66,6 +67,7 @@ class AttemptByteAccess:
                 raise FleetError("attempt_artifact_unavailable", 404)
             if not AttemptService._rooted_in(conn, row):
                 raise FleetError("attempt_root_unavailable", 503)
+            admission.ensure_current(self.clock)
             return AttemptSnapshot.from_row(row)
 
     async def preflight(self, principal: VerifiedOsPrincipal,

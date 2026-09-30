@@ -3,14 +3,17 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 from uuid import UUID
 
 import pytest
 from psycopg.errors import CheckViolation
 
 import central.fleet.attempt_reports as reports_module
+import central.fleet.principal as principal_module
 from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.attempt_reports import AttemptReportStore
+from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import FleetError
 from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
 from contracts.os_attempt_report import OsAttemptReport
@@ -153,6 +156,36 @@ def test_current_session_required_even_for_replay(registry) -> None:
     assert _count(registry) == 1
 
 
+@pytest.mark.parametrize("reverse_utc", [False, True])
+def test_report_cannot_enter_after_session_expires_during_fleet_lock_wait(
+    registry, monkeypatch, reverse_utc,
+) -> None:
+    _seed(registry)
+    waiting = Event()
+    lock = principal_module.lock_fleet_assets_in
+
+    def signalled_lock(conn):
+        waiting.set()
+        lock(conn)
+
+    monkeypatch.setattr(principal_module, "lock_fleet_assets_in", signalled_lock)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with registry.db.transaction() as blocker:
+            blocker.execute("SELECT pg_advisory_xact_lock(%s)", (FLEET_ASSET_LOCK,))
+            future = pool.submit(
+                AttemptReportStore(registry.db, registry.clock).record,
+                _principal(), _report(),
+            )
+            assert waiting.wait(timeout=3)
+            assert not future.done()
+            registry.clock.advance(101)
+            if reverse_utc:
+                registry.clock.step_utc(-101)
+        with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+            future.result(timeout=5)
+    assert _count(registry) == 0
+
+
 @pytest.mark.parametrize("replay", [False, True])
 @pytest.mark.parametrize("utc_steps_back", [False, True])
 def test_session_expiry_during_lock_wait_blocks_insert_and_replay(
@@ -164,13 +197,14 @@ def test_session_expiry_during_lock_wait_blocks_insert_and_replay(
         assert store.record(_principal(), _report()) == "stored"
     guard = reports_module.require_current_principal_in
 
-    def delayed_guard(conn, principal, *, now):
-        guard(conn, principal, now=now)
+    def delayed_guard(conn, principal, *, clock):
+        admission = guard(conn, principal, clock=clock)
         # Simulate waiting after the guard sampled UTC, while its session row
         # remains locked. A backward wall-clock step cannot undo elapsed time.
         registry.clock.advance(101)
         if utc_steps_back:
             registry.clock.step_utc(-101)
+        return admission
 
     monkeypatch.setattr(reports_module, "require_current_principal_in", delayed_guard)
     with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
@@ -182,9 +216,10 @@ def test_received_at_samples_after_authority_lock_wait(registry, monkeypatch) ->
     _seed(registry)
     guard = reports_module.require_current_principal_in
 
-    def delayed_guard(conn, principal, *, now):
-        guard(conn, principal, now=now)
+    def delayed_guard(conn, principal, *, clock):
+        admission = guard(conn, principal, clock=clock)
         registry.clock.advance(5)
+        return admission
 
     monkeypatch.setattr(reports_module, "require_current_principal_in", delayed_guard)
     assert AttemptReportStore(registry.db, registry.clock).record(_principal(), _report()) == \

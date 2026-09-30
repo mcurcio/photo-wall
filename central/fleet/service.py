@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
 from central.db import Database
 from central.fleet.locks import lock_fleet_assets_in
+from central.fleet.maintenance_requests import MaintenanceRequestStore
 from central.fleet.models import (
     T0_AUDIENCE,
     Artifact,
@@ -20,6 +21,8 @@ from central.fleet.models import (
     CheckIn,
     CheckInV2,
     FleetError,
+    MaintenanceRequestCancel,
+    MaintenanceRequestWrite,
     OfferAsset,
     OfferRequest,
     PolicyWrite,
@@ -274,6 +277,27 @@ class FleetService:
                          (revision, request.tag, self.clock.utc()))
             return {"revision": revision, "tag": request.tag, "source": "operator",
                     "status": "operator_baseline"}
+
+    def request_maintenance(self, device_id: str, request: MaintenanceRequestWrite) -> dict:
+        """Freeze one operator intent without creating execution authority."""
+        with self.db.transaction() as conn:
+            lock_fleet_assets_in(conn)
+            generation = MaintenanceRequestStore.lock_current_device_in(
+                conn, device_id, expected_generation=request.expected_device_generation)
+            fleet, override = self._app_policy(conn, device_id)
+            selected = effective_app(fleet, override)
+            return MaintenanceRequestStore.create_in(
+                conn, device_id, generation, request, selected=selected,
+                validate_app=self._validate_app, now=self.clock.utc())
+
+    def cancel_maintenance(self, device_id: str, request_id: UUID,
+                           request: MaintenanceRequestCancel) -> dict:
+        with self.db.transaction() as conn:
+            lock_fleet_assets_in(conn)
+            generation = MaintenanceRequestStore.lock_current_device_in(
+                conn, device_id, expected_generation=None)
+            return MaintenanceRequestStore.cancel_in(
+                conn, device_id, generation, request_id, request, now=self.clock.utc())
 
     @staticmethod
     def _app_policy(conn, device_id: str) -> tuple[dict, dict | None]:
@@ -570,9 +594,16 @@ class FleetService:
                                     "FROM app_releases r LEFT JOIN base_cache c ON c.tag=r.tag "
                                     "ORDER BY r.major DESC,r.minor DESC,r.patch DESC,r.tag DESC "
                                     "LIMIT 500").fetchall()
-            devices = conn.execute("SELECT device_id,serial,known_good_tag,boot_outcome,"
-                                   "last_served_tag,attached_tag FROM devices "
-                                   "WHERE retired_at IS NULL ORDER BY device_id LIMIT 5000").fetchall()
+            devices = conn.execute("SELECT device.device_id,device.serial,device.known_good_tag,"
+                                   "device.boot_outcome,device.last_served_tag,device.attached_tag,"
+                                   "lifecycle.generation AS device_generation FROM devices AS device "
+                                   "JOIN fleet_device_lifecycle AS lifecycle "
+                                   "ON lifecycle.device_id=device.device_id "
+                                   "WHERE device.retired_at IS NULL "
+                                   "AND lifecycle.revoked_at IS NULL "
+                                   "ORDER BY device.device_id LIMIT 5000").fetchall()
+            maintenance = MaintenanceRequestStore.latest_by_device_in(
+                conn, device_ids=[row["device_id"] for row in devices], read_at=read_at)
             overrides = {r["device_id"]: r for r in conn.execute(
                 "SELECT * FROM fleet_device_app_overrides").fetchall()}
             observations: dict[str, list[dict]] = {}
@@ -618,6 +649,8 @@ class FleetService:
                 app_fact = app_control_status(player=player, session=session, read_at=read_at)
                 result.append({
                     "device_id": device_id, "serial": device["serial"],
+                    "device_generation": device["device_generation"],
+                    "maintenance_request": maintenance.get(device_id),
                     "capability": (f"offer_v{offer['offer_schema']}_claimed" if offer
                                    else "legacy_or_unknown"),
                     "desired": {**desired, "artifact": desired["target"]},

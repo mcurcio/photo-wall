@@ -1,11 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import {
   appArtifact,
   baseBaselineRequest,
+  cancelMaintenanceRequest,
   clearDeviceOverrideRequest,
   deviceOverrideRequest,
   fleetPolicyRequest,
+  newMaintenanceRequestId,
+  queueMaintenanceRequest,
   refreshReleaseCatalog,
   useFleetFacts,
 } from "./fleetApi.js";
@@ -66,7 +69,7 @@ function readTime(value) {
 
 function writeMessage(result, success) {
   if (result?.ok) return success;
-  if (result?.status === 409) return "Policy changed while this page was open. Refresh and choose again.";
+  if (result?.status === 409) return "Policy or maintenance state changed while this page was open. Refresh and choose again.";
   if (result?.status >= 400 && result?.status < 500) {
     return `Central refused this selection: ${result.error ?? result.status}.`;
   }
@@ -82,6 +85,7 @@ export function PlayerVersions({ snapshot }) {
   const [devicePicks, setDevicePicks] = useState(() => new Map());
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
+  const queueIds = useRef(new Map());
   const view = facts.data;
   const releases = (view?.releases ?? []).filter((release) => appArtifact(release) !== null);
   const devices = view?.devices ?? [];
@@ -122,6 +126,7 @@ export function PlayerVersions({ snapshot }) {
     setNotice(writeMessage(result, success));
     await facts.refresh();
     setBusy(false);
+    return result;
   };
 
   const chooseFleet = () => {
@@ -157,6 +162,32 @@ export function PlayerVersions({ snapshot }) {
     refreshReleaseCatalog,
     "Release discovery requested. Refresh this view after mirroring completes.",
   );
+
+  const queueUpdate = (device) => {
+    const desired = device.desired;
+    const target = desired?.artifact;
+    if (!target?.sha256 || !Number.isSafeInteger(device.device_generation)
+        || !["explicit", "override"].includes(desired.source)) return;
+    const key = `${device.device_id}:${device.device_generation}:${desired.source}:${desired.revision}:${target.sha256}`;
+    let requestId = queueIds.current.get(key);
+    if (!requestId) {
+      requestId = newMaintenanceRequestId();
+      queueIds.current.set(key, requestId);
+    }
+    void submit(
+      () => queueMaintenanceRequest(device.device_id, {
+        request_id: requestId,
+        expected_device_generation: device.device_generation,
+        expected_policy_source: desired.source,
+        expected_policy_revision: desired.revision,
+        expected_target_sha256: target.sha256,
+        ttl_seconds: 3600,
+      }),
+      `Maintenance request recorded for ${device.device_id}; it expires in one hour. Online execution is unavailable until the command path and Runtime drain are commissioned.`,
+    ).then((result) => {
+      if (result?.ok) queueIds.current.delete(key);
+    });
+  };
 
   return (
     <section className="fleet" aria-label="Player versions">
@@ -221,6 +252,12 @@ export function PlayerVersions({ snapshot }) {
           <ul className="fleet__devices">
             {devices.map((device) => {
               const pick = devicePicks.get(device.device_id) ?? device.desired?.artifact?.tag ?? fleetPick;
+              const request = device.maintenance_request;
+              const canQueue = Number.isSafeInteger(device.device_generation)
+                && device.device_generation > 0
+                && ["explicit", "override"].includes(device.desired?.source)
+                && Boolean(device.desired?.artifact?.sha256)
+                && request?.status !== "queued";
               return (
                 <li key={device.device_id} className="fleet__device">
                   <h3>{device.device_id}</h3>
@@ -251,7 +288,7 @@ export function PlayerVersions({ snapshot }) {
                         {releases.map((release) => <option key={release.tag} value={release.tag}>{release.tag}</option>)}
                       </select>
                     </label>
-                    <button type="button" disabled={busy || !pick} onClick={() => chooseDevice(device)}>Set for Player</button>
+                    <button type="button" disabled={busy || !pick} onClick={() => chooseDevice(device)}>Set desired version</button>
                     {device.override !== null && (
                       <button
                         type="button"
@@ -263,6 +300,23 @@ export function PlayerVersions({ snapshot }) {
                       >Clear override</button>
                     )}
                   </span>
+                  <div className="fleet__policy">
+                    <p>Online maintenance: {request
+                      ? `${String(request.status).replaceAll("_", " ")} · ${version(request.target)} · expires ${readTime(request.expires_at)}`
+                      : "No request"}
+                      {request?.reason && ` · ${String(request.reason).replaceAll("_", " ")}`}
+                    </p>
+                    <p className="fleet__note">A maintenance request records intent for one hour. Execution requires commissioned loader OS command trust, a qualified fallback, and a safe Runtime drain. Setting a desired version applies to future boot offers separately.</p>
+                    <span className="fleet__controls">
+                      <button type="button" disabled={busy || !canQueue} onClick={() => queueUpdate(device)}>Queue online update</button>
+                      {request?.status === "queued" && (
+                        <button type="button" disabled={busy} onClick={() => submit(
+                          () => cancelMaintenanceRequest(device.device_id, request.request_id, request.revision),
+                          `Maintenance request canceled for ${device.device_id}.`,
+                        )}>Cancel request</button>
+                      )}
+                    </span>
+                  </div>
                   {!device.update_now?.available && (
                     <p className="fleet__note">Update now unavailable: {device.update_now?.reason ?? "management trust not commissioned"}.</p>
                   )}
