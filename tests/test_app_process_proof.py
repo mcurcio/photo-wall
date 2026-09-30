@@ -53,17 +53,29 @@ def verifier_state():
 
 def test_existing_process_key_signs_domain_separated_attempt_bound_challenge():
     verifier, _ = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     assert b"photo-wall-local-app-proof-v1" in app_proof_message(challenge)
     assert challenge.attempt_id == ATTEMPT and challenge.command_id == COMMAND
     assert challenge.device_id == DEVICE and challenge.kernel_boot_id == BOOT
     assert b"os_command_session" not in app_proof_message(challenge)
     identity = load_identity()
-    proof = verifier.verify(object(), identity.sign_app_proof(challenge))
+    proof = verifier.verify(handle, identity.sign_app_proof(challenge))
     assert proof.response.public_key == identity.public_key
     assert proof.verified_boottime_ms == 10000
     with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
-        verifier.verify(object(), proof.response)
+        verifier.verify(handle, proof.response)
+
+
+def test_proof_nonce_is_bound_to_exact_peer_handle_and_consumed_on_mismatch():
+    verifier, _ = verifier_state()
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
+    response = load_identity().sign_app_proof(challenge)
+    with pytest.raises(LocalProofError, match="app_proof_peer_changed"):
+        verifier.verify(object(), response)
+    with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
+        verifier.verify(handle, response)
 
 
 def test_proof_rejects_wrong_peer_and_process_identity():
@@ -77,32 +89,36 @@ def test_proof_rejects_wrong_peer_and_process_identity():
          "main": PROCESS.model_copy(update={"start_ticks": 457})},
     ):
         verifier, state = verifier_state()
-        challenge = verifier.begin(object(), PLAYER, 7)
+        handle = object()
+        challenge = verifier.begin(handle, PLAYER, 7)
         state.update(changed)
         with pytest.raises(LocalProofError):
-            verifier.verify(object(), load_identity().sign_app_proof(challenge))
+            verifier.verify(handle, load_identity().sign_app_proof(challenge))
 
 
 def test_proof_rejects_attempt_switch_expiry_and_invalid_signature():
     verifier, state = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     state["context"] = replace(CONTEXT, attempt_id=UUID(int=9))
     with pytest.raises(LocalProofError, match="app_proof_context_changed"):
-        verifier.verify(object(), load_identity().sign_app_proof(challenge))
+        verifier.verify(handle, load_identity().sign_app_proof(challenge))
 
     verifier, state = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     state["now"] = 25.0
     with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
-        verifier.verify(object(), load_identity().sign_app_proof(challenge))
+        verifier.verify(handle, load_identity().sign_app_proof(challenge))
 
     verifier, _ = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     response = load_identity().sign_app_proof(challenge)
     forged = AppProofResponse(nonce=response.nonce, public_key=load_identity().public_key,
                               signature=response.signature)
     with pytest.raises(LocalProofError, match="app_proof_signature_invalid"):
-        verifier.verify(object(), forged)
+        verifier.verify(handle, forged)
 
 
 def test_proof_detects_context_or_process_change_during_exchange():
@@ -119,7 +135,8 @@ def test_proof_detects_context_or_process_change_during_exchange():
         verifier.begin(object(), PLAYER, 7)
 
     verifier, _ = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     samples = 0
 
     def switching_process(_):
@@ -129,13 +146,14 @@ def test_proof_detects_context_or_process_change_during_exchange():
 
     verifier.peer_process_sampler = switching_process
     with pytest.raises(LocalProofError, match="app_process_mismatch"):
-        verifier.verify(object(), load_identity().sign_app_proof(challenge))
+        verifier.verify(handle, load_identity().sign_app_proof(challenge))
 
 
 def test_proof_contract_bounds_and_report_cannot_reuse_another_attempt():
     verifier, _ = verifier_state()
-    challenge = verifier.begin(object(), PLAYER, 7)
-    proof = verifier.verify(object(), load_identity().sign_app_proof(challenge))
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
+    proof = verifier.verify(handle, load_identity().sign_app_proof(challenge))
     report = OsAttemptReport(
         device_id=DEVICE, device_generation=2, installation_audience="installation-one",
         kernel_boot_id=BOOT, offer_id=OFFER, command_session_id=SESSION,

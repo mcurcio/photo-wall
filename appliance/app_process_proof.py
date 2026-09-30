@@ -67,6 +67,7 @@ class PeerProcessSampler(Protocol):
 @dataclass(frozen=True, slots=True)
 class _Pending:
     challenge: AppProofChallenge
+    peer_handle: object
     peer: PeerCredentials
     context: CurrentAttemptContext
     expires_at: float
@@ -152,7 +153,7 @@ class LocalAppProofVerifier:
             if len(self._pending) >= self.MAX_PENDING or challenge.nonce in self._pending:
                 raise LocalProofError("app_proof_busy")
             self._pending[challenge.nonce] = _Pending(
-                challenge, peer, context, now + self.TTL_SECONDS)
+                challenge, peer_handle, peer, context, now + self.TTL_SECONDS)
         return challenge
 
     def verify(self, peer_handle: object, response: AppProofResponse) -> LocalAppProof:
@@ -162,6 +163,8 @@ class LocalAppProofVerifier:
             pending = self._pending.pop(response.nonce, None)
         if pending is None or self.boottime() >= pending.expires_at:
             raise LocalProofError("app_proof_expired_or_used")
+        if peer_handle is not pending.peer_handle:
+            raise LocalProofError("app_proof_peer_changed")
         peer, process = self._sample(peer_handle)
         if (peer != pending.peer or process != pending.challenge.process
                 or self._context() != pending.context):

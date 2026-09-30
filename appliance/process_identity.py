@@ -28,6 +28,28 @@ class ProcessSampler(Protocol):
     def sample(self) -> ProcessSample | None: ...
 
 
+def read_proc_start_ticks(proc_root: Path, pid: int) -> int | None:
+    """Read field 22 of one kernel stat record without trusting the process name."""
+    if type(pid) is not int or not 0 < pid < 2**31:
+        return None
+    try:
+        with (proc_root / str(pid) / "stat").open("rb") as stream:
+            raw = stream.read(4097)
+    except OSError:
+        return None
+    if len(raw) > 4096 or not raw.startswith(f"{pid} (".encode()):
+        return None
+    close = raw.rfind(b") ")
+    if close < 0:
+        return None
+    fields = raw[close + 2:].split()
+    # /proc/<pid>/stat field 22 is starttime; field 3 begins here.
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    ticks = int(fields[19])
+    return ticks if 0 < ticks < 2**63 else None
+
+
 class SystemdProcessSampler:
     """Sample PID1's invocation and the current MainPID's kernel birth tick."""
 
@@ -52,18 +74,7 @@ class SystemdProcessSampler:
                     or invocation is None or _INVOCATION.fullmatch(invocation) is None):
                 return None
             pid = int(pid_text)
-            with (self.proc_root / pid_text / "stat").open("rb") as stream:
-                raw = stream.read(4097)
-            if len(raw) > 4096 or not raw.startswith(f"{pid} (".encode()):
-                return None
-            close = raw.rfind(b") ")
-            if close < 0:
-                return None
-            fields = raw[close + 2:].split()
-            # /proc/<pid>/stat field 22 is starttime; field 3 begins here.
-            if len(fields) < 20 or not fields[19].isdigit():
-                return None
-            ticks = int(fields[19])
-            return ProcessSample(pid, ticks, invocation) if ticks > 0 else None
+            ticks = read_proc_start_ticks(self.proc_root, pid)
+            return ProcessSample(pid, ticks, invocation) if ticks is not None else None
         except (OSError, subprocess.SubprocessError, ValueError):
             return None
