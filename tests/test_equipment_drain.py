@@ -160,6 +160,45 @@ def test_active_run_requires_declared_interruption_policy(registry):
         assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
 
 
+@pytest.mark.parametrize("advance_before_commit", [False, True])
+def test_program_entering_after_prepare_refuses_stop(registry, advance_before_commit):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="scheduled", loop=True,
+        contributions=(
+            Contribution(target="frame:drain-frame", kind="black"),
+            Contribution(target="actuator:lamp", kind="actuator", ramp_to=1),
+        ),
+    ))
+    coordinator.runtime.command("set_program", Program(
+        program_id="scheduled", scene_id="scheduled", starts_at=1005, ends_at=1100,
+    ))
+    drain = EquipmentDrain(coordinator)
+    drain.prepare_idle(
+        player["player_id"], "attempt-scheduled", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1020,
+    )
+    registry.clock.advance(5)
+    if advance_before_commit:
+        coordinator.advance()
+    # The Program is active at the stop cut even if a scheduler tick has not
+    # persisted it yet. Its Actuator is part of the same logical Run.
+    active = [run for run in coordinator.runtime.read().project(registry.clock.utc()).runs
+              if run.ended_at is None and "frame:drain-frame" in run.participants]
+    assert len(active) == 1
+    assert "actuator:lamp" in active[0].participants
+    with pytest.raises(RegistryError, match="active_run_requires_interruption_policy") as exc:
+        drain.commit_stop(player["player_id"], "attempt-scheduled", request.boot_id,
+                          player["authority_epoch"])
+    assert exc.value.details["run_ids"] == [active[0].run_id]
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT phase,stop_committed_at FROM equipment_drains "
+                           "WHERE player_id=%s", (player["player_id"],)).fetchone()
+    assert row["phase"] == "prepared"
+    assert row["stop_committed_at"] is None
+
+
 def test_media_grant_and_frame_placement_are_fenced(registry, tmp_path):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)

@@ -70,6 +70,15 @@ class EquipmentDrain:
     def __init__(self, coordinator: Coordinator):
         self.coordinator = coordinator
 
+    @staticmethod
+    def _affected_active_runs(runtime, frame_ids: set[str], now: float) -> tuple[str, ...]:
+        """Project due Programs as well as already persisted Runs at the lock cut."""
+        targets = {f"frame:{frame_id}" for frame_id in frame_ids}
+        return tuple(sorted(
+            run.run_id for run in runtime.project(now).runs
+            if run.ended_at is None and not run.participants.isdisjoint(targets)
+        ))
+
     def prepare_idle(self, player_id: str, attempt_id: str, boot_id: str,
                      authority_epoch: int, *, authorization_expires_at: float) -> DrainOutcome:
         """Fence an idle device and cancel old group authority atomically.
@@ -124,13 +133,7 @@ class EquipmentDrain:
                 "WHERE b.player_id=%s ORDER BY b.output_id FOR UPDATE OF b,f", (player_id,),
             ).fetchall()
             frame_ids = {row["frame_id"] for row in bindings}
-            current = runtime.project(now)
-            affected = tuple(sorted(run.run_id for run in current.runs
-                                    if run.ended_at is None and any(
-                                        target == f"frame:{frame_id}"
-                                        for target in run.participants
-                                        for frame_id in frame_ids
-                                    )))
+            affected = self._affected_active_runs(runtime, frame_ids, now)
             if affected:
                 raise RegistryError("active_run_requires_interruption_policy", details={
                     "run_ids": list(affected),
@@ -200,7 +203,7 @@ class EquipmentDrain:
                     authority_epoch: int) -> DrainOutcome:
         """Persist the irreversible admission phase; no command is issued here."""
         with self.coordinator._transaction() as conn:
-            self.coordinator.runtime.read_locked(conn)
+            runtime = self.coordinator.runtime.read_locked(conn)
             row = conn.execute(
                 "SELECT * FROM equipment_drains WHERE player_id=%s FOR UPDATE", (player_id,),
             ).fetchone()
@@ -223,6 +226,17 @@ class EquipmentDrain:
             if (current is None or current["retired_at"] is not None
                     or current["authority_epoch"] != authority_epoch):
                 raise RegistryError("stale_authority", 403)
+            frame_ids = {
+                output["frame_id"] for output in row["snapshot"]["outputs"]
+                if output["frame_id"] is not None
+            }
+            affected = self._affected_active_runs(
+                runtime, frame_ids, self.coordinator.clock.utc(),
+            )
+            if affected:
+                raise RegistryError("active_run_requires_interruption_policy", details={
+                    "run_ids": list(affected),
+                })
             conn.execute(
                 "UPDATE equipment_drains SET phase='stop_committed',stop_committed_at=%s "
                 "WHERE player_id=%s", (self.coordinator.clock.utc(), player_id),
@@ -296,11 +310,7 @@ class EquipmentDrain:
                 output["frame_id"] for output in row["snapshot"]["outputs"]
                 if output["frame_id"] is not None
             }
-            if any(
-                run.ended_at is None and any(
-                    f"frame:{frame_id}" in run.participants for frame_id in frame_ids
-                ) for run in runtime.project(now).runs
-            ):
+            if self._affected_active_runs(runtime, frame_ids, now):
                 raise RegistryError("active_run_requires_interruption_policy")
             conn.execute(
                 "UPDATE equipment_drains SET phase='aborted',aborted_at=%s WHERE player_id=%s",
