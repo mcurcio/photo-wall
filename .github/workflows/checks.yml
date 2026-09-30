@@ -75,6 +75,10 @@ jobs:
           load: true
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
+      - name: Prepare digest-pinned published Player wire fixtures
+        run: |
+          .venv/bin/python scripts/published_player_wire.py prepare \
+            "$RUNNER_TEMP/published-player-wire"
       - name: Run the Postgres pytest suite
         env:
           # The built-in, repo-scoped GHA token (no manually-managed secret): the
@@ -86,6 +90,7 @@ jobs:
           # empty/restricted, so gate (b) skips (its guard treats an empty token as
           # unset) -- the correct safe behavior.
           PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
         run: .venv/bin/python scripts/test_local.py -q --tb=short
       - name: Walk through the operator interface in the pinned browser image
         env:

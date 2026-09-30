@@ -639,7 +639,8 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         expect(_serial_option(inspector)).to_be_visible()
         go(page, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
-        expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
+        expect(pending).to_contain_text(
+            f"Reported serial {SERIAL} · Legacy netboot seen, no image served yet")
 
 
 def test_collapsed_pending_cards_show_distinct_reported_serial_handles(page, registry):

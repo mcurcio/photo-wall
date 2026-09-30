@@ -291,7 +291,8 @@ NOT_SHIPPED: Final = (
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
-    "scripts/provenance_models.py", "scripts/release_plan.py", "scripts/release_seal.py",
+    "scripts/provenance_models.py", "scripts/published_player_wire.py",
+    "scripts/release_plan.py", "scripts/release_seal.py",
     "scripts/runtime_provenance.py",
     "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
 )
