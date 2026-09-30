@@ -9,9 +9,7 @@ The per-operation stores recheck the current session under database locks.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
-from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from fastapi import FastAPI, Request
@@ -25,45 +23,22 @@ from central.fleet.attempt_bytes import AttemptByteAccess
 from central.fleet.attempt_reports import AttemptReportStore
 from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError
-from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
+from central.fleet.os_route_support import (
+    OsRequestVerifier,
+    authenticate_os_request,
+    bounded_os_body,
+    install_os_no_store,
+    os_error,
+)
+from central.fleet.os_route_support import OsVerifierForbidden as OsVerifierForbidden
+from central.fleet.os_route_support import OsVerifierUnauthorized as OsVerifierUnauthorized
+from central.fleet.principal import PrincipalError
 from contracts.os_attempt_report import MAX_ATTEMPT_REPORT_BYTES, parse_os_attempt_report
 from contracts.time import Clock
 
-OsRequestVerifier = Callable[
-    [Request], VerifiedOsPrincipal | Awaitable[VerifiedOsPrincipal]
-]
-
-
-class OsVerifierUnauthorized(Exception):
-    """The request has no acceptable loader-OS carrier credential."""
-
-
-class OsVerifierForbidden(Exception):
-    """The carrier is authenticated but cannot act as this loader OS."""
-
-
-def _error(code: str, status: int) -> JSONResponse:
-    return JSONResponse({"error": code}, status_code=status,
-                        headers={"Cache-Control": "private, no-store"})
-
-
-async def _body_bounded(request: Request) -> bytes:
-    """Read at most the report contract's limit even when length is absent or false."""
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            if int(declared) > MAX_ATTEMPT_REPORT_BYTES:
-                raise FleetError("attempt_report_too_large", 413)
-        except ValueError:
-            # A proxy may strip or rewrite a malformed length; the stream is
-            # still authoritative and bounded independently of that header.
-            pass
-    data = bytearray()
-    async for chunk in request.stream():
-        if len(data) + len(chunk) > MAX_ATTEMPT_REPORT_BYTES:
-            raise FleetError("attempt_report_too_large", 413)
-        data.extend(chunk)
-    return bytes(data)
+# Keep imports for existing independent route clients; the shared support
+# module owns verification and body policy for all loader-OS adapters.
+_error = os_error
 
 
 def mount_os_fleet_data_routes(
@@ -80,31 +55,11 @@ def mount_os_fleet_data_routes(
     access = AttemptByteAccess(db, clock, OfferByteReader(content.reader))
     reports = AttemptReportStore(db, clock)
 
-    @app.middleware("http")
-    async def os_no_store(request: Request, call_next):
-        response = await call_next(request)
-        # Also cover FastAPI's automatic 404/405/422 and disconnect responses.
-        if request.url.path.startswith("/v1/os/"):
-            response.headers["Cache-Control"] = "private, no-store"
-        return response
-
-    async def authenticated(request: Request) -> VerifiedOsPrincipal | JSONResponse:
-        try:
-            result = verifier(request)
-            principal = await result if inspect.isawaitable(result) else result
-        except OsVerifierUnauthorized:
-            return _error("os_authentication_required", 401)
-        except OsVerifierForbidden:
-            return _error("os_verifier_denied", 403)
-        except PrincipalError as exc:
-            return _error(str(exc), 403)
-        if type(principal) is not VerifiedOsPrincipal:
-            return _error("os_verifier_denied", 403)
-        return principal
+    install_os_no_store(app)
 
     @app.get("/v1/os/attempts/{attempt_id}/artifacts/{role}")
     async def attempt_artifact(request: Request, attempt_id: UUID, role: str) -> Response:
-        principal = await authenticated(request)
+        principal = await authenticate_os_request(request, verifier)
         if isinstance(principal, JSONResponse):
             return principal
         if role not in ("target", "fallback"):
@@ -131,11 +86,14 @@ def mount_os_fleet_data_routes(
 
     @app.post("/v1/os/attempts/{attempt_id}/reports")
     async def attempt_report(request: Request, attempt_id: UUID) -> Response:
-        principal = await authenticated(request)
+        principal = await authenticate_os_request(request, verifier)
         if isinstance(principal, JSONResponse):
             return principal
         try:
-            raw = await _body_bounded(request)
+            raw = await bounded_os_body(
+                request, limit=MAX_ATTEMPT_REPORT_BYTES,
+                error_code="attempt_report_too_large",
+            )
             try:
                 report = parse_os_attempt_report(raw)
             except ValueError:

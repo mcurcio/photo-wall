@@ -1,5 +1,6 @@
 # Acceptance evidence
 
+- [2026-09-30 fleet command and recovery slice](2026-09-30-fleet-command-recovery-slice.md): unmounted command/permit lifecycle, cross-boot repair lease, deferred unbound-stop guard, truthful management view and local software/database limits.
 - [2026-09-30 fleet pre-effect integration](2026-09-30-fleet-pre-effect-integration.md): whole-repository portable and PostgreSQL results for the staged gate, attempt, receipt, proof and Runtime seams; command, deployment and physical qualification remain open.
 - [2026-09-30 local Player process proof](2026-09-30-local-app-proof.md): separate app-to-base key proof client, per-packet Linux credentials, attempt-bound challenge and base packaging checks; service composition and physical qualification remain open.
 - [2026-09-30 command trust and rollout audit](2026-09-30-command-rollout-audit.md): live serving paths and the conditional D14/D17 gates; no command activation or deployment change.

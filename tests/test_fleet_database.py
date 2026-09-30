@@ -215,6 +215,40 @@ def test_offer_freezes_exact_pair_provenance_and_expiry(registry) -> None:
     assert evicted == ["base"]
 
 
+def test_current_generation_accepted_base_remains_desired_after_offer_expiry(registry) -> None:
+    """The desired-assets view must honor the same conservative root as cache GC."""
+    _seed_release(registry)
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    fleet.create_offer(_request(56, "a"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+    _accept_app(registry, device_id, APP_SHA, 123, "qualified:56")
+    accepted_key, accepted_digest = "c" * 64, "e" * 64
+    with registry.db.transaction() as conn:
+        session = conn.execute(
+            "SELECT command_session_id,device_generation FROM fleet_os_command_sessions "
+            "WHERE device_id=%s AND revoked_at IS NULL", (device_id,),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO fleet_generation_acceptances(device_id,device_generation,kind,"
+            "content_key,sha256,size,trust_mode,evidence_ref,accepted_at,basis,"
+            "command_session_id) VALUES(%s,%s,'base',%s,%s,123,'t1',%s,%s,"
+            "'cold_boot',%s)",
+            (device_id, session["device_generation"], accepted_key, accepted_digest,
+             "synthetic-base-acceptance", registry.clock.utc(), session["command_session_id"]),
+        )
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert accepted_key in desired.base_tarballs
+    assert not fleet.evict_if_unretained(
+        kind="base", content_key=accepted_key,
+        evict=lambda: pytest.fail("accepted base evicted"),
+    )
+
+
 def test_check_in_sequence_and_delayed_boot_remain_observational(registry) -> None:
     _seed_release(registry)
     service = FleetService(registry.db, registry.clock)

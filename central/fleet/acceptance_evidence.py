@@ -1,10 +1,9 @@
 """Read-only classification of a managed app attempt's currently available evidence.
 
-This projector cannot authorize promotion, a command, or drain release. Current
-schema-one local proof names a Player epoch but does not bind a specific applied
-control delivery to the OS-observed process. A future causal proof and
-base-observed Output handoff contract must be added before an acceptance writer
-can consume these classifications.
+This projector cannot authorize promotion, a command, or drain release. V1
+proof names a Player epoch but cannot bind an applied control delivery. V2
+proof can link one current Registry receipt to an OS-observed process, but
+base-observed Output handoff and an acceptance writer remain separate gates.
 """
 
 from __future__ import annotations
@@ -18,12 +17,18 @@ from uuid import UUID
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from contracts.app_process_proof import ProcessIdentity, app_proof_message
+from contracts.app_process_proof import (
+    LocalAppProofV2,
+    ProcessIdentity,
+    app_proof_message,
+    app_proof_message_v2,
+)
 from contracts.os_attempt_report import OsAttemptReport
 
 PackageState = Literal["unknown", "committed_target", "rolled_back", "recovery_required",
                        "conflicting"]
-ControlState = Literal["unavailable", "applied_unlinked", "latest_rejected",
+ControlState = Literal["unavailable", "applied_unlinked", "applied_process_linked",
+                       "latest_rejected",
                        "historical_applied_latest_rejected", "incoherent"]
 OutputState = Literal["unavailable", "incomplete", "matching_base_claims"]
 
@@ -84,6 +89,13 @@ class AppControl:
     last_delivery_id: str | None
     last_result_digest: str | None
     last_result_at: float | None
+    # These fields are internal Registry evidence, not part of the public
+    # control_fact projection. Missing fields fail the V2 causal join closed.
+    issued_sequence: int | None = None
+    pending_id: str | None = None
+    pending_digest: str | None = None
+    pending_expires: float | None = None
+    applied_ack_nonce: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +172,29 @@ def _report_matches(row: StoredReport, attempt: AttemptIdentity,
     )
 
 
+def _current_v2_receipt_matches(proof: LocalAppProofV2,
+                                control: AppControl | None) -> bool:
+    if control is None:
+        return False
+    receipt = proof.challenge.receipt
+    return (
+        control.status == "negotiated" and control.schema_version == 2
+        and control.applied_at is not None and control.last_result_at is not None
+        and control.last_result == "applied"
+        and control.issued_sequence == control.applied_sequence
+        and control.pending_id is None and control.pending_digest is None
+        and control.pending_expires is None
+        and control.last_result_sequence == control.applied_sequence
+        and control.last_delivery_id == control.applied_delivery_id
+        and control.last_result_digest == control.applied_digest
+        and receipt.authority_epoch == control.authority_epoch
+        and receipt.delivery_id == control.applied_delivery_id
+        and receipt.delivery_sequence == control.applied_sequence
+        and receipt.state_digest == control.applied_digest
+        and receipt.ack_nonce == control.applied_ack_nonce
+    )
+
+
 def _proof_valid(report: OsAttemptReport, control: AppControl | None,
                  authority: CurrentAuthority) -> bool:
     proof = report.app_proof
@@ -175,16 +210,24 @@ def _proof_valid(report: OsAttemptReport, control: AppControl | None,
                            or challenge.claimed_authority_epoch != control.authority_epoch
                            or response.public_key != control.public_key):
         return False
+    if type(proof) is LocalAppProofV2 and (
+        challenge.active_sha256 != report.active_sha256
+        or challenge.active_sha256 != report.running_sha256
+        or not _current_v2_receipt_matches(proof, control)
+    ):
+        return False
     try:
         key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(response.public_key))
         key.verify(base64.b64decode(response.signature, validate=True),
-                   app_proof_message(challenge))
+                   app_proof_message_v2(challenge) if type(proof) is LocalAppProofV2
+                   else app_proof_message(challenge))
     except (ValueError, binascii.Error, InvalidSignature):
         return False
     return True
 
 
-def _control_state(control: AppControl | None) -> ControlState:
+def _control_state(control: AppControl | None, report: OsAttemptReport | None,
+                   proof_matched: bool) -> ControlState:
     if control is None:
         return "unavailable"
     if control.last_result != "applied":
@@ -199,8 +242,11 @@ def _control_state(control: AppControl | None) -> ControlState:
             or control.last_result_digest != control.applied_digest
             or control.applied_delivery_id is None or control.applied_digest is None):
         return "incoherent"
-    # Schema-one local proof has no signed delivery ID/digest. This is an app
-    # acknowledgment, but it cannot yet be attributed to the sampled process.
+    if (proof_matched and report is not None
+            and type(report.app_proof) is LocalAppProofV2):
+        return "applied_process_linked"
+    # A V1 proof, or a V2 proof that fails the current receipt join, cannot
+    # attribute the applied ACK to the sampled process.
     return "applied_unlinked"
 
 
@@ -305,11 +351,14 @@ def assess_acceptance(evidence: AcceptanceEvidence) -> AcceptanceAssessment:
         if not proof_matched:
             refuse("app_process_proof_unmatched")
         if package == "committed_target" and proof_matched:
+            linked_v2 = type(current.app_proof) is LocalAppProofV2
             candidates = [row.report for row in valid if
                           row.report.executor_state == "committed"
                           and row.report.active_sha256 == attempt.target_sha256
                           and row.report.running_sha256 == attempt.target_sha256
                           and row.report.running_process == process
+                          and (not linked_v2 or
+                               type(row.report.app_proof) is LocalAppProofV2)
                           and _proof_valid(row.report, evidence.control, authority)]
             if candidates:
                 earliest_ms = candidates[0].sampled_boottime_ms
@@ -324,14 +373,15 @@ def assess_acceptance(evidence: AcceptanceEvidence) -> AcceptanceAssessment:
             if not stable:
                 refuse("sustained_process_evidence_missing")
 
-    control_state = _control_state(evidence.control)
+    control_state = _control_state(evidence.control, latest.report if latest else None,
+                                   proof_matched)
     if control_state == "unavailable":
         refuse("control_unavailable")
     elif control_state in ("latest_rejected", "historical_applied_latest_rejected"):
         refuse("control_latest_rejected")
     elif control_state == "incoherent":
         refuse("control_incoherent")
-    else:
+    elif control_state == "applied_unlinked":
         refuse("control_delivery_unlinked")
     output_state = _matching_handoffs(
         evidence, process, evidence.control.authority_epoch if evidence.control else None,
@@ -340,6 +390,8 @@ def assess_acceptance(evidence: AcceptanceEvidence) -> AcceptanceAssessment:
         refuse("output_inventory_unavailable")
     elif output_state == "incomplete":
         refuse("output_handoff_incomplete")
+    if not refusals:
+        refuse("acceptance_writer_unavailable")
     return AcceptanceAssessment(
         package_state=package, control_state=control_state, output_state=output_state,
         proof_matched=proof_matched, process_stable=stable,

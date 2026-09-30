@@ -7,6 +7,7 @@ from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.errors import CheckViolation
 from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
@@ -256,12 +257,16 @@ def test_unbound_canary_freezes_outputs_and_requires_safe_commit(registry):
     with pytest.raises(RegistryError, match="unbound_drain_requires_safe_commit"):
         drain.commit_stop(player["player_id"], "attempt-unbound", request.boot_id,
                           player["authority_epoch"])
-    assert drain.commit_stop_unbound(player["player_id"], "attempt-unbound", request.boot_id,
-                                     player["authority_epoch"]).status == "stop_committed"
-    assert EquipmentDrain(Coordinator(registry.db, registry.clock)).commit_stop_unbound(
-        player["player_id"], "attempt-unbound", request.boot_id,
-        player["authority_epoch"],
-    ).status == "already_committed"
+    with pytest.raises(CheckViolation, match="same-transaction fleet permit"):
+        drain.commit_stop_unbound(player["player_id"], "attempt-unbound", request.boot_id,
+                                  player["authority_epoch"])
+    with registry.db.transaction() as conn:
+        assert conn.execute(
+            "SELECT phase,stop_committed_at,fleet_drain_id FROM equipment_drains "
+            "WHERE player_id=%s", (player["player_id"],),
+        ).fetchone() == {
+            "phase": "prepared", "stop_committed_at": None, "fleet_drain_id": None,
+        }
 
 
 @pytest.mark.parametrize("drift", ["observation", "inventory", "binding"])

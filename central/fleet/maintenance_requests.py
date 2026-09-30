@@ -180,3 +180,22 @@ class MaintenanceRequestStore:
             (now, request_id),
         ).fetchone()
         return cls._document(canceled)
+
+    @staticmethod
+    def dispatch_in(conn, request_id: UUID, *, expected_revision: int,
+                    now: float) -> dict[str, Any]:
+        """Consume a queued intent inside the command owner's transaction.
+
+        The caller has already locked and validated the request, attempt and
+        drain. This transition cannot by itself issue a command or permit.
+        """
+        row = conn.execute(
+            "UPDATE fleet_maintenance_requests SET status='dispatched',"
+            "revision=revision+1,changed_at=GREATEST(changed_at,%s),"
+            "reason='command_dispatched' WHERE request_id=%s AND status='queued' "
+            "AND revision=%s AND expires_at>%s RETURNING *",
+            (now, request_id, expected_revision, now),
+        ).fetchone()
+        if row is None:
+            raise FleetError("maintenance_request_not_dispatchable")
+        return row

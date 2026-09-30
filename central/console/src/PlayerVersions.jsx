@@ -12,6 +12,7 @@ import {
   refreshReleaseCatalog,
   useFleetFacts,
 } from "./fleetApi.js";
+import { ManagementFacts } from "./ManagementFacts.jsx";
 import { useMutate } from "./useMutate.js";
 
 function version(artifact) {
@@ -273,10 +274,11 @@ export function PlayerVersions({ snapshot }) {
                   <p>Fallback: {String(device.fallback ?? "unknown").replaceAll("_", " ")}
                     {device.accepted_fallback?.sha256 && ` · recorded ${device.accepted_fallback.sha256.slice(0, 12)}`}
                   </p>
+                  <ManagementFacts management={device.management} />
                   {device.capability?.startsWith("offer_v") ? (
                     <p className="fleet__note">Offer-aware boot requested. OS app observations are unverified serial claims; they do not prove installation on the physical Player or visible output.</p>
                   ) : (
-                    <p className="fleet__note">App-only target is queued; this legacy or unknown base cannot enforce it.</p>
+                    <p className="fleet__note">No offer-aware boot is recorded. This base's ability to enforce the desired app target is unknown.</p>
                   )}
                   <span className="fleet__controls">
                     <label>App for {device.device_id}
@@ -306,7 +308,7 @@ export function PlayerVersions({ snapshot }) {
                       : "No request"}
                       {request?.reason && ` · ${String(request.reason).replaceAll("_", " ")}`}
                     </p>
-                    <p className="fleet__note">A maintenance request records intent for one hour. Execution requires commissioned loader OS command trust, a qualified fallback, and a safe Runtime drain. Setting a desired version applies to future boot offers separately.</p>
+                    <p className="fleet__note">A queued request records intent until its shown expiry. Dispatched means Central committed a command handoff; it does not confirm OS receipt or execution. Setting a desired version applies to future boot offers separately.</p>
                     <span className="fleet__controls">
                       <button type="button" disabled={busy || !canQueue} onClick={() => queueUpdate(device)}>Queue online update</button>
                       {request?.status === "queued" && (

@@ -17,8 +17,15 @@ from central.fleet.attempt_reports import AttemptReportStore
 from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import FleetError
 from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
-from contracts.app_process_proof import AppProofChallenge, LocalAppProof, ProcessIdentity
+from contracts.app_process_proof import (
+    AppProofChallenge,
+    AppProofChallengeV2,
+    LocalAppProof,
+    LocalAppProofV2,
+    ProcessIdentity,
+)
 from contracts.os_attempt_report import OsAttemptReport
+from contracts.player_control import ControlAppliedReceipt
 from player.identity import load_identity
 
 SERIAL = "abcdef1234567890"
@@ -204,6 +211,38 @@ def test_proof_session_and_carrier_trust_match_report_and_principal(registry) ->
     with pytest.raises(FleetError, match="attempt_report_principal_mismatch"):
         AttemptReportStore(registry.db, registry.clock).record(_principal(), report)
     assert _count(registry) == 0
+
+
+def test_current_authenticated_carrier_stores_v2_receipt_proof_as_claim(registry) -> None:
+    _seed(registry)
+    process = ProcessIdentity(pid=123, start_ticks=456, invocation_id="c" * 32,
+                              cgroup_unit="photo-wall-player.service")
+    receipt = ControlAppliedReceipt(
+        authority_epoch=1, delivery_id="a" * 32, delivery_sequence=2,
+        state_digest="b" * 64, ack_nonce="c" * 64)
+    challenge = AppProofChallengeV2(
+        nonce="d" * 64, installation_audience=AUDIENCE,
+        device_id=DEVICE, device_generation=1, kernel_boot_id=BOOT,
+        offer_id=OFFER, command_session_id=SESSION, attempt_id=ATTEMPT,
+        command_id=COMMAND, trust_mode="t1", claimed_player_id="p-" + "b" * 32,
+        claimed_authority_epoch=1, process=process, active_sha256=TARGET,
+        receipt=receipt)
+    proof = LocalAppProofV2(
+        challenge=challenge,
+        response=load_identity().sign_applied_control_proof(challenge),
+        verified_boottime_ms=1233)
+    report = _report(running_sha256=TARGET, running_process=process, app_proof=proof)
+    store = AttemptReportStore(registry.db, registry.clock)
+    assert store.record(_principal(), report) == "stored"
+    assert store.record(_principal(), report) == "replayed"
+    with registry.db.transaction() as conn:
+        stored = conn.execute(
+            "SELECT report_json FROM fleet_os_attempt_reports WHERE attempt_id=%s",
+            (ATTEMPT,),
+        ).fetchone()["report_json"]
+        assert json.loads(stored)["app_proof"]["challenge"]["schema"] == 2
+        assert conn.execute("SELECT count(*) AS n FROM fleet_generation_acceptances").fetchone()[
+            "n"] == 0
 
 
 def test_current_session_required_even_for_replay(registry) -> None:

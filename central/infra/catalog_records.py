@@ -160,7 +160,16 @@ class PgReleaseRecords:
         bases = conn.execute(
             "SELECT r.base_tarball_sha256 AS digest FROM fleet_base_policy AS b "
             "JOIN app_releases AS r ON r.tag=b.tag "
-            "WHERE r.base_tarball_sha256 IS NOT NULL"
+            "WHERE r.base_tarball_sha256 IS NOT NULL "
+            "UNION ALL "
+            "SELECT accepted.content_key AS digest "
+            "FROM fleet_generation_acceptances AS accepted "
+            "JOIN devices AS device ON device.device_id=accepted.device_id "
+            "JOIN fleet_device_lifecycle AS lifecycle "
+            "ON lifecycle.device_id=accepted.device_id "
+            "WHERE accepted.kind='base' "
+            "AND accepted.device_generation=lifecycle.generation "
+            "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL"
         ).fetchall()
         offers = conn.execute(
             "SELECT roots.kind, roots.content_key AS digest, offers.offer_schema "

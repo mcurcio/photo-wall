@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 
 import pytest
+from psycopg.errors import CheckViolation
 from test_registry import enroll
 
 from central.coordination import Coordinator
@@ -65,14 +66,18 @@ def test_unbound_prepare_and_commit_roll_back_with_callers_transaction(registry)
         ).fetchone()
     assert row == {"phase": "prepared", "stop_committed_at": None}
 
-    with _cut(drain) as conn:
-        assert drain.commit_stop_unbound_in(
-            conn, player_id, "attempt-unbound", request.boot_id, epoch,
-        ).status == "stop_committed"
+    with pytest.raises(CheckViolation, match="same-transaction fleet permit"):
+        with _cut(drain) as conn:
+            assert drain.commit_stop_unbound_in(
+                conn, player_id, "attempt-unbound", request.boot_id, epoch,
+            ).status == "stop_committed"
     with registry.db.transaction() as conn:
         assert conn.execute(
-            "SELECT phase FROM equipment_drains WHERE player_id=%s", (player_id,),
-        ).fetchone()["phase"] == "stop_committed"
+            "SELECT phase,stop_committed_at,fleet_drain_id FROM equipment_drains "
+            "WHERE player_id=%s", (player_id,),
+        ).fetchone() == {
+            "phase": "prepared", "stop_committed_at": None, "fleet_drain_id": None,
+        }
 
 
 def test_unbound_caller_owned_seam_refuses_missing_runtime_locks(registry) -> None:

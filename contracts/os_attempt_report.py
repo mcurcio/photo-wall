@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from contracts.app_process_proof import LocalAppProof, ProcessIdentity
+from contracts.app_process_proof import LocalAppProof, LocalAppProofV2, ProcessIdentity
 from contracts.strict_json import loads_object
 
 MAX_ATTEMPT_REPORT_BYTES = 4096
@@ -38,7 +38,9 @@ class OsAttemptReport(BaseModel):
     active_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     running_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     running_process: ProcessIdentity | None = None
-    app_proof: LocalAppProof | None = None
+    # V1 remains a valid historical observation. A V2 proof additionally
+    # signs the applied-control receipt and base-owned active root.
+    app_proof: LocalAppProofV2 | LocalAppProof | None = None
     fault_code: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
 
     @model_validator(mode="after")
@@ -67,6 +69,14 @@ class OsAttemptReport(BaseModel):
             or self.app_proof.verified_boottime_ms > self.sampled_boottime_ms
         ):
             raise ValueError("attempt_report_proof_mismatch")
+        if type(self.app_proof) is LocalAppProofV2 and (
+            self.app_proof.challenge.active_sha256 != self.active_sha256
+            or self.app_proof.challenge.active_sha256 != self.running_sha256
+            or self.sampled_boottime_ms - self.app_proof.verified_boottime_ms > 15_000
+        ):
+            # A V2 receipt must describe the root actually sampled by this
+            # report. Old local proofs cannot be replayed as fresh samples.
+            raise ValueError("attempt_report_v2_proof_stale_or_root_mismatch")
         return self
 
 

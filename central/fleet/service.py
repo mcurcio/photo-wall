@@ -14,6 +14,7 @@ from central.content_catalog.catalog import device_id_for_serial, sanitize_seria
 from central.db import Database
 from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.maintenance_requests import MaintenanceRequestStore
+from central.fleet.management_status import management_status_in
 from central.fleet.models import (
     T0_AUDIENCE,
     Artifact,
@@ -605,6 +606,8 @@ class FleetService:
                                    "ORDER BY device.device_id LIMIT 5000").fetchall()
             maintenance = MaintenanceRequestStore.latest_by_device_in(
                 conn, device_ids=[row["device_id"] for row in devices], read_at=read_at)
+            management = management_status_in(
+                conn, [row["device_id"] for row in devices], read_at=read_at)
             overrides = {r["device_id"]: r for r in conn.execute(
                 "SELECT * FROM fleet_device_app_overrides").fetchall()}
             observations: dict[str, list[dict]] = {}
@@ -659,6 +662,7 @@ class FleetService:
                     "device_id": device_id, "serial": device["serial"],
                     "device_generation": device["device_generation"],
                     "maintenance_request": maintenance.get(device_id),
+                    "management": management[device_id],
                     "capability": (f"offer_v{offer['offer_schema']}_claimed" if offer
                                    else "legacy_or_unknown"),
                     "desired": {**desired, "artifact": desired["target"]},

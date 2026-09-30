@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
@@ -281,7 +282,8 @@ class EquipmentDrain:
             )
 
     def commit_stop_unbound_in(self, conn, player_id: str, attempt_id: str,
-                               boot_id: str, authority_epoch: int) -> DrainOutcome:
+                               boot_id: str, authority_epoch: int, *,
+                               fleet_drain_id: UUID | None = None) -> DrainOutcome:
         """Commit in the caller's transaction; no command or permit is issued.
 
         The caller acquires Coordination then Runtime before later fleet or
@@ -289,7 +291,19 @@ class EquipmentDrain:
         """
         return self._commit_stop_in(
             conn, player_id, attempt_id, boot_id, authority_epoch,
-            require_unbound=True,
+            require_unbound=True, fleet_drain_id=fleet_drain_id,
+        )
+
+    def commit_stop_unbound_fleet_in(self, conn, player_id: str, attempt_id: UUID,
+                                     boot_id: UUID, authority_epoch: int,
+                                     fleet_drain_id: UUID) -> DrainOutcome:
+        """Attach the fleet ID in the same SQL update as stop commitment."""
+        if not all(type(value) is UUID for value in
+                   (attempt_id, boot_id, fleet_drain_id)):
+            raise RegistryError("invalid_drain_request", 422)
+        return self.commit_stop_unbound_in(
+            conn, player_id, str(attempt_id), str(boot_id), authority_epoch,
+            fleet_drain_id=fleet_drain_id,
         )
 
     def commit_stop(self, player_id: str, attempt_id: str, boot_id: str,
@@ -308,9 +322,13 @@ class EquipmentDrain:
             )
 
     def _commit_stop_in(self, conn, player_id: str, attempt_id: str, boot_id: str,
-                        authority_epoch: int, *, require_unbound: bool) -> DrainOutcome:
+                        authority_epoch: int, *, require_unbound: bool,
+                        fleet_drain_id: UUID | None = None) -> DrainOutcome:
         if not holds_runtime_locks_in(conn):
             raise RegistryError("runtime_snapshot_required", 500)
+        if (fleet_drain_id is not None
+                and (not require_unbound or type(fleet_drain_id) is not UUID)):
+            raise RegistryError("invalid_drain_request", 422)
         runtime = self.coordinator.runtime.read_in(conn)
         row = conn.execute(
             "SELECT * FROM equipment_drains WHERE player_id=%s FOR UPDATE", (player_id,),
@@ -326,6 +344,9 @@ class EquipmentDrain:
         if not require_unbound and row["snapshot"].get("admission_scope") == "unbound_canary":
             raise RegistryError("unbound_drain_requires_safe_commit")
         if row["phase"] == "stop_committed":
+            if (fleet_drain_id is not None
+                    and row["fleet_drain_id"] != fleet_drain_id):
+                raise RegistryError("equipment_drain_conflict")
             if require_unbound:
                 current = conn.execute(
                     "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
@@ -338,6 +359,9 @@ class EquipmentDrain:
             return self._outcome(row, "already_committed")
         if row["phase"] == "aborted":
             raise RegistryError("drain_aborted")
+        if (fleet_drain_id is not None and row["fleet_drain_id"] is not None
+                and row["fleet_drain_id"] != fleet_drain_id):
+            raise RegistryError("equipment_drain_conflict")
         current = conn.execute(
             "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
             (player_id,),
@@ -360,8 +384,9 @@ class EquipmentDrain:
                 "run_ids": list(affected),
             })
         conn.execute(
-            "UPDATE equipment_drains SET phase='stop_committed',stop_committed_at=%s "
-            "WHERE player_id=%s", (cut_now, player_id),
+            "UPDATE equipment_drains SET phase='stop_committed',stop_committed_at=%s,"
+            "fleet_drain_id=%s "
+            "WHERE player_id=%s", (cut_now, fleet_drain_id, player_id),
         )
         return DrainOutcome("stop_committed", player_id, attempt_id, boot_id,
                             authority_epoch, row["snapshot"])
