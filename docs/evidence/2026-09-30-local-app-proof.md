@@ -17,7 +17,7 @@ The bootstrapper source closure now includes the proof contract, verifier, Linux
 | Check | Result | Limit |
 |---|---|---|
 | Combined proof, Player service/link, closure and packaging tests on macOS | 290 passed, 6 skipped | Linux kernel credential and `dpkg-deb` cases are among the skips. This is not a resident base service test. |
-| Full portable suite | 2,806 passed, 1,123 skipped, 1 failed at the old bootstrapper import-table expectation | The package declaration now correctly includes cryptography and pydantic; after updating that assertion, all 7 package-closure tests passed. The full suite was not repeated after that test correction. |
+| Full portable suite on the shutdown-fix revision | 2,810 passed, 1,124 skipped, 25 warnings | macOS skips PostgreSQL, Linux-only and physical cases. An earlier run had one stale bootstrapper import-table expectation, corrected before this full pass. |
 | PostgreSQL attempt-report tests with proof session/trust binding | 26 passed, 2 warnings | A report is stored only as a carrier claim; this does not certify the app process or accept an artifact. |
 | Ruff, six import contracts, documentation links and diff check | Passed | Static/structural checks. |
 | Adversarial socket regressions | 34 passed, 1 skipped | Fake-socket tests close returned descriptors and prove a second proof completes while one connection waits. The Linux credential test is skipped on macOS. |
