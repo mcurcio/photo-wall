@@ -30,6 +30,35 @@ function observed(fact, fallback = "No report") {
   return `${state}${digest}${provenance}${assurance}${age}`;
 }
 
+function reportedAppObservation(fact, offeredBootId, includeProcess = false) {
+  if (!fact) return "Unknown · no OS app observation";
+  const parts = [fact.digest ? fact.digest.slice(0, 12) : "Unknown"];
+  if (fact.reason) parts.push(`reason: ${String(fact.reason).replaceAll("_", " ")}`);
+  if (fact.source === "serial_claim") parts.push("serial claim");
+  else parts.push(fact.source ? String(fact.source).replaceAll("_", " ") : "source unknown");
+  parts.push(fact.assurance === "t0_unverified" ? "T0 unverified" :
+    fact.assurance ? String(fact.assurance).replaceAll("_", " ") : "assurance unknown");
+  parts.push(Number.isFinite(fact.age_seconds)
+    ? `${Math.max(0, Math.round(fact.age_seconds))} s since Central receipt`
+    : "receipt age unknown");
+  if (fact.boot_id) {
+    parts.push(`boot claim ${fact.boot_id}`);
+    if (offeredBootId && offeredBootId !== fact.boot_id) parts.push("differs from latest offer boot");
+  } else {
+    parts.push("boot claim unknown");
+  }
+  if (fact.boot_ambiguity) parts.push("multiple boot claims");
+  parts.push(fact.boot_linkage === "claim_only" ? "physical boot unverified" :
+    "boot linkage unknown");
+  if (includeProcess && fact.process) {
+    const process = fact.process;
+    if (Number.isSafeInteger(process.pid)) parts.push(`PID ${process.pid}`);
+    if (Number.isSafeInteger(process.start_ticks)) parts.push(`start ticks ${process.start_ticks}`);
+    if (process.invocation_id) parts.push(`invocation ${process.invocation_id}`);
+  }
+  return parts.join(" · ");
+}
+
 function readTime(value) {
   const time = typeof value === "number" ? new Date(value * 1000) : new Date(value);
   return Number.isNaN(time.getTime()) ? "unknown" : time.toLocaleString();
@@ -201,14 +230,14 @@ export function PlayerVersions({ snapshot }) {
                   <p>Latest offer: {device.offered
                     ? `${device.offered.app_digest?.slice(0, 12) ?? "no app selected"} · ${String(device.offered.app_status ?? "offer only").replaceAll("_", " ")} · offer only`
                     : "No offer recorded"}</p>
-                  <p>Installed: {observed(device.installed, "Unknown")}</p>
-                  <p>Running: {observed(device.running, "Unknown")}{device.running?.linkage === "unknown" && " · boot linkage unknown"}</p>
+                  <p>Reported installed: {reportedAppObservation(device.installed, device.offered?.boot_id)}</p>
+                  <p>Reported running: {reportedAppObservation(device.running, device.offered?.boot_id, true)}</p>
                   <p>Output: {observed(device.output, "No current presentation report")}</p>
                   <p>Fallback: {String(device.fallback ?? "unknown").replaceAll("_", " ")}
                     {device.accepted_fallback?.sha256 && ` · recorded ${device.accepted_fallback.sha256.slice(0, 12)}`}
                   </p>
                   {device.capability?.startsWith("offer_v") ? (
-                    <p className="fleet__note">Offer-aware boot requested. Base reports are serial claims; this view has no direct proof of the installed app or visible output.</p>
+                    <p className="fleet__note">Offer-aware boot requested. OS app observations are unverified serial claims; they do not prove installation on the physical Player or visible output.</p>
                   ) : (
                     <p className="fleet__note">App-only target is queued; this legacy or unknown base cannot enforce it.</p>
                   )}

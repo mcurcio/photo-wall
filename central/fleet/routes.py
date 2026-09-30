@@ -21,6 +21,7 @@ from central.fleet.bytes import OfferByteReader
 from central.fleet.models import (
     BaselineWrite,
     CheckIn,
+    CheckInV2,
     FleetError,
     OfferRequest,
     OverrideWrite,
@@ -89,6 +90,10 @@ def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.post("/v1/appliance/check-ins")
     async def check_in(body: CheckIn) -> dict:
+        return await asyncio.to_thread(service.record_check_in, body)
+
+    @app.post("/v2/appliance/check-ins")
+    async def check_in_v2(body: CheckInV2) -> dict:
         return await asyncio.to_thread(service.record_check_in, body)
 
     @app.get("/v1/operator/fleet", dependencies=[Depends(admin)])

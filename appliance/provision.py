@@ -47,7 +47,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeVar
 
 from appliance.app_executor import AppExecutor, ExecutorError, expected_abi
 from appliance.boot_offer import BOOT_HANDOFF, BootOfferError, read_current_handoff
@@ -121,6 +121,9 @@ START_UNIT_SECONDS: Final = 90.0
 # below that).
 UNIT_STATUS_SECONDS: Final = 5.0
 MAX_BACKOFF_SECONDS: Final = 30.0
+# A read-only app sample can hold the executor's shared lock past its OS-agent
+# reporting deadline. Bound each wait; production keeps waiting for the lock.
+EXECUTOR_BUSY_RETRY_SECONDS: Final = 1.0
 # An allowance, NOT an enforced bound: the CPU- and RAM-local steps -- the sha256 of up to
 # MAX_APP_PACKAGE_BYTES, the 0600 temp .deb write and the handoff write.
 LOCAL_STEPS_SECONDS: Final = 15.0
@@ -147,6 +150,9 @@ PROVISION_ATTEMPT_TIMEOUT_SECONDS: Final = math.ceil(ATTEMPT_MARGIN * LONGEST_AT
 class ProvisionError(ValueError):
     """A content failure with a fixed code (e.g. provision_manifest_invalid). Network failures
     are UplinkError, never this."""
+
+
+_ExecutorResult = TypeVar("_ExecutorResult")
 
 
 # systemd's own exit statuses: the unit's process failed while systemd was setting it up
@@ -413,6 +419,27 @@ class Bootstrapper:
     def _fetch(self, found: Found, seconds: float) -> DirectFetch:
         return DirectFetch(found.central, transport=self._transport, seconds=seconds)
 
+    async def _retry_executor_busy(self, effect: Callable[[], _ExecutorResult], *,
+                                   max_attempts: int | None, digest: str | None,
+                                   resume_phase: str | None = None) -> _ExecutorResult:
+        """Wait through a local observer's shared lock without reselecting inputs."""
+        attempts = 0
+        while max_attempts is None or attempts < max_attempts:
+            attempts += 1
+            if attempts > 1 and resume_phase is not None:
+                self._phase(resume_phase, digest, None)
+            try:
+                return effect()
+            except ExecutorError as error:
+                if str(error) != "executor_busy" or attempts == max_attempts:
+                    raise
+                self._phase("retry_wait", digest, "executor_busy")
+                # A collector may outlive its reporting deadline. Keep the unit's
+                # start window alive while polling the nonblocking exclusive lock.
+                self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
+                await self._sleep(EXECUTOR_BUSY_RETRY_SECONDS)
+        raise AssertionError("executor retry budget must be positive")
+
     async def run(self, *, max_attempts: int | None = None) -> bool:
         """One attempt:
           1. found = await find()                         (locates again on every attempt)
@@ -443,14 +470,19 @@ class Bootstrapper:
                 # The selected root and journal are volatile but survive this unit restarting
                 # within the same PXE boot. A stale boot handoff is rejected by main().
                 try:
-                    recovered = self._data_executor.recover(
-                        expected_base_abi=self._base_abi_reader())
+                    base_abi = self._base_abi_reader()
+                    recovered = await self._retry_executor_busy(
+                        lambda: self._data_executor.recover(expected_base_abi=base_abi),
+                        max_attempts=max_attempts, digest=None)
                 except ExecutorError as error:
                     fault = str(error)
                     if re.fullmatch(r"[a-z0-9_]{1,64}", fault) is None:
                         fault = "app_recovery_failed"
                     self._phase("retry_wait", None, fault)
-                    LOG.error("provision: local app recovery requires repair: %s", error)
+                    if fault == "executor_busy":
+                        LOG.warning("provision: local app recovery still waiting for observer")
+                    else:
+                        LOG.error("provision: local app recovery requires repair: %s", error)
                     self._watchdog_ready()
                     return False
                 if recovered is not None:
@@ -476,9 +508,10 @@ class Bootstrapper:
                     assert manifest is not None
                     if self._boot_handoff.get("schema") == 2:
                         asset = self._boot_handoff["initial_app"]
+                        expected_base_abi = self._base_abi_reader()
                         if (not isinstance(asset, dict)
                                 or asset.get("format") != "pw-player-data-v1"
-                                or asset.get("base_abi") != self._base_abi_reader()):
+                                or asset.get("base_abi") != expected_base_abi):
                             raise ProvisionError("data_payload_abi_mismatch")
                     self._phase("fetching_app", manifest.sha256, None)
                     package = fetch_offered_package(self._fetch(found, PACKAGE_SECONDS),
@@ -532,18 +565,26 @@ class Bootstrapper:
                 self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
                                             None))
                 try:
-                    outcome = self._data_executor.activate(
-                        package, sha256=manifest.sha256, size=manifest.size,
-                        base_abi=str(asset["base_abi"]),
-                        attempt_id=str(self._boot_handoff["offer_id"]),
-                        expected_base_abi=self._base_abi_reader())
+                    base_abi = str(asset["base_abi"])
+                    offer_id = str(self._boot_handoff["offer_id"])
+                    outcome = await self._retry_executor_busy(
+                        lambda: self._data_executor.activate(
+                            package, sha256=manifest.sha256, size=manifest.size,
+                            base_abi=base_abi, attempt_id=offer_id,
+                            expected_base_abi=expected_base_abi),
+                        max_attempts=max_attempts, digest=manifest.sha256,
+                        resume_phase="installing_app")
                 except ExecutorError as error:
                     fault = str(error)
                     if re.fullmatch(r"[a-z0-9_]{1,64}", fault) is None:
                         fault = "app_activation_failed"
                     self._phase("retry_wait", manifest.sha256, fault)
-                    LOG.error("provision: data app %s awaiting operator: %s",
-                              manifest.sha256, error)
+                    if fault == "executor_busy":
+                        LOG.warning("provision: data app %s still waiting for observer",
+                                    manifest.sha256)
+                    else:
+                        LOG.error("provision: data app %s awaiting operator: %s",
+                                  manifest.sha256, error)
                     self._watchdog_ready()
                     return False
                 if outcome != "committed":

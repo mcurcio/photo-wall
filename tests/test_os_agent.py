@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import threading
 
 import pytest
 
+from appliance.app_evidence import AppEvidence, ProcessSample, RunningEvidence
 from appliance.boot_offer import BootOffer, write_handoff
 from appliance.os_agent import (
     MAX_SEQUENCE,
@@ -17,6 +19,7 @@ from appliance.os_agent import (
     write_phase,
 )
 from tests.uplink_fakes import FakeReply, finding
+from uplink.causes import UplinkError
 
 BOOT = "11111111-2222-3333-4444-555555555555"
 OTHER = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -135,6 +138,147 @@ class PostTransport:
     def send(self, url, *, headers, deadline, method="GET", body=None, **_kwargs):
         self.requests.append((method, str(url), json.loads(body)))
         return FakeReply(200, body=self.reply)
+
+
+class ScriptedPostTransport:
+    def __init__(self, *replies):
+        self.replies = iter(replies)
+        self.requests = []
+
+    def send(self, url, *, headers, deadline, method="GET", body=None, **_kwargs):
+        self.requests.append((str(url), json.loads(body)))
+        status, reply = next(self.replies)
+        return FakeReply(status, body=reply)
+
+
+class EvidenceReader:
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def collect(self, boot_id):
+        self.calls.append(boot_id)
+        if isinstance(self.value, Exception):
+            raise self.value
+        return self.value
+
+
+def _agent(tmp_path, transport, evidence, *, evidence_seconds=3.0):
+    return OsAgent(serial="abcd1234", kernel_boot_id=BOOT,
+                   find=finding("http://central.local:8080"), transport=transport,
+                   sequence=ObservationSequence(tmp_path / "sequence.json"),
+                   handoff_path=tmp_path / "missing", phase_path=tmp_path / "missing-phase",
+                   boottime=lambda: 1.5, app_evidence=evidence,
+                   app_evidence_seconds=evidence_seconds)
+
+
+def test_v2_report_includes_bounded_same_boot_app_evidence(tmp_path):
+    evidence = EvidenceReader(AppEvidence(
+        BOOT, "a" * 64, RunningEvidence("a" * 64,
+                                        ProcessSample(123, 456, "b" * 32)), None, None))
+    transport = ScriptedPostTransport((200, b'{"accepted":true}'))
+    assert asyncio.run(_agent(tmp_path, transport, evidence).report_once()).accepted
+    assert evidence.calls == [BOOT]
+    path, body = transport.requests[0]
+    assert path.endswith("/v2/appliance/check-ins")
+    assert body["schema"] == 2 and body["observation_sequence"] == 1
+    assert body["app_evidence"] == {
+        "kernel_boot_id": BOOT, "installed_sha256": "a" * 64,
+        "running": {"sha256": "a" * 64, "pid": 123, "start_ticks": 456,
+                    "invocation_id": "b" * 32},
+        "installed_reason": None, "running_reason": None}
+
+
+def test_unsupported_v2_route_reuses_one_base_sample_and_sequence_for_v1(tmp_path):
+    evidence = EvidenceReader(AppEvidence(BOOT, None, None, "no_selected_root", "no_selected_root"))
+    transport = ScriptedPostTransport(
+        (404, b'{"detail":"Not Found"}'), (200, b'{"accepted":true}'))
+    agent = _agent(tmp_path, transport, evidence)
+    assert asyncio.run(agent.report_once()).accepted
+    assert len(transport.requests) == 2 and evidence.calls == [BOOT]
+    v2_path, v2 = transport.requests[0]
+    v1_path, v1 = transport.requests[1]
+    assert v2_path.endswith("/v2/appliance/check-ins")
+    assert v1_path.endswith("/v1/appliance/check-ins")
+    assert v2["schema"] == 2 and "app_evidence" in v2
+    assert v1 == {**{key: value for key, value in v2.items() if key != "app_evidence"},
+                  "schema": 1}
+    assert ObservationSequence(tmp_path / "sequence.json").next(BOOT) == 2
+
+
+@pytest.mark.parametrize("evidence", [
+    RuntimeError("private local failure"),
+    AppEvidence(OTHER, "a" * 64, None, None, "unit_inactive"),
+    AppEvidence(BOOT, None, None, "unbounded-raw-error!", "unbounded-raw-error!"),
+])
+def test_failed_or_invalid_collector_still_reports_base_with_named_unknown(tmp_path, evidence):
+    transport = ScriptedPostTransport((200, b'{"accepted":true}'))
+    assert asyncio.run(_agent(tmp_path, transport, EvidenceReader(evidence)).report_once()).accepted
+    body = transport.requests[0][1]
+    assert body["phase"] == "base_ready"
+    assert body["app_evidence"] == {
+        "kernel_boot_id": BOOT, "installed_sha256": None, "running": None,
+        "installed_reason": "evidence_unavailable",
+        "running_reason": "evidence_unavailable"}
+
+
+def test_noncanonical_v2_404_does_not_downgrade(tmp_path):
+    evidence = EvidenceReader(AppEvidence(BOOT, None, None,
+                                          "no_selected_root", "no_selected_root"))
+    transport = ScriptedPostTransport((404, b'{"detail":"denied"}'))
+    with pytest.raises(UplinkError):
+        asyncio.run(_agent(tmp_path, transport, evidence).report_once())
+    assert len(transport.requests) == 1
+
+
+def test_slow_collector_is_single_flight_and_late_result_is_discarded(tmp_path):
+    class SlowEvidenceReader:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def collect(self, boot_id):
+            with self.lock:
+                self.calls += 1
+                call = self.calls
+            if call == 1:
+                self.started.set()
+                if not self.release.wait(1):
+                    raise RuntimeError("test collector was never released")
+                return AppEvidence(boot_id, "a" * 64, None, None, "unit_inactive")
+            return AppEvidence(boot_id, "b" * 64, None, None, "unit_inactive")
+
+    reader = SlowEvidenceReader()
+    transport = ScriptedPostTransport(*[(200, b'{"accepted":true}')] * 3)
+    agent = _agent(tmp_path, transport, reader, evidence_seconds=0.02)
+
+    async def exercise():
+        try:
+            assert (await asyncio.wait_for(agent.report_once(), 0.5)).accepted
+            assert reader.started.is_set()
+            assert (await asyncio.wait_for(agent.report_once(), 0.5)).accepted
+            assert reader.calls == 1  # no second collector while the first is blocked
+            reader.release.set()
+            for _ in range(100):
+                if agent._evidence_flight is not None and agent._evidence_flight.done():
+                    break
+                await asyncio.sleep(0.001)
+            else:
+                pytest.fail("late collector did not finish")
+            assert (await asyncio.wait_for(agent.report_once(), 0.5)).accepted
+        finally:
+            reader.release.set()
+
+    asyncio.run(exercise())
+    assert reader.calls == 2
+    bodies = [body for _, body in transport.requests]
+    assert [body["observation_sequence"] for body in bodies] == [1, 2, 3]
+    assert [body["app_evidence"]["installed_sha256"] for body in bodies] == [None, None,
+                                                                              "b" * 64]
+    assert bodies[0]["app_evidence"]["installed_reason"] == "evidence_unavailable"
+    assert bodies[1]["app_evidence"]["installed_reason"] == "evidence_unavailable"
 
 
 def test_resident_agent_reports_without_app_and_recovers_sequence_hint(tmp_path):

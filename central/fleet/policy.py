@@ -15,7 +15,7 @@ def effective_app(fleet: dict[str, Any], override: dict[str, Any] | None) -> dic
 
 
 def base_state(*, observation: dict[str, Any] | None, legacy: dict[str, Any] | None,
-               read_at: float, fresh_seconds: float = 30.0) -> dict[str, Any]:
+               read_at: float, fresh_seconds: float = 60.0) -> dict[str, Any]:
     """Conservative F6/T0 label. Missing evidence is unknown, never failure/acceptance."""
     if observation is None:
         if legacy is None or (legacy.get("boot_outcome") is None
@@ -37,19 +37,30 @@ def base_state(*, observation: dict[str, Any] | None, legacy: dict[str, Any] | N
     }
 
 
+def _boot_claim_context(*, observations: list[dict[str, Any]],
+                        offer: dict[str, Any] | None) -> tuple[
+                            dict[str, Any] | None, list[str], str | None, bool]:
+    """Choose one received claim for all OS facets; arrival ID resolves clock ties."""
+    ordered = sorted(observations, key=lambda row: (
+        row["received_at"], row.get("arrival_id") or 0), reverse=True)
+    boot_ids = [str(row["kernel_boot_id"]) for row in ordered[:3]]
+    offered_boot = str(offer["kernel_boot_id"]) if offer else None
+    ambiguous = len(ordered) > 1 or bool(
+        boot_ids and offered_boot is not None and offered_boot != boot_ids[0])
+    return (ordered[0] if ordered else None, boot_ids, offered_boot, ambiguous)
+
+
 def boot_claim_status(*, observations: list[dict[str, Any]], offer: dict[str, Any] | None,
                       legacy: dict[str, Any] | None, read_at: float) -> dict[str, Any]:
     """Latest T0 claim is diagnostic; no arrival order proves a physical current boot."""
-    if not observations:
+    latest, boot_ids, offered_boot, ambiguous = _boot_claim_context(
+        observations=observations, offer=offer)
+    if latest is None:
         result = base_state(observation=None, legacy=legacy, read_at=read_at)
         result["current_physical_boot"] = "unknown"
         return result
-    ordered = sorted(observations, key=lambda row: row["received_at"], reverse=True)
-    latest = ordered[0]
     result = base_state(observation=latest, legacy=legacy, read_at=read_at)
-    boot_ids = [str(row["kernel_boot_id"]) for row in ordered[:3]]
-    offered_boot = str(offer["kernel_boot_id"]) if offer else None
-    if len(ordered) > 1 or (offered_boot is not None and offered_boot != boot_ids[0]):
+    if ambiguous:
         result["state"] = "ambiguous_boot_claims"
     result["latest_claim_state"] = base_state(observation=latest, legacy=legacy,
                                                read_at=read_at)["state"]
@@ -57,6 +68,50 @@ def boot_claim_status(*, observations: list[dict[str, Any]], offer: dict[str, An
     result["latest_offered_boot_id"] = offered_boot
     result["current_physical_boot"] = "unknown"
     return result
+
+
+def app_observation_status(*, observations: list[dict[str, Any]],
+                           offer: dict[str, Any] | None,
+                           read_at: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Project installed/process claims from the exact row selected for base status."""
+    latest, boot_ids, offered_boot, ambiguous = _boot_claim_context(
+        observations=observations, offer=offer)
+    shared: dict[str, Any] = {
+        "source": "serial_claim" if latest is not None else "none",
+        "assurance": "t0_unverified" if latest is not None else "none",
+        "age_seconds": max(0.0, read_at - latest["received_at"]) if latest else None,
+        "boot_id": str(latest["kernel_boot_id"]) if latest else None,
+        "boot_linkage": "claim_only" if latest is not None else "unknown",
+        "boot_ambiguity": ambiguous,
+        "claimed_boot_ids": boot_ids,
+        "latest_offered_boot_id": offered_boot,
+        "current_physical_boot": "unknown",
+    }
+    if latest is None:
+        unknown = {**shared, "state": "unknown", "digest": None,
+                   "reason": "os_telemetry_unavailable"}
+        return unknown, {**unknown, "process": None}
+    if latest["observation_schema"] == 1:
+        installed_digest = running_digest = None
+        installed_reason = running_reason = "schema_one_no_app_evidence"
+    else:
+        installed_digest = latest["app_installed_sha256"]
+        running_digest = latest["app_running_sha256"]
+        installed_reason = latest["app_installed_reason"]
+        running_reason = latest["app_running_reason"]
+    installed = {**shared, "state": "reported" if installed_digest else "unknown",
+                 "digest": installed_digest}
+    running = {**shared, "state": "reported" if running_digest else "unknown",
+               "digest": running_digest,
+               "process": ({"pid": latest["app_running_pid"],
+                            "start_ticks": latest["app_running_start_ticks"],
+                            "invocation_id": latest["app_running_invocation_id"]}
+                           if running_digest else None)}
+    if installed_digest is None:
+        installed["reason"] = installed_reason
+    if running_digest is None:
+        running["reason"] = running_reason
+    return installed, running
 
 
 def app_control_status(*, player: dict[str, Any] | None,

@@ -12,10 +12,9 @@ import json
 import re
 import subprocess
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from appliance.app_launcher import CONFIG as PLAYER_CONFIG
 from appliance.app_launcher import PYTHON as PLAYER_PYTHON
@@ -46,6 +45,15 @@ class RecoveryResult:
     attempt_id: str
     state: str  # committed or rolled_back
     active_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedSnapshot:
+    """A terminal attempt and active pointer observed under one short read lock."""
+
+    attempt_id: str
+    state: str
+    digest: str
 
 
 class PlayerService(Protocol):
@@ -186,17 +194,26 @@ class AppExecutor:
             raise ExecutorError("executor_busy") from exc
         return handle
 
-    @contextmanager
-    def observe_selected(self, *, expected_base_abi: str) -> Iterator[str]:
-        """Hold a shared mutation fence while a caller samples the selected app.
+    def _terminal_selection(self) -> SelectedSnapshot:
+        """Parse one selected terminal journal while the caller holds a lock."""
+        if self.legacy_override.exists() or self.legacy_override.is_symlink():
+            raise ExecutorError("legacy_app_unverified")
+        row = self._journal()
+        if row is None:
+            raise ExecutorError("executor_journal_missing")
+        if row["state"] not in ("committed", "rolled_back"):
+            raise ExecutorError("executor_mutation_unsettled")
+        selected = row["target"] if row["state"] == "committed" else row["fallback"]
+        if selected is None or self._active() != selected:
+            raise ExecutorError("selected_root_unconfirmed")
+        return SelectedSnapshot(row["attempt_id"], row["state"], selected)
 
-        This is observation only: it never repairs a journal, creates a lock file, or
-        treats a staged root or an unfinished attempt as installed. The yielded digest
-        names a terminal journal's selected root whose files and ABI were verified.
+    def selected_snapshot(self) -> SelectedSnapshot:
+        """Read selection under a nonblocking shared lock, then release it.
+
+        Root hashing and PID1 sampling belong outside this brief critical section.
+        A caller compares two snapshots to reject a concurrent activation.
         """
-        if (not isinstance(expected_base_abi, str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_base_abi) is None):
-            raise ExecutorError("base_abi_invalid")
         try:
             lock = self.lock.open("rb")
         except FileNotFoundError as exc:
@@ -207,18 +224,7 @@ class AppExecutor:
             except BlockingIOError as exc:
                 raise ExecutorError("executor_busy") from exc
             try:
-                if self.legacy_override.exists() or self.legacy_override.is_symlink():
-                    raise ExecutorError("legacy_app_unverified")
-                row = self._journal()
-                if row is None:
-                    raise ExecutorError("executor_journal_missing")
-                if row["state"] not in ("committed", "rolled_back"):
-                    raise ExecutorError("executor_mutation_unsettled")
-                selected = row["target"] if row["state"] == "committed" else row["fallback"]
-                if selected is None or self._active() != selected:
-                    raise ExecutorError("selected_root_unconfirmed")
-                verify_root(self.roots / selected, expected_abi=expected_base_abi)
-                yield selected
+                return self._terminal_selection()
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 

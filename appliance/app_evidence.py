@@ -1,9 +1,9 @@
 """Read-only, same-boot evidence for the base-owned data-only Player app.
 
 This collector never promotes health or authorizes a mutation. A selected,
-verified root and a stable systemd process sample are separate facts. It uses
-the executor's lock and parsers so a concurrent activation cannot be joined
-with an unrelated process observation.
+verified root and a stable systemd process sample are separate facts. Two brief
+executor snapshots fence root verification and PID1 sampling without holding
+its mutation lock across slow I/O.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from appliance.app_executor import UNIT, AppExecutor, ExecutorError, expected_abi
-from appliance.app_payload import PayloadError
+from appliance.app_payload import PayloadError, verify_root
 
 _BOOT_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 _INVOCATION = re.compile(r"[0-9a-f]{32}")
@@ -107,9 +107,14 @@ class AppEvidenceCollector:
         if _BOOT_ID.fullmatch(kernel_boot_id) is None:
             raise ValueError("boot_id_invalid")
         try:
-            with self.executor.observe_selected(
-                    expected_base_abi=self.expected_abi_reader()) as selected:
-                return self._sample_selected(kernel_boot_id, selected)
+            abi = self.expected_abi_reader()
+            before = self.executor.selected_snapshot()
+            verify_root(self.executor.roots / before.digest, expected_abi=abi)
+            sample = self._sample_selected(kernel_boot_id, before.digest)
+            after = self.executor.selected_snapshot()
+            if after != before:
+                return self._unknown(kernel_boot_id, "executor_selection_changed")
+            return sample
         except (OSError, ExecutorError, PayloadError) as exc:
             reason = str(exc) if isinstance(exc, (ExecutorError, PayloadError)) else "evidence_unavailable"
             return self._unknown(kernel_boot_id, reason)

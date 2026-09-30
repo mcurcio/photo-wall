@@ -70,6 +70,12 @@ def test_serial_claim_is_not_base_acceptance_or_failure_from_silence() -> None:
     current = base_state(observation=observed, legacy=legacy, read_at=100)
     assert current["state"] == "base_heard_recently"
     assert current["assurance"] == "t0_unverified"
+    assert base_state(observation=observed, legacy=legacy, read_at=130)["state"] == (
+        "base_heard_recently")
+    assert base_state(observation=observed, legacy=legacy, read_at=150)["state"] == (
+        "base_heard_recently")
+    assert base_state(observation=observed, legacy=legacy, read_at=160)["state"] == (
+        "base_last_heard")
     assert base_state(observation=observed, legacy=legacy, read_at=200)["state"] == (
         "base_last_heard")
     assert fallback_classification(accepted_digest=None, obtainable=True, compatible=True,

@@ -1,5 +1,6 @@
 # Acceptance evidence
 
+- [2026-09-29 fleet app observation software evidence](2026-09-29-fleet-app-observation.md): schema-2 OS app claims, v1 fallback, bounded collection and executor contention fixes with PostgreSQL/portable tests; mixed-pod, boot-tree and physical qualification remain open.
 - [2026-09-29 Kubernetes Central diagnosis](2026-09-29-kubernetes-central-diagnosis.md): read-only live request trace and exact-release schema comparison explaining the v0.12 Player/v0.13 Central disconnect, plus current boot, Source, Scene and readiness findings; Player-local and physical confirmation remain open.
 - [2026-09-29 Frame profile serialization and partial Source refresh](2026-09-29-frame-profile-and-source-partial-refresh.md): atomic profile
   replacement under coordination/Runtime locks and successful-but-partial

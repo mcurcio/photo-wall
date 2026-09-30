@@ -17,12 +17,14 @@ from central.fleet.models import (
     Artifact,
     BaselineWrite,
     CheckIn,
+    CheckInV2,
     FleetError,
     OfferRequest,
     PolicyWrite,
 )
 from central.fleet.policy import (
     app_control_status,
+    app_observation_status,
     boot_claim_status,
     effective_app,
     fallback_classification,
@@ -485,7 +487,7 @@ class FleetService:
             evict()
             return True
 
-    def record_check_in(self, request: CheckIn) -> dict:
+    def record_check_in(self, request: CheckIn | CheckInV2) -> dict:
         serial = sanitize_serial(request.serial)
         if serial is None:
             raise FleetError("invalid_serial", 422)
@@ -518,14 +520,26 @@ class FleetService:
                 return {"accepted": False, "reason": "stale_or_duplicate",
                         "next_sequence": last + 1 if last < 2147483647 else None}
             self._claim_new_device(conn, device_id=device_id, serial=serial, now=now)
+            evidence = request.app_evidence if isinstance(request, CheckInV2) else None
+            running = evidence.running if evidence is not None else None
             conn.execute("INSERT INTO fleet_os_observations(device_id,kernel_boot_id,"
                          "agent_incarnation,observation_sequence,offer_id,base_digest,phase,"
-                         "fault_code,attempted_app_sha256,sampled_boottime_ms,received_at) "
-                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                         "fault_code,attempted_app_sha256,sampled_boottime_ms,received_at,"
+                         "observation_schema,app_installed_sha256,app_running_sha256,"
+                         "app_running_pid,app_running_start_ticks,app_running_invocation_id,"
+                         "app_installed_reason,app_running_reason) "
+                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                          (device_id, request.kernel_boot_id, request.agent_incarnation,
                           request.observation_sequence, request.offer_id, request.base_digest,
                           request.phase, request.fault_code, request.attempted_app_sha256,
-                          request.sampled_boottime_ms, now))
+                          request.sampled_boottime_ms, now, request.schema_version,
+                          evidence.installed_sha256 if evidence is not None else None,
+                          running.sha256 if running is not None else None,
+                          running.pid if running is not None else None,
+                          running.start_ticks if running is not None else None,
+                          running.invocation_id if running is not None else None,
+                          evidence.installed_reason if evidence is not None else None,
+                          evidence.running_reason if evidence is not None else None))
             # Bounded per-boot history; the latest sequence and its fault always survive.
             conn.execute("DELETE FROM fleet_os_observations WHERE device_id=%s "
                          "AND kernel_boot_id=%s AND observation_sequence < %s",
@@ -594,6 +608,8 @@ class FleetService:
                 session = control.get(player["id"]) if player else None
                 base = boot_claim_status(observations=obs, offer=offer, legacy=device,
                                          read_at=read_at)
+                installed, running = app_observation_status(
+                    observations=obs, offer=offer, read_at=read_at)
                 accepted_app = accepted.get((device_id, "app"))
                 app_fact = app_control_status(player=player, session=session, read_at=read_at)
                 result.append({
@@ -615,7 +631,7 @@ class FleetService:
                         "app_policy_revision": offer["app_policy_revision"],
                         "compatibility_basis": offer["compatibility_basis"],
                         "at": offer["created_at"], "expires_at": offer["expires_at"]},
-                    "installed": None, "running": None,
+                    "installed": installed, "running": running,
                     "accepted_fallback": None if accepted_app is None else {
                         "sha256": accepted_app["sha256"], "size": accepted_app["size"],
                         "at": accepted_app["accepted_at"], "assurance": "accepted_record"},

@@ -8,6 +8,7 @@ dpkg, systemd and mDNS are injected: this is not a real Pi boot, which is the ow
 """
 
 import asyncio
+import fcntl
 import functools
 import hashlib
 import json
@@ -659,6 +660,114 @@ def test_schema_two_repairs_local_attempt_before_central_discovery():
                                                          "base_abi": abi}})
     assert run(subject, 1) is False
     assert order == [("recover", abi), ("find",)]
+
+
+def test_schema_two_recovery_waits_for_os_shared_lock_before_central(tmp_path):
+    lock_path = tmp_path / "executor.lock"
+    lock_path.touch()
+    events = []
+    watchdog = Watchdog()
+    abi = "sha256:" + "c" * 64
+
+    class TracedExecutor(provision.AppExecutor):
+        def recover(self, *, expected_base_abi):
+            events.append(("recover", expected_base_abi))
+            return super().recover(expected_base_abi=expected_base_abi)
+
+    executor = TracedExecutor(roots=tmp_path / "apps", journal=tmp_path / "journal",
+                              lock=lock_path, legacy_override=tmp_path / "legacy")
+    with lock_path.open("rb") as observer:
+        fcntl.flock(observer, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+        async def release_observer(seconds):
+            events.append(("sleep", seconds))
+            fcntl.flock(observer, fcntl.LOCK_UN)
+
+        subject = bootstrapper(FakeTransport({}), find=never_called,
+                               data_executor=executor, sleep=release_observer,
+                               base_abi_reader=lambda: abi,
+                               watchdog_extend=watchdog.extend,
+                               watchdog_ready=watchdog.ready,
+                               boot_handoff={"schema": 2, "mode": "offer",
+                                             "initial_app": None})
+        assert run(subject, 2) is False  # app-less offer, after recovery succeeds
+    assert events == [("recover", abi), ("sleep", provision.EXECUTOR_BUSY_RETRY_SECONDS),
+                      ("recover", abi)]
+    assert watchdog.calls == [
+        ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS),
+        ("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS), ("ready",)]
+
+
+def test_schema_two_busy_recovery_obeys_finite_test_budget(tmp_path):
+    lock_path = tmp_path / "executor.lock"
+    lock_path.touch()
+    waits, phases = [], []
+    executor = provision.AppExecutor(roots=tmp_path / "apps", journal=tmp_path / "journal",
+                                     lock=lock_path, legacy_override=tmp_path / "legacy")
+
+    async def record_wait(seconds):
+        waits.append(seconds)
+
+    with lock_path.open("rb") as observer:
+        fcntl.flock(observer, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        subject = bootstrapper(FakeTransport({}), find=never_called, data_executor=executor,
+                               base_abi_reader=lambda: "sha256:" + "c" * 64,
+                               sleep=record_wait, phase=lambda *args: phases.append(args),
+                               boot_handoff={"schema": 2, "mode": "offer",
+                                             "initial_app": None})
+        assert run(subject, 3) is False
+    assert waits == [provision.EXECUTOR_BUSY_RETRY_SECONDS] * 2
+    assert phases[-1] == ("retry_wait", None, "executor_busy")
+
+def test_schema_two_activation_waits_for_os_shared_lock_without_refetch(tmp_path):
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    abi = "sha256:" + "c" * 64
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY)})
+    lock_path = tmp_path / "executor.lock"
+    calls, phases, waits = [], [], []
+    watchdog = Watchdog()
+
+    class LockingExecutor(provision.AppExecutor):
+        def activate(self, body, **kwargs):
+            calls.append((body, kwargs))
+            with self._lock() as locked:
+                fcntl.flock(locked, fcntl.LOCK_UN)
+            return "committed"
+
+    executor = LockingExecutor(roots=tmp_path / "apps", journal=tmp_path / "journal",
+                               lock=lock_path, legacy_override=tmp_path / "legacy")
+    recorder = Recorder()
+    with lock_path.open("a+b") as observer:
+        def hold_during_activation(handoff):
+            recorder.write_handoff(handoff)
+            fcntl.flock(observer, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+        async def release_after_long_collection(seconds):
+            waits.append(seconds)
+            if len(waits) == 7:
+                fcntl.flock(observer, fcntl.LOCK_UN)
+
+        subject = bootstrapper(
+            transport, find=finding(ORIGIN), install=never_called,
+            start_unit=never_called, data_executor=executor,
+            write_handoff=hold_during_activation, sleep=release_after_long_collection,
+            base_abi_reader=lambda: abi, phase=lambda *args: phases.append(args),
+            watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready,
+            boot_handoff={"schema": 2, "mode": "offer", "offer_id": offer_id,
+                          "base_tag": "v1-base",
+                          "initial_app": {"tag": TAG, "sha256": SHA256, "size": len(BODY),
+                                          "format": "pw-player-data-v1", "base_abi": abi}})
+        assert run(subject, None) is True
+    assert len(waits) == 7 and waits == [provision.EXECUTOR_BUSY_RETRY_SECONDS] * 7
+    assert len(calls) == 8 and all(call == calls[0] for call in calls)
+    assert calls[0][0] is calls[-1][0]
+    assert transport.urls == [ORIGIN + route]
+    assert recorder.order == [("write_handoff", Handoff(None, None))]
+    assert ("retry_wait", SHA256, "executor_busy") in phases
+    assert phases[-1] == ("player_unit_started", SHA256, None)
+    assert watchdog.calls == [("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS)] * 8 + [
+        ("ready",)]
 
 
 def test_schema_two_unrepairable_local_attempt_never_contacts_central():

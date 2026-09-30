@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from central.content_catalog.catalog import sanitize_serial
 from contracts.release import MAX_ROOTFS_BYTES
@@ -60,6 +60,46 @@ class CheckIn(WireModel):
                                    pattern=r"^[a-z0-9_]+$")
     attempted_app_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     sampled_boottime_ms: int | None = Field(default=None, ge=0)
+
+
+class RunningAppEvidence(WireModel):
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    pid: int = Field(strict=True, gt=0, le=2147483647)
+    start_ticks: int = Field(strict=True, gt=0, le=9223372036854775807)
+    invocation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class AppEvidence(WireModel):
+    kernel_boot_id: UUID
+    installed_sha256: str | None = Field(pattern=r"^[0-9a-f]{64}$")
+    running: RunningAppEvidence | None
+    installed_reason: str | None = Field(min_length=1, max_length=64,
+                                         pattern=r"^[a-z0-9_]+$")
+    running_reason: str | None = Field(min_length=1, max_length=64,
+                                       pattern=r"^[a-z0-9_]+$")
+
+    @model_validator(mode="after")
+    def coherent(self) -> AppEvidence:
+        if (self.installed_sha256 is None) == (self.installed_reason is None):
+            raise ValueError("installed_evidence_incoherent")
+        if (self.running is None) == (self.running_reason is None):
+            raise ValueError("running_evidence_incoherent")
+        if self.running is not None and self.running.sha256 != self.installed_sha256:
+            raise ValueError("running_digest_mismatch")
+        return self
+
+
+class CheckInV2(CheckIn):
+    schema_version: Literal[2] = Field(alias="schema")
+    observation_sequence: int = Field(strict=True, ge=0, le=2147483647)
+    sampled_boottime_ms: int | None = Field(default=None, strict=True, ge=0)
+    app_evidence: AppEvidence
+
+    @model_validator(mode="after")
+    def same_boot_evidence(self) -> CheckInV2:
+        if self.app_evidence.kernel_boot_id != self.kernel_boot_id:
+            raise ValueError("app_evidence_boot_mismatch")
+        return self
 
 
 class PolicyWrite(WireModel):
