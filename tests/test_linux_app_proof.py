@@ -3,6 +3,7 @@
 import os
 import socket
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,9 @@ def proc(tmp_path: Path, *, pid=123, ticks=456, cgroup=CGROUP):
     (directory / "cgroup").write_text(f"0::{cgroup}\n")
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux AF_UNIX SOCK_SEQPACKET required")
 def test_kernel_peer_credentials_come_from_the_supplied_connected_socket():
-    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     seen = []
     try:
         def credentials(connection):
@@ -41,7 +43,7 @@ def test_kernel_peer_credentials_come_from_the_supplied_connected_socket():
         assert adapter.peer_credentials(first).pid == 123
         assert adapter.peer_credentials(first).uid == 10001
         assert seen == [first, first]
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         try:
             with pytest.raises(OSError):
                 adapter.peer_credentials(listener)
@@ -54,9 +56,9 @@ def test_kernel_peer_credentials_come_from_the_supplied_connected_socket():
         second.close()
 
 
-@pytest.mark.skipif(not hasattr(socket, "SO_PEERCRED"), reason="Linux SO_PEERCRED required")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SO_PEERCRED required")
 def test_real_linux_peercred_is_kernel_connection_snapshot():
-    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         observed = LinuxAppProofSamplers().peer_credentials(first)
         assert (observed.pid, observed.uid, observed.gid) == (
@@ -66,6 +68,7 @@ def test_real_linux_peercred_is_kernel_connection_snapshot():
         second.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux AF_UNIX SOCK_SEQPACKET required")
 def test_peer_credentials_reject_wrong_protocol_and_malformed_kernel_record():
     first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
@@ -75,7 +78,7 @@ def test_peer_credentials_reject_wrong_protocol_and_malformed_kernel_record():
     finally:
         first.close()
         second.close()
-    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         with pytest.raises(ValueError, match="peercred_invalid"):
             LinuxAppProofSamplers(peercred_reader=lambda _: b"short").peer_credentials(first)

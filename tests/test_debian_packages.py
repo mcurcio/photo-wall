@@ -147,7 +147,9 @@ def test_the_pin_names_its_two_sources_each_signed_by_the_debian_keyring():
 
 
 def test_each_consumer_gets_its_list():
-    assert packages("bootstrapper") == ("ca-certificates", "python3", "python3-zeroconf")
+    assert packages("bootstrapper") == (
+        "ca-certificates", "python3", "python3-cryptography", "python3-pydantic",
+        "python3-zeroconf")
     assert packages("player") == tuple(sorted(
         (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev")))
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
@@ -168,7 +170,9 @@ def test_an_unknown_consumer_is_refused_rather_than_rendering_nothing():
 
 
 def test_the_import_tables_are_read_only_and_cover_the_device_imports():
-    assert dict(import_table("bootstrapper")) == {"zeroconf": "python3-zeroconf"}
+    assert dict(import_table("bootstrapper")) == {
+        "cryptography": "python3-cryptography", "pydantic": "python3-pydantic",
+        "zeroconf": "python3-zeroconf"}
     assert sorted(import_table("player")) == [
         "OpenGL", "cryptography", "gi", "httpx", "pydantic", "websockets", "zeroconf"]
     assert import_table("initrd-build") == {}
@@ -191,7 +195,8 @@ def test_mmdebstrap_builds_the_device_root_at_the_pin():
 
 @pytest.mark.parametrize(("argv", "printed"), [
     (["epoch"], ["1788480000"]),
-    (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-zeroconf"]),
+    (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-cryptography",
+                                   "python3-pydantic", "python3-zeroconf"]),
     (["packages", "bootstrapper", "player"], list(packages(*DEVICE_CONSUMERS))),
     (["packages", "--archive", "raspberrypi", "initrd-build"],
      ["linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom"]),

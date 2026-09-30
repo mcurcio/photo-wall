@@ -33,7 +33,8 @@ PLAYER = "p-" + "a" * 32
 DEVICE = "device-" + "b" * 64
 PROCESS = ProcessIdentity(pid=123, start_ticks=456, invocation_id="c" * 32,
                           cgroup_unit="photo-wall-player.service")
-CONTEXT = CurrentAttemptContext("installation-one", DEVICE, 2, BOOT, OFFER, ATTEMPT, COMMAND)
+CONTEXT = CurrentAttemptContext("installation-one", DEVICE, 2, BOOT, OFFER, SESSION,
+                                ATTEMPT, COMMAND, "t1")
 
 
 def verifier_state():
@@ -57,8 +58,9 @@ def test_existing_process_key_signs_domain_separated_attempt_bound_challenge():
     challenge = verifier.begin(handle, PLAYER, 7)
     assert b"photo-wall-local-app-proof-v1" in app_proof_message(challenge)
     assert challenge.attempt_id == ATTEMPT and challenge.command_id == COMMAND
+    assert challenge.command_session_id == SESSION and challenge.trust_mode == "t1"
     assert challenge.device_id == DEVICE and challenge.kernel_boot_id == BOOT
-    assert b"os_command_session" not in app_proof_message(challenge)
+    assert b'"command_session_id"' in app_proof_message(challenge)
     identity = load_identity()
     proof = verifier.verify(handle, identity.sign_app_proof(challenge))
     assert proof.response.public_key == identity.public_key
@@ -107,6 +109,13 @@ def test_proof_rejects_attempt_switch_expiry_and_invalid_signature():
     verifier, state = verifier_state()
     handle = object()
     challenge = verifier.begin(handle, PLAYER, 7)
+    state["context"] = replace(CONTEXT, command_session_id=UUID(int=9))
+    with pytest.raises(LocalProofError, match="app_proof_context_changed"):
+        verifier.verify(handle, load_identity().sign_app_proof(challenge))
+
+    verifier, state = verifier_state()
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7)
     state["now"] = 25.0
     with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
         verifier.verify(handle, load_identity().sign_app_proof(challenge))
@@ -149,6 +158,17 @@ def test_proof_detects_context_or_process_change_during_exchange():
         verifier.verify(handle, load_identity().sign_app_proof(challenge))
 
 
+def test_t0_and_unknown_trust_modes_cannot_issue_local_proof():
+    for context in (
+        replace(CONTEXT, installation_audience="photo-wall-central-t0"),
+        replace(CONTEXT, trust_mode="t0"),
+    ):
+        verifier, state = verifier_state()
+        state["context"] = context
+        with pytest.raises(LocalProofError, match="attempt_context_untrusted"):
+            verifier.begin(object(), PLAYER, 7)
+
+
 def test_proof_contract_bounds_and_report_cannot_reuse_another_attempt():
     verifier, _ = verifier_state()
     handle = object()
@@ -166,6 +186,8 @@ def test_proof_contract_bounds_and_report_cannot_reuse_another_attempt():
     assert parse_os_attempt_report(report.model_dump_json(by_alias=True).encode()) == report
     with pytest.raises(ValidationError, match="attempt_report_proof_mismatch"):
         OsAttemptReport(**{**report.model_dump(by_alias=True), "attempt_id": UUID(int=9)})
+    with pytest.raises(ValidationError, match="attempt_report_proof_mismatch"):
+        OsAttemptReport(**{**report.model_dump(by_alias=True), "command_session_id": UUID(int=9)})
     with pytest.raises(ValidationError, match="attempt_report_t0_audience"):
         OsAttemptReport(**{**report.model_dump(by_alias=True), "installation_audience":
                            "photo-wall-central-t0"})

@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 from psycopg.errors import CheckViolation
+from pydantic import ValidationError
 
 import central.fleet.attempt_reports as reports_module
 import central.fleet.principal as principal_module
@@ -16,7 +17,9 @@ from central.fleet.attempt_reports import AttemptReportStore
 from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import FleetError
 from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
+from contracts.app_process_proof import AppProofChallenge, LocalAppProof, ProcessIdentity
 from contracts.os_attempt_report import OsAttemptReport
+from player.identity import load_identity
 
 SERIAL = "abcdef1234567890"
 DEVICE = device_id_for_serial(SERIAL)
@@ -143,6 +146,34 @@ def test_report_cannot_cross_principal_or_attempt_boundary(registry, changed) ->
     _seed(registry)
     with pytest.raises(FleetError, match="attempt_report_.*_mismatch"):
         AttemptReportStore(registry.db, registry.clock).record(_principal(), _report(**changed))
+    assert _count(registry) == 0
+
+
+def test_proof_session_and_carrier_trust_match_report_and_principal(registry) -> None:
+    process = ProcessIdentity(pid=123, start_ticks=456, invocation_id="c" * 32,
+                              cgroup_unit="photo-wall-player.service")
+
+    def proof(*, session: UUID, trust: str) -> LocalAppProof:
+        challenge = AppProofChallenge(
+            nonce="a" * 64, installation_audience=AUDIENCE,
+            device_id=DEVICE, device_generation=1, kernel_boot_id=BOOT,
+            offer_id=OFFER, command_session_id=session, attempt_id=ATTEMPT,
+            command_id=COMMAND, trust_mode=trust, claimed_player_id="p-" + "b" * 32,
+            claimed_authority_epoch=1, process=process,
+        )
+        return LocalAppProof(challenge=challenge,
+                             response=load_identity().sign_app_proof(challenge),
+                             verified_boottime_ms=100)
+
+    with pytest.raises(ValidationError, match="attempt_report_proof_mismatch"):
+        _report(running_sha256=TARGET, running_process=process,
+                app_proof=proof(session=UUID(int=999), trust="t1"))
+
+    _seed(registry)
+    report = _report(running_sha256=TARGET, running_process=process,
+                     app_proof=proof(session=SESSION, trust="t2"))
+    with pytest.raises(FleetError, match="attempt_report_principal_mismatch"):
+        AttemptReportStore(registry.db, registry.clock).record(_principal(), report)
     assert _count(registry) == 0
 
 

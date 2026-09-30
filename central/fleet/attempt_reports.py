@@ -68,7 +68,9 @@ class AttemptReportStore:
                     or report.kernel_boot_id != principal.kernel_boot_id
                     or report.offer_id != principal.offer_id
                     or report.installation_audience != principal.installation_audience
-                    or report.command_session_id != principal.command_session_id):
+                    or report.command_session_id != principal.command_session_id
+                    or (report.app_proof is not None
+                        and report.app_proof.challenge.trust_mode != principal.trust_mode)):
                 raise FleetError("attempt_report_principal_mismatch", 409)
             attempt = conn.execute(
                 "SELECT * FROM fleet_app_attempts WHERE attempt_id=%s FOR UPDATE",

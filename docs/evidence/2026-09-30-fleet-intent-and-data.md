@@ -18,7 +18,7 @@ The [fleet design](../player-fleet-control-design.md) owns the intended behavior
 | Full `pytest -q` with an isolated schema per test on local Compose PostgreSQL | 3,546 passed, 342 skipped, 1 expected failure, 24 warnings | This run overlapped the final review corrections. |
 | Focused maintenance-request and OS-data routes against PostgreSQL after the review corrections | 14 passed, 3 warnings | Includes the backward UTC step and uncached error responses. |
 | Whole-repository Ruff and six import contracts | Passed | Static checks only. |
-| `scripts/check_docs.py` and `git diff --check` | Passed before the final evidence edit | Recheck before commit. |
+| `scripts/check_docs.py` and `git diff --check` | Passed after the evidence edits | Documentation links and whitespace only. |
 | Console production Vite build with bundled Node 24 | Passed, 122 modules transformed | Build does not prove the operator flow in a browser or deployed Central. |
 
 `scripts/test_local.py -q` was attempted but this managed PR worktree has no private `.env`, so the script stopped before testing. The full PostgreSQL run instead obtained the local Compose password in process from Docker configuration, supplied `PHOTO_WALL_TEST_DATABASE_URL` only to the test subprocess, and did not print or persist it. The tests used fresh random schemas and left deployment data untouched.

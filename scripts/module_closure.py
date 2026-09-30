@@ -59,7 +59,8 @@ INITRD_POLICY: Final = ClosurePolicy(
     ("player", "central", "media", "zeroconf", "ifaddr", "gi"), MappingProxyType({}))
 BOOTSTRAPPER_POLICY: Final = ClosurePolicy(
     "bootstrapper", ("appliance.provision", "appliance.os_agent",
-                     "appliance.app_launcher"), ("central", "media"),
+                     "appliance.app_launcher", "appliance.app_proof_service"),
+    ("central", "media"),
     debian_packages.import_table("bootstrapper"))
 PLAYER_POLICY: Final = ClosurePolicy(
     "player", ("player.service",), ("central", "media", "appliance"),

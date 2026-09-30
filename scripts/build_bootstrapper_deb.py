@@ -7,7 +7,8 @@ raw-file overlay an image-build tool owns), the bootstrapper is built like the P
 Contents (Project 2 design §2.7, rule 2: each package ships exactly its computed closure,
 privately):
 
-- the computed first-party closure of the base-owned provisioning, OS-agent, and app-launcher roots
+- the computed first-party closure of the base-owned provisioning, OS-agent, app-launcher,
+  and local app-proof roots
   (`scripts/module_closure.py` `BOOTSTRAPPER_POLICY`), staged under INSTALL_DIR with a generated
   `__main__.py` and `closure.json` (Debian Python Policy's private-module directory; a PEP 441
   directory application run as `python3 -I -B /usr/lib/photo-wall-bootstrapper`). Nothing goes
@@ -123,6 +124,10 @@ def launcher_contract_digest(tree: Path) -> str:
         ("app_launcher", (tree / "appliance/app_launcher.py").read_bytes()),
         ("app_executor", (tree / "appliance/app_executor.py").read_bytes()),
         ("app_payload", (tree / "appliance/app_payload.py").read_bytes()),
+        ("app_proof_contract", (tree / "contracts/app_process_proof.py").read_bytes()),
+        ("app_proof_verifier", (tree / "appliance/app_process_proof.py").read_bytes()),
+        ("app_proof_service", (tree / "appliance/app_proof_service.py").read_bytes()),
+        ("app_proof_linux", (tree / "appliance/linux_app_proof.py").read_bytes()),
         ("player_unit", managed_player_unit(
             (tree / "appliance/systemd/player.service").read_bytes())),
         ("player_launcher", PLAYER_LAUNCHER),

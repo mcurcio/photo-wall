@@ -16,6 +16,8 @@ from contracts.strict_json import loads_object
 
 MAX_PROOF_CHALLENGE_BYTES = 2048
 MAX_PROOF_RESPONSE_BYTES = 512
+MAX_PROOF_BEGIN_BYTES = 256
+MAX_PROOF_PACKET_BYTES = 2304
 
 
 class _StrictModel(BaseModel):
@@ -37,8 +39,10 @@ class AppProofChallenge(_StrictModel):
     device_generation: int = Field(ge=1, le=2**63 - 1)
     kernel_boot_id: UUID
     offer_id: UUID
+    command_session_id: UUID
     attempt_id: UUID
     command_id: UUID
+    trust_mode: Literal["t1", "t2"]
     claimed_player_id: str = Field(pattern=r"^p-[0-9a-f]{32}$")
     claimed_authority_epoch: int = Field(ge=1)
     process: ProcessIdentity
@@ -54,6 +58,37 @@ class AppProofResponse(_StrictModel):
     nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
     public_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     signature: str = Field(pattern=r"^[A-Za-z0-9+/]{86}==$")
+
+
+class AppProofBegin(_StrictModel):
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    kind: Literal["begin"]
+    claimed_player_id: str = Field(pattern=r"^p-[0-9a-f]{32}$")
+    claimed_authority_epoch: int = Field(ge=1, le=2**63 - 1)
+
+
+class AppProofChallengePacket(_StrictModel):
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    kind: Literal["challenge"]
+    challenge: AppProofChallenge
+
+
+class AppProofResponsePacket(_StrictModel):
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    kind: Literal["response"]
+    response: AppProofResponse
+
+
+class AppProofResultPacket(_StrictModel):
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    kind: Literal["result"]
+    status: Literal["recorded"]
+
+
+class AppProofErrorPacket(_StrictModel):
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    kind: Literal["error"]
+    code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
 
 
 class LocalAppProof(_StrictModel):
@@ -91,3 +126,17 @@ def parse_app_proof_response(raw: bytes) -> AppProofResponse:
     if value is None:
         raise ValueError("app_proof_response_invalid_json")
     return AppProofResponse.model_validate_json(json.dumps(value).encode("utf-8"))
+
+
+def parse_app_proof_begin(raw: bytes) -> AppProofBegin:
+    value = loads_object(raw, max_bytes=MAX_PROOF_BEGIN_BYTES)
+    if value is None or "schema" not in value:
+        raise ValueError("app_proof_begin_invalid_json")
+    return AppProofBegin.model_validate_json(json.dumps(value).encode("utf-8"))
+
+
+def parse_app_proof_response_packet(raw: bytes) -> AppProofResponse:
+    value = loads_object(raw, max_bytes=MAX_PROOF_PACKET_BYTES)
+    if value is None or "schema" not in value:
+        raise ValueError("app_proof_packet_invalid_json")
+    return AppProofResponsePacket.model_validate_json(json.dumps(value).encode("utf-8")).response

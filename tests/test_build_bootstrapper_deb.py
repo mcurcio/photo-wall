@@ -27,6 +27,7 @@ from scripts.module_closure import (
     ClosurePolicy,
     closure_for,
     first_party_packages,
+    isolated_import,
     read_manifest,
 )
 
@@ -58,7 +59,8 @@ def test_the_control_file_depends_are_the_declarations_bootstrapper_list(tmp_pat
     assert "Architecture: all" in control
     assert f"Depends: {', '.join(packages('bootstrapper'))}\n" in control
     # Its own closure's needs only: never the render stack, never a bare PyPI name.
-    assert "Depends: ca-certificates, python3, python3-zeroconf\n" in control
+    assert ("Depends: ca-certificates, python3, python3-cryptography, "
+            "python3-pydantic, python3-zeroconf\n") in control
 
 
 # --- version derivation (content-derived, NOT the git revision) --------------------------------
@@ -91,12 +93,19 @@ def test_package_version_rejects_a_local_version_segment(closure):
         deb.package_version(closure, UNIT, "0.1.0+local")
 
 
+@pytest.mark.parametrize("relative_path", [
+    "appliance/app_launcher.py",
+    "contracts/app_process_proof.py",
+    "appliance/app_process_proof.py",
+    "appliance/app_proof_service.py",
+    "appliance/linux_app_proof.py",
+])
 def test_launcher_contract_digest_changes_with_base_owned_execution_bytes(
-        committed, closure):
+        committed, closure, relative_path):
     repository, _revision = committed
     before = deb.launcher_contract_digest(repository)
     before_abi = deb.base_abi_bytes(repository)
-    launcher = repository / "appliance/app_launcher.py"
+    launcher = repository / relative_path
     launcher.write_bytes(launcher.read_bytes() + b"\n# changed launch contract\n")
     assert deb.launcher_contract_digest(repository) != before
     assert deb.base_abi_bytes(repository) != before_abi
@@ -194,10 +203,22 @@ def test_stage_tree_ships_the_computed_closure_privately(tmp_path, closure):
     assert staged == sorted([*manifest.files, "__main__.py", "closure.json", "os-agent.py",
                              "player-launch.py", "base-abi.txt", "weston.ini"])
     assert "appliance.os_agent" in manifest.modules
+    assert {"appliance.app_proof_service", "appliance.app_process_proof",
+            "appliance.linux_app_proof", "contracts.app_process_proof"} <= set(
+                manifest.modules)
     # Inverted from the fixed-list era: uplink needs contracts, so it ships (privately).
     assert (private / "contracts/equipment.py").is_file()
     assert (private / "uplink/finder.py").is_file()
     assert not (deb_root / "usr/lib/python3/dist-packages").exists()
+
+
+def test_staged_proof_service_imports_from_the_bootstrapper_private_tree(tmp_path, closure):
+    private = _staged(tmp_path, closure) / PRIVATE_DIR
+    modules = ("appliance.app_proof_service", "appliance.app_process_proof",
+               "appliance.linux_app_proof")
+    report = isolated_import(private, modules, policy=BOOTSTRAPPER_POLICY)
+    assert report.imported == modules
+    assert report.unavailable == ()
 
 
 def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path, closure):
@@ -211,6 +232,8 @@ def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path, 
     agent_wants = (deb_root / "etc/systemd/system/multi-user.target.wants/"
                    "photo-wall-os-agent.service")
     assert os.readlink(agent_wants) == "/lib/systemd/system/photo-wall-os-agent.service"
+    assert not (deb_root / "lib/systemd/system/photo-wall-app-proof.service").exists()
+    assert not (deb_root / "lib/systemd/system/photo-wall-app-proof.socket").exists()
     assert b"photo-wall-os-agent.service" in UNIT
     player = deb_root / "lib/systemd/system/photo-wall-player.service"
     assert player.read_bytes() == deb.DEFAULT_PLAYER_UNIT
@@ -225,13 +248,13 @@ def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path, 
 
 
 def test_stage_tree_refuses_a_declared_import_no_code_reaches(tmp_path, closure, monkeypatch):
-    """Mutation probe (b): a declaration that gives the bootstrapper python3-cryptography."""
+    """Mutation probe (b): a declaration that gives the bootstrapper python3-httpx."""
     stale = ClosurePolicy("bootstrapper", BOOTSTRAPPER_POLICY.roots,
                           BOOTSTRAPPER_POLICY.forbidden, MappingProxyType(
                               {**BOOTSTRAPPER_POLICY.third_party,
-                               "cryptography": "python3-cryptography"}))
+                               "httpx": "python3-httpx"}))
     monkeypatch.setattr(deb, "BOOTSTRAPPER_POLICY", stale)
-    with pytest.raises(BuildError, match="declared_import_unreached:cryptography"):
+    with pytest.raises(BuildError, match="declared_import_unreached:httpx"):
         _staged(tmp_path, closure)
     assert not (tmp_path / "deb-root").exists()
 

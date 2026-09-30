@@ -61,7 +61,7 @@ def player_deb_root(tmp_path_factory, player):
     return deb_root
 
 
-def test_the_bootstrapper_closure_is_provisioning_uplink_and_one_declared_import(bootstrapper):
+def test_the_bootstrapper_closure_includes_proof_and_its_declared_imports(bootstrapper):
     reached_by_s1a = compute_closure(("uplink.finder", "uplink.diagnosis"), repo=REPO,
                                      first_party=first_party_packages(REPO),
                                      third_party=BOOTSTRAPPER_POLICY.third_party)
@@ -70,7 +70,8 @@ def test_the_bootstrapper_closure_is_provisioning_uplink_and_one_declared_import
         "appliance", "contracts", "player", "uplink"}
     assert [name for name in bootstrapper.modules if name.startswith("player")] == [
         "player", "player.mdns_discovery"]
-    assert bootstrapper.third_party == ("zeroconf",)
+    assert "appliance.app_proof_service" in bootstrapper.modules
+    assert bootstrapper.third_party == ("cryptography", "pydantic", "zeroconf")
     assert unreached_imports(bootstrapper, BOOTSTRAPPER_POLICY) == ()
 
 

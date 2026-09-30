@@ -1,8 +1,8 @@
-"""Linux readers for a future root-owned local app-proof socket service.
+"""Linux readers for a root-owned local app-proof socket service.
 
 These readers only supply facts to LocalAppProofVerifier. They do not create a
 socket, command authority, Central evidence, or an acceptance record. A caller
-must pass the same accepted AF_UNIX stream socket to begin and verify.
+must pass the same accepted AF_UNIX seqpacket socket to begin and verify.
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ class LinuxAppProofSamplers:
         """Read kernel credentials from the exact connected socket supplied."""
         if (not isinstance(peer_handle, socket.socket)
                 or peer_handle.family != socket.AF_UNIX
-                or peer_handle.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM):
-            raise TypeError("app_proof_unix_stream_required")
+                or peer_handle.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET):
+            raise TypeError("app_proof_unix_seqpacket_required")
         peer_handle.getpeername()  # An unconnected listener is not a peer.
         raw = self.peercred_reader(peer_handle)
         if type(raw) is not bytes or len(raw) != _UCRED_BYTES:

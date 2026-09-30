@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -48,8 +48,20 @@ class CurrentAttemptContext:
     device_generation: int
     kernel_boot_id: UUID
     offer_id: UUID
+    command_session_id: UUID
     attempt_id: UUID
     command_id: UUID
+    trust_mode: Literal["t1", "t2"]
+
+    @classmethod
+    def from_challenge(cls, challenge: AppProofChallenge) -> CurrentAttemptContext:
+        """Recover the exact protected context that the app signed."""
+        return cls(
+            challenge.installation_audience, challenge.device_id,
+            challenge.device_generation, challenge.kernel_boot_id,
+            challenge.offer_id, challenge.command_session_id,
+            challenge.attempt_id, challenge.command_id, challenge.trust_mode,
+        )
 
 
 class PeerSampler(Protocol):
@@ -83,7 +95,7 @@ class LocalAppProofVerifier:
                  main_process_sampler: MainProcessSampler,
                  peer_process_sampler: PeerProcessSampler,
                  current_attempt: Callable[[], CurrentAttemptContext],
-                 boottime: Callable[[], float] = time.monotonic,
+                 boottime: Callable[[], float] | None = None,
                  nonce_bytes: Callable[[int], bytes] = secrets.token_bytes) -> None:
         if type(expected_app_uid) is not int or expected_app_uid < 1:
             raise ValueError("app_uid_invalid")
@@ -92,7 +104,7 @@ class LocalAppProofVerifier:
         self.main_process_sampler = main_process_sampler
         self.peer_process_sampler = peer_process_sampler
         self.current_attempt = current_attempt
-        self.boottime = boottime
+        self.boottime = boottime or linux_boottime
         self.nonce_bytes = nonce_bytes
         self._pending: dict[str, _Pending] = {}
         self._lock = threading.Lock()
@@ -104,7 +116,7 @@ class LocalAppProofVerifier:
                 raise TypeError("invalid peer sample")
             main = self.main_process_sampler()
             process = self.peer_process_sampler(peer.pid)
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             raise LocalProofError("app_process_unavailable") from exc
         if (type(peer.uid) is not int or peer.uid != self.expected_app_uid
                 or type(peer.gid) is not int or peer.pid <= 0
@@ -118,11 +130,19 @@ class LocalAppProofVerifier:
     def _context(self) -> CurrentAttemptContext:
         try:
             context = self.current_attempt()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             raise LocalProofError("attempt_context_unavailable") from exc
         if type(context) is not CurrentAttemptContext:
             raise LocalProofError("attempt_context_unavailable")
+        if (context.trust_mode not in ("t1", "t2")
+                or context.installation_audience == "photo-wall-central-t0"):
+            raise LocalProofError("attempt_context_untrusted")
         return context
+
+    def ensure_current_context(self, expected: CurrentAttemptContext) -> None:
+        """Pre-sink check; the injected sink must still CAS atomically on this value."""
+        if self._context() != expected:
+            raise LocalProofError("app_proof_context_changed")
 
     def begin(self, peer_handle: object, claimed_player_id: str,
               claimed_authority_epoch: int) -> AppProofChallenge:
@@ -136,7 +156,9 @@ class LocalAppProofVerifier:
                 nonce=nonce.hex(), installation_audience=context.installation_audience,
                 device_id=context.device_id, device_generation=context.device_generation,
                 kernel_boot_id=context.kernel_boot_id, offer_id=context.offer_id,
+                command_session_id=context.command_session_id,
                 attempt_id=context.attempt_id, command_id=context.command_id,
+                trust_mode=context.trust_mode,
                 claimed_player_id=claimed_player_id,
                 claimed_authority_epoch=claimed_authority_epoch, process=process,
             )
@@ -176,8 +198,24 @@ class LocalAppProofVerifier:
         except (ValueError, InvalidSignature) as exc:
             raise LocalProofError("app_proof_signature_invalid") from exc
         peer_after, process_after = self._sample(peer_handle)
+        verified_at = self.boottime()
+        if verified_at >= pending.expires_at:
+            raise LocalProofError("app_proof_expired_or_used")
         if (peer_after != pending.peer or process_after != pending.challenge.process
                 or self._context() != pending.context):
             raise LocalProofError("app_proof_context_changed")
         return LocalAppProof(challenge=pending.challenge, response=response,
-                             verified_boottime_ms=int(self.boottime() * 1000))
+                             verified_boottime_ms=int(verified_at * 1000))
+
+    def cancel(self, nonce: str) -> None:
+        """Discard an abandoned challenge when its socket closes."""
+        with self._lock:
+            self._pending.pop(nonce, None)
+
+
+def linux_boottime() -> float:
+    """Suspend-aware TTL clock; the proof service is supported on Linux only."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        raise LocalProofError("boottime_unavailable")
+    return time.clock_gettime(clock)

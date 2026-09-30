@@ -49,6 +49,7 @@ from player.cache import Cache
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
+from player.local_app_proof import LocalAppProofClient, LocalProofError
 from player.output_discovery import discover_outputs, output_app_id
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
 from uplink import watchdog
@@ -75,6 +76,7 @@ CHUNK_SIZE = 64 * 1024
 BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
+LOCAL_PROOF_RETRY = 5.0
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -383,6 +385,7 @@ class PlayerService:
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
+                 app_proof_client: LocalAppProofClient | None = None,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
                  boot_context: BootContext | None = None):
@@ -394,6 +397,8 @@ class PlayerService:
                                 time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
+        self.app_proof_client = (LocalAppProofClient() if app_proof_client is None
+                                 else app_proof_client)
         self.health_path = health_path
         try:
             with boot_id_path.open("r") as stream:
@@ -422,6 +427,8 @@ class PlayerService:
         self._verify_due = threading.Event()
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="player-media")
         self._stop = threading.Event()
+        self._proof_active = False
+        self._proof_generation = 0
         self._thread = None
         self._loop = None
         self._task = None
@@ -1097,10 +1104,52 @@ class PlayerService:
                 await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
+    async def _local_app_proof_loop(self) -> None:
+        """Keep OS-local evidence separate from Central liveness and rendering.
+
+        Only the process-local enrollment key enters the blocking socket worker.
+        A re-enrollment or relocation replaces the Session object and invalidates
+        that worker before it signs or sends a response.
+        """
+        recorded_session: Session | None = None
+        while self._proof_active and not self._stop.is_set():
+            session = self._session
+            registration = session.registration if session is not None else None
+            generation = self._proof_generation
+            if (registration is not None and session is not recorded_session
+                    and self.boot_context is not None and self.boot_id):
+                def current() -> bool:
+                    return (self._proof_active and self._proof_generation == generation
+                            and not self._stop.is_set() and self._session is session
+                            and session.registration is registration)
+
+                try:
+                    outcome = await asyncio.to_thread(
+                        self.app_proof_client.exchange, identity=self.identity,
+                        player_id=registration.player_id,
+                        authority_epoch=registration.authority_epoch,
+                        device_id=self.boot_context.device_id,
+                        kernel_boot_id=self.boot_id,
+                        enrollment_current=current,
+                    )
+                    if outcome == "recorded":
+                        recorded_session = session
+                        LOG.debug("player: OS-local app proof recorded")
+                except (LocalProofError, OSError, TimeoutError) as error:
+                    LOG.debug("player: OS-local app proof unavailable: %s",
+                              str(error) if isinstance(error, LocalProofError)
+                              else type(error).__name__)
+                except Exception as error:
+                    LOG.warning("player: OS-local app proof failed: %s", type(error).__name__)
+            await asyncio.sleep(LOCAL_PROOF_RETRY)
+
     async def run(self):
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
         self.link.open()
+        self._proof_generation += 1
+        self._proof_active = True
+        proof_task = asyncio.create_task(self._local_app_proof_loop())
         attempt = 0
         try:
             while not self._stop.is_set():
@@ -1160,6 +1209,10 @@ class PlayerService:
         except asyncio.CancelledError:
             pass
         finally:
+            self._proof_active = False
+            self._proof_generation += 1
+            proof_task.cancel()
+            await asyncio.gather(proof_task, return_exceptions=True)
             await self.link.aclose()
             if self.cache is not None:
                 await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)

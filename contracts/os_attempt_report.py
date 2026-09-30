@@ -60,6 +60,7 @@ class OsAttemptReport(BaseModel):
             or self.app_proof.challenge.device_generation != self.device_generation
             or self.app_proof.challenge.kernel_boot_id != self.kernel_boot_id
             or self.app_proof.challenge.offer_id != self.offer_id
+            or self.app_proof.challenge.command_session_id != self.command_session_id
             or self.app_proof.challenge.attempt_id != self.attempt_id
             or self.app_proof.challenge.command_id != self.command_id
             or self.app_proof.challenge.process != self.running_process
