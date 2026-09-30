@@ -1003,6 +1003,13 @@ jobs:
             --deb "$PLAYER_DEB" \
             --work "$RUNNER_TEMP/os-agent-service-probe"
 
+      - name: Make OS-agent probe diagnostics readable to the runner
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/os-agent-service-probe" ]; then
+            sudo chmod -R a+rX "$RUNNER_TEMP/os-agent-service-probe"
+          fi
+
       - name: Upload OS-agent service probe diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

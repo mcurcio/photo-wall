@@ -149,6 +149,7 @@ PAYLOAD_IN_CONTAINER: Final = "/var/tmp/photo-wall-player-payload.tar.gz"
 HANDOFF_IN_CONTAINER: Final = "/etc/photo-wall/public.json"
 SYSTEMD: Final = "/usr/lib/systemd/systemd"
 PROBE_CMDLINE: Final = "/var/tmp/photo-wall-probe-cmdline"
+PROBE_FIRMWARE: Final = "/var/tmp/photo-wall-probe-firmware"
 BOOT_SECONDS: Final = 180.0
 # A booted system: `degraded` too, since some units (systemd-modules-load: no modules for the
 # host's kernel) cannot work in a container, and none of them is the Player's concern.
@@ -178,6 +179,7 @@ def cpuinfo_text(serial: str = PROBE_SERIAL) -> str:
 
 
 def docker_run_argv(image: str, name: str, cpuinfo: Path, *, cmdline: Path | None = None,
+                    firmware: Path | None = None,
                     host_network: bool = False, target: str | None = None,
                     mask_provisioner: bool = True) -> list[str]:
     """PURE. Boot `image` with systemd as PID 1. Arguments after SYSTEMD are its command line in
@@ -190,13 +192,22 @@ def docker_run_argv(image: str, name: str, cpuinfo: Path, *, cmdline: Path | Non
         # runc refuses a direct OCI bind over /proc/cmdline. The privileged entrypoint
         # binds it inside the container, then execs systemd as PID 1. Unit files remain exact.
         argv.extend(("--volume", f"{cmdline}:{PROBE_CMDLINE}:ro"))
+    if firmware is not None:
+        # The base OS-agent reads the Pi devicetree serial, never cpuinfo. Bind a fixture
+        # directory over existing /sys/firmware in this container's mount namespace.
+        argv.extend(("--volume", f"{firmware}:{PROBE_FIRMWARE}:ro"))
     if host_network:
         argv.extend(("--network", "host"))
-    if cmdline is None:
+    if cmdline is None and firmware is None:
         argv.extend((image, SYSTEMD))
     else:
+        mounts = []
+        if cmdline is not None:
+            mounts.append(f"mount --bind {PROBE_CMDLINE} /proc/cmdline")
+        if firmware is not None:
+            mounts.append(f"mount --bind {PROBE_FIRMWARE} /sys/firmware")
         argv.extend((image, "sh", "-ec",
-                     f'mount --bind {PROBE_CMDLINE} /proc/cmdline; exec {SYSTEMD} "$@"',
+                     "; ".join((*mounts, f'exec {SYSTEMD} "$@"')),
                      "sh"))
     if target is not None:
         argv.append(f"systemd.unit={target}")

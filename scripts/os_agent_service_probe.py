@@ -232,6 +232,10 @@ def probe(image: str, deb: Path, work: Path) -> dict:
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     cpuinfo = work / "cpuinfo"
     cpuinfo.write_text(cpuinfo_text())
+    firmware = work / "firmware"
+    serial = firmware / "devicetree/base/serial-number"
+    serial.parent.mkdir(parents=True, exist_ok=True)
+    serial.write_text(PROBE_SERIAL + "\n")
     result: dict = {"status": "running"}
     started = False
     with Recorder(deb.read_bytes()) as recorder:
@@ -239,14 +243,31 @@ def probe(image: str, deb: Path, work: Path) -> dict:
         cmdline.write_text(f"photowall.central={recorder.origin}\n")
         try:
             subprocess.run(docker_run_argv(image, container.name, cpuinfo,
-                                           cmdline=cmdline, host_network=True,
+                                           cmdline=cmdline, firmware=firmware,
+                                           host_network=True,
                                            target="basic.target", mask_provisioner=False),
                            check=True, capture_output=True, timeout=60)
             started = True
             state = container.wait_booted(seconds=BOOT_SECONDS)
             require(state in BOOTED, f"base_systemd_boot_failed:{state}")
+            fixture_serial = container.exec(
+                "cat", "/sys/firmware/devicetree/base/serial-number")
+            require(fixture_serial.returncode == 0 and
+                    fixture_serial.stdout.strip() == PROBE_SERIAL,
+                    "agent_devicetree_serial_missing")
+            actual_cmdline = container.exec("cat", "/proc/cmdline")
+            require(actual_cmdline.returncode == 0 and
+                    actual_cmdline.stdout.strip() == f"photowall.central={recorder.origin}",
+                    "agent_central_cmdline_missing")
+            resolved_serial = container.exec(
+                "python3", "-I", "-B", "-c",
+                "import sys; sys.path.insert(0, '/usr/lib/photo-wall-bootstrapper'); "
+                "from appliance.bootstrap import read_pi_serial; print(read_pi_serial())")
+            require(resolved_serial.returncode == 0 and
+                    resolved_serial.stdout.strip() == PROBE_SERIAL,
+                    "installed_agent_serial_reader_failed")
             provision = container.exec("systemctl", "is-active", PROVISION_UNIT)
-            require(provision.stdout.strip() != "active", "provision_started_before_gate")
+            require(provision.stdout.strip() == "inactive", "provision_started_before_gate")
             started_agent = container.exec("systemctl", "start", AGENT_UNIT, timeout=30)
             require(started_agent.returncode == 0, "agent_unit_start_failed")
             boot_id_result = container.exec("cat", "/proc/sys/kernel/random/boot_id")
@@ -286,16 +307,26 @@ def probe(image: str, deb: Path, work: Path) -> dict:
             result = {"status": "failed", "error": str(error)}
             raise
         finally:
-            (work / "requests.json").write_text(json.dumps(recorder.snapshot(), indent=2))
+            snapshot = recorder.snapshot()
+            (work / "requests.json").write_text(json.dumps(snapshot, indent=2))
+            journal_text = ""
             if started:
                 try:
                     journal = container.exec("journalctl", "--no-pager", "-n", "150",
                                              "-u", AGENT_UNIT, "-u", PROVISION_UNIT,
                                              timeout=15)
-                    (work / "journal.log").write_text(journal.stdout + journal.stderr)
+                    journal_text = journal.stdout + journal.stderr
                 except (OSError, subprocess.SubprocessError) as error:
-                    (work / "journal.log").write_text(f"journal unavailable: {error}\n")
+                    journal_text = f"journal unavailable: {error}\n"
+                (work / "journal.log").write_text(journal_text)
             (work / "evidence.json").write_text(json.dumps(result, indent=2))
+            if result["status"] != "passed":
+                print("OS-agent probe request tail: " +
+                      json.dumps(snapshot["requests"][-20:]), file=sys.stderr)
+                print("OS-agent probe observation tail: " +
+                      json.dumps(snapshot["observations"][-2:])[-3000:], file=sys.stderr)
+                print("OS-agent/provisioner journal tail:\n" +
+                      "\n".join(journal_text.splitlines()[-40:])[-6000:], file=sys.stderr)
             subprocess.run(["docker", "rm", "--force", container.name], check=False,
                            capture_output=True, timeout=60)
 

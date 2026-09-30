@@ -118,11 +118,15 @@ def test_the_container_boots_systemd_with_the_provisioner_masked(tmp_path):
 
 def test_resident_probe_boots_basic_target_with_real_service_units(tmp_path):
     cmdline = tmp_path / "cmdline"
+    firmware = tmp_path / "firmware"
     argv = docker_run_argv("base:probe", "probe-1", tmp_path / "cpuinfo",
-                           cmdline=cmdline, host_network=True, target="basic.target",
+                           cmdline=cmdline, firmware=firmware, host_network=True,
+                           target="basic.target",
                            mask_provisioner=False)
     assert f"{cmdline}:/var/tmp/photo-wall-probe-cmdline:ro" in argv
+    assert f"{firmware}:/var/tmp/photo-wall-probe-firmware:ro" in argv
     assert "mount --bind /var/tmp/photo-wall-probe-cmdline /proc/cmdline" in argv[-5]
+    assert "mount --bind /var/tmp/photo-wall-probe-firmware /sys/firmware" in argv[-5]
     assert argv[argv.index("--network") + 1] == "host"
     assert "systemd.unit=basic.target" in argv
     assert f"systemd.mask={PROVISION_UNIT}" not in argv
