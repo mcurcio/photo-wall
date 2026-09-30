@@ -4,6 +4,8 @@ Photo Wall is implementing this sequence; see the [durable checklist](implementa
 
 Use the [validation matrix](validation.md#acceptance-matrix) for evidence and [design decisions](design-decisions.md) for open policies, release scope, and performance budgets. All slices follow [recursive development and agent orchestration](../CONTRIBUTING.md#recursive-development-and-agent-orchestration): design modules first, then integrate child implementations and evidence from the bottom up.
 
+The [Player fleet implementation map](player-fleet-implementation-map.md) proposes a bounded F0–F4/F6 recovery sequence and module ownership for the v0.13 Kubernetes gaps. It does not mark those features complete.
+
 ## Dependencies
 
 | Slice | Dependency | Result |
