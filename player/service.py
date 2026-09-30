@@ -1149,7 +1149,7 @@ class PlayerService:
         self.link.open()
         self._proof_generation += 1
         self._proof_active = True
-        proof_task = asyncio.create_task(self._local_app_proof_loop())
+        proof_task = None
         attempt = 0
         try:
             while not self._stop.is_set():
@@ -1161,6 +1161,8 @@ class PlayerService:
                     if self.registration is None:
                         await self.enroll()
                         await self._report_base_health()
+                    if proof_task is None:
+                        proof_task = asyncio.create_task(self._local_app_proof_loop())
                     await self.hello_protocol()
                     # Reconnection reconciles authority before any download work.
                     await self.probe_time()
@@ -1211,8 +1213,16 @@ class PlayerService:
         finally:
             self._proof_active = False
             self._proof_generation += 1
-            proof_task.cancel()
-            await asyncio.gather(proof_task, return_exceptions=True)
+            if proof_task is not None:
+                proof_task.cancel()
+                # stop() may cancel this parent while it awaits the child.
+                # Shield the child so cleanup waits for it without surfacing
+                # that second cancellation to callers of run().
+                while not proof_task.done():
+                    try:
+                        await asyncio.shield(proof_task)
+                    except asyncio.CancelledError:
+                        pass
             await self.link.aclose()
             if self.cache is not None:
                 await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
