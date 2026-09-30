@@ -1,6 +1,7 @@
 # Acceptance evidence
 
 - [2026-09-30 local Player process proof](2026-09-30-local-app-proof.md): separate app-to-base key proof client, per-packet Linux credentials, attempt-bound challenge and base packaging checks; service composition and physical qualification remain open.
+- [2026-09-30 command trust and rollout audit](2026-09-30-command-rollout-audit.md): live serving paths and the conditional D14/D17 gates; no command activation or deployment change.
 - [2026-09-30 fleet intent and loader OS data](2026-09-30-fleet-intent-and-data.md): inert operator maintenance requests, verifier-gated OS data routes and session expiry checks with local PostgreSQL evidence, plus read-only Kubernetes trust/rollback observations; no command or physical activation.
 - [2026-09-29 fleet app observation software evidence](2026-09-29-fleet-app-observation.md): schema-2 OS app claims, v1 fallback, bounded collection and executor contention fixes with PostgreSQL/portable tests; mixed-pod, boot-tree and physical qualification remain open.
 - [2026-09-29 Kubernetes Central diagnosis](2026-09-29-kubernetes-central-diagnosis.md): read-only live request trace and exact-release schema comparison explaining the v0.12 Player/v0.13 Central disconnect, plus current boot, Source, Scene and readiness findings; Player-local and physical confirmation remain open.

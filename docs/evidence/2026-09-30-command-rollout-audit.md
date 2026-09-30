@@ -1,0 +1,26 @@
+# 2026-09-30 command trust and rollout audit
+
+**Evidence class:** read-only Kubernetes resource inspection and repository architecture review. **Status:** D14 and D17 proposals, not an activated command channel or a deployment change. The upstream switch, PXE server and external deployment configuration were not inspected.
+
+## Observed serving surface
+
+At inspection, the `photos/photo-wall` Deployment had one replica, used `Recreate`, ran `ghcr.io/mcurcio/photo-wall/central:v0.13.0`, and used a TCP port-8000 readiness probe. Its Service selected `app=photo-wall`, exposed LoadBalancer address `10.0.31.1:8000` and NodePort `30204`, and had `externalTrafficPolicy: Cluster`. The `photo-wall-access` NetworkPolicy allowed source range `10.0.0.0/16` to TCP 8000. The `photo-wall` HTTPRoute forwarded to the same Service without an authentication filter. The Gateway is therefore not the sole path to a serving Central pod. These resource facts do not establish whether an upstream network control restricts the other paths.
+
+The read-only checks used `kubectl -n photos get service photo-wall`, `get deployment photo-wall`, `get networkpolicy photo-wall-access`, and `get httproute` with selected JSONPath fields. No Secret, Player key or private media was read. The running Central image was not changed. The [earlier live diagnosis](2026-09-29-kubernetes-central-diagnosis.md) records the v0.12 Player/v0.13 Central compatibility fault.
+
+## Command trust conclusion (D14)
+
+The current Gateway, HTTPRoute and NetworkPolicy do not prove a managed attachment or an integrity-protected PXE boot. Existing T0 serial/offer claims and an unauthenticated `photo-wall-central-t0` audience cannot be relabeled as a command-capable T1 session. Keep zero-touch T0 appearance and base observation; keep remote stop, update, reboot and automatic accepted-frontier promotion disabled.
+
+The smallest conditional T1 design requires a deployment-owned trusted gateway to attest a commissioned switch attachment and fresh protected boot phase; a root-owned ephemeral loader key before the Player starts; a Central-authenticated audience; one immutable offer/session bound to attachment, boot, device generation and key; signed requests with nonce/replay protection or end-to-end client certificates; and idempotent renewal of the same key. Central must reject direct-pod access and untrusted forwarded identity headers. T1 identifies an attachment, so same-port replacement remains ambiguous until reconciled. If the switch and boot path cannot supply these proofs, a T2 commissioned hardware-key pilot is the next command-capable option; T0 appearance remains available. The [trust contract](../player-fleet-red-blue-refinement.md#trust-and-channel-contract) owns the full protocol.
+
+## Serving and effect gates (D17)
+
+| Gate | Required evidence before opening | Current result |
+|---|---|---|
+| F0 serving compatibility | Every routable and rollback Central image preserves the exact legacy v0.12 Player state shape through REST/WebSocket and enrollment, while accepting the new protocol. Test digest-pinned published packages through ingress with bound and unbound Players. | CI has package-level compatibility checks; no mixed Central image/rollback or every-serving-endpoint test. Historical v0.13.0 is not a qualified rollback target for a v0.12 Player. |
+| F4 effect admission | A durable default-closed, generation-checked Central gate; D14 verifier and D16 Runtime policy; exact retained bytes per serving pod; and no ambiguous attempt. Every routable pod **and rollback image** must enforce attempt, drain and revocation fences before a command is returned. | No production verifier, command route, gate controller or certified rollback digest. The direct Service paths prevent a Gateway-only assertion from satisfying the gate. |
+
+An external deployment owner must allow only certified image digests on all Service EndpointSlices, drain existing connections before a pod loses or gains eligibility, verify the rollback artifact, and replace TCP readiness with an HTTP contract/database readiness check while keeping liveness independent of the database. Central should own the durable gate and shared transactional guards; release CI should own the exact-image compatibility matrix. The repository has no Kubernetes manifests or rollout controller. Central currently performs forward-only, checksum-verified database migrations during each pod startup; a separately verified expansion step is needed before mixed serving. The legacy app/netboot manifest, package-byte and auto-promotion paths require an explicit drain/attempt fence audit before F4 effect admission.
+
+Closing command issuance does not itself make an older Central image safe to serve while a stop may have occurred. Rollback to an image without the fence contract requires revoking sessions and reconciling every prepared, committed and ambiguous attempt and drain to zero active barriers first. The [rollout contract](../player-fleet-red-blue-refinement.md#rollout-and-decision-gates) and [implementation map](../player-fleet-implementation-map.md) own the remaining work. No physical Pi, switch, panel or PXE trust behavior was qualified by this audit.
