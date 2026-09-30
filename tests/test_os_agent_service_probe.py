@@ -13,12 +13,14 @@ import urllib.request
 
 import pytest
 
+from scripts import os_agent_service_probe as probe_module
 from scripts.os_agent_service_probe import (
     AGENT_LAUNCHER,
     ProbeError,
     Recorder,
     ServiceIdentity,
     continuity_violations,
+    require_agent_enabled,
     service_identity,
     start_ticks,
 )
@@ -99,3 +101,98 @@ def test_service_identity_is_the_installed_unit_and_exact_launcher():
 
     with pytest.raises(ProbeError, match="agent_not_installed_launcher"):
         service_identity(WrongLauncher())
+
+
+def test_autostart_preflight_uses_multi_user_target_without_manual_agent_start(
+        tmp_path, monkeypatch):
+    boot_id = "11111111-2222-3333-4444-555555555555"
+    report = {"schema": 2, "kind": "pi", "serial": probe_module.PROBE_SERIAL,
+              "kernel_boot_id": boot_id, "phase": "base_ready",
+              "observation_sequence": 1,
+              "app_evidence": {"kernel_boot_id": boot_id, "installed_sha256": None,
+                               "running": None, "installed_reason": "no_selected_root",
+                               "running_reason": "no_selected_root"}}
+
+    class FakeRecorder:
+        origin = "http://127.0.0.1:12345"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def wait_for(self, predicate, _seconds, _code):
+            assert predicate(report)
+            return report
+
+        def snapshot(self):
+            return {"requests": ["/v1/locate", "/v2/appliance/check-ins"],
+                    "observations": [report]}
+
+    commands = []
+
+    class FakeContainer:
+        def __init__(self, name, *, run):
+            self.name = name
+
+        def wait_booted(self, *, seconds):
+            return "running"
+
+        def exec(self, *argv, **_kwargs):
+            commands.append(argv)
+            if argv == ("readlink", "--", probe_module.AGENT_WANTS):
+                output = probe_module.AGENT_VENDOR + "\n"
+            elif argv == ("systemctl", "is-enabled", probe_module.PROVISION_UNIT):
+                output = "masked-runtime\n"
+            elif argv == ("systemctl", "is-active", probe_module.PROVISION_UNIT):
+                output = "inactive\n"
+            elif argv == ("cat", "/proc/sys/kernel/random/boot_id"):
+                output = boot_id + "\n"
+            elif argv[0] == "journalctl":
+                output = "agent started\n"
+            else:
+                raise AssertionError(argv)
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+    runs = []
+
+    def fake_run(argv, **_kwargs):
+        runs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(probe_module, "Container", FakeContainer)
+    monkeypatch.setattr(probe_module, "Recorder", lambda _deb: FakeRecorder())
+    monkeypatch.setattr(probe_module, "service_identity",
+                        lambda _container: ServiceIdentity(42, 900, "a" * 32))
+    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+    deb = tmp_path / "player.deb"
+    deb.write_bytes(b"package")
+    result = probe_module.probe_autostart("built-squashfs", deb, tmp_path / "preflight")
+    assert result["status"] == "passed"
+    assert result["enablement"] == probe_module.AGENT_VENDOR
+    assert "systemd.unit=multi-user.target" in runs[0]
+    assert f"systemd.mask={probe_module.PROVISION_UNIT}" in runs[0]
+    assert not any(command[:2] == ("systemctl", "start") for command in commands)
+    assert (tmp_path / "preflight/evidence.json").is_file()
+    assert (tmp_path / "preflight/requests.json").is_file()
+    assert (tmp_path / "preflight/journal.log").is_file()
+    assert (tmp_path / "preflight/cmdline").read_text() == (
+        "photowall.central=http://127.0.0.1:12345\n")
+    assert (tmp_path / "preflight/firmware/devicetree/base/serial-number").read_text() == (
+        probe_module.PROBE_SERIAL + "\n")
+
+
+def test_final_root_agent_enablement_must_point_to_vendor_unit():
+    class Container:
+        def __init__(self, target):
+            self.target = target
+
+        def exec(self, *argv):
+            assert argv == ("readlink", "--", probe_module.AGENT_WANTS)
+            return subprocess.CompletedProcess(argv, 0, self.target + "\n", "")
+
+    assert require_agent_enabled(Container(probe_module.AGENT_VENDOR)) == (
+        probe_module.AGENT_VENDOR)
+    with pytest.raises(ProbeError, match="agent_final_root_enablement_missing"):
+        require_agent_enabled(Container("/etc/systemd/system/other.service"))

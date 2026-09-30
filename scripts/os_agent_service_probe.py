@@ -43,6 +43,9 @@ AGENT_UNIT: Final = "photo-wall-os-agent.service"
 PROVISION_UNIT: Final = "photo-wall-provision.service"
 PLAYER_UNIT: Final = "photo-wall-player.service"
 AGENT_LAUNCHER: Final = "/usr/lib/photo-wall-bootstrapper/os-agent.py"
+AGENT_WANTS: Final = "/etc/systemd/system/multi-user.target.wants/" + AGENT_UNIT
+AGENT_VENDOR: Final = "/lib/systemd/system/" + AGENT_UNIT
+AGENT_VENDOR_USR: Final = "/usr/lib/systemd/system/" + AGENT_UNIT
 FIRST_REPORT_SECONDS: Final = 50.0
 REFUSAL_REPORT_SECONDS: Final = 90.0
 BOOT_SECONDS: Final = 180.0
@@ -98,6 +101,15 @@ def service_identity(container: Container) -> ServiceIdentity:
     stat = container.exec("cat", f"/proc/{pid}/stat")
     require(stat.returncode == 0, "agent_proc_stat_unavailable")
     return ServiceIdentity(pid, start_ticks(stat.stdout), invocation)
+
+
+def require_agent_enabled(container: Container) -> str:
+    """Check the final imported squashfs, not merely the staged .deb."""
+    link = container.exec("readlink", "--", AGENT_WANTS)
+    target = link.stdout.strip()
+    require(link.returncode == 0 and target in (AGENT_VENDOR, AGENT_VENDOR_USR),
+            "agent_final_root_enablement_missing")
+    return target
 
 
 class Recorder:
@@ -226,9 +238,8 @@ def continuity_violations(before: dict, after: dict, digest: str,
     return violations
 
 
-def probe(image: str, deb: Path, work: Path) -> dict:
-    container = Container(f"photo-wall-agent-probe-{secrets.token_hex(4)}",
-                          run=subprocess.run)
+def stage_fixtures(work: Path, origin: str) -> tuple[Path, Path, Path]:
+    """Stage the same synthetic Pi identity and Central root for both boots."""
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     cpuinfo = work / "cpuinfo"
     cpuinfo.write_text(cpuinfo_text())
@@ -236,11 +247,86 @@ def probe(image: str, deb: Path, work: Path) -> dict:
     serial = firmware / "devicetree/base/serial-number"
     serial.parent.mkdir(parents=True, exist_ok=True)
     serial.write_text(PROBE_SERIAL + "\n")
+    cmdline = work / "cmdline"
+    cmdline.write_text(f"photowall.central={origin}\n")
+    return cpuinfo, firmware, cmdline
+
+
+def probe_autostart(image: str, deb: Path, work: Path) -> dict:
+    """Boot a separate final-root container and let multi-user.target start the agent."""
+    container = Container(f"photo-wall-agent-autostart-{secrets.token_hex(4)}",
+                          run=subprocess.run)
     result: dict = {"status": "running"}
     started = False
     with Recorder(deb.read_bytes()) as recorder:
-        cmdline = work / "cmdline"
-        cmdline.write_text(f"photowall.central={recorder.origin}\n")
+        cpuinfo, firmware, cmdline = stage_fixtures(work, recorder.origin)
+        try:
+            subprocess.run(docker_run_argv(image, container.name, cpuinfo,
+                                           cmdline=cmdline, firmware=firmware,
+                                           host_network=True, target="multi-user.target",
+                                           mask_provisioner=True),
+                           check=True, capture_output=True, timeout=60)
+            started = True
+            state = container.wait_booted(seconds=BOOT_SECONDS)
+            require(state in BOOTED, f"autostart_systemd_boot_failed:{state}")
+            enablement = require_agent_enabled(container)
+            masked = container.exec("systemctl", "is-enabled", PROVISION_UNIT)
+            require(masked.stdout.strip() in ("masked", "masked-runtime"),
+                    "autostart_provisioner_not_masked")
+            provision = container.exec("systemctl", "is-active", PROVISION_UNIT)
+            require(provision.stdout.strip() != "active", "autostart_provisioner_active")
+            boot_id_result = container.exec("cat", "/proc/sys/kernel/random/boot_id")
+            require(boot_id_result.returncode == 0, "autostart_kernel_boot_id_unavailable")
+            boot_id = boot_id_result.stdout.strip()
+            first = recorder.wait_for(
+                lambda row: claim_is_ours(row, boot_id) and
+                row.get("phase") == "base_ready" and row.get("observation_sequence") == 1,
+                FIRST_REPORT_SECONDS, "autostart_agent_report_missing")
+            evidence = first["app_evidence"]
+            require(evidence.get("installed_sha256") is None and evidence.get("running") is None,
+                    "autostart_report_claimed_uninstalled_app")
+            identity = service_identity(container)
+            requests = recorder.snapshot()["requests"]
+            require("/v1/app/manifest" not in requests,
+                    "autostart_provisioner_contacted_central")
+            result = {"status": "passed", "first": first, "service": asdict(identity),
+                      "enablement": enablement}
+            return result
+        except Exception as error:
+            result = {"status": "failed", "error": str(error)}
+            raise
+        finally:
+            snapshot = recorder.snapshot()
+            (work / "requests.json").write_text(json.dumps(
+                {"requests": snapshot["requests"][-50:],
+                 "observations": snapshot["observations"][-10:]}, indent=2))
+            journal_text = ""
+            if started:
+                try:
+                    journal = container.exec("journalctl", "--no-pager", "-n", "150",
+                                             "-u", AGENT_UNIT, "-u", PROVISION_UNIT,
+                                             timeout=15)
+                    journal_text = journal.stdout + journal.stderr
+                except (OSError, subprocess.SubprocessError) as error:
+                    journal_text = f"journal unavailable: {error}\n"
+            (work / "journal.log").write_text(journal_text)
+            (work / "evidence.json").write_text(json.dumps(result, indent=2))
+            if result["status"] != "passed":
+                print("OS-agent autostart request tail: " +
+                      json.dumps(snapshot["requests"][-20:]), file=sys.stderr)
+                print("OS-agent autostart journal tail:\n" +
+                      "\n".join(journal_text.splitlines()[-40:])[-6000:], file=sys.stderr)
+            subprocess.run(["docker", "rm", "--force", container.name], check=False,
+                           capture_output=True, timeout=60)
+
+
+def probe(image: str, deb: Path, work: Path) -> dict:
+    container = Container(f"photo-wall-agent-probe-{secrets.token_hex(4)}",
+                          run=subprocess.run)
+    result: dict = {"status": "running"}
+    started = False
+    with Recorder(deb.read_bytes()) as recorder:
+        cpuinfo, firmware, cmdline = stage_fixtures(work, recorder.origin)
         try:
             subprocess.run(docker_run_argv(image, container.name, cpuinfo,
                                            cmdline=cmdline, firmware=firmware,
@@ -344,7 +430,10 @@ def main(argv: list[str] | None = None) -> int:
     image = f"photo-wall-os-agent-service:{secrets.token_hex(4)}"
     try:
         import_squashfs(args.squashfs, image, work)
-        evidence = probe(image, args.deb, work)
+        autostart = probe_autostart(image, args.deb, work / "autostart")
+        continuity = probe(image, args.deb, work)
+        evidence = {"status": "passed", "autostart": autostart,
+                    "continuity": continuity}
         print(json.dumps(evidence, sort_keys=True))
         return 0
     except (ProbeError, subprocess.CalledProcessError, subprocess.TimeoutExpired,

@@ -406,6 +406,15 @@ jobs:
               violation "enablement symlink points at unexpected target: $target"
             fi
           fi
+          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service 'photo-wall-os-agent.service enablement symlink'
+          if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service' "$typed"; then
+            agent_target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service ->' "$listing" | awk '{print $NF}')
+            if [ "$agent_target" = "/lib/systemd/system/photo-wall-os-agent.service" ] || [ "$agent_target" = "/usr/lib/systemd/system/photo-wall-os-agent.service" ]; then
+              echo "OK: OS-agent enablement symlink points at the vendor unit path"
+            else
+              violation "OS-agent enablement symlink points at unexpected target: $agent_target"
+            fi
+          fi
           # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
           # regular file on some distros), so accept either type here. The
           # unit runs it as `python3 -I -B /usr/lib/photo-wall-bootstrapper`.
@@ -989,9 +998,10 @@ jobs:
             --work "$RUNNER_TEMP/player-payload-start-probe"
 
       # The netboot tracer checks the exact packaged check-in wire against Central, but
-      # invokes two one-shot reports. This starts the installed OS-agent unit under PID 1
-      # and keeps the same process alive while the installed provisioner rejects a corrupt
-      # package. Its local HTTP peer is only a recorder, not a Central qualification.
+      # invokes two one-shot reports. First boot the final squashfs to multi-user.target
+      # with provisioner masked and require the OS-agent to start without an explicit start.
+      # A separate container then keeps the same installed agent process alive while the
+      # provisioner rejects a corrupt package. The HTTP peer is only a local recorder.
       - name: Keep the OS-agent service reporting through package refusal
         env:
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
@@ -1019,6 +1029,9 @@ jobs:
             ${{ runner.temp }}/os-agent-service-probe/evidence.json
             ${{ runner.temp }}/os-agent-service-probe/requests.json
             ${{ runner.temp }}/os-agent-service-probe/journal.log
+            ${{ runner.temp }}/os-agent-service-probe/autostart/evidence.json
+            ${{ runner.temp }}/os-agent-service-probe/autostart/requests.json
+            ${{ runner.temp }}/os-agent-service-probe/autostart/journal.log
           if-no-files-found: warn
           retention-days: 7
 
