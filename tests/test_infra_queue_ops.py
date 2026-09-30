@@ -14,6 +14,7 @@ from procrastinate.jobs import Status
 from runtime_fakes import (
     FetchOsImageStub,
     FetchPackageStub,
+    FetchPlayerPayloadStub,
     PrefetchStub,
     SyncReleasesStub,
     apply_procrastinate_schema,
@@ -97,7 +98,8 @@ def test_the_handlers_dispatch_by_their_hints_and_fill_the_catalog():
                                      outcomes=JobOutcomes(), clock=ManualClock(0.0))
     assert handler_job_type(rescue) is RescueStalledJobs
     assert handler_job_type(purge) is PurgeFinishedJobs
-    JobExecutor([FetchOsImageStub(), FetchPackageStub(), SyncReleasesStub(), PrefetchStub(),
+    JobExecutor([FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
+                 SyncReleasesStub(), PrefetchStub(),
                  rescue, purge], transactions=FakeTransactions(), outcomes=JobOutcomes(),
                 assets=PgAssetRecords(ManualClock(0.0)), clock=ManualClock(0.0), redeliver=None)
 

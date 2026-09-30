@@ -247,7 +247,7 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
     assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
+            "player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
@@ -755,7 +755,7 @@ def test_base_cache_and_content_check_include_base_owned_player_contract():
                  "appliance/systemd/weston.ini", "player/output_discovery.py"):
         assert path in key
     for path in ("$bootstrapper_dir/os-agent.py", "$bootstrapper_dir/player-launch.py",
-                 "$bootstrapper_dir/base-abi.txt", "etc/xdg/weston/weston.ini"):
+                 "$bootstrapper_dir/base-abi.txt", "$bootstrapper_dir/weston.ini"):
         assert path in workflow
     assert "forbid_substring 'squashfs-root/usr/lib/photo-wall-player/'" in workflow
 

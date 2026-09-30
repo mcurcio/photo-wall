@@ -174,7 +174,8 @@ def test_the_policy_table():
     assert INITRD_POLICY.roots == ("appliance.netboot_init",)
     assert INITRD_POLICY.forbidden == ("player", "central", "media", "zeroconf", "ifaddr", "gi")
     assert INITRD_POLICY.third_party == {}
-    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision",)
+    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision", "appliance.os_agent",
+                                         "appliance.app_launcher")
     assert PLAYER_POLICY.roots == ("player.service",)
     # The .deb tables are the declaration's, never hand-written.
     assert BOOTSTRAPPER_POLICY.third_party == debian_packages.import_table("bootstrapper")

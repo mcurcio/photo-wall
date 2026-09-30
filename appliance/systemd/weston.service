@@ -19,7 +19,7 @@ TTYVTDisallocate=yes
 Environment=XDG_RUNTIME_DIR=/run/user/10001
 Environment=LIBSEAT_BACKEND=logind
 Environment=XDG_SESSION_TYPE=wayland
-ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=kiosk-shell.so --config=/etc/xdg/weston/weston.ini --log=/run/user/10001/weston.log --socket=wayland-0
+ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=kiosk-shell.so --config=/usr/lib/photo-wall-bootstrapper/weston.ini --log=/run/user/10001/weston.log --socket=wayland-0
 Restart=always
 RestartSec=2
 TimeoutStopSec=10

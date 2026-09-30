@@ -15,6 +15,7 @@ from central.kernel.assets import AssetReady
 from central.kernel.job_types import (
     FetchOsImage,
     FetchPackage,
+    FetchPlayerPayload,
     Prefetch,
     PurgeFinishedJobs,
     RescueStalledJobs,
@@ -31,6 +32,11 @@ class FetchOsImageStub:
 
 class FetchPackageStub:
     async def handle(self, job: FetchPackage) -> AssetReady:
+        return FACTS
+
+
+class FetchPlayerPayloadStub:
+    async def handle(self, job: FetchPlayerPayload) -> AssetReady:
         return FACTS
 
 
@@ -55,7 +61,8 @@ class PurgeStub:
 
 
 def catalog_stubs() -> list[Any]:
-    return [FetchOsImageStub(), FetchPackageStub(), SyncReleasesStub(), PrefetchStub(),
+    return [FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
+            SyncReleasesStub(), PrefetchStub(),
             RescueStub(), PurgeStub()]
 
 

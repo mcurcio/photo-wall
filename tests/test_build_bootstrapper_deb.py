@@ -192,7 +192,7 @@ def test_stage_tree_ships_the_computed_closure_privately(tmp_path, closure):
     manifest = read_manifest(private / "closure.json")
     assert manifest.modules == closure.modules
     assert staged == sorted([*manifest.files, "__main__.py", "closure.json", "os-agent.py",
-                             "player-launch.py", "base-abi.txt"])
+                             "player-launch.py", "base-abi.txt", "weston.ini"])
     assert "appliance.os_agent" in manifest.modules
     # Inverted from the fixed-list era: uplink needs contracts, so it ships (privately).
     assert (private / "contracts/equipment.py").is_file()
@@ -218,7 +218,8 @@ def test_stage_tree_places_the_unit_at_the_vendor_path_and_enables_it(tmp_path, 
     assert not (deb_root / "etc/systemd/system/photo-wall-player.service").exists()
     assert (deb_root / "lib/systemd/system/photo-wall-weston.service").read_bytes() == (
         deb.DEFAULT_WESTON_UNIT)
-    assert (deb_root / "etc/xdg/weston/weston.ini").read_bytes() == deb.DEFAULT_WESTON_INI
+    assert (deb_root / "usr/lib/photo-wall-bootstrapper/weston.ini").read_bytes() == (
+        deb.DEFAULT_WESTON_INI)
     assert (deb_root / PRIVATE_DIR / "base-abi.txt").read_bytes() == deb.base_abi_bytes()
     assert (deb_root / "DEBIAN/postinst").read_bytes() == deb.postinst_script()
 

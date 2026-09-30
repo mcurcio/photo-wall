@@ -377,7 +377,7 @@ jobs:
           require_path - "$bootstrapper_dir/os-agent.py" 'the base-owned OS agent launcher'
           require_path - "$bootstrapper_dir/player-launch.py" 'the base-owned Player launcher'
           require_path - "$bootstrapper_dir/base-abi.txt" 'the base ABI declaration'
-          require_path - etc/xdg/weston/weston.ini 'the base-owned Weston configuration'
+          require_path - "$bootstrapper_dir/weston.ini" 'the base-owned Weston configuration'
           for unit in photo-wall-os-agent photo-wall-player photo-wall-weston; do
             if grep -Eq -- "^- squashfs-root/(usr/)?lib/systemd/system/$unit.service$" "$typed"; then
               echo "OK: found base-owned $unit.service vendor unit"

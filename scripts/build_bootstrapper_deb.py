@@ -7,7 +7,7 @@ raw-file overlay an image-build tool owns), the bootstrapper is built like the P
 Contents (Project 2 design §2.7, rule 2: each package ships exactly its computed closure,
 privately):
 
-- the computed first-party closure of `appliance.provision`
+- the computed first-party closure of the base-owned provisioning, OS-agent, and app-launcher roots
   (`scripts/module_closure.py` `BOOTSTRAPPER_POLICY`), staged under INSTALL_DIR with a generated
   `__main__.py` and `closure.json` (Debian Python Policy's private-module directory; a PEP 441
   directory application run as `python3 -I -B /usr/lib/photo-wall-bootstrapper`). Nothing goes
@@ -227,8 +227,8 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, unit: bytes,
         target = units_dir / name
         target.write_bytes(data)
         target.chmod(0o644)
-    weston_config = deb_root / "etc/xdg/weston/weston.ini"
-    weston_config.parent.mkdir(parents=True)
+    weston_config = deb_root / "usr/lib/photo-wall-bootstrapper/weston.ini"
+    weston_config.parent.mkdir(parents=True, exist_ok=True)
     weston_config.write_bytes(weston_ini)
     weston_config.chmod(0o644)
 
