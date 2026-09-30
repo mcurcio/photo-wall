@@ -116,6 +116,19 @@ def test_the_container_boots_systemd_with_the_provisioner_masked(tmp_path):
                          "systemd.mask=systemd-modules-load.service"]
 
 
+def test_resident_probe_boots_basic_target_with_real_service_units(tmp_path):
+    cmdline = tmp_path / "cmdline"
+    argv = docker_run_argv("base:probe", "probe-1", tmp_path / "cpuinfo",
+                           cmdline=cmdline, host_network=True, target="basic.target",
+                           mask_provisioner=False)
+    assert f"{cmdline}:/var/tmp/photo-wall-probe-cmdline:ro" in argv
+    assert "mount --bind /var/tmp/photo-wall-probe-cmdline /proc/cmdline" in argv[-5]
+    assert argv[argv.index("--network") + 1] == "host"
+    assert "systemd.unit=basic.target" in argv
+    assert f"systemd.mask={PROVISION_UNIT}" not in argv
+    assert all(f"systemd.mask={unit}" in argv for unit in HOST_ACTING_UNITS)
+
+
 def test_the_units_that_act_on_the_runner_are_masked():
     """Privileged: the container's udev trigger would replay every runner device, and
     systemd-modules-load would load into the runner's kernel."""

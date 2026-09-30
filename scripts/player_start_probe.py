@@ -148,6 +148,7 @@ DEB_IN_CONTAINER: Final = "/var/tmp/photo-wall-player.deb"
 PAYLOAD_IN_CONTAINER: Final = "/var/tmp/photo-wall-player-payload.tar.gz"
 HANDOFF_IN_CONTAINER: Final = "/etc/photo-wall/public.json"
 SYSTEMD: Final = "/usr/lib/systemd/systemd"
+PROBE_CMDLINE: Final = "/var/tmp/photo-wall-probe-cmdline"
 BOOT_SECONDS: Final = 180.0
 # A booted system: `degraded` too, since some units (systemd-modules-load: no modules for the
 # host's kernel) cannot work in a container, and none of them is the Player's concern.
@@ -176,15 +177,32 @@ def cpuinfo_text(serial: str = PROBE_SERIAL) -> str:
     return f"processor\t: 0\nSerial\t\t: {serial}\n"
 
 
-def docker_run_argv(image: str, name: str, cpuinfo: Path) -> list[str]:
+def docker_run_argv(image: str, name: str, cpuinfo: Path, *, cmdline: Path | None = None,
+                    host_network: bool = False, target: str | None = None,
+                    mask_provisioner: bool = True) -> list[str]:
     """PURE. Boot `image` with systemd as PID 1. Arguments after SYSTEMD are its command line in
     a container: systemd.mask= keeps the provisioner (this probe plays its part) and the units
     that act on the runner's devices and kernel (HOST_ACTING_UNITS) from running."""
-    return ["docker", "run", "--detach", "--name", name, "--privileged",
+    argv = ["docker", "run", "--detach", "--name", name, "--privileged",
             "--env", "container=docker", "--tmpfs", "/run", "--tmpfs", "/run/lock",
-            "--volume", f"{cpuinfo}:/proc/cpuinfo:ro",
-            image, SYSTEMD, *(f"systemd.mask={unit}"
-                              for unit in (PROVISION_UNIT, *HOST_ACTING_UNITS))]
+            "--volume", f"{cpuinfo}:/proc/cpuinfo:ro"]
+    if cmdline is not None:
+        # runc refuses a direct OCI bind over /proc/cmdline. The privileged entrypoint
+        # binds it inside the container, then execs systemd as PID 1. Unit files remain exact.
+        argv.extend(("--volume", f"{cmdline}:{PROBE_CMDLINE}:ro"))
+    if host_network:
+        argv.extend(("--network", "host"))
+    if cmdline is None:
+        argv.extend((image, SYSTEMD))
+    else:
+        argv.extend((image, "sh", "-ec",
+                     f'mount --bind {PROBE_CMDLINE} /proc/cmdline; exec {SYSTEMD} "$@"',
+                     "sh"))
+    if target is not None:
+        argv.append(f"systemd.unit={target}")
+    argv.extend(f"systemd.mask={unit}" for unit in
+                ((*((PROVISION_UNIT,) if mask_provisioner else ()), *HOST_ACTING_UNITS)))
+    return argv
 
 
 def kmod_violations(output: str, modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:

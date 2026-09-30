@@ -146,6 +146,15 @@ def test_packaged_os_agent_gate_runs_for_central_database_and_image_inputs(scrat
 
 
 @needs_uvx
+def test_resident_agent_probe_change_runs_the_built_base_gate(scratch):
+    scratch.commit("fix(base): keep OS reports through package failure",
+                   {"scripts/os_agent_service_probe.py": "PROBE = 1\n"})
+    plan = scratch.plan()
+    assert "base-bundle" in plan.packages
+    assert "base-image" in plan.suites
+
+
+@needs_uvx
 def test_a_breaking_change_is_capped_to_minor_while_major_version_zero_holds(scratch):
     """pyproject's `major_version_zero = true`: a breaking change bumps the minor within 0.x --
     even on a fix, which would otherwise be a patch."""

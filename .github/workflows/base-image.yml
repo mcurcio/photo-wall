@@ -988,6 +988,33 @@ jobs:
             --payload "$PLAYER_PAYLOAD" \
             --work "$RUNNER_TEMP/player-payload-start-probe"
 
+      # The netboot tracer checks the exact packaged check-in wire against Central, but
+      # invokes two one-shot reports. This starts the installed OS-agent unit under PID 1
+      # and keeps the same process alive while the installed provisioner rejects a corrupt
+      # package. Its local HTTP peer is only a recorder, not a Central qualification.
+      - name: Keep the OS-agent service reporting through package refusal
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+        run: |
+          set -eu
+          sudo .venv/bin/python scripts/os_agent_service_probe.py \
+            --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
+            --deb "$PLAYER_DEB" \
+            --work "$RUNNER_TEMP/os-agent-service-probe"
+
+      - name: Upload OS-agent service probe diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-os-agent-service-${{ env.REVISION }}
+          path: |
+            ${{ runner.temp }}/os-agent-service-probe/evidence.json
+            ${{ runner.temp }}/os-agent-service-probe/requests.json
+            ${{ runner.temp }}/os-agent-service-probe/journal.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Show what was produced
         if: always()
         env:
