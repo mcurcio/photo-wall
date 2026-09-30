@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { isBound } from "./health.js";
 import { boundOutput } from "./join.js";
@@ -119,6 +119,14 @@ export function Commissioning({ snapshot, frameId }) {
   const svgRef = useRef(/** @type {SVGSVGElement|null} */ (null));
   const dragRef = useRef(/** @type {{kind: string, index?: number}|null} */ (null));
 
+  // Restore focus after React has committed the editor's removal. A queued
+  // animation frame may be throttled while the operator tab is in the background.
+  useEffect(() => {
+    if (profileDraft == null && profileStatus != null) {
+      profileEditButtonRef.current?.focus();
+    }
+  }, [profileDraft, profileStatus]);
+
   if (!frame) {
     return (
       <div className="facet facet--commissioning">
@@ -178,7 +186,6 @@ export function Commissioning({ snapshot, frameId }) {
         setProfileStatus(result.changed
           ? "Display profile saved. Recalibrate this Frame before showing content."
           : "Display profile already matches; calibration was not changed.");
-        requestAnimationFrame(() => profileEditButtonRef.current?.focus());
       } else if (result.code === "binding_generation_conflict") {
         setProfileError("This Frame's equipment changed while you were editing. Reload its facts before retrying.");
       } else if (result.code === "frame_bound") {

@@ -79,6 +79,17 @@ class EquipmentDrain:
             if run.ended_at is None and not run.participants.isdisjoint(targets)
         ))
 
+    def prepare_unbound(self, player_id: str, attempt_id: str, boot_id: str,
+                        authority_epoch: int, *, authorization_expires_at: float) -> DrainOutcome:
+        """Prepare only a Player with no bound Output at the serialized cut.
+
+        This is the sole drain preparation eligible for a future unbound canary
+        command issuer. It creates no command or stop permit itself.
+        """
+        return self._prepare_idle(player_id, attempt_id, boot_id, authority_epoch,
+                                  authorization_expires_at=authorization_expires_at,
+                                  require_unbound=True)
+
     def prepare_idle(self, player_id: str, attempt_id: str, boot_id: str,
                      authority_epoch: int, *, authorization_expires_at: float) -> DrainOutcome:
         """Fence an idle device and cancel old group authority atomically.
@@ -86,6 +97,13 @@ class EquipmentDrain:
         This first slice refuses active Run participants. Multi-participant
         interruption requires an explicit Runtime policy before it can be offered.
         """
+        return self._prepare_idle(player_id, attempt_id, boot_id, authority_epoch,
+                                  authorization_expires_at=authorization_expires_at,
+                                  require_unbound=False)
+
+    def _prepare_idle(self, player_id: str, attempt_id: str, boot_id: str,
+                      authority_epoch: int, *, authorization_expires_at: float,
+                      require_unbound: bool) -> DrainOutcome:
         if (not isinstance(attempt_id, str) or not 1 <= len(attempt_id) <= 160
                 or not isinstance(boot_id, str) or not 1 <= len(boot_id) <= 160
                 or type(authority_epoch) is not int or authority_epoch < 1
@@ -115,11 +133,14 @@ class EquipmentDrain:
                 elif not same_attempt:
                     raise RegistryError("equipment_drain_conflict")
                 else:
+                    if require_unbound:
+                        self._verify_unbound_snapshot_in(conn, player_id, existing["snapshot"])
                     return self._outcome(existing, "already_committed" if
                                          existing["phase"] == "stop_committed" else
                                          "already_prepared")
             outputs = conn.execute(
-                "SELECT output_id FROM outputs WHERE player_id=%s ORDER BY output_id FOR UPDATE",
+                "SELECT output_id,observation FROM outputs WHERE player_id=%s "
+                "ORDER BY output_id FOR UPDATE",
                 (player_id,),
             ).fetchall()
             if not outputs:
@@ -129,6 +150,8 @@ class EquipmentDrain:
                 "f.calibration,f.preview FROM bindings b JOIN frames f ON f.id=b.frame_id "
                 "WHERE b.player_id=%s ORDER BY b.output_id FOR UPDATE OF b,f", (player_id,),
             ).fetchall()
+            if require_unbound and bindings:
+                raise RegistryError("unbound_drain_requires_unbound_outputs")
             cut_now = self.coordinator.clock.utc()
             if not cut_now < authorization_expires_at <= cut_now + 600:
                 raise RegistryError("invalid_drain_request", 422)
@@ -153,6 +176,7 @@ class EquipmentDrain:
                             if bound else None
                         ),
                         "calibration_revision": bound["calibration"]["revision"] if bound else None,
+                        **({"observation": row["observation"]} if require_unbound else {}),
                     }
                     for row in outputs
                     for bound in [next((b for b in bindings if b["output_id"] == row["output_id"]), None)]
@@ -164,6 +188,8 @@ class EquipmentDrain:
                     control["authority_epoch"] == authority_epoch else None
                 ),
             }
+            if require_unbound:
+                snapshot["admission_scope"] = "unbound_canary"
             # End visual cues before the old app can be withdrawn. The Frame row
             # locks above serialize this with configuration and calibration reads.
             conn.execute("DELETE FROM player_output_identification WHERE player_id=%s", (player_id,))
@@ -199,9 +225,46 @@ class EquipmentDrain:
             return DrainOutcome("prepared", player_id, attempt_id, boot_id,
                                 authority_epoch, snapshot)
 
+    @staticmethod
+    def _verify_unbound_snapshot_in(conn, player_id: str, snapshot: dict) -> None:
+        """Lock the complete current Output set and compare the frozen inventory."""
+        if snapshot.get("admission_scope") != "unbound_canary":
+            raise RegistryError("unbound_drain_snapshot_changed")
+        outputs = conn.execute(
+            "SELECT output_id,observation FROM outputs WHERE player_id=%s "
+            "ORDER BY output_id FOR UPDATE", (player_id,),
+        ).fetchall()
+        bindings = conn.execute(
+            "SELECT b.output_id,b.frame_id,f.generation,f.configuration_revision,"
+            "f.calibration,f.preview FROM bindings b JOIN frames f ON f.id=b.frame_id "
+            "WHERE b.player_id=%s ORDER BY b.output_id FOR UPDATE OF b,f", (player_id,),
+        ).fetchall()
+        expected = snapshot.get("outputs")
+        current = [
+            {
+                "output_id": output["output_id"], "frame_id": None,
+                "binding_generation": None, "configuration_revision": None,
+                "calibration_revision": None, "observation": output["observation"],
+            }
+            for output in outputs
+        ]
+        if not current or bindings or expected != current:
+            raise RegistryError("unbound_drain_snapshot_changed")
+
+    def commit_stop_unbound(self, player_id: str, attempt_id: str, boot_id: str,
+                            authority_epoch: int) -> DrainOutcome:
+        """Commit only the still-unbound prepared cut; no command is issued."""
+        return self._commit_stop(player_id, attempt_id, boot_id, authority_epoch,
+                                 require_unbound=True)
+
     def commit_stop(self, player_id: str, attempt_id: str, boot_id: str,
                     authority_epoch: int) -> DrainOutcome:
         """Persist the irreversible admission phase; no command is issued here."""
+        return self._commit_stop(player_id, attempt_id, boot_id, authority_epoch,
+                                 require_unbound=False)
+
+    def _commit_stop(self, player_id: str, attempt_id: str, boot_id: str,
+                     authority_epoch: int, *, require_unbound: bool) -> DrainOutcome:
         with self.coordinator._transaction() as conn:
             runtime = self.coordinator.runtime.read_locked(conn)
             row = conn.execute(
@@ -213,7 +276,20 @@ class EquipmentDrain:
                 attempt_id, boot_id, authority_epoch
             ):
                 raise RegistryError("equipment_drain_conflict")
+            if require_unbound and row["snapshot"].get("admission_scope") != "unbound_canary":
+                raise RegistryError("unbound_drain_snapshot_changed")
+            if not require_unbound and row["snapshot"].get("admission_scope") == "unbound_canary":
+                raise RegistryError("unbound_drain_requires_safe_commit")
             if row["phase"] == "stop_committed":
+                if require_unbound:
+                    current = conn.execute(
+                        "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
+                        (player_id,),
+                    ).fetchone()
+                    if (current is None or current["retired_at"] is not None
+                            or current["authority_epoch"] != authority_epoch):
+                        raise RegistryError("stale_authority", 403)
+                    self._verify_unbound_snapshot_in(conn, player_id, row["snapshot"])
                 return self._outcome(row, "already_committed")
             if row["phase"] == "aborted":
                 raise RegistryError("drain_aborted")
@@ -227,6 +303,8 @@ class EquipmentDrain:
             cut_now = self.coordinator.clock.utc()
             if row["authorization_expires_at"] <= cut_now:
                 raise RegistryError("drain_authorization_expired")
+            if require_unbound:
+                self._verify_unbound_snapshot_in(conn, player_id, row["snapshot"])
             frame_ids = {
                 output["frame_id"] for output in row["snapshot"]["outputs"]
                 if output["frame_id"] is not None

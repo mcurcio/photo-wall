@@ -145,6 +145,154 @@ def test_expired_preparation_stays_fenced_and_cannot_commit_stop(registry):
         registry.unbind("drain-frame", expected_generation=1)
 
 
+def test_unbound_canary_requires_its_own_preparation_and_complete_unbound_set(registry):
+    bound, request = bound_player(registry)
+    drain = EquipmentDrain(Coordinator(registry.db, registry.clock))
+    with pytest.raises(RegistryError, match="unbound_drain_requires_unbound_outputs"):
+        drain.prepare_unbound(bound["player_id"], "attempt-bound", request.boot_id,
+                              bound["authority_epoch"], authorization_expires_at=1010)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+
+    unbound, _, unbound_request = enroll(registry)
+    drain.prepare_idle(unbound["player_id"], "attempt-legacy", unbound_request.boot_id,
+                       unbound["authority_epoch"], authorization_expires_at=1010)
+    with pytest.raises(RegistryError, match="unbound_drain_snapshot_changed"):
+        drain.commit_stop_unbound(unbound["player_id"], "attempt-legacy",
+                                  unbound_request.boot_id, unbound["authority_epoch"])
+
+
+def test_unbound_canary_freezes_outputs_and_requires_safe_commit(registry):
+    player, _, request = enroll(registry)
+    drain = EquipmentDrain(Coordinator(registry.db, registry.clock))
+    prepared = drain.prepare_unbound(player["player_id"], "attempt-unbound", request.boot_id,
+                                     player["authority_epoch"], authorization_expires_at=1010)
+    assert prepared.snapshot["admission_scope"] == "unbound_canary"
+    assert [output["output_id"] for output in prepared.snapshot["outputs"]] == [
+        "HDMI-A-1", "HDMI-A-2",
+    ]
+    assert all(output["frame_id"] is None and "observation" in output
+               for output in prepared.snapshot["outputs"])
+    assert drain.prepare_unbound(player["player_id"], "attempt-unbound", request.boot_id,
+                                 player["authority_epoch"],
+                                 authorization_expires_at=1010).status == "already_prepared"
+    with pytest.raises(RegistryError, match="unbound_drain_requires_safe_commit"):
+        drain.commit_stop(player["player_id"], "attempt-unbound", request.boot_id,
+                          player["authority_epoch"])
+    assert drain.commit_stop_unbound(player["player_id"], "attempt-unbound", request.boot_id,
+                                     player["authority_epoch"]).status == "stop_committed"
+    assert EquipmentDrain(Coordinator(registry.db, registry.clock)).commit_stop_unbound(
+        player["player_id"], "attempt-unbound", request.boot_id,
+        player["authority_epoch"],
+    ).status == "already_committed"
+
+
+@pytest.mark.parametrize("drift", ["observation", "inventory", "binding"])
+def test_unbound_canary_refuses_snapshot_drift_at_commit(registry, drift):
+    player, _, request = enroll(registry)
+    drain = EquipmentDrain(Coordinator(registry.db, registry.clock))
+    prepared = drain.prepare_unbound(player["player_id"], "attempt-drift", request.boot_id,
+                                     player["authority_epoch"], authorization_expires_at=1010)
+    if drift == "binding":
+        frame(registry, "drift-frame")
+    with registry.db.transaction() as conn:
+        if drift == "observation":
+            conn.execute(
+                "UPDATE outputs SET observation=jsonb_set(observation,'{width_px}','1280') "
+                "WHERE player_id=%s AND output_id='HDMI-A-1'", (player["player_id"],),
+            )
+        elif drift == "inventory":
+            conn.execute(
+                "INSERT INTO outputs(player_id,output_id,observation) "
+                "SELECT player_id,'HDMI-A-3',observation FROM outputs "
+                "WHERE player_id=%s AND output_id='HDMI-A-1'", (player["player_id"],),
+            )
+        else:
+            conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)",
+                         ("drift-frame", player["player_id"], "HDMI-A-1"))
+    with pytest.raises(RegistryError, match="unbound_drain_snapshot_changed"):
+        drain.commit_stop_unbound(player["player_id"], "attempt-drift", request.boot_id,
+                                  player["authority_epoch"])
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT phase,snapshot FROM equipment_drains WHERE player_id=%s",
+                           (player["player_id"],)).fetchone()
+    assert row["phase"] == "prepared"
+    assert row["snapshot"] == prepared.snapshot
+
+
+def test_unbound_preparation_serializes_with_binding_before_its_cut(registry, monkeypatch):
+    player, _, request = enroll(registry)
+    frame(registry, "unbound-race-frame")
+    drain = EquipmentDrain(Coordinator(registry.db, registry.clock))
+    original_write = registry._equipment_write
+    entered, release = Event(), Event()
+
+    @contextmanager
+    def paused_equipment_write():
+        with original_write() as conn:
+            entered.set()
+            assert release.wait(4)
+            yield conn
+
+    monkeypatch.setattr(registry, "_equipment_write", paused_equipment_write)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        pending_bind = workers.submit(
+            registry.bind, "unbound-race-frame", player["player_id"], "HDMI-A-1",
+            expected_generation=0,
+        )
+        assert entered.wait(4)
+        pending_prepare = workers.submit(
+            drain.prepare_unbound, player["player_id"], "attempt-race", request.boot_id,
+            player["authority_epoch"], authorization_expires_at=1010,
+        )
+        try:
+            with pytest.raises(TimeoutError):
+                pending_prepare.result(timeout=.1)
+        finally:
+            release.set()
+        assert pending_bind.result(timeout=4)["changed"]
+        with pytest.raises(RegistryError, match="unbound_drain_requires_unbound_outputs"):
+            pending_prepare.result(timeout=4)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+
+
+def test_binding_after_unbound_preparation_is_fenced(registry, monkeypatch):
+    player, _, request = enroll(registry)
+    frame(registry, "unbound-race-frame")
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    original_transaction = coordinator._transaction
+    entered, release = Event(), Event()
+
+    @contextmanager
+    def paused_preparation():
+        with original_transaction() as conn:
+            entered.set()
+            assert release.wait(4)
+            yield conn
+
+    monkeypatch.setattr(coordinator, "_transaction", paused_preparation)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        pending_prepare = workers.submit(
+            drain.prepare_unbound, player["player_id"], "attempt-race", request.boot_id,
+            player["authority_epoch"], authorization_expires_at=1010,
+        )
+        assert entered.wait(4)
+        pending_bind = workers.submit(
+            registry.bind, "unbound-race-frame", player["player_id"], "HDMI-A-1",
+            expected_generation=0,
+        )
+        try:
+            with pytest.raises(TimeoutError):
+                pending_bind.result(timeout=.1)
+        finally:
+            release.set()
+        assert pending_prepare.result(timeout=4).status == "prepared"
+        with pytest.raises(RegistryError, match="equipment_draining"):
+            pending_bind.result(timeout=4)
+
+
 def test_active_run_requires_declared_interruption_policy(registry):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
