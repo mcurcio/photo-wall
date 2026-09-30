@@ -292,6 +292,7 @@ NOT_SHIPPED: Final = (
     "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
     "scripts/provenance_models.py", "scripts/published_player_wire.py",
+    "scripts/packaged_os_agent_probe.py",
     "scripts/release_plan.py", "scripts/release_seal.py",
     "scripts/runtime_provenance.py",
     "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
@@ -357,10 +358,13 @@ SUITES: Final = (
                                   "player-payload")),
     # The tracer serves the Player .deb from a real Central: its content-serving layers.
     Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
-          paths=("scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
+          paths=("scripts/test_netboot_e2e.py", "scripts/packaged_os_agent_probe.py",
+                 "scripts/uplink_device_harness.py",
                  "tests/tls_fixture.py", ".github/workflows/netboot-e2e.yml",
+                 "central/app.py", "central/db.py", "central/fleet/**",
+                 "central/migrations/041_fleet_app_observations.sql",
                  "central/content_routes.py", "central/content_catalog/**",
-                 "central/assets/**", "central/infra/**")),
+                 "central/assets/**", "central/infra/**", "Dockerfile", "uv.lock")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # A release runs these; base-image doubles as the release build (its artifacts are what the

@@ -23,6 +23,13 @@ This proves the 0009 *software* contract, on the device's own package set:
 
 What is REAL here vs captured
 -----------------------------
+- REAL F3/T0 seam: the exact installed bootstrapper closure runs one OS-agent
+  check-in before any Player package lands, then a packaged one-attempt
+  provisioner refuses corrupted package bytes and the agent checks in again.
+  Central's v2 HTTP route, PostgreSQL rows and operator projection must retain
+  the base claim with unknown app state and no acceptance/command authority.
+  The synthetic serial/boot and one-shot calls do not qualify the systemd unit
+  schedule, switch-root, Pi hardware or mixed Central pods.
 - REAL: central + Postgres (docker compose, the production `central` image);
   the app-package HTTP surface (`/v1/locate`, `/v1/app/manifest`,
   `/v1/app/package/{sha256}.deb`, read through the asset cache); the packaged
@@ -118,6 +125,9 @@ SHIMS = {"apt": _shim("apt", "apt.calls", 99), "apt-get": _shim("apt-get", "apt.
 # release tag (the catalog's label), not the `.deb`'s own version.
 TRACER_TAG = "v0.0.1"
 TRACER_DEB_URL = "https://example.invalid/photo-wall-player_all.deb"  # never fetched
+PROBE_SERIAL = "10000000cafef00d"
+PROBE_BOOT_ID = "11111111-2222-3333-4444-555555555555"
+PROBE_STATE = "/run/photo-wall/packaged-probe"
 _TAG_SHAPE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 _SHA256_SHAPE = re.compile(r"[0-9a-f]{64}")
 
@@ -379,6 +389,35 @@ class Central:
     def manifest(self) -> dict:
         return self._request("GET", "/v1/app/manifest")
 
+    def fleet(self) -> dict:
+        return self._request("GET", "/v1/operator/fleet", authenticated=True)
+
+    def os_rows(self) -> list[dict]:
+        """Read committed T0 rows from the same PostgreSQL the HTTP pod writes."""
+        query = (
+            "SELECT COALESCE(json_agg(json_build_object("
+            "'schema',o.observation_schema,'sequence',o.observation_sequence,"
+            "'boot_id',o.kernel_boot_id::text,'phase',o.phase,'fault',o.fault_code,"
+            "'attempted',o.attempted_app_sha256,"
+            "'installed',o.app_installed_sha256,'running',o.app_running_sha256,"
+            "'installed_reason',o.app_installed_reason,"
+            "'running_reason',o.app_running_reason) "
+            "ORDER BY o.observation_sequence),'[]'::json) "
+            "FROM fleet_os_observations o JOIN devices d USING(device_id) "
+            f"WHERE d.serial='{PROBE_SERIAL}'"
+        )
+        output = self.compose("exec", "-T", "database", "psql", "-At", "-v",
+                              "ON_ERROR_STOP=1", "-U", "wall", "-d", "wall", "-c", query)
+        return json.loads(output.strip())
+
+    def accepted_count(self) -> int:
+        query = ("SELECT count(*) FROM fleet_accepted_artifacts a "
+                 "JOIN devices d USING(device_id) "
+                 f"WHERE d.serial='{PROBE_SERIAL}'")
+        output = self.compose("exec", "-T", "database", "psql", "-At", "-v",
+                              "ON_ERROR_STOP=1", "-U", "wall", "-d", "wall", "-c", query)
+        return int(output.strip())
+
     def log(self) -> str:
         return self.compose("logs", "--no-color", "central")
 
@@ -410,7 +449,8 @@ class DeviceRoot:
         # staged read-only under WORK so root_checks() can run them from the container.
         tools = self.work / "tools" / "scripts"
         tools.mkdir(parents=True, exist_ok=True)
-        for name in ("device_root_checks.py", "debian_packages.py"):
+        for name in ("device_root_checks.py", "debian_packages.py",
+                     "packaged_os_agent_probe.py"):
             target = tools / name
             target.write_bytes((ROOT / "scripts" / name).read_bytes())
             target.chmod(0o644)
@@ -433,6 +473,32 @@ class DeviceRoot:
 
     def _calls(self, name: str) -> list[str]:
         return self._exec("sh", "-ec", f"cat {CALLS_DIR}/{name} 2>/dev/null || true").splitlines()
+
+    def packaged_probe(self, mode: str, origin: str, *, log: Path) -> dict:
+        require(mode in ("report", "refuse-package"), "probe_mode_invalid")
+        try:
+            output = run([
+                "docker", "exec", self.container,
+                "python3", "-I", "-B", f"{self.WORK}/tools/scripts/packaged_os_agent_probe.py",
+                mode, "--root", origin, "--serial", PROBE_SERIAL,
+                "--boot-id", PROBE_BOOT_ID, "--state", PROBE_STATE],
+                timeout=240 if mode == "refuse-package" else 60, log=log)
+        except TracerError as error:
+            if not log.is_file() or not log.stat().st_size:
+                log.write_text(f"{error}\n")
+            raise
+        log.write_text(output)
+        try:
+            result = json.loads(output.strip().splitlines()[-1])
+        except (ValueError, IndexError) as error:
+            raise TracerError("packaged_probe_output_invalid") from error
+        require(result.get("mode") == mode, "packaged_probe_mode_mismatch")
+        return result
+
+    def assert_player_absent(self) -> None:
+        self._exec("sh", "-ec", "! dpkg-query -W -f='${Status}' photo-wall-player "
+                   "2>/dev/null | grep -q 'install ok installed'")
+        require(self._calls("systemctl.calls") == [], "player_started_before_package")
 
     def provision(self, root: str, *, log: Path) -> None:
         """Run the packaged provisioner once, bounded, from a command line naming `root`. Its
@@ -626,6 +692,39 @@ def part_a_refusal(origin: str, staged: Path, size: int) -> dict:
     return {"refused": True, "install_calls": recorder.installs}
 
 
+def os_claim_evidence(central: Central, *, sequence: int, phase: str,
+                      fault: str | None) -> dict:
+    """Require one more committed v2 row and an observational status projection."""
+    rows = central.os_rows()
+    require(len(rows) == sequence, "os_check_in_row_count")
+    require([row["sequence"] for row in rows] == list(range(1, sequence + 1)),
+            "os_check_in_sequence")
+    require(all(row["schema"] == 2 and row["boot_id"] == PROBE_BOOT_ID
+                and row["installed"] is None and row["running"] is None
+                and row["installed_reason"] and row["running_reason"]
+                for row in rows), "os_check_in_app_claim_invalid")
+    require(rows[-1]["phase"] == phase and rows[-1]["fault"] == fault,
+            "os_check_in_phase_invalid")
+    require(central.accepted_count() == 0, "os_check_in_created_acceptance")
+    status = central.fleet()
+    devices = [device for device in status["devices"] if device["serial"] == PROBE_SERIAL]
+    require(len(devices) == 1, "os_check_in_device_missing")
+    device = devices[0]
+    base, installed, running = (device[key] for key in ("base", "installed", "running"))
+    require(base["source"] == "serial_claim" and base["assurance"] == "t0_unverified"
+            and base["boot_id"] == PROBE_BOOT_ID and base["phase"] == phase
+            and base["fault_code"] == fault, "os_check_in_base_projection")
+    require(all(item["state"] == "unknown" and item["source"] == "serial_claim"
+                and item["assurance"] == "t0_unverified"
+                and item["boot_id"] == PROBE_BOOT_ID and item["digest"] is None
+                for item in (installed, running)), "os_check_in_app_projection")
+    require(device["accepted_fallback"] is None and
+            device["update_now"]["available"] is False and
+            status["commands_available"] is False, "os_check_in_promoted_authority")
+    return {"rows": rows, "base": base, "installed": installed, "running": running,
+            "commands_available": status["commands_available"]}
+
+
 class _NoSleep:
     async def __call__(self, _seconds: float) -> None:
         return None
@@ -689,6 +788,39 @@ def run_tracer(state: Path, *, central_image: str, device_root: str, bootstrappe
         save()
 
         device.start(bootstrapper_deb)
+        device.assert_player_absent()
+        first = device.packaged_probe("report", origin, log=state / "os-agent-before.log")
+        require(first == {"mode": "report", "accepted": True, "sequence": 1,
+                          "phase": "base_ready"}, "os_first_receipt_invalid")
+        evidence["phases"]["os_absent"] = os_claim_evidence(
+            central, sequence=1, phase="base_ready", fault=None)
+        save()
+
+        good = staged.read_bytes()
+        corrupt = good[:-1] + bytes([good[-1] ^ 0x01])
+        require(len(corrupt) == size, "corruption_changed_size")
+        try:
+            staged.write_bytes(corrupt)
+            staged.chmod(0o644)
+            refused = device.packaged_probe("refuse-package", origin,
+                                            log=state / "packaged-refusal.log")
+            require(refused == {"mode": "refuse-package", "refused": True,
+                                "phase": "retry_wait", "fault": "app_integrity",
+                                "attempted_sha256": sha256},
+                    "packaged_refusal_invalid")
+            device.assert_player_absent()
+            second = device.packaged_probe("report", origin,
+                                           log=state / "os-agent-after.log")
+            require(second == {"mode": "report", "accepted": True, "sequence": 2,
+                               "phase": "retry_wait"}, "os_second_receipt_invalid")
+            evidence["phases"]["os_after_package_failure"] = os_claim_evidence(
+                central, sequence=2, phase="retry_wait", fault="app_integrity")
+            evidence["phases"]["packaged_refusal"] = refused
+            save()
+        finally:
+            staged.write_bytes(good)
+            staged.chmod(0o644)
+
         evidence["phases"]["part_a_happy"] = part_a_happy(
             central, device, port, state / "provision.log"
         )

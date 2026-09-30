@@ -131,11 +131,18 @@ def test_feat_releases_a_minor(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
     assert plan.packages == ("central-image", "media-worker-image")
-    # A central-only change needs no base build or tracer on a pull request; the release
-    # itself always builds the base (it is the release's asset build).
-    assert plan.suites == ("checks", "e2e")
-    assert PullRequestRun(plan).jobs == ("checks", "e2e")
+    # The composition root mounts the packaged OS-agent's v2 route, so it runs
+    # the netboot tracer; a pull request still needs no base-image rebuild.
+    assert plan.suites == ("checks", "e2e", "netboot-e2e")
+    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e")
     assert "base-image" in ReleaseRun(plan).jobs
+
+
+@needs_uvx
+@pytest.mark.parametrize("path", ("central/db.py", "Dockerfile", "uv.lock"))
+def test_packaged_os_agent_gate_runs_for_central_database_and_image_inputs(scratch, path):
+    scratch.commit("fix(central): preserve check-in startup", {path: "changed\n"})
+    assert "netboot-e2e" in scratch.plan().suites
 
 
 @needs_uvx
