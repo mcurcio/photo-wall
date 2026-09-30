@@ -28,6 +28,7 @@ from websockets.http11 import Response as Http11Response
 
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
+from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.output_discovery import (
@@ -284,6 +285,10 @@ class Server:
             })
         if path == "/v1/player/state":
             return httpx.Response(200, json=self.state.model_dump(mode="json"))
+        if path == "/v1/player/hello":
+            # Existing Central releases have no negotiation route; a new Player
+            # must fall back only for this exact 404 before its first state read.
+            return httpx.Response(404, json={"detail": "Not Found"})
         if path == "/v1/player/boot-health":
             return httpx.Response(200, json={"accepted": True, "release_id": "c" * 64})
         if path.startswith("/v1/media/"):
@@ -303,7 +308,7 @@ class Server:
         return self.state
 
 
-async def rig(tmp_path, *, server=None):
+async def rig(tmp_path, *, server=None, negotiate=False):
     directory = tmp_path / "cache"
     directory.mkdir(mode=0o700, exist_ok=True)
     clock = ManualClock(100)
@@ -317,10 +322,68 @@ async def rig(tmp_path, *, server=None):
         websocket_connect=False, health_path=None, boot_context=boot_context())
     await service.locate_central()
     await service.enroll()
+    if negotiate:
+        await service.hello_protocol()
     await service.probe_time()
     server.offer()
     await service.poll_state()
     return service, server
+
+
+def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
+    class V2Server(Server):
+        def __call__(self, request):
+            if request.url.path == "/v1/player/hello":
+                self.requests.append(request)
+                return httpx.Response(200, json={"authority_epoch": self.epoch,
+                    "schema": 2, "capabilities": ["identify_output"]})
+            return super().__call__(request)
+
+        def offer(self, **kwargs):
+            state = super().offer(**kwargs)
+            self.state = state.model_copy(update={"delivery_id": "1" * 32,
+                                           "delivery_sequence": 1})
+            return self.state
+
+    async def check():
+        service, server = await rig(tmp_path, server=V2Server(ManualClock(100)),
+                                    negotiate=True)
+        try:
+            paths = [request.url.path for request in server.requests]
+            assert paths.index("/v1/player/hello") < paths.index("/v1/player/state")
+            assert service._control_selection.schema_version == 2
+            reports = [request for request in server.requests
+                       if request.url.path == "/v1/player/control-acks"]
+            assert len(reports) == 1
+            assert json.loads(reports[0].content) == {
+                "authority_epoch": service.registration.authority_epoch,
+                "delivery_id": "1" * 32, "result": "applied",
+            }
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_legacy_hello_fallback_suppresses_unnegotiated_identify(tmp_path):
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            await service.hello_protocol()
+            assert service._control_selection.schema_version == 1
+            service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
+                                            height_px=1080, connected=True),)
+            config = PlayerConfiguration(player_id=service.registration.player_id,
+                authority_epoch=service.registration.authority_epoch,
+                configuration_revision=2, bindings=(), enabled_outputs=())
+            cue = IdentifyOutput(request_id="old-central-cue", output_id="hdmi2",
+                authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
+            state = State(configuration=config, plan=None, commits=(), revocations=(),
+                          identify_output=cue)
+            assert service._apply_state(state) == "applied"
+            assert service.renderer.identify_output is None
+        finally:
+            await close(service)
+    asyncio.run(check())
 
 
 async def close(service):
@@ -340,6 +403,9 @@ def test_identify_output_deduplicates_deadline_and_clears_on_vanish_or_epoch(tmp
 async def _identify_output_scenario(tmp_path):
     service, _ = await rig(tmp_path)
     try:
+        service._control_selection = ControlSelection(
+            authority_epoch=service.registration.authority_epoch, schema=2,
+            capabilities=("identify_output",))
         service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
                                         height_px=1080, connected=True),)
         config = PlayerConfiguration(player_id=service.registration.player_id,
@@ -348,7 +414,8 @@ async def _identify_output_scenario(tmp_path):
         cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
             authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
         state = State(configuration=config, plan=None, commits=(), revocations=(),
-                      identify_output=cue)
+                      identify_output=cue, identify_expires_at=service.clock.utc() + 10,
+                      delivery_id="1" * 32, delivery_sequence=1)
         service._apply_state(state)
         renderer = service.renderer
         deadline = service._identify_deadline
@@ -370,8 +437,21 @@ async def _identify_output_scenario(tmp_path):
         assert renderer.identify_output is None
         assert service._identify_deadline is None
 
-        service._apply_state(state.model_copy(update={"identify_output": None}))
-        service._apply_state(state)
+        cleared = state.model_copy(update={"identify_output": None,
+                                           "identify_expires_at": None,
+                                           "delivery_id": "2" * 32,
+                                           "delivery_sequence": 2})
+        service._apply_state(cleared)
+        assert service._apply_state(state) == "superseded"
+        assert renderer.identify_output is None
+
+        new_cue = cue.model_copy(update={"request_id": "identify-2"})
+        service._apply_state(state.model_copy(update={
+            "identify_output": new_cue,
+            "identify_expires_at": service.clock.utc() + 5,
+            "delivery_id": "3" * 32,
+            "delivery_sequence": 3,
+        }))
         assert renderer.identify_output == "hdmi2"
 
         service._apply_identify_output(cue, ("hdmi2",), config.authority_epoch + 1)

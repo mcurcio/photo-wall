@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -31,6 +32,13 @@ from contracts.models import (
     Model,
     OutputBinding,
     TargetIdentifier,
+)
+from contracts.player_control import (
+    ControlAck,
+    ControlDelivery,
+    ControlHello,
+    ControlSelection,
+    select_control,
 )
 from contracts.time import Clock
 
@@ -89,6 +97,17 @@ class Registry:
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
 
+    @contextmanager
+    def _equipment_write(self):
+        """Serialize equipment mutation after Coordination then Runtime locks."""
+        from central.coordination import COORDINATION_LOCK
+        from central.runtime_store import RUNTIME_LOCK
+
+        with self.db.transaction() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (RUNTIME_LOCK,))
+            yield conn
+
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
                      (self.clock.utc(), kind, subject, Jsonb(detail or {})))
@@ -133,6 +152,9 @@ class Registry:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         player_id = "p-" + hashlib.sha256(request.device_id.encode()).hexdigest()[:32]
         with self.db.transaction() as conn:
+            from central.coordination import COORDINATION_LOCK
+
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
             conn.execute("SELECT pg_advisory_xact_lock(734118322)")
             challenge = conn.execute("DELETE FROM enrollment_nonces WHERE nonce=%s "
                                      "AND public_key=%s AND expires_at>%s RETURNING nonce",
@@ -160,6 +182,8 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
+            # Negotiation belongs to this enrollment epoch, never to the serial or package tag.
+            self._reset_control(conn, player_id, epoch, "open")
             # Ticketless enroll (0009): the signed-rootfs boot-ticket path has
             # been retired, so no boot server ever issues a ticket and there is
             # no release session to bind. Every player enrolls unbound (pending)
@@ -182,18 +206,176 @@ class Registry:
                 raise RegistryError("unauthorized", 401)
             return row
 
+    @staticmethod
+    def _control_player(conn, player_id: str, epoch: int) -> None:
+        row = conn.execute(
+            "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
+            (player_id,),
+        ).fetchone()
+        if not row or row["retired_at"] is not None or row["authority_epoch"] != epoch:
+            raise RegistryError("stale_authority", 403)
+
+    @staticmethod
+    def _reset_control(conn, player_id: str, epoch: int, status: str) -> None:
+        conn.execute(
+            "INSERT INTO player_control_sessions(player_id,authority_epoch,status) "
+            "VALUES(%s,%s,%s) ON CONFLICT(player_id) DO UPDATE SET "
+            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,schema_version=1,"
+            "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
+            "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
+            "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
+            "applied_digest=NULL,last_delivery_id=NULL,last_result_sequence=NULL,"
+            "last_result_digest=NULL,last_result=NULL,last_result_at=NULL",
+            (player_id, epoch, status),
+        )
+
+    @classmethod
+    def _seal_legacy_control(cls, conn, player_id: str, epoch: int) -> ControlSelection:
+        """An epoch enrolled by an older Central is already legacy on the wire."""
+        cls._reset_control(conn, player_id, epoch, "legacy")
+        return ControlSelection(authority_epoch=epoch, schema=1)
+
+    def control_hello(self, player_id: str, request: ControlHello) -> ControlSelection:
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, request.authority_epoch)
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if not row or row["authority_epoch"] != request.authority_epoch:
+                # A mixed-version pod may have enrolled this current epoch without a
+                # control row. Seal it as legacy so a new Player can still proceed.
+                if 1 not in request.schemas:
+                    raise RegistryError("control_schema_unsupported")
+                return self._seal_legacy_control(conn, player_id, request.authority_epoch)
+            if row["status"] == "negotiated":
+                if (row["offered_schemas"] != list(request.schemas)
+                        or row["offered_capabilities"] != list(request.capabilities)):
+                    raise RegistryError("control_negotiation_conflict")
+                return ControlSelection(authority_epoch=request.authority_epoch,
+                                        schema=row["schema_version"],
+                                        capabilities=tuple(row["capabilities"]))
+            if row["status"] != "open":
+                raise RegistryError("control_negotiation_closed")
+            selection = select_control(request)
+            if selection is None:
+                raise RegistryError("control_schema_unsupported")
+            conn.execute(
+                "UPDATE player_control_sessions SET status='negotiated',schema_version=%s,"
+                "capabilities=%s,offered_schemas=%s,offered_capabilities=%s "
+                "WHERE player_id=%s",
+                (selection.schema_version, Jsonb(list(selection.capabilities)),
+                 Jsonb(list(request.schemas)),
+                 Jsonb(list(request.capabilities)), player_id),
+            )
+            return selection
+
+    def control_selection(self, player_id: str, epoch: int) -> ControlSelection:
+        """Seal the first state read as legacy before taking Coordination's lock."""
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, epoch)
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if not row or row["authority_epoch"] != epoch:
+                return self._seal_legacy_control(conn, player_id, epoch)
+            if row["status"] == "open":
+                conn.execute("UPDATE player_control_sessions SET status='legacy' "
+                             "WHERE player_id=%s", (player_id,))
+                return ControlSelection(authority_epoch=epoch, schema=1)
+            return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
+                                    capabilities=tuple(row["capabilities"]))
+
+    def issue_control_delivery_record(self, player_id: str, epoch: int,
+                                      digest: str) -> dict:
+        """Persist a v2 challenge and sequence before sending either state transport."""
+        now = self.clock.utc()
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, epoch)
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
+                raise RegistryError("control_protocol_mismatch")
+            if (row["pending_id"] and row["pending_digest"] == digest
+                    and row["pending_expires"] > now):
+                return ControlDelivery(delivery_id=row["pending_id"],
+                                       delivery_sequence=row["issued_sequence"]).model_dump()
+            delivery_id = secrets.token_hex(16)
+            issued = conn.execute(
+                "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
+                "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s "
+                "RETURNING issued_sequence",
+                (delivery_id, digest, now + 60, player_id),
+            ).fetchone()
+            return ControlDelivery(delivery_id=delivery_id,
+                                   delivery_sequence=issued["issued_sequence"]).model_dump()
+
+    def issue_control_delivery(self, player_id: str, epoch: int, digest: str) -> str:
+        """Compatibility wrapper while HTTP and WebSocket adopt the sequence field."""
+        return self.issue_control_delivery_record(player_id, epoch, digest)["delivery_id"]
+
+    def control_ack(self, player_id: str, report: ControlAck) -> bool:
+        now = self.clock.utc()
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, report.authority_epoch)
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if (not row or row["authority_epoch"] != report.authority_epoch
+                    or row["schema_version"] != 2 or row["pending_id"] != report.delivery_id
+                    or row["pending_expires"] <= now):
+                return False
+            conn.execute(
+                "UPDATE player_control_sessions SET pending_id=NULL,pending_digest=NULL,"
+                "pending_expires=NULL,last_delivery_id=%s,last_result_sequence=issued_sequence,"
+                "last_result_digest=pending_digest,last_result=%s,last_result_at=%s,"
+                "applied_sequence=CASE WHEN %s='applied' THEN issued_sequence "
+                "ELSE applied_sequence END,"
+                "applied_at=CASE WHEN %s='applied' THEN %s ELSE applied_at END,"
+                "applied_delivery_id=CASE WHEN %s='applied' THEN pending_id "
+                "ELSE applied_delivery_id END,"
+                "applied_digest=CASE WHEN %s='applied' THEN pending_digest "
+                "ELSE applied_digest END "
+                "WHERE player_id=%s",
+                (report.delivery_id, report.result, now, report.result, report.result, now,
+                 report.result, report.result, player_id),
+            )
+            return True
+
+    def control_fact(self, player_id: str) -> dict | None:
+        """Read provenance-labelled app-control history without readiness inference."""
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT c.authority_epoch,c.schema_version,c.status,c.issued_sequence,"
+                "c.pending_id,c.pending_digest,c.applied_sequence,c.applied_at,"
+                "c.applied_delivery_id,c.applied_digest,c.last_delivery_id,"
+                "c.last_result_sequence,c.last_result_digest,c.last_result,c.last_result_at "
+                "FROM player_control_sessions c JOIN players p ON p.id=c.player_id "
+                "AND p.authority_epoch=c.authority_epoch WHERE c.player_id=%s "
+                "AND p.retired_at IS NULL",
+                (player_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def identify_output(self, player_id: str, output_id: str) -> dict:
         """Ask one active, connected, unbound Output to identify itself briefly."""
         now = self.clock.utc()
         request_id = uuid.uuid4()
         expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_player_in
+
+            require_unfenced_player_in(conn, player_id)
             player = conn.execute(
                 "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
                 (player_id,),
             ).fetchone()
             if not player:
                 raise RegistryError("unknown_or_retired_player", 404)
+            negotiated = conn.execute(
+                "SELECT 1 FROM player_control_sessions WHERE player_id=%s "
+                "AND authority_epoch=%s AND status='negotiated' AND schema_version=2 "
+                "AND capabilities ? 'identify_output'",
+                (player_id, player["authority_epoch"]),
+            ).fetchone()
+            if not negotiated:
+                raise RegistryError("identify_unsupported")
             output = conn.execute(
                 "SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s FOR UPDATE",
                 (player_id, output_id),
@@ -250,7 +432,14 @@ class Registry:
 
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
         try:
-            with self.db.transaction() as conn:
+            with self._equipment_write() as conn:
+                from central.equipment_drain import (
+                    require_unfenced_frame_in,
+                    require_unfenced_player_in,
+                )
+
+                require_unfenced_player_in(conn, player_id)
+                require_unfenced_frame_in(conn, frame_id)
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
                 player = conn.execute("SELECT retired_at FROM players WHERE id=%s FOR UPDATE",
                                       (player_id,)).fetchone()
@@ -283,7 +472,10 @@ class Registry:
     def unbind(self, frame_id: str, *, expected_generation: int) -> dict:
         """Release a Frame's active binding, reversibly: unlike retire, the player record
         (and its ability to be re-bound, to this or another Frame) is untouched."""
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
                 raise RegistryError("unknown_frame", 404)
@@ -305,7 +497,10 @@ class Registry:
         """Reposition: last-write-wins, no token (the one deliberate exception to R3,
         design §9a). FOR UPDATE makes the read-merge-write atomic; the row is still LWW.
         Bumps NO generation, NO configuration_revision; never touches calibration."""
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                  (frame_id,)).fetchone()
             if not frame:
@@ -341,6 +536,9 @@ class Registry:
         ).fetchone()["n"]
         if held != 2:
             raise RegistryError("frame_runtime_snapshot_required", 500)
+        from central.equipment_drain import require_unfenced_frame_in
+
+        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -398,6 +596,9 @@ class Registry:
         ).fetchone()["n"]
         if held != 2:
             raise RegistryError("frame_reference_snapshot_required", 500)
+        from central.equipment_drain import require_unfenced_frame_in
+
+        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -421,7 +622,10 @@ class Registry:
         too, so a bind and a retire serialize. Under READ COMMITTED (the default;
         central/db.py sets no isolation) the check is a new statement after any lock
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_player_in
+
+            require_unfenced_player_in(conn, player_id)
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if not player:
                 raise RegistryError("unknown_player", 404)
@@ -437,7 +641,10 @@ class Registry:
     def calibrate(self, frame_id: str, operation: str, expected_revision: int,
                   calibration: Calibration | None = None, *, expected_generation: int) -> dict:
         now = self.clock.utc()
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
             self._expire_previews(conn)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:

@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from central.db import Database
+from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.installation_models import PlayerReports
 from central.installation_ports import InstallationSessions
@@ -348,11 +349,12 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code):
+    def _skip_group(self, conn, group_id, code, *, cancel=False):
         sequence = self._event(conn, "group_skipped", detail={"group_id": group_id, "code": code})
         conn.execute(
-            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s WHERE id=%s",
-            (sequence, group_id),
+            "UPDATE coordination_groups SET status='skipped',skip_sequence=%s,drain_cancel=%s "
+            "WHERE id=%s",
+            (sequence, cancel, group_id),
         )
         conn.execute("UPDATE execution_commits SET valid=FALSE WHERE group_id=%s", (group_id,))
 
@@ -395,6 +397,7 @@ class Coordinator:
         now = self.clock.utc()
         with self._transaction() as conn, self.runtime.edit(conn) as runtime:
             runtime.advance(now)
+            fenced = fenced_players_in(conn)
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)
@@ -410,7 +413,8 @@ class Coordinator:
                 runtime,
                 now,
                 bindings_by_player={
-                    p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
+                    p: tuple(b for b in config.bindings
+                             if p not in fenced and b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
                 catalog_snapshots=snapshots,
@@ -419,7 +423,10 @@ class Coordinator:
                 horizon_seconds=horizon_end - now,
                 limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
             )
-            groups = self._groups(conn, runtime, now, horizon_end, configurations)
+            groups = self._groups(conn, runtime, now, horizon_end, {
+                p: config.model_copy(update={"enabled_outputs": ()}) if p in fenced else config
+                for p, config in configurations.items()
+            })
             for proposal in projection.players:
                 config = configurations[proposal.player_id]
                 # Historical offers feed content locks only. Reconciliation,
@@ -580,7 +587,7 @@ class Coordinator:
             if plan:
                 membership = self._plan_groups(conn, plan)
                 skipped = conn.execute(
-                    "SELECT id,skip_sequence FROM coordination_groups "
+                    "SELECT id,skip_sequence,drain_cancel FROM coordination_groups "
                     "WHERE status='skipped' AND skip_sequence IS NOT NULL"
                 ).fetchall()
                 revocations = tuple(
@@ -589,6 +596,7 @@ class Coordinator:
                         revision=plan.revision,
                         authority_epoch=epoch,
                         sequence=g["skip_sequence"],
+                        mode="cancel" if g["drain_cancel"] else "invalidate",
                         assignment_ids=tuple(
                             sorted(a for a, group in membership.items() if group == g["id"])
                         ),
@@ -655,6 +663,8 @@ class Coordinator:
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()
         with self._transaction() as conn:
+            if player_id in fenced_players_in(conn):
+                raise CoordinationError("equipment_draining")
             configurations = {
                 p["id"]: self._configuration(conn, p["id"], p["authority_epoch"])
                 for p in self._players(conn)

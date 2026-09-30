@@ -1,0 +1,230 @@
+"""Runtime maintenance admission stays fenced across deadlines and restart."""
+
+import pytest
+from test_registry import enroll, frame
+
+from central.coordination import Coordinator
+from central.equipment_drain import EquipmentDrain
+from central.media_repository import MediaRepository
+from central.media_store import MediaStore, MediaStoreError
+from central.player_control_protocol import project_state, state_digest
+from central.registry import RegistryError
+from central.runtime import Contribution, Program, Scene
+from contracts.models import Calibration, Readiness
+from contracts.player_control import ControlAck, ControlHello
+
+
+def bound_player(registry):
+    player, _, request = enroll(registry)
+    frame(registry, "drain-frame")
+    registry.bind("drain-frame", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.calibrate("drain-frame", "commit", 1, Calibration(), expected_generation=1)
+    return player, request
+
+
+def future_run(coordinator):
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="future", loop=True, cycle_seconds=60,
+        contributions=(Contribution(target="frame:drain-frame", kind="black"),),
+    ))
+    coordinator.runtime.command("set_program", Program(
+        program_id="future", scene_id="future", starts_at=1010, ends_at=1100,
+    ))
+    coordinator.advance()
+
+
+def test_prepared_drain_cancels_old_group_and_blocks_new_delivery(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    future_run(coordinator)
+    before = coordinator.delivery(player["player_id"], player["authority_epoch"])
+    assert before["plan"] and before["plan"].layers
+
+    drain = EquipmentDrain(coordinator)
+    result = drain.prepare_idle(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1015,
+    )
+    assert result.status == "prepared"
+    assert {output["output_id"] for output in result.snapshot["outputs"]} == {
+        "HDMI-A-1", "HDMI-A-2",
+    }
+    assert result.snapshot["outputs"][0]["binding_generation"] == 1
+
+    pending = coordinator.delivery(player["player_id"], player["authority_epoch"])
+    assert pending["commits"] == ()
+    assert pending["revocations"] and all(
+        revocation.mode == "cancel" for revocation in pending["revocations"]
+    )
+    with pytest.raises(RegistryError, match="equipment_draining"):
+        coordinator.readiness(player["player_id"], Readiness(
+            plan_id=before["plan"].plan_id, revision=before["plan"].revision,
+            authority_epoch=player["authority_epoch"], sequence=1,
+            observed_at=registry.clock.utc(), clock_uncertainty=.01,
+            capacity_ok=True,
+        ))
+    coordinator.advance()
+    after = coordinator.delivery(player["player_id"], player["authority_epoch"])
+    assert after["plan"] is None or not after["plan"].layers
+    assert after["commits"] == ()
+    with pytest.raises(RegistryError, match="equipment_draining"):
+        registry.calibrate("drain-frame", "commit", 2, Calibration(), expected_generation=1)
+    with pytest.raises(RegistryError, match="equipment_draining"):
+        registry.unbind("drain-frame", expected_generation=1)
+
+
+def test_stop_committed_never_time_releases_and_retries_are_typed(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    registry.calibrate("drain-frame", "preview", 2, Calibration(gain=.8),
+                       expected_generation=1)
+    with registry.db.transaction() as conn:
+        preview_revision = conn.execute(
+            "SELECT configuration_revision FROM frames WHERE id='drain-frame'"
+        ).fetchone()["configuration_revision"]
+    prepared = drain.prepare_idle(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1005,
+    )
+    assert prepared.snapshot["outputs"][0]["configuration_revision"] == preview_revision + 1
+    with registry.db.transaction() as conn:
+        assert conn.execute(
+            "SELECT preview FROM frames WHERE id='drain-frame'"
+        ).fetchone()["preview"] is None
+    assert drain.prepare_idle(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1300,
+    ).status == "already_prepared"
+    assert drain.commit_stop(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"],
+    ).status == "stop_committed"
+    registry.clock.advance(100)
+    restarted = EquipmentDrain(Coordinator(registry.db, registry.clock))
+    assert restarted.commit_stop(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"],
+    ).status == "already_committed"
+    assert restarted.prepare_idle(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1300,
+    ).status == "already_committed"
+    with pytest.raises(RegistryError, match="equipment_drain_conflict"):
+        restarted.prepare_idle(
+            player["player_id"], "attempt-2", request.boot_id,
+            player["authority_epoch"], authorization_expires_at=1300,
+        )
+    assert prepared.snapshot == restarted.commit_stop(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"],
+    ).snapshot
+    with pytest.raises(RegistryError, match="stop_committed_requires_reconciliation"):
+        restarted.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                                player["authority_epoch"])
+
+
+def test_expired_preparation_stays_fenced_and_cannot_commit_stop(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+                       player["authority_epoch"], authorization_expires_at=1001)
+    registry.clock.advance(2)
+    with pytest.raises(RegistryError, match="drain_authorization_expired"):
+        drain.commit_stop(player["player_id"], "attempt-1", request.boot_id,
+                          player["authority_epoch"])
+    with pytest.raises(RegistryError, match="equipment_draining"):
+        registry.unbind("drain-frame", expected_generation=1)
+
+
+def test_active_run_requires_declared_interruption_policy(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="live", loop=True,
+        contributions=(Contribution(target="frame:drain-frame", kind="black"),),
+    ))
+    coordinator.runtime.command("activate", "live", "live-1", registry.clock.utc())
+    with pytest.raises(RegistryError, match="active_run_requires_interruption_policy"):
+        EquipmentDrain(coordinator).prepare_idle(
+            player["player_id"], "attempt-1", request.boot_id,
+            player["authority_epoch"], authorization_expires_at=1010,
+        )
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+
+
+def test_media_grant_and_frame_placement_are_fenced(registry, tmp_path):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    EquipmentDrain(coordinator).prepare_idle(
+        player["player_id"], "attempt-1", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1010,
+    )
+    store = MediaStore(MediaRepository(registry.db, registry.clock), tmp_path / "media")
+    with pytest.raises(MediaStoreError, match="equipment_draining"):
+        store.open_read(player["token"], "a" * 64)
+    from central.registry import FramePlacement
+
+    with pytest.raises(RegistryError, match="equipment_draining"):
+        registry.place_frame("drain-frame", FramePlacement(x_mm=12))
+
+
+def test_reenrollment_cannot_clear_fence_or_commit_old_epoch(registry):
+    player, key, request = enroll(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+                       player["authority_epoch"], authorization_expires_at=1010)
+    replacement, _, _ = enroll(registry, key=key, device_id=request.device_id)
+    assert replacement["authority_epoch"] == player["authority_epoch"] + 1
+    with pytest.raises(RegistryError, match="stale_authority"):
+        drain.commit_stop(player["player_id"], "attempt-1", request.boot_id,
+                          player["authority_epoch"])
+    from central.equipment_drain import fenced_players_in
+
+    with registry.db.transaction() as conn:
+        assert player["player_id"] in fenced_players_in(conn)
+
+
+def test_prepared_abort_needs_expiry_and_fresh_applied_control(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    selection = registry.control_hello(player["player_id"], ControlHello(
+        authority_epoch=player["authority_epoch"], schemas=(1, 2), capabilities=(),
+    ))
+    old_delivery = registry.issue_control_delivery_record(
+        player["player_id"], player["authority_epoch"], "a" * 64,
+    )
+    drain = EquipmentDrain(coordinator)
+    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+                       player["authority_epoch"], authorization_expires_at=1001)
+    with pytest.raises(RegistryError, match="drain_authorization_open"):
+        drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                             player["authority_epoch"])
+    registry.clock.advance(4)
+    with pytest.raises(RegistryError, match="drain_recovery_unverified"):
+        drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                             player["authority_epoch"])
+    assert registry.control_ack(player["player_id"], ControlAck(
+        authority_epoch=player["authority_epoch"],
+        delivery_id=old_delivery["delivery_id"], result="applied",
+    ))
+    with pytest.raises(RegistryError, match="drain_recovery_unverified"):
+        drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                             player["authority_epoch"])
+    delivery = coordinator.delivery(player["player_id"], player["authority_epoch"])
+    digest = state_digest(project_state(delivery, selection))
+    issued = registry.issue_control_delivery_record(
+        player["player_id"], player["authority_epoch"], digest,
+    )
+    assert registry.control_ack(player["player_id"], ControlAck(
+        authority_epoch=player["authority_epoch"],
+        delivery_id=issued["delivery_id"], result="applied",
+    ))
+    assert drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                                player["authority_epoch"]).status == "aborted"
+    assert drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
+                                player["authority_epoch"]).status == "already_aborted"
+    registry.unbind("drain-frame", expected_generation=1)

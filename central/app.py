@@ -26,6 +26,7 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
 from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
@@ -41,6 +42,7 @@ from central.media_store import MediaStore
 from central.netboot_base import record_base_health
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.player_control_protocol import project_state, state_digest
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -62,6 +64,7 @@ from contracts.models import (
     PlayerTime,
     Readiness,
 )
+from contracts.player_control import ControlAck, ControlHello
 from contracts.time import Clock, SystemClock
 from media.models import SourcePreviewQuery, SourceSpec
 
@@ -316,6 +319,22 @@ def create_app(
             raise RegistryError("unauthorized", 401)
         return registry.authenticate(credentials.credentials)
 
+    def control_state(identity: dict) -> dict:
+        # The short Registry row lock seals negotiation before Coordination takes its lock.
+        selection = registry.control_selection(identity["id"], identity["authority_epoch"])
+        payload = project_state(
+            coordinator.delivery(identity["id"], identity["authority_epoch"]), selection
+        )
+        if selection.schema_version == 2:
+            cue = payload["identify_output"]
+            payload["identify_expires_at"] = (
+                clock.utc() + cue["remaining_seconds"] if cue else None
+            )
+            payload.update(registry.issue_control_delivery_record(
+                identity["id"], identity["authority_epoch"], state_digest(payload)
+            ))
+        return payload
+
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
         detail = {"error": exc.code}
@@ -450,6 +469,12 @@ def create_app(
     def register(request: Enrollment):
         return registry.enroll(request)
 
+    @app.post("/v1/player/hello")
+    def player_hello(request: ControlHello, identity: dict = Depends(player)):
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        return registry.control_hello(identity["id"], request)
+
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):
         config = coordinator.configuration(identity["id"], identity["authority_epoch"])
@@ -457,7 +482,13 @@ def create_app(
 
     @app.get("/v1/player/state")
     def player_state(identity: dict = Depends(player)):
-        return coordinator.delivery(identity["id"], identity["authority_epoch"])
+        return control_state(identity)
+
+    @app.post("/v1/player/control-acks")
+    def control_ack(request: ControlAck, identity: dict = Depends(player)):
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        return {"accepted": registry.control_ack(identity["id"], request)}
 
     @app.get("/v1/player/time", response_model=PlayerTime)
     def player_time(identity: dict = Depends(player)):
@@ -536,20 +567,11 @@ def create_app(
                 current = await asyncio.to_thread(registry.authenticate, token)
                 if current != identity:
                     raise RegistryError("stale_authority", 403)
-                state = await asyncio.to_thread(
-                    coordinator.delivery, identity["id"], identity["authority_epoch"]
-                )
-                await websocket.send_json(
-                    {
-                        "type": "state",
-                        "configuration": state["configuration"].model_dump(mode="json"),
-                        "plan": state["plan"].model_dump(mode="json") if state["plan"] else None,
-                        "commits": [c.model_dump(mode="json") for c in state["commits"]],
-                        "revocations": [r.model_dump(mode="json") for r in state["revocations"]],
-                        "identify_output": (state["identify_output"].model_dump(mode="json")
-                                           if state["identify_output"] else None),
-                    }
-                )
+                state = await asyncio.to_thread(control_state, identity)
+                # A re-enrollment during projection must not keep this old session alive.
+                if await asyncio.to_thread(registry.authenticate, token) != identity:
+                    raise RegistryError("stale_authority", 403)
+                await websocket.send_json({"type": "state", **state})
                 try:
                     raw = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
                 except asyncio.TimeoutError:
@@ -835,4 +857,5 @@ def create_app(
 
     if content is not None:
         mount_content_routes(app, content)
+    mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)
     return app

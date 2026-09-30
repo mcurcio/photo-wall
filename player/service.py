@@ -43,6 +43,7 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.player_control import ControlAck, ControlHello, ControlSelection
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
 from player.central_link import CentralLink, Session, read_refusal
@@ -169,6 +170,20 @@ class State(Model):
     commits: tuple[Commit, ...] = Field(max_length=1024)
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
     identify_output: IdentifyOutput | None = None
+    identify_expires_at: Instant | None = None
+    delivery_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    delivery_sequence: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def coherent_delivery(self):
+        if (self.delivery_id is None) != (self.delivery_sequence is None):
+            raise ValueError("control_delivery_pair")
+        if self.identify_expires_at is not None and self.identify_output is None:
+            raise ValueError("identify_expiry_without_request")
+        if (self.delivery_sequence is not None and self.identify_output is not None
+                and self.identify_expires_at is None):
+            raise ValueError("identify_request_without_expiry")
+        return self
 
 
 class BootContext(Model):
@@ -418,6 +433,10 @@ class PlayerService:
         self._base_health_epoch: int | None = None
         self._base_health_sequence_epoch: int | None = None
         self._base_health_sequence = 0
+        self._hello_epoch: int | None = None
+        self._control_selection: ControlSelection | None = None
+        self._highest_control_sequence = 0
+        self._highest_control_delivery_id: str | None = None
         self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
         self._configuration_received = False
         self._unbound_outputs = tuple(output.output_id for output in outputs if output.connected)
@@ -574,6 +593,10 @@ class PlayerService:
             body=enrollment.model_dump(mode="json"), authenticated=False))
         # Issued by session's origin, so it joins that Session and no other (U8).
         self._session = session.enrolled(registered)
+        self._hello_epoch = None
+        self._control_selection = None
+        self._highest_control_sequence = 0
+        self._highest_control_delivery_id = None
         with self._lock:
             self._offered = False
             self._jobs = ()
@@ -598,6 +621,32 @@ class PlayerService:
                 self.cache = self.executor = None
                 self._session = session.unregistered()
                 raise ServiceError("player_initialization") from error
+
+    async def hello_protocol(self) -> None:
+        """Negotiate before either state transport; only this hello's 404 means legacy."""
+        if self.registration is None:
+            raise Unauthorized("not_registered")
+        epoch = self.registration.authority_epoch
+        if self._hello_epoch == epoch:
+            return
+        offer = ControlHello(authority_epoch=epoch, schemas=(1, 2),
+                             capabilities=("identify_output",))
+        try:
+            response = await self.request("POST", "/v1/player/hello",
+                                          body=offer.model_dump(mode="json"))
+        except UplinkError as error:
+            if error.cause is Cause.HTTP and error.detail == "status=404":
+                self._control_selection = ControlSelection(authority_epoch=epoch, schema=1)
+                self._hello_epoch = epoch
+                return
+            raise
+        selected = ControlSelection.model_validate(response)
+        if selected.authority_epoch != epoch or selected.schema_version not in offer.schemas:
+            raise ServiceError("control_selection_invalid")
+        if any(capability not in offer.capabilities for capability in selected.capabilities):
+            raise ServiceError("control_selection_invalid")
+        self._control_selection = selected
+        self._hello_epoch = epoch
 
     async def _report_base_health(self):
         """One-shot base-image health check-in after enroll (0012 bead 6).
@@ -648,9 +697,24 @@ class PlayerService:
             or state.configuration.authority_epoch != self.registration.authority_epoch
         ):
             raise ServiceError("state_authority")
+        sequence = state.delivery_sequence
+        if sequence is None:
+            # An old pod can answer during a mixed rollout. Its unsequenced state
+            # cannot supersede a v2 delivery already observed in this epoch.
+            if self._highest_control_sequence:
+                return "superseded"
+        elif sequence < self._highest_control_sequence:
+            return "superseded"
+        elif sequence == self._highest_control_sequence:
+            if state.delivery_id != self._highest_control_delivery_id:
+                raise ServiceError("control_sequence_conflict")
+        else:
+            self._highest_control_sequence = sequence
+            self._highest_control_delivery_id = state.delivery_id
         if self.executor is None:
-            return
+            return "parsed_execution_unavailable"
         with self._lock:
+            rejected = False
             configuration = state.configuration
             self.executor.accept_configuration(configuration)
             if self._configuration is None or configuration.authority_epoch != self._configuration.authority_epoch:
@@ -682,6 +746,7 @@ class PlayerService:
                     # Replayed grants can refer to readiness invalidated locally.
                     # A fresh report is required; never infer replacement authority.
                     self.fault("stale_commit")
+                    rejected = True
                 self._seen_commits.append(commit)
             bound = {binding.output_id for binding in configuration.bindings}
             self._unbound_outputs = tuple(output.output_id for output in self.outputs
@@ -690,22 +755,56 @@ class PlayerService:
             self.central_link_state = "reachable"
             self._render_unbound_diagnostic()
             unbound = self._unbound_outputs
-            self._apply_identify_output(state.identify_output, unbound,
-                                        configuration.authority_epoch)
+            selection = self._control_selection
+            cue = state.identify_output if (
+                sequence is not None and selection is not None
+                and selection.authority_epoch == configuration.authority_epoch
+                and selection.schema_version == 2
+                and "identify_output" in selection.capabilities
+            ) else None
+            deadline = None
+            if cue is not None:
+                try:
+                    deadline = self.mapping.deadline(state.identify_expires_at)
+                except ValueError:
+                    cue = None
+            self._apply_identify_output(cue, unbound,
+                                        configuration.authority_epoch, deadline=deadline)
             self.tick_main()
+            return "rejected" if rejected else "applied"
+
+    async def _ack_control(self, state: State, result: str) -> None:
+        selection = self._control_selection
+        if (result == "superseded" or state.delivery_id is None
+                or self.registration is None or selection is None
+                or selection.schema_version != 2
+                or selection.authority_epoch != self.registration.authority_epoch):
+            return
+        report = ControlAck(authority_epoch=self.registration.authority_epoch,
+                            delivery_id=state.delivery_id, result=result)
+        # A superseded delivery can return accepted=false; the next state retries with a
+        # fresh challenge. This is not plan readiness or OS management evidence.
+        await self.request("POST", "/v1/player/control-acks",
+                           body=report.model_dump(mode="json"))
 
     def _apply_identify_output(self, cue: IdentifyOutput | None,
-                               unbound: tuple[str, ...], authority_epoch: int) -> None:
+                               unbound: tuple[str, ...], authority_epoch: int,
+                               *, deadline: float | None = None) -> None:
         now = self.clock.monotonic()
         key = None if cue is None else (cue.request_id, cue.authority_epoch)
-        if cue is None or cue.authority_epoch != authority_epoch or cue.output_id not in unbound:
+        if (cue is None or cue.authority_epoch != authority_epoch
+                or cue.output_id not in unbound
+                or (deadline is not None and deadline <= now)):
             self._identify_key = None
             self._identify_output = None
             self._identify_deadline = None
         else:
             if key != self._identify_key:
                 self._identify_key = key
-                self._identify_deadline = now + min(cue.remaining_seconds, 15.0)
+                self._identify_deadline = min(
+                    now + min(cue.remaining_seconds, 15.0),
+                    deadline if deadline is not None else math.inf,
+                )
             if self._identify_deadline is not None and now >= self._identify_deadline:
                 self._identify_output = None
                 self._identify_deadline = None
@@ -901,7 +1000,8 @@ class PlayerService:
     async def poll_state(self):
         body, _ = await self._request_with_receipt("GET", "/v1/player/state")
         state = State.model_validate(body)
-        await self.dispatch(lambda: self._apply_state(state))
+        result = await self.dispatch(lambda: self._apply_state(state))
+        await self._ack_control(state, result)
 
     async def probe_time(self) -> bool:
         if self.registration is None:
@@ -993,7 +1093,8 @@ class PlayerService:
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
                 state = State.model_validate(body)
-                await self.dispatch(lambda: self._apply_state(state))
+                result = await self.dispatch(lambda: self._apply_state(state))
+                await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
     async def run(self):
@@ -1011,6 +1112,7 @@ class PlayerService:
                     if self.registration is None:
                         await self.enroll()
                         await self._report_base_health()
+                    await self.hello_protocol()
                     # Reconnection reconciles authority before any download work.
                     await self.probe_time()
                     await self.poll_state()
