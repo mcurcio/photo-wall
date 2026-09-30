@@ -12,8 +12,7 @@ import hashlib
 import os
 
 from central.assets.reader import AssetReader, Opened, Unavailable
-from central.fleet.models import FleetError
-from central.fleet.service import OfferAsset
+from central.fleet.models import FleetError, OfferAsset
 from central.kernel.job_types import FetchOsImage, FetchPackage, FetchPlayerPayload
 from central.kernel.ports import Candidates
 from contracts.player_payload import FORMAT as PAYLOAD_FORMAT

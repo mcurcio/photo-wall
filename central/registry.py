@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
+from central.fleet.locks import lock_fleet_assets_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -161,6 +162,14 @@ class Registry:
                                      (request.nonce, request.public_key, now)).fetchone()
             if not challenge:
                 raise RegistryError("expired_or_used_challenge", 403)
+            # Serial enrollment has no OS command authority. It must still
+            # respect permanent device retirement while an offer or retirement
+            # transaction may be creating/updating the canonical row.
+            lock_fleet_assets_in(conn)
+            device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
+                                  (request.device_id,)).fetchone()
+            if device is not None and device["retired_at"] is not None:
+                raise RegistryError("retired_device", 403)
             old = conn.execute("SELECT * FROM players WHERE device_id=%s FOR UPDATE",
                                (request.device_id,)).fetchone()
             if old and old["retired_at"] is not None:
@@ -632,18 +641,44 @@ class Registry:
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
         with self._equipment_write() as conn:
             from central.equipment_drain import require_unfenced_player_in
+            from central.fleet.fallback import retire_device_fallback_references
 
             require_unfenced_player_in(conn, player_id)
-            player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
-            if not player:
+            identity = conn.execute("SELECT device_id FROM players WHERE id=%s",
+                                    (player_id,)).fetchone()
+            if identity is None:
                 raise RegistryError("unknown_player", 404)
+            device_id = identity["device_id"]
+            # Fleet offer, fallback reservation and eviction take this lock
+            # before the device row. Use the same order for retirement so a
+            # fallback cannot be pinned between revocation and GC release.
+            lock_fleet_assets_in(conn)
+            now = self.clock.utc()
+            # Ticketless legacy Players may predate any PXE `devices` row.
+            # Operator retirement is allowed to create their canonical tombstone.
+            conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) "
+                         "VALUES(%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
+                         (device_id, now, now))
+            conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
+                         (device_id,)).fetchone()
+            player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if player["retired_at"] is not None:
                 return
             if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s LIMIT 1",
                             (player_id,)).fetchone():
                 raise RegistryError("player_bound")
+            conn.execute("UPDATE devices SET retired_at=COALESCE(retired_at,%s) "
+                         "WHERE device_id=%s", (now, device_id))
+            conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
+                         "revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL",
+                         (now, device_id))
+            conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=%s "
+                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
+            conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s "
+                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
+            retire_device_fallback_references(conn, device_id)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
-                         "WHERE id=%s", (self.clock.utc(), player_id))
+                         "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)
 
     def calibrate(self, frame_id: str, operation: str, expected_revision: int,

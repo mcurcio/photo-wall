@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from appliance.app_evidence import AppEvidenceCollector, ProcessSample, SystemdProcessSampler
-from appliance.app_executor import AppExecutor
+from appliance.app_executor import AppExecutor, CapacitySnapshot
 from contracts.player_payload import canonical_json
 from tests.test_app_executor import Service as MutableService
 from tests.test_app_executor import payload
@@ -69,8 +69,13 @@ def subject(tmp_path, *, state="committed", target=A, fallback=None,
     lock = tmp_path / "executor.lock"
     lock.touch()
     active_service = service or Service(selected)
+    class TestCapacity:
+        def snapshot(self, _roots):
+            return CapacitySnapshot(10**12, 10**12)
+
     executor = AppExecutor(roots=apps, journal=journal, lock=lock,
-                           legacy_override=tmp_path / "legacy", service=active_service)
+                           legacy_override=tmp_path / "legacy", service=active_service,
+                           capacity_probe=TestCapacity())
     return executor
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
@@ -11,6 +12,19 @@ from central.content_catalog.catalog import sanitize_serial
 from contracts.release import MAX_ROOTFS_BYTES
 
 Digest = str
+T0_AUDIENCE = "photo-wall-central-t0"  # correlation label, not an authenticated audience
+
+
+@dataclass(frozen=True, slots=True)
+class OfferAsset:
+    """Frozen exact bytes requested by an offer or accepted fallback."""
+
+    kind: str
+    tag: str
+    content_key: str
+    sha256: str
+    size: int
+    format: str | None = None
 
 
 class FleetError(Exception):

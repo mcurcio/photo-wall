@@ -9,7 +9,14 @@ import tarfile
 
 import pytest
 
-from appliance.app_executor import AppExecutor, ExecutorError, SystemdPlayer
+from appliance.app_executor import (
+    STAGING_ALLOWANCE_BYTES,
+    AppExecutor,
+    CapacitySnapshot,
+    ExecutorError,
+    LinuxCapacityProbe,
+    SystemdPlayer,
+)
 from appliance.app_launcher import selected_app
 from appliance.app_payload import PayloadError, stage_payload, verify_root
 from contracts.player_payload import canonical_json
@@ -76,11 +83,21 @@ class Service:
         self.running = json.loads((self.roots / "active.json").read_text())["sha256"]
 
 
+class Capacity:
+    def __init__(self, *snapshots):
+        self.snapshots = list(snapshots)
+        self.calls = 0
+
+    def snapshot(self, _roots):
+        self.calls += 1
+        return self.snapshots.pop(0) if self.snapshots else CapacitySnapshot(10**12, 10**12)
+
+
 def executor(tmp_path, service):
     service.roots = tmp_path / "apps"
     return AppExecutor(roots=tmp_path / "apps", journal=tmp_path / "journal.json",
                        lock=tmp_path / "executor.lock", legacy_override=tmp_path / "legacy",
-                       service=service)
+                       service=service, capacity_probe=Capacity())
 
 
 def activate(subject, body, digest, attempt):
@@ -136,6 +153,83 @@ def test_writable_fallback_root_is_rejected_before_service_stop(tmp_path):
     with pytest.raises(ExecutorError, match="payload_root_ownership"):
         activate(subject, next_body, next_digest, ATTEMPT_B)
     assert service.events == []
+
+
+@pytest.mark.parametrize("filesystem,memory,reason", [
+    (STAGING_ALLOWANCE_BYTES + 99, 10**12, "app_filesystem_capacity_insufficient"),
+    (10**12, STAGING_ALLOWANCE_BYTES + 99, "app_memory_capacity_insufficient"),
+])
+def test_online_preflight_refuses_insufficient_staging_capacity_before_stop(
+        tmp_path, filesystem, memory, reason):
+    service = Service()
+    subject = executor(tmp_path, service)
+    first, first_digest = payload()
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    service.events.clear()
+    second, second_digest = payload(b"b")
+    probe = Capacity(CapacitySnapshot(filesystem, memory))
+    subject.capacity_probe = probe
+    subject.protected_filesystem_bytes = 100
+    subject.protected_memory_bytes = 100
+
+    with pytest.raises(ExecutorError, match=reason):
+        activate(subject, second, second_digest, ATTEMPT_B)
+    assert probe.calls == 1
+    assert service.events == []
+    assert service.running_digest() == first_digest
+    assert not (tmp_path / "apps" / second_digest).exists()
+
+
+def test_online_preflight_rechecks_headroom_after_verified_roots_before_stop(tmp_path):
+    service = Service()
+    subject = executor(tmp_path, service)
+    first, first_digest = payload()
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    service.events.clear()
+    second, second_digest = payload(b"b")
+    probe = Capacity(CapacitySnapshot(10**12, 10**12), CapacitySnapshot(99, 10**12))
+    subject.capacity_probe = probe
+    subject.protected_filesystem_bytes = 100
+    subject.protected_memory_bytes = 100
+
+    with pytest.raises(ExecutorError, match="app_filesystem_capacity_insufficient"):
+        activate(subject, second, second_digest, ATTEMPT_B)
+    assert probe.calls == 2
+    assert service.events == []
+    assert service.running_digest() == first_digest
+    verify_root(tmp_path / "apps" / first_digest, expected_abi=ABI)
+    verify_root(tmp_path / "apps" / second_digest, expected_abi=ABI)
+    assert json.loads((tmp_path / "journal.json").read_text())["attempt_id"] == ATTEMPT_A
+
+    # The exact root was published before the refusal. Retry can verify and
+    # reuse it without reserving space for another complete extraction.
+    retry_probe = Capacity(CapacitySnapshot(100, 100), CapacitySnapshot(100, 100))
+    subject.capacity_probe = retry_probe
+    assert activate(subject, second, second_digest, ATTEMPT_B) == "committed"
+    assert retry_probe.calls == 2
+    assert service.events == ["stop", "start"]
+
+
+def test_cold_activation_remains_available_without_a_local_fallback(tmp_path):
+    service = Service()
+    subject = executor(tmp_path, service)
+    probe = Capacity(CapacitySnapshot(0, 0))
+    subject.capacity_probe = probe
+    body, digest = payload()
+    assert activate(subject, body, digest, ATTEMPT_A) == "committed"
+    assert probe.calls == 0
+    assert service.running_digest() == digest
+
+
+def test_linux_capacity_probe_requires_memavailable_fact(tmp_path):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable: 42 kB\n")
+    result = LinuxCapacityProbe(meminfo).snapshot(tmp_path)
+    assert result.memory_available_bytes == 42 * 1024
+    assert result.filesystem_free_bytes > 0
+    meminfo.write_text("MemFree: 42 kB\n")
+    with pytest.raises(ExecutorError, match="app_capacity_unavailable"):
+        LinuxCapacityProbe(meminfo).snapshot(tmp_path)
 
 
 def test_crash_during_stop_reconciles_same_attempt_before_admitting_another(tmp_path):

@@ -4,17 +4,27 @@ The shared registry fixture supplies a private migrated schema and skips without
 PHOTO_WALL_TEST_DATABASE_URL; this test must run against local Compose and CI PostgreSQL.
 """
 
+import asyncio
 import hashlib
 import os
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from central.assets.handlers import FetchPlayerPayloadHandler
+from central.assets.layout import CacheLayout
+from central.assets.production import AssetProduction
 from central.assets.reader import Opened
+from central.assets.store import CacheStore
+from central.fleet.bytes import OfferByteReader
+from central.fleet.fallback import (
+    AcceptedFallbackService,
+    retire_device_fallback_references,
+)
 from central.fleet.models import (
     Artifact,
     BaselineWrite,
@@ -26,8 +36,10 @@ from central.fleet.models import (
 from central.fleet.routes import mount_fleet_routes
 from central.fleet.service import OFFER_TTL_SECONDS, FleetService
 from central.infra.asset_records import PgAssetRecords
+from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.job_types import FetchPlayerPayload
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -66,6 +78,54 @@ def _seed_release(registry) -> None:
 def _request(boot: int, nonce: str) -> OfferRequest:
     return OfferRequest(schema=1, kind="pi", serial=SERIAL,
                         kernel_boot_id=UUID(int=boot), boot_nonce=nonce * 32)
+
+
+def _accept_app(registry, device_id: str, digest: str, size: int,
+                evidence_ref: str, *, trust_mode: str = "t1") -> None:
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
+                     "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
+                     "VALUES(%s,'app',%s,%s,%s,%s,%s,%s,%s)",
+                     (device_id, digest, digest, size, BASE_ABI, trust_mode,
+                      evidence_ref, registry.clock.utc()))
+
+
+def _two_accepted_payloads(registry):
+    """Two frozen boot offers on one device, with a mutable tag recut between them."""
+    _seed_release(registry)
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    first_policy = fleet.set_app_policy(PolicyWrite(
+        expected_revision=0, target=Artifact(tag=TAG, sha256=APP_SHA, size=123)))
+    fleet.create_offer(_request(54, "d"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+    _accept_app(registry, device_id, APP_SHA, 123, "qualified:54")
+    empty = fleet.set_app_policy(PolicyWrite(expected_revision=first_policy["revision"],
+                                             target=None))
+    second_sha = "d" * 64
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE app_releases SET payload_url=%s,payload_sha256=%s,"
+                     "payload_size=124 WHERE tag=%s",
+                     ("https://example.invalid/new-payload.tar.gz", second_sha, TAG))
+    second_policy = fleet.set_app_policy(PolicyWrite(
+        expected_revision=empty["revision"],
+        target=Artifact(tag=TAG, sha256=second_sha, size=124)))
+    second_offer = fleet.create_offer(_request(55, "e"))
+    _accept_app(registry, device_id, second_sha, 124, "qualified:55")
+    return fleet, AcceptedFallbackService(registry.db, registry.clock), \
+        device_id, second_sha, second_offer, second_policy
+
+
+def _copy_attempt_root(conn, attempt_id, device_id: str, digest: str) -> None:
+    conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,"
+                 "locator_sha256,locator_size,expected_sha256,expected_size,added_at) "
+                 "SELECT kind,identity,%s,locator_url,locator_sha256,locator_size,"
+                 "expected_sha256,expected_size,added_at FROM asset_references "
+                 "WHERE kind='player-payload' AND identity=%s AND owner=%s",
+                 (f"fleet-attempt:{attempt_id}", digest,
+                  f"fleet-fallback:{device_id}"))
 
 
 def test_offer_freezes_exact_pair_provenance_and_expiry(registry) -> None:
@@ -264,6 +324,309 @@ def test_offer_owned_references_survive_release_recut_until_expiry(registry) -> 
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM asset_references "
                             "WHERE owner=%s", (owner,)).fetchone()["n"] == 0
+
+
+def test_accepted_fallback_retains_exact_locator_after_offer_expiry(registry) -> None:
+    _seed_release(registry)
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    fleet.set_app_policy(PolicyWrite(expected_revision=0,
+                                     target=Artifact(tag=TAG, sha256=APP_SHA, size=123)))
+    fleet.create_offer(_request(51, "a"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+    retention = AcceptedFallbackService(registry.db, registry.clock)
+    with pytest.raises(FleetError, match="fallback_not_qualified"):
+        retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
+                     "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
+                     "VALUES(%s,'app',%s,%s,123,%s,'t1','qualified:51',%s)",
+                     (device_id, APP_SHA, APP_SHA, BASE_ABI, registry.clock.utc()))
+    with pytest.raises(FleetError, match="fallback_not_qualified"):
+        retention.reserve_app(device_id=device_id, sha256=APP_SHA,
+                              base_abi="sha256:" + "e" * 64)
+    fallback = retention.reserve_app(device_id=device_id, sha256=APP_SHA,
+                                     base_abi=BASE_ABI)
+    assert fallback.sha256 == APP_SHA
+    assert fallback.trust_mode == "t1"
+    assert fallback.evidence_ref == "qualified:51"
+    assert fallback.asset.format == "pw-player-data-v1"
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE app_releases SET payload_url=%s,payload_sha256=%s "
+                     "WHERE tag=%s", ("https://example.invalid/recut.tar.gz", "8" * 64, TAG))
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with pytest.raises(FleetError, match="boot_offer_expired"):
+        fleet.create_offer(_request(51, "a"))
+    with registry.db.transaction() as conn:
+        ref = conn.execute("SELECT locator_url,locator_sha256 FROM asset_references "
+                           "WHERE kind='player-payload' AND identity=%s AND owner=%s",
+                           (APP_SHA, f"fleet-fallback:{device_id}")).fetchone()
+    assert ref == {"locator_url": "https://example.invalid/payload.tar.gz",
+                   "locator_sha256": APP_SHA}
+    assert retention.reserve_app(device_id=device_id, sha256=APP_SHA,
+                                 base_abi=BASE_ABI) == fallback
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA in desired.player_payloads
+    assert not fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
+                                        evict=lambda: pytest.fail("retained fallback evicted"))
+
+
+def test_retired_device_keeps_fallback_history_but_releases_bytes(registry) -> None:
+    _seed_release(registry)
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    policy = fleet.set_app_policy(PolicyWrite(
+        expected_revision=0, target=Artifact(tag=TAG, sha256=APP_SHA, size=123)))
+    fleet.create_offer(_request(52, "b"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+        conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
+                     "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
+                     "VALUES(%s,'app',%s,%s,123,%s,'t2','qualified:52',%s)",
+                     (device_id, APP_SHA, APP_SHA, BASE_ABI, registry.clock.utc()))
+    retention = AcceptedFallbackService(registry.db, registry.clock)
+    retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    with registry.db.transaction() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (734118328,))
+        conn.execute("UPDATE devices SET retired_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), device_id))
+        retire_device_fallback_references(conn, device_id)
+        assert conn.execute("SELECT count(*) AS n FROM fleet_accepted_artifacts "
+                            "WHERE device_id=%s", (device_id,)).fetchone()["n"] == 1
+    with pytest.raises(FleetError, match="fallback_device_unavailable"):
+        retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    fleet.set_app_policy(PolicyWrite(expected_revision=policy["revision"], target=None))
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA not in desired.player_payloads
+    evicted = []
+    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
+                                    evict=lambda: evicted.append(APP_SHA))
+    assert evicted == [APP_SHA]
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM asset_references WHERE owner=%s",
+                            (f"fleet-fallback:{device_id}",)).fetchone()["n"] == 0
+
+
+def test_retired_device_override_is_history_not_a_prefetch_root(registry) -> None:
+    _seed_release(registry)
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    fleet.create_offer(_request(56, "f"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+    fleet.set_override(device_id, expected_revision=0,
+                       target=Artifact(tag=TAG, sha256=APP_SHA, size=123))
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA in desired.player_payloads
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE devices SET retired_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), device_id))
+        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
+                     "revoked_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), device_id))
+        assert conn.execute("SELECT count(*) AS n FROM fleet_device_app_overrides "
+                            "WHERE device_id=%s", (device_id,)).fetchone()["n"] == 1
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA not in desired.player_payloads
+
+
+def test_accepted_fallback_preflight_hashes_local_bytes(registry, tmp_path,
+                                                        monkeypatch) -> None:
+    _seed_release(registry)
+    blob = b"verified fallback bytes"
+    digest = hashlib.sha256(blob).hexdigest()
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE app_releases SET payload_sha256=%s,payload_size=%s "
+                     "WHERE tag=%s", (digest, len(blob), TAG))
+    fleet = FleetService(registry.db, registry.clock)
+    fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
+    fleet.set_app_policy(PolicyWrite(expected_revision=0,
+                                     target=Artifact(tag=TAG, sha256=digest,
+                                                     size=len(blob))))
+    fleet.create_offer(_request(53, "c"))
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+        conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
+                     "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
+                     "VALUES(%s,'app',%s,%s,%s,%s,'t1','qualified:53',%s)",
+                     (device_id, digest, digest, len(blob), BASE_ABI, registry.clock.utc()))
+    path = tmp_path / "fallback.tar.gz"
+    path.write_bytes(blob)
+
+    class LocalReader:
+        async def read(self, candidates):
+            fd = os.open(path, os.O_RDONLY)
+            return Opened(candidates.jobs[0], fd, len(blob), "f" * 64)
+
+    retention = AcceptedFallbackService(registry.db, registry.clock)
+    bytes_reader = OfferByteReader(LocalReader())
+    assert asyncio.run(retention.preflight_app(
+        device_id=device_id, sha256=digest, base_abi=BASE_ABI,
+        bytes_reader=bytes_reader)).sha256 == digest
+    path.write_bytes(b"wrong fallback bytes")
+    with pytest.raises(FleetError, match="offer_artifact_mismatch"):
+        asyncio.run(retention.preflight_app(device_id=device_id, sha256=digest,
+                                           base_abi=BASE_ABI, bytes_reader=bytes_reader))
+
+    # After recut and offer expiry the only exact locator/ABI source is the
+    # accepted fallback reservation. The worker can still rehydrate a wiped cache.
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE app_releases SET payload_url=%s,payload_sha256=%s "
+                     "WHERE tag=%s", ("https://example.invalid/recut.tar.gz", "8" * 64, TAG))
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with pytest.raises(FleetError, match="boot_offer_expired"):
+        fleet.create_offer(_request(53, "c"))
+    releases = PgReleaseRecords()
+    with PgTransactions(registry.db).begin() as tx:
+        assert releases.payload_abi_for(tx, digest, now=registry.clock.utc()) == BASE_ABI
+        asset = PgAssetRecords(registry.clock).get(
+            tx, AssetKey(AssetKind.PLAYER_PAYLOAD, digest))
+    assert asset is not None
+    assert [ref.owner for ref in asset.references] == [f"fleet-fallback:{device_id}"]
+
+    class FrozenOrigin:
+        async def download(self, locator, destination, *, max_bytes):
+            assert locator.url == "https://example.invalid/payload.tar.gz"
+            assert max_bytes == len(blob)
+            destination.write_bytes(blob)
+
+    async def expected_abi(sha256):
+        with PgTransactions(registry.db).begin() as tx:
+            return releases.payload_abi_for(tx, sha256, now=registry.clock.utc())
+
+    monkeypatch.setattr("central.assets.handlers.verify_archive",
+                        lambda _path: {"base_abi": BASE_ABI})
+    store = CacheStore(CacheLayout(tmp_path / "rehydrated-cache"))
+    handler = FetchPlayerPayloadHandler(
+        production=AssetProduction(store=store, records=PgAssetRecords(registry.clock),
+                                   transactions=PgTransactions(registry.db)),
+        origin=FrozenOrigin(), expected_abi=expected_abi)
+    asyncio.run(handler.handle(FetchPlayerPayload(sha256=digest)))
+    assert store.layout.path(AssetKey(AssetKind.PLAYER_PAYLOAD, digest)).read_bytes() == blob
+
+
+def test_accepted_fallback_reservation_is_idempotent_and_rotates_one_root(registry) -> None:
+    _, retention, device_id, second_sha, _, _ = _two_accepted_payloads(registry)
+    first = retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    assert retention.reserve_app(device_id=device_id, sha256=APP_SHA,
+                                 base_abi=BASE_ABI) == first
+    second = retention.reserve_app(device_id=device_id, sha256=second_sha,
+                                   base_abi=BASE_ABI)
+    assert second.sha256 == second_sha
+    with registry.db.transaction() as conn:
+        roots = conn.execute("SELECT identity,locator_url FROM asset_references "
+                             "WHERE kind='player-payload' AND owner=%s",
+                             (f"fleet-fallback:{device_id}",)).fetchall()
+        accepted = conn.execute("SELECT count(*) AS n FROM fleet_accepted_artifacts "
+                                "WHERE device_id=%s AND kind='app'", (device_id,)
+                                ).fetchone()["n"]
+    assert roots == [{"identity": second_sha,
+                      "locator_url": "https://example.invalid/new-payload.tar.gz"}]
+    assert accepted == 2  # Rotation changes byte retention, never historical acceptance.
+
+
+def test_accepted_fallback_rotation_refuses_unfinished_attempt(registry) -> None:
+    _, retention, device_id, second_sha, offer, policy = _two_accepted_payloads(registry)
+    retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    attempt_id = uuid4()
+    with registry.db.transaction() as conn:
+        generation = conn.execute("SELECT generation FROM fleet_device_lifecycle "
+                                  "WHERE device_id=%s", (device_id,)).fetchone()["generation"]
+        conn.execute("INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
+                     "device_generation,desired_revision,target_sha256,fallback_sha256,"
+                     "phase,created_at,updated_at) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,%s,'prepared',%s,%s)",
+                     (attempt_id, device_id, offer["offer_id"], generation,
+                      policy["revision"],
+                      second_sha, APP_SHA, registry.clock.utc(), registry.clock.utc()))
+    with pytest.raises(FleetError, match="fallback_rotation_blocked_by_attempt"):
+        retention.reserve_app(device_id=device_id, sha256=second_sha, base_abi=BASE_ABI)
+    with registry.db.transaction() as conn:
+        roots = conn.execute("SELECT identity FROM asset_references WHERE owner=%s",
+                             (f"fleet-fallback:{device_id}",)).fetchall()
+    assert roots == [{"identity": APP_SHA}]
+    with registry.db.transaction() as conn:
+        _copy_attempt_root(conn, attempt_id, device_id, APP_SHA)
+    retention.reserve_app(device_id=device_id, sha256=second_sha, base_abi=BASE_ABI)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT identity FROM asset_references WHERE owner=%s",
+                            (f"fleet-fallback:{device_id}",)).fetchall() == [
+                                {"identity": second_sha}]
+        assert conn.execute("SELECT identity FROM asset_references WHERE owner=%s",
+                            (f"fleet-attempt:{attempt_id}",)).fetchall() == [
+                                {"identity": APP_SHA}]
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA in desired.player_payloads  # The active attempt's own root remains.
+    assert not FleetService(registry.db, registry.clock).evict_if_unretained(
+        kind="app", content_key=APP_SHA,
+        evict=lambda: pytest.fail("active attempt bytes evicted"))
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s WHERE attempt_id=%s",
+                     (registry.clock.utc(), attempt_id))
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA not in desired.player_payloads
+    evicted = []
+    assert FleetService(registry.db, registry.clock).evict_if_unretained(
+        kind="app", content_key=APP_SHA, evict=lambda: evicted.append(APP_SHA))
+    assert evicted == [APP_SHA]
+
+
+def test_issued_attempt_retains_exact_bytes_across_revocation_until_release(registry) -> None:
+    fleet, retention, device_id, second_sha, offer, policy = _two_accepted_payloads(registry)
+    retention.reserve_app(device_id=device_id, sha256=APP_SHA, base_abi=BASE_ABI)
+    attempt_id = uuid4()
+    with registry.db.transaction() as conn:
+        generation = conn.execute("SELECT generation FROM fleet_device_lifecycle "
+                                  "WHERE device_id=%s", (device_id,)).fetchone()["generation"]
+        conn.execute("INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
+                     "device_generation,desired_revision,target_sha256,fallback_sha256,"
+                     "phase,command_id,drain_id,created_at,updated_at) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,%s,'stop_committed',%s,%s,%s,%s)",
+                     (attempt_id, device_id, offer["offer_id"], generation,
+                      policy["revision"], second_sha, APP_SHA, uuid4(), uuid4(),
+                      registry.clock.utc(), registry.clock.utc()))
+        _copy_attempt_root(conn, attempt_id, device_id, APP_SHA)
+    with registry.db.transaction() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (734118328,))
+        conn.execute("UPDATE devices SET retired_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), device_id))
+        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
+                     "revoked_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), device_id))
+        conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s,phase='expired_unknown' "
+                     "WHERE attempt_id=%s", (registry.clock.utc(), attempt_id))
+        retire_device_fallback_references(conn, device_id)
+    registry.clock.advance(OFFER_TTL_SECONDS)
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA in desired.player_payloads
+    assert not fleet.evict_if_unretained(
+        kind="app", content_key=APP_SHA,
+        evict=lambda: pytest.fail("unresolved issued attempt evicted"))
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE fleet_app_attempts SET root_released_at=%s "
+                     "WHERE attempt_id=%s", (registry.clock.utc(), attempt_id))
+    with PgTransactions(registry.db).begin() as tx:
+        desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
+    assert APP_SHA not in desired.player_payloads
+    evicted = []
+    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
+                                    evict=lambda: evicted.append(APP_SHA))
+    assert evicted == [APP_SHA]
 
 
 def test_repeated_exact_byte_reads_consume_a_separate_quota(registry) -> None:

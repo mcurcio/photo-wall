@@ -7,18 +7,20 @@ facts in an offer; it never treats a mutable release tag or an HTTP 200 as deliv
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
 from central.db import Database
+from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.models import (
+    T0_AUDIENCE,
     Artifact,
     BaselineWrite,
     CheckIn,
     CheckInV2,
     FleetError,
+    OfferAsset,
     OfferRequest,
     PolicyWrite,
 )
@@ -34,8 +36,7 @@ from contracts.player_payload import MAX_ARCHIVE_BYTES
 from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import Clock
 
-AUDIENCE = "photo-wall-central-t0"  # a label, deliberately not an authenticated audience
-_OFFER_LOCK = 734118328
+AUDIENCE = T0_AUDIENCE  # compatibility alias for existing service callers
 _OBS_LOCK_CLASS = 734118329
 _DAY_SECONDS = 86400
 _OBS_TTL_SECONDS = 30 * _DAY_SECONDS
@@ -60,16 +61,6 @@ class DisabledCommandAuthority:
     def authorize(self, *, device_id: str, boot_id: UUID, attempt_id: UUID,
                   policy_revision: int, drain_id: UUID) -> UUID:
         raise FleetError("command_trust_unapproved", 409)
-
-
-@dataclass(frozen=True, slots=True)
-class OfferAsset:
-    kind: str
-    tag: str
-    content_key: str
-    sha256: str
-    size: int
-    format: str | None = None
 
 
 def _artifact(row: dict[str, Any] | None, *, prefix: str = "target") -> dict | None:
@@ -200,7 +191,7 @@ class FleetService:
 
     def set_app_policy(self, request: PolicyWrite) -> dict:
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(conn)
             row = conn.execute("SELECT revision FROM fleet_app_policy WHERE singleton FOR UPDATE").fetchone()
             current = row["revision"] if row else 0
             if current != request.expected_revision:
@@ -226,7 +217,7 @@ class FleetService:
     def set_override(self, device_id: str, *, expected_revision: int,
                      target: Artifact | None) -> dict:
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(conn)
             device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
                                   (device_id,)).fetchone()
             if device is None or device["retired_at"] is not None:
@@ -262,7 +253,7 @@ class FleetService:
     def set_base_baseline(self, request: BaselineWrite) -> dict:
         """An operator selection, not an automatic frontier or acceptance event."""
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(conn)
             old = conn.execute("SELECT revision FROM fleet_base_policy WHERE singleton FOR UPDATE").fetchone()
             if (old["revision"] if old else 0) != request.expected_revision:
                 raise FleetError("policy_revision_conflict")
@@ -318,10 +309,10 @@ class FleetService:
         # policy/byte preflight fails. Idempotency must not make hashing free.
         with self.db.transaction() as quota_conn:
             self._claim_quota(quota_conn, device_id=device_id, kind="offer", now=now)
-            quota_conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(quota_conn)
             self._retire_expired_offer_assets(quota_conn, now)
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(conn)
             existing = conn.execute(
                 "SELECT * FROM fleet_boot_offers WHERE installation_audience=%s "
                 "AND device_id=%s AND (kernel_boot_id=%s OR boot_nonce=%s) FOR UPDATE",
@@ -462,7 +453,7 @@ class FleetService:
             raise ValueError("invalid_asset_identity")
         now = self.clock.utc()
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            lock_fleet_assets_in(conn)
             root = conn.execute(
                 "SELECT 1 FROM fleet_offer_artifact_roots WHERE kind=%s AND content_key=%s "
                 "AND retain_until>%s LIMIT 1", (kind, content_key, now),
@@ -470,17 +461,30 @@ class FleetService:
             if root:
                 return False
             accepted = conn.execute(
-                "SELECT 1 FROM fleet_accepted_artifacts WHERE kind=%s AND content_key=%s "
-                "LIMIT 1", (kind, content_key),
+                "SELECT 1 FROM fleet_accepted_artifacts AS accepted "
+                "JOIN devices AS device ON device.device_id=accepted.device_id "
+                "JOIN fleet_device_lifecycle AS lifecycle "
+                "ON lifecycle.device_id=accepted.device_id "
+                "WHERE accepted.kind=%s AND accepted.content_key=%s "
+                "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL "
+                "AND (%s='base' OR EXISTS ("
+                "SELECT 1 FROM asset_references AS ref WHERE ref.kind='player-payload' "
+                "AND ref.identity=accepted.content_key "
+                "AND ref.owner='fleet-fallback:' || accepted.device_id)) LIMIT 1",
+                (kind, content_key, kind),
             ).fetchone()
             if accepted:
                 return False
             if kind == "app":
                 attempt = conn.execute(
-                    "SELECT 1 FROM fleet_app_attempts WHERE "
-                    "(target_sha256=%s OR fallback_sha256=%s) AND phase NOT IN "
-                    "('operational','observed_failed','expired_unknown','recovery_required') "
-                    "LIMIT 1", (content_key, content_key),
+                    "SELECT 1 FROM fleet_artifact_retention_attempts AS attempt "
+                    "JOIN asset_references AS ref ON ref.kind='player-payload' "
+                    "AND ref.owner='fleet-attempt:' || attempt.attempt_id::text "
+                    "AND ref.identity=%s AND ref.locator_sha256=ref.identity "
+                    "AND ref.expected_sha256=ref.identity "
+                    "AND ref.locator_size=ref.expected_size "
+                    "WHERE (attempt.target_sha256=%s OR attempt.fallback_sha256=%s) "
+                    "LIMIT 1", (content_key, content_key, content_key),
                 ).fetchone()
                 if attempt:
                     return False

@@ -149,8 +149,13 @@ class PgReleaseRecords:
             "SELECT target_sha256 AS digest, target_format AS format "
             "FROM fleet_app_policy WHERE target_sha256 IS NOT NULL "
             "UNION ALL "
-            "SELECT target_sha256 AS digest, target_format AS format "
-            "FROM fleet_device_app_overrides WHERE target_sha256 IS NOT NULL"
+            "SELECT override.target_sha256 AS digest, override.target_format AS format "
+            "FROM fleet_device_app_overrides AS override "
+            "JOIN devices AS device ON device.device_id=override.device_id "
+            "JOIN fleet_device_lifecycle AS lifecycle "
+            "ON lifecycle.device_id=override.device_id "
+            "WHERE override.target_sha256 IS NOT NULL AND device.retired_at IS NULL "
+            "AND lifecycle.revoked_at IS NULL"
         ).fetchall()
         bases = conn.execute(
             "SELECT r.base_tarball_sha256 AS digest FROM fleet_base_policy AS b "
@@ -163,6 +168,32 @@ class PgReleaseRecords:
             "JOIN fleet_boot_offers AS offers ON offers.offer_id=roots.offer_id "
             "WHERE offers.expires_at>%s", (now,),
         ).fetchall()
+        # A reserved exact fallback remains wanted after its source offer expires.
+        # A historical acceptance on retired equipment does not retain bytes forever.
+        fallbacks = conn.execute(
+            "SELECT accepted.content_key AS digest FROM fleet_accepted_artifacts AS accepted "
+            "JOIN devices AS device ON device.device_id=accepted.device_id "
+            "JOIN fleet_device_lifecycle AS lifecycle "
+            "ON lifecycle.device_id=accepted.device_id "
+            "JOIN asset_references AS ref ON ref.kind='player-payload' "
+            "AND ref.identity=accepted.content_key "
+            "AND ref.owner='fleet-fallback:' || accepted.device_id "
+            "WHERE accepted.kind='app' AND accepted.content_key=accepted.sha256 "
+            "AND accepted.base_abi IS NOT NULL AND accepted.trust_mode IN ('t1','t2') "
+            "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL"
+        ).fetchall()
+        # An in-progress attempt may hold exact bytes independently of the device's
+        # accepted fallback. Its owned reference is required to rehydrate after a wipe.
+        attempts = conn.execute(
+            "SELECT ref.identity AS digest "
+            "FROM fleet_artifact_retention_attempts AS attempt "
+            "JOIN asset_references AS ref ON ref.kind='player-payload' "
+            "AND ref.owner='fleet-attempt:' || attempt.attempt_id::text "
+            "AND (ref.identity=attempt.target_sha256 "
+            "OR ref.identity=attempt.fallback_sha256) "
+            "WHERE ref.locator_sha256=ref.identity AND ref.expected_sha256=ref.identity "
+            "AND ref.locator_size=ref.expected_size"
+        ).fetchall()
         debs = {row["digest"] for row in policy if row["format"] == "player-deb"}
         payloads = {row["digest"] for row in policy
                     if row["format"] == "pw-player-data-v1"}
@@ -174,6 +205,8 @@ class PgReleaseRecords:
                 payloads.add(row["digest"])
             else:
                 debs.add(row["digest"])
+        payloads.update(row["digest"] for row in fallbacks)
+        payloads.update(row["digest"] for row in attempts)
         return FleetDesiredAssets(frozenset(base_keys), frozenset(debs),
                                   frozenset(payloads))
 
@@ -183,9 +216,26 @@ class PgReleaseRecords:
             "SELECT payload_base_abi AS abi FROM app_releases WHERE payload_sha256=%s "
             "UNION ALL "
             "SELECT app_base_abi AS abi FROM fleet_boot_offers "
-            "WHERE offer_schema=2 AND app_sha256=%s AND expires_at>%s"
+            "WHERE offer_schema=2 AND app_sha256=%s AND expires_at>%s "
+            "UNION ALL "
+            "SELECT accepted.base_abi AS abi "
+            "FROM fleet_accepted_artifacts AS accepted "
+            "JOIN devices AS device ON device.device_id=accepted.device_id "
+            "JOIN fleet_device_lifecycle AS lifecycle "
+            "ON lifecycle.device_id=accepted.device_id "
+            "JOIN asset_references AS ref ON ref.kind='player-payload' "
+            "AND ref.identity=accepted.content_key "
+            "AND ref.owner='fleet-fallback:' || accepted.device_id "
+            "WHERE accepted.kind='app' AND accepted.sha256=%s "
+            "AND accepted.content_key=accepted.sha256 "
+            "AND accepted.trust_mode IN ('t1','t2') "
+            "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL "
+            "AND ref.locator_sha256=accepted.sha256 "
+            "AND ref.locator_size=accepted.size "
+            "AND ref.expected_sha256=accepted.sha256 "
+            "AND ref.expected_size=accepted.size"
             ") AS claims WHERE abi IS NOT NULL",
-            (sha256, sha256, now),
+            (sha256, sha256, now, sha256),
         ).fetchall()
         return rows[0]["abi"] if len(rows) == 1 else None
 

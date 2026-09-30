@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import subprocess
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from typing import Protocol
 from appliance.app_launcher import CONFIG as PLAYER_CONFIG
 from appliance.app_launcher import PYTHON as PLAYER_PYTHON
 from appliance.app_payload import PayloadError, stage_payload, verify_root
+from contracts.player_payload import MAX_EXPANDED_BYTES, MAX_MANIFEST_BYTES, MAX_MEMBERS
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
 
@@ -32,6 +34,13 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 _STATES = frozenset({"intent_stop", "stopped", "activated", "start_requested",
                      "committed", "rolled_back", "recovery_required"})
+# Provisional admission reserves, not a physical Pi capacity qualification.
+DEFAULT_MEMORY_HEADROOM_BYTES = 512 * 1024 * 1024
+DEFAULT_FILESYSTEM_HEADROOM_BYTES = 64 * 1024 * 1024
+# File contents plus manifest and a conservative allowance for tmpfs pages,
+# directory entries, and the temporary root used before atomic publication.
+STAGING_ALLOWANCE_BYTES = (MAX_EXPANDED_BYTES + MAX_MANIFEST_BYTES
+                           + 2 * MAX_MEMBERS * 4096)
 
 
 class ExecutorError(ValueError):
@@ -54,6 +63,35 @@ class SelectedSnapshot:
     attempt_id: str
     state: str
     digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CapacitySnapshot:
+    filesystem_free_bytes: int
+    memory_available_bytes: int
+
+
+class CapacityProbe(Protocol):
+    def snapshot(self, roots: Path) -> CapacitySnapshot: ...
+
+
+class LinuxCapacityProbe:
+    """Observe writable tmpfs space and reclaimable system RAM at admission."""
+
+    def __init__(self, meminfo: Path = Path("/proc/meminfo")) -> None:
+        self.meminfo = meminfo
+
+    def snapshot(self, roots: Path) -> CapacitySnapshot:
+        try:
+            filesystem = os.statvfs(roots)
+            raw = self.meminfo.read_bytes()
+        except OSError as exc:
+            raise ExecutorError("app_capacity_unavailable") from exc
+        match = re.search(rb"^MemAvailable:\s*([0-9]+) kB\s*$", raw, re.MULTILINE)
+        if match is None:
+            raise ExecutorError("app_capacity_unavailable")
+        return CapacitySnapshot(filesystem.f_bavail * filesystem.f_frsize,
+                                int(match.group(1)) * 1024)
 
 
 class PlayerService(Protocol):
@@ -128,10 +166,39 @@ class AppExecutor:
 
     def __init__(self, *, roots: Path = ROOTS, journal: Path = JOURNAL,
                  lock: Path = LOCK, legacy_override: Path = LEGACY_UNIT_OVERRIDE,
-                 service: PlayerService | None = None) -> None:
+                 service: PlayerService | None = None,
+                 capacity_probe: CapacityProbe | None = None,
+                 protected_memory_bytes: int = DEFAULT_MEMORY_HEADROOM_BYTES,
+                 protected_filesystem_bytes: int = DEFAULT_FILESYSTEM_HEADROOM_BYTES) -> None:
+        if (type(protected_memory_bytes) is not int or protected_memory_bytes < 0
+                or type(protected_filesystem_bytes) is not int
+                or protected_filesystem_bytes < 0):
+            raise ValueError("protected_capacity_invalid")
         self.roots, self.journal, self.lock = roots, journal, lock
         self.legacy_override = legacy_override
         self.service = service or SystemdPlayer(roots)
+        self.capacity_probe = capacity_probe or LinuxCapacityProbe()
+        self.protected_memory_bytes = protected_memory_bytes
+        self.protected_filesystem_bytes = protected_filesystem_bytes
+
+    def _require_capacity(self, *, staging_bytes: int = 0,
+                          archive_copy_bytes: int = 0) -> None:
+        """Refuse a healthy-app stop unless both writable space and RAM retain headroom.
+
+        The pre-stage check covers a complete extra expanded root plus a possible
+        in-memory archive copy. The second check uses no speculative growth and
+        runs after both exact roots have been verified, immediately before intent.
+        These are admission bounds; the physical peak still needs measurement.
+        """
+        snapshot = self.capacity_probe.snapshot(self.roots)
+        if (type(snapshot.filesystem_free_bytes) is not int
+                or snapshot.filesystem_free_bytes <
+                self.protected_filesystem_bytes + staging_bytes):
+            raise ExecutorError("app_filesystem_capacity_insufficient")
+        if (type(snapshot.memory_available_bytes) is not int
+                or snapshot.memory_available_bytes <
+                self.protected_memory_bytes + staging_bytes + archive_copy_bytes):
+            raise ExecutorError("app_memory_capacity_insufficient")
 
     def _read(self, path: Path) -> dict | None:
         try:
@@ -369,9 +436,23 @@ class AppExecutor:
                             raise ExecutorError("attempt_outcome_unconfirmed")
                         verify_root(self.roots / selected, expected_abi=expected_base_abi)
                         return previous.state
+                fallback = self._active()
+                if self.service.active():
+                    running = self.service.running_digest()
+                    if running is None:
+                        raise ExecutorError("player_process_unconfirmed")
+                    if fallback is None or running != fallback:
+                        raise ExecutorError("unmanaged_player_active")
+                    # A prior refusal may have left a fully published root. The
+                    # stage port re-verifies it without extracting or copying the
+                    # archive, so retries need only the protected headroom.
+                    already_staged = (_SHA256.fullmatch(sha256) is not None
+                                      and (self.roots / sha256).exists())
+                    self._require_capacity(
+                        staging_bytes=0 if already_staged else STAGING_ALLOWANCE_BYTES,
+                        archive_copy_bytes=0 if already_staged else size)
                 target = stage_payload(payload, sha256=sha256, size=size,
                                        expected_abi=expected_base_abi, roots=self.roots)
-                fallback = self._active()
                 if fallback is not None:
                     verify_root(self.roots / fallback, expected_abi=expected_base_abi)
                 if self.service.active():
@@ -380,6 +461,7 @@ class AppExecutor:
                         raise ExecutorError("player_process_unconfirmed")
                     if fallback is None or running != fallback:
                         raise ExecutorError("unmanaged_player_active")
+                    self._require_capacity()
                 row = {"schema": 1, "attempt_id": attempt_id, "target": target.name,
                        "fallback": fallback}
                 self._write_journal(row, "intent_stop")
