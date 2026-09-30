@@ -314,10 +314,14 @@ def test_systemd_running_digest_requires_main_pid_exact_base_launcher_argv(
     service = SystemdPlayer(roots=roots, proc_root=tmp_path / "proc")
     cmdline = proc / "cmdline"
     cmdline.write_bytes(b"/usr/bin/python3\x00-I\x00-B\x00" +
-                        str(roots / digest / "app").encode() + b"\x00")
+                        str(roots / digest / "app").encode() +
+                        b"\x00--config\x00/etc/photo-wall/public.json\x00")
     assert service.running_digest() == digest
+    cmdline.write_bytes(cmdline.read_bytes() + b"--extra\x00")
+    assert service.running_digest() is None
     cmdline.write_bytes(b"/usr/bin/python3\x00-I\x00-B\x00" +
-                        str(roots / ("c" * 64) / "app").encode() + b"\x00")
+                        str(roots / ("c" * 64) / "app").encode() +
+                        b"\x00--config\x00/etc/photo-wall/public.json\x00")
     assert service.running_digest() != digest
     cmdline.write_bytes(b"/usr/bin/python3\x00-I\x00-B\x00/usr/lib/photo-wall-player\x00")
     assert service.running_digest() is None

@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
 
+from appliance.app_launcher import CONFIG as PLAYER_CONFIG
+from appliance.app_launcher import PYTHON as PLAYER_PYTHON
 from appliance.app_payload import PayloadError, stage_payload, verify_root
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
@@ -72,10 +74,14 @@ class SystemdPlayer:
             pid_text = shown.stdout.strip()
             if shown.returncode != 0 or not pid_text.isdecimal() or int(pid_text) <= 0:
                 return None
-            argv = (self.proc_root / pid_text / "cmdline").read_bytes()[:4096].split(b"\x00")
+            raw = (self.proc_root / pid_text / "cmdline").read_bytes()
         except (OSError, subprocess.SubprocessError):
             return None
-        if len(argv) < 4 or argv[:3] != [b"/usr/bin/python3", b"-I", b"-B"]:
+        if not 0 < len(raw) <= 4096 or not raw.endswith(b"\x00"):
+            return None
+        argv = raw.split(b"\x00")
+        if (len(argv) != 7 or argv[:3] != [PLAYER_PYTHON.encode(), b"-I", b"-B"]
+                or argv[4:] != [b"--config", PLAYER_CONFIG.encode(), b""]):
             return None
         try:
             app_path = argv[3].decode("ascii")
