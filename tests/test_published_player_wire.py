@@ -6,6 +6,7 @@ downloaded assets and sets it, making this matrix a required Postgres gate.
 
 import json
 import os
+import selectors
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from test_coordination import schedule
-from test_registry import ADMIN, enroll, frame
+from test_registry import ADMIN, frame
 
 from central.app import create_app
 from contracts.models import Calibration
@@ -45,26 +46,79 @@ def package_wire(root: Path, mode: str, body: dict | str | bytes) -> dict:
     return received
 
 
+def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool) -> dict:
+    """Relay the released PlayerService.enroll calls to real Central HTTP routes."""
+    rounds = 2 if cold else 1
+    process = subprocess.Popen(
+        [sys.executable, "-I", str(SCRIPT), "handshake", str(root), str(rounds)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    registrations = []
+    expected_paths = ("/v1/enrollment/challenge", "/v1/enrollment/register")
+    try:
+        assert process.stdin is not None and process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            for _ in range(rounds):
+                for path in expected_paths:
+                    assert selector.select(timeout=15), "published Player enrollment timed out"
+                    line = process.stdout.readline()
+                    assert line, "published Player enrollment exited before HTTP request"
+                    request = json.loads(line)
+                    assert request["event"] == "request"
+                    assert request["source"] == str(root / "player/service.py")
+                    assert (request["method"], request["path"], request["authenticated"]) == (
+                        "POST", path, False)
+                    response = client.post(path, json=request["body"])
+                    assert response.status_code == 200, response.text
+                    process.stdin.write(json.dumps({"status": response.status_code,
+                                                    "body": response.json()}) + "\n")
+                    process.stdin.flush()
+                    if path.endswith("/register"):
+                        registrations.append(response.json())
+                assert selector.select(timeout=15), "published Player registration timed out"
+                line = process.stdout.readline()
+                assert line, "published Player omitted parsed registration"
+                registered = json.loads(line)
+                assert registered == {"event": "registered",
+                                      "source": str(root / "player/service.py"),
+                                      "player_id": registrations[-1]["player_id"],
+                                      "authority_epoch": registrations[-1]["authority_epoch"],
+                                      "has_token": True}
+        process.stdin.close()
+        assert process.wait(timeout=15) == 0, process.stderr.read()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+    assert len(registrations) == rounds
+    if cold:
+        assert registrations[0]["player_id"] == registrations[1]["player_id"]
+        assert registrations[1]["authority_epoch"] == registrations[0]["authority_epoch"] + 1
+    return registrations[-1]
+
+
 @pytest.mark.parametrize("player", PLAYERS, ids=lambda value: value.tag)
 @pytest.mark.parametrize("cold", (False, True), ids=("warm", "cold-reenrollment"))
 @pytest.mark.parametrize("bound", (False, True), ids=("unbound", "bound-active-plan"))
 def test_published_player_accepts_central_legacy_transport_matrix(
         published_directory, registry, player, cold, bound):
     root = package_root(published_directory, player)
-    identity, key, enrollment = enroll(registry)
-    if cold:
-        identity, _, _ = enroll(registry, key=key, device_id=enrollment.device_id)
-        assert identity["authority_epoch"] == 2
+    with TestClient(create_app(registry.db, registry.clock, ADMIN)) as enrollment_client:
+        identity = enroll_from_published_package(enrollment_client, root, cold=cold)
+    # A new Central instance serves the retained token from a published
+    # package's actual HTTP handshake and the same database-backed selection.
+    app = create_app(registry.db, registry.clock, ADMIN)
     if bound:
         frame(registry, "frame-0")
         registry.bind("frame-0", identity["player_id"], "HDMI-A-1",
                       expected_generation=0)
         registry.calibrate("frame-0", "commit", 1, Calibration(),
                            expected_generation=1)
-    # A new Central app instance serves an already-issued warm token or a freshly
-    # re-enrolled epoch through the same database-backed compatibility projection.
-    app = create_app(registry.db, registry.clock, ADMIN)
-    if bound:
         schedule(app.state.coordinator, ("frame-0",), starts=1010)
         registry.clock.advance(6)
     headers = {"Authorization": "Bearer " + identity["token"]}
@@ -75,6 +129,12 @@ def test_published_player_accepts_central_legacy_transport_matrix(
         assert set(body) == STATE_FIELDS
         parsed_rest = package_wire(root, "rest", rest.content)
         assert parsed_rest["accepted"] and parsed_rest["has_plan"] is bound
+        late_hello = client.post("/v1/player/hello", json={
+            "authority_epoch": identity["authority_epoch"], "schemas": [1, 2],
+            "capabilities": ["identify_output"],
+        }, headers=headers)
+        assert late_hello.status_code == 409
+        assert late_hello.json() == {"error": "control_negotiation_closed"}
         with client.websocket_connect("/v1/player/session", headers=headers) as socket:
             raw_message = socket.receive_text()
             message = json.loads(raw_message)

@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """Pin and exercise the exact v0.12/v0.13 published Player package wire models.
 
-`prepare` is opt-in locally and mandatory in CI. `parse` and `readiness` run in a
+`prepare` is opt-in locally and mandatory in CI. The child commands run in a
 fresh isolated Python interpreter with the extracted package first on sys.path.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
+import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 
 @dataclass(frozen=True)
@@ -91,19 +96,39 @@ def prepare(directory: Path) -> None:
             extracted.rename(root)
 
 
-def _child(root: Path, mode: str) -> None:
-    """Load the extracted package, never an editable checkout, for one wire exchange."""
+def _load_package(root: Path) -> Path:
+    """Require exact-package imports even when an editable checkout is installed."""
     root = root.resolve(strict=True)
     sys.path.insert(0, str(root))
     import contracts.models  # noqa: PLC0415
     import player.service  # noqa: PLC0415
-    from contracts.models import Readiness  # noqa: PLC0415
-    from player.service import State, _json  # noqa: PLC0415
-
     source = Path(player.service.__file__).resolve(strict=True)
     contract_source = Path(contracts.models.__file__).resolve(strict=True)
     if source != root / "player/service.py" or contract_source != root / "contracts/models.py":
         raise ValueError("published_player_import_escaped_package")
+    _require_package_imports(root)
+    return source
+
+
+def _require_package_imports(root: Path) -> None:
+    """Do not let a missing packaged dependency resolve to the checkout `.pth`."""
+    root = root.resolve(strict=True)
+    for name, module in tuple(sys.modules.items()):
+        if name in ("player", "contracts", "uplink") or name.startswith(
+            ("player.", "contracts.", "uplink.")
+        ):
+            source = getattr(module, "__file__", None)
+            if source is None or not Path(source).resolve(strict=True).is_relative_to(root):
+                raise ValueError(f"published_player_import_escaped_package:{name}")
+
+
+def _child(root: Path, mode: str) -> None:
+    """Apply the released REST/WS parser or readiness contract to one wire body."""
+    source = _load_package(root)
+    from contracts.models import Readiness  # noqa: PLC0415
+    from player.service import State, _json  # noqa: PLC0415
+    _require_package_imports(root)
+
     body = _json(sys.stdin.buffer.read())
     if mode == "readiness":
         report = Readiness.model_validate(body)
@@ -123,6 +148,57 @@ def _child(root: Path, mode: str) -> None:
                           "commits": len(state.commits)}))
 
 
+def _handshake(root: Path, rounds: int) -> None:
+    """Run the published PlayerService.enroll method over a parent-relayed HTTP port.
+
+    The parent sends real Central HTTP responses on stdin. The Player's output
+    messages name the method, path and exact package-built JSON body. Keep one
+    process/ephemeral key across two rounds to exercise cold re-enrollment.
+    """
+    source = _load_package(root)
+    from contracts.enrollment import OutputReport  # noqa: PLC0415
+    from player.central_link import Session  # noqa: PLC0415
+    from player.identity import load_identity  # noqa: PLC0415
+    from player.service import BootContext, PlayerService  # noqa: PLC0415
+    _require_package_imports(root)
+
+    identity = load_identity()
+    device_id = "device-" + hashlib.sha256(bytes.fromhex(identity.public_key)).hexdigest()
+    outputs = (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),
+               OutputReport(output_id="HDMI-A-2", width_px=1920, height_px=1080))
+
+    async def request(method, path, *, body, authenticated):
+        print(json.dumps({"event": "request", "source": str(source), "method": method,
+                          "path": path, "body": body, "authenticated": authenticated}),
+              flush=True)
+        line = sys.stdin.readline()
+        if not line:
+            raise ValueError("published_player_http_response_missing")
+        response = json.loads(line)
+        if response["status"] != 200:
+            raise ValueError(f"published_player_http_refused:{path}:{response['status']}")
+        return response["body"]
+
+    probe = SimpleNamespace(
+        identity=identity, outputs=outputs, request=request,
+        _session=Session(object()), _lock=threading.RLock(), _outgoing=deque(),
+        executor=object(), _offered=False, _jobs=(),
+    )
+    for _ in range(rounds):
+        probe.boot_context = BootContext.model_validate({
+            "schema": 2, "ticket_id": None, "device_id": device_id,
+            "boot_id": str(uuid.uuid4()), "release_id": "a" * 64,
+            "trial": False, "persistence": "volatile", "fault": None,
+        })
+        probe.session = probe._session
+        asyncio.run(PlayerService.enroll(probe))
+        registered = probe._session.registration
+        print(json.dumps({"event": "registered", "source": str(source),
+                          "player_id": registered.player_id,
+                          "authority_epoch": registered.authority_epoch,
+                          "has_token": bool(registered.token)}), flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     action = parser.add_subparsers(dest="action", required=True)
@@ -130,11 +206,16 @@ def main() -> None:
     child = action.add_parser("child")
     child.add_argument("root", type=Path)
     child.add_argument("mode", choices=("rest", "websocket", "readiness"))
+    handshake = action.add_parser("handshake")
+    handshake.add_argument("root", type=Path)
+    handshake.add_argument("rounds", type=int, choices=(1, 2))
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.directory)
-    else:
+    elif args.action == "child":
         _child(args.root, args.mode)
+    else:
+        _handshake(args.root, args.rounds)
 
 
 if __name__ == "__main__":

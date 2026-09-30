@@ -491,6 +491,12 @@ class FleetService:
             raise FleetError("invalid_serial", 422)
         device_id = device_id_for_serial(serial)
         assert device_id is not None
+        # T0 is unauthenticated. Charge every syntactically valid check-in before
+        # any idempotency/offer lookup or per-boot lock, so cheap duplicate and
+        # mismatched-offer traffic cannot bypass the daily DB admission cap.
+        now = self.clock.utc()
+        with self.db.transaction() as quota_conn:
+            self._claim_quota(quota_conn, device_id=device_id, kind="observation", now=now)
         with self.db.transaction() as conn:
             conn.execute("SELECT pg_advisory_xact_lock(%s,hashtext(%s))",
                          (_OBS_LOCK_CLASS, device_id + str(request.kernel_boot_id)))
@@ -511,8 +517,6 @@ class FleetService:
             if last is not None and request.observation_sequence <= last:
                 return {"accepted": False, "reason": "stale_or_duplicate",
                         "next_sequence": last + 1 if last < 2147483647 else None}
-            now = self.clock.utc()
-            self._claim_quota(conn, device_id=device_id, kind="observation", now=now)
             self._claim_new_device(conn, device_id=device_id, serial=serial, now=now)
             conn.execute("INSERT INTO fleet_os_observations(device_id,kernel_boot_id,"
                          "agent_incarnation,observation_sequence,offer_id,base_digest,phase,"

@@ -64,7 +64,11 @@ class SystemdPlayer:
     def active(self) -> bool:
         result = subprocess.run(["systemctl", "is-active", "--quiet", UNIT],
                                 check=False, timeout=5)
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if result.returncode == 3:  # LSB: known inactive/failed unit
+            return False
+        raise ExecutorError("player_unit_state_unknown")
 
     def running_digest(self) -> str | None:
         """Read MainPID's actual argv; a pointer and an active unit do not prove a process."""
@@ -244,6 +248,21 @@ class AppExecutor:
                 and self.service.running_digest() == fallback):
             self._write_journal(row, "rolled_back")
             return
+        if self.service.active():
+            observed = self.service.running_digest()
+            if observed is None:
+                raise ExecutorError("player_process_unconfirmed")
+            # An earlier sample may have raced PID1's state. Recheck the now
+            # identified process before deciding that a stop is necessary.
+            if (target_valid and row["state"] not in ("rolled_back", "recovery_required")
+                    and self._active() == target and observed == target):
+                self._write_journal(row, "committed")
+                return
+            if (fallback is not None and row["state"] in (
+                    "intent_stop", "stopped", "rolled_back", "recovery_required")
+                    and self._active() == fallback and observed == fallback):
+                self._write_journal(row, "rolled_back")
+                return
         # Stop waits for PID1's previous stop/start job and kills any surviving Player.
         self.service.stop()
         chosen = (target if row["state"] == "committed" and target_valid else
@@ -349,8 +368,12 @@ class AppExecutor:
                 fallback = self._active()
                 if fallback is not None:
                     verify_root(self.roots / fallback, expected_abi=expected_base_abi)
-                elif self.service.active():
-                    raise ExecutorError("unmanaged_player_active")
+                if self.service.active():
+                    running = self.service.running_digest()
+                    if running is None:
+                        raise ExecutorError("player_process_unconfirmed")
+                    if fallback is None or running != fallback:
+                        raise ExecutorError("unmanaged_player_active")
                 row = {"schema": 1, "attempt_id": attempt_id, "target": target.name,
                        "fallback": fallback}
                 self._write_journal(row, "intent_stop")

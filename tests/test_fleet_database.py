@@ -137,6 +137,44 @@ def test_check_in_sequence_and_delayed_boot_remain_observational(registry) -> No
     assert device["offered"]["boot_id"] == str(UUID(int=2))
 
 
+def test_duplicate_check_ins_consume_quota_before_idempotent_receipt(registry) -> None:
+    service = FleetService(registry.db, registry.clock)
+    report = CheckIn(schema=1, kind="pi", serial=SERIAL, kernel_boot_id=UUID(int=91),
+                     agent_incarnation="agent-1", observation_sequence=1,
+                     phase="base_ready")
+    assert service.record_check_in(report) == {"accepted": True}
+    with registry.db.transaction() as conn:
+        device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
+                                 (SERIAL,)).fetchone()["device_id"]
+        conn.execute("UPDATE fleet_t0_daily_quotas SET used=9999 "
+                     "WHERE scope=%s AND kind='observation'", (device_id,))
+    assert service.record_check_in(report) == {
+        "accepted": False, "reason": "stale_or_duplicate", "next_sequence": 2}
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT used FROM fleet_t0_daily_quotas "
+                            "WHERE scope=%s AND kind='observation'", (device_id,)
+                            ).fetchone()["used"] == 10000
+        assert conn.execute("SELECT count(*) AS n FROM fleet_os_observations "
+                            "WHERE device_id=%s", (device_id,)).fetchone()["n"] == 1
+    with pytest.raises(FleetError, match="t0_rate_limited"):
+        service.record_check_in(report)
+
+
+def test_mismatched_offer_check_in_pays_quota_before_lookup(registry) -> None:
+    service = FleetService(registry.db, registry.clock)
+    report = CheckIn(schema=1, kind="pi", serial=SERIAL, kernel_boot_id=UUID(int=92),
+                     offer_id=UUID(int=999), agent_incarnation="agent-1",
+                     observation_sequence=1, phase="base_ready")
+    with pytest.raises(FleetError, match="boot_offer_mismatch"):
+        service.record_check_in(report)
+    with registry.db.transaction() as conn:
+        charged = conn.execute("SELECT scope,used FROM fleet_t0_daily_quotas "
+                               "WHERE kind='observation' ORDER BY scope").fetchall()
+        assert len(charged) == 2 and all(row["used"] == 1 for row in charged)
+        assert conn.execute("SELECT count(*) AS n FROM fleet_os_observations").fetchone()[
+            "n"] == 0
+
+
 def test_new_offer_never_selects_payload_with_incompatible_base_abi(registry) -> None:
     _seed_release(registry)
     service = FleetService(registry.db, registry.clock)

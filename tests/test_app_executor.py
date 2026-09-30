@@ -280,6 +280,57 @@ def test_recover_corrupt_selected_root_never_stops_running_player(tmp_path):
     assert service.running_digest() == digest
 
 
+def test_recover_active_unit_with_unknown_digest_never_stops_it(tmp_path):
+    body, digest = payload()
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, body, digest, ATTEMPT_A) == "committed"
+    service.events.clear()
+    service.running_digest = lambda: None
+    with pytest.raises(ExecutorError, match="player_process_unconfirmed"):
+        subject.recover(expected_base_abi=ABI)
+    assert service.events == []
+    assert service.is_active
+
+
+def test_new_admission_refuses_unidentified_active_unit_before_stop(tmp_path):
+    first, first_digest = payload()
+    second, second_digest = payload(b"b")
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    service.events.clear()
+    service.running_digest = lambda: None
+    with pytest.raises(ExecutorError, match="player_process_unconfirmed"):
+        activate(subject, second, second_digest, ATTEMPT_B)
+    assert service.events == []
+    assert service.is_active
+
+
+def test_recover_confirmed_different_digest_repairs_selected_root(tmp_path):
+    body, digest = payload()
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, body, digest, ATTEMPT_A) == "committed"
+    service.running = "f" * 64
+    service.events.clear()
+    result = subject.recover(expected_base_abi=ABI)
+    assert result is not None and result.active_sha256 == digest
+    assert service.events == ["stop", "start"]
+    assert service.running_digest() == digest
+
+
+def test_systemd_active_distinguishes_inactive_from_unknown(monkeypatch):
+    service = SystemdPlayer()
+    monkeypatch.setattr("appliance.app_executor.subprocess.run",
+                        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 3))
+    assert service.active() is False
+    monkeypatch.setattr("appliance.app_executor.subprocess.run",
+                        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1))
+    with pytest.raises(ExecutorError, match="player_unit_state_unknown"):
+        service.active()
+
+
 def test_failed_cold_start_is_fenced_until_operator_action(tmp_path):
     body, digest = payload()
     service = Service()
