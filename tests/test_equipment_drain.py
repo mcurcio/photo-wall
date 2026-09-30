@@ -1,7 +1,9 @@
 """Runtime maintenance admission stays fenced across deadlines and restart."""
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import contextmanager
 from threading import Event
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
@@ -197,6 +199,142 @@ def test_program_entering_after_prepare_refuses_stop(registry, advance_before_co
                            "WHERE player_id=%s", (player["player_id"],)).fetchone()
     assert row["phase"] == "prepared"
     assert row["stop_committed_at"] is None
+
+
+@pytest.mark.parametrize("expires_at,expected_code", [
+    (1020, "active_run_requires_interruption_policy"),
+    (1002, "invalid_drain_request"),
+])
+def test_prepare_samples_time_after_waiting_for_coordination_lock(
+    registry, monkeypatch, expires_at, expected_code,
+):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="due-during-lock-wait", loop=True,
+        contributions=(Contribution(target="frame:drain-frame", kind="black"),
+                       Contribution(target="actuator:lamp", kind="actuator", ramp_to=1)),
+    ))
+    coordinator.runtime.command("set_program", Program(
+        program_id="due-during-lock-wait", scene_id="due-during-lock-wait",
+        starts_at=1005, ends_at=1100,
+    ))
+    drain = EquipmentDrain(coordinator)
+    original_transaction = coordinator._transaction
+    entering = Event()
+
+    @contextmanager
+    def notified_transaction():
+        # The old implementation had already read clock.utc() by this point.
+        entering.set()
+        with original_transaction() as conn:
+            yield conn
+
+    monkeypatch.setattr(coordinator, "_transaction", notified_transaction)
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with original_transaction():
+            pending = workers.submit(
+                drain.prepare_idle, player["player_id"], "attempt-cut", request.boot_id,
+                player["authority_epoch"], authorization_expires_at=expires_at,
+            )
+            assert entering.wait(4)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=.1)
+            registry.clock.advance(5)
+        due = [run for run in coordinator.runtime.read().project(registry.clock.utc()).runs
+               if run.ended_at is None and "frame:drain-frame" in run.participants]
+        assert len(due) == 1 and "actuator:lamp" in due[0].participants
+        with pytest.raises(RegistryError, match=expected_code):
+            pending.result(timeout=4)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("expires_at,expected_code", [
+    (1020, "active_run_requires_interruption_policy"),
+    (1002, "invalid_drain_request"),
+])
+def test_prepare_samples_time_after_waiting_for_binding_row(
+    registry, monkeypatch, expires_at, expected_code,
+):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="due-during-binding-wait", loop=True,
+        contributions=(Contribution(target="frame:drain-frame", kind="black"),
+                       Contribution(target="actuator:lamp", kind="actuator", ramp_to=1)),
+    ))
+    coordinator.runtime.command("set_program", Program(
+        program_id="due-during-binding-wait", scene_id="due-during-binding-wait",
+        starts_at=1005, ends_at=1100,
+    ))
+    drain = EquipmentDrain(coordinator)
+    original_transaction = coordinator._transaction
+    entered = Event()
+    backend_pid = {}
+
+    @contextmanager
+    def identified_transaction():
+        with original_transaction() as conn:
+            backend_pid["pid"] = conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+            entered.set()
+            yield conn
+
+    monkeypatch.setattr(coordinator, "_transaction", identified_transaction)
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        # A raw row holder exercises a wait below the advisory lock cut. Normal
+        # equipment writers also take Coordination, so cannot cause this wait.
+        with registry.db.transaction() as blocker:
+            blocker.execute("SELECT 1 FROM bindings WHERE frame_id='drain-frame' FOR UPDATE")
+            pending = workers.submit(
+                drain.prepare_idle, player["player_id"], "attempt-binding", request.boot_id,
+                player["authority_epoch"], authorization_expires_at=expires_at,
+            )
+            assert entered.wait(4)
+            deadline = monotonic() + 3
+            while monotonic() < deadline:
+                with registry.db.transaction() as observer:
+                    activity = observer.execute(
+                        "SELECT wait_event_type,query FROM pg_stat_activity WHERE pid=%s",
+                        (backend_pid["pid"],),
+                    ).fetchone()
+                if (activity and activity["wait_event_type"] == "Lock"
+                        and "FROM bindings b JOIN frames f" in activity["query"]):
+                    break
+                sleep(.01)
+            else:
+                pytest.fail("prepare never waited on the binding row lock")
+            registry.clock.advance(5)
+        due = [run for run in coordinator.runtime.read().project(registry.clock.utc()).runs
+               if run.ended_at is None and "frame:drain-frame" in run.participants]
+        assert len(due) == 1 and "actuator:lamp" in due[0].participants
+        with pytest.raises(RegistryError, match=expected_code):
+            pending.result(timeout=4)
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+
+
+def test_stop_projection_and_recorded_timestamp_share_one_cut(registry, monkeypatch):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    drain.prepare_idle(player["player_id"], "attempt-cut", request.boot_id,
+                       player["authority_epoch"], authorization_expires_at=1010)
+    samples = []
+
+    def ticking_utc():
+        samples.append(registry.clock.wall)
+        registry.clock.wall += 1
+        return samples[-1]
+
+    monkeypatch.setattr(registry.clock, "utc", ticking_utc)
+    assert drain.commit_stop(player["player_id"], "attempt-cut", request.boot_id,
+                             player["authority_epoch"]).status == "stop_committed"
+    with registry.db.transaction() as conn:
+        stamped = conn.execute("SELECT stop_committed_at FROM equipment_drains WHERE player_id=%s",
+                               (player["player_id"],)).fetchone()["stop_committed_at"]
+    assert samples == [1000]
+    assert stamped == samples[0]
 
 
 def test_media_grant_and_frame_placement_are_fenced(registry, tmp_path):

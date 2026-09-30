@@ -86,13 +86,11 @@ class EquipmentDrain:
         This first slice refuses active Run participants. Multi-participant
         interruption requires an explicit Runtime policy before it can be offered.
         """
-        now = self.coordinator.clock.utc()
         if (not isinstance(attempt_id, str) or not 1 <= len(attempt_id) <= 160
                 or not isinstance(boot_id, str) or not 1 <= len(boot_id) <= 160
                 or type(authority_epoch) is not int or authority_epoch < 1
                 or type(authorization_expires_at) not in (int, float)
-                or not math.isfinite(authorization_expires_at)
-                or not now < authorization_expires_at <= now + 600):
+                or not math.isfinite(authorization_expires_at)):
             raise RegistryError("invalid_drain_request", 422)
         with self.coordinator._transaction() as conn:
             runtime = self.coordinator.runtime.read_locked(conn)
@@ -120,7 +118,6 @@ class EquipmentDrain:
                     return self._outcome(existing, "already_committed" if
                                          existing["phase"] == "stop_committed" else
                                          "already_prepared")
-
             outputs = conn.execute(
                 "SELECT output_id FROM outputs WHERE player_id=%s ORDER BY output_id FOR UPDATE",
                 (player_id,),
@@ -132,8 +129,11 @@ class EquipmentDrain:
                 "f.calibration,f.preview FROM bindings b JOIN frames f ON f.id=b.frame_id "
                 "WHERE b.player_id=%s ORDER BY b.output_id FOR UPDATE OF b,f", (player_id,),
             ).fetchall()
+            cut_now = self.coordinator.clock.utc()
+            if not cut_now < authorization_expires_at <= cut_now + 600:
+                raise RegistryError("invalid_drain_request", 422)
             frame_ids = {row["frame_id"] for row in bindings}
-            affected = self._affected_active_runs(runtime, frame_ids, now)
+            affected = self._affected_active_runs(runtime, frame_ids, cut_now)
             if affected:
                 raise RegistryError("active_run_requires_interruption_policy", details={
                     "run_ids": list(affected),
@@ -177,7 +177,7 @@ class EquipmentDrain:
                     "UPDATE equipment_drains SET attempt_id=%s,boot_id=%s,authority_epoch=%s,"
                     "phase='prepared',prepared_at=%s,authorization_expires_at=%s,"
                     "stop_committed_at=NULL,aborted_at=NULL,snapshot=%s WHERE player_id=%s",
-                    (attempt_id, boot_id, authority_epoch, now, authorization_expires_at,
+                    (attempt_id, boot_id, authority_epoch, cut_now, authorization_expires_at,
                      Jsonb(snapshot), player_id),
                 )
             else:
@@ -185,7 +185,7 @@ class EquipmentDrain:
                     "INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,"
                     "phase,prepared_at,authorization_expires_at,snapshot) "
                     "VALUES(%s,%s,%s,%s,'prepared',%s,%s,%s)",
-                    (player_id, attempt_id, boot_id, authority_epoch, now,
+                    (player_id, attempt_id, boot_id, authority_epoch, cut_now,
                      authorization_expires_at, Jsonb(snapshot)),
                 )
             # Skipping the entire atomic group also fences other participants.
@@ -217,8 +217,6 @@ class EquipmentDrain:
                 return self._outcome(row, "already_committed")
             if row["phase"] == "aborted":
                 raise RegistryError("drain_aborted")
-            if row["authorization_expires_at"] <= self.coordinator.clock.utc():
-                raise RegistryError("drain_authorization_expired")
             current = conn.execute(
                 "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
                 (player_id,),
@@ -226,20 +224,21 @@ class EquipmentDrain:
             if (current is None or current["retired_at"] is not None
                     or current["authority_epoch"] != authority_epoch):
                 raise RegistryError("stale_authority", 403)
+            cut_now = self.coordinator.clock.utc()
+            if row["authorization_expires_at"] <= cut_now:
+                raise RegistryError("drain_authorization_expired")
             frame_ids = {
                 output["frame_id"] for output in row["snapshot"]["outputs"]
                 if output["frame_id"] is not None
             }
-            affected = self._affected_active_runs(
-                runtime, frame_ids, self.coordinator.clock.utc(),
-            )
+            affected = self._affected_active_runs(runtime, frame_ids, cut_now)
             if affected:
                 raise RegistryError("active_run_requires_interruption_policy", details={
                     "run_ids": list(affected),
                 })
             conn.execute(
                 "UPDATE equipment_drains SET phase='stop_committed',stop_committed_at=%s "
-                "WHERE player_id=%s", (self.coordinator.clock.utc(), player_id),
+                "WHERE player_id=%s", (cut_now, player_id),
             )
             return DrainOutcome("stop_committed", player_id, attempt_id, boot_id,
                                 authority_epoch, row["snapshot"])
@@ -251,7 +250,6 @@ class EquipmentDrain:
         A stopped or ambiguous attempt has no automatic release path. The next
         Coordinator advance may build fresh offers; canceled groups stay canceled.
         """
-        now = self.coordinator.clock.utc()
         with self.coordinator._transaction() as conn:
             runtime = self.coordinator.runtime.read_locked(conn)
             row = conn.execute(
@@ -267,8 +265,6 @@ class EquipmentDrain:
                 return self._outcome(row, "already_aborted")
             if row["phase"] == "stop_committed":
                 raise RegistryError("stop_committed_requires_reconciliation")
-            if now <= row["authorization_expires_at"] + self.ABORT_MARGIN_SECONDS:
-                raise RegistryError("drain_authorization_open")
             player = conn.execute(
                 "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
                 (player_id,),
@@ -289,6 +285,15 @@ class EquipmentDrain:
             fresh_sequence = (control is not None and control["applied_sequence"] >
                               (floor if current_epoch == authority_epoch and floor is not None
                                else 0))
+            configuration = self.coordinator._configuration(conn, player_id, current_epoch)
+            plan = self.coordinator._current_plan(conn, player_id, current_epoch)
+            has_commit = conn.execute(
+                "SELECT 1 FROM execution_commits WHERE player_id=%s AND valid LIMIT 1",
+                (player_id,),
+            ).fetchone()
+            cut_now = self.coordinator.clock.utc()
+            if cut_now <= row["authorization_expires_at"] + self.ABORT_MARGIN_SECONDS:
+                raise RegistryError("drain_authorization_open")
             if (control is None or control["authority_epoch"] != current_epoch
                     or control["status"] != "negotiated"
                     or control["schema_version"] != 2
@@ -297,24 +302,19 @@ class EquipmentDrain:
                     or control["last_result_at"] is None
                     or control["last_result_at"] <= row["prepared_at"]):
                 raise RegistryError("drain_recovery_unverified")
-            configuration = self.coordinator._configuration(conn, player_id, current_epoch)
-            plan = self.coordinator._current_plan(conn, player_id, current_epoch)
-            if plan and (plan.valid_until <= now or plan.bindings != configuration.bindings):
+            if plan and (plan.valid_until <= cut_now or plan.bindings != configuration.bindings):
                 raise RegistryError("drain_offers_stale")
-            if conn.execute(
-                "SELECT 1 FROM execution_commits WHERE player_id=%s AND valid LIMIT 1",
-                (player_id,),
-            ).fetchone():
+            if has_commit:
                 raise RegistryError("drain_commit_still_valid")
             frame_ids = {
                 output["frame_id"] for output in row["snapshot"]["outputs"]
                 if output["frame_id"] is not None
             }
-            if self._affected_active_runs(runtime, frame_ids, now):
+            if self._affected_active_runs(runtime, frame_ids, cut_now):
                 raise RegistryError("active_run_requires_interruption_policy")
             conn.execute(
                 "UPDATE equipment_drains SET phase='aborted',aborted_at=%s WHERE player_id=%s",
-                (now, player_id),
+                (cut_now, player_id),
             )
             return DrainOutcome("aborted", player_id, attempt_id, boot_id,
                                 authority_epoch, row["snapshot"])
