@@ -18,7 +18,7 @@ from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.time import Clock
 
 
-def _fallback_owner(device_id: str) -> str:
+def _legacy_fallback_owner(device_id: str) -> str:
     return f"fleet-fallback:{device_id}"
 
 
@@ -28,13 +28,18 @@ def retire_device_fallback_references(conn, device_id: str) -> None:
     The caller holds the fleet offer lock in its device-retirement transaction. This shared
     lock serializes retirement with reservations and cache eviction.
     """
-    conn.execute("DELETE FROM asset_references WHERE kind='player-payload' AND owner=%s",
-                 (_fallback_owner(device_id),))
+    conn.execute(
+        "DELETE FROM asset_references WHERE kind='player-payload' AND "
+        "(owner=%s OR owner IN (SELECT fallback_owner FROM fleet_generation_acceptances "
+        "WHERE device_id=%s))",
+        (_legacy_fallback_owner(device_id), device_id),
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class ReservedFallback:
     device_id: str
+    device_generation: int
     sha256: str
     size: int
     base_abi: str
@@ -58,28 +63,28 @@ class AcceptedFallbackService:
         This is a durable cache obligation, not evidence that any serving pod currently has
         the bytes. A missing accepted record, source offer, or matching ABI is a refusal.
         """
-        now = self.clock.utc()
         with self.db.transaction() as conn:
             lock_fleet_assets_in(conn)
             device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s "
                                   "FOR UPDATE", (device_id,)).fetchone()
-            lifecycle = conn.execute("SELECT revoked_at FROM fleet_device_lifecycle "
+            lifecycle = conn.execute("SELECT generation,revoked_at FROM fleet_device_lifecycle "
                                      "WHERE device_id=%s FOR UPDATE",
                                      (device_id,)).fetchone()
             if (device is None or device["retired_at"] is not None
                     or lifecycle is None or lifecycle["revoked_at"] is not None):
                 raise FleetError("fallback_device_unavailable", 409)
             accepted = conn.execute(
-                "SELECT content_key,sha256,size,base_abi,trust_mode,evidence_ref "
-                "FROM fleet_accepted_artifacts WHERE device_id=%s AND kind='app' "
-                "AND sha256=%s FOR SHARE", (device_id, sha256),
+                "SELECT content_key,sha256,size,base_abi,trust_mode,evidence_ref,"
+                "fallback_owner FROM fleet_generation_acceptances "
+                "WHERE device_id=%s AND device_generation=%s AND kind='app' "
+                "AND sha256=%s FOR SHARE", (device_id, lifecycle["generation"], sha256),
             ).fetchone()
             if (accepted is None or accepted["content_key"] != sha256
                     or accepted["base_abi"] != base_abi
                     or accepted["trust_mode"] not in ("t1", "t2")
                     or not accepted["evidence_ref"]):
                 raise FleetError("fallback_not_qualified", 409)
-            owner = _fallback_owner(device_id)
+            owner = accepted["fallback_owner"]
             if len(owner) > 128:
                 raise FleetError("fallback_device_unavailable", 409)
             # The original offer's locator is immutable even if a release tag is later recut.
@@ -90,6 +95,10 @@ class AcceptedFallbackService:
                 "AND identity=%s AND owner=%s", (sha256, owner),
             ).fetchone()
             if source is None:
+                # Offer eligibility is decided at the locked reservation cut.
+                # Sampling before the fleet/device waits could create a new
+                # durable root from an offer that expired during those waits.
+                now = self.clock.utc()
                 source = conn.execute(
                     "SELECT ref.locator_url,ref.locator_sha256,ref.locator_size,"
                     "ref.expected_sha256,ref.expected_size FROM fleet_boot_offers AS offer "
@@ -144,7 +153,8 @@ class AcceptedFallbackService:
                 "DELETE FROM asset_references WHERE kind='player-payload' AND owner=%s "
                 "AND identity<>%s", (owner, sha256),
             )
-        return ReservedFallback(device_id, sha256, accepted["size"], base_abi,
+        return ReservedFallback(device_id, lifecycle["generation"], sha256,
+                                accepted["size"], base_abi,
                                 accepted["trust_mode"], accepted["evidence_ref"])
 
     @staticmethod

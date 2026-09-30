@@ -54,6 +54,7 @@ class AttemptByteAccess:
                     or row["kernel_boot_id"] != principal.kernel_boot_id
                     or row["offer_id"] != principal.offer_id
                     or row["installation_audience"] != principal.installation_audience
+                    or row["command_session_id"] != principal.command_session_id
                     or row["root_released_at"] is not None):
                 raise FleetError("attempt_artifact_unavailable", 404)
             # A superseded committed attempt may still need both frozen files

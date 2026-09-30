@@ -1,12 +1,14 @@
 # 2026-09-30 command trust and rollout audit
 
-**Evidence class:** read-only Kubernetes resource inspection and repository architecture review. **Status:** D14 and D17 proposals, not an activated command channel or a deployment change. The upstream switch, PXE server and external deployment configuration were not inspected.
+**Evidence class:** read-only Kubernetes resource inspection and repository architecture review. **Status:** D14 and D17 proposals, not an activated command channel or a deployment change. The upstream switch and PXE server were not inspected. The separate `mcurcio/iac` Photo Wall workload and its shape tests were inspected read-only after the live resource audit.
 
 ## Observed serving surface
 
 At inspection, the `photos/photo-wall` Deployment had one replica, used `Recreate`, ran `ghcr.io/mcurcio/photo-wall/central:v0.13.0`, and used a TCP port-8000 readiness probe. Its Service selected `app=photo-wall`, exposed LoadBalancer address `10.0.31.1:8000` and NodePort `30204`, and had `externalTrafficPolicy: Cluster`. The `photo-wall-access` NetworkPolicy allowed source range `10.0.0.0/16` to TCP 8000. The `photo-wall` HTTPRoute forwarded to the same Service without an authentication filter. The Gateway is therefore not the sole path to a serving Central pod. These resource facts do not establish whether an upstream network control restricts the other paths.
 
 The read-only checks used `kubectl -n photos get service photo-wall`, `get deployment photo-wall`, `get networkpolicy photo-wall-access`, and `get httproute` with selected JSONPath fields. No Secret, Player key or private media was read. The running Central image was not changed. The [earlier live diagnosis](2026-09-29-kubernetes-central-diagnosis.md) records the v0.12 Player/v0.13 Central compatibility fault.
+
+The deployment definition lives in the separate `mcurcio/iac` repository at `workloads/photo_wall/__init__.py`, wired by `stacks/home/prod/photos/stack.py`. Its one `PortRole.HTTP` port deliberately emits both the Pi-facing LoadBalancer and the operator Gateway/HTTPRoute, while `NetworkExposure.lan()` admits the shared 10.0.0.0/16 LAN. The checked-in workload test asserts this topology and TCP readiness/liveness. The inspected source defaults to v0.12.0 image tags, whereas the live Deployment runs v0.13.0; this source checkout alone does not establish which revision or override produced the live tag. The one-replica `Recreate` shape simplifies serving inventory but does not make the direct Service path authenticated or qualify a rollback image. This is source inspection, not proof of the deployed switch or boot path.
 
 ## Command trust conclusion (D14)
 

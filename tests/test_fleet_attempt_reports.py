@@ -7,7 +7,7 @@ from threading import Event
 from uuid import UUID
 
 import pytest
-from psycopg.errors import CheckViolation
+from psycopg.errors import CheckViolation, ForeignKeyViolation
 from pydantic import ValidationError
 
 import central.fleet.attempt_reports as reports_module
@@ -56,7 +56,8 @@ def _report(sequence: int = 1, **changes) -> OsAttemptReport:
 
 
 def _seed(registry, *, phase: str = "stop_committed", schema: int = 1,
-          revoked_at: float | None = None) -> None:
+          revoked_at: float | None = None,
+          attempt_session_id: UUID | None = SESSION) -> None:
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                      "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,900,900)")
@@ -76,20 +77,29 @@ def _seed(registry, *, phase: str = "stop_committed", schema: int = 1,
                      "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at) "
                      "VALUES(%s,%s,1,%s,%s,%s,'t1',%s,'test-gateway',900,1100)",
                      (SESSION, DEVICE, BOOT, OFFER, AUDIENCE, "f" * 64))
+        if attempt_session_id is not None and attempt_session_id != SESSION:
+            conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
+                         "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                         "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at,"
+                         "revoked_at) VALUES(%s,%s,1,%s,%s,%s,'t1',%s,"
+                         "'former-gateway',800,900,900)",
+                         (attempt_session_id, DEVICE, BOOT, OFFER, AUDIENCE, "e" * 64))
         if schema == 1:
             conn.execute(
                 "INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
                 "desired_revision,target_sha256,fallback_sha256,phase,command_id,drain_id,"
-                "created_at,updated_at,device_generation,revoked_at,attempt_schema,"
+                "created_at,updated_at,device_generation,command_session_id,"
+                "revoked_at,attempt_schema,"
                 "installation_audience,kernel_boot_id,policy_source,base_sha256,base_abi,"
                 "base_abi_source_manifest,target_tag,target_size,target_format,"
                 "target_base_abi,target_source_manifest,fallback_size,fallback_base_abi,"
                 "fallback_trust_mode,fallback_evidence_ref) "
-                "VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,900,900,1,%s,1,%s,%s,'explicit',%s,%s,"
+                "VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,900,900,1,%s,%s,1,%s,%s,'explicit',%s,%s,"
                 "'manifest.v2.json','v1.0.1',123,'pw-player-data-v1',%s,"
                 "'manifest.v2.json',80,%s,'t1','test-qualified-output')",
                 (ATTEMPT, DEVICE, OFFER, TARGET, FALLBACK, phase, COMMAND, DRAIN,
-                 revoked_at, AUDIENCE, BOOT, "b" * 64, "sha256:" + "c" * 64,
+                 attempt_session_id, revoked_at, AUDIENCE, BOOT, "b" * 64,
+                 "sha256:" + "c" * 64,
                  "sha256:" + "c" * 64, "sha256:" + "c" * 64),
             )
         else:
@@ -119,6 +129,25 @@ def test_report_is_append_only_carrier_claim_with_exact_replay(registry) -> None
         assert attempt["phase"] == "stop_committed"
         assert conn.execute("SELECT count(*) AS n FROM fleet_accepted_artifacts").fetchone()["n"] == 0
     assert _count(registry) == 1
+
+
+def test_report_cannot_use_another_sessions_attempt(registry) -> None:
+    _seed(registry, attempt_session_id=UUID(int=707))
+    with pytest.raises(FleetError, match="attempt_report_attempt_mismatch"):
+        AttemptReportStore(registry.db, registry.clock).record(_principal(), _report())
+    with pytest.raises(ForeignKeyViolation):
+        with registry.db.transaction() as conn:
+            conn.execute("INSERT INTO fleet_os_attempt_reports(attempt_id,report_sequence,"
+                         "command_session_id,carrier_trust_mode,report_json,received_at) "
+                         "VALUES(%s,1,%s,'t1','{}',1000)", (ATTEMPT, SESSION))
+    assert _count(registry) == 0
+
+
+def test_historical_unbound_schema_one_attempt_cannot_gain_new_report(registry) -> None:
+    _seed(registry, attempt_session_id=None)
+    with pytest.raises(FleetError, match="attempt_report_attempt_mismatch"):
+        AttemptReportStore(registry.db, registry.clock).record(_principal(), _report())
+    assert _count(registry) == 0
 
 
 def test_sequence_is_monotonic_and_same_sequence_conflict_fails(registry) -> None:

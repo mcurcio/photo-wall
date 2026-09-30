@@ -95,16 +95,19 @@ def _seed(registry, *, offer_audience: str = AUDIENCE,
                      "VALUES(TRUE,1,%s,%s,%s,'pw-player-data-v1',900)",
                      (TARGET_TAG, target_sha, target_size))
         if fallback_qualified:
-            conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
-                         "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
-                         "VALUES(%s,'app',%s,%s,%s,%s,'t1','qualified-output-proof',900)",
-                         (DEVICE_ID, fallback_sha, fallback_sha, fallback_size, BASE_ABI))
+            conn.execute("INSERT INTO fleet_generation_acceptances(device_id,"
+                         "device_generation,kind,content_key,sha256,size,base_abi,"
+                         "trust_mode,evidence_ref,accepted_at,basis,command_session_id) "
+                         "VALUES(%s,1,'app',%s,%s,%s,%s,'t1',"
+                         "'qualified-output-proof',900,'cold_boot',%s)",
+                         (DEVICE_ID, fallback_sha, fallback_sha, fallback_size,
+                          BASE_ABI, SESSION_ID))
             conn.execute("INSERT INTO assets(kind,identity,created_at) "
                          "VALUES('player-payload',%s,900)", (fallback_sha,))
             conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,"
                          "locator_sha256,locator_size,expected_sha256,expected_size,added_at) "
                          "VALUES('player-payload',%s,%s,%s,%s,%s,%s,%s,900)",
-                         (fallback_sha, f"fleet-fallback:{DEVICE_ID}",
+                         (fallback_sha, f"fleet-fallback:{DEVICE_ID}:1",
                           "https://example.invalid/fallback.tar.gz", fallback_sha,
                           fallback_size, fallback_sha, fallback_size))
 
@@ -187,6 +190,37 @@ def test_queued_attempt_timestamps_use_post_lock_admission_time(registry, monkey
     assert row == {"created_at": 1005, "updated_at": 1005}
 
 
+def test_queued_attempt_joins_caller_transaction_and_rolls_back_with_it(registry) -> None:
+    _seed(registry)
+    service = AttemptService(registry.db, registry.clock)
+    with pytest.raises(RuntimeError, match="caller_rollback"):
+        with registry.db.transaction() as conn:
+            attempt = service.create_queued_in(
+                conn, _principal(), desired_revision=1,
+                expected_target_sha256=TARGET_SHA, fallback_sha256=FALLBACK_SHA,
+            )
+            assert attempt.phase == "queued"
+            assert conn.execute(
+                "SELECT command_session_id FROM fleet_app_attempts WHERE attempt_id=%s",
+                (attempt.attempt_id,),
+            ).fetchone()["command_session_id"] == SESSION_ID
+            assert {row["identity"] for row in conn.execute(
+                "SELECT identity FROM asset_references WHERE kind='player-payload' "
+                "AND owner=%s", (f"fleet-attempt:{attempt.attempt_id}",),
+            ).fetchall()} == {TARGET_SHA, FALLBACK_SHA}
+            assert service.create_queued_in(
+                conn, _principal(), desired_revision=1,
+                expected_target_sha256=TARGET_SHA, fallback_sha256=FALLBACK_SHA,
+            ) == attempt
+            raise RuntimeError("caller_rollback")
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM fleet_app_attempts "
+                            "WHERE device_id=%s", (DEVICE_ID,)).fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM asset_references "
+                            "WHERE kind='player-payload' AND owner=%s",
+                            (f"fleet-attempt:{attempt.attempt_id}",)).fetchone()["n"] == 0
+
+
 @pytest.mark.parametrize("reverse_utc", [False, True])
 def test_queued_retry_rejects_expiry_during_attempt_row_lock_wait(
     registry, monkeypatch, reverse_utc,
@@ -205,6 +239,7 @@ def test_queued_attempt_freezes_two_exact_roots_and_survives_release_recut(regis
     first = _create(registry)
     assert first.phase == "queued" and first.root_released_at is None
     assert first.device_generation == 1 and first.base_abi == BASE_ABI
+    assert first.command_session_id == SESSION_ID
     assert {asset.sha256 for asset in first.assets} == {TARGET_SHA, FALLBACK_SHA}
     with registry.db.transaction() as conn:
         refs = conn.execute("SELECT identity,locator_url,locator_sha256,locator_size,"
@@ -228,6 +263,32 @@ def test_queued_attempt_freezes_two_exact_roots_and_survives_release_recut(regis
         AttemptService(registry.db, registry.clock).create_queued(
             _principal(), desired_revision=1, expected_target_sha256=TARGET_SHA,
             fallback_sha256="1" * 64)
+
+
+def test_attempt_cannot_rebind_to_a_later_session_in_the_same_boot(registry) -> None:
+    _seed(registry)
+    attempt = _create(registry)
+    replacement = UUID(int=910)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=1000 "
+                     "WHERE command_session_id=%s", (SESSION_ID,))
+        conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
+                     "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                     "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at) "
+                     "VALUES(%s,%s,1,%s,%s,%s,'t1',%s,'replacement-gateway',900,1100)",
+                     (replacement, DEVICE_ID, BOOT_ID, OFFER_ID, AUDIENCE, "f" * 64))
+    new_principal = replace(_principal(), command_session_id=replacement)
+    with pytest.raises(FleetError, match="attempt_retry_conflict"):
+        AttemptService(registry.db, registry.clock).create_queued(
+            new_principal, desired_revision=1, expected_target_sha256=TARGET_SHA,
+            fallback_sha256=FALLBACK_SHA)
+    with pytest.raises(FleetError, match="attempt_artifact_unavailable"):
+        AttemptByteAccess(registry.db, registry.clock, OfferByteReader(None)).resolve(
+            new_principal, attempt.attempt_id, "target")
+    with pytest.raises(CheckViolation):
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE fleet_app_attempts SET command_session_id=%s "
+                         "WHERE attempt_id=%s", (replacement, attempt.attempt_id))
 
 
 def test_missing_qualified_fallback_does_not_publish_attempt_or_root(registry) -> None:
@@ -372,7 +433,7 @@ def test_retirement_revokes_and_releases_queued_attempt_atomically(registry) -> 
         assert row["revoked_at"] is not None and row["root_released_at"] is not None
         assert conn.execute("SELECT count(*) AS n FROM asset_references WHERE owner=%s",
                             (f"fleet-attempt:{attempt.attempt_id}",)).fetchone()["n"] == 0
-        assert conn.execute("SELECT count(*) AS n FROM fleet_accepted_artifacts "
+        assert conn.execute("SELECT count(*) AS n FROM fleet_generation_acceptances "
                             "WHERE device_id=%s", (DEVICE_ID,)).fetchone()["n"] == 1
     registry.retire("player-1")
     service = AttemptService(registry.db, registry.clock)
@@ -431,7 +492,7 @@ def test_attempt_byte_access_preflights_same_pod_and_survives_catalog_recut(regi
         conn.execute("UPDATE fleet_boot_offers SET expires_at=999 WHERE offer_id=%s",
                      (OFFER_ID,))
         conn.execute("DELETE FROM asset_references WHERE owner=%s",
-                     (f"fleet-fallback:{DEVICE_ID}",))
+                     (f"fleet-fallback:{DEVICE_ID}:1",))
     with PgTransactions(registry.db).begin() as tx:
         assert releases.payload_abi_for(tx, target_sha, now=1000) == BASE_ABI
         assert releases.payload_abi_for(tx, fallback_sha, now=1000) == BASE_ABI

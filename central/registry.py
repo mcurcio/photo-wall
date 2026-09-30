@@ -23,6 +23,7 @@ from central.installation_models import (
     OutputInventory,
     PlayerInventory,
 )
+from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
@@ -36,6 +37,8 @@ from contracts.models import (
 )
 from contracts.player_control import (
     ControlAck,
+    ControlAckResponse,
+    ControlAppliedReceipt,
     ControlDelivery,
     ControlHello,
     ControlSelection,
@@ -101,12 +104,8 @@ class Registry:
     @contextmanager
     def _equipment_write(self):
         """Serialize equipment mutation after Coordination then Runtime locks."""
-        from central.coordination import COORDINATION_LOCK
-        from central.runtime_store import RUNTIME_LOCK
-
         with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (RUNTIME_LOCK,))
+            acquire_runtime_locks(conn)
             yield conn
 
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
@@ -233,7 +232,7 @@ class Registry:
             "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
             "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
             "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
-            "applied_digest=NULL,last_delivery_id=NULL,last_result_sequence=NULL,"
+            "applied_digest=NULL,applied_ack_nonce=NULL,last_delivery_id=NULL,last_result_sequence=NULL,"
             "last_result_digest=NULL,last_result=NULL,last_result_at=NULL",
             (player_id, epoch, status),
         )
@@ -304,8 +303,8 @@ class Registry:
     def issue_control_delivery_record_in(self, conn, player_id: str, epoch: int,
                                          digest: str) -> dict:
         """Issue under the caller's Coordinator lock, atomic with its projected state."""
-        now = self.clock.utc()
         self._control_player(conn, player_id, epoch)
+        now = self.clock.utc()
         row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                            (player_id,)).fetchone()
         if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
@@ -317,7 +316,8 @@ class Registry:
         delivery_id = secrets.token_hex(16)
         issued = conn.execute(
             "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
-            "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s "
+            "pending_id=%s,pending_digest=%s,pending_expires=%s,"
+            "applied_ack_nonce=NULL WHERE player_id=%s "
             "RETURNING issued_sequence",
             (delivery_id, digest, now + 60, player_id),
         ).fetchone()
@@ -329,19 +329,55 @@ class Registry:
         return self.issue_control_delivery_record(player_id, epoch, digest)["delivery_id"]
 
     def control_ack(self, player_id: str, report: ControlAck) -> bool:
-        now = self.clock.utc()
+        """Compatibility wrapper for callers that only need ACK acceptance."""
+        return self.control_ack_response(player_id, report).accepted
+
+    @staticmethod
+    def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
+        """Replay only a receipt for the exact still-current applied delivery."""
+        if (report.result != "applied" or row["status"] != "negotiated"
+                or row["schema_version"] != 2
+                or row["pending_id"] is not None or row["pending_digest"] is not None
+                or row["pending_expires"] is not None
+                or row["issued_sequence"] != row["applied_sequence"]
+                or row["last_result_sequence"] != row["applied_sequence"]
+                or row["last_result"] != "applied"
+                or row["applied_at"] is None or row["last_result_at"] is None
+                or row["applied_delivery_id"] != report.delivery_id
+                or row["last_delivery_id"] != report.delivery_id
+                or row["last_result_digest"] != row["applied_digest"]
+                or row["applied_ack_nonce"] is None):
+            return None
+        return ControlAppliedReceipt(
+            authority_epoch=row["authority_epoch"],
+            delivery_id=row["applied_delivery_id"],
+            delivery_sequence=row["applied_sequence"],
+            state_digest=row["applied_digest"],
+            ack_nonce=row["applied_ack_nonce"],
+        )
+
+    def control_ack_response(self, player_id: str, report: ControlAck) -> ControlAckResponse:
         with self.db.transaction() as conn:
             self._control_player(conn, player_id, report.authority_epoch)
+            now = self.clock.utc()
             row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                                (player_id,)).fetchone()
             if (not row or row["authority_epoch"] != report.authority_epoch
-                    or row["schema_version"] != 2 or row["pending_id"] != report.delivery_id
-                    or row["pending_expires"] <= now):
-                return False
+                    or row["schema_version"] != 2):
+                return ControlAckResponse(accepted=False)
+            if row["pending_id"] != report.delivery_id:
+                receipt = self._current_applied_receipt(row, report)
+                return ControlAckResponse(accepted=receipt is not None, receipt=receipt)
+            if row["pending_expires"] is None or row["pending_expires"] <= now:
+                return ControlAckResponse(accepted=False)
+            # The nonce is generated only after the ACK passes the current-epoch,
+            # pending-delivery and expiry checks. It is committed with the result.
+            nonce = secrets.token_hex(32) if report.result == "applied" else None
             conn.execute(
                 "UPDATE player_control_sessions SET pending_id=NULL,pending_digest=NULL,"
                 "pending_expires=NULL,last_delivery_id=%s,last_result_sequence=issued_sequence,"
                 "last_result_digest=pending_digest,last_result=%s,last_result_at=%s,"
+                "applied_ack_nonce=%s,"
                 "applied_sequence=CASE WHEN %s='applied' THEN issued_sequence "
                 "ELSE applied_sequence END,"
                 "applied_at=CASE WHEN %s='applied' THEN %s ELSE applied_at END,"
@@ -350,10 +386,20 @@ class Registry:
                 "applied_digest=CASE WHEN %s='applied' THEN pending_digest "
                 "ELSE applied_digest END "
                 "WHERE player_id=%s",
-                (report.delivery_id, report.result, now, report.result, report.result, now,
+                (report.delivery_id, report.result, now, nonce,
+                 report.result, report.result, now,
                  report.result, report.result, player_id),
             )
-            return True
+            receipt = None
+            if nonce is not None:
+                receipt = ControlAppliedReceipt(
+                    authority_epoch=report.authority_epoch,
+                    delivery_id=report.delivery_id,
+                    delivery_sequence=row["issued_sequence"],
+                    state_digest=row["pending_digest"],
+                    ack_nonce=nonce,
+                )
+            return ControlAckResponse(accepted=True, receipt=receipt)
 
     def control_fact(self, player_id: str) -> dict | None:
         """Read provenance-labelled app-control history without readiness inference."""
@@ -542,16 +588,7 @@ class Registry:
         The persistent Frame and its placement remain the same. A changed display
         profile invalidates committed calibration and any outstanding preview.
         """
-        from central.coordination import COORDINATION_LOCK
-        from central.runtime_store import RUNTIME_LOCK
-
-        held = conn.execute(
-            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
-            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
-            "AND objid=ANY(%s::oid[])",
-            ([COORDINATION_LOCK, RUNTIME_LOCK],),
-        ).fetchone()["n"]
-        if held != 2:
+        if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_runtime_snapshot_required", 500)
         from central.equipment_drain import require_unfenced_frame_in
 
@@ -599,19 +636,9 @@ class Registry:
             raise RegistryError("frame_reference_snapshot_required", 500)
         if any(not isinstance(references[key], tuple) for key in reference_keys):
             raise RegistryError("frame_reference_snapshot_required", 500)
-        # The caller's reference snapshot is authoritative only while both writers
-        # are excluded on this same transaction connection. Import constants here
-        # to avoid a module cycle: Coordination depends on RegistryError.
-        from central.coordination import COORDINATION_LOCK
-        from central.runtime_store import RUNTIME_LOCK
-
-        held = conn.execute(
-            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
-            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
-            "AND objid=ANY(%s::oid[])",
-            ([COORDINATION_LOCK, RUNTIME_LOCK],),
-        ).fetchone()["n"]
-        if held != 2:
+        # The caller's reference snapshot is authoritative only while both
+        # writers are excluded on this same transaction connection.
+        if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_reference_snapshot_required", 500)
         from central.equipment_drain import require_unfenced_frame_in
 

@@ -1,5 +1,6 @@
 """The local app key proof stays distinct from OS command authority."""
 
+import json
 from dataclasses import replace
 from uuid import UUID
 
@@ -14,13 +15,18 @@ from appliance.app_process_proof import (
 )
 from contracts.app_process_proof import (
     AppProofChallenge,
+    AppProofChallengeV2,
     AppProofResponse,
+    LocalAppProofV2,
     ProcessIdentity,
     app_proof_message,
+    app_proof_message_v2,
+    parse_app_proof_begin_any,
     parse_app_proof_challenge,
     parse_app_proof_response,
 )
 from contracts.os_attempt_report import OsAttemptReport, parse_os_attempt_report
+from contracts.player_control import ControlAppliedReceipt
 from player.identity import load_identity
 
 BOOT = UUID("10000000-0000-0000-0000-000000000001")
@@ -35,6 +41,9 @@ PROCESS = ProcessIdentity(pid=123, start_ticks=456, invocation_id="c" * 32,
                           cgroup_unit="photo-wall-player.service")
 CONTEXT = CurrentAttemptContext("installation-one", DEVICE, 2, BOOT, OFFER, SESSION,
                                 ATTEMPT, COMMAND, "t1")
+RECEIPT = ControlAppliedReceipt(authority_epoch=7, delivery_id="e" * 32,
+                                delivery_sequence=5, state_digest="a" * 64,
+                                ack_nonce="b" * 64)
 
 
 def verifier_state():
@@ -67,6 +76,67 @@ def test_existing_process_key_signs_domain_separated_attempt_bound_challenge():
     assert proof.verified_boottime_ms == 10000
     with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
         verifier.verify(handle, proof.response)
+
+
+def test_v2_binds_post_ack_receipt_and_protected_active_root_without_changing_v1():
+    verifier, state = verifier_state()
+    state["context"] = replace(CONTEXT, active_sha256="f" * 64)
+    handle = object()
+    v1 = verifier.begin(handle, PLAYER, 7)
+    assert type(v1) is AppProofChallenge
+    assert b"photo-wall-local-app-proof-v1" in app_proof_message(v1)
+    verifier.cancel(v1.nonce)
+    v2 = verifier.begin(handle, PLAYER, 7, receipt=RECEIPT)
+    assert type(v2) is AppProofChallengeV2
+    assert v2.receipt == RECEIPT and v2.active_sha256 == "f" * 64
+    assert v2.process == PROCESS and v2.command_session_id == SESSION
+    assert b"photo-wall-local-app-proof-v2" in app_proof_message_v2(v2)
+    with pytest.raises(TypeError, match="app_proof_challenge_required"):
+        app_proof_message(v2)
+    identity = load_identity()
+    proof, context = verifier.verify_with_context(
+        handle, identity.sign_applied_control_proof(v2))
+    assert type(proof) is LocalAppProofV2 and context == state["context"]
+    assert proof.response.public_key == identity.public_key
+    with pytest.raises(LocalProofError, match="app_proof_expired_or_used"):
+        verifier.verify(handle, proof.response)
+
+
+def test_v2_refuses_missing_or_changed_root_and_receipt_substitution():
+    verifier, _ = verifier_state()
+    with pytest.raises(LocalProofError, match="app_root_unavailable"):
+        verifier.begin(object(), PLAYER, 7, receipt=RECEIPT)
+
+    verifier, state = verifier_state()
+    state["context"] = replace(CONTEXT, active_sha256="f" * 64)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7, receipt=RECEIPT)
+    identity = load_identity()
+    changed = challenge.model_copy(update={"receipt": RECEIPT.model_copy(
+        update={"ack_nonce": "c" * 64})})
+    with pytest.raises(LocalProofError, match="app_proof_signature_invalid"):
+        verifier.verify(handle, identity.sign_applied_control_proof(changed))
+
+    verifier, state = verifier_state()
+    state["context"] = replace(CONTEXT, active_sha256="f" * 64)
+    handle = object()
+    challenge = verifier.begin(handle, PLAYER, 7, receipt=RECEIPT)
+    state["context"] = replace(state["context"], active_sha256="e" * 64)
+    with pytest.raises(LocalProofError, match="app_proof_context_changed"):
+        verifier.verify(handle, identity.sign_applied_control_proof(challenge))
+
+
+def test_v2_begin_parser_refuses_extra_fields_and_mismatched_epoch():
+    raw = {"schema": 2, "kind": "begin", "purpose": "control_applied",
+           "claimed_player_id": PLAYER, "claimed_authority_epoch": 7,
+           "receipt": RECEIPT.model_dump(mode="json", by_alias=True)}
+    assert parse_app_proof_begin_any(json.dumps(raw).encode()).receipt == RECEIPT
+    with pytest.raises(ValidationError, match="app_proof_receipt_epoch_mismatch"):
+        parse_app_proof_begin_any(json.dumps({
+            **raw, "claimed_authority_epoch": 8}).encode())
+    with pytest.raises(ValidationError):
+        parse_app_proof_begin_any(json.dumps({
+            **raw, "receipt": {**raw["receipt"], "unexpected": True}}).encode())
 
 
 def test_proof_nonce_is_bound_to_exact_peer_handle_and_consumed_on_mismatch():

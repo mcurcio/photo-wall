@@ -61,3 +61,29 @@ class ControlAck(Model):
     authority_epoch: int = Field(ge=1)
     delivery_id: str = Field(min_length=32, max_length=64, pattern=r"^[a-f0-9]+$")
     result: Literal["applied", "parsed_execution_unavailable", "rejected"]
+
+
+class ControlAppliedReceipt(Model):
+    """Post-commit evidence that Registry accepted one exact applied ACK.
+
+    The nonce is a correlation secret for a later process-bound local proof,
+    not a credential or evidence that pixels were rendered.
+    """
+
+    schema_version: Literal[1] = Field(default=1, alias="schema")
+    authority_epoch: int = Field(ge=1)
+    delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    delivery_sequence: int = Field(ge=1, le=2**63 - 1)
+    state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    ack_nonce: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ControlAckResponse(Model):
+    accepted: bool
+    receipt: ControlAppliedReceipt | None = None
+
+    @model_validator(mode="after")
+    def receipt_requires_acceptance(self):
+        if self.receipt is not None and not self.accepted:
+            raise ValueError("control_receipt_without_acceptance")
+        return self

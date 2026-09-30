@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from central.runtime import (
     OPERATOR_HISTORY_SECONDS,
+    AdmissionPolicy,
     Child,
     Contribution,
     Program,
@@ -28,6 +29,60 @@ def lamp(start=0, end=1):
 
 def get_run(view, run_id):
     return next(run for run in view.runs if run.run_id == run_id)
+
+
+def test_drain_policy_rejects_manual_force_restart_and_explicit_queue_before_admission():
+    scene = Scene(scene_id="nested", loop=True, children=(Child(scene=Scene(
+        scene_id="child", contributions=(media("frame:drained"),),
+    )),))
+    runtime = Runtime()
+    runtime.set_scene(scene)
+    existing = runtime.activate("nested", "existing", 0)
+    policy = AdmissionPolicy(frozenset({"frame:drained"}))
+    guarded = Runtime.restore(runtime.export_state(), admission_policy=policy)
+
+    for identity, options in (
+        ("manual", {}),
+        ("forced-restart", {"repeat": "restart", "force": True}),
+        ("explicit-queue", {"repeat": "queue", "expires_at": 20}),
+    ):
+        refusal = guarded.activate("nested", identity, 0, **options)
+        assert (refusal.status, refusal.reason) == ("rejected", "equipment_draining")
+    assert [run.run_id for run in guarded.project(0).runs
+            if run.ended_at is None and run.parent_id is None] == [
+        existing.run_id
+    ]
+    assert guarded.export_state()["queue"] == []
+    assert guarded.project(0).now == 0
+    assert guarded._copy().admission_policy == policy
+
+    guarded.set_scene(Scene(scene_id="unrelated", contributions=(media("frame:open"),)))
+    assert guarded.activate("unrelated", "unrelated", 0).status == "admitted"
+
+
+def test_preexisting_queued_activation_waits_behind_drain_until_expiry_without_spin():
+    runtime = Runtime()
+    runtime.set_scene(Scene(scene_id="queued", loop=True, cycle_seconds=100,
+                            contributions=(media("frame:open"),)))
+    existing = runtime.activate("queued", "existing", 0)
+    runtime.set_scene(Scene(scene_id="queued", revision=2, loop=True, cycle_seconds=100,
+                            contributions=(media("frame:drained"),)))
+    assert runtime.activate("queued", "pending", 0, repeat="queue", expires_at=10).status == (
+        "queued"
+    )
+    guarded = Runtime.restore(
+        runtime.export_state(), admission_policy=AdmissionPolicy(frozenset({"frame:drained"}))
+    )
+    guarded.cancel(existing.run_id, 0)
+
+    before = guarded.export_state()
+    assert guarded.project(5, max_events=2).now == 5
+    assert guarded.export_state() == before
+    assert guarded.advance(5, max_events=2).now == 5
+    assert guarded.export_state()["admissions"]["pending"]["status"] == "queued"
+    assert guarded.advance(10, max_events=2).now == 10
+    assert guarded.export_state()["admissions"]["pending"]["status"] == "expired"
+    assert guarded.export_state()["queue"] == []
 
 
 def test_frame_references_include_nested_outro_and_upcoming_program_context():

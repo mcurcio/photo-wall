@@ -30,12 +30,17 @@ from appliance.app_process_proof import (
 from appliance.linux_app_proof import LinuxAppProofSamplers
 from contracts.app_process_proof import (
     MAX_PROOF_PACKET_BYTES,
+    AppProofBeginV2,
     AppProofChallengePacket,
+    AppProofChallengePacketV2,
     AppProofErrorPacket,
+    AppProofErrorPacketV2,
     AppProofResultPacket,
+    AppProofResultPacketV2,
     LocalAppProof,
-    parse_app_proof_begin,
-    parse_app_proof_response_packet,
+    LocalAppProofV2,
+    parse_app_proof_begin_any,
+    parse_app_proof_response_packet_any,
 )
 
 _UCRED_FORMAT = "=iII"
@@ -53,6 +58,7 @@ _ERROR_CODES = frozenset({
     "app_proof_context_invalid", "app_proof_context_changed", "app_proof_busy",
     "app_proof_response_invalid", "app_proof_expired_or_used", "app_proof_peer_changed",
     "app_proof_signature_invalid", "record_rejected", "service_unavailable",
+    "app_root_unavailable",
 })
 
 
@@ -63,7 +69,7 @@ class LocalAppProofSink(Protocol):
     stores only volatile OS-local evidence; it grants no Central acceptance.
     """
 
-    def record_if_current(self, proof: LocalAppProof,
+    def record_if_current(self, proof: LocalAppProof | LocalAppProofV2,
                           expected: CurrentAttemptContext) -> bool: ...
 
 
@@ -126,6 +132,7 @@ class LocalAppProofService:
         """Close the exchange after one terminal result or bounded error."""
         nonce: str | None = None
         verifier: LocalAppProofVerifier | None = None
+        wire_schema = 1
         try:
             if (connection.family != socket.AF_UNIX
                     or connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
@@ -149,17 +156,21 @@ class LocalAppProofService:
                 main_process_sampler=self.samplers.main_process,
                 peer_process_sampler=self.samplers.peer_process,
                 current_attempt=self.current_attempt, boottime=self.boottime)
-            begin = parse_app_proof_begin(raw)
+            begin = parse_app_proof_begin_any(raw)
+            wire_schema = begin.schema_version
             challenge = verifier.begin(connection, begin.claimed_player_id,
-                                       begin.claimed_authority_epoch)
+                                       begin.claimed_authority_epoch,
+                                       receipt=begin.receipt if type(begin) is AppProofBeginV2
+                                       else None)
             nonce = challenge.nonce
-            packet = AppProofChallengePacket(kind="challenge", challenge=challenge)
+            packet = (AppProofChallengePacketV2(kind="challenge", challenge=challenge)
+                      if wire_schema == 2 else
+                      AppProofChallengePacket(kind="challenge", challenge=challenge))
             self._send(connection, packet.model_dump_json(by_alias=True).encode("utf-8"))
             connection.settimeout(LocalAppProofVerifier.TTL_SECONDS)
             message_peer, raw = self._recv(connection)
-            response = parse_app_proof_response_packet(raw)
-            proof = verifier.verify(connection, response)
-            expected = CurrentAttemptContext.from_challenge(proof.challenge)
+            response = parse_app_proof_response_packet_any(raw, schema=wire_schema)
+            proof, expected = verifier.verify_with_context(connection, response)
             verifier.ensure_current_context(expected)
             try:
                 recorded = self.sink.record_if_current(proof, expected)
@@ -167,12 +178,16 @@ class LocalAppProofService:
                 raise LocalProofError("service_unavailable") from exc
             if type(recorded) is not bool or not recorded:
                 raise LocalProofError("record_rejected")
-            result = AppProofResultPacket(kind="result", status="recorded")
+            result = (AppProofResultPacketV2(kind="result", status="recorded")
+                      if wire_schema == 2 else
+                      AppProofResultPacket(kind="result", status="recorded"))
             self._send(connection, result.model_dump_json(by_alias=True).encode("utf-8"))
         except (LocalProofError, OSError, ValueError) as exc:
             code = str(exc) if str(exc) in _ERROR_CODES else "invalid_packet"
             try:
-                packet = AppProofErrorPacket(kind="error", code=code)
+                packet = (AppProofErrorPacketV2(kind="error", code=code)
+                          if wire_schema == 2 else
+                          AppProofErrorPacket(kind="error", code=code))
                 self._send(connection, packet.model_dump_json(by_alias=True).encode("utf-8"))
             except (OSError, LocalProofError):
                 pass

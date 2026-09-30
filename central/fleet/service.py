@@ -485,16 +485,17 @@ class FleetService:
             if root:
                 return False
             accepted = conn.execute(
-                "SELECT 1 FROM fleet_accepted_artifacts AS accepted "
+                "SELECT 1 FROM fleet_generation_acceptances AS accepted "
                 "JOIN devices AS device ON device.device_id=accepted.device_id "
                 "JOIN fleet_device_lifecycle AS lifecycle "
                 "ON lifecycle.device_id=accepted.device_id "
                 "WHERE accepted.kind=%s AND accepted.content_key=%s "
+                "AND accepted.device_generation=lifecycle.generation "
                 "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL "
                 "AND (%s='base' OR EXISTS ("
                 "SELECT 1 FROM asset_references AS ref WHERE ref.kind='player-payload' "
                 "AND ref.identity=accepted.content_key "
-                "AND ref.owner='fleet-fallback:' || accepted.device_id)) LIMIT 1",
+                "AND ref.owner=accepted.fallback_owner)) LIMIT 1",
                 (kind, content_key, kind),
             ).fetchone()
             if accepted:
@@ -626,8 +627,15 @@ class FleetService:
                 "last_result_digest,last_result,last_result_at "
                 "FROM player_control_sessions").fetchall()}
             accepted = {(r["device_id"], r["kind"]): r for r in conn.execute(
-                "SELECT DISTINCT ON(device_id,kind) * FROM fleet_accepted_artifacts "
-                "ORDER BY device_id,kind,accepted_at DESC").fetchall()}
+                "SELECT DISTINCT ON(accepted.device_id,accepted.kind) accepted.* "
+                "FROM fleet_generation_acceptances AS accepted "
+                "JOIN fleet_device_lifecycle AS lifecycle "
+                "ON lifecycle.device_id=accepted.device_id "
+                "JOIN devices AS device ON device.device_id=accepted.device_id "
+                "WHERE accepted.device_generation=lifecycle.generation "
+                "AND lifecycle.revoked_at IS NULL AND device.retired_at IS NULL "
+                "ORDER BY accepted.device_id,accepted.kind,accepted.accepted_at DESC,"
+                "accepted.sha256 DESC").fetchall()}
             result = []
             for device in devices:
                 device_id = device["device_id"]

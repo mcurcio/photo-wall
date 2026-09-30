@@ -17,6 +17,7 @@ from central.media_store import MediaStore, MediaStoreError
 from central.player_control_protocol import project_state, state_digest
 from central.registry import RegistryError
 from central.runtime import Contribution, Program, Scene
+from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration, Readiness
 from contracts.player_control import ControlAck, ControlHello
 
@@ -40,6 +41,31 @@ def future_run(coordinator):
     coordinator.advance()
 
 
+def historical_bound_prepare(drain, player_id, attempt_id, boot_id, authority_epoch, *,
+                             authorization_expires_at):
+    """Exercise persisted pre-D16 bound drains without enabling their public entry."""
+    with drain.coordinator._transaction() as conn:
+        acquire_runtime_locks(conn)
+        return drain._prepare_idle_in(
+            conn, player_id, attempt_id, boot_id, authority_epoch,
+            authorization_expires_at=authorization_expires_at, require_unbound=False,
+        )
+
+
+def test_public_bound_preparation_refuses_before_any_durable_change(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    before = coordinator.runtime.read().export_state()
+    with pytest.raises(RegistryError, match="bound_drain_policy_unselected"):
+        EquipmentDrain(coordinator).prepare_idle(
+            player["player_id"], "attempt-bound", request.boot_id,
+            player["authority_epoch"], authorization_expires_at=1010,
+        )
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
+    assert coordinator.runtime.read().export_state() == before
+
+
 def test_prepared_drain_cancels_old_group_and_blocks_new_delivery(registry):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
@@ -48,7 +74,7 @@ def test_prepared_drain_cancels_old_group_and_blocks_new_delivery(registry):
     assert before["plan"] and before["plan"].layers
 
     drain = EquipmentDrain(coordinator)
-    result = drain.prepare_idle(
+    result = historical_bound_prepare(drain,
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1015,
     )
@@ -80,6 +106,57 @@ def test_prepared_drain_cancels_old_group_and_blocks_new_delivery(registry):
         registry.unbind("drain-frame", expected_generation=1)
 
 
+def test_prepared_drain_hydrates_runtime_policy_for_direct_commands_and_projections(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="manual", loop=True,
+        contributions=(Contribution(target="frame:drain-frame", kind="black"),),
+    ))
+    historical_bound_prepare(EquipmentDrain(coordinator),
+        player["player_id"], "attempt-manual", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1010,
+    )
+
+    observed = coordinator.runtime.read()
+    assert observed.admission_policy.blocked_targets == frozenset({"frame:drain-frame"})
+    assert observed.export_state()["now"] == registry.clock.utc()
+    assert observed.project(registry.clock.utc()).runs == ()
+    assert coordinator.runtime.command(
+        "activate", "manual", "direct", registry.clock.utc(), force=True, repeat="restart",
+    ).reason == "equipment_draining"
+    assert coordinator.runtime.command(
+        "activate", "manual", "queued", registry.clock.utc(),
+        repeat="queue", expires_at=1010,
+    ).reason == "equipment_draining"
+    assert coordinator.runtime.read().export_state()["queue"] == []
+    assert coordinator.runtime.read().project(registry.clock.utc()).runs == ()
+
+
+def test_prepare_persists_due_unrelated_program_at_the_barrier_cut(registry):
+    player, request = bound_player(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="independent", loop=True,
+        contributions=(Contribution(target="actuator:independent", kind="actuator"),),
+    ))
+    program = Program(
+        program_id="independent", scene_id="independent", starts_at=1002, ends_at=1020,
+    )
+    coordinator.runtime.command("set_program", program)
+    registry.clock.advance(5)
+
+    historical_bound_prepare(EquipmentDrain(coordinator),
+        player["player_id"], "attempt-independent", request.boot_id,
+        player["authority_epoch"], authorization_expires_at=1010,
+    )
+    state = coordinator.runtime.read().export_state()
+    assert state["now"] == 1005
+    assert state["admissions"][program.activation_id]["status"] == "admitted"
+    assert any(run["program_id"] == program.program_id and run["ended_at"] is None
+               for run in state["runs"].values())
+
+
 def test_stop_committed_never_time_releases_and_retries_are_typed(registry):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
@@ -90,7 +167,7 @@ def test_stop_committed_never_time_releases_and_retries_are_typed(registry):
         preview_revision = conn.execute(
             "SELECT configuration_revision FROM frames WHERE id='drain-frame'"
         ).fetchone()["configuration_revision"]
-    prepared = drain.prepare_idle(
+    prepared = historical_bound_prepare(drain,
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1005,
     )
@@ -99,7 +176,7 @@ def test_stop_committed_never_time_releases_and_retries_are_typed(registry):
         assert conn.execute(
             "SELECT preview FROM frames WHERE id='drain-frame'"
         ).fetchone()["preview"] is None
-    assert drain.prepare_idle(
+    assert historical_bound_prepare(drain,
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1300,
     ).status == "already_prepared"
@@ -113,12 +190,12 @@ def test_stop_committed_never_time_releases_and_retries_are_typed(registry):
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"],
     ).status == "already_committed"
-    assert restarted.prepare_idle(
+    assert historical_bound_prepare(restarted,
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1300,
     ).status == "already_committed"
     with pytest.raises(RegistryError, match="equipment_drain_conflict"):
-        restarted.prepare_idle(
+        historical_bound_prepare(restarted,
             player["player_id"], "attempt-2", request.boot_id,
             player["authority_epoch"], authorization_expires_at=1300,
         )
@@ -135,7 +212,7 @@ def test_expired_preparation_stays_fenced_and_cannot_commit_stop(registry):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     drain = EquipmentDrain(coordinator)
-    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+    historical_bound_prepare(drain, player["player_id"], "attempt-1", request.boot_id,
                        player["authority_epoch"], authorization_expires_at=1001)
     registry.clock.advance(2)
     with pytest.raises(RegistryError, match="drain_authorization_expired"):
@@ -155,7 +232,7 @@ def test_unbound_canary_requires_its_own_preparation_and_complete_unbound_set(re
         assert conn.execute("SELECT count(*) AS n FROM equipment_drains").fetchone()["n"] == 0
 
     unbound, _, unbound_request = enroll(registry)
-    drain.prepare_idle(unbound["player_id"], "attempt-legacy", unbound_request.boot_id,
+    historical_bound_prepare(drain, unbound["player_id"], "attempt-legacy", unbound_request.boot_id,
                        unbound["authority_epoch"], authorization_expires_at=1010)
     with pytest.raises(RegistryError, match="unbound_drain_snapshot_changed"):
         drain.commit_stop_unbound(unbound["player_id"], "attempt-legacy",
@@ -302,7 +379,7 @@ def test_active_run_requires_declared_interruption_policy(registry):
     ))
     coordinator.runtime.command("activate", "live", "live-1", registry.clock.utc())
     with pytest.raises(RegistryError, match="active_run_requires_interruption_policy"):
-        EquipmentDrain(coordinator).prepare_idle(
+        historical_bound_prepare(EquipmentDrain(coordinator),
             player["player_id"], "attempt-1", request.boot_id,
             player["authority_epoch"], authorization_expires_at=1010,
         )
@@ -325,7 +402,7 @@ def test_program_entering_after_prepare_refuses_stop(registry, advance_before_co
         program_id="scheduled", scene_id="scheduled", starts_at=1005, ends_at=1100,
     ))
     drain = EquipmentDrain(coordinator)
-    drain.prepare_idle(
+    historical_bound_prepare(drain,
         player["player_id"], "attempt-scheduled", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1020,
     )
@@ -382,7 +459,7 @@ def test_prepare_samples_time_after_waiting_for_coordination_lock(
     with ThreadPoolExecutor(max_workers=1) as workers:
         with original_transaction():
             pending = workers.submit(
-                drain.prepare_idle, player["player_id"], "attempt-cut", request.boot_id,
+                historical_bound_prepare, drain, player["player_id"], "attempt-cut", request.boot_id,
                 player["authority_epoch"], authorization_expires_at=expires_at,
             )
             assert entering.wait(4)
@@ -435,7 +512,7 @@ def test_prepare_samples_time_after_waiting_for_binding_row(
         with registry.db.transaction() as blocker:
             blocker.execute("SELECT 1 FROM bindings WHERE frame_id='drain-frame' FOR UPDATE")
             pending = workers.submit(
-                drain.prepare_idle, player["player_id"], "attempt-binding", request.boot_id,
+                historical_bound_prepare, drain, player["player_id"], "attempt-binding", request.boot_id,
                 player["authority_epoch"], authorization_expires_at=expires_at,
             )
             assert entered.wait(4)
@@ -466,7 +543,7 @@ def test_stop_projection_and_recorded_timestamp_share_one_cut(registry, monkeypa
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     drain = EquipmentDrain(coordinator)
-    drain.prepare_idle(player["player_id"], "attempt-cut", request.boot_id,
+    historical_bound_prepare(drain, player["player_id"], "attempt-cut", request.boot_id,
                        player["authority_epoch"], authorization_expires_at=1010)
     samples = []
 
@@ -488,7 +565,7 @@ def test_stop_projection_and_recorded_timestamp_share_one_cut(registry, monkeypa
 def test_media_grant_and_frame_placement_are_fenced(registry, tmp_path):
     player, request = bound_player(registry)
     coordinator = Coordinator(registry.db, registry.clock)
-    EquipmentDrain(coordinator).prepare_idle(
+    historical_bound_prepare(EquipmentDrain(coordinator),
         player["player_id"], "attempt-1", request.boot_id,
         player["authority_epoch"], authorization_expires_at=1010,
     )
@@ -505,7 +582,7 @@ def test_reenrollment_cannot_clear_fence_or_commit_old_epoch(registry):
     player, key, request = enroll(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     drain = EquipmentDrain(coordinator)
-    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+    historical_bound_prepare(drain, player["player_id"], "attempt-1", request.boot_id,
                        player["authority_epoch"], authorization_expires_at=1010)
     replacement, _, _ = enroll(registry, key=key, device_id=request.device_id)
     assert replacement["authority_epoch"] == player["authority_epoch"] + 1
@@ -528,7 +605,7 @@ def test_prepared_abort_needs_expiry_and_fresh_applied_control(registry):
         player["player_id"], player["authority_epoch"], "a" * 64,
     )
     drain = EquipmentDrain(coordinator)
-    drain.prepare_idle(player["player_id"], "attempt-1", request.boot_id,
+    historical_bound_prepare(drain, player["player_id"], "attempt-1", request.boot_id,
                        player["authority_epoch"], authorization_expires_at=1001)
     with pytest.raises(RegistryError, match="drain_authorization_open"):
         drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
@@ -555,6 +632,9 @@ def test_prepared_abort_needs_expiry_and_fresh_applied_control(registry):
     ))
     assert drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
                                 player["authority_epoch"]).status == "aborted"
+    restored = coordinator.runtime.read()
+    assert restored.admission_policy.blocked_targets == frozenset()
+    assert restored.export_state()["now"] == registry.clock.utc()
     assert drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
                                 player["authority_epoch"]).status == "already_aborted"
     registry.unbind("drain-frame", expected_generation=1)
@@ -580,7 +660,7 @@ def test_control_delivery_challenge_and_drain_floor_are_one_lock_cut(registry, m
 
     def prepare():
         drain_started.set()
-        return drain.prepare_idle(player_id, "attempt-race", request.boot_id, epoch,
+        return historical_bound_prepare(drain, player_id, "attempt-race", request.boot_id, epoch,
                                   authorization_expires_at=registry.clock.utc() + 15)
 
     with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as workers:
@@ -610,7 +690,7 @@ def test_expired_prepared_drain_recovers_after_new_epoch_applies_fenced_state(re
     registry.bind("reenroll-frame", old["player_id"], "HDMI-A-1", expected_generation=0)
     coordinator = Coordinator(registry.db, registry.clock)
     drain = EquipmentDrain(coordinator)
-    prepared = drain.prepare_idle(old["player_id"], "attempt-reenroll", request.boot_id,
+    prepared = historical_bound_prepare(drain, old["player_id"], "attempt-reenroll", request.boot_id,
                                   old["authority_epoch"], authorization_expires_at=1005)
     assert prepared.status == "prepared"
 

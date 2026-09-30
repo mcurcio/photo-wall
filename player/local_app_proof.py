@@ -21,11 +21,17 @@ from pydantic import ValidationError
 from contracts.app_process_proof import (
     MAX_PROOF_PACKET_BYTES,
     AppProofBegin,
+    AppProofBeginV2,
     AppProofChallengePacket,
+    AppProofChallengePacketV2,
     AppProofErrorPacket,
+    AppProofErrorPacketV2,
     AppProofResponsePacket,
+    AppProofResponsePacketV2,
     AppProofResultPacket,
+    AppProofResultPacketV2,
 )
+from contracts.player_control import ControlAppliedReceipt
 from contracts.strict_json import loads_object
 from player.identity import Identity
 
@@ -133,6 +139,27 @@ class LocalAppProofClient:
     def exchange(self, *, identity: Identity, player_id: str, authority_epoch: int,
                  device_id: str, kernel_boot_id: str,
                  enrollment_current: Callable[[], bool]) -> ProofOutcome:
+        return self._exchange(identity=identity, player_id=player_id,
+                              authority_epoch=authority_epoch, device_id=device_id,
+                              kernel_boot_id=kernel_boot_id,
+                              enrollment_current=enrollment_current, receipt=None)
+
+    def exchange_applied(self, *, identity: Identity, player_id: str,
+                         authority_epoch: int, device_id: str, kernel_boot_id: str,
+                         receipt: ControlAppliedReceipt,
+                         enrollment_current: Callable[[], bool]) -> ProofOutcome:
+        """Sign a current Central ACK marker without blocking Player control."""
+        if type(receipt) is not ControlAppliedReceipt:
+            raise LocalProofError("receipt_invalid")
+        return self._exchange(identity=identity, player_id=player_id,
+                              authority_epoch=authority_epoch, device_id=device_id,
+                              kernel_boot_id=kernel_boot_id,
+                              enrollment_current=enrollment_current, receipt=receipt)
+
+    def _exchange(self, *, identity: Identity, player_id: str, authority_epoch: int,
+                  device_id: str, kernel_boot_id: str,
+                  enrollment_current: Callable[[], bool],
+                  receipt: ControlAppliedReceipt | None) -> ProofOutcome:
         if (not enrollment_current() or not player_id.startswith("p-")
                 or authority_epoch < 1):
             return "stale"
@@ -142,15 +169,22 @@ class LocalAppProofClient:
             raise LocalProofError("socket_unavailable") from error
         with connection:
             connection.settimeout(PROOF_SOCKET_TIMEOUT)
-            begin = AppProofBegin(kind="begin", claimed_player_id=player_id,
-                                  claimed_authority_epoch=authority_epoch)
+            begin = (AppProofBegin(kind="begin", claimed_player_id=player_id,
+                                   claimed_authority_epoch=authority_epoch)
+                     if receipt is None else
+                     AppProofBeginV2(kind="begin", claimed_player_id=player_id,
+                                     claimed_authority_epoch=authority_epoch,
+                                     receipt=receipt))
             _send(connection, begin.model_dump(mode="json", by_alias=True))
             packet = _receive(connection)
             if packet.get("kind") == "error":
-                self._error_packet(packet)
+                self._error_packet(packet, schema=begin.schema_version)
                 return "rejected"
             try:
-                challenge = AppProofChallengePacket.model_validate_json(_packet(packet)).challenge
+                challenge = (AppProofChallengePacket.model_validate_json(_packet(packet)).challenge
+                             if receipt is None else
+                             AppProofChallengePacketV2.model_validate_json(
+                                 _packet(packet), strict=True).challenge)
             except (ValidationError, ValueError, TypeError) as error:
                 raise LocalProofError("challenge_invalid") from error
             if (challenge.trust_mode not in ("t1", "t2")
@@ -160,19 +194,27 @@ class LocalAppProofClient:
                     or challenge.claimed_authority_epoch != authority_epoch
                     or challenge.process.pid != os.getpid()):
                 raise LocalProofError("challenge_context")
+            if receipt is not None and challenge.receipt != receipt:
+                raise LocalProofError("challenge_receipt")
             if not enrollment_current():
                 return "stale"
-            response = identity.sign_app_proof(challenge)
+            response = (identity.sign_app_proof(challenge) if receipt is None else
+                        identity.sign_applied_control_proof(challenge))
             if not enrollment_current():
                 return "stale"
-            response_packet = AppProofResponsePacket(kind="response", response=response)
+            response_packet = (AppProofResponsePacket(kind="response", response=response)
+                               if receipt is None else
+                               AppProofResponsePacketV2(kind="response", response=response))
             _send(connection, response_packet.model_dump(mode="json", by_alias=True))
             terminal = _receive(connection)
             if terminal.get("kind") == "error":
-                self._error_packet(terminal)
+                self._error_packet(terminal, schema=begin.schema_version)
                 return "rejected"
             try:
-                AppProofResultPacket.model_validate(terminal)
+                if receipt is None:
+                    AppProofResultPacket.model_validate(terminal)
+                else:
+                    AppProofResultPacketV2.model_validate(terminal)
             except (ValidationError, ValueError, TypeError) as error:
                 raise LocalProofError("result_invalid") from error
             if not enrollment_current():
@@ -180,9 +222,12 @@ class LocalAppProofClient:
             return "recorded"
 
     @staticmethod
-    def _error_packet(packet: dict[str, object]) -> None:
+    def _error_packet(packet: dict[str, object], *, schema: int = 1) -> None:
         try:
-            AppProofErrorPacket.model_validate(packet)
+            if schema == 1:
+                AppProofErrorPacket.model_validate(packet)
+            else:
+                AppProofErrorPacketV2.model_validate(packet)
         except (ValidationError, ValueError, TypeError) as error:
             raise LocalProofError("error_packet") from error
 

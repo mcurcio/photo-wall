@@ -498,7 +498,8 @@ def create_app(
     def control_ack(request: ControlAck, identity: dict = Depends(player)):
         if request.authority_epoch != identity["authority_epoch"]:
             raise RegistryError("stale_authority", 403)
-        return {"accepted": registry.control_ack(identity["id"], request)}
+        return registry.control_ack_response(identity["id"], request).model_dump(
+            mode="json", by_alias=True, exclude_none=True)
 
     @app.get("/v1/player/time", response_model=PlayerTime)
     def player_time(identity: dict = Depends(player)):
@@ -839,22 +840,19 @@ def create_app(
     def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
         if request.expected.program_id != program_id or request.program.program_id != program_id:
             raise ValueError("Program identity mismatch")
-        coordinator.runtime.command(
-            "replace_program", request.expected, request.program, clock.utc()
-        )
+        coordinator.runtime.command_current("replace_program", request.expected, request.program)
         return {"status": "configured"}
 
     @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
     def remove_program(program_id: Identifier):
-        return coordinator.runtime.command("remove_program", program_id, clock.utc())
+        return coordinator.runtime.command_current("remove_program", program_id)
 
     @app.post("/v1/operator/activations", dependencies=[Depends(admin)])
     def activate(request: ActivationRequest):
-        return coordinator.runtime.command(
+        return coordinator.runtime.command_current(
             "activate",
             request.scene_id,
             request.activation_id,
-            clock.utc(),
             priority=request.priority,
             repeat=request.repeat,
             force=request.force,
@@ -863,7 +861,7 @@ def create_app(
 
     @app.post("/v1/operator/runs/{run_id}/{operation}", dependencies=[Depends(admin)])
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
-        return coordinator.runtime.command(operation, run_id, clock.utc())
+        return coordinator.runtime.command_current(operation, run_id)
 
     if content is not None:
         mount_content_routes(app, content)

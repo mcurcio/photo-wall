@@ -15,10 +15,15 @@ import pytest
 from appliance.app_process_proof import CurrentAttemptContext, LocalProofError, PeerCredentials
 from appliance.app_proof_service import LocalAppProofService
 from contracts.app_process_proof import (
+    AppProofBeginV2,
     AppProofChallenge,
+    AppProofChallengeV2,
     AppProofResponsePacket,
+    AppProofResponsePacketV2,
+    LocalAppProofV2,
     ProcessIdentity,
 )
+from contracts.player_control import ControlAppliedReceipt
 from player.identity import load_identity
 
 PLAYER = "p-" + "a" * 32
@@ -26,6 +31,9 @@ DEVICE = "device-" + "b" * 64
 PEER = PeerCredentials(123, 10001, 10001)
 PROCESS = ProcessIdentity(pid=123, start_ticks=456, invocation_id="c" * 32,
                           cgroup_unit="photo-wall-player.service")
+RECEIPT = ControlAppliedReceipt(authority_epoch=7, delivery_id="e" * 32,
+                                delivery_sequence=5, state_digest="a" * 64,
+                                ack_nonce="b" * 64)
 CONTEXT = CurrentAttemptContext(
     "installation-one", DEVICE, 2, UUID(int=1), UUID(int=2), UUID(int=3),
     UUID(int=4), UUID(int=5), "t2",
@@ -67,11 +75,19 @@ class FakeConnection:
             return raw, self.begin_creds, self.begin_flags, None
         assert self.receives == 2
         if self.second_raw is None:
-            challenge = AppProofChallenge.model_validate_json(
-                json.dumps(json.loads(self.sent[0])["challenge"]).encode())
-            response = load_identity().sign_app_proof(challenge)
-            raw = AppProofResponsePacket(kind="response", response=response).model_dump_json(
-                by_alias=True).encode()
+            packet = json.loads(self.sent[0])
+            if packet["schema"] == 2:
+                challenge = AppProofChallengeV2.model_validate_json(
+                    json.dumps(packet["challenge"]).encode())
+                response = load_identity().sign_applied_control_proof(challenge)
+                raw = AppProofResponsePacketV2(kind="response", response=response).model_dump_json(
+                    by_alias=True).encode()
+            else:
+                challenge = AppProofChallenge.model_validate_json(
+                    json.dumps(packet["challenge"]).encode())
+                response = load_identity().sign_app_proof(challenge)
+                raw = AppProofResponsePacket(kind="response", response=response).model_dump_json(
+                    by_alias=True).encode()
         else:
             raw = self.second_raw
         return raw, self.second_creds, self.second_flags, None
@@ -137,6 +153,33 @@ def test_one_exchange_records_bound_proof_through_injected_cas_sink():
     assert proof.challenge.command_session_id == CONTEXT.command_session_id
     assert proof.challenge.trust_mode == "t2"
     assert proof.challenge.process == PROCESS
+
+
+def test_v2_exchange_records_signed_receipt_and_protected_active_root():
+    service, state, _, sink = service_state()
+    state["context"] = replace(CONTEXT, active_sha256="f" * 64)
+    begin = AppProofBeginV2(kind="begin", claimed_player_id=PLAYER,
+                            claimed_authority_epoch=7, receipt=RECEIPT)
+    connection = FakeConnection(begin_raw=begin.model_dump_json(by_alias=True).encode())
+    service.handle_connection(connection)
+    assert connection.closed
+    assert terminal(connection) == {"schema": 2, "kind": "result", "status": "recorded"}
+    proof = sink.recorded[0]
+    assert type(proof) is LocalAppProofV2
+    assert proof.challenge.receipt == RECEIPT
+    assert proof.challenge.active_sha256 == "f" * 64
+    assert proof.challenge.process == PROCESS
+
+
+def test_v2_exchange_without_protected_root_is_boundedly_refused():
+    service, _, _, sink = service_state()
+    begin = AppProofBeginV2(kind="begin", claimed_player_id=PLAYER,
+                            claimed_authority_epoch=7, receipt=RECEIPT)
+    connection = FakeConnection(begin_raw=begin.model_dump_json(by_alias=True).encode())
+    service.handle_connection(connection)
+    assert connection.closed and not sink.recorded
+    assert terminal(connection) == {"schema": 2, "kind": "error",
+                                    "code": "app_root_unavailable"}
 
 
 @pytest.mark.parametrize("second_creds,second_flags,second_raw", [

@@ -36,6 +36,7 @@ from central.registry import RegistryError
 from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
+from central.transaction_locks import COORDINATION_LOCK
 from contracts.models import (
     Commit,
     IdentifyOutput,
@@ -48,8 +49,6 @@ from contracts.models import (
     Revocation,
 )
 from contracts.time import Clock
-
-COORDINATION_LOCK = 734118324
 
 
 class CoordinationLimits(Model):
@@ -394,8 +393,10 @@ class Coordinator:
 
     def advance(self) -> Projection:
         """One persisted current advance plus pure future planning and atomic offers."""
-        now = self.clock.utc()
         with self._transaction() as conn, self.runtime.edit(conn) as runtime:
+            # A scheduler waiting on either lock must advance at the committed
+            # serialization cut, not at the time it first requested the cut.
+            now = self.clock.utc()
             runtime.advance(now)
             fenced = fenced_players_in(conn)
             configurations = {

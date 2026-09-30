@@ -1,5 +1,6 @@
 # Acceptance evidence
 
+- [2026-09-30 fleet pre-effect integration](2026-09-30-fleet-pre-effect-integration.md): whole-repository portable and PostgreSQL results for the staged gate, attempt, receipt, proof and Runtime seams; command, deployment and physical qualification remain open.
 - [2026-09-30 local Player process proof](2026-09-30-local-app-proof.md): separate app-to-base key proof client, per-packet Linux credentials, attempt-bound challenge and base packaging checks; service composition and physical qualification remain open.
 - [2026-09-30 command trust and rollout audit](2026-09-30-command-rollout-audit.md): live serving paths and the conditional D14/D17 gates; no command activation or deployment change.
 - [2026-09-30 fleet intent and loader OS data](2026-09-30-fleet-intent-and-data.md): inert operator maintenance requests, verifier-gated OS data routes and session expiry checks with local PostgreSQL evidence, plus read-only Kubernetes trust/rollback observations; no command or physical activation.

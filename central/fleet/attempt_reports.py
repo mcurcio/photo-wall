@@ -82,6 +82,7 @@ class AttemptReportStore:
                     or attempt["kernel_boot_id"] != principal.kernel_boot_id
                     or attempt["offer_id"] != principal.offer_id
                     or attempt["installation_audience"] != principal.installation_audience
+                    or attempt["command_session_id"] != principal.command_session_id
                     or attempt["command_id"] != report.command_id
                     or attempt["drain_id"] != report.drain_id
                     or attempt["phase"] not in _REPORT_PHASES):

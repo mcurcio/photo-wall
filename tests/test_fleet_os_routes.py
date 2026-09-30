@@ -163,7 +163,7 @@ def test_reports_are_bounded_strict_and_only_carrier_claims(registry, tmp_path) 
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM fleet_os_attempt_reports")\
             .fetchone()["n"] == 1
-        assert conn.execute("SELECT count(*) AS n FROM fleet_accepted_artifacts")\
+        assert conn.execute("SELECT count(*) AS n FROM fleet_generation_acceptances")\
             .fetchone()["n"] == 1  # the previously qualified fallback only
 
     registry.clock.advance(101)

@@ -1,5 +1,9 @@
 """Application envelope compatibility and epoch-scoped control evidence."""
 
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -127,7 +131,7 @@ def test_first_state_seals_hello_and_new_epoch_can_negotiate(registry):
         assert conflict.json() == {"error": "control_negotiation_conflict"}
 
 
-def test_v2_applied_ack_is_once_consumed_and_epoch_fenced(registry):
+def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(registry):
     player, key, request = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
@@ -143,8 +147,18 @@ def test_v2_applied_ack_is_once_consumed_and_epoch_fenced(registry):
         State.model_validate(state)
         report = {"authority_epoch": player["authority_epoch"],
                   "delivery_id": state["delivery_id"], "result": "applied"}
-        assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
-            "accepted": True}
+        accepted = client.post(
+            "/v1/player/control-acks", json=report, headers=headers).json()
+        assert accepted["accepted"] is True
+        assert accepted["receipt"] == {
+            "schema": 1, "authority_epoch": player["authority_epoch"],
+            "delivery_id": state["delivery_id"], "delivery_sequence": 1,
+            "state_digest": accepted["receipt"]["state_digest"],
+            "ack_nonce": accepted["receipt"]["ack_nonce"],
+        }
+        assert re.fullmatch(r"[0-9a-f]{64}", accepted["receipt"]["state_digest"])
+        assert re.fullmatch(r"[0-9a-f]{64}", accepted["receipt"]["ack_nonce"])
+        assert "ack_nonce" not in registry.control_fact(player["player_id"])
         with registry.db.transaction() as conn:
             first = conn.execute(
                 "SELECT applied_at,applied_sequence FROM player_control_sessions WHERE player_id=%s",
@@ -152,8 +166,8 @@ def test_v2_applied_ack_is_once_consumed_and_epoch_fenced(registry):
             ).fetchone()
         assert first["applied_at"] is not None and first["applied_sequence"] == 1
         registry.clock.advance(10)
-        assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
-            "accepted": False}
+        assert client.post("/v1/player/control-acks", json=report,
+                           headers=headers).json() == accepted
         with registry.db.transaction() as conn:
             repeated = conn.execute(
                 "SELECT applied_at,applied_sequence FROM player_control_sessions WHERE player_id=%s",
@@ -162,6 +176,8 @@ def test_v2_applied_ack_is_once_consumed_and_epoch_fenced(registry):
         assert repeated == first
         assert client.get("/v1/player/state", headers=headers).json()["delivery_id"] != state[
             "delivery_id"]
+        assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
+            "accepted": False}
         newer, _, _ = enroll(registry, key=key, device_id=request.device_id)
         stale = client.post("/v1/player/control-acks", json=report, headers={
             "Authorization": "Bearer " + newer["token"]})
@@ -176,14 +192,26 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
     assert registry.issue_control_delivery_record(player_id, epoch, "a" * 64) == first
     assert first["delivery_sequence"] == 1
-    assert registry.control_ack(player_id, ControlAck(
-        authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied"))
+    first_ack = ControlAck(authority_epoch=epoch, delivery_id=first["delivery_id"],
+                           result="applied")
+    receipt = registry.control_ack_response(player_id, first_ack)
+    assert receipt.accepted and receipt.receipt is not None
+    assert registry.control_ack_response(player_id, first_ack) == receipt
     second = registry.issue_control_delivery_record(player_id, epoch, "b" * 64)
     assert second["delivery_sequence"] == 2
+    assert registry.control_ack_response(player_id, first_ack).model_dump(exclude_none=True) == {
+        "accepted": False}
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT applied_ack_nonce FROM player_control_sessions "
+                            "WHERE player_id=%s", (player_id,)).fetchone()[
+                                "applied_ack_nonce"] is None
     assert not registry.control_ack(player_id, ControlAck(
         authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied"))
-    assert registry.control_ack(player_id, ControlAck(
+    rejected = registry.control_ack_response(player_id, ControlAck(
         authority_epoch=epoch, delivery_id=second["delivery_id"], result="rejected"))
+    assert rejected.model_dump(exclude_none=True) == {"accepted": True}
+    assert registry.control_ack_response(player_id, first_ack).model_dump(
+        exclude_none=True) == {"accepted": False}
     fact = registry.control_fact(player_id)
     assert fact["issued_sequence"] == 2
     assert fact["applied_sequence"] == 1
@@ -193,3 +221,64 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     assert fact["last_result_sequence"] == 2
     assert fact["last_result_digest"] == "b" * 64
     assert fact["last_result"] == "rejected"
+
+
+def test_older_central_writer_cannot_leave_a_replayable_receipt(registry):
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    ack = ControlAck(authority_epoch=epoch, delivery_id=first["delivery_id"],
+                     result="applied")
+    assert registry.control_ack_response(player_id, ack).receipt is not None
+    # Simulate a mixed-version Central pod that issues a newer delivery using
+    # the pre-receipt SQL, which does not know about applied_ack_nonce.
+    with registry.db.transaction() as conn:
+        conn.execute(
+            "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
+            "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s",
+            ("b" * 32, "b" * 64, registry.clock.utc() + 60, player_id),
+        )
+        nonce = conn.execute("SELECT applied_ack_nonce FROM player_control_sessions "
+                             "WHERE player_id=%s", (player_id,)).fetchone()[
+                                 "applied_ack_nonce"]
+    assert nonce is None
+    assert registry.control_ack_response(player_id, ack).model_dump(exclude_none=True) == {
+        "accepted": False}
+
+
+@pytest.mark.parametrize("operation", ["ack", "reissue"])
+def test_control_expiry_is_sampled_after_waiting_for_player_lock(
+        registry, monkeypatch, operation):
+    player, _, _ = enroll(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+    first = registry.issue_control_delivery_record(player_id, epoch, "a" * 64)
+    waiting = threading.Event()
+    original = registry._control_player
+
+    def mark_lock_wait(conn, locked_player_id, locked_epoch):
+        waiting.set()
+        original(conn, locked_player_id, locked_epoch)
+
+    monkeypatch.setattr(registry, "_control_player", mark_lock_wait)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with registry.db.transaction() as conn:
+            conn.execute("SELECT id FROM players WHERE id=%s FOR UPDATE", (player_id,))
+            if operation == "ack":
+                ack = ControlAck(authority_epoch=epoch,
+                                 delivery_id=first["delivery_id"], result="applied")
+                future = executor.submit(registry.control_ack_response, player_id, ack)
+            else:
+                future = executor.submit(registry.issue_control_delivery_record,
+                                         player_id, epoch, "a" * 64)
+            assert waiting.wait(timeout=2)
+            registry.clock.advance(61)
+        outcome = future.result(timeout=5)
+    if operation == "ack":
+        assert outcome.model_dump(exclude_none=True) == {"accepted": False}
+    else:
+        assert outcome["delivery_id"] != first["delivery_id"]
+        assert outcome["delivery_sequence"] == first["delivery_sequence"] + 1

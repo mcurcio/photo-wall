@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import httpx
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 
 from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
@@ -43,7 +43,13 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
-from contracts.player_control import ControlAck, ControlHello, ControlSelection
+from contracts.player_control import (
+    ControlAck,
+    ControlAckResponse,
+    ControlAppliedReceipt,
+    ControlHello,
+    ControlSelection,
+)
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
 from player.central_link import CentralLink, Session, read_refusal
@@ -444,6 +450,8 @@ class PlayerService:
         self._control_selection: ControlSelection | None = None
         self._highest_control_sequence = 0
         self._highest_control_delivery_id: str | None = None
+        self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
+        self._control_proof_revision = 0
         self.central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting"
         self._configuration_received = False
         self._unbound_outputs = tuple(output.output_id for output in outputs if output.connected)
@@ -527,8 +535,13 @@ class PlayerService:
         registration drops it (Session.relocated), so the next step re-enrolls there.
         Raises UplinkError."""
         found = await self._find_central()
-        self._session = (Session(found.central) if self._session is None
-                         else self._session.relocated(found.central))
+        previous = self._session
+        self._session = (Session(found.central) if previous is None
+                         else previous.relocated(found.central))
+        if self._session is not previous:
+            with self._lock:
+                self._applied_proof_receipt = None
+                self._control_proof_revision += 1
         self._located = True
         LOG.info("player: central %s (%s root %s)", found.central.origin, found.source,
                  found.root)
@@ -605,6 +618,8 @@ class PlayerService:
         self._highest_control_sequence = 0
         self._highest_control_delivery_id = None
         with self._lock:
+            self._applied_proof_receipt = None
+            self._control_proof_revision += 1
             self._offered = False
             self._jobs = ()
         self._outgoing.clear()
@@ -705,19 +720,22 @@ class PlayerService:
         ):
             raise ServiceError("state_authority")
         sequence = state.delivery_sequence
-        if sequence is None:
-            # An old pod can answer during a mixed rollout. Its unsequenced state
-            # cannot supersede a v2 delivery already observed in this epoch.
-            if self._highest_control_sequence:
+        with self._lock:
+            if sequence is None:
+                # An old pod can answer during a mixed rollout. Its unsequenced state
+                # cannot supersede a v2 delivery already observed in this epoch.
+                if self._highest_control_sequence:
+                    return "superseded"
+            elif sequence < self._highest_control_sequence:
                 return "superseded"
-        elif sequence < self._highest_control_sequence:
-            return "superseded"
-        elif sequence == self._highest_control_sequence:
-            if state.delivery_id != self._highest_control_delivery_id:
-                raise ServiceError("control_sequence_conflict")
-        else:
-            self._highest_control_sequence = sequence
-            self._highest_control_delivery_id = state.delivery_id
+            elif sequence == self._highest_control_sequence:
+                if state.delivery_id != self._highest_control_delivery_id:
+                    raise ServiceError("control_sequence_conflict")
+            else:
+                self._highest_control_sequence = sequence
+                self._highest_control_delivery_id = state.delivery_id
+                self._applied_proof_receipt = None
+                self._control_proof_revision += 1
         if self.executor is None:
             return "parsed_execution_unavailable"
         with self._lock:
@@ -781,18 +799,44 @@ class PlayerService:
             return "rejected" if rejected else "applied"
 
     async def _ack_control(self, state: State, result: str) -> None:
+        session = self._session
         selection = self._control_selection
         if (result == "superseded" or state.delivery_id is None
-                or self.registration is None or selection is None
+                or session is None or session.registration is None or selection is None
                 or selection.schema_version != 2
-                or selection.authority_epoch != self.registration.authority_epoch):
+                or selection.authority_epoch != session.registration.authority_epoch):
             return
-        report = ControlAck(authority_epoch=self.registration.authority_epoch,
+        registration = session.registration
+        with self._lock:
+            if result != "applied":
+                self._applied_proof_receipt = None
+                self._control_proof_revision += 1
+            revision = self._control_proof_revision
+        report = ControlAck(authority_epoch=registration.authority_epoch,
                             delivery_id=state.delivery_id, result=result)
         # A superseded delivery can return accepted=false; the next state retries with a
         # fresh challenge. This is not plan readiness or OS management evidence.
-        await self.request("POST", "/v1/player/control-acks",
-                           body=report.model_dump(mode="json"))
+        response = await self.request("POST", "/v1/player/control-acks",
+                                      body=report.model_dump(mode="json"))
+        if result != "applied":
+            return
+        try:
+            outcome = ControlAckResponse.model_validate(response, strict=True)
+        except ValidationError:
+            LOG.debug("player: applied ACK receipt invalid")
+            return
+        receipt = outcome.receipt
+        if (not outcome.accepted or receipt is None
+                or receipt.authority_epoch != registration.authority_epoch
+                or receipt.delivery_id != state.delivery_id
+                or receipt.delivery_sequence != state.delivery_sequence):
+            return
+        with self._lock:
+            if (self._control_proof_revision == revision and self._session is session
+                    and session.registration is registration
+                    and self._highest_control_sequence == receipt.delivery_sequence
+                    and self._highest_control_delivery_id == receipt.delivery_id):
+                self._applied_proof_receipt = (session, receipt)
 
     def _apply_identify_output(self, cue: IdentifyOutput | None,
                                unbound: tuple[str, ...], authority_epoch: int,
@@ -1112,6 +1156,7 @@ class PlayerService:
         that worker before it signs or sends a response.
         """
         recorded_session: Session | None = None
+        recorded_applied: tuple[Session, ControlAppliedReceipt] | None = None
         while self._proof_active and not self._stop.is_set():
             session = self._session
             registration = session.registration if session is not None else None
@@ -1141,6 +1186,43 @@ class PlayerService:
                               else type(error).__name__)
                 except Exception as error:
                     LOG.warning("player: OS-local app proof failed: %s", type(error).__name__)
+            with self._lock:
+                applied = self._applied_proof_receipt
+                revision = self._control_proof_revision
+            if (registration is not None and applied is not None
+                    and applied[0] is session and applied != recorded_applied
+                    and self.boot_context is not None and self.boot_id):
+                receipt = applied[1]
+
+                def applied_current() -> bool:
+                    with self._lock:
+                        return (self._proof_active and self._proof_generation == generation
+                                and not self._stop.is_set() and self._session is session
+                                and session.registration is registration
+                                and self._control_proof_revision == revision
+                                and self._applied_proof_receipt == applied
+                                and self._highest_control_sequence == receipt.delivery_sequence
+                                and self._highest_control_delivery_id == receipt.delivery_id)
+
+                try:
+                    outcome = await asyncio.to_thread(
+                        self.app_proof_client.exchange_applied, identity=self.identity,
+                        player_id=registration.player_id,
+                        authority_epoch=registration.authority_epoch,
+                        device_id=self.boot_context.device_id,
+                        kernel_boot_id=self.boot_id, receipt=receipt,
+                        enrollment_current=applied_current,
+                    )
+                    if outcome == "recorded" and applied_current():
+                        recorded_applied = applied
+                        LOG.debug("player: OS-local applied control proof recorded")
+                except (LocalProofError, OSError, TimeoutError) as error:
+                    LOG.debug("player: OS-local applied control proof unavailable: %s",
+                              str(error) if isinstance(error, LocalProofError)
+                              else type(error).__name__)
+                except Exception as error:
+                    LOG.warning("player: OS-local applied control proof failed: %s",
+                                type(error).__name__)
             await asyncio.sleep(LOCAL_PROOF_RETRY)
 
     async def run(self):
@@ -1185,6 +1267,9 @@ class PlayerService:
                     self._located = False
                     if self._session is not None:
                         self._session = self._session.unregistered()
+                    with self._lock:
+                        self._applied_proof_receipt = None
+                        self._control_proof_revision += 1
                     self.fault("registration_required")
                     if not self._stop.is_set():
                         await self._mark_central_retrying()
@@ -1213,6 +1298,9 @@ class PlayerService:
         finally:
             self._proof_active = False
             self._proof_generation += 1
+            with self._lock:
+                self._applied_proof_receipt = None
+                self._control_proof_revision += 1
             if proof_task is not None:
                 proof_task.cancel()
                 # stop() may cancel this parent while it awaits the child.

@@ -14,7 +14,14 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from contracts.app_process_proof import AppProofChallenge, AppProofResponse, app_proof_message
+from contracts.app_process_proof import (
+    AppProofChallenge,
+    AppProofChallengeV2,
+    AppProofResponse,
+    app_proof_message,
+    app_proof_message_v2,
+)
+from contracts.player_control import ControlAppliedReceipt, ControlSelection
 from player.identity import load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError, _receive
 from tests.test_player_service import close, rig
@@ -22,6 +29,9 @@ from tests.test_player_service import close, rig
 BOOT_ID = "12345678-1234-1234-1234-123456789abc"
 DEVICE_ID = "device-" + "b" * 64
 PLAYER_ID = "p-" + "c" * 32
+RECEIPT = ControlAppliedReceipt(authority_epoch=7, delivery_id="e" * 32,
+                                delivery_sequence=5, state_digest="f" * 64,
+                                ack_nonce="b" * 64)
 
 
 def challenge(*, trust_mode="t1", device_id=DEVICE_ID, boot_id=BOOT_ID,
@@ -90,7 +100,7 @@ def _packet_pair():
         return app, os_peer
 
 
-def _exchange(server_fn, *, current=lambda: True):
+def _exchange(server_fn, *, current=lambda: True, receipt=None):
     app, os_peer = _packet_pair()
     app.settimeout(1)
     os_peer.settimeout(1)
@@ -109,9 +119,11 @@ def _exchange(server_fn, *, current=lambda: True):
     thread.start()
     failure = None
     try:
-        outcome = client.exchange(identity=identity, player_id=PLAYER_ID,
-                                  authority_epoch=7, device_id=DEVICE_ID,
-                                  kernel_boot_id=BOOT_ID, enrollment_current=current)
+        arguments = dict(identity=identity, player_id=PLAYER_ID,
+                         authority_epoch=7, device_id=DEVICE_ID,
+                         kernel_boot_id=BOOT_ID, enrollment_current=current)
+        outcome = (client.exchange(**arguments) if receipt is None else
+                   client.exchange_applied(**arguments, receipt=receipt))
     except BaseException as error:
         failure = error
     finally:
@@ -142,6 +154,42 @@ def test_player_signs_only_the_exact_root_peer_challenge(trust_mode):
         _send(sock, {"schema": 1, "kind": "result", "status": "recorded"})
 
     assert _exchange(serve) == "recorded"
+
+
+def test_v2_player_signs_exact_applied_receipt_and_root_observed_process():
+    def serve(sock, identity):
+        begin = json.loads(sock.recv(768))
+        assert begin == {"schema": 2, "kind": "begin", "purpose": "control_applied",
+                         "claimed_player_id": PLAYER_ID, "claimed_authority_epoch": 7,
+                         "receipt": RECEIPT.model_dump(mode="json", by_alias=True)}
+        value = {**challenge(), "schema": 2, "purpose": "control_applied",
+                 "active_sha256": "a" * 64,
+                 "receipt": RECEIPT.model_dump(mode="json", by_alias=True)}
+        _send(sock, {"schema": 2, "kind": "challenge", "challenge": value})
+        packet = json.loads(sock.recv(2305))
+        assert packet["schema"] == 2 and packet["kind"] == "response"
+        response = AppProofResponse.model_validate(packet["response"])
+        signed = AppProofChallengeV2.model_validate_json(json.dumps(value))
+        assert response.public_key == identity.public_key
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(response.public_key)).verify(
+            base64.b64decode(response.signature), app_proof_message_v2(signed))
+        _send(sock, {"schema": 2, "kind": "result", "status": "recorded"})
+
+    assert _exchange(serve, receipt=RECEIPT) == "recorded"
+
+
+def test_v2_player_refuses_receipt_substitution_without_signing():
+    def serve(sock, _identity):
+        sock.recv(768)
+        changed = RECEIPT.model_copy(update={"ack_nonce": "c" * 64})
+        value = {**challenge(), "schema": 2, "purpose": "control_applied",
+                 "active_sha256": "a" * 64,
+                 "receipt": changed.model_dump(mode="json", by_alias=True)}
+        _send(sock, {"schema": 2, "kind": "challenge", "challenge": value})
+        assert sock.recv(2305) == b""
+
+    with pytest.raises(LocalProofError, match="challenge_receipt"):
+        _exchange(serve, receipt=RECEIPT)
 
 
 @pytest.mark.parametrize("changed", [
@@ -317,6 +365,78 @@ def test_service_exit_invalidates_in_flight_socket_worker(tmp_path):
             assert proof.current_at_release is False
         finally:
             proof.release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalidate", ["new_delivery", "rejected"])
+def test_v2_proof_worker_cannot_record_after_control_invalidation(
+        tmp_path, monkeypatch, invalidate):
+    class WaitingProof:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.current_at_release = None
+
+        def exchange(self, **_kwargs):
+            return "recorded"
+
+        def exchange_applied(self, **kwargs):
+            self.started.set()
+            self.release.wait(timeout=2)
+            self.current_at_release = kwargs["enrollment_current"]()
+            return "recorded" if self.current_at_release else "stale"
+
+    async def run():
+        service, server = await rig(tmp_path)
+        proof = WaitingProof()
+        service.app_proof_client = proof
+        service.boot_id = BOOT_ID
+        service._proof_active = True
+        registration = service.registration
+        service._control_selection = ControlSelection(
+            authority_epoch=registration.authority_epoch, schema=2)
+        state = server.state.model_copy(update={"delivery_id": "e" * 32,
+                                        "delivery_sequence": 5})
+        service._highest_control_sequence = 5
+        service._highest_control_delivery_id = "e" * 32
+        receipt = RECEIPT.model_copy(update={"authority_epoch": registration.authority_epoch})
+
+        async def ack_request(_method, _path, *, body):
+            return ({"accepted": True,
+                     "receipt": receipt.model_dump(mode="json", by_alias=True)}
+                    if body["result"] == "applied" else {"accepted": True})
+
+        service.request = ack_request
+        await service._ack_control(state, "applied")
+        assert service._applied_proof_receipt == (service._session, receipt)
+        monkeypatch.setattr("player.service.LOCAL_PROOF_RETRY", .01)
+        task = asyncio.create_task(service._local_app_proof_loop())
+        try:
+            for _ in range(1000):
+                if proof.started.is_set():
+                    break
+                await asyncio.sleep(.001)
+            assert proof.started.is_set()
+            if invalidate == "new_delivery":
+                newer = state.model_copy(update={"delivery_id": "d" * 32,
+                                                 "delivery_sequence": 6})
+                assert service._apply_state(newer) == "applied"
+            else:
+                await service._ack_control(state, "rejected")
+            assert service._applied_proof_receipt is None
+            proof.release.set()
+            for _ in range(1000):
+                if proof.current_at_release is not None:
+                    break
+                await asyncio.sleep(.001)
+            assert proof.current_at_release is False
+        finally:
+            proof.release.set()
+            service._proof_active = False
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await close(service)
