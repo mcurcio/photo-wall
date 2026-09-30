@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import hashlib
 import http.server
+import io
 import itertools
 import json
 import os
 import socket
 import stat
+import tarfile
 import threading
 from dataclasses import dataclass, field, replace
 from urllib.parse import parse_qs, urlparse
@@ -33,8 +35,10 @@ from support.release_build import (
     inputs,
     manifest_blob,
     reference,
+    with_base_abi,
 )
 
+from contracts.player_payload import FORMAT, archive_name, base_abi, canonical_json
 from contracts.release import CHECKSUMS, IMAGES, MANIFEST
 from scripts import release_seal
 from scripts.package_release_artifacts import package, verify
@@ -966,6 +970,30 @@ def test_a_rerun_after_a_successful_publish_writes_nothing_and_passes(github, re
     again = seal(api, registry, rerun(registry, _again(build, "rerun")))
     assert again["id"] == first["id"]
     assert len(state.writes()) == writes and registry.tags == tags and len(registry.writes) == 2
+
+
+def test_schema_two_publish_and_rerun_read_both_manifests(github, registry, build, tmp_path):
+    files = {"app/__main__.py": b"pass\n", "app/closure.json": b"{}\n"}
+    manifest = {"schema": 1, "format": FORMAT, "revision": REVISION,
+                "base_abi": base_abi("20260904T000000Z", ("python3",),
+                                     "sha256:" + "a" * 64),
+                "entrypoint": "app", "files": {
+                    name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                    for name, data in files.items()}}
+    payload = tmp_path / archive_name(REVISION)
+    with tarfile.open(payload, "w:gz") as archive:
+        for name, data in (("manifest.json", canonical_json(manifest)), *sorted(files.items())):
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o644
+            archive.addfile(info, io.BytesIO(data))
+    build = replace(build, player_payload=payload)
+    with_base_abi(build.base_bundle, manifest["base_abi"])
+    state, api = github
+    first = seal(api, registry, build)
+    writes = len(state.writes())
+    assert any(asset["name"] == "manifest.v2.json" for asset in first["assets"])
+    again = seal(api, registry, _again(build, "rerun-payload"))
+    assert again["id"] == first["id"] and len(state.writes()) == writes
 
 
 def _drop_asset(state: State, name: str) -> None:

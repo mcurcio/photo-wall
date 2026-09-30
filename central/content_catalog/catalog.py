@@ -26,7 +26,14 @@ from central.content_catalog.ports import (
     ReleaseRow,
     StoredAssets,
 )
-from central.kernel.job_types import AssetJob, FetchOsImage, FetchPackage, Prefetch, SyncReleases
+from central.kernel.job_types import (
+    AssetJob,
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    Prefetch,
+    SyncReleases,
+)
 from central.kernel.ports import (
     Candidates,
     ContentRequest,
@@ -234,9 +241,19 @@ class ReleaseCatalog:
                 jobs.add(job)
             if (package := self._obtainable(tx, row)) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
+            if row.payload is not None and row.payload.locator.sha256 is not None:
+                jobs.add(FetchPlayerPayload(sha256=row.payload.locator.sha256))
         for tag in self._policy_tags(tx):
             if (package := self._obtainable(tx, by_tag.get(tag))) is not None:
                 jobs.add(FetchPackage(sha256=package.sha256))
+            row = by_tag.get(tag)
+            if row is not None and row.payload is not None \
+                    and row.payload.locator.sha256 is not None:
+                jobs.add(FetchPlayerPayload(sha256=row.payload.locator.sha256))
+        fleet = self._releases.fleet_desired_assets(tx, now=self._clock.utc())
+        jobs.update(FetchOsImage(tarball_sha256=digest) for digest in fleet.base_tarballs)
+        jobs.update(FetchPackage(sha256=digest) for digest in fleet.player_debs)
+        jobs.update(FetchPlayerPayload(sha256=digest) for digest in fleet.player_payloads)
         return frozenset(jobs)
 
     def _obtainable(self, tx: Transaction, row: ReleaseRow | None) -> DevicePackage | None:

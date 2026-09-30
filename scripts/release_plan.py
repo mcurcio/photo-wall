@@ -229,7 +229,12 @@ _PLAYER_DEB: Final = (*_DEB_BUILD, "player/**", "contracts/**", "uplink/**",
                       "appliance/systemd/weston.ini")
 _BOOTSTRAPPER_DEB: Final = (*_DEB_BUILD, "scripts/build_bootstrapper_deb.py",
                             "appliance/*.py", "contracts/**", "uplink/**", "player/**",
-                            "appliance/systemd/photo-wall-provision.service")
+                            "appliance/systemd/photo-wall-provision.service",
+                            "appliance/systemd/photo-wall-os-agent.service",
+                            "appliance/systemd/player.service",
+                            "appliance/systemd/weston.service",
+                            "appliance/systemd/weston.ini")
+_PLAYER_PAYLOAD: Final = (*_BOOTSTRAPPER_DEB, "scripts/build_player_payload.py")
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +259,7 @@ PACKAGES: Final = (
            "FROM the media OS base service-base.yml prepares", "media-worker",
            "scripts/service_base.py", ".github/workflows/service-base.yml"),
     Package("player-deb", "the Player .deb", _PLAYER_DEB),
+    Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
     Package("bootstrapper-deb", "the bootstrapper .deb", _BOOTSTRAPPER_DEB),
     # The squashfs bakes the bootstrapper .deb, so the bundle reads everything that .deb does;
     # the rest of appliance/ is the image and initramfs definition, claimed whole.
@@ -267,7 +273,7 @@ PACKAGES: Final = (
     # SHA256SUMS, whose names, layout and contents this packager writes to the declaration.
     Package("release-assets", "the GitHub Release's operator asset set (base tarball, "
             "manifest.json, SHA256SUMS)", ("scripts/package_release_artifacts.py",
-                                           "contracts/release.py")),
+                                           "contracts/release.py", "contracts/player_payload.py")),
 )
 
 # Every tracked path no package claims must match one of these, so a new top-level directory or
@@ -346,7 +352,8 @@ class Suite:
 SUITES: Final = (
     Suite("checks", always=True),
     Suite("e2e", always=True),
-    Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb")),
+    Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb",
+                                  "player-payload")),
     # The tracer serves the Player .deb from a real Central: its content-serving layers.
     Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
           paths=("scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",

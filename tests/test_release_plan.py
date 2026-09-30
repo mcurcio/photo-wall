@@ -441,7 +441,8 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
                  "scripts/release_plan.py"):
         assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
-                                                "contracts/release.py")
+                                                "contracts/release.py",
+                                                "contracts/player_payload.py")
     assert "release-assets" in claimed_by("contracts/release.py")
 
 
@@ -733,7 +734,8 @@ def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, pac
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
-    assert [path for path in base if not _package("base-bundle").claims(path)] == []
+    assert [path for path in base if not (_package("base-bundle").claims(path)
+                                         or _package("player-payload").claims(path))] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
     seal = _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
@@ -742,6 +744,20 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
+
+
+def test_base_cache_and_content_check_include_base_owned_player_contract():
+    workflow = (WORKFLOWS / "base-image.yml").read_text()
+    key = next(line for line in workflow.splitlines() if "key: squashfs-" in line)
+    for path in ("appliance/systemd/photo-wall-os-agent.service",
+                 "appliance/systemd/player.service",
+                 "appliance/systemd/weston.service",
+                 "appliance/systemd/weston.ini", "player/output_discovery.py"):
+        assert path in key
+    for path in ("$bootstrapper_dir/os-agent.py", "$bootstrapper_dir/player-launch.py",
+                 "$bootstrapper_dir/base-abi.txt", "etc/xdg/weston/weston.ini"):
+        assert path in workflow
+    assert "forbid_substring 'squashfs-root/usr/lib/photo-wall-player/'" in workflow
 
 
 # --- pipeline.yml wires the rule ---------------------------------------------------------------

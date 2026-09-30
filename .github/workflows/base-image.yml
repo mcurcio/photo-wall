@@ -153,6 +153,19 @@ jobs:
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
+      - name: Build the data-only Player payload
+        id: player-payload
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-payload"
+          payload_path=$(.venv/bin/python -m scripts.build_player_payload \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --output-dir "$RUNNER_TEMP/photo-wall-player-payload")
+          echo "payload_path=$payload_path" >> "$GITHUB_OUTPUT"
+
       # The bootstrapper's computed closure digest (scripts/module_closure.py,
       # the code the .deb ships): Cache A's code input, instead of a hand-kept
       # file list that could fall behind the closure.
@@ -226,7 +239,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -361,6 +374,17 @@ jobs:
           bootstrapper_dir=usr/lib/photo-wall-bootstrapper
           require_path - "$bootstrapper_dir/__main__.py" 'the bootstrapper entry point'
           require_path - "$bootstrapper_dir/closure.json" 'the bootstrapper closure manifest'
+          require_path - "$bootstrapper_dir/os-agent.py" 'the base-owned OS agent launcher'
+          require_path - "$bootstrapper_dir/player-launch.py" 'the base-owned Player launcher'
+          require_path - "$bootstrapper_dir/base-abi.txt" 'the base ABI declaration'
+          require_path - etc/xdg/weston/weston.ini 'the base-owned Weston configuration'
+          for unit in photo-wall-os-agent photo-wall-player photo-wall-weston; do
+            if grep -Eq -- "^- squashfs-root/(usr/)?lib/systemd/system/$unit.service$" "$typed"; then
+              echo "OK: found base-owned $unit.service vendor unit"
+            else
+              violation "missing base-owned $unit.service vendor unit"
+            fi
+          done
           # The unit ships at the vendor path (/lib/systemd/system, not
           # /etc/systemd/system -- this is a packaged unit now, not a raw
           # overlay file), AND is actually enabled (a `.wants` symlink the
@@ -399,13 +423,21 @@ jobs:
           rm -rf "$extract"
           unsquashfs -no-xattrs -d "$extract" "$squashfs" \
             etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
-            etc/apt var/lib/dpkg/status "$bootstrapper_dir/closure.json" >/dev/null
+            etc/apt etc/passwd var/lib/dpkg/status "$bootstrapper_dir/closure.json" \
+            "$bootstrapper_dir/base-abi.txt" >/dev/null
           manifest="$extract/$bootstrapper_dir/closure.json"
           if [ -f "$manifest" ]; then
             closure_files=$(python3 -c 'import sys; from pathlib import Path; from scripts.module_closure import read_manifest; print("\n".join(read_manifest(Path(sys.argv[1])).files))' "$manifest")
             for file in $closure_files; do
               require_path - "$bootstrapper_dir/$file" "closure file $file"
             done
+          fi
+          if ! grep -q '^wall:' "$extract/etc/passwd"; then
+            violation "missing wall user in base OS"
+          fi
+          expected_abi=$(python3 -c 'from pathlib import Path; from contracts.player_payload import base_abi; from scripts.debian_packages import PIN, packages; from scripts.build_bootstrapper_deb import launcher_contract_digest; print(base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(Path.cwd())))')
+          if [ "$(cat "$extract/$bootstrapper_dir/base-abi.txt")" != "$expected_abi" ]; then
+            violation "base ABI file does not match installed runtime declaration"
           fi
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
@@ -445,6 +477,7 @@ jobs:
           fi
           # No Player venv baked into the base.
           forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
+          forbid_substring 'squashfs-root/usr/lib/photo-wall-player/' 'application code before payload activation'
           # No deployment config or app trust anchor baked into the base --
           # the bootstrapper resolves these at boot, not build time.
           forbid_substring 'squashfs-root/etc/photo-wall/public.json' 'a baked /etc/photo-wall/public.json'
@@ -773,6 +806,7 @@ jobs:
             --rpi-eeprom-digest "$KOUT/rpi-eeprom-digest" \
             $overlay_arg \
             --squashfs "$squashfs" \
+            --base-abi-file "$RUNNER_TEMP/photo-wall-base-extract/usr/lib/photo-wall-bootstrapper/base-abi.txt" \
             --output "$BUNDLE" \
             --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
             --python python3
@@ -792,7 +826,7 @@ jobs:
           for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
                    boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
                    boot/pieeprom.upd boot/pieeprom.sig \
-                   photo-wall-base.squashfs SHA256SUMS; do
+                   photo-wall-base.squashfs base-abi.json SHA256SUMS; do
             [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
           done
 
@@ -814,6 +848,18 @@ jobs:
             || violation "SHA256SUMS lists $listed files, bundle has $expected"
           ( cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS ) \
             || violation "SHA256SUMS re-verification failed"
+          python3 - "$BUNDLE" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+          from contracts.release import parse_base_abi_sidecar
+          bundle = pathlib.Path(sys.argv[1])
+          abi, digest = parse_base_abi_sidecar((bundle / "base-abi.json").read_bytes())
+          with (bundle / "photo-wall-base.squashfs").open("rb") as stream:
+              actual = hashlib.file_digest(stream, "sha256").hexdigest()
+          if digest != actual:
+              raise SystemExit("base ABI sidecar does not bind assembled squashfs")
+          PY
 
           # No signed / trust material anywhere in the bundle (this path is
           # unsigned by construction -- 0008 boot-chain). pieeprom.sig is the
@@ -967,6 +1013,14 @@ jobs:
         with:
           name: photo-wall-player-deb-${{ env.REVISION }}
           path: ${{ steps.player-deb.outputs.deb_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the data-only Player payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-player-payload-${{ env.REVISION }}
+          path: ${{ steps.player-payload.outputs.payload_path }}
           if-no-files-found: error
           retention-days: 7
 

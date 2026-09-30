@@ -39,12 +39,20 @@ from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import OriginLocator
-from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
+from central.kernel.job_types import (
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    Prefetch,
+    SyncReleases,
+)
 from central.kernel.ports import (
     Candidates,
     ContentCatalog,
     NetbootBaseRequest,
     PackageRequest,
+    PlayerPayload,
+    PublishedRelease,
     Unknown,
 )
 from contracts.equipment import equipment_device_id
@@ -468,6 +476,22 @@ def test_desired_assets_skips_missing_locators(world):
 
 def test_desired_assets_of_an_empty_catalog_is_empty(world):
     assert run(world().catalog.desired_assets()) == frozenset()
+
+
+def test_explicit_fleet_payload_target_is_desired_by_exact_digest(world):
+    digest = sha("fleet-payload")
+    payload = PlayerPayload(OriginLocator("https://example.test/payload.tar.gz", digest, 100),
+                            "pw-player-data-v1", "sha256:" + "a" * 64)
+    published = PublishedRelease(T1, True,
+                                 OriginLocator("https://example.test/legacy.deb", deb_sha(T1),
+                                               10), None, None, None, payload)
+    w = world([published])
+    with w.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO fleet_app_policy(singleton,revision,target_tag,target_sha256,"
+            "target_size,target_format,changed_at) "
+            "VALUES(TRUE,1,%s,%s,100,'pw-player-data-v1',1000)", (T1, digest))
+    assert FetchPlayerPayload(sha256=digest) in run(w.catalog.desired_assets())
 
 
 # -- B4 device_package / promoted_package -------------------------------------------------------

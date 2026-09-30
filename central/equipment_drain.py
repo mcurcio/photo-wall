@@ -31,6 +31,15 @@ class DrainOutcome:
     snapshot: dict
 
 
+def control_fence_in(conn, player_id: str) -> dict | None:
+    """Salt the v2 challenge with the drain cut even when visible state is unchanged."""
+    row = conn.execute(
+        "SELECT attempt_id,phase,prepared_at FROM active_equipment_drains "
+        "WHERE player_id=%s", (player_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def fenced_players_in(conn) -> frozenset[str]:
     """Read the durable fence inside a Coordination-locked transaction."""
     return frozenset(row["player_id"] for row in conn.execute(
@@ -251,25 +260,31 @@ class EquipmentDrain:
                 (player_id,),
             ).fetchone()
             if (player is None or player["retired_at"] is not None
-                    or player["authority_epoch"] != authority_epoch):
+                    or player["authority_epoch"] < authority_epoch):
                 raise RegistryError("stale_authority", 403)
+            current_epoch = player["authority_epoch"]
             floor = row["snapshot"].get("control_floor_sequence")
             control = conn.execute(
                 "SELECT authority_epoch,schema_version,status,applied_sequence,"
                 "last_result,last_result_at FROM player_control_sessions WHERE player_id=%s",
                 (player_id,),
             ).fetchone()
-            if (floor is None or control is None
-                    or control["authority_epoch"] != authority_epoch
+            # A re-enrollment resets the sequence. Its first v2 challenge is issued
+            # after the drain and salted with this active fence, so an applied new
+            # epoch proves fresh control without comparing unrelated sequence spaces.
+            fresh_sequence = (control is not None and control["applied_sequence"] >
+                              (floor if current_epoch == authority_epoch and floor is not None
+                               else 0))
+            if (control is None or control["authority_epoch"] != current_epoch
                     or control["status"] != "negotiated"
                     or control["schema_version"] != 2
                     or control["last_result"] != "applied"
-                    or control["applied_sequence"] <= floor
+                    or not fresh_sequence
                     or control["last_result_at"] is None
                     or control["last_result_at"] <= row["prepared_at"]):
                 raise RegistryError("drain_recovery_unverified")
-            configuration = self.coordinator._configuration(conn, player_id, authority_epoch)
-            plan = self.coordinator._current_plan(conn, player_id, authority_epoch)
+            configuration = self.coordinator._configuration(conn, player_id, current_epoch)
+            plan = self.coordinator._current_plan(conn, player_id, current_epoch)
             if plan and (plan.valid_until <= now or plan.bindings != configuration.bindings):
                 raise RegistryError("drain_offers_stale")
             if conn.execute(

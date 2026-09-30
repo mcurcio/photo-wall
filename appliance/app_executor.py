@@ -1,0 +1,279 @@
+"""One base-owned app mutation port for cold boot and future authorized online attempts.
+
+The local journal records intent before service stop. It is volatile across PXE
+boots but survives provisioner process restart. A stale or corrupt journal
+blocks a new mutation until its earlier effect is reconciled.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import re
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Protocol
+
+from appliance.app_payload import PayloadError, stage_payload, verify_root
+from contracts.strict_json import loads_object
+from uplink.files import write_atomically
+
+ROOTS = Path("/run/photo-wall/apps")
+JOURNAL = Path("/run/photo-wall/app-mutation.json")
+LOCK = Path("/run/photo-wall/app-executor.lock")
+LEGACY_UNIT_OVERRIDE = Path("/etc/systemd/system/photo-wall-player.service")
+EXPECTED_ABI = Path("/usr/lib/photo-wall-bootstrapper/base-abi.txt")
+UNIT = "photo-wall-player.service"
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+_STATES = frozenset({"intent_stop", "stopped", "activated", "start_requested",
+                     "committed", "rolled_back", "recovery_required"})
+
+
+class ExecutorError(ValueError):
+    pass
+
+
+class PlayerService(Protocol):
+    def active(self) -> bool: ...
+    def running_digest(self) -> str | None: ...
+    def stop(self) -> None: ...
+    def start(self) -> None: ...
+
+
+class SystemdPlayer:
+    """Bounded PID1 effects; all callers enter through AppExecutor's local lock."""
+
+    def __init__(self, roots: Path = ROOTS, proc_root: Path = Path("/proc")) -> None:
+        self.roots, self.proc_root = roots, proc_root
+
+    def active(self) -> bool:
+        result = subprocess.run(["systemctl", "is-active", "--quiet", UNIT],
+                                check=False, timeout=5)
+        return result.returncode == 0
+
+    def running_digest(self) -> str | None:
+        """Read MainPID's actual argv; a pointer and an active unit do not prove a process."""
+        try:
+            shown = subprocess.run(["systemctl", "show", "--value", "--property=MainPID", UNIT],
+                                   capture_output=True, text=True, check=False, timeout=5)
+            pid_text = shown.stdout.strip()
+            if shown.returncode != 0 or not pid_text.isdecimal() or int(pid_text) <= 0:
+                return None
+            argv = (self.proc_root / pid_text / "cmdline").read_bytes()[:4096].split(b"\x00")
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if len(argv) < 4 or argv[:3] != [b"/usr/bin/python3", b"-I", b"-B"]:
+            return None
+        try:
+            app_path = argv[3].decode("ascii")
+        except UnicodeError:
+            return None
+        match = re.fullmatch(re.escape(str(self.roots)) + r"/([0-9a-f]{64})/app", app_path)
+        return match.group(1) if match is not None else None
+
+    def stop(self) -> None:
+        subprocess.run(["systemctl", "stop", UNIT], check=True, timeout=150)
+        if self.active():
+            raise ExecutorError("player_stop_unconfirmed")
+
+    def start(self) -> None:
+        subprocess.run(["systemctl", "start", UNIT], check=True, timeout=90)
+        if not self.active():
+            raise ExecutorError("player_start_unconfirmed")
+
+
+def expected_abi(path: Path = EXPECTED_ABI) -> str:
+    try:
+        value = path.read_text().strip()
+    except OSError as exc:
+        raise ExecutorError("base_abi_unavailable") from exc
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise ExecutorError("base_abi_invalid")
+    return value
+
+
+class AppExecutor:
+    """One locked mutation and deterministic restart repair, independent of OS telemetry."""
+
+    def __init__(self, *, roots: Path = ROOTS, journal: Path = JOURNAL,
+                 lock: Path = LOCK, legacy_override: Path = LEGACY_UNIT_OVERRIDE,
+                 service: PlayerService | None = None) -> None:
+        self.roots, self.journal, self.lock = roots, journal, lock
+        self.legacy_override = legacy_override
+        self.service = service or SystemdPlayer(roots)
+
+    def _read(self, path: Path) -> dict | None:
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ExecutorError("executor_state_unavailable") from exc
+        value = loads_object(raw, max_bytes=2048)
+        if value is None:
+            raise ExecutorError("executor_state_invalid")
+        return value
+
+    def _active(self) -> str | None:
+        value = self._read(self.roots / "active.json")
+        if value is None:
+            return None
+        digest = value.get("sha256")
+        if (set(value) != {"schema", "sha256"} or value["schema"] != 1
+                or not isinstance(digest, str) or _SHA256.fullmatch(digest) is None):
+            raise ExecutorError("active_root_invalid")
+        return digest
+
+    def _write_active(self, digest: str | None) -> None:
+        path = self.roots / "active.json"
+        if digest is None:
+            path.unlink(missing_ok=True)
+        else:
+            write_atomically(path, json.dumps({"schema": 1, "sha256": digest},
+                                              sort_keys=True).encode(), mode=0o644)
+
+    def _journal(self) -> dict | None:
+        value = self._read(self.journal)
+        if value is None:
+            return None
+        if (set(value) != {"schema", "attempt_id", "target", "fallback", "state"}
+                or value["schema"] != 1 or value["state"] not in _STATES
+                or not isinstance(value["attempt_id"], str)
+                or _UUID.fullmatch(value["attempt_id"]) is None
+                or not isinstance(value["target"], str)
+                or _SHA256.fullmatch(value["target"]) is None
+                or (value["fallback"] is not None
+                    and (not isinstance(value["fallback"], str)
+                         or _SHA256.fullmatch(value["fallback"]) is None))):
+            raise ExecutorError("executor_journal_invalid")
+        return value
+
+    def _write_journal(self, value: Mapping[str, object], state: str) -> None:
+        write_atomically(self.journal, json.dumps({**value, "state": state},
+                                                sort_keys=True).encode(), mode=0o600)
+
+    def _lock(self):
+        self.lock.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.lock.open("a+b")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.close()
+            raise ExecutorError("executor_busy") from exc
+        return handle
+
+    def _restore(self, row: dict, *, abi: str) -> None:
+        """Complete or roll back one interrupted attempt before a new admission."""
+        target, fallback = row["target"], row["fallback"]
+        if row["state"] == "recovery_required" and fallback is None:
+            raise ExecutorError("cold_attempt_requires_operator")
+        if fallback is not None:
+            verify_root(self.roots / fallback, expected_abi=abi)
+        try:
+            verify_root(self.roots / target, expected_abi=abi)
+            target_valid = True
+        except PayloadError:
+            target_valid = False
+            if fallback is None:
+                self._write_journal(row, "recovery_required")
+                raise ExecutorError("target_and_fallback_unavailable") from None
+        if (target_valid and self._active() == target
+                and self.service.running_digest() == target):
+            self._write_journal(row, "committed")
+            return
+        if (fallback is not None and row["state"] in ("intent_stop", "stopped")
+                and self._active() == fallback
+                and self.service.running_digest() == fallback):
+            self._write_journal(row, "rolled_back")
+            return
+        # Stop waits for PID1's previous stop/start job and kills any surviving Player.
+        self.service.stop()
+        chosen = fallback if fallback is not None else target
+        self._write_active(chosen)
+        self._write_journal(row, "activated")
+        self._write_journal(row, "start_requested")
+        try:
+            self.service.start()
+        except (OSError, subprocess.SubprocessError, ExecutorError):
+            self._write_journal(row, "recovery_required")
+            raise ExecutorError("player_recovery_required") from None
+        if self.service.running_digest() != chosen:
+            self._write_journal(row, "recovery_required")
+            raise ExecutorError("player_recovery_unconfirmed")
+        self._write_journal(row, "rolled_back" if fallback is not None else "committed")
+
+    def activate(self, payload: bytes, *, sha256: str, size: int, base_abi: str,
+                 attempt_id: str, expected_base_abi: str) -> str:
+        """Preflight exact target/fallback, then journal, stop, switch and start once."""
+        if (_UUID.fullmatch(attempt_id) is None or base_abi != expected_base_abi):
+            raise ExecutorError("executor_attempt_or_abi_invalid")
+        if self.roots.is_symlink():
+            raise ExecutorError("payload_roots_invalid")
+        self.roots.mkdir(parents=True, exist_ok=True)
+        self.roots.chmod(0o755)
+        with self._lock() as locked:
+            try:
+                if self.legacy_override.exists() or self.legacy_override.is_symlink():
+                    raise ExecutorError("legacy_unit_override")
+                previous = self._journal()
+                if previous is not None:
+                    if previous["state"] not in ("committed", "rolled_back"):
+                        self._restore(previous, abi=expected_base_abi)
+                        previous = self._journal()
+                        assert previous is not None
+                    if previous["attempt_id"] == attempt_id:
+                        if previous["target"] != sha256:
+                            raise ExecutorError("attempt_digest_conflict")
+                        selected = (previous["target"] if previous["state"] == "committed"
+                                    else previous["fallback"])
+                        if (selected is None or self._active() != selected
+                                or self.service.running_digest() != selected):
+                            raise ExecutorError("attempt_outcome_unconfirmed")
+                        verify_root(self.roots / selected, expected_abi=expected_base_abi)
+                        return previous["state"]
+                target = stage_payload(payload, sha256=sha256, size=size,
+                                       expected_abi=expected_base_abi, roots=self.roots)
+                fallback = self._active()
+                if fallback is not None:
+                    verify_root(self.roots / fallback, expected_abi=expected_base_abi)
+                elif self.service.active():
+                    raise ExecutorError("unmanaged_player_active")
+                row = {"schema": 1, "attempt_id": attempt_id, "target": target.name,
+                       "fallback": fallback}
+                self._write_journal(row, "intent_stop")
+                self.service.stop()
+                self._write_journal(row, "stopped")
+                self._write_active(target.name)
+                self._write_journal(row, "activated")
+                self._write_journal(row, "start_requested")
+                try:
+                    self.service.start()
+                    if self.service.running_digest() != target.name:
+                        raise ExecutorError("player_process_unconfirmed")
+                except (OSError, subprocess.SubprocessError, ExecutorError) as exc:
+                    self.service.stop()
+                    if fallback is None:
+                        self._write_active(None)
+                        self._write_journal(row, "recovery_required")
+                        raise ExecutorError("candidate_start_failed") from exc
+                    self._write_active(fallback)
+                    self._write_journal(row, "activated")
+                    self._write_journal(row, "start_requested")
+                    try:
+                        self.service.start()
+                        if self.service.running_digest() != fallback:
+                            raise ExecutorError("fallback_process_unconfirmed")
+                    except (OSError, subprocess.SubprocessError, ExecutorError) as repair:
+                        self._write_journal(row, "recovery_required")
+                        raise ExecutorError("fallback_recovery_failed") from repair
+                    self._write_journal(row, "rolled_back")
+                    return "rolled_back"
+                self._write_journal(row, "committed")
+                return "committed"
+            except (PayloadError, OSError, subprocess.SubprocessError) as exc:
+                raise ExecutorError(str(exc) if isinstance(exc, PayloadError)
+                                    else "executor_effect_failed") from exc
+            finally:
+                fcntl.flock(locked, fcntl.LOCK_UN)

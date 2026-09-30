@@ -290,6 +290,12 @@ jobs:
           name: photo-wall-player-deb-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/player-deb
 
+      - name: Download the data-only Player payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-player-payload-${{ needs.plan.outputs.revision }}
+          path: ${{ runner.temp }}/photo-wall-release/player-payload
+
       - name: Download the bootstrapper .deb
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -310,6 +316,7 @@ jobs:
           python3 -m scripts.release_seal --tag "$TAG" --revision "$REVISION" --since "$SINCE" \
             --base-bundle "$release_root/bundle" \
             --player-deb "$release_root/player-deb" \
+            --player-payload "$release_root/player-payload" \
             --bootstrapper-deb "$release_root/bootstrapper-deb" \
             --image "central=$CENTRAL" --image "media-worker=$MEDIA_WORKER" \
             --destination "$release_root/artifacts"

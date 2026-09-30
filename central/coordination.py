@@ -541,7 +541,8 @@ class Coordinator:
         ).fetchone()
         return Plan.model_validate(row["manifest"]) if row else None
 
-    def delivery(self, player_id: str, epoch: int) -> dict:
+    def delivery(self, player_id: str, epoch: int, *, finalize=None) -> dict:
+        """Read delivery and optionally finalize its wire challenge under one lock cut."""
         with self._transaction() as conn:
             self._players(conn)
             config = self._configuration(conn, player_id, epoch)
@@ -632,13 +633,14 @@ class Coordinator:
                         )
                         for sequence in sorted({r["readiness_sequence"] for r in rows})
                     )
-            return {
+            delivery = {
                 "configuration": config,
                 "plan": plan,
                 "commits": commits,
                 "revocations": revocations,
                 "identify_output": identify_output,
             }
+            return finalize(conn, delivery) if finalize is not None else delivery
 
     def player_reports_lock_free(self) -> PlayerReports:
         """The Players' last accepted reports, read in one statement of a plain transaction.

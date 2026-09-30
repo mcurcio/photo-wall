@@ -49,6 +49,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
+from appliance.app_executor import AppExecutor, ExecutorError, expected_abi
+from appliance.boot_offer import BOOT_HANDOFF, read_handoff
 from appliance.bootstrap import read_pi_serial
 from contracts.clock_record import ClockRecord
 from contracts.strict_json import loads_object
@@ -262,6 +264,27 @@ def fetch_package(fetch: DirectFetch, manifest: AppManifest) -> bytes:
                                  block=CHUNK))
 
 
+def offered_manifest(handoff: Mapping[str, object]) -> AppManifest | None:
+    """Use the stage-one selection verbatim; never consult a mutable manifest."""
+    if handoff.get("mode") != "offer":
+        return None
+    asset = handoff.get("initial_app")
+    if asset is None:
+        return None
+    if not isinstance(asset, dict):
+        raise ProvisionError("boot_handoff_app_invalid")
+    return AppManifest(str(asset["tag"]), str(asset["sha256"]), int(asset["size"]),
+                       str(asset["tag"]))
+
+
+def fetch_offered_package(fetch: DirectFetch, manifest: AppManifest, offer_id: str) -> bytes:
+    package = b"".join(fetch.chunks(f"/v1/netboot/offers/{offer_id}/app", manifest.size,
+                                  block=CHUNK))
+    if len(package) != manifest.size:
+        raise ProvisionError("offered_app_size_mismatch")
+    return package
+
+
 def install_package(package: bytes, manifest: AppManifest) -> None:
     """Write the bytes to a 0600 temp .deb, then `dpkg --install <tmp>.deb` with
     DEBIAN_FRONTEND=noninteractive; nothing else. No apt, no package lists, no network: the
@@ -358,7 +381,11 @@ class Bootstrapper:
                  backoff: Callable[[int], float] = _default_backoff,
                  serial_reader: Callable[[], str | None] | None = None,
                  watchdog_extend: Callable[[float], bool] = extend_start,
-                 watchdog_ready: Callable[[], bool] = watchdog_ready) -> None:
+                 watchdog_ready: Callable[[], bool] = watchdog_ready,
+                 boot_handoff: Mapping[str, object] | None = None,
+                 phase: Callable[[str, str | None, str | None], None] | None = None,
+                 data_executor: AppExecutor | None = None,
+                 base_abi_reader: Callable[[], str] = expected_abi) -> None:
         self._find, self._transport, self._clock = find, transport, clock
         self._fetch_manifest, self._fetch_package = fetch_manifest, fetch_package
         self._install, self._write_handoff, self._start_unit = install, write_handoff, start_unit
@@ -370,6 +397,10 @@ class Bootstrapper:
         # M5: default to the real systemd-notify calls (no-ops, returning False, when not run
         # under systemd's Type=notify -- see uplink.watchdog). Tests inject fakes.
         self._watchdog_extend, self._watchdog_ready = watchdog_extend, watchdog_ready
+        self._boot_handoff = boot_handoff
+        self._phase = phase or (lambda _phase, _digest, _fault: None)
+        self._data_executor = data_executor or AppExecutor()
+        self._base_abi_reader = base_abi_reader
 
     def _serial(self) -> str | None:
         if self._serial_reader is None:
@@ -407,34 +438,107 @@ class Bootstrapper:
         while max_attempts is None or attempt < max_attempts:
             attempt += 1
             self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
+            if (self._boot_handoff and self._boot_handoff.get("mode") == "offer"
+                    and self._boot_handoff.get("initial_app") is None):
+                status = self._boot_handoff.get("initial_app_status")
+                fault = {"unconfigured": "app_unconfigured",
+                         "unavailable": "app_unavailable",
+                         "compatibility_unverified": "compatibility_unverified"}.get(
+                             status, "app_selection_invalid")
+                self._phase("retry_wait", None, fault)
+                self._watchdog_ready()
+                return False
+            manifest: AppManifest | None = None
             try:
                 found = await self._find()
                 LOG.info("provision: central %s (%s root %s)", found.central.origin,
                          found.source, found.root)
-                manifest = self._fetch_manifest(self._fetch(found, MANIFEST_SECONDS),
-                                                self._serial())
-                package = self._fetch_package(self._fetch(found, PACKAGE_SECONDS), manifest)
+                if self._boot_handoff and self._boot_handoff.get("mode") == "offer":
+                    manifest = offered_manifest(self._boot_handoff)
+                    assert manifest is not None
+                    if self._boot_handoff.get("schema") == 2:
+                        asset = self._boot_handoff["initial_app"]
+                        if (not isinstance(asset, dict)
+                                or asset.get("format") != "pw-player-data-v1"
+                                or asset.get("base_abi") != self._base_abi_reader()):
+                            raise ProvisionError("data_payload_abi_mismatch")
+                    self._phase("fetching_app", manifest.sha256, None)
+                    package = fetch_offered_package(self._fetch(found, PACKAGE_SECONDS),
+                                                    manifest, str(self._boot_handoff["offer_id"]))
+                else:
+                    self._phase("fetching_app", None, None)
+                    manifest = self._fetch_manifest(self._fetch(found, MANIFEST_SECONDS),
+                                                    self._serial())
+                    package = self._fetch_package(self._fetch(found, PACKAGE_SECONDS), manifest)
             except UplinkError as error:
-                if error.cause is Cause.TIME:
+                if (error.cause is Cause.TIME or
+                        error.central_error == "boot_offer_expired"):
                     raise
+                self._phase("retry_wait", manifest.sha256 if manifest else None,
+                            error.central_error or "uplink_unavailable")
                 LOG.warning("provision: %s (attempt %d)",
                             failure_text(error, clock=self._clock), attempt)
                 await self._sleep(self._backoff(attempt))
                 continue
             except ProvisionError as error:
+                self._phase("retry_wait", manifest.sha256 if manifest else None, str(error))
                 LOG.warning("provision: %s (attempt %d)", error, attempt)
                 await self._sleep(self._backoff(attempt))
                 continue
+            except ExecutorError as error:
+                self._phase("retry_wait", manifest.sha256 if manifest else None,
+                            "base_abi_unavailable")
+                LOG.error("provision: base executor unavailable: %s", error)
+                self._watchdog_ready()
+                return False
+            self._phase("verifying_app", manifest.sha256, None)
             if hashlib.sha256(package).hexdigest() != manifest.sha256:
                 # Corruption guard (0009 owner ruling: integrity, not authenticity). Never
                 # install or start on a mismatch.
                 LOG.warning("provision: app_integrity mismatch, discarding (attempt %d)", attempt)
+                self._phase("retry_wait", manifest.sha256, "app_integrity")
                 await self._sleep(self._backoff(attempt))
                 continue
-            self._install(package, manifest)
-            self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
-                                        manifest.tag))
-            self._start_unit()
+            self._phase("installing_app", manifest.sha256, None)
+            if self._boot_handoff and self._boot_handoff.get("schema") == 2:
+                asset = self._boot_handoff["initial_app"]
+                assert isinstance(asset, dict)
+                # The OS channel owns base health for schema 2. Suppress the
+                # legacy app-owned base-health report, even when a base tag is
+                # available; an app tag may belong to another release cohort.
+                base_tag = self._boot_handoff.get("base_tag")
+                if not isinstance(base_tag, str) or not base_tag:
+                    self._phase("retry_wait", manifest.sha256, "boot_handoff_base_tag_invalid")
+                    self._watchdog_ready()
+                    return False
+                self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
+                                            None))
+                try:
+                    outcome = self._data_executor.activate(
+                        package, sha256=manifest.sha256, size=manifest.size,
+                        base_abi=str(asset["base_abi"]),
+                        attempt_id=str(self._boot_handoff["offer_id"]),
+                        expected_base_abi=self._base_abi_reader())
+                except ExecutorError as error:
+                    fault = str(error)
+                    if re.fullmatch(r"[a-z0-9_]{1,64}", fault) is None:
+                        fault = "app_activation_failed"
+                    self._phase("retry_wait", manifest.sha256, fault)
+                    LOG.error("provision: data app %s awaiting operator: %s",
+                              manifest.sha256, error)
+                    self._watchdog_ready()
+                    return False
+                if outcome != "committed":
+                    self._phase("retry_wait", manifest.sha256, "app_attempt_rolled_back")
+                    self._watchdog_ready()
+                    return False
+            else:
+                self._install(package, manifest)
+                self._write_handoff(Handoff(found.root if found.source == "discovered" else None,
+                                            manifest.tag))
+                self._phase("starting_app", manifest.sha256, None)
+                self._start_unit()
+            self._phase("player_unit_started", manifest.sha256, None)
             self._watchdog_ready()
             LOG.info("provision: app_installed %s", manifest.sha256)
             return True
@@ -455,6 +559,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--config", type=Path, default=DEFAULT_PUBLIC_CONFIG)
     parser.add_argument("--unit", default=DEFAULT_UNIT)
     parser.add_argument("--cmdline", type=Path, default=KERNEL_COMMAND_LINE)
+    parser.add_argument("--boot-handoff", type=Path, default=BOOT_HANDOFF)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     clock = RunClockRecord().read()
@@ -469,18 +574,32 @@ def main(argv: Sequence[str] | None = None) -> None:
         # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB is
         # set does the appliance send its serial and hand the served tag forward.
         serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
+        boot_handoff = read_handoff(args.boot_handoff)
+        if boot_handoff is None:
+            if args.boot_handoff.exists() or args.boot_handoff.is_symlink():
+                LOG.error("provision: boot_handoff_invalid")
+                raise SystemExit(1)
+            # An older stage-one initrd never wrote this file. Such a boot is explicitly
+            # uncorrelated and retains the legacy manifest path for mixed-version rollout.
+            boot_handoff = {"mode": "legacy_uncorrelated"}
+        from appliance.os_agent import write_phase
+
         bootstrapper = Bootstrapper(
             find=functools.partial(find_central, resolution, transport=transport,
                                    discovery=discovery),
             transport=transport, clock=clock,
             write_handoff=functools.partial(write_handoff, path=args.config),
             start_unit=functools.partial(start_player_unit, unit=args.unit),
-            serial_reader=serial_reader)
+            serial_reader=serial_reader, boot_handoff=boot_handoff,
+            phase=write_phase)
         asyncio.run(bootstrapper.run())
     except UplinkError as error:
         LOG.error("provision: %s", failure_text(error, clock=clock))
         raise SystemExit(1) from None
     except UnitStartError as error:
+        LOG.error("provision: %s", error)
+        raise SystemExit(1) from None
+    except ExecutorError as error:
         LOG.error("provision: %s", error)
         raise SystemExit(1) from None
 

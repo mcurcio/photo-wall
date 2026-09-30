@@ -1,8 +1,13 @@
 """Runtime maintenance admission stays fenced across deadlines and restart."""
 
-import pytest
-from test_registry import enroll, frame
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from threading import Event
 
+import pytest
+from fastapi.testclient import TestClient
+from test_registry import ADMIN, enroll, frame
+
+from central.app import create_app
 from central.coordination import Coordinator
 from central.equipment_drain import EquipmentDrain
 from central.media_repository import MediaRepository
@@ -228,3 +233,77 @@ def test_prepared_abort_needs_expiry_and_fresh_applied_control(registry):
     assert drain.abort_prepared(player["player_id"], "attempt-1", request.boot_id,
                                 player["authority_epoch"]).status == "already_aborted"
     registry.unbind("drain-frame", expected_generation=1)
+
+
+def test_control_delivery_challenge_and_drain_floor_are_one_lock_cut(registry, monkeypatch):
+    player, request = bound_player(registry)
+    player_id, epoch = player["player_id"], player["authority_epoch"]
+    registry.control_hello(player_id, ControlHello(
+        authority_epoch=epoch, schemas=(1, 2), capabilities=()))
+    app = create_app(registry.db, registry.clock, ADMIN)
+    entered, release, drain_started = Event(), Event(), Event()
+    original = app.state.registry.issue_control_delivery_record_in
+
+    def paused_issue(conn, *args):
+        entered.set()
+        assert release.wait(4)
+        return original(conn, *args)
+
+    monkeypatch.setattr(app.state.registry, "issue_control_delivery_record_in", paused_issue)
+    headers = {"Authorization": "Bearer " + player["token"]}
+    drain = EquipmentDrain(app.state.coordinator)
+
+    def prepare():
+        drain_started.set()
+        return drain.prepare_idle(player_id, "attempt-race", request.boot_id, epoch,
+                                  authorization_expires_at=registry.clock.utc() + 15)
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as workers:
+        pending_state = workers.submit(client.get, "/v1/player/state", headers=headers)
+        assert entered.wait(4)
+        pending_drain = workers.submit(prepare)
+        assert drain_started.wait(4)
+        try:
+            with pytest.raises(TimeoutError):
+                pending_drain.result(timeout=.1)
+        finally:
+            release.set()
+        state = pending_state.result(timeout=4)
+        prepared = pending_drain.result(timeout=4)
+        assert state.status_code == 200
+        first = state.json()
+        floor = prepared.snapshot["control_floor_sequence"]
+        assert first["delivery_sequence"] <= floor
+        later = client.get("/v1/player/state", headers=headers).json()
+        assert later["delivery_sequence"] > floor
+        assert later["delivery_id"] != first["delivery_id"]
+
+
+def test_expired_prepared_drain_recovers_after_new_epoch_applies_fenced_state(registry):
+    old, key, request = enroll(registry)
+    frame(registry, "reenroll-frame")
+    registry.bind("reenroll-frame", old["player_id"], "HDMI-A-1", expected_generation=0)
+    coordinator = Coordinator(registry.db, registry.clock)
+    drain = EquipmentDrain(coordinator)
+    prepared = drain.prepare_idle(old["player_id"], "attempt-reenroll", request.boot_id,
+                                  old["authority_epoch"], authorization_expires_at=1005)
+    assert prepared.status == "prepared"
+
+    current, _, _ = enroll(registry, key=key, device_id=request.device_id)
+    assert current["player_id"] == old["player_id"]
+    assert current["authority_epoch"] > old["authority_epoch"]
+    registry.clock.advance(1)
+    registry.control_hello(current["player_id"], ControlHello(
+        authority_epoch=current["authority_epoch"], schemas=(1, 2), capabilities=()))
+    app = create_app(registry.db, registry.clock, ADMIN)
+    with TestClient(app) as client:
+        response = client.get("/v1/player/state", headers={
+            "Authorization": "Bearer " + current["token"]})
+        assert response.status_code == 200
+        delivery = response.json()
+    assert registry.control_ack(current["player_id"], ControlAck(
+        authority_epoch=current["authority_epoch"],
+        delivery_id=delivery["delivery_id"], result="applied"))
+    registry.clock.advance(17)
+    assert drain.abort_prepared(old["player_id"], "attempt-reenroll", request.boot_id,
+                                old["authority_epoch"]).status == "aborted"

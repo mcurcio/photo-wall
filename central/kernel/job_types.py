@@ -26,6 +26,12 @@ class FetchPackage(Job[AssetReady], name="player_deb.fetch", asset=AssetKind.PLA
     sha256: Sha256
 
 
+class FetchPlayerPayload(Job[AssetReady], name="player_payload.fetch",
+                         asset=AssetKind.PLAYER_PAYLOAD,
+                         delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
+    sha256: Sha256
+
+
 class SyncReleases(Job[None], name="releases.sync",
                    delivery=Delivery(queue=QueueName.FETCH, every=timedelta(minutes=15))):
     pass
@@ -46,6 +52,7 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = FetchOsImage | FetchPackage
+AssetJob: TypeAlias = FetchOsImage | FetchPackage | FetchPlayerPayload
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchPackage, SyncReleases, Prefetch, RescueStalledJobs, PurgeFinishedJobs)
+    FetchOsImage, FetchPackage, FetchPlayerPayload, SyncReleases, Prefetch,
+    RescueStalledJobs, PurgeFinishedJobs)

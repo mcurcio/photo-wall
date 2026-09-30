@@ -28,6 +28,7 @@ from central.fleet.models import (
     RevisionWrite,
 )
 from central.fleet.service import FleetService
+from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.time import Clock
 
 
@@ -71,8 +72,9 @@ def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ClientDisconnected:
             return Response(status_code=499)
         try:
-            return _stream(opened, DEB_MEDIA_TYPE if kind == "app" else
-                           "application/octet-stream")
+            media_type = ("application/gzip" if asset.format == PAYLOAD_FORMAT else
+                          DEB_MEDIA_TYPE if kind == "app" else "application/octet-stream")
+            return _stream(opened, media_type)
         except BaseException:
             os.close(opened.fd)
             raise

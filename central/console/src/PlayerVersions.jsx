@@ -198,17 +198,17 @@ export function PlayerVersions({ snapshot }) {
                   <p>Base: {observed(device.base, "OS telemetry unavailable")}</p>
                   <p>App: {observed(device.app, "App control unconfirmed")}</p>
                   <p>Desired: {version(device.desired?.artifact)} · {device.desired?.source ?? "none"}</p>
-                  <p>Offered: {device.offered
+                  <p>Latest offer: {device.offered
                     ? `${device.offered.app_digest?.slice(0, 12) ?? "no app selected"} · ${String(device.offered.app_status ?? "offer only").replaceAll("_", " ")} · offer only`
-                    : "No current offer"}</p>
+                    : "No offer recorded"}</p>
                   <p>Installed: {observed(device.installed, "Unknown")}</p>
                   <p>Running: {observed(device.running, "Unknown")}{device.running?.linkage === "unknown" && " · boot linkage unknown"}</p>
                   <p>Output: {observed(device.output, "No current presentation report")}</p>
                   <p>Fallback: {String(device.fallback ?? "unknown").replaceAll("_", " ")}
                     {device.accepted_fallback?.sha256 && ` · recorded ${device.accepted_fallback.sha256.slice(0, 12)}`}
                   </p>
-                  {device.capability === "offer_v1_claimed" ? (
-                    <p className="fleet__note">Offer-aware boot requested; exact policy enforcement is unconfirmed until a matching base report arrives.</p>
+                  {device.capability?.startsWith("offer_v") ? (
+                    <p className="fleet__note">Offer-aware boot requested. Base reports are serial claims; this view has no direct proof of the installed app or visible output.</p>
                   ) : (
                     <p className="fleet__note">App-only target is queued; this legacy or unknown base cannot enforce it.</p>
                   )}

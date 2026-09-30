@@ -136,6 +136,41 @@ def at(port: int, host: str = "127.0.0.1", scheme: str = "http") -> Url:
     return Url(Origin(scheme, host, port), "/v1/locate")
 
 
+def test_bounded_post_uses_same_direct_transport_without_redirect(trust):
+    body = b'{"schema":1}'
+    received = []
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        port = listener.getsockname()[1]
+
+        def serve():
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(3)
+                data = bytearray()
+                while b"\r\n\r\n" not in data:
+                    data.extend(connection.recv(4096))
+                head, _, tail = bytes(data).partition(b"\r\n\r\n")
+                while len(tail) < len(body):
+                    tail += connection.recv(4096)
+                received.append((head.split(b"\r\n", 1)[0], tail[:len(body)]))
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        reply = HttpTransport(trust=trust).send(at(port), headers={"Content-Type": "application/json"},
+                                                 deadline=time.monotonic() + 3,
+                                                 method="POST", body=body)
+        try:
+            assert reply.read(2, timeout=1) == b"ok"
+        finally:
+            reply.close()
+        thread.join(3)
+    assert received == [(b"POST /v1/locate HTTP/1.1", body)]
+    with pytest.raises(ValueError, match="too large"):
+        HttpTransport(trust=trust).send(at(1), headers={}, deadline=time.monotonic() + 1,
+                                        method="POST", body=b"x" * 8193)
+
+
 def failure(transport: HttpTransport, url: Url, *, seconds: float = 5.0,
             **bounds: float) -> UplinkError:
     with pytest.raises(UplinkError) as caught:

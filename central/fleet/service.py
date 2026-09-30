@@ -27,6 +27,8 @@ from central.fleet.policy import (
     effective_app,
     fallback_classification,
 )
+from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
+from contracts.player_payload import MAX_ARCHIVE_BYTES
 from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import Clock
 
@@ -37,6 +39,8 @@ _DAY_SECONDS = 86400
 _OBS_TTL_SECONDS = 30 * _DAY_SECONDS
 _OFFER_DEVICE_DAILY = 128
 _OFFER_GLOBAL_DAILY = 32768  # 128 Players x 128 offers, plus equivalent spoof headroom
+_ASSET_DEVICE_DAILY = 512
+_ASSET_GLOBAL_DAILY = 131072
 _OBS_DEVICE_DAILY = 10000  # 10-second heartbeat with room for phase changes
 _OBS_GLOBAL_DAILY = 2000000  # exceeds 128 x per-device budget with headroom
 _NEW_CLAIMS_GLOBAL_DAILY = 1024  # bounds distinct fake serial rows, above 128-Player ceiling
@@ -63,6 +67,7 @@ class OfferAsset:
     content_key: str
     sha256: str
     size: int
+    format: str | None = None
 
 
 def _artifact(row: dict[str, Any] | None, *, prefix: str = "target") -> dict | None:
@@ -74,11 +79,15 @@ def _artifact(row: dict[str, Any] | None, *, prefix: str = "target") -> dict | N
 
 
 def _offer_document(row: dict[str, Any]) -> dict[str, Any]:
+    initial = _artifact(row, prefix="app")
+    if initial is not None and row["offer_schema"] == 2:
+        initial = {**initial, "format": row["app_format"],
+                   "base_abi": row["app_base_abi"]}
     return {
-        "schema": 1, "offer_id": str(row["offer_id"]),
+        "schema": row["offer_schema"], "offer_id": str(row["offer_id"]),
         "base": {"tag": row["base_tag"], "sha256": row["base_sha256"],
                  "size": row["base_size"]},
-        "initial_app": _artifact(row, prefix="app"),
+        "initial_app": initial,
         "initial_app_status": row["app_status"],
         "compatibility_basis": row["compatibility_basis"],
         "base_policy_source": row["base_policy_source"],
@@ -98,10 +107,48 @@ class FleetService:
         return conn.execute("SELECT nextval('fleet_policy_revision_seq') AS n").fetchone()["n"]
 
     @staticmethod
+    def _retain_offer_asset(conn, *, offer_id: UUID, kind: str, identity: str,
+                            url: str, source_sha256: str, source_size: int | None,
+                            expected_sha256: str | None, expected_size: int | None,
+                            now: float) -> None:
+        """Keep a frozen locator and produced facts readable after a release recut.
+
+        The shared cache is still the byte source; an offer-owned asset reference
+        prevents catalog sync from making the old exact digest invisible to the reader.
+        """
+        asset_kind = {"base": "os-image", "app": "player-payload"}[kind]
+        conn.execute("INSERT INTO assets(kind,identity,created_at) VALUES(%s,%s,%s) "
+                     "ON CONFLICT(kind,identity) DO NOTHING", (asset_kind, identity, now))
+        conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,"
+                     "locator_sha256,locator_size,expected_sha256,expected_size,added_at) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                     (asset_kind, identity, f"fleet-offer:{offer_id}", url,
+                      source_sha256, source_size, expected_sha256, expected_size, now))
+
+    @staticmethod
+    def _retire_expired_offer_assets(conn, now: float) -> None:
+        expired = conn.execute(
+            "SELECT offer_id,kind,content_key FROM fleet_offer_artifact_roots "
+            "WHERE retain_until<=%s ORDER BY retain_until,offer_id LIMIT 100 FOR UPDATE",
+            (now,),
+        ).fetchall()
+        for root in expired:
+            asset_kind = "os-image" if root["kind"] == "base" else "player-payload"
+            conn.execute("DELETE FROM asset_references WHERE kind=%s AND identity=%s "
+                         "AND owner=%s", (asset_kind, root["content_key"],
+                                          f"fleet-offer:{root['offer_id']}"))
+            conn.execute("DELETE FROM fleet_offer_artifact_roots "
+                         "WHERE offer_id=%s AND kind=%s",
+                         (root["offer_id"], root["kind"]))
+
+    @staticmethod
     def _claim_quota(conn, *, device_id: str, kind: str, now: float) -> None:
         day = int(now // _DAY_SECONDS)
-        limits = ((_OFFER_GLOBAL_DAILY, _OFFER_DEVICE_DAILY) if kind == "offer" else
-                  (_OBS_GLOBAL_DAILY, _OBS_DEVICE_DAILY))
+        limits = {
+            "offer": (_OFFER_GLOBAL_DAILY, _OFFER_DEVICE_DAILY),
+            "asset": (_ASSET_GLOBAL_DAILY, _ASSET_DEVICE_DAILY),
+            "observation": (_OBS_GLOBAL_DAILY, _OBS_DEVICE_DAILY),
+        }[kind]
         for scope, limit in zip(("global", device_id), limits, strict=True):
             row = conn.execute(
                 "INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
@@ -135,12 +182,17 @@ class FleetService:
     @staticmethod
     def _validate_app(conn, target: Artifact) -> None:
         row = conn.execute(
-            "SELECT asset_sha256,asset_size,mirror_state FROM app_releases WHERE tag=%s FOR SHARE",
+            "SELECT payload_sha256,payload_size,payload_format,payload_base_abi,"
+            "payload_source_manifest,mirror_state FROM app_releases WHERE tag=%s FOR SHARE",
             (target.tag,),
         ).fetchone()
         if row is None:
             raise FleetError("release_not_found", 404)
-        if (row["asset_sha256"] != target.sha256 or row["asset_size"] != target.size
+        if (row["payload_sha256"] != target.sha256 or row["payload_size"] != target.size
+                or not 0 < target.size <= MAX_ARCHIVE_BYTES
+                or row["payload_format"] != PAYLOAD_FORMAT
+                or row["payload_source_manifest"] != "manifest.v2.json"
+                or not row["payload_base_abi"]
                 or row["mirror_state"] in ("divergent", "withdrawn", "undeployable")):
             raise FleetError("release_artifact_changed")
 
@@ -157,12 +209,14 @@ class FleetService:
             target = request.target
             conn.execute(
                 "INSERT INTO fleet_app_policy(singleton,revision,target_tag,target_sha256,"
-                "target_size,changed_at) VALUES(TRUE,%s,%s,%s,%s,%s) ON CONFLICT(singleton) "
+                "target_size,target_format,changed_at) VALUES(TRUE,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(singleton) "
                 "DO UPDATE SET revision=EXCLUDED.revision,target_tag=EXCLUDED.target_tag,"
                 "target_sha256=EXCLUDED.target_sha256,target_size=EXCLUDED.target_size,"
+                "target_format=EXCLUDED.target_format,"
                 "changed_at=EXCLUDED.changed_at",
                 (revision, target.tag if target else None, target.sha256 if target else None,
-                 target.size if target else None, self.clock.utc()),
+                 target.size if target else None, PAYLOAD_FORMAT, self.clock.utc()),
             )
             return {"source": "explicit", "revision": revision,
                     "target": target.model_dump() if target else None, "status": "selected"}
@@ -185,16 +239,19 @@ class FleetService:
             revision = self._revision(conn)
             conn.execute(
                 "INSERT INTO fleet_device_app_overrides(device_id,revision,target_tag,"
-                "target_sha256,target_size,changed_at) VALUES(%s,%s,%s,%s,%s,%s) "
+                "target_sha256,target_size,target_format,changed_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT(device_id) DO UPDATE SET revision=EXCLUDED.revision,"
                 "target_tag=EXCLUDED.target_tag,target_sha256=EXCLUDED.target_sha256,"
-                "target_size=EXCLUDED.target_size,changed_at=EXCLUDED.changed_at",
+                "target_size=EXCLUDED.target_size,target_format=EXCLUDED.target_format,"
+                "changed_at=EXCLUDED.changed_at",
                 (device_id, revision, target.tag if target else None,
                  target.sha256 if target else None, target.size if target else None,
-                 self.clock.utc()),
+                 PAYLOAD_FORMAT, self.clock.utc()),
             )
             capable_claim = conn.execute("SELECT 1 FROM fleet_boot_offers "
-                                         "WHERE device_id=%s LIMIT 1", (device_id,)).fetchone()
+                                         "WHERE device_id=%s AND offer_schema=2 LIMIT 1",
+                                         (device_id,)).fetchone()
             return {"source": "override", "revision": revision,
                     "target": target.model_dump() if target else None,
                     "status": ("queued_for_next_offer" if capable_claim else "queued_unenforceable")
@@ -207,11 +264,14 @@ class FleetService:
             old = conn.execute("SELECT revision FROM fleet_base_policy WHERE singleton FOR UPDATE").fetchone()
             if (old["revision"] if old else 0) != request.expected_revision:
                 raise FleetError("policy_revision_conflict")
-            row = conn.execute("SELECT c.state,c.squashfs_sha256,c.size "
+            row = conn.execute("SELECT c.state,c.squashfs_sha256,c.size,r.base_abi,"
+                               "r.base_abi_squashfs_sha256 "
                                "FROM app_releases r JOIN base_cache c ON c.tag=r.tag "
                                "WHERE r.tag=%s FOR SHARE", (request.tag,)).fetchone()
             if (row is None or row["state"] != "cached" or not row["squashfs_sha256"]
-                    or not row["size"] or row["size"] > MAX_ROOTFS_BYTES):
+                    or not row["size"] or row["size"] > MAX_ROOTFS_BYTES
+                    or not row["base_abi"] or
+                    row["base_abi_squashfs_sha256"] != row["squashfs_sha256"]):
                 raise FleetError("base_unavailable")
             revision = self._revision(conn)
             conn.execute("INSERT INTO fleet_base_policy(singleton,revision,tag,source,changed_at) "
@@ -224,21 +284,27 @@ class FleetService:
 
     @staticmethod
     def _app_policy(conn, device_id: str) -> tuple[dict, dict | None]:
+        def typed_artifact(row: dict | None, artifact_format: str) -> dict | None:
+            artifact = _artifact(row)
+            return {**artifact, "format": artifact_format} if artifact else None
+
         row = conn.execute("SELECT * FROM fleet_app_policy WHERE singleton").fetchone()
         if row is not None:
             fleet = {"source": "explicit", "revision": row["revision"],
-                     "target": _artifact(row)}
+                     "target": typed_artifact(row, row["target_format"])}
         else:
-            legacy = conn.execute("SELECT r.tag AS target_tag,r.asset_sha256 AS target_sha256,"
-                                  "r.asset_size AS target_size FROM app_release_policy p "
+            legacy = conn.execute("SELECT r.tag AS target_tag,"
+                                  "r.payload_sha256 AS target_sha256,"
+                                  "r.payload_size AS target_size FROM app_release_policy p "
                                   "JOIN app_releases r ON r.tag=p.promoted_tag "
                                   "WHERE p.singleton").fetchone()
             fleet = {"source": "legacy_promotion", "revision": 0,
-                     "target": _artifact(legacy)}
+                     "target": typed_artifact(legacy, PAYLOAD_FORMAT)}
         override = conn.execute("SELECT * FROM fleet_device_app_overrides "
                                 "WHERE device_id=%s", (device_id,)).fetchone()
         override_doc = (None if override is None else
-                        {"revision": override["revision"], "target": _artifact(override)})
+                        {"revision": override["revision"],
+                         "target": typed_artifact(override, override["target_format"])})
         return fleet, override_doc
 
     def create_offer(self, request: OfferRequest) -> dict:
@@ -246,6 +312,12 @@ class FleetService:
         device_id = device_id_for_serial(serial)
         assert device_id is not None
         now = self.clock.utc()
+        # This quota commits even when a duplicate offer returns early or a later
+        # policy/byte preflight fails. Idempotency must not make hashing free.
+        with self.db.transaction() as quota_conn:
+            self._claim_quota(quota_conn, device_id=device_id, kind="offer", now=now)
+            quota_conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
+            self._retire_expired_offer_assets(quota_conn, now)
         with self.db.transaction() as conn:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_OFFER_LOCK,))
             existing = conn.execute(
@@ -261,7 +333,6 @@ class FleetService:
                 if row["expires_at"] <= now:
                     raise FleetError("boot_offer_expired", 410)
                 return _offer_document(row)
-            self._claim_quota(conn, device_id=device_id, kind="offer", now=now)
             self._claim_new_device(conn, device_id=device_id, serial=serial, now=now)
             device = conn.execute("SELECT attached_tag,retired_at FROM devices "
                                   "WHERE device_id=%s FOR UPDATE", (device_id,)).fetchone()
@@ -271,48 +342,55 @@ class FleetService:
             base_tag = device["attached_tag"] or (baseline["tag"] if baseline else None)
             if base_tag is None:
                 raise FleetError("recovery_required", 503)
-            base = conn.execute("SELECT r.tag,r.base_tarball_sha256,c.squashfs_sha256,c.size,c.state "
+            base = conn.execute("SELECT r.tag,r.base_tarball_url,r.base_tarball_sha256,"
+                                "r.base_tarball_size,r.base_abi,r.base_abi_squashfs_sha256,"
+                                "c.squashfs_sha256,c.size,c.state "
                                 "FROM app_releases r JOIN base_cache c ON c.tag=r.tag "
                                 "WHERE r.tag=%s", (base_tag,)).fetchone()
             if (base is None or base["state"] != "cached" or not base["base_tarball_sha256"]
+                    or not base["base_tarball_url"] or not base["base_tarball_size"]
                     or not base["squashfs_sha256"] or not base["size"]
                     or base["size"] > MAX_ROOTFS_BYTES):
                 raise FleetError("base_unavailable", 503)
+            if (not base["base_abi"] or
+                    base["base_abi_squashfs_sha256"] != base["squashfs_sha256"]):
+                # An old base ignores the handoff and could fetch a mutable .deb.
+                raise FleetError("base_incapable", 503)
             fleet, override = self._app_policy(conn, device_id)
             desired = effective_app(fleet, override)
             target = desired["target"]
-            app, app_status, compatibility_basis, app_abi_key = None, "unconfigured", "none", None
+            app, app_release = None, None
+            app_status, compatibility_basis, app_abi_key = "unconfigured", "none", None
             if target is not None:
-                row = conn.execute("SELECT tag,asset_sha256,asset_size,mirror_state "
-                                   "FROM app_releases WHERE tag=%s", (target["tag"],)).fetchone()
-                if (row is None or row["asset_sha256"] != target["sha256"]
-                        or row["asset_size"] != target["size"]
-                        or row["asset_size"] > MAX_ROOTFS_BYTES
-                        or row["mirror_state"] in ("divergent", "withdrawn", "undeployable")):
+                app_release = conn.execute(
+                    "SELECT tag,payload_url,payload_sha256,payload_size,payload_format,"
+                    "payload_base_abi,payload_source_manifest,mirror_state "
+                    "FROM app_releases WHERE tag=%s", (target["tag"],)).fetchone()
+                if (target["format"] != PAYLOAD_FORMAT or app_release is None
+                        or app_release["payload_sha256"] != target["sha256"]
+                        or app_release["payload_size"] != target["size"]
+                        or not 0 < app_release["payload_size"] <= MAX_ARCHIVE_BYTES
+                        or not app_release["payload_url"]
+                        or app_release["payload_format"] != PAYLOAD_FORMAT
+                        or app_release["payload_source_manifest"] != "manifest.v2.json"
+                        or app_release["mirror_state"] in
+                        ("divergent", "withdrawn", "undeployable")):
                     app_status = "unavailable"
+                elif base["base_abi"] == app_release["payload_base_abi"]:
+                    app, app_status = target, "selected"
+                    compatibility_basis, app_abi_key = (
+                        "abi_match", app_release["payload_base_abi"])
                 else:
-                    abi_rows = conn.execute(
-                        "SELECT kind,sha256,abi_key FROM fleet_artifact_abi "
-                        "WHERE (kind='base' AND sha256=%s) OR (kind='app' AND sha256=%s)",
-                        (base["squashfs_sha256"], target["sha256"]),
-                    ).fetchall()
-                    abi = {r["kind"]: r["abi_key"] for r in abi_rows}
-                    if abi.get("base") and abi.get("base") == abi.get("app"):
-                        app, app_status = target, "selected"
-                        compatibility_basis, app_abi_key = "abi_match", abi["app"]
-                    elif row["tag"] == base_tag:
-                        app, app_status = target, "selected"
-                        compatibility_basis = "co_release_unverified"
-                    else:
-                        app_status = "compatibility_unverified"
+                    app_status = "compatibility_unverified"
             offer_id = uuid4()
             row = conn.execute(
                 "INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,serial,"
                 "kernel_boot_id,boot_nonce,base_policy_source,base_policy_revision,"
                 "app_policy_source,app_policy_revision,base_tag,"
                 "base_content_key,base_sha256,base_size,app_tag,app_sha256,app_size,app_status,"
-                "compatibility_basis,app_abi_key,created_at,expires_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "compatibility_basis,app_abi_key,offer_schema,app_format,app_base_abi,"
+                "created_at,expires_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "RETURNING *",
                 (offer_id, self.audience, device_id, serial, request.kernel_boot_id,
                  request.boot_nonce, "pin" if device["attached_tag"] else "operator_baseline",
@@ -321,17 +399,30 @@ class FleetService:
                  base["base_tarball_sha256"],
                  base["squashfs_sha256"], base["size"], app["tag"] if app else None,
                  app["sha256"] if app else None, app["size"] if app else None, app_status,
-                 compatibility_basis, app_abi_key, now, now + OFFER_TTL_SECONDS),
+                 compatibility_basis, app_abi_key, 2,
+                 PAYLOAD_FORMAT if app else None, app_abi_key if app else None,
+                 now, now + OFFER_TTL_SECONDS),
             ).fetchone()
             conn.execute("INSERT INTO fleet_offer_artifact_roots(offer_id,kind,content_key,"
                          "sha256,size,retain_until) VALUES(%s,'base',%s,%s,%s,%s)",
                          (offer_id, base["base_tarball_sha256"], base["squashfs_sha256"],
                           base["size"], row["expires_at"]))
+            self._retain_offer_asset(
+                conn, offer_id=offer_id, kind="base", identity=base["base_tarball_sha256"],
+                url=base["base_tarball_url"], source_sha256=base["base_tarball_sha256"],
+                source_size=base["base_tarball_size"], expected_sha256=None,
+                expected_size=None, now=now)
             if app is not None:
                 conn.execute("INSERT INTO fleet_offer_artifact_roots(offer_id,kind,content_key,"
                              "sha256,size,retain_until) VALUES(%s,'app',%s,%s,%s,%s)",
                              (offer_id, app["sha256"], app["sha256"], app["size"],
                               row["expires_at"]))
+                assert app_release is not None
+                self._retain_offer_asset(
+                    conn, offer_id=offer_id, kind="app", identity=app["sha256"],
+                    url=app_release["payload_url"], source_sha256=app["sha256"],
+                    source_size=app["size"], expected_sha256=app["sha256"],
+                    expected_size=app["size"], now=now)
             return _offer_document(row)
 
     def offer_asset(self, offer_id: UUID, kind: str) -> OfferAsset:
@@ -344,6 +435,9 @@ class FleetService:
             raise FleetError("boot_offer_not_found", 404)
         if row["expires_at"] <= self.clock.utc():
             raise FleetError("boot_offer_expired", 410)
+        with self.db.transaction() as quota_conn:
+            self._claim_quota(quota_conn, device_id=row["device_id"], kind="asset",
+                              now=self.clock.utc())
         if kind == "base":
             return OfferAsset(kind, row["base_tag"], row["base_content_key"],
                               row["base_sha256"], row["base_size"])
@@ -351,7 +445,7 @@ class FleetService:
             raise FleetError("app_unconfigured" if row["app_status"] == "unconfigured"
                              else "app_unavailable", 503)
         return OfferAsset(kind, row["app_tag"], row["app_sha256"], row["app_sha256"],
-                          row["app_size"])
+                          row["app_size"], row["app_format"])
 
     def evict_if_unretained(self, *, kind: str, content_key: str,
                             evict: Callable[[], None]) -> bool:
@@ -446,7 +540,9 @@ class FleetService:
             fleet, _ = self._app_policy(conn, "")
             base_policy = conn.execute("SELECT revision,tag,source FROM fleet_base_policy "
                                        "WHERE singleton").fetchone()
-            releases = conn.execute("SELECT r.tag,r.asset_sha256,r.asset_size,r.base_tarball_sha256,"
+            releases = conn.execute("SELECT r.tag,r.payload_sha256,r.payload_size,"
+                                    "r.payload_format,r.payload_base_abi,r.payload_source_manifest,"
+                                    "r.base_tarball_sha256,"
                                     "r.base_tarball_size,r.mirror_state,c.state AS base_cache_state,"
                                     "c.squashfs_sha256,c.size AS squashfs_size "
                                     "FROM app_releases r LEFT JOIN base_cache c ON c.tag=r.tag "
@@ -467,7 +563,7 @@ class FleetService:
                 observations.setdefault(observation["device_id"], []).append(observation)
             offers = {r["device_id"]: r for r in conn.execute(
                 "SELECT DISTINCT ON(device_id) * FROM fleet_boot_offers "
-                "ORDER BY device_id,created_at DESC,offer_id DESC").fetchall()}
+                "ORDER BY device_id,offer_sequence DESC").fetchall()}
             players = {r["device_id"]: r for r in conn.execute(
                 "SELECT DISTINCT ON(device_id) device_id,id,authority_epoch,last_seen,health "
                 "FROM players WHERE retired_at IS NULL ORDER BY device_id,last_seen DESC").fetchall()}
@@ -484,7 +580,9 @@ class FleetService:
                 device_id = device["device_id"]
                 override = overrides.get(device_id)
                 override_doc = (None if override is None else
-                                {"revision": override["revision"], "target": _artifact(override)})
+                                {"revision": override["revision"], "target":
+                                 ({**_artifact(override), "format": override["target_format"]}
+                                  if _artifact(override) else None)})
                 desired = effective_app(fleet, override_doc)
                 offer = offers.get(device_id)
                 obs = observations.get(device_id, [])
@@ -496,16 +594,17 @@ class FleetService:
                 app_fact = app_control_status(player=player, session=session, read_at=read_at)
                 result.append({
                     "device_id": device_id, "serial": device["serial"],
-                    "capability": "offer_v1_claimed" if offer else "legacy_or_unknown",
+                    "capability": (f"offer_v{offer['offer_schema']}_claimed" if offer
+                                   else "legacy_or_unknown"),
                     "desired": {**desired, "artifact": desired["target"]},
                     "override": override_doc if override_doc and
                     override_doc["target"] is not None else None,
                     "override_revision": override_doc["revision"] if override_doc else 0,
                     "offered": None if offer is None else {
-                        "offer_id": str(offer["offer_id"]),
+                        "offer_id": str(offer["offer_id"]), "schema": offer["offer_schema"],
                         "boot_id": str(offer["kernel_boot_id"]),
                         "base_digest": offer["base_sha256"], "app_digest": offer["app_sha256"],
-                        "app_status": offer["app_status"],
+                        "app_status": offer["app_status"], "app_format": offer["app_format"],
                         "base_policy_source": offer["base_policy_source"],
                         "base_policy_revision": offer["base_policy_revision"],
                         "app_policy_source": offer["app_policy_source"],
@@ -527,13 +626,19 @@ class FleetService:
                 })
             release_docs = [{
                 "tag": r["tag"],
-                "app": {"sha256": r["asset_sha256"], "size": r["asset_size"]}
-                if r["asset_sha256"] and r["asset_size"] else None,
+                "app": {"sha256": r["payload_sha256"], "size": r["payload_size"],
+                        "format": r["payload_format"], "base_abi": r["payload_base_abi"]}
+                if r["payload_sha256"] and r["payload_size"] and
+                r["payload_format"] == PAYLOAD_FORMAT and
+                r["payload_source_manifest"] == "manifest.v2.json" else None,
                 "base": {"sha256": r["squashfs_sha256"], "size": r["squashfs_size"]}
                 if r["squashfs_sha256"] and r["squashfs_size"] else None,
                 "mirror_state": r["mirror_state"],
-                "deployable": bool(r["asset_sha256"] and r["asset_size"] and
-                                   r["mirror_state"] not in ("divergent", "undeployable")),
+                "deployable": bool(r["payload_sha256"] and r["payload_size"] and
+                                   r["payload_format"] == PAYLOAD_FORMAT and
+                                   r["payload_source_manifest"] == "manifest.v2.json" and
+                                   r["mirror_state"] not in
+                                   ("divergent", "withdrawn", "undeployable")),
                 # Catalog state is not a local file-open proof on every serving pod.
                 "available_now": None,
                 "base_cache_state": r["base_cache_state"],

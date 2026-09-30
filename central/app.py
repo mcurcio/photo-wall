@@ -25,6 +25,7 @@ from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
+from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
@@ -320,20 +321,29 @@ def create_app(
         return registry.authenticate(credentials.credentials)
 
     def control_state(identity: dict) -> dict:
-        # The short Registry row lock seals negotiation before Coordination takes its lock.
-        selection = registry.control_selection(identity["id"], identity["authority_epoch"])
-        payload = project_state(
-            coordinator.delivery(identity["id"], identity["authority_epoch"]), selection
-        )
-        if selection.schema_version == 2:
-            cue = payload["identify_output"]
-            payload["identify_expires_at"] = (
-                clock.utc() + cue["remaining_seconds"] if cue else None
+        # Projection, drain generation and challenge issuance share one Coordination
+        # transaction. A prepared drain cannot slip between projection and sequence.
+        def finalize(conn, delivery: dict) -> dict:
+            selection = registry.control_selection_in(
+                conn, identity["id"], identity["authority_epoch"]
             )
-            payload.update(registry.issue_control_delivery_record(
-                identity["id"], identity["authority_epoch"], state_digest(payload)
-            ))
-        return payload
+            payload = project_state(delivery, selection)
+            if selection.schema_version == 2:
+                cue = payload["identify_output"]
+                payload["identify_expires_at"] = (
+                    clock.utc() + cue["remaining_seconds"] if cue else None
+                )
+                digest = state_digest(
+                    payload, control_fence=control_fence_in(conn, identity["id"])
+                )
+                payload.update(registry.issue_control_delivery_record_in(
+                    conn, identity["id"], identity["authority_epoch"], digest
+                ))
+            return payload
+
+        return coordinator.delivery(
+            identity["id"], identity["authority_epoch"], finalize=finalize
+        )
 
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):

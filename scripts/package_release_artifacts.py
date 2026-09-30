@@ -21,7 +21,7 @@ Player and bootstrapper `.deb`s built by `scripts/build_player_deb.py` and
   same staged copy in the same run (so its kernel and initrd are the base tarball's), for
   infrastructure that stages a TFTP tree without downloading the base squashfs. Reproducible
   the same way.
-- `photo-wall-player_<version>_arm64.deb`: the Player application, copied
+- `photo-wall-player_<version>_arm64.deb`: the legacy Player package, copied
   through byte-for-byte under its own build-assigned filename. Central serves
   this by reference (`docs/runbook.md`); it is not installed by the base image.
 - `photo-wall-bootstrapper_<version>_arm64.deb`: the bootstrapper package,
@@ -30,6 +30,10 @@ Player and bootstrapper `.deb`s built by `scripts/build_player_deb.py` and
 - A top-level `manifest.json` (schema, revision, each file's filename + sha256 +
   size, and each service image's repository + digest) and a `SHA256SUMS`
   covering every other produced file.
+- For schema-2 releases, a validated data-only Player archive and `manifest.v2.json` are
+  attached as well. The latter repeats every schema-1 field and adds the archive's exact
+  format and required base ABI, plus a separate base ABI bound to the exact squashfs in the
+  base tarball. Old Central continues to read `manifest.json` and serve the `.deb`.
 
 Per the home-LAN, no-threat-model ruling (UX over security), NONE of this is
 signed: every sha256 here is a **corruption check only** -- proof the bytes were
@@ -56,7 +60,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
+from contracts.player_payload import MAX_ARCHIVE_BYTES as MAX_PLAYER_PAYLOAD_BYTES
+from contracts.player_payload import PayloadError
+from contracts.player_payload import archive_name as player_payload_name
+from contracts.player_payload import verify_archive as verify_player_payload
 from contracts.release import (
+    BASE_ABI_SIDECAR,
     BASE_BOOT,
     BASE_CHECKSUMS,
     BASE_IMAGE,
@@ -74,10 +84,16 @@ from contracts.release import (
     IMAGES_KEY,
     MANIFEST,
     MANIFEST_SCHEMA,
+    MANIFEST_V2,
     MAX_MANIFEST_BYTES,
+    PAYLOAD_FILES,
+    PAYLOAD_MANIFEST_SCHEMA,
     PLAYER_DEB,
+    PLAYER_PAYLOAD,
     base_member,
     boot_member,
+    legacy_projection,
+    parse_base_abi_sidecar,
     tarball_name,
 )
 
@@ -206,6 +222,7 @@ def package(
     revision: str,
     images: Mapping[str, str],
     source_date_epoch: int,
+    player_payload: Path | None = None,
 ) -> dict:
     """Assemble the flat operator artifact set into a new `destination` directory."""
     if (
@@ -220,6 +237,7 @@ def package(
     base_bundle = base_bundle.absolute()
     player_deb = player_deb.absolute()
     bootstrapper_deb = bootstrapper_deb.absolute()
+    player_payload = player_payload.absolute() if player_payload is not None else None
     destination = destination.absolute()
     _outside_git(destination)
     if destination.exists() or destination.is_symlink():
@@ -228,7 +246,7 @@ def package(
     if not base_bundle.is_dir() or base_bundle.is_symlink():
         raise PackagingError("base_bundle_missing")
     squashfs = base_bundle / BASE_SQUASHFS
-    _require_file(squashfs, MAX_SQUASHFS_BYTES, label="base_squashfs")
+    squashfs_record = _require_file(squashfs, MAX_SQUASHFS_BYTES, label="base_squashfs")
     boot_tree = base_bundle / BASE_BOOT
     if not boot_tree.is_dir() or boot_tree.is_symlink() or not any(boot_tree.iterdir()):
         raise PackagingError("base_boot_tree_missing")
@@ -236,6 +254,31 @@ def package(
 
     player_record = _deb_record(player_deb, label="player_deb")
     bootstrapper_record = _deb_record(bootstrapper_deb, label="bootstrapper_deb")
+    payload_record = None
+    base_abi = None
+    if player_payload is not None:
+        sidecar = base_bundle / BASE_ABI_SIDECAR
+        _require_file(sidecar, 512, label="base_abi_sidecar")
+        try:
+            base_abi, bound_digest = parse_base_abi_sidecar(sidecar.read_bytes())
+        except ValueError as error:
+            raise PackagingError(str(error)) from None
+        if bound_digest != squashfs_record["sha256"]:
+            raise PackagingError("base_abi_squashfs_mismatch")
+        if player_payload.name != player_payload_name(revision):
+            raise PackagingError("player_payload_filename_invalid")
+        try:
+            payload_manifest = verify_player_payload(player_payload)
+        except PayloadError as error:
+            raise PackagingError(f"player_payload_invalid:{error}") from None
+        if payload_manifest["revision"] != revision:
+            raise PackagingError("player_payload_revision_mismatch")
+        payload_record = {
+            "filename": player_payload.name,
+            **checked_file(player_payload, MAX_PLAYER_PAYLOAD_BYTES),
+            "format": PLAYER_PAYLOAD_FORMAT,
+            "base_abi": payload_manifest["base_abi"],
+        }
 
     destination.mkdir(mode=0o700, parents=True)
     staging = destination / ".staging"
@@ -256,6 +299,8 @@ def package(
 
         shutil.copyfile(player_deb, destination / player_record["filename"])
         shutil.copyfile(bootstrapper_deb, destination / bootstrapper_record["filename"])
+        if player_payload is not None and payload_record is not None:
+            shutil.copyfile(player_payload, destination / payload_record["filename"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -271,6 +316,14 @@ def package(
     (destination / MANIFEST).write_bytes(
         (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     )
+    if payload_record is not None:
+        manifest = {**manifest, "schema": PAYLOAD_MANIFEST_SCHEMA,
+                    BASE_IMAGE: {**base_record, "base_abi": base_abi,
+                                 "base_abi_squashfs_sha256": squashfs_record["sha256"]},
+                    PLAYER_PAYLOAD: payload_record}
+        (destination / MANIFEST_V2).write_bytes(
+            (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
 
     sums = "".join(
         f"{checked_file(path, MAX_TARBALL_BYTES)['sha256']}  {path.name}\n"
@@ -316,7 +369,8 @@ def _file_record(key: str, record: object) -> tuple[str, str, int]:
     if not isinstance(record, dict) or not {"filename", "sha256", "size"} <= set(record):
         raise PackagingError(f"manifest_record_invalid:{key}")
     filename, sha256, size = record["filename"], record["sha256"], record["size"]
-    if (not isinstance(filename, str) or filename in ("", ".", "..", MANIFEST, CHECKSUMS)
+    if (not isinstance(filename, str) or filename in ("", ".", "..", MANIFEST,
+                                                   MANIFEST_V2, CHECKSUMS)
             or "/" in filename or "\\" in filename
             or not isinstance(sha256, str) or not _SHA256.fullmatch(sha256)
             or type(size) is not int or size <= 0):
@@ -342,14 +396,35 @@ def read_manifest(manifest: object, *, revision: str) -> Declared:
     """`manifest` (parsed JSON) as the declared release for `revision`: the declared schema,
     exactly the declared keys, a well-formed record for each file, distinct filenames, and
     every declared image pinned by digest. Raises PackagingError naming the first difference."""
-    expected_keys = {"schema", "revision", *FILES, IMAGES_KEY}
-    if not isinstance(manifest, dict) or set(manifest) != expected_keys:
+    if not isinstance(manifest, dict):
         raise PackagingError("manifest_keys_invalid")
-    if manifest["schema"] != MANIFEST_SCHEMA:
+    schema = manifest.get("schema")
+    if schema not in (MANIFEST_SCHEMA, PAYLOAD_MANIFEST_SCHEMA) or type(schema) is not int:
         raise PackagingError("manifest_schema_invalid")
+    file_keys = FILES if schema == MANIFEST_SCHEMA else PAYLOAD_FILES
+    expected_keys = {"schema", "revision", *file_keys, IMAGES_KEY}
+    if set(manifest) != expected_keys:
+        raise PackagingError("manifest_keys_invalid")
     if manifest["revision"] != revision:
         raise PackagingError("manifest_revision_mismatch")
-    files = {key: _file_record(key, manifest[key]) for key in FILES}
+    files = {key: _file_record(key, manifest[key]) for key in file_keys}
+    if schema == PAYLOAD_MANIFEST_SCHEMA:
+        base = manifest[BASE_IMAGE]
+        if (set(base) != {"filename", "sha256", "size", "base_abi",
+                             "base_abi_squashfs_sha256"}
+                or not isinstance(base["base_abi"], str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", base["base_abi"]) is None
+                or not isinstance(base["base_abi_squashfs_sha256"], str)
+                or _SHA256.fullmatch(base["base_abi_squashfs_sha256"]) is None):
+            raise PackagingError("manifest_base_abi_invalid")
+        payload = manifest[PLAYER_PAYLOAD]
+        if (set(payload) != {"filename", "sha256", "size", "format", "base_abi"}
+                or payload["filename"] != player_payload_name(revision)
+                or payload["size"] > MAX_PLAYER_PAYLOAD_BYTES
+                or payload["format"] != PLAYER_PAYLOAD_FORMAT
+                or not isinstance(payload["base_abi"], str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", payload["base_abi"]) is None):
+            raise PackagingError("manifest_player_payload_invalid")
     names = [filename for filename, _, _ in files.values()]
     if len(set(names)) != len(names):
         raise PackagingError("manifest_filenames_repeat")
@@ -383,7 +458,7 @@ _ABSENT: Final = _Member()
 
 
 def _members(path: Path, root: str, label: str, hashed: str,
-             kept: str | None = None) -> dict[str, _Member]:
+             kept: str | None = None, extra_hash: tuple[str, ...] = ()) -> dict[str, _Member]:
     """Every member of the tarball `path`, read in one pass: each within `root`, no traversal,
     no name twice, the sha256 of each regular file beneath `hashed`, and the bytes of the file
     `kept` (at most MAX_CMDLINE_BYTES of them, one more marking it too long)."""
@@ -396,7 +471,8 @@ def _members(path: Path, root: str, label: str, hashed: str,
                         or member.name in members):
                     raise PackagingError(f"{label}_member_invalid:{member.name}")
                 sha256 = content = None
-                if member.isfile() and member.name.startswith(hashed + "/"):
+                if member.isfile() and (member.name.startswith(hashed + "/")
+                                        or member.name in extra_hash):
                     digest, content = hashlib.sha256(), b""
                     with archive.extractfile(member) as data:
                         while block := data.read(MIB):
@@ -422,16 +498,31 @@ def _tree(members: Mapping[str, _Member], directory: str, label: str) -> dict[st
     return tree
 
 
-def _check_base_tarball(path: Path) -> dict[str, _Member]:
+def _check_base_tarball(path: Path, *, require_abi: bool = False
+                        ) -> tuple[dict[str, _Member], tuple[str, str] | None]:
     """The base tarball holds the declared layout (contracts/release.py): everything within
     BASE_ROOT, no traversal, the squashfs and the bundle's sums as regular files, and a boot/
     directory holding at least one file. Returns that boot/ tree, each file hashed."""
     boot = base_member(BASE_BOOT)
-    members = _members(path, BASE_ROOT, "base_tarball", hashed=boot)
+    sidecar = base_member(BASE_ABI_SIDECAR)
+    squashfs = base_member(BASE_SQUASHFS)
+    members = _members(path, BASE_ROOT, "base_tarball", hashed=boot,
+                       kept=sidecar if require_abi else None,
+                       extra_hash=(squashfs, sidecar) if require_abi else ())
     for name in (BASE_SQUASHFS, BASE_CHECKSUMS):
         if not members.get(base_member(name), _ABSENT).file:
             raise PackagingError(f"base_tarball_missing:{base_member(name)}")
-    return _tree(members, boot, "base_tarball")
+    proof = None
+    if require_abi:
+        if not members.get(sidecar, _ABSENT).file:
+            raise PackagingError(f"base_tarball_missing:{sidecar}")
+        try:
+            proof = parse_base_abi_sidecar(members[sidecar].data or b"")
+        except ValueError as error:
+            raise PackagingError(str(error)) from None
+        if proof[1] != members[squashfs].sha256:
+            raise PackagingError("base_abi_squashfs_mismatch")
+    return _tree(members, boot, "base_tarball"), proof
 
 
 def _check_cmdline(data: bytes | None, name: str) -> None:
@@ -473,29 +564,66 @@ def verify(directory: Path, *, revision: str) -> Packaged:
     tree between them, a checksum list that matches every other file, and no other file.
     Raises PackagingError naming the first difference."""
     directory = directory.absolute()
-    manifest_record = _actual(directory, MANIFEST)
-    if manifest_record["size"] > MAX_MANIFEST_BYTES:
+    legacy_record = _actual(directory, MANIFEST)
+    if legacy_record["size"] > MAX_MANIFEST_BYTES:
         raise PackagingError("manifest_too_large")
     try:
-        manifest = json.loads((directory / MANIFEST).read_bytes())
+        legacy = json.loads((directory / MANIFEST).read_bytes())
     except (ValueError, UnicodeError):
         raise PackagingError("manifest_invalid") from None
+    if not isinstance(legacy, dict) or type(legacy.get("schema")) is not int or \
+            legacy.get("schema") != MANIFEST_SCHEMA:
+        raise PackagingError("manifest_schema_invalid")
+    read_manifest(legacy, revision=revision)
+    has_v2 = (directory / MANIFEST_V2).exists()
+    manifest_record = _actual(directory, MANIFEST_V2) if has_v2 else legacy_record
+    if manifest_record["size"] > MAX_MANIFEST_BYTES:
+        raise PackagingError("manifest_too_large")
+    if has_v2:
+        try:
+            manifest = json.loads((directory / MANIFEST_V2).read_bytes())
+        except (ValueError, UnicodeError):
+            raise PackagingError("manifest_invalid") from None
+        if (not isinstance(manifest, dict) or legacy_projection(manifest) != legacy):
+            raise PackagingError("manifest_legacy_mismatch")
+    else:
+        manifest = legacy
     declared = read_manifest(manifest, revision=revision)
+    if has_v2 and manifest["schema"] != PAYLOAD_MANIFEST_SCHEMA:
+        raise PackagingError("manifest_schema_invalid")
 
     present = {path.name for path in directory.iterdir()}
     names = {MANIFEST, CHECKSUMS, *(filename for filename, _, _ in declared.files.values())}
+    if has_v2:
+        names.add(MANIFEST_V2)
     if present != names:
         raise PackagingError("assets_mismatch:" + ",".join(
             [f"missing {name}" for name in sorted(names - present)]
             + [f"undeclared {name}" for name in sorted(present - names)]))
 
-    assets = [Asset(MANIFEST, directory / MANIFEST, **manifest_record)]
+    assets = [Asset(MANIFEST, directory / MANIFEST, **legacy_record)]
+    if has_v2:
+        assets.append(Asset(MANIFEST_V2, directory / MANIFEST_V2, **manifest_record))
     for filename, sha256, size in declared.files.values():
         actual = _actual(directory, filename)
         if actual != {"sha256": sha256, "size": size}:
             raise PackagingError(f"asset_digest_mismatch:{filename}")
         assets.append(Asset(filename, directory / filename, sha256, size))
-    base_boot = _check_base_tarball(directory / declared.files[BASE_IMAGE][0])
+    if PLAYER_PAYLOAD in declared.files:
+        try:
+            payload_manifest = verify_player_payload(directory / declared.files[PLAYER_PAYLOAD][0])
+        except PayloadError as error:
+            raise PackagingError(f"player_payload_invalid:{error}") from None
+        payload_record = manifest[PLAYER_PAYLOAD]
+        if (payload_manifest["revision"] != revision
+                or payload_manifest["base_abi"] != payload_record["base_abi"]
+                or payload_manifest["format"] != payload_record["format"]):
+            raise PackagingError("player_payload_contract_mismatch")
+    base_boot, base_proof = _check_base_tarball(directory / declared.files[BASE_IMAGE][0],
+                                               require_abi=has_v2)
+    if has_v2 and base_proof != (manifest[BASE_IMAGE]["base_abi"],
+                                 manifest[BASE_IMAGE]["base_abi_squashfs_sha256"]):
+        raise PackagingError("manifest_base_abi_mismatch")
     boot_boot = _check_boot_tarball(directory / declared.files[BOOT_IMAGE][0])
     if boot_boot != base_boot:
         differing = sorted(set(base_boot).symmetric_difference(boot_boot) | {

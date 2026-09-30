@@ -13,6 +13,7 @@ import central.fleet.routes as routes
 from central.assets.reader import Opened
 from central.fleet.models import FleetError
 from central.fleet.service import OfferAsset
+from central.kernel.job_types import FetchPackage, FetchPlayerPayload
 from contracts.time import ManualClock
 
 OFFER_ID = UUID(int=1)
@@ -24,8 +25,10 @@ DIGEST = hashlib.sha256(BLOB).hexdigest()
 class Reader:
     def __init__(self, path):
         self.path = path
+        self.jobs = []
 
     async def read(self, candidates):
+        self.jobs.append(candidates.jobs[0])
         return Opened(candidates.jobs[0], os.open(self.path, os.O_RDONLY),
                       len(BLOB), "0" * 64)
 
@@ -93,3 +96,43 @@ def test_missing_pod_bytes_do_not_reselect_or_claim_delivery(tmp_path, monkeypat
     assert response.status_code == 503
     assert response.json() == {"error": "content_unavailable"}
     assert service.calls == [("offer", body["serial"])]
+
+
+def test_payload_offer_uses_payload_cache_job_and_gzip_media(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "payload.tar.gz"
+    path.write_bytes(BLOB)
+    reader = Reader(path)
+
+    class PayloadService(Service):
+        def offer_asset(self, offer_id, kind):
+            assert offer_id == OFFER_ID and kind == "app"
+            return OfferAsset("app", "v1", DIGEST, DIGEST, len(BLOB),
+                              "pw-player-data-v1")
+
+    monkeypatch.setattr(routes, "FleetService", PayloadService)
+    app = FastAPI()
+    routes.mount_fleet_routes(app, db=None, clock=ManualClock(100), admin=lambda: None,
+                              content=SimpleNamespace(reader=reader))
+    response = TestClient(app).get(f"/v1/netboot/offers/{OFFER_ID}/app")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/gzip"
+    assert isinstance(reader.jobs[0], FetchPlayerPayload)
+
+
+def test_historical_app_offer_uses_package_cache_job(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "player.deb"
+    path.write_bytes(BLOB)
+    reader = Reader(path)
+
+    class LegacyService(Service):
+        def offer_asset(self, offer_id, kind):
+            assert offer_id == OFFER_ID and kind == "app"
+            return OfferAsset("app", "v1", DIGEST, DIGEST, len(BLOB))
+
+    monkeypatch.setattr(routes, "FleetService", LegacyService)
+    app = FastAPI()
+    routes.mount_fleet_routes(app, db=None, clock=ManualClock(100), admin=lambda: None,
+                              content=SimpleNamespace(reader=reader))
+    response = TestClient(app).get(f"/v1/netboot/offers/{OFFER_ID}/app")
+    assert response.status_code == 200
+    assert isinstance(reader.jobs[0], FetchPackage)

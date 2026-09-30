@@ -42,7 +42,13 @@ from central.content_catalog.boot_policy import newest
 from central.content_catalog.catalog import ReleaseCatalog, in_transaction
 from central.content_catalog.ports import DeviceRecords, ReleaseRecords, ReleaseRow
 from central.kernel.assets import AssetKey, AssetReference, OriginLocator
-from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
+from central.kernel.job_types import (
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    Prefetch,
+    SyncReleases,
+)
 from central.kernel.jobs import asset_key, job_keys
 from central.kernel.ports import AssetRecords, PublishedRelease, ReleaseOrigin
 from central.kernel.publishing import Publisher
@@ -133,6 +139,22 @@ class SyncReleasesHandler:
         if old is not None and old.sha256 is not None and (
                 package is None or package.sha256 != old.sha256):
             self._assets.retire(tx, asset_key(FetchPackage(sha256=old.sha256)), tag)  # re-cut
+        payload = release.payload
+        if payload is not None:
+            locator = payload.locator
+            assert locator.sha256 is not None and locator.size is not None
+            key = asset_key(FetchPlayerPayload(sha256=locator.sha256))
+            reference = AssetReference(owner=tag, locator=locator,
+                                       expected_size=locator.size,
+                                       expected_sha256=locator.sha256)
+            if self._assets.reference(tx, key, reference):
+                changed.add(key)
+        old_payload = previous.payload if previous is not None else None
+        if old_payload is not None:
+            old_digest = old_payload.locator.sha256
+            if old_digest is not None and (
+                    payload is None or payload.locator.sha256 != old_digest):
+                self._assets.retire(tx, asset_key(FetchPlayerPayload(sha256=old_digest)), tag)
         return changed
 
     def _frozen_package(self, tx: Transaction, release: PublishedRelease,

@@ -17,6 +17,7 @@ from typing import Any, Final
 from central.content_catalog.ports import (
     DeviceRow,
     DeviceUpdate,
+    FleetDesiredAssets,
     NamedTags,
     Promoter,
     Promotion,
@@ -26,13 +27,15 @@ from central.content_catalog.ports import (
 )
 from central.infra.transactions import pg_connection
 from central.kernel.assets import OriginLocator
-from central.kernel.ports import PublishedRelease
+from central.kernel.ports import PlayerPayload, PublishedRelease
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version
 
 _RELEASE_COLUMNS = (
     "tag, is_prerelease, asset_url, asset_sha256, asset_size, "
-    "base_tarball_url, base_tarball_sha256, base_tarball_size, mirror_state"
+    "base_tarball_url, base_tarball_sha256, base_tarball_size, mirror_state, "
+    "payload_url, payload_sha256, payload_size, payload_format, payload_base_abi, "
+    "payload_source_manifest, base_abi, base_abi_squashfs_sha256, base_abi_source_manifest"
 )
 # The transaction-scoped advisory lock one automatic promotion holds from its first read to its
 # write (docs/central-idempotent-jobs.md §4). Distinct from every other lock id in `central`
@@ -65,6 +68,11 @@ def _locator(url: str | None, sha256: str | None, size: int | None) -> OriginLoc
 
 
 def _release(row: dict[str, Any]) -> ReleaseRow:
+    payload = None
+    if row["payload_sha256"] is not None:
+        payload = PlayerPayload(
+            _locator(row["payload_url"], row["payload_sha256"], row["payload_size"]),
+            row["payload_format"], row["payload_base_abi"])
     return ReleaseRow(
         tag=row["tag"],
         is_prerelease=row["is_prerelease"],
@@ -72,6 +80,9 @@ def _release(row: dict[str, Any]) -> ReleaseRow:
         os_image=_locator(row["base_tarball_url"], row["base_tarball_sha256"],
                           row["base_tarball_size"]),
         divergent=row["mirror_state"] == "divergent",
+        payload=payload,
+        base_abi=row["base_abi"],
+        base_abi_squashfs_sha256=row["base_abi_squashfs_sha256"],
     )
 
 
@@ -100,6 +111,22 @@ def _upstream(release: PublishedRelease) -> tuple[float | None, int | None]:
     return (None, None) if version is None else (version.changed_at, version.asset_id)
 
 
+def _payload_facts(payload: PlayerPayload | None) -> tuple[str | None, str | None,
+                                                           int | None, str | None,
+                                                           str | None, str | None]:
+    if payload is None:
+        return None, None, None, None, None, None
+    locator = payload.locator
+    return (locator.url, locator.sha256, locator.size, payload.format, payload.base_abi,
+            "manifest.v2.json")
+
+
+def _base_abi_facts(release: PublishedRelease) -> tuple[str | None, str | None, str | None]:
+    if release.base_abi is None:
+        return None, None, None
+    return release.base_abi, release.base_abi_squashfs_sha256, "manifest.v2.json"
+
+
 class PgReleaseRecords:
     """Implements `ReleaseRecords`."""
 
@@ -114,6 +141,53 @@ class PgReleaseRecords:
             f"SELECT {_RELEASE_COLUMNS} FROM app_releases ORDER BY tag"
         ).fetchall()
         return tuple(_release(row) for row in rows)
+
+    def fleet_desired_assets(self, tx: Transaction, *, now: float) -> FleetDesiredAssets:
+        """Keep exact fleet targets and live offer roots desired across tag recuts."""
+        conn = pg_connection(tx)
+        policy = conn.execute(
+            "SELECT target_sha256 AS digest, target_format AS format "
+            "FROM fleet_app_policy WHERE target_sha256 IS NOT NULL "
+            "UNION ALL "
+            "SELECT target_sha256 AS digest, target_format AS format "
+            "FROM fleet_device_app_overrides WHERE target_sha256 IS NOT NULL"
+        ).fetchall()
+        bases = conn.execute(
+            "SELECT r.base_tarball_sha256 AS digest FROM fleet_base_policy AS b "
+            "JOIN app_releases AS r ON r.tag=b.tag "
+            "WHERE r.base_tarball_sha256 IS NOT NULL"
+        ).fetchall()
+        offers = conn.execute(
+            "SELECT roots.kind, roots.content_key AS digest, offers.offer_schema "
+            "FROM fleet_offer_artifact_roots AS roots "
+            "JOIN fleet_boot_offers AS offers ON offers.offer_id=roots.offer_id "
+            "WHERE offers.expires_at>%s", (now,),
+        ).fetchall()
+        debs = {row["digest"] for row in policy if row["format"] == "player-deb"}
+        payloads = {row["digest"] for row in policy
+                    if row["format"] == "pw-player-data-v1"}
+        base_keys = {row["digest"] for row in bases}
+        for row in offers:
+            if row["kind"] == "base":
+                base_keys.add(row["digest"])
+            elif row["offer_schema"] == 2:
+                payloads.add(row["digest"])
+            else:
+                debs.add(row["digest"])
+        return FleetDesiredAssets(frozenset(base_keys), frozenset(debs),
+                                  frozenset(payloads))
+
+    def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:
+        rows = pg_connection(tx).execute(
+            "SELECT DISTINCT abi FROM ("
+            "SELECT payload_base_abi AS abi FROM app_releases WHERE payload_sha256=%s "
+            "UNION ALL "
+            "SELECT app_base_abi AS abi FROM fleet_boot_offers "
+            "WHERE offer_schema=2 AND app_sha256=%s AND expires_at>%s"
+            ") AS claims WHERE abi IS NOT NULL",
+            (sha256, sha256, now),
+        ).fetchall()
+        return rows[0]["abi"] if len(rows) == 1 else None
 
     def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
         rows = pg_connection(tx).execute(
@@ -135,12 +209,18 @@ class PgReleaseRecords:
         if conn.execute(
             "INSERT INTO app_releases(tag,major,minor,patch,prerelease,is_prerelease,"
             "asset_url,asset_sha256,asset_size,base_tarball_url,base_tarball_sha256,"
-            "base_tarball_size,mirror_state,upstream_changed_at,upstream_asset_id,"
+            "base_tarball_size,payload_url,payload_sha256,payload_size,payload_format,"
+            "payload_base_abi,payload_source_manifest,base_abi,"
+            "base_abi_squashfs_sha256,base_abi_source_manifest,"
+            "mirror_state,upstream_changed_at,"
+            "upstream_asset_id,"
             "discovered_at,updated_at) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT(tag) DO NOTHING",
             (release.tag, version.major, version.minor, version.patch, version.prerelease,
              release.is_prerelease, *_facts(release.package), *_facts(release.os_image),
+             *_payload_facts(release.payload),
+             *_base_abi_facts(release),
              mirror_state, changed_at, asset_id, now, now),
         ).rowcount == 1:
             return None
@@ -159,12 +239,22 @@ class PgReleaseRecords:
         changed_at, asset_id = _upstream(release)
         asset_url, asset_sha256, asset_size = _facts(release.package)
         base_url, base_sha256, base_size = _facts(release.os_image)
+        payload_url, payload_sha256, payload_size, payload_format, payload_base_abi, \
+            payload_source_manifest = _payload_facts(release.payload)
+        base_abi, base_abi_squashfs_sha256, base_abi_source_manifest = _base_abi_facts(release)
         return pg_connection(tx).execute(
             "UPDATE app_releases SET major=%(major)s,minor=%(minor)s,patch=%(patch)s,"
             "prerelease=%(prerelease)s,is_prerelease=%(is_prerelease)s,"
             "asset_url=%(asset_url)s,asset_sha256=%(asset_sha256)s,asset_size=%(asset_size)s,"
             "base_tarball_url=%(base_url)s,base_tarball_sha256=%(base_sha256)s,"
             "base_tarball_size=%(base_size)s,"
+            "payload_url=%(payload_url)s,payload_sha256=%(payload_sha256)s,"
+            "payload_size=%(payload_size)s,payload_format=%(payload_format)s,"
+            "payload_base_abi=%(payload_base_abi)s,"
+            "payload_source_manifest=%(payload_source_manifest)s,"
+            "base_abi=%(base_abi)s,"
+            "base_abi_squashfs_sha256=%(base_abi_squashfs_sha256)s,"
+            "base_abi_source_manifest=%(base_abi_source_manifest)s,"
             "upstream_changed_at=%(changed_at)s,upstream_asset_id=%(asset_id)s,"
             "mirror_state=CASE WHEN %(divergent)s THEN 'divergent' "
             "WHEN mirror_state='divergent' THEN %(released_state)s ELSE mirror_state END,"
@@ -181,6 +271,13 @@ class PgReleaseRecords:
              "is_prerelease": release.is_prerelease, "asset_url": asset_url,
              "asset_sha256": asset_sha256, "asset_size": asset_size, "base_url": base_url,
              "base_sha256": base_sha256, "base_size": base_size, "changed_at": changed_at,
+             "payload_url": payload_url, "payload_sha256": payload_sha256,
+             "payload_size": payload_size, "payload_format": payload_format,
+             "payload_base_abi": payload_base_abi,
+             "payload_source_manifest": payload_source_manifest,
+             "base_abi": base_abi,
+             "base_abi_squashfs_sha256": base_abi_squashfs_sha256,
+             "base_abi_source_manifest": base_abi_source_manifest,
              "asset_id": asset_id, "divergent": divergent, "now": now,
              "released_state": "discovered" if release.package is not None else "undeployable"},
         ).fetchone() is not None

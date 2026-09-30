@@ -27,7 +27,7 @@ from central.content_catalog.ports import (
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import OriginLocator
-from central.kernel.ports import PublishedRelease, UpstreamVersion
+from central.kernel.ports import PlayerPayload, PublishedRelease, UpstreamVersion
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -146,6 +146,29 @@ def test_claim_inserts_then_returns_the_previous_row_and_apply_writes_over_it(re
     assert (stored["discovered_at"], stored["updated_at"]) == (1000.0, 2000.0)
     assert stored["base_tarball_url"] is None
     assert (stored["upstream_changed_at"], stored["upstream_asset_id"]) == (2.0, 1)
+
+
+def test_payload_origin_facts_round_trip_and_clear_on_newer_schema_one(registry, pg):
+    payload = PlayerPayload(OriginLocator("https://example.test/player.tar.gz", sha("payload"),
+                                          123), "pw-player-data-v1", "sha256:" + "a" * 64)
+    release = dataclasses.replace(published(T1), payload=payload)
+    records = PgReleaseRecords()
+    with pg.begin() as tx:
+        assert records.claim(tx, release, now=1000.0) is None
+        assert records.get(tx, T1).payload == payload
+    stored = _raw(registry, "SELECT payload_sha256,payload_size,payload_format,"
+                            "payload_base_abi,payload_source_manifest "
+                            "FROM app_releases WHERE tag=%s", (T1,))
+    assert dict(stored) == {
+        "payload_sha256": payload.locator.sha256, "payload_size": 123,
+        "payload_format": payload.format, "payload_base_abi": payload.base_abi,
+        "payload_source_manifest": "manifest.v2.json",
+    }
+    legacy = published(T1, at=2)
+    with pg.begin() as tx:
+        assert records.claim(tx, legacy, now=2000.0).payload == payload
+        assert records.apply(tx, legacy, divergent=False, now=2000.0)
+        assert records.get(tx, T1).payload is None
 
 
 def test_claim_of_a_prerelease_without_a_deb_is_undeployable_legacy_state(registry, pg):

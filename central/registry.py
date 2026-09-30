@@ -269,43 +269,51 @@ class Registry:
             return selection
 
     def control_selection(self, player_id: str, epoch: int) -> ControlSelection:
-        """Seal the first state read as legacy before taking Coordination's lock."""
         with self.db.transaction() as conn:
-            self._control_player(conn, player_id, epoch)
-            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                               (player_id,)).fetchone()
-            if not row or row["authority_epoch"] != epoch:
-                return self._seal_legacy_control(conn, player_id, epoch)
-            if row["status"] == "open":
-                conn.execute("UPDATE player_control_sessions SET status='legacy' "
-                             "WHERE player_id=%s", (player_id,))
-                return ControlSelection(authority_epoch=epoch, schema=1)
-            return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
-                                    capabilities=tuple(row["capabilities"]))
+            return self.control_selection_in(conn, player_id, epoch)
+
+    def control_selection_in(self, conn, player_id: str, epoch: int) -> ControlSelection:
+        """Seal/select under a caller-owned Coordination transaction when issuing state."""
+        self._control_player(conn, player_id, epoch)
+        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                           (player_id,)).fetchone()
+        if not row or row["authority_epoch"] != epoch:
+            return self._seal_legacy_control(conn, player_id, epoch)
+        if row["status"] == "open":
+            conn.execute("UPDATE player_control_sessions SET status='legacy' "
+                         "WHERE player_id=%s", (player_id,))
+            return ControlSelection(authority_epoch=epoch, schema=1)
+        return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
+                                capabilities=tuple(row["capabilities"]))
 
     def issue_control_delivery_record(self, player_id: str, epoch: int,
                                       digest: str) -> dict:
         """Persist a v2 challenge and sequence before sending either state transport."""
-        now = self.clock.utc()
         with self.db.transaction() as conn:
-            self._control_player(conn, player_id, epoch)
-            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                               (player_id,)).fetchone()
-            if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
-                raise RegistryError("control_protocol_mismatch")
-            if (row["pending_id"] and row["pending_digest"] == digest
-                    and row["pending_expires"] > now):
-                return ControlDelivery(delivery_id=row["pending_id"],
-                                       delivery_sequence=row["issued_sequence"]).model_dump()
-            delivery_id = secrets.token_hex(16)
-            issued = conn.execute(
-                "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
-                "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s "
-                "RETURNING issued_sequence",
-                (delivery_id, digest, now + 60, player_id),
-            ).fetchone()
-            return ControlDelivery(delivery_id=delivery_id,
-                                   delivery_sequence=issued["issued_sequence"]).model_dump()
+            return self.issue_control_delivery_record_in(conn, player_id, epoch, digest)
+
+    def issue_control_delivery_record_in(self, conn, player_id: str, epoch: int,
+                                         digest: str) -> dict:
+        """Issue under the caller's Coordinator lock, atomic with its projected state."""
+        now = self.clock.utc()
+        self._control_player(conn, player_id, epoch)
+        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                           (player_id,)).fetchone()
+        if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
+            raise RegistryError("control_protocol_mismatch")
+        if (row["pending_id"] and row["pending_digest"] == digest
+                and row["pending_expires"] > now):
+            return ControlDelivery(delivery_id=row["pending_id"],
+                                   delivery_sequence=row["issued_sequence"]).model_dump()
+        delivery_id = secrets.token_hex(16)
+        issued = conn.execute(
+            "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
+            "pending_id=%s,pending_digest=%s,pending_expires=%s WHERE player_id=%s "
+            "RETURNING issued_sequence",
+            (delivery_id, digest, now + 60, player_id),
+        ).fetchone()
+        return ControlDelivery(delivery_id=delivery_id,
+                               delivery_sequence=issued["issued_sequence"]).model_dump()
 
     def issue_control_delivery(self, player_id: str, epoch: int, digest: str) -> str:
         """Compatibility wrapper while HTTP and WebSocket adopt the sequence field."""

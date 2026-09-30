@@ -51,15 +51,18 @@ from typing import Final
 
 from packaging.version import Version
 
+from contracts.player_payload import base_abi
+from player.output_discovery import weston_ini as render_weston_ini
 from scripts.build_player import BuildError
 from scripts.build_player_deb import MAINTAINER as _PLAYER_MAINTAINER
 from scripts.build_player_deb import (
     assert_declaration_matches,
     control_file,
     fetch_tree,
+    postinst_script,
     run_dpkg_deb,
 )
-from scripts.debian_packages import packages
+from scripts.debian_packages import PIN, packages
 from scripts.device_root_checks import watchdog_overrides
 from scripts.module_closure import (
     BOOTSTRAPPER_POLICY,
@@ -84,9 +87,66 @@ DESCRIPTION = (
 )
 INSTALL_DIR: Final = PurePosixPath("/usr/lib/photo-wall-bootstrapper")
 UNIT_NAME = "photo-wall-provision.service"
+AGENT_UNIT_NAME = "photo-wall-os-agent.service"
+AGENT_LAUNCHER = (b"import runpy, sys\n"
+                  b"sys.path.insert(0, '/usr/lib/photo-wall-bootstrapper')\n"
+                  b"runpy.run_module('appliance.os_agent', run_name='__main__')\n")
+PLAYER_LAUNCHER = (b"import runpy, sys\n"
+                   b"sys.path.insert(0, '/usr/lib/photo-wall-bootstrapper')\n"
+                   b"runpy.run_module('appliance.app_launcher', run_name='__main__')\n")
+PLAYER_UNIT_NAME = "photo-wall-player.service"
+WESTON_UNIT_NAME = "photo-wall-weston.service"
+ABI_FILE = "base-abi.txt"
+_LEGACY_EXEC = (b"ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-player "
+                b"--config /etc/photo-wall/public.json")
+_BASE_EXEC = b"ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-bootstrapper/player-launch.py"
+DEFAULT_AGENT_UNIT = (Path(__file__).resolve().parents[1] / "appliance/systemd" /
+                      AGENT_UNIT_NAME).read_bytes()
 
 
-def package_version(closure: Closure, unit: bytes, project_version: str) -> str:
+def managed_player_unit(legacy: bytes) -> bytes:
+    if legacy.count(_LEGACY_EXEC) != 1:
+        raise BuildError("player_unit_launcher_contract_changed")
+    return legacy.replace(_LEGACY_EXEC, _BASE_EXEC)
+
+
+DEFAULT_PLAYER_UNIT = managed_player_unit(
+    (Path(__file__).resolve().parents[1] / "appliance/systemd/player.service").read_bytes())
+DEFAULT_WESTON_UNIT = (
+    Path(__file__).resolve().parents[1] / "appliance/systemd/weston.service").read_bytes()
+DEFAULT_WESTON_INI = render_weston_ini().encode()
+
+
+def launcher_contract_digest(tree: Path) -> str:
+    """Hash the committed base-owned execution bytes that an app payload depends on."""
+    sources = (
+        ("app_launcher", (tree / "appliance/app_launcher.py").read_bytes()),
+        ("app_executor", (tree / "appliance/app_executor.py").read_bytes()),
+        ("app_payload", (tree / "appliance/app_payload.py").read_bytes()),
+        ("player_unit", managed_player_unit(
+            (tree / "appliance/systemd/player.service").read_bytes())),
+        ("player_launcher", PLAYER_LAUNCHER),
+    )
+    hasher = hashlib.sha256()
+    for name, data in sources:
+        for field in (name.encode(), data):
+            hasher.update(len(field).to_bytes(8, "big"))
+            hasher.update(field)
+    return "sha256:" + hasher.hexdigest()
+
+
+def base_abi_bytes(tree: Path | None = None) -> bytes:
+    source = tree or Path(__file__).resolve().parents[1]
+    return (base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(source))
+            + "\n").encode()
+
+
+def package_version(closure: Closure, unit: bytes, project_version: str, *,
+                    agent_unit: bytes = DEFAULT_AGENT_UNIT,
+                    player_unit: bytes = DEFAULT_PLAYER_UNIT,
+                    weston_unit: bytes = DEFAULT_WESTON_UNIT,
+                    weston_ini: bytes = DEFAULT_WESTON_INI,
+                    tree: Path | None = None) -> str:
     """`{project_version}+{12 hex}`: a CONTENT-DERIVED suffix over what the package ships --
     the closure digest (every staged file's path and bytes), the install directory, the unit's
     name and bytes, and the Depends -- NOT the git revision (see the module docstring,
@@ -97,13 +157,20 @@ def package_version(closure: Closure, unit: bytes, project_version: str) -> str:
         raise BuildError("unsupported project version")
     hasher = hashlib.sha256(str(base_version).encode())
     for field in (closure.digest.encode(), str(INSTALL_DIR).encode(), UNIT_NAME.encode(), unit,
+                  AGENT_UNIT_NAME.encode(), agent_unit, AGENT_LAUNCHER,
+                  PLAYER_UNIT_NAME.encode(), player_unit, WESTON_UNIT_NAME.encode(),
+                  weston_unit, weston_ini, PLAYER_LAUNCHER, base_abi_bytes(tree),
+                  postinst_script(),
                   "\n".join(packages("bootstrapper")).encode()):
         hasher.update(b"\x00" + str(len(field)).encode() + b"\x00" + field)
     return f"{base_version}+{hasher.hexdigest()[:12]}"
 
 
 def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, unit: bytes,
-               version: str) -> None:
+               version: str, agent_unit: bytes = DEFAULT_AGENT_UNIT,
+               player_unit: bytes = DEFAULT_PLAYER_UNIT,
+               weston_unit: bytes = DEFAULT_WESTON_UNIT,
+               weston_ini: bytes = DEFAULT_WESTON_INI) -> None:
     """Assemble the `.deb` staging tree.
 
     `stage_application(closure, BOOTSTRAPPER_POLICY, repo=tree, into=deb_root / INSTALL_DIR)`;
@@ -131,19 +198,44 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, unit: bytes,
         maintainer=MAINTAINER, description=DESCRIPTION,
     ))
     control_path.chmod(0o644)
+    postinst = debian / "postinst"
+    postinst.write_bytes(postinst_script())
+    postinst.chmod(0o755)
 
     stage_application(closure, BOOTSTRAPPER_POLICY, repo=tree,
                       into=deb_root / INSTALL_DIR.relative_to("/"))
+    agent_launcher = deb_root / INSTALL_DIR.relative_to("/") / "os-agent.py"
+    agent_launcher.write_bytes(AGENT_LAUNCHER)
+    agent_launcher.chmod(0o644)
+    player_launcher = deb_root / INSTALL_DIR.relative_to("/") / "player-launch.py"
+    player_launcher.write_bytes(PLAYER_LAUNCHER)
+    player_launcher.chmod(0o644)
+    abi_path = deb_root / INSTALL_DIR.relative_to("/") / ABI_FILE
+    abi_path.write_bytes(base_abi_bytes(tree))
+    abi_path.chmod(0o644)
 
     units_dir = deb_root / "lib/systemd/system"
     units_dir.mkdir(parents=True)
     unit_path = units_dir / UNIT_NAME
     unit_path.write_bytes(unit)
     unit_path.chmod(0o644)
+    agent_unit_path = units_dir / AGENT_UNIT_NAME
+    agent_unit_path.write_bytes(agent_unit)
+    agent_unit_path.chmod(0o644)
+    for name, data in ((PLAYER_UNIT_NAME, player_unit),
+                       (WESTON_UNIT_NAME, weston_unit)):
+        target = units_dir / name
+        target.write_bytes(data)
+        target.chmod(0o644)
+    weston_config = deb_root / "etc/xdg/weston/weston.ini"
+    weston_config.parent.mkdir(parents=True)
+    weston_config.write_bytes(weston_ini)
+    weston_config.chmod(0o644)
 
     wants_dir = deb_root / "etc/systemd/system/multi-user.target.wants"
     wants_dir.mkdir(parents=True)
     (wants_dir / UNIT_NAME).symlink_to("/lib/systemd/system/" + UNIT_NAME)
+    (wants_dir / AGENT_UNIT_NAME).symlink_to("/lib/systemd/system/" + AGENT_UNIT_NAME)
 
 
 def assert_minimal(deb_root: Path) -> None:
@@ -176,12 +268,21 @@ def build(repository: Path, revision: str, output_dir: Path) -> Path:
         assert_declaration_matches(tree)
         closure = closure_for(BOOTSTRAPPER_POLICY, repo=tree)
         unit = (tree / "appliance/systemd" / UNIT_NAME).read_bytes()
+        agent_unit = (tree / "appliance/systemd" / AGENT_UNIT_NAME).read_bytes()
+        player_unit = managed_player_unit(
+            (tree / "appliance/systemd/player.service").read_bytes())
+        weston_unit = (tree / "appliance/systemd/weston.service").read_bytes()
+        weston_ini = render_weston_ini().encode()
         project = tomllib.loads((tree / "pyproject.toml").read_text())
         # Version is derived from the packaged CONTENT, not the revision; the revision only
         # selects WHICH content `fetch_tree` pulls.
-        version = package_version(closure, unit, project["project"]["version"])
+        version = package_version(closure, unit, project["project"]["version"],
+                                  agent_unit=agent_unit, player_unit=player_unit,
+                                  weston_unit=weston_unit, weston_ini=weston_ini, tree=tree)
         deb_root = Path(tmp) / "deb-root"
-        stage_tree(deb_root, closure=closure, tree=tree, unit=unit, version=version)
+        stage_tree(deb_root, closure=closure, tree=tree, unit=unit, version=version,
+                   agent_unit=agent_unit, player_unit=player_unit,
+                   weston_unit=weston_unit, weston_ini=weston_ini)
         assert_minimal(deb_root)
         output = output_dir / f"{PACKAGE}_{version}_{ARCHITECTURE}.deb"
         return run_dpkg_deb(deb_root, output)

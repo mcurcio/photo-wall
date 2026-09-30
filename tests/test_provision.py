@@ -22,6 +22,7 @@ import pytest
 
 import uplink.watchdog
 from appliance import provision
+from appliance.boot_offer import read_handoff as real_read_boot_handoff
 from appliance.provision import (
     APP_MANIFEST_PATH,
     DEVICE_MANIFEST_PATH,
@@ -538,6 +539,155 @@ def test_an_unreadable_serial_keeps_the_global_manifest():
     assert recorder.order[1] == ("write_handoff", Handoff(None, None))
 
 
+def test_frozen_initial_app_fetches_exact_offer_without_mutable_manifest():
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY)})
+    recorder = Recorder()
+    phases = []
+    subject = bootstrapper(transport, find=finding(ORIGIN), recorder=recorder,
+                           phase=lambda *args: phases.append(args),
+                           boot_handoff={"mode": "offer", "offer_id": offer_id,
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY)}})
+    assert run(subject, 1) is True
+    assert transport.urls == [ORIGIN + route]
+    assert recorder.order[0][0:2] == ("install", BODY)
+    assert [phase for phase, _, _ in phases] == [
+        "fetching_app", "verifying_app", "installing_app", "starting_app",
+        "player_unit_started"]
+
+
+def test_app_less_offer_keeps_base_ready_without_central_or_install():
+    watchdog = Watchdog()
+    subject = bootstrapper(FakeTransport({}), find=never_called,
+                           install=never_called, start_unit=never_called,
+                           boot_handoff={"mode": "offer", "offer_id": "ignored",
+                                         "initial_app": None},
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready)
+    assert run(subject, 1) is False
+    assert watchdog.calls == [("extend", provision.PROVISION_ATTEMPT_TIMEOUT_SECONDS),
+                             ("ready",)]
+
+
+def test_offer_bytes_with_wrong_size_never_reach_installer():
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY[:-1])})
+    recorder = Recorder()
+    subject = bootstrapper(transport, find=finding(ORIGIN), recorder=recorder,
+                           boot_handoff={"mode": "offer", "offer_id": offer_id,
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY)}})
+    assert run(subject, 1) is False
+    assert recorder.order == []
+
+
+def test_schema_two_payload_uses_base_executor_and_never_runs_dpkg():
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    abi = "sha256:" + "c" * 64
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY)})
+
+    class Executor:
+        calls = []
+
+        def activate(self, body, **kwargs):
+            self.calls.append((body, kwargs))
+            return "committed"
+
+    executor = Executor()
+    recorder = Recorder()
+    subject = bootstrapper(transport, find=finding(ORIGIN), install=never_called,
+                           start_unit=never_called, data_executor=executor,
+                           write_handoff=recorder.write_handoff,
+                           base_abi_reader=lambda: abi,
+                           boot_handoff={"schema": 2, "mode": "offer", "offer_id": offer_id,
+                                         "base_tag": "v1-base",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": abi}})
+    assert run(subject, 1) is True
+    assert executor.calls == [(BODY, {"sha256": SHA256, "size": len(BODY),
+                                     "base_abi": abi, "attempt_id": offer_id,
+                                     "expected_base_abi": abi})]
+    assert recorder.order == [("write_handoff", Handoff(None, None))]
+
+
+def test_schema_two_abi_mismatch_never_fetches_or_mutates():
+    subject = bootstrapper(FakeTransport({}), find=finding(ORIGIN),
+                           install=never_called, start_unit=never_called,
+                           base_abi_reader=lambda: "sha256:" + "d" * 64,
+                           boot_handoff={"schema": 2, "mode": "offer",
+                                         "offer_id": "12345678-1234-1234-1234-123456789abc",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": "sha256:" + "c" * 64}})
+    assert run(subject, 1) is False
+
+
+def test_rolled_back_data_attempt_reports_failure_with_fallback_running():
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    abi = "sha256:" + "c" * 64
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY)})
+    phases, watchdog = [], Watchdog()
+
+    class RolledBack:
+        def activate(self, *_args, **_kwargs):
+            return "rolled_back"
+
+    subject = bootstrapper(transport, find=finding(ORIGIN), install=never_called,
+                           start_unit=never_called, data_executor=RolledBack(),
+                           base_abi_reader=lambda: abi,
+                           phase=lambda *args: phases.append(args),
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready,
+                           boot_handoff={"schema": 2, "mode": "offer", "offer_id": offer_id,
+                                         "base_tag": "v1-base",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": abi}})
+    assert run(subject, 1) is False
+    assert phases[-1] == ("retry_wait", SHA256, "app_attempt_rolled_back")
+    assert not any(phase == "player_unit_started" for phase, _, _ in phases)
+    assert watchdog.calls[-1] == ("ready",)
+
+
+def test_cold_data_activation_failure_stays_in_base_diagnostic_without_reboot_loop():
+    offer_id = "12345678-1234-1234-1234-123456789abc"
+    abi = "sha256:" + "c" * 64
+    route = f"/v1/netboot/offers/{offer_id}/app"
+    transport = FakeTransport({ORIGIN + route: lambda: reply(BODY)})
+    phases, watchdog = [], Watchdog()
+
+    class Fails:
+        calls = 0
+
+        def activate(self, *_args, **_kwargs):
+            self.calls += 1
+            raise provision.ExecutorError("candidate_start_failed")
+
+    executor = Fails()
+    subject = bootstrapper(transport, find=finding(ORIGIN), install=never_called,
+                           start_unit=never_called, data_executor=executor,
+                           base_abi_reader=lambda: abi,
+                           phase=lambda *args: phases.append(args),
+                           watchdog_extend=watchdog.extend, watchdog_ready=watchdog.ready,
+                           boot_handoff={"schema": 2, "mode": "offer", "offer_id": offer_id,
+                                         "base_tag": "v1-base",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": abi}})
+    assert run(subject, 3) is False
+    assert executor.calls == 1
+    assert phases[-1] == ("retry_wait", SHA256, "candidate_start_failed")
+    assert watchdog.calls[-1] == ("ready",)
+
+
 # --- dpkg / systemctl are thin, replaceable shell-outs ------------------------------
 
 
@@ -740,6 +890,8 @@ class _Stubs:
         monkeypatch.setattr(provision, "RunClockRecord", lambda: type(
             "Record", (), {"read": staticmethod(lambda: clock)})())
         monkeypatch.setattr(provision.Bootstrapper, "run", run)
+        monkeypatch.setattr(provision, "read_handoff",
+                            lambda _path: {"mode": "legacy_uncorrelated"})
         monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", Discovery)
         self.clock = clock
 
@@ -805,3 +957,27 @@ def test_main_builds_a_bootstrapper_on_the_real_systemd_notify_calls(tmp_path, m
     [built] = stubs.bootstrappers
     assert built._watchdog_extend is uplink.watchdog.extend_start
     assert built._watchdog_ready is uplink.watchdog.ready
+
+
+def test_old_stage_one_new_base_without_handoff_uses_uncorrelated_legacy_path(
+        tmp_path, monkeypatch):
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text(f"photowall.central={CMDLINE}/\n")
+    stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired"))
+    monkeypatch.setattr(provision, "read_handoff", real_read_boot_handoff)
+    with pytest.raises(SystemExit):
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
+                        "--boot-handoff", str(tmp_path / "missing.json")])
+    assert stubs.bootstrappers[0]._boot_handoff == {"mode": "legacy_uncorrelated"}
+
+
+def test_present_malformed_handoff_fails_closed(tmp_path, monkeypatch):
+    cmdline, handoff = tmp_path / "cmdline", tmp_path / "handoff.json"
+    cmdline.write_text(f"photowall.central={CMDLINE}/\n")
+    handoff.write_text("broken")
+    stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired"))
+    monkeypatch.setattr(provision, "read_handoff", real_read_boot_handoff)
+    with pytest.raises(SystemExit, match="1"):
+        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
+                        "--boot-handoff", str(handoff)])
+    assert stubs.bootstrappers == []
