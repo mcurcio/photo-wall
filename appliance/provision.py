@@ -50,7 +50,7 @@ from types import MappingProxyType
 from typing import Final
 
 from appliance.app_executor import AppExecutor, ExecutorError, expected_abi
-from appliance.boot_offer import BOOT_HANDOFF, read_handoff
+from appliance.boot_offer import BOOT_HANDOFF, BootOfferError, read_current_handoff
 from appliance.bootstrap import read_pi_serial
 from contracts.clock_record import ClockRecord
 from contracts.strict_json import loads_object
@@ -438,6 +438,24 @@ class Bootstrapper:
         while max_attempts is None or attempt < max_attempts:
             attempt += 1
             self._watchdog_extend(PROVISION_ATTEMPT_TIMEOUT_SECONDS)
+            if attempt == 1 and self._boot_handoff and self._boot_handoff.get("schema") == 2:
+                # Repair an interrupted local activation before any dependency on Central.
+                # The selected root and journal are volatile but survive this unit restarting
+                # within the same PXE boot. A stale boot handoff is rejected by main().
+                try:
+                    recovered = self._data_executor.recover(
+                        expected_base_abi=self._base_abi_reader())
+                except ExecutorError as error:
+                    fault = str(error)
+                    if re.fullmatch(r"[a-z0-9_]{1,64}", fault) is None:
+                        fault = "app_recovery_failed"
+                    self._phase("retry_wait", None, fault)
+                    LOG.error("provision: local app recovery requires repair: %s", error)
+                    self._watchdog_ready()
+                    return False
+                if recovered is not None:
+                    LOG.info("provision: locally recovered app %s (%s)",
+                             recovered.active_sha256, recovered.state)
             if (self._boot_handoff and self._boot_handoff.get("mode") == "offer"
                     and self._boot_handoff.get("initial_app") is None):
                 status = self._boot_handoff.get("initial_app_status")
@@ -560,6 +578,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--unit", default=DEFAULT_UNIT)
     parser.add_argument("--cmdline", type=Path, default=KERNEL_COMMAND_LINE)
     parser.add_argument("--boot-handoff", type=Path, default=BOOT_HANDOFF)
+    parser.add_argument("--boot-id", type=Path, default=Path("/proc/sys/kernel/random/boot_id"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     clock = RunClockRecord().read()
@@ -574,15 +593,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         # Opt-in per-device `.deb` path (0012 bead 6): only when PHOTO_WALL_PER_DEVICE_DEB is
         # set does the appliance send its serial and hand the served tag forward.
         serial_reader = read_pi_serial if os.environ.get(PER_DEVICE_ENV) == "1" else None
-        boot_handoff = read_handoff(args.boot_handoff)
+        from appliance.os_agent import write_phase
+
+        boot_id = args.boot_id.read_text().strip()
+        try:
+            boot_handoff = read_current_handoff(args.boot_handoff, boot_id)
+        except BootOfferError as error:
+            LOG.error("provision: %s", error)
+            write_phase("retry_wait", None, str(error), boot_id_path=args.boot_id)
+            watchdog_ready()
+            return
         if boot_handoff is None:
-            if args.boot_handoff.exists() or args.boot_handoff.is_symlink():
-                LOG.error("provision: boot_handoff_invalid")
-                raise SystemExit(1)
             # An older stage-one initrd never wrote this file. Such a boot is explicitly
             # uncorrelated and retains the legacy manifest path for mixed-version rollout.
             boot_handoff = {"mode": "legacy_uncorrelated"}
-        from appliance.os_agent import write_phase
 
         bootstrapper = Bootstrapper(
             find=functools.partial(find_central, resolution, transport=transport,

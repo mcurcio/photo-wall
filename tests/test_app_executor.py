@@ -194,6 +194,92 @@ def test_crash_after_start_intent_recovers_fallback_before_retry(tmp_path):
     assert service.running_digest() == first_digest
 
 
+def test_recover_interrupted_cold_start_without_payload_or_network(tmp_path):
+    body, digest = payload()
+    service = Service()
+    subject = executor(tmp_path, service)
+    service.crash_start = True
+    with pytest.raises(KeyboardInterrupt):
+        activate(subject, body, digest, ATTEMPT_A)
+    assert json.loads((tmp_path / "journal.json").read_text())["state"] == "start_requested"
+    service.crash_start = False
+    recovered = executor(tmp_path, service).recover(expected_base_abi=ABI)
+    assert recovered is not None
+    assert (recovered.attempt_id, recovered.state, recovered.active_sha256) == (
+        ATTEMPT_A, "committed", digest)
+    assert service.running_digest() == digest
+    assert json.loads((tmp_path / "journal.json").read_text())["state"] == "committed"
+
+
+def test_recover_interrupted_candidate_uses_local_fallback(tmp_path):
+    first, first_digest = payload()
+    second, second_digest = payload(b"b")
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    service.crash_start = True
+    with pytest.raises(KeyboardInterrupt):
+        activate(subject, second, second_digest, ATTEMPT_B)
+    service.crash_start = False
+    recovered = executor(tmp_path, service).recover(expected_base_abi=ABI)
+    assert recovered is not None
+    assert (recovered.attempt_id, recovered.state, recovered.active_sha256) == (
+        ATTEMPT_B, "rolled_back", first_digest)
+    assert service.running_digest() == first_digest
+
+
+def test_recover_terminal_commit_repairs_service_without_reverting_target(tmp_path):
+    first, first_digest = payload()
+    second, second_digest = payload(b"b")
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    assert activate(subject, second, second_digest, ATTEMPT_B) == "committed"
+    service.is_active, service.running = False, None
+    recovered = executor(tmp_path, service).recover(expected_base_abi=ABI)
+    assert recovered is not None
+    assert recovered.state == "committed" and recovered.active_sha256 == second_digest
+    assert service.running_digest() == second_digest
+
+
+def test_recover_terminal_commit_falls_back_when_target_restart_fails(tmp_path):
+    first, first_digest = payload()
+    second, second_digest = payload(b"b")
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, first, first_digest, ATTEMPT_A) == "committed"
+    assert activate(subject, second, second_digest, ATTEMPT_B) == "committed"
+    service.is_active, service.running = False, None
+    original_start = service.start
+    starts = 0
+
+    def fail_first_start():
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            raise ExecutorError("target_restart_failed")
+        original_start()
+
+    service.start = fail_first_start
+    recovered = subject.recover(expected_base_abi=ABI)
+    assert recovered is not None
+    assert recovered.state == "rolled_back" and recovered.active_sha256 == first_digest
+    assert service.running_digest() == first_digest
+
+
+def test_recover_corrupt_selected_root_never_stops_running_player(tmp_path):
+    body, digest = payload()
+    service = Service()
+    subject = executor(tmp_path, service)
+    assert activate(subject, body, digest, ATTEMPT_A) == "committed"
+    service.events.clear()
+    (tmp_path / "apps" / digest / "app/__main__.py").write_bytes(b"tampered")
+    with pytest.raises(ExecutorError, match="payload_root_integrity"):
+        subject.recover(expected_base_abi=ABI)
+    assert service.events == []
+    assert service.running_digest() == digest
+
+
 def test_failed_cold_start_is_fenced_until_operator_action(tmp_path):
     body, digest = payload()
     service = Service()

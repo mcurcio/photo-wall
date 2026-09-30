@@ -1,6 +1,6 @@
 # Red/blue refinement of Player fleet architecture
 
-**Status:** design proposal for owner review; no feature implementation or physical qualification. **Scope:** F0–F4/F6 in the [v0.13 readiness intake](production-readiness-v0.13.md). Three red reviewers attacked the [control-protocol](player-protocol-compatibility-design.md), [fleet-control](player-fleet-control-design.md), and [first adversarial review](player-fleet-adversarial-review.md) proposals. Three blue reviews composed corrections, followed by a red challenge of those corrections. This page owns the resulting cross-layer safety contracts and remaining decisions; the linked proposals own their feature-specific behavior.
+**Status:** design proposal for owner review; staged implementation is not deployed or physically qualified. **Scope:** F0–F4/F6 in the [v0.13 readiness intake](production-readiness-v0.13.md). Three red reviewers attacked the [control-protocol](player-protocol-compatibility-design.md), [fleet-control](player-fleet-control-design.md), and [first adversarial review](player-fleet-adversarial-review.md) proposals. Three blue reviews composed corrections, followed by a red challenge of those corrections. This page owns the resulting cross-layer safety contracts and remaining decisions; the linked proposals own their feature-specific behavior.
 
 ## What the exchange changed
 

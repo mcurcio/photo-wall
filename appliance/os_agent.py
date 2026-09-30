@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from appliance.boot_offer import BOOT_HANDOFF, read_handoff
+from appliance.boot_offer import BOOT_HANDOFF, BootOfferError, read_current_handoff
 from appliance.bootstrap import read_pi_serial
 from appliance.central_post import UnsupportedRoute, post_json
 from contracts.strict_json import loads_object
@@ -165,9 +165,12 @@ def observation(*, serial: str, kernel_boot_id: str, agent_incarnation: str,
         raise OsObservationError("observation_fault_invalid")
     if attempted_app_sha256 is not None and _SHA256.fullmatch(attempted_app_sha256) is None:
         raise OsObservationError("observation_digest_invalid")
-    handoff = read_handoff(handoff_path)
-    if handoff is not None and handoff["kernel_boot_id"] != kernel_boot_id:
-        handoff = None  # prior boot's file must not join this current OS claim
+    try:
+        handoff = read_current_handoff(handoff_path, kernel_boot_id)
+    except BootOfferError as exc:
+        handoff = None  # invalid/prior-boot file must not join the current OS claim
+        if fault_code is None:
+            fault_code = str(exc)
     return {"schema": 1, "kind": "pi", "serial": serial,
             "kernel_boot_id": kernel_boot_id,
             "boot_nonce": handoff["boot_nonce"] if handoff else None,

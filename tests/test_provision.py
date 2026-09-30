@@ -22,7 +22,7 @@ import pytest
 
 import uplink.watchdog
 from appliance import provision
-from appliance.boot_offer import read_handoff as real_read_boot_handoff
+from appliance.boot_offer import write_handoff as write_boot_handoff
 from appliance.provision import (
     APP_MANIFEST_PATH,
     DEVICE_MANIFEST_PATH,
@@ -592,6 +592,9 @@ def test_schema_two_payload_uses_base_executor_and_never_runs_dpkg():
     class Executor:
         calls = []
 
+        def recover(self, **_kwargs):
+            return None
+
         def activate(self, body, **kwargs):
             self.calls.append((body, kwargs))
             return "committed"
@@ -616,8 +619,13 @@ def test_schema_two_payload_uses_base_executor_and_never_runs_dpkg():
 
 
 def test_schema_two_abi_mismatch_never_fetches_or_mutates():
+    class Executor:
+        def recover(self, **_kwargs):
+            return None
+
     subject = bootstrapper(FakeTransport({}), find=finding(ORIGIN),
                            install=never_called, start_unit=never_called,
+                           data_executor=Executor(),
                            base_abi_reader=lambda: "sha256:" + "d" * 64,
                            boot_handoff={"schema": 2, "mode": "offer",
                                          "offer_id": "12345678-1234-1234-1234-123456789abc",
@@ -628,6 +636,62 @@ def test_schema_two_abi_mismatch_never_fetches_or_mutates():
     assert run(subject, 1) is False
 
 
+def test_schema_two_repairs_local_attempt_before_central_discovery():
+    order = []
+
+    class Executor:
+        def recover(self, *, expected_base_abi):
+            order.append(("recover", expected_base_abi))
+            return None
+
+    async def unavailable():
+        order.append(("find",))
+        raise ProvisionError("central_unavailable")
+
+    abi = "sha256:" + "c" * 64
+    subject = bootstrapper(FakeTransport({}), find=unavailable,
+                           data_executor=Executor(), base_abi_reader=lambda: abi,
+                           boot_handoff={"schema": 2, "mode": "offer",
+                                         "offer_id": "12345678-1234-1234-1234-123456789abc",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": abi}})
+    assert run(subject, 1) is False
+    assert order == [("recover", abi), ("find",)]
+
+
+def test_schema_two_unrepairable_local_attempt_never_contacts_central():
+    order = []
+
+    class Executor:
+        def recover(self, **_kwargs):
+            order.append("recover")
+            raise provision.ExecutorError("player_recovery_unconfirmed")
+
+    async def should_not_find():
+        order.append("find")
+        raise AssertionError("unrepairable local state must fence network activation")
+
+    phases, watchdog = [], Watchdog()
+    subject = bootstrapper(FakeTransport({}), find=should_not_find,
+                           data_executor=Executor(),
+                           base_abi_reader=lambda: "sha256:" + "c" * 64,
+                           phase=lambda *args: phases.append(args),
+                           watchdog_extend=watchdog.extend,
+                           watchdog_ready=watchdog.ready,
+                           boot_handoff={"schema": 2, "mode": "offer",
+                                         "offer_id": "12345678-1234-1234-1234-123456789abc",
+                                         "initial_app": {"tag": TAG, "sha256": SHA256,
+                                                         "size": len(BODY),
+                                                         "format": "pw-player-data-v1",
+                                                         "base_abi": "sha256:" + "c" * 64}})
+    assert run(subject, 1) is False
+    assert order == ["recover"]
+    assert phases[-1] == ("retry_wait", None, "player_recovery_unconfirmed")
+    assert watchdog.calls[-1] == ("ready",)
+
+
 def test_rolled_back_data_attempt_reports_failure_with_fallback_running():
     offer_id = "12345678-1234-1234-1234-123456789abc"
     abi = "sha256:" + "c" * 64
@@ -636,6 +700,9 @@ def test_rolled_back_data_attempt_reports_failure_with_fallback_running():
     phases, watchdog = [], Watchdog()
 
     class RolledBack:
+        def recover(self, **_kwargs):
+            return None
+
         def activate(self, *_args, **_kwargs):
             return "rolled_back"
 
@@ -665,6 +732,9 @@ def test_cold_data_activation_failure_stays_in_base_diagnostic_without_reboot_lo
 
     class Fails:
         calls = 0
+
+        def recover(self, **_kwargs):
+            return None
 
         def activate(self, *_args, **_kwargs):
             self.calls += 1
@@ -852,6 +922,13 @@ def test_parse_unit_properties_reads_key_value_lines():
 # --- main -------------------------------------------------------------------------
 
 
+def main_args(tmp_path, cmdline, *extra):
+    boot_id = tmp_path / "boot-id"
+    boot_id.write_text("11111111-2222-3333-4444-555555555555")
+    return ["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
+            "--boot-id", str(boot_id), *extra]
+
+
 def test_help_runs_isolated_from_the_repo():
     """`python -I` (as the unit runs it): no zeroconf or network import on the way to --help."""
     result = subprocess.run([sys.executable, "-I", "-m", "appliance.provision", "--help"],
@@ -890,8 +967,6 @@ class _Stubs:
         monkeypatch.setattr(provision, "RunClockRecord", lambda: type(
             "Record", (), {"read": staticmethod(lambda: clock)})())
         monkeypatch.setattr(provision.Bootstrapper, "run", run)
-        monkeypatch.setattr(provision, "read_handoff",
-                            lambda _path: {"mode": "legacy_uncorrelated"})
         monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", Discovery)
         self.clock = clock
 
@@ -904,7 +979,7 @@ def test_main_with_a_cmdline_root_builds_no_discovery_and_exits_1_on_time(
     stubs = _Stubs(monkeypatch, gateway(), expired)
     caplog.set_level(logging.ERROR, logger=provision.LOG.name)
     with pytest.raises(SystemExit) as raised:
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+        provision.main(main_args(tmp_path, cmdline))
     assert raised.value.code == 1
     assert [(found.root, found.source, found.central.origin) for found in stubs.found] == [
         (CMDLINE, "cmdline", CENTRAL)]
@@ -918,7 +993,7 @@ def test_main_without_a_cmdline_root_discovers_with_the_proof(tmp_path, monkeypa
     stubs = _Stubs(monkeypatch, FakeTransport({}), AssertionError("unreached"))
     caplog.set_level(logging.ERROR, logger=provision.LOG.name)
     with pytest.raises(SystemExit):
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+        provision.main(main_args(tmp_path, cmdline))
     [discovery] = stubs.discoveries
     assert discovery.proofs == [Unconfigured("absent")]
     assert discovery.options == {"timeout": provision.DISCOVERY_SECONDS}
@@ -938,7 +1013,7 @@ def test_main_logs_a_failed_player_start_as_one_named_line_and_exits_1(
     _Stubs(monkeypatch, gateway(), failure)
     caplog.set_level(logging.ERROR, logger=provision.LOG.name)
     with pytest.raises(SystemExit) as raised:
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+        provision.main(main_args(tmp_path, cmdline))
     assert raised.value.code == 1
     assert caplog.messages == ["provision: cause=unit reason=exit-code "
                                "detail=photo-wall-player.service/status=216/GROUP"]
@@ -953,7 +1028,7 @@ def test_main_builds_a_bootstrapper_on_the_real_systemd_notify_calls(tmp_path, m
     cmdline.write_text(f"console=tty1 photowall.central={CMDLINE}/\n")
     stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired", host="central"))
     with pytest.raises(SystemExit):
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json")])
+        provision.main(main_args(tmp_path, cmdline))
     [built] = stubs.bootstrappers
     assert built._watchdog_extend is uplink.watchdog.extend_start
     assert built._watchdog_ready is uplink.watchdog.ready
@@ -964,20 +1039,42 @@ def test_old_stage_one_new_base_without_handoff_uses_uncorrelated_legacy_path(
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"photowall.central={CMDLINE}/\n")
     stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired"))
-    monkeypatch.setattr(provision, "read_handoff", real_read_boot_handoff)
     with pytest.raises(SystemExit):
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
-                        "--boot-handoff", str(tmp_path / "missing.json")])
+        provision.main(main_args(tmp_path, cmdline, "--boot-handoff",
+                                 str(tmp_path / "missing.json")))
     assert stubs.bootstrappers[0]._boot_handoff == {"mode": "legacy_uncorrelated"}
 
 
-def test_present_malformed_handoff_fails_closed(tmp_path, monkeypatch):
+def test_present_malformed_handoff_keeps_os_agent_alive_with_named_diagnostic(
+        tmp_path, monkeypatch, caplog):
     cmdline, handoff = tmp_path / "cmdline", tmp_path / "handoff.json"
     cmdline.write_text(f"photowall.central={CMDLINE}/\n")
     handoff.write_text("broken")
     stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired"))
-    monkeypatch.setattr(provision, "read_handoff", real_read_boot_handoff)
-    with pytest.raises(SystemExit, match="1"):
-        provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
-                        "--boot-handoff", str(handoff)])
+    phases, ready = [], []
+    monkeypatch.setattr("appliance.os_agent.write_phase",
+                        lambda *args, **kwargs: phases.append((args, kwargs)))
+    monkeypatch.setattr(provision, "watchdog_ready", lambda: ready.append(True))
+    provision.main(main_args(tmp_path, cmdline, "--boot-handoff", str(handoff)))
     assert stubs.bootstrappers == []
+    assert phases[0][0] == ("retry_wait", None, "boot_handoff_invalid")
+    assert ready == [True]
+    assert "provision: boot_handoff_invalid" in caplog.messages
+
+
+def test_prior_boot_handoff_never_fetches_old_offer_or_falls_back(tmp_path, monkeypatch):
+    cmdline, boot_id = tmp_path / "cmdline", tmp_path / "boot-id"
+    cmdline.write_text(f"photowall.central={CMDLINE}/\n")
+    boot_id.write_text("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    handoff = write_boot_handoff(tmp_path, kernel_boot_id="11111111-2222-3333-4444-555555555555",
+                                 nonce="c" * 32, base_digest="a" * 64, offer=None)
+    stubs = _Stubs(monkeypatch, gateway(), UplinkError(Cause.TIME, "expired"))
+    phases, ready = [], []
+    monkeypatch.setattr("appliance.os_agent.write_phase",
+                        lambda *args, **kwargs: phases.append((args, kwargs)))
+    monkeypatch.setattr(provision, "watchdog_ready", lambda: ready.append(True))
+    provision.main(["--cmdline", str(cmdline), "--config", str(tmp_path / "public.json"),
+                    "--boot-handoff", str(handoff), "--boot-id", str(boot_id)])
+    assert stubs.bootstrappers == []
+    assert phases[0][0] == ("retry_wait", None, "boot_handoff_stale")
+    assert ready == [True]

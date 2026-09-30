@@ -12,8 +12,10 @@ import json
 import re
 import subprocess
 from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Iterator, Protocol
 
 from appliance.app_payload import PayloadError, stage_payload, verify_root
 from contracts.strict_json import loads_object
@@ -33,6 +35,15 @@ _STATES = frozenset({"intent_stop", "stopped", "activated", "start_requested",
 
 class ExecutorError(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryResult:
+    """A locally verified terminal attempt; no network or Central claim is implied."""
+
+    attempt_id: str
+    state: str  # committed or rolled_back
+    active_sha256: str
 
 
 class PlayerService(Protocol):
@@ -146,7 +157,8 @@ class AppExecutor:
                 or _SHA256.fullmatch(value["target"]) is None
                 or (value["fallback"] is not None
                     and (not isinstance(value["fallback"], str)
-                         or _SHA256.fullmatch(value["fallback"]) is None))):
+                         or _SHA256.fullmatch(value["fallback"]) is None))
+                or (value["state"] == "rolled_back" and value["fallback"] is None)):
             raise ExecutorError("executor_journal_invalid")
         return value
 
@@ -164,13 +176,47 @@ class AppExecutor:
             raise ExecutorError("executor_busy") from exc
         return handle
 
+    @contextmanager
+    def observe_selected(self, *, expected_base_abi: str) -> Iterator[str]:
+        """Hold a shared mutation fence while a caller samples the selected app.
+
+        This is observation only: it never repairs a journal, creates a lock file, or
+        treats a staged root or an unfinished attempt as installed. The yielded digest
+        names a terminal journal's selected root whose files and ABI were verified.
+        """
+        if (not isinstance(expected_base_abi, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_base_abi) is None):
+            raise ExecutorError("base_abi_invalid")
+        try:
+            lock = self.lock.open("rb")
+        except FileNotFoundError as exc:
+            raise ExecutorError("executor_not_initialized") from exc
+        with lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ExecutorError("executor_busy") from exc
+            try:
+                if self.legacy_override.exists() or self.legacy_override.is_symlink():
+                    raise ExecutorError("legacy_app_unverified")
+                row = self._journal()
+                if row is None:
+                    raise ExecutorError("executor_journal_missing")
+                if row["state"] not in ("committed", "rolled_back"):
+                    raise ExecutorError("executor_mutation_unsettled")
+                selected = row["target"] if row["state"] == "committed" else row["fallback"]
+                if selected is None or self._active() != selected:
+                    raise ExecutorError("selected_root_unconfirmed")
+                verify_root(self.roots / selected, expected_abi=expected_base_abi)
+                yield selected
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def _restore(self, row: dict, *, abi: str) -> None:
         """Complete or roll back one interrupted attempt before a new admission."""
         target, fallback = row["target"], row["fallback"]
         if row["state"] == "recovery_required" and fallback is None:
             raise ExecutorError("cold_attempt_requires_operator")
-        if fallback is not None:
-            verify_root(self.roots / fallback, expected_abi=abi)
         try:
             verify_root(self.roots / target, expected_abi=abi)
             target_valid = True
@@ -179,30 +225,92 @@ class AppExecutor:
             if fallback is None:
                 self._write_journal(row, "recovery_required")
                 raise ExecutorError("target_and_fallback_unavailable") from None
-        if (target_valid and self._active() == target
+        if fallback is not None and not (row["state"] == "committed" and target_valid):
+            verify_root(self.roots / fallback, expected_abi=abi)
+        if (target_valid and row["state"] not in ("rolled_back", "recovery_required")
+                and self._active() == target
                 and self.service.running_digest() == target):
             self._write_journal(row, "committed")
             return
-        if (fallback is not None and row["state"] in ("intent_stop", "stopped")
+        if (fallback is not None and row["state"] in (
+                "intent_stop", "stopped", "rolled_back", "recovery_required")
                 and self._active() == fallback
                 and self.service.running_digest() == fallback):
             self._write_journal(row, "rolled_back")
             return
         # Stop waits for PID1's previous stop/start job and kills any surviving Player.
         self.service.stop()
-        chosen = fallback if fallback is not None else target
+        chosen = (target if row["state"] == "committed" and target_valid else
+                  fallback if fallback is not None else target)
         self._write_active(chosen)
         self._write_journal(row, "activated")
         self._write_journal(row, "start_requested")
         try:
             self.service.start()
         except (OSError, subprocess.SubprocessError, ExecutorError):
-            self._write_journal(row, "recovery_required")
-            raise ExecutorError("player_recovery_required") from None
-        if self.service.running_digest() != chosen:
+            started = False
+        else:
+            started = self.service.running_digest() == chosen
+        if not started and chosen == target and fallback is not None:
+            # A once-committed target can fail on a later service restart. The
+            # prior exact root is still a valid local repair, with no network.
+            verify_root(self.roots / fallback, expected_abi=abi)
+            self.service.stop()
+            chosen = fallback
+            self._write_active(chosen)
+            self._write_journal(row, "activated")
+            self._write_journal(row, "start_requested")
+            try:
+                self.service.start()
+            except (OSError, subprocess.SubprocessError, ExecutorError):
+                started = False
+            else:
+                started = self.service.running_digest() == chosen
+        if not started:
             self._write_journal(row, "recovery_required")
             raise ExecutorError("player_recovery_unconfirmed")
-        self._write_journal(row, "rolled_back" if fallback is not None else "committed")
+        self._write_journal(row, "committed" if chosen == target else "rolled_back")
+
+    def _recover_locked(self, *, abi: str) -> RecoveryResult | None:
+        row = self._journal()
+        if row is None:
+            return None
+        if row["state"] in ("committed", "rolled_back"):
+            selected = row["target"] if row["state"] == "committed" else row["fallback"]
+            assert selected is not None
+            verify_root(self.roots / selected, expected_abi=abi)
+            if self._active() == selected and self.service.running_digest() == selected:
+                return RecoveryResult(row["attempt_id"], row["state"], selected)
+        self._restore(row, abi=abi)
+        final = self._journal()
+        assert final is not None
+        state = final["state"]
+        if state not in ("committed", "rolled_back"):
+            raise ExecutorError("executor_recovery_incomplete")
+        selected = final["target"] if state == "committed" else final["fallback"]
+        if (selected is None or self._active() != selected
+                or self.service.running_digest() != selected):
+            raise ExecutorError("executor_recovery_unconfirmed")
+        verify_root(self.roots / selected, expected_abi=abi)
+        return RecoveryResult(final["attempt_id"], state, selected)
+
+    def recover(self, *, expected_base_abi: str) -> RecoveryResult | None:
+        """Repair the previous local attempt before network fetch or new admission.
+
+        A provisioner can call this at process start, even when Central is unavailable.
+        Only the executor's volatile journal, staged roots and actual service are used.
+        """
+        if (not isinstance(expected_base_abi, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_base_abi) is None):
+            raise ExecutorError("base_abi_invalid")
+        with self._lock() as locked:
+            try:
+                return self._recover_locked(abi=expected_base_abi)
+            except (PayloadError, OSError, subprocess.SubprocessError) as exc:
+                raise ExecutorError(str(exc) if isinstance(exc, PayloadError)
+                                    else "executor_effect_failed") from exc
+            finally:
+                fcntl.flock(locked, fcntl.LOCK_UN)
 
     def activate(self, payload: bytes, *, sha256: str, size: int, base_abi: str,
                  attempt_id: str, expected_base_abi: str) -> str:
@@ -217,22 +325,19 @@ class AppExecutor:
             try:
                 if self.legacy_override.exists() or self.legacy_override.is_symlink():
                     raise ExecutorError("legacy_unit_override")
-                previous = self._journal()
+                previous = self._recover_locked(abi=expected_base_abi)
                 if previous is not None:
-                    if previous["state"] not in ("committed", "rolled_back"):
-                        self._restore(previous, abi=expected_base_abi)
-                        previous = self._journal()
-                        assert previous is not None
-                    if previous["attempt_id"] == attempt_id:
-                        if previous["target"] != sha256:
+                    if previous.attempt_id == attempt_id:
+                        row = self._journal()
+                        assert row is not None
+                        if row["target"] != sha256:
                             raise ExecutorError("attempt_digest_conflict")
-                        selected = (previous["target"] if previous["state"] == "committed"
-                                    else previous["fallback"])
+                        selected = previous.active_sha256
                         if (selected is None or self._active() != selected
                                 or self.service.running_digest() != selected):
                             raise ExecutorError("attempt_outcome_unconfirmed")
                         verify_root(self.roots / selected, expected_abi=expected_base_abi)
-                        return previous["state"]
+                        return previous.state
                 target = stage_payload(payload, sha256=sha256, size=size,
                                        expected_abi=expected_base_abi, roots=self.roots)
                 fallback = self._active()

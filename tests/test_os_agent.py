@@ -108,6 +108,7 @@ def test_current_handoff_correlation_is_observation_only(tmp_path):
                         sequence=1, phase="base_ready", sampled_boottime_ms=1,
                         handoff_path=path)
     assert stale["offer_id"] is None and stale["base_digest"] is None
+    assert stale["fault_code"] == "boot_handoff_stale"
 
 
 def test_missing_app_and_handoff_still_allow_base_claim(tmp_path):

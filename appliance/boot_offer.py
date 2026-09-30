@@ -120,17 +120,28 @@ class BootOffer:
 
 
 def boot_nonce(run_root: Path, kernel_boot_id: str) -> str:
-    """Persist one nonce per kernel boot for stage-one process retries."""
+    """Persist one nonce per kernel boot; a damaged existing file cannot select anew."""
     _hex(kernel_boot_id, _UUID, "boot_id_invalid")
     path = run_root / NONCE_NAME
     try:
-        existing = loads_object(path.read_bytes(), max_bytes=256)
-    except OSError:
+        with path.open("rb") as stream:
+            raw = stream.read(257)
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise BootOfferError("boot_nonce_invalid") from None
         existing = None
-    if (existing is not None and existing.get("kernel_boot_id") == kernel_boot_id
-            and isinstance(existing.get("boot_nonce"), str)
-            and _NONCE.fullmatch(existing["boot_nonce"]) is not None):
-        return existing["boot_nonce"]
+    except OSError as exc:
+        raise BootOfferError("boot_nonce_unavailable") from exc
+    else:
+        existing = loads_object(raw, max_bytes=256)
+        if (existing is None or set(existing) != {"kernel_boot_id", "boot_nonce"}
+                or not isinstance(existing["kernel_boot_id"], str)
+                or _UUID.fullmatch(existing["kernel_boot_id"]) is None
+                or not isinstance(existing["boot_nonce"], str)
+                or _NONCE.fullmatch(existing["boot_nonce"]) is None):
+            raise BootOfferError("boot_nonce_invalid")
+        if existing["kernel_boot_id"] == kernel_boot_id:
+            return existing["boot_nonce"]
     nonce = secrets.token_hex(16)
     write_atomically(path, json.dumps({"kernel_boot_id": kernel_boot_id,
                                        "boot_nonce": nonce}, sort_keys=True).encode(), mode=0o600)
@@ -170,7 +181,7 @@ def write_handoff(rootmnt: Path, *, kernel_boot_id: str, nonce: str,
 
 
 def read_handoff(path: Path) -> dict[str, object] | None:
-    """Read a validated correlation claim; missing/malformed files are legacy unknown."""
+    """Read a syntactically valid correlation claim, without boot-age inference."""
     try:
         value = loads_object(path.read_bytes(), max_bytes=MAX_HANDOFF_BYTES)
     except OSError:
@@ -208,3 +219,20 @@ def read_handoff(path: Path) -> dict[str, object] | None:
     except BootOfferError:
         return None
     return value
+
+
+def read_current_handoff(path: Path, kernel_boot_id: str) -> dict[str, object] | None:
+    """Missing means old stage one; a present bad or prior-boot file is never legacy."""
+    _hex(kernel_boot_id, _UUID, "boot_id_invalid")
+    handoff = read_handoff(path)
+    if handoff is None:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise BootOfferError("boot_handoff_invalid") from exc
+        raise BootOfferError("boot_handoff_invalid")
+    if handoff["kernel_boot_id"] != kernel_boot_id:
+        raise BootOfferError("boot_handoff_stale")
+    return handoff
