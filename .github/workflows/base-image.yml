@@ -435,7 +435,7 @@ jobs:
           if ! grep -q '^wall:' "$extract/etc/passwd"; then
             violation "missing wall user in base OS"
           fi
-          expected_abi=$(python3 -c 'from pathlib import Path; from contracts.player_payload import base_abi; from scripts.debian_packages import PIN, packages; from scripts.build_bootstrapper_deb import launcher_contract_digest; print(base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(Path.cwd())))')
+          expected_abi=$(.venv/bin/python -c 'from pathlib import Path; from contracts.player_payload import base_abi; from scripts.debian_packages import PIN, packages; from scripts.build_bootstrapper_deb import launcher_contract_digest; print(base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(Path.cwd())))')
           if [ "$(cat "$extract/$bootstrapper_dir/base-abi.txt")" != "$expected_abi" ]; then
             violation "base ABI file does not match installed runtime declaration"
           fi
@@ -974,6 +974,19 @@ jobs:
             --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
             --deb "$PLAYER_DEB" --initrd "$BUNDLE/boot/initrd.img" \
             --work "$RUNNER_TEMP/player-start-probe"
+
+      # The legacy .deb probe installs an overriding unit. Use a fresh container
+      # so this gate exercises the shipped base-owned launcher and exact archive.
+      - name: Activate the data-only Player payload on the built base under systemd
+        env:
+          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
+          PLAYER_PAYLOAD: ${{ steps.player-payload.outputs.payload_path }}
+        run: |
+          set -eu
+          sudo .venv/bin/python scripts/player_start_probe.py \
+            --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
+            --payload "$PLAYER_PAYLOAD" \
+            --work "$RUNNER_TEMP/player-payload-start-probe"
 
       - name: Show what was produced
         if: always()
