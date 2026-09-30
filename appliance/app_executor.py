@@ -12,15 +12,24 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from appliance.app_launcher import CONFIG as PLAYER_CONFIG
 from appliance.app_launcher import PYTHON as PLAYER_PYTHON
-from appliance.app_payload import PayloadError, stage_payload, verify_root
-from contracts.player_payload import MAX_EXPANDED_BYTES, MAX_MANIFEST_BYTES, MAX_MEMBERS
+from appliance.app_launcher import UNIT
+from appliance.app_payload import PayloadError, stage_payload, stage_payload_file, verify_root
+from appliance.online_activation import OnlineArtifactRef, OnlineAttempt
+from appliance.process_identity import ProcessSample, ProcessSampler, SystemdProcessSampler
+from contracts.player_payload import (
+    MAX_ARCHIVE_BYTES,
+    MAX_EXPANDED_BYTES,
+    MAX_MANIFEST_BYTES,
+    MAX_MEMBERS,
+)
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
 
@@ -29,7 +38,6 @@ JOURNAL = Path("/run/photo-wall/app-mutation.json")
 LOCK = Path("/run/photo-wall/app-executor.lock")
 LEGACY_UNIT_OVERRIDE = Path("/etc/systemd/system/photo-wall-player.service")
 EXPECTED_ABI = Path("/usr/lib/photo-wall-bootstrapper/base-abi.txt")
-UNIT = "photo-wall-player.service"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 _STATES = frozenset({"intent_stop", "stopped", "activated", "start_requested",
@@ -63,6 +71,16 @@ class SelectedSnapshot:
     attempt_id: str
     state: str
     digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedOnline:
+    """Locally staged facts only; this handle cannot authorize a service stop."""
+
+    attempt: OnlineAttempt
+    selected: SelectedSnapshot
+    process: ProcessSample
+    base_abi: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +186,7 @@ class AppExecutor:
                  lock: Path = LOCK, legacy_override: Path = LEGACY_UNIT_OVERRIDE,
                  service: PlayerService | None = None,
                  capacity_probe: CapacityProbe | None = None,
+                 expected_abi_reader: Callable[[], str] = expected_abi,
                  protected_memory_bytes: int = DEFAULT_MEMORY_HEADROOM_BYTES,
                  protected_filesystem_bytes: int = DEFAULT_FILESYSTEM_HEADROOM_BYTES) -> None:
         if (type(protected_memory_bytes) is not int or protected_memory_bytes < 0
@@ -178,6 +197,7 @@ class AppExecutor:
         self.legacy_override = legacy_override
         self.service = service or SystemdPlayer(roots)
         self.capacity_probe = capacity_probe or LinuxCapacityProbe()
+        self.expected_abi_reader = expected_abi_reader
         self.protected_memory_bytes = protected_memory_bytes
         self.protected_filesystem_bytes = protected_filesystem_bytes
 
@@ -191,12 +211,14 @@ class AppExecutor:
         These are admission bounds; the physical peak still needs measurement.
         """
         snapshot = self.capacity_probe.snapshot(self.roots)
-        if (type(snapshot.filesystem_free_bytes) is not int
-                or snapshot.filesystem_free_bytes <
+        if (not isinstance(snapshot, CapacitySnapshot)
+                or type(snapshot.filesystem_free_bytes) is not int
+                or type(snapshot.memory_available_bytes) is not int):
+            raise ExecutorError("app_capacity_unavailable")
+        if snapshot.filesystem_free_bytes < (
                 self.protected_filesystem_bytes + staging_bytes):
             raise ExecutorError("app_filesystem_capacity_insufficient")
-        if (type(snapshot.memory_available_bytes) is not int
-                or snapshot.memory_available_bytes <
+        if snapshot.memory_available_bytes < (
                 self.protected_memory_bytes + staging_bytes + archive_copy_bytes):
             raise ExecutorError("app_memory_capacity_insufficient")
 
@@ -404,6 +426,93 @@ class AppExecutor:
         with self._lock() as locked:
             try:
                 return self._recover_locked(abi=expected_base_abi)
+            except (PayloadError, OSError, subprocess.SubprocessError) as exc:
+                raise ExecutorError(str(exc) if isinstance(exc, PayloadError)
+                                    else "executor_effect_failed") from exc
+            finally:
+                fcntl.flock(locked, fcntl.LOCK_UN)
+
+    def _online_process(self, sampler: ProcessSampler, selected: str) -> ProcessSample:
+        """Require one unchanged PID1 invocation around the argv digest sample."""
+        if not self.service.active():
+            raise ExecutorError("player_process_unconfirmed")
+        before = sampler.sample()
+        running = self.service.running_digest()
+        after = sampler.sample()
+        if (type(before) is not ProcessSample or type(before.pid) is not int
+                or before.pid <= 0 or type(before.start_ticks) is not int
+                or before.start_ticks <= 0
+                or not isinstance(before.invocation_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", before.invocation_id) is None
+                or before != after or running != selected
+                or not self.service.active()):
+            raise ExecutorError("player_process_unconfirmed")
+        return before
+
+    def prepare_online(self, attempt: OnlineAttempt, *, fallback_archive: Path,
+                       target_archive: Path, expected_base_abi: str,
+                       process_sampler: ProcessSampler | None = None) -> PreparedOnline:
+        """Stage exact local roots while the current healthy Player keeps running.
+
+        This never obtains a Central permit, writes mutation intent, or touches
+        systemd start/stop. A future activation must recheck every fact in the
+        returned non-authoritative handle under the same executor lock.
+        """
+        if (type(attempt) is not OnlineAttempt
+                or not isinstance(attempt.command_sha256, str)
+                or _SHA256.fullmatch(attempt.command_sha256) is None
+                or not isinstance(attempt.attempt_id, UUID)
+                or type(attempt.target) is not OnlineArtifactRef
+                or type(attempt.fallback) is not OnlineArtifactRef
+                or any(not isinstance(ref.sha256, str)
+                       or _SHA256.fullmatch(ref.sha256) is None
+                       or type(ref.size) is not int
+                       or not 0 < ref.size <= MAX_ARCHIVE_BYTES
+                       or not isinstance(ref.base_abi, str)
+                       for ref in (attempt.target, attempt.fallback))):
+            raise ExecutorError("online_attempt_invalid")
+        if attempt.target.sha256 == attempt.fallback.sha256:
+            raise ExecutorError("online_target_unchanged")
+        sealed_abi = self.expected_abi_reader()
+        if (sealed_abi != expected_base_abi
+                or attempt.target.base_abi != sealed_abi
+                or attempt.fallback.base_abi != sealed_abi):
+            raise ExecutorError("base_abi_mismatch")
+        if self.roots.is_symlink():
+            raise ExecutorError("payload_roots_invalid")
+        self.roots.mkdir(parents=True, exist_ok=True, mode=0o755)
+        if (self.roots.stat().st_uid != os.geteuid()
+                or self.roots.stat().st_mode & 0o022):
+            raise ExecutorError("payload_roots_invalid")
+        sampler = process_sampler or SystemdProcessSampler()
+        with self._lock() as locked:
+            try:
+                selected = self._terminal_selection()
+                if attempt.fallback.sha256 != selected.digest:
+                    raise ExecutorError("online_fallback_mismatch")
+                verify_root(self.roots / selected.digest, expected_abi=sealed_abi)
+                process = self._online_process(sampler, selected.digest)
+                missing = [ref for ref in (attempt.fallback, attempt.target)
+                           if not (self.roots / ref.sha256).exists()]
+                # Roots persist while one private archive copy exists at a time.
+                # This is a conservative software bound, not Pi qualification.
+                staging_budget = (len(missing) * STAGING_ALLOWANCE_BYTES
+                                  + max((ref.size for ref in missing), default=0))
+                self._require_capacity(staging_bytes=staging_budget)
+                fallback = stage_payload_file(
+                    fallback_archive, sha256=attempt.fallback.sha256,
+                    size=attempt.fallback.size, expected_abi=sealed_abi, roots=self.roots)
+                target = stage_payload_file(
+                    target_archive, sha256=attempt.target.sha256,
+                    size=attempt.target.size, expected_abi=sealed_abi, roots=self.roots)
+                verify_root(fallback, expected_abi=sealed_abi)
+                verify_root(target, expected_abi=sealed_abi)
+                verify_root(self.roots / selected.digest, expected_abi=sealed_abi)
+                if (self._terminal_selection() != selected
+                        or self._online_process(sampler, selected.digest) != process):
+                    raise ExecutorError("online_selection_changed")
+                self._require_capacity()
+                return PreparedOnline(attempt, selected, process, sealed_abi)
             except (PayloadError, OSError, subprocess.SubprocessError) as exc:
                 raise ExecutorError(str(exc) if isinstance(exc, PayloadError)
                                     else "executor_effect_failed") from exc

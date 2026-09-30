@@ -217,7 +217,7 @@ def test_systemd_sampler_uses_main_pid_invocation_and_proc_start_tick(tmp_path, 
     proc.mkdir()
     # The final ')' matters: a process name can itself contain a close parenthesis.
     (proc / "stat").write_text("123 (odd ) name) S " + " ".join(["0"] * 18 + ["456"]))
-    monkeypatch.setattr("appliance.app_evidence.subprocess.run", lambda *_a, **_k:
+    monkeypatch.setattr("appliance.process_identity.subprocess.run", lambda *_a, **_k:
                         SimpleNamespace(returncode=0, stdout="MainPID=123\n"
                                         "InvocationID=" + "d" * 32 + "\nActiveState=active\n"))
     assert SystemdProcessSampler(tmp_path).sample() == PROCESS

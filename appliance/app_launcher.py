@@ -11,6 +11,7 @@ from contracts.strict_json import loads_object
 ROOTS = Path("/run/photo-wall/apps")
 PYTHON = "/usr/bin/python3"
 CONFIG = "/etc/photo-wall/public.json"
+UNIT = "photo-wall-player.service"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 

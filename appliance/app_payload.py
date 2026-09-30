@@ -15,6 +15,7 @@ import stat
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import BinaryIO
 
 from contracts.player_payload import (
     MAX_ARCHIVE_BYTES,
@@ -57,9 +58,9 @@ def _copy_verified(source, destination: Path, digest: str, size: int) -> None:
         raise PayloadError("payload_file_integrity")
 
 
-def _check_archive(payload: bytes, temporary: Path, expected_abi: str) -> dict:
+def _check_archive(payload: BinaryIO, temporary: Path, expected_abi: str) -> dict:
     try:
-        archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz")
+        archive = tarfile.open(fileobj=payload, mode="r:gz")
     except (tarfile.TarError, OSError) as exc:
         raise PayloadError("payload_archive_invalid") from exc
     with archive:
@@ -134,21 +135,20 @@ def verify_root(path: Path, *, expected_abi: str) -> dict:
     return manifest
 
 
-def stage_payload(payload: bytes, *, sha256: str, size: int, expected_abi: str,
-                  roots: Path) -> Path:
-    """Verify complete archive, then publish one digest-keyed read-only root."""
-    if (not isinstance(payload, bytes) or len(payload) != size or size > MAX_ARCHIVE_BYTES
-            or _SHA256.fullmatch(sha256) is None
-            or hashlib.sha256(payload).hexdigest() != sha256):
-        raise PayloadError("payload_outer_integrity")
-    if _ABI.fullmatch(expected_abi) is None:
-        raise PayloadError("payload_abi_invalid")
+def _root_target(roots: Path, sha256: str) -> Path:
     if roots.is_symlink():
         raise PayloadError("payload_roots_invalid")
     roots.mkdir(parents=True, exist_ok=True)
     if roots.stat().st_uid != os.geteuid():
         raise PayloadError("payload_roots_invalid")
     target = roots / sha256
+    if target.is_symlink():
+        raise PayloadError("payload_root_invalid")
+    return target
+
+
+def _publish_archive(payload: BinaryIO, target: Path, roots: Path,
+                     expected_abi: str) -> Path:
     if target.exists():
         verify_root(target, expected_abi=expected_abi)
         return target
@@ -164,3 +164,88 @@ def stage_payload(payload: bytes, *, sha256: str, size: int, expected_abi: str,
         if isinstance(exc, (tarfile.TarError, EOFError)):
             raise PayloadError("payload_archive_invalid") from exc
         raise
+
+
+def stage_payload(payload: bytes, *, sha256: str, size: int, expected_abi: str,
+                  roots: Path) -> Path:
+    """Verify complete archive, then publish one digest-keyed read-only root."""
+    if (not isinstance(payload, bytes) or len(payload) != size or size > MAX_ARCHIVE_BYTES
+            or _SHA256.fullmatch(sha256) is None
+            or hashlib.sha256(payload).hexdigest() != sha256):
+        raise PayloadError("payload_outer_integrity")
+    if _ABI.fullmatch(expected_abi) is None:
+        raise PayloadError("payload_abi_invalid")
+    target = _root_target(roots, sha256)
+    return _publish_archive(io.BytesIO(payload), target, roots, expected_abi)
+
+
+def stage_payload_file(archive_path: Path, *, sha256: str, size: int,
+                       expected_abi: str, roots: Path) -> Path:
+    """Freeze and stream one exact local archive before publishing its root.
+
+    The caller owns acquisition. The bounded private copy prevents a changing
+    input file from being hashed as one archive and extracted as another. It is
+    removed after publication or refusal; no source URL or command is inferred.
+    """
+    if (not isinstance(archive_path, Path) or type(size) is not int
+            or not 0 < size <= MAX_ARCHIVE_BYTES or not isinstance(sha256, str)
+            or _SHA256.fullmatch(sha256) is None):
+        raise PayloadError("payload_outer_integrity")
+    if not isinstance(expected_abi, str) or _ABI.fullmatch(expected_abi) is None:
+        raise PayloadError("payload_abi_invalid")
+    try:
+        source_stat = archive_path.lstat()
+    except OSError as exc:
+        raise PayloadError("payload_archive_unavailable") from exc
+    if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size != size:
+        raise PayloadError("payload_outer_integrity")
+    target = _root_target(roots, sha256)
+    if stat.S_IMODE(roots.stat().st_mode) & 0o022:
+        raise PayloadError("payload_roots_invalid")
+
+    try:
+        source_fd = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise PayloadError("payload_archive_unavailable") from exc
+    spool: Path | None = None
+    try:
+        with os.fdopen(source_fd, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_size != size
+                    or (opened.st_dev, opened.st_ino) !=
+                    (source_stat.st_dev, source_stat.st_ino)):
+                raise PayloadError("payload_outer_integrity")
+            if target.exists():
+                digest, copied = hashlib.sha256(), 0
+                while copied < size:
+                    block = source.read(min(BLOCK, size - copied))
+                    if not block:
+                        raise PayloadError("payload_outer_integrity")
+                    copied += len(block)
+                    digest.update(block)
+                if source.read(1) or digest.hexdigest() != sha256:
+                    raise PayloadError("payload_outer_integrity")
+                verify_root(target, expected_abi=expected_abi)
+                return target
+            spool_fd, name = tempfile.mkstemp(prefix=".archive-", dir=roots)
+            spool = Path(name)
+            digest, copied = hashlib.sha256(), 0
+            with os.fdopen(spool_fd, "wb") as frozen:
+                while copied < size:
+                    block = source.read(min(BLOCK, size - copied))
+                    if not block:
+                        raise PayloadError("payload_outer_integrity")
+                    copied += len(block)
+                    digest.update(block)
+                    frozen.write(block)
+                if source.read(1) or digest.hexdigest() != sha256:
+                    raise PayloadError("payload_outer_integrity")
+                frozen.flush()
+                os.fsync(frozen.fileno())
+        with spool.open("rb") as frozen:
+            return _publish_archive(frozen, target, roots, expected_abi)
+    except OSError as exc:
+        raise PayloadError("payload_archive_unavailable") from exc
+    finally:
+        if spool is not None:
+            spool.unlink(missing_ok=True)

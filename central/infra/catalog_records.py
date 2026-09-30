@@ -233,9 +233,26 @@ class PgReleaseRecords:
             "AND ref.locator_sha256=accepted.sha256 "
             "AND ref.locator_size=accepted.size "
             "AND ref.expected_sha256=accepted.sha256 "
-            "AND ref.expected_size=accepted.size"
+            "AND ref.expected_size=accepted.size "
+            "UNION ALL "
+            "SELECT CASE WHEN ref.identity=attempt.target_sha256 "
+            "THEN attempt.target_base_abi ELSE attempt.fallback_base_abi END AS abi "
+            "FROM fleet_app_attempts AS attempt "
+            "JOIN fleet_artifact_retention_attempts AS rooted "
+            "ON rooted.attempt_id=attempt.attempt_id "
+            "JOIN asset_references AS ref ON ref.kind='player-payload' "
+            "AND ref.owner='fleet-attempt:' || attempt.attempt_id::text "
+            "WHERE attempt.attempt_schema=1 AND ref.identity=%s "
+            "AND ref.locator_sha256=ref.identity "
+            "AND ref.expected_sha256=ref.identity "
+            "AND ((ref.identity=attempt.target_sha256 "
+            "AND ref.locator_size=attempt.target_size "
+            "AND ref.expected_size=attempt.target_size) "
+            "OR (ref.identity=attempt.fallback_sha256 "
+            "AND ref.locator_size=attempt.fallback_size "
+            "AND ref.expected_size=attempt.fallback_size)) "
             ") AS claims WHERE abi IS NOT NULL",
-            (sha256, sha256, now, sha256),
+            (sha256, sha256, now, sha256, sha256),
         ).fetchall()
         return rows[0]["abi"] if len(rows) == 1 else None
 

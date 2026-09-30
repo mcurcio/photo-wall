@@ -31,6 +31,7 @@ ALTER TABLE fleet_app_attempts
             AND kernel_boot_id IS NOT NULL
             AND policy_source IN ('explicit','override')
             AND base_sha256 ~ '^[0-9a-f]{64}$'
+            AND target_sha256<>fallback_sha256
             AND base_abi ~ '^sha256:[0-9a-f]{64}$'
             AND base_abi_source_manifest='manifest.v2.json'
             AND length(target_tag) BETWEEN 1 AND 128

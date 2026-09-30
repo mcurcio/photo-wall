@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from contracts.app_process_proof import AppProofChallenge, AppProofResponse, app_proof_message
 from contracts.enrollment import BootTicketId, Enrollment, OutputReport, enrollment_message
 from contracts.models import Identifier
 
@@ -43,6 +44,14 @@ class Identity:
             device_id=device_id,
             boot_id=boot_id,
             ticket_id=ticket_id,
+        )
+
+    def sign_app_proof(self, challenge: AppProofChallenge) -> AppProofResponse:
+        """Prove this process's enrollment key to the local base OS verifier."""
+        return AppProofResponse(
+            nonce=challenge.nonce,
+            public_key=self.public_key,
+            signature=base64.b64encode(self._key.sign(app_proof_message(challenge))).decode(),
         )
 
 

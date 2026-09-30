@@ -1,16 +1,31 @@
 """PostgreSQL gates for immutable, exact-byte queued app attempts."""
 
+import asyncio
+import hashlib
+import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
 from psycopg.errors import CheckViolation
 
+from central.assets.handlers import FetchPlayerPayloadHandler
+from central.assets.layout import CacheLayout
+from central.assets.production import AssetProduction
+from central.assets.reader import Opened
+from central.assets.store import CacheStore
 from central.content_catalog.catalog import device_id_for_serial
+from central.fleet.attempt_bytes import AttemptByteAccess
 from central.fleet.attempts import AttemptService
+from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError
 from central.fleet.principal import PrincipalError, VerifiedOsPrincipal
 from central.fleet.service import FleetService
+from central.infra.asset_records import PgAssetRecords
+from central.infra.catalog_records import PgReleaseRecords
+from central.infra.transactions import PgTransactions
+from central.kernel.job_types import FetchPlayerPayload
 
 SERIAL = "abcdef1234567890"
 DEVICE_ID = device_id_for_serial(SERIAL)
@@ -38,7 +53,9 @@ def _principal() -> VerifiedOsPrincipal:
 
 
 def _seed(registry, *, offer_audience: str = AUDIENCE,
-          fallback_qualified: bool = True) -> None:
+          fallback_qualified: bool = True, target_sha: str = TARGET_SHA,
+          target_size: int = 123, fallback_sha: str = FALLBACK_SHA,
+          fallback_size: int = 80) -> None:
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                      "discovered_at,updated_at,base_tarball_sha256,base_abi,"
@@ -48,10 +65,10 @@ def _seed(registry, *, offer_audience: str = AUDIENCE,
         conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                      "discovered_at,updated_at,mirror_state,payload_url,payload_sha256,"
                      "payload_size,payload_format,payload_base_abi,payload_source_manifest) "
-                     "VALUES(%s,1,0,1,FALSE,900,900,'mirrored',%s,%s,123,"
+                     "VALUES(%s,1,0,1,FALSE,900,900,'mirrored',%s,%s,%s,"
                      "'pw-player-data-v1',%s,'manifest.v2.json')",
                      (TARGET_TAG, "https://example.invalid/target-old.tar.gz",
-                      TARGET_SHA, BASE_ABI))
+                      target_sha, target_size, BASE_ABI))
         conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
                      "VALUES(%s,%s,900,900)", (DEVICE_ID, SERIAL))
         conn.execute("INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,"
@@ -70,27 +87,27 @@ def _seed(registry, *, offer_audience: str = AUDIENCE,
                      (SESSION_ID, DEVICE_ID, BOOT_ID, OFFER_ID, AUDIENCE, "f" * 64))
         conn.execute("INSERT INTO fleet_app_policy(singleton,revision,target_tag,"
                      "target_sha256,target_size,target_format,changed_at) "
-                     "VALUES(TRUE,1,%s,%s,123,'pw-player-data-v1',900)",
-                     (TARGET_TAG, TARGET_SHA))
+                     "VALUES(TRUE,1,%s,%s,%s,'pw-player-data-v1',900)",
+                     (TARGET_TAG, target_sha, target_size))
         if fallback_qualified:
             conn.execute("INSERT INTO fleet_accepted_artifacts(device_id,kind,content_key,"
                          "sha256,size,base_abi,trust_mode,evidence_ref,accepted_at) "
-                         "VALUES(%s,'app',%s,%s,80,%s,'t1','qualified-output-proof',900)",
-                         (DEVICE_ID, FALLBACK_SHA, FALLBACK_SHA, BASE_ABI))
+                         "VALUES(%s,'app',%s,%s,%s,%s,'t1','qualified-output-proof',900)",
+                         (DEVICE_ID, fallback_sha, fallback_sha, fallback_size, BASE_ABI))
             conn.execute("INSERT INTO assets(kind,identity,created_at) "
-                         "VALUES('player-payload',%s,900)", (FALLBACK_SHA,))
+                         "VALUES('player-payload',%s,900)", (fallback_sha,))
             conn.execute("INSERT INTO asset_references(kind,identity,owner,locator_url,"
                          "locator_sha256,locator_size,expected_sha256,expected_size,added_at) "
-                         "VALUES('player-payload',%s,%s,%s,%s,80,%s,80,900)",
-                         (FALLBACK_SHA, f"fleet-fallback:{DEVICE_ID}",
-                          "https://example.invalid/fallback.tar.gz", FALLBACK_SHA,
-                          FALLBACK_SHA))
+                         "VALUES('player-payload',%s,%s,%s,%s,%s,%s,%s,900)",
+                         (fallback_sha, f"fleet-fallback:{DEVICE_ID}",
+                          "https://example.invalid/fallback.tar.gz", fallback_sha,
+                          fallback_size, fallback_sha, fallback_size))
 
 
-def _create(registry):
+def _create(registry, *, target_sha: str = TARGET_SHA, fallback_sha: str = FALLBACK_SHA):
     return AttemptService(registry.db, registry.clock).create_queued(
-        _principal(), desired_revision=1, expected_target_sha256=TARGET_SHA,
-        fallback_sha256=FALLBACK_SHA)
+        _principal(), desired_revision=1, expected_target_sha256=target_sha,
+        fallback_sha256=fallback_sha)
 
 
 def test_queued_attempt_freezes_two_exact_roots_and_survives_release_recut(registry) -> None:
@@ -170,6 +187,15 @@ def test_snapshot_and_locator_cannot_change_and_legacy_cannot_upgrade(registry) 
         with registry.db.transaction() as conn:
             conn.execute("UPDATE fleet_app_attempts SET attempt_schema=1 "
                          "WHERE attempt_id=%s", (UUID(int=904),))
+    with pytest.raises(CheckViolation):
+        with registry.db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO fleet_app_attempts SELECT (jsonb_populate_record("
+                "NULL::fleet_app_attempts,to_jsonb(a) || jsonb_build_object("
+                "'attempt_id',%s::text,'desired_revision',3,'fallback_sha256',"
+                "a.target_sha256))).* FROM fleet_app_attempts AS a WHERE a.attempt_id=%s",
+                (UUID(int=907), attempt.attempt_id),
+            )
 
 
 def test_two_retries_share_one_attempt_id(registry) -> None:
@@ -261,3 +287,142 @@ def test_retirement_revokes_and_releases_queued_attempt_atomically(registry) -> 
     registry.retire("player-1")
     service = AttemptService(registry.db, registry.clock)
     service.release_queued(attempt.attempt_id)
+
+
+class _FileReader:
+    def __init__(self, paths, *, after_read=None):
+        self.paths = paths
+        self.after_read = after_read
+        self.fds = []
+
+    async def read(self, candidates):
+        job = candidates.jobs[0]
+        path = self.paths[job.sha256]
+        fd = os.open(path, os.O_RDONLY)
+        self.fds.append(fd)
+        if self.after_read is not None:
+            self.after_read()
+        return Opened(job, fd, os.fstat(fd).st_size, job.sha256)
+
+
+def _seed_file_attempt(registry, tmp_path):
+    target_bytes, fallback_bytes = b"attempt target bytes", b"accepted fallback bytes"
+    target_sha = hashlib.sha256(target_bytes).hexdigest()
+    fallback_sha = hashlib.sha256(fallback_bytes).hexdigest()
+    target_path, fallback_path = tmp_path / "target", tmp_path / "fallback"
+    target_path.write_bytes(target_bytes)
+    fallback_path.write_bytes(fallback_bytes)
+    _seed(registry, target_sha=target_sha, target_size=len(target_bytes),
+          fallback_sha=fallback_sha, fallback_size=len(fallback_bytes))
+    attempt = _create(registry, target_sha=target_sha, fallback_sha=fallback_sha)
+    reader = _FileReader({target_sha: target_path, fallback_sha: fallback_path})
+    return attempt, reader, target_sha, fallback_sha
+
+
+def test_attempt_byte_access_preflights_same_pod_and_survives_catalog_recut(registry,
+                                                                             tmp_path,
+                                                                             monkeypatch) -> None:
+    attempt, reader, target_sha, fallback_sha = _seed_file_attempt(registry, tmp_path)
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    assert asyncio.run(access.preflight(_principal(), attempt.attempt_id)) == attempt
+    assert len(reader.fds) == 2
+    for fd in reader.fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    releases = PgReleaseRecords()
+    # Matching release/accepted and attempt claims must collapse to one ABI.
+    with PgTransactions(registry.db).begin() as tx:
+        assert releases.payload_abi_for(tx, target_sha, now=1000) == BASE_ABI
+        assert releases.payload_abi_for(tx, fallback_sha, now=1000) == BASE_ABI
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE app_releases SET payload_url=%s,payload_sha256=%s "
+                     "WHERE tag=%s", ("https://example.invalid/recut.tar.gz",
+                                      "0" * 64, TARGET_TAG))
+        conn.execute("UPDATE fleet_boot_offers SET expires_at=999 WHERE offer_id=%s",
+                     (OFFER_ID,))
+        conn.execute("DELETE FROM asset_references WHERE owner=%s",
+                     (f"fleet-fallback:{DEVICE_ID}",))
+    with PgTransactions(registry.db).begin() as tx:
+        assert releases.payload_abi_for(tx, target_sha, now=1000) == BASE_ABI
+        assert releases.payload_abi_for(tx, fallback_sha, now=1000) == BASE_ABI
+
+    class FrozenOrigin:
+        async def download(self, locator, destination, *, max_bytes):
+            expected = {
+                "https://example.invalid/target-old.tar.gz":
+                    reader.paths[target_sha].read_bytes(),
+                "https://example.invalid/fallback.tar.gz":
+                    reader.paths[fallback_sha].read_bytes(),
+            }
+            assert locator.url in expected
+            assert max_bytes == len(expected[locator.url])
+            destination.write_bytes(expected[locator.url])
+
+    async def expected_abi(sha256):
+        with PgTransactions(registry.db).begin() as tx:
+            return releases.payload_abi_for(tx, sha256, now=1000)
+
+    monkeypatch.setattr("central.assets.handlers.verify_archive",
+                        lambda _path: {"base_abi": BASE_ABI})
+    store = CacheStore(CacheLayout(tmp_path / "rehydrated-cache"))
+    handler = FetchPlayerPayloadHandler(
+        production=AssetProduction(store=store, records=PgAssetRecords(registry.clock),
+                                   transactions=PgTransactions(registry.db)),
+        origin=FrozenOrigin(), expected_abi=expected_abi)
+    for sha in (target_sha, fallback_sha):
+        assert asyncio.run(handler.handle(FetchPlayerPayload(sha256=sha))).sha256 == sha
+    opened = asyncio.run(access.open_role(_principal(), attempt.attempt_id, "target"))
+    try:
+        assert os.read(opened.fd, 100) == b"attempt target bytes"
+    finally:
+        os.close(opened.fd)
+
+
+def test_attempt_byte_access_rejects_wrong_session_and_bad_bytes(registry, tmp_path) -> None:
+    attempt, reader, target_sha, _ = _seed_file_attempt(registry, tmp_path)
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        access.resolve(replace(_principal(), kernel_boot_id=UUID(int=999)),
+                       attempt.attempt_id, "target")
+    with pytest.raises(FleetError, match="attempt_artifact_request_invalid"):
+        access.resolve(_principal(), attempt.attempt_id, "unknown")
+    reader.paths[target_sha].write_bytes(b"wrong bytes")
+    with pytest.raises(FleetError, match="offer_artifact_mismatch"):
+        asyncio.run(access.preflight(_principal(), attempt.attempt_id))
+    for fd in reader.fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_attempt_open_rechecks_after_release_and_closes_fd(registry, tmp_path) -> None:
+    attempt, reader, _, _ = _seed_file_attempt(registry, tmp_path)
+
+    def revoke_and_release():
+        reader.after_read = None
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE fleet_app_attempts SET revoked_at=1000 WHERE attempt_id=%s",
+                         (attempt.attempt_id,))
+        AttemptService(registry.db, registry.clock).release_queued(attempt.attempt_id)
+
+    reader.after_read = revoke_and_release
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    with pytest.raises(FleetError, match="attempt_artifact_unavailable"):
+        asyncio.run(access.open_role(_principal(), attempt.attempt_id, "target"))
+    for fd in reader.fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_committed_revoked_attempt_bytes_stay_available_to_current_session(registry,
+                                                                            tmp_path) -> None:
+    attempt, reader, _, _ = _seed_file_attempt(registry, tmp_path)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE fleet_app_attempts SET phase='stop_committed',"
+                     "command_id=%s,drain_id=%s,revoked_at=1000 WHERE attempt_id=%s",
+                     (UUID(int=905), UUID(int=906), attempt.attempt_id))
+    access = AttemptByteAccess(registry.db, registry.clock, OfferByteReader(reader))
+    assert access.resolve(_principal(), attempt.attempt_id, "fallback").sha256 == \
+        attempt.fallback_sha256
+    registry.clock.advance(101)
+    with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
+        access.resolve(_principal(), attempt.attempt_id, "fallback")
