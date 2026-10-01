@@ -46,6 +46,7 @@ CI_SKIP_ALLOWLIST = (
     "interactive local fixture only",  # a developer's interactive fixture
     "real dpkg-deb build/inspection requires",  # opt-in PHOTO_WALL_IMAGE_TOOL_TESTS only
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
+    "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
 )
 
 
@@ -54,6 +55,7 @@ def pytest_configure(config):
     config.stash[_RUN_ID] = getattr(config, "workerinput", {}).get("testrunuid") or uuid.uuid4().hex
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
     config.addinivalue_line("markers", "browser: drives the console in a browser (tests/browser)")
+    config.addinivalue_line("markers", "node_pid1: the node under real systemd (node-pid1.yml)")
 
 
 @pytest.hookimpl(tryfirst=True)  # before `-m` deselects and xdist reads the groups

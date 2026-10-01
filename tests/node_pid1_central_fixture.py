@@ -47,26 +47,33 @@ from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
 from contracts.player_control import ControlAppliedReceipt
 from contracts.time import SystemClock
 
+# The outage begins once Central has served the target artifact, its last contribution to a
+# switch, and lasts at least OUTAGE_SECONDS and until the probe has watched the node converge
+# (POST /fixture/outage-release), never longer than OUTAGE_CAP_SECONDS.
 OUTAGE_SECONDS = 35
+OUTAGE_CAP_SECONDS = 300
 
 
 @contextmanager
-def central_fixture(registry, components_dir, extra_refs_and_archives, workdir):
+def central_fixture(registry, components_dir, extra_refs_and_archives, workdir, max_boots=1):
     # Own the listening socket before any fallible publication/cache setup.
     with socket.socket() as listener:
         listener.bind(("0.0.0.0", 0))
         listener.listen(16)
         with _central_fixture(
-            registry, components_dir, extra_refs_and_archives, workdir, listener
+            registry, components_dir, extra_refs_and_archives, workdir, listener, max_boots
         ) as fixture:
             yield fixture
 
 
 @contextmanager
-def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir, listener):
+def _central_fixture(
+    registry, components_dir, extra_refs_and_archives, workdir, listener, max_boots
+):
     """Yield real HTTP origins plus fixture token; caller owns random-schema registry.
 
     extras maps phase -> (AppEnvironmentRefV2 or reference dict, exact archive).
+    max_boots bounds the distinct kernel boots of the one device (2 for a reboot).
     Component provenance/base identity here is a fixture, never a PXE release claim.
     """
     components_dir, workdir = Path(components_dir), Path(workdir)
@@ -166,12 +173,12 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
     gate, verifier = _gate(registry, _certificate(expires_in=300))
     generation = gate.open(expected_revision=0).generation
     operations = {}
-    # The outage phase drops every node exchange for OUTAGE_SECONDS once the broker
-    # has fetched its stage: the switch must converge locally and report afterwards.
+    # The outage phase drops every node exchange once the target artifact is in flight: the
+    # switch must converge locally and report afterwards.
     dropped = {"outage": 0}
-    outage = {"started": None}
+    outage = {"started": None, "released": False, "last_drop": None}
     state_lock = threading.Lock()
-    boot_request = None
+    boot_requests = {}  # kernel boot id -> the PXE boot request of that boot
 
     def authenticate(request):
         if not secrets.compare_digest(request.headers.get("X-Fixture-Token", ""), token):
@@ -191,29 +198,46 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
             raise NodeControlError("fixture_real_app_link_pending", 409)
         return principal, link
 
+    def outage_active(now):
+        started = outage["started"]
+        if started is None or now >= started + OUTAGE_CAP_SECONDS:
+            return False
+        return not outage["released"] or now < started + OUTAGE_SECONDS
+
     @app.middleware("http")
     async def central_outage_after_accept(request, call_next):
         entry = operations.get("outage")
-        node = request.url.path.startswith("/v2/node/")
-        started = outage["started"]
-        if entry and node and started is not None and clock.utc() < started + OUTAGE_SECONDS:
+        path = request.url.path
+        if entry and path.startswith("/v2/node/") and outage_active(clock.utc()):
             dropped["outage"] += 1
+            outage["last_drop"] = clock.utc()
             return JSONResponse({"fixture": "central_unreachable"}, status_code=503)
         response = await call_next(request)
-        if entry and started is None and request.url.path == "/v2/node/app-commands":
-            outage["started"] = clock.utc()  # The broker now holds the desired stage.
+        if (entry and outage["started"] is None and path.startswith("/v2/node/app-attempts/")
+                and path.endswith("/artifacts/target")):
+            # The stage is accepted and its target is streaming: nothing else needs Central.
+            outage["started"] = clock.utc()
         return response
+
+    @app.post("/fixture/outage-release")
+    def outage_release(request: Request):
+        authenticate(request)
+        if outage["started"] is None:
+            raise HTTPException(409, "fixture_outage_not_started")
+        outage["released"] = True
+        return {"released": True}
 
     @app.post("/fixture/node-ready")
     def node_ready(request: Request, value: dict):
-        nonlocal boot_request
         authenticate(request)
         supplied = UUID(value["boot_id"])
         with state_lock:
+            boot_request = boot_requests.get(supplied)
             if boot_request is None:
+                if len(boot_requests) >= max_boots:
+                    raise HTTPException(409, "fixture_boot_changed")
                 boot_request = NodeBootRequestV2(SERIAL, supplied, secrets.token_hex(32))
-            elif boot_request.kernel_boot_id != supplied:
-                raise HTTPException(409, "fixture_boot_changed")
+                boot_requests[supplied] = boot_request
             offer = boots.offer(boot_request)
         return {
             "offer": json.loads(encode_node_boot_offer(offer)),
@@ -431,10 +455,33 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                         "effect_diagnostics": effect_diagnostics(conn, operation),
                     }
                 )
+            # Each kernel boot's admission and its unrevoked sessions, oldest first.
+            admissions = conn.execute(
+                "SELECT b.kernel_boot_id, b.superseded_at IS NOT NULL AS superseded, "
+                "count(s.session_id) FILTER (WHERE s.revoked_at IS NULL) AS live_sessions "
+                "FROM node_boot_admissions b LEFT JOIN node_producers p USING(admission_id) "
+                "LEFT JOIN node_sessions s USING(producer_id) WHERE b.device_id=%s "
+                "GROUP BY b.admission_id ORDER BY b.admitted_at",
+                (DEVICE_ID,),
+            ).fetchall()
             return {
                 "current": current,
                 "operations": rows,
+                "admissions": [
+                    {
+                        "kernel_boot_id": str(a["kernel_boot_id"]),
+                        "superseded": a["superseded"],
+                        "live_sessions": a["live_sessions"],
+                    }
+                    for a in admissions
+                ],
                 "response_losses": dict(dropped),
+                "outage": {
+                    "started": outage["started"] is not None,
+                    "active": outage_active(clock.utc()),
+                    "dropped_seconds": (outage["last_drop"] - outage["started"])
+                    if outage["last_drop"] is not None else 0,
+                },
                 "protocol_refusals": dict(protocol_refusals),
                 "fixture_qualification": True,
             }
@@ -462,6 +509,8 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
         server.should_exit = True
         thread.join(timeout=15)
         listener.close()
+        # The served archive copies are the fixture's own (several GB); evidence stays.
+        shutil.rmtree(workdir / "cache", ignore_errors=True)
         if thread.is_alive():
             raise RuntimeError("fixture_central_stop_timeout")
 
@@ -493,8 +542,22 @@ def assert_phase_completed(status, phase, target_reference):
     positions = [phases.index(name) for name in order]
     assert all(left < right for left, right in zip(positions, positions[1:])), status
     assert "effect_unknown" not in phases, status
+    # The reported terminal effect is the exact current process, after an ordered stop.
+    diagnostics = entry["effect_diagnostics"]
+    for predicate in ("terminal_effect", "ordered_stop_before_terminal", "process_matches_event",
+                      "app_epoch_matches_event", "environment_matches_event",
+                      "authority_advanced", "boot_eligible"):
+        assert diagnostics.get(predicate) is True, (predicate, status)
+    # Nothing held: every effect report was accepted and no control delivery is pending.
+    assert status["protocol_refusals"] == {}, status
+    control = diagnostics.get("control", {})
+    for predicate in ("issued_equals_applied", "no_pending_id", "no_pending_digest",
+                      "no_pending_expiry", "last_result_applied"):
+        assert control.get(predicate) is True, (predicate, status)
     if phase == "outage":
         assert status["response_losses"]["outage"] > 0, status
+        assert not status["outage"]["active"], status
+        assert status["outage"]["dropped_seconds"] >= OUTAGE_SECONDS - 5, status
     return {
         "phase": phase,
         "state": entry["state"],
