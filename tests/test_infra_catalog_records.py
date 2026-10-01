@@ -124,14 +124,19 @@ FAKE_TRANSACTION_CALLS = {
 
 
 def test_a_fake_transaction_is_a_type_error():
-    accepted = []
+    # Every call is tried, so one run names every offender: one that accepts the fake, and one
+    # that refuses it with anything but a TypeError.
+    offenders = []
     for name, call in FAKE_TRANSACTION_CALLS.items():
         try:
             call(FakeTransaction())
         except TypeError:
             continue
-        accepted.append(name)
-    assert accepted == []
+        except Exception as error:
+            offenders.append(f"{name}: {type(error).__name__}")
+        else:
+            offenders.append(f"{name}: accepted")
+    assert offenders == []
 
 
 # -- releases -----------------------------------------------------------------------------------
