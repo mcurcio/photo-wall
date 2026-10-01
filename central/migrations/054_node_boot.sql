@@ -32,7 +32,6 @@ CREATE TABLE node_boot_offers (
     offer_payload BYTEA,
     refusal TEXT,
     created_at DOUBLE PRECISION NOT NULL,
-    expires_at DOUBLE PRECISION NOT NULL,
     UNIQUE(device_id,kernel_boot_id),
     UNIQUE(device_id,boot_nonce),
     CHECK((offer_payload IS NULL)=(refusal IS NOT NULL))

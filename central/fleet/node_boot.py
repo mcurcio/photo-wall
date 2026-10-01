@@ -220,10 +220,10 @@ class NodeBootService:
                 else:
                     refusal = "node_boot_policy_unconfigured"
                 conn.execute("INSERT INTO node_boot_offers(offer_id,device_id,device_generation,kernel_boot_id,"
-                             "boot_nonce,request_payload,offer_payload,refusal,created_at,expires_at) "
-                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                             "boot_nonce,request_payload,offer_payload,refusal,created_at) "
+                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (offer_id, device_id, generation, request.kernel_boot_id, request.boot_nonce,
-                              canonical, encode_node_boot_offer(result) if result else None, refusal, now, now + 3600))
+                              canonical, encode_node_boot_offer(result) if result else None, refusal, now))
                 if result:
                     conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,node_offer_id) VALUES(%s,'node_v2',%s)",
                                  (offer_id, offer_id))
@@ -239,8 +239,6 @@ class NodeBootService:
             row = conn.execute("SELECT * FROM node_boot_offers WHERE offer_id=%s", (offer_id,)).fetchone()
             if row is None or row["offer_payload"] is None:
                 raise NodeControlError("node_boot_offer_unknown", 404)
-            if row["expires_at"] <= self.sessions.clock.utc():
-                raise NodeControlError("node_boot_offer_expired", 410)
             offer = parse_node_boot_offer(bytes(row["offer_payload"]))
             generation = self.sessions.lock_device_generation_in(conn, offer.device_id)
             if generation != offer.device_generation:

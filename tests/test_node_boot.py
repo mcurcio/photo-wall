@@ -109,6 +109,15 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
     # and a first enrollment after a long Central outage is still admitted.
     assert service.offer(request) == offer
     assert sessions.enroll(claim_for(offer, owner="app_effect_broker")).command_eligible
+    # Nor does it refuse the offer's frozen artifacts: identity and generation gate them.
+    assert service.asset(offer.offer_id, "base").sha256 == BASE_SHA
+    with pytest.raises(NodeControlError, match="offer_unknown"):
+        service.asset(uuid4(), "base")
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1 WHERE device_id=%s",
+                     (offer.device_id,))
+    with pytest.raises(NodeControlError, match="generation_stale"):
+        service.asset(offer.offer_id, "base")
 
 
 def test_manager_pins_and_environment_identity_are_immutable(registry):
