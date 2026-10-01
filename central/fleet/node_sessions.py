@@ -193,7 +193,12 @@ class NodeSessions:
                 if grant.producer.installation_audience != config.installation_audience:
                     raise NodeControlError("node_audience_mismatch", 403)
                 SessionAdmission(now, later, prior["expires_at"]).ensure_current(self.clock)
-                return self._grant_eligibility_in(conn, grant)
+                # A replay grants only the remaining duration; the node's pre-request
+                # sample plus this duration never outlives Central's own expiry.
+                remaining = int((prior["expires_at"] - now) * 1000)
+                if remaining < 1:
+                    raise NodeControlError("node_session_unavailable", 403)
+                return self._grant_eligibility_in(conn, replace(grant, valid_for_ms=remaining))
             credential_hash = sha256(claim.credential.encode()).hexdigest()
             if conn.execute("SELECT 1 FROM node_sessions WHERE credential_sha256=%s",
                             (credential_hash,)).fetchone():
@@ -217,8 +222,7 @@ class NodeSessions:
                              (producer_id, admission_id, claim.owner, claim.incarnation_id,
                               Jsonb(producer_document(producer)), now))
             grant = NodeSessionGrant(producer, claim.session_id, claim.offer_id,
-                                     claim.sampled_boottime_ms + config.session_seconds * 1000,
-                                     scope_for_owner(claim.owner))
+                                     config.session_seconds * 1000, scope_for_owner(claim.owner))
             conn.execute("INSERT INTO node_sessions(session_id,producer_id,device_id,"
                          "device_generation,owner,scope,credential_sha256,claim_sha256,grant_payload,"
                          "issued_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -277,19 +281,3 @@ class NodeSessions:
         return NodePrincipal(grant, row["producer_id"],
                              SessionAdmission(now, later, row["expires_at"]), current), row
 
-
-NODE_SAMPLE_FUTURE_TOLERANCE_MS = 1000
-
-
-def grant_boottime_at(grant: NodeSessionGrant, expires_at: float, now: float) -> int:
-    """Enrolled boot-clock estimate; never substitute receipt time for sample age."""
-    return grant.expires_boottime_ms - int((expires_at-now)*1000)
-
-
-def session_boottime_at(principal: NodePrincipal, now: float) -> int:
-    return grant_boottime_at(principal.grant, principal.admission.expires_at, now)
-
-
-def node_sample_fresh(local_now_ms: int, sampled_ms: int, *, max_age_ms: int = 5000) -> bool:
-    """Bounded enrollment/transport skew is tolerated, never an age refresh."""
-    return -NODE_SAMPLE_FUTURE_TOLERANCE_MS <= local_now_ms-sampled_ms < max_age_ms

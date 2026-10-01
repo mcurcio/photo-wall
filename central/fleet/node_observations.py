@@ -73,7 +73,7 @@ class NodeObservations:
                     "physical_identity": "unverified", "command_eligible": grant.command_eligible,
                     "command_reason": grant.command_reason, "current": row["revoked_at"] is None
                     and row["superseded_at"] is None and row["expires_at"] > now,
-                    "expires_at": row["expires_at"], "expires_boottime_ms": grant.expires_boottime_ms,
+                    "expires_at": row["expires_at"],
                     "manager_preparation": None if preparation is None else {
                         "sample": json.loads(bytes(preparation["payload"])), "received_at": preparation["received_at"],
                         "receipt_age_seconds": max(0, now-preparation["received_at"]), "authority_granted": False},

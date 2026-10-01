@@ -13,14 +13,7 @@ from central.fleet.node_app_links import (
     load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
 )
-from central.fleet.node_sessions import (
-    NodeControlError,
-    NodeSessions,
-    claim_intake_in,
-    grant_boottime_at,
-    node_sample_fresh,
-    session_boottime_at,
-)
+from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks
 from contracts.node_commands import parse_session_grant
@@ -54,7 +47,7 @@ class NodeDisplay:
             if request.producer != principal.grant.producer:
                 raise NodeControlError("display_producer_mismatch", 403)
             now = principal.admission.ensure_current(self.sessions.clock)
-            self._fresh_request(principal, request, now)
+            self._fresh_receipt(request)
             prior = conn.execute(
                 "SELECT request,response FROM node_display_exchanges "
                 "WHERE producer_id=%s AND request_id=%s",
@@ -78,8 +71,6 @@ class NodeDisplay:
                     or request.output.mode_generation < old.output.mode_generation
                 ):
                     raise NodeControlError("display_observation_stale", 409)
-            if request.sampled_boottime_ms >= principal.grant.expires_boottime_ms:
-                raise NodeControlError("display_session_expired", 401)
             link = load_current_node_app_link_in(conn, principal)
             configuration = (
                 self.installation.configuration_in(conn, link.player_id, link.authority_epoch)
@@ -150,10 +141,8 @@ class NodeDisplay:
                 uuid4(),
                 request.output,
                 operation,
-                min(
-                    request.sampled_boottime_ms + self.decision_ms,
-                    principal.grant.expires_boottime_ms,
-                ),
+                # A node-local deadline: the node's own sample plus a Central duration.
+                request.sampled_boottime_ms + self.decision_ms,
                 reason,
                 decision_surface if operation != "retain" else None,
                 receipt,
@@ -182,7 +171,7 @@ class NodeDisplay:
                     now,
                 ),
             )
-            self._fresh_request(principal, request, principal.admission.ensure_current(self.sessions.clock))
+            principal.admission.ensure_current(self.sessions.clock)
             return response
 
     def _authorized_previous_in(self, conn, principal, request, previous) -> bool:
@@ -222,12 +211,10 @@ class NodeDisplay:
                 return True
         return False
 
-    def _fresh_request(self, principal, request, now):
-        local_now = session_boottime_at(principal, now)
-        if not node_sample_fresh(local_now, request.sampled_boottime_ms):
-            raise NodeControlError("display_sample_stale", 409)
-        if request.receipt and not node_sample_fresh(local_now,
-                request.receipt.sampled_boottime_ms, max_age_ms=self.receipt_ms):
+    def _fresh_receipt(self, request):
+        """Compare only samples of one node clock; Central never maps node time."""
+        if request.receipt and not (
+                0 <= request.sampled_boottime_ms - request.receipt.sampled_boottime_ms < self.receipt_ms):
             raise NodeControlError("display_receipt_stale", 409)
 
     def current_frame_in(self, conn, frame_id: str):
@@ -276,11 +263,6 @@ class NodeDisplay:
         ):
             raise NodeControlError("trial_current_output_required", 409)
         request = parse_display_exchange(bytes(observed["request"]))
-        local_now = grant_boottime_at(grant, session["expires_at"], self.sessions.clock.utc())
-        if not node_sample_fresh(local_now, request.sampled_boottime_ms) or (
-                request.receipt is not None and not node_sample_fresh(local_now,
-                    request.receipt.sampled_boottime_ms, max_age_ms=self.receipt_ms)):
-            raise NodeControlError("trial_display_evidence_stale", 409)
         expected = Surface(
             request.output,
             link.process,
@@ -295,7 +277,7 @@ class NodeDisplay:
             or request.admitted != expected
             or request.receipt is None
             or request.receipt.surface != expected
-            or request.sampled_boottime_ms - request.receipt.sampled_boottime_ms >= self.receipt_ms
+            or not 0 <= request.sampled_boottime_ms - request.receipt.sampled_boottime_ms < self.receipt_ms
         ):
             raise NodeControlError("trial_admitted_surface_required", 409)
         admission = self.runtime.display_admission_in(

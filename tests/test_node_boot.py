@@ -85,7 +85,7 @@ def cold_setup(registry, *, app=True):
 
 def claim_for(offer, *, owner="host_core"):
     return NodeSessionClaim(offer.serial, offer.offer_id, offer.kernel_boot_id, owner, uuid4(), uuid4(),
-                            uuid4().hex + uuid4().hex, 1000)
+                            uuid4().hex + uuid4().hex)
 
 
 def test_frozen_offer_selection_exact_retry_and_no_app(registry):
@@ -133,7 +133,7 @@ def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
     gate, _ = _gate(registry)
     generation = gate.open(expected_revision=0).generation
     commands = NodeCommands(sessions, gate)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator", generation, 31000)
+    request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator", generation)
     commands.request_reboot(DEVICE_ID, request)
     # A second boot of the same serial needs no knowledge of its predecessor.
     second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))

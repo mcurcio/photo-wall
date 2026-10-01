@@ -118,7 +118,6 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
             uuid4(),
             uuid4(),
             uuid4().hex + uuid4().hex,
-            value["boottime_ms"],
         )
         grant = sessions.enroll(claim)
         process = NodeProcessIdentity(

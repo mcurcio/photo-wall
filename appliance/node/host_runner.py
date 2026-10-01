@@ -44,16 +44,17 @@ class HostRunner:
         return self.session.claim
 
     def establish_session(self) -> bool:
+        """Reuse the locally unexpired grant; a renewed session gets a new HostCore scope."""
         grant = self.session.ensure()
         if grant is None:
             return False
-        self.core = HostCore(producer=grant.producer, session_id=grant.session_id,
-                             offer_id=grant.offer_id, session_expires_boottime_ms=grant.expires_boottime_ms,
-                             journal=self.journal, driver=SystemdRebootDriver())
+        if self.core is None or self.core.session_id != grant.session_id:
+            self.core = HostCore(producer=grant.producer, session_id=grant.session_id,
+                                 offer_id=grant.offer_id, journal=self.journal, driver=SystemdRebootDriver())
         return True
 
     def _send_evidence(self, message) -> bool:
-        status, _ = self.transport.request("POST", "/v2/node/evidence", encode_node_message(message), self.claim)
+        status, _ = self.session.request("POST", "/v2/node/evidence", encode_node_message(message))
         return status == 200
 
     def tick(self) -> None:
@@ -61,9 +62,8 @@ class HostRunner:
         recovery_metrics, recovery_fault = self.recovery.telemetry()
         metrics = self.sampler.sample() + self.sampler.supervision() + recovery_metrics
         self.store.write("observation", {"sampled_boottime_ms": now, "metrics": metrics})
-        if self.core is None or now >= self.core.session_expires:
-            if not self.establish_session():
-                return
+        if not self.establish_session():
+            return
         # New authority is polled before backlog or telemetry HTTP. No network
         # response is required between durable admission and the effect fence.
         try:
@@ -74,15 +74,14 @@ class HostRunner:
         observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
                                         now, tuple(HostMetricV2(*row) for row in metrics), fault_code=recovery_fault)
         try:
-            self.transport.request("POST", "/v2/node/observations",
-                                   encode_host_observation(observation), self.claim)
+            self.session.request("POST", "/v2/node/observations", encode_host_observation(observation))
         except (OSError, ValueError, http.client.HTTPException):
             pass
         self.delivery.flush(self.journal, session_id=self.claim.session_id,
                             send=self._send_evidence, budget=2)
 
     def _poll_commands(self) -> None:
-        status, raw = self.transport.request("GET", "/v2/node/commands", claim=self.claim)
+        status, raw = self.session.request("GET", "/v2/node/commands")
         if status != 200:
             return
         document = loads_object(raw, max_bytes=65536)

@@ -12,18 +12,12 @@ from psycopg.types.json import Jsonb
 from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.node_app_links import load_current_node_app_link_for_player_in
-from central.fleet.node_sessions import (
-    NodeControlError,
-    NodeSessions,
-    grant_boottime_at,
-    node_sample_fresh,
-)
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.models import Plan, Readiness
 from contracts.node_boot import parse_node_boot_offer
-from contracts.node_commands import parse_session_grant
 from contracts.node_display import parse_display_exchange
 from contracts.node_frame import frame_witness_tag
 from contracts.node_protocol import digest, identifier, token
@@ -42,7 +36,7 @@ def current_cohort_in(conn, device_id: str, generation: int, now: float) -> dict
         raise NodeControlError("node_player_unavailable")
     reports = conn.execute("SELECT output_id,observation FROM outputs WHERE player_id=%s ORDER BY output_id",
                            (player["id"],)).fetchall()
-    rows = conn.execute("SELECT DISTINCT ON(e.output_id) e.output_id,e.request,e.received_at,s.grant_payload,s.expires_at "
+    rows = conn.execute("SELECT DISTINCT ON(e.output_id) e.output_id,e.request,e.received_at "
                         "FROM node_display_exchanges e JOIN node_sessions s USING(session_id) "
                         "JOIN node_producers p ON p.producer_id=e.producer_id "
                         "JOIN node_boot_admissions b USING(admission_id) "
@@ -57,9 +51,7 @@ def current_cohort_in(conn, device_id: str, generation: int, now: float) -> dict
         if row is None or now-row["received_at"] > 10:
             raise NodeControlError("node_output_cohort_unavailable")
         observed = parse_display_exchange(bytes(row["request"]))
-        local_now = grant_boottime_at(parse_session_grant(bytes(row["grant_payload"])), row["expires_at"], now)
-        if (not node_sample_fresh(local_now, observed.sampled_boottime_ms, max_age_ms=10000)
-                or not observed.connected or not report["observation"].get("connected")):
+        if not observed.connected or not report["observation"].get("connected"):
             raise NodeControlError("node_output_cohort_unavailable")
         cohort.append({"output_id": report["output_id"], "observation": report["observation"],
                        "connection_generation": observed.output.connection_generation,
@@ -164,7 +156,7 @@ class NodeAcceptance:
             by_output = {b.output_id: b for b in plan.bindings}
             buffers, buffer_samples = {}, {}
             for output in required:
-                latest = conn.execute("SELECT e.request,e.received_at,s.grant_payload,s.expires_at FROM node_display_exchanges e "
+                latest = conn.execute("SELECT e.request,e.received_at FROM node_display_exchanges e "
                     "JOIN node_sessions s USING(session_id) WHERE s.device_id=%s AND s.device_generation=%s "
                     "AND s.revoked_at IS NULL AND e.output_id=%s ORDER BY e.sampled_boottime_ms DESC LIMIT 1",
                     (request["device_id"], generation, output)).fetchone()
@@ -178,9 +170,6 @@ class NodeAcceptance:
                         or not conn.execute("SELECT 1 FROM node_display_handoffs WHERE decision_id=%s",
                                             (exchange.completed_decision_id,)).fetchone()):
                     raise NodeControlError("node_qualification_handoff_unavailable")
-                local_now = grant_boottime_at(parse_session_grant(bytes(latest["grant_payload"])), latest["expires_at"], now)
-                if not node_sample_fresh(local_now, exchange.receipt.sampled_boottime_ms, max_age_ms=self.MAX_GAP_SECONDS*1000):
-                    raise NodeControlError("node_qualification_original_sample_stale")
                 # The explicit qualification scenario is a single full-opacity
                 # committed media layer per Output. General overlap/fade semantics
                 # remain renderer-owned and are not reconstructed here.

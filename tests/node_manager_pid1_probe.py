@@ -12,7 +12,6 @@ from uuid import uuid4
 
 sys.path.insert(0, "/usr/lib/photo-wall-manager-supervisor")
 import contracts
-from appliance.node.clock import boottime_ms
 from appliance.node.environment import verify_root
 from appliance.node.manager_launcher import UNIT, SystemdManagerLauncher
 
@@ -65,7 +64,7 @@ class Handler(BaseHTTPRequestHandler):
                         producer,
                         claim.session_id,
                         claim.offer_id,
-                        boottime_ms() + 600000,
+                        600000,
                         "evidence",
                     )
                 ),

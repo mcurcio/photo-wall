@@ -3,6 +3,8 @@
 Issue and dispatch each hold the rollout gate before Fleet/generation locks.
 The command record commits before HTTP polling can see it. Responses and effects
 remain separate. Expiry or a changed session never retargets an old command.
+Expiry is Central's own: poll filters by expires_at and HostCore dedupes by
+command id. Central never states a node-clock deadline.
 """
 from __future__ import annotations
 
@@ -35,7 +37,6 @@ class OperatorReboot:
     device_generation: int
     operator_audit_ref: str
     rollout_generation: int
-    expires_boottime_ms: int
     valid_for_seconds: int = 30
 
     def __post_init__(self) -> None:
@@ -43,7 +44,6 @@ class OperatorReboot:
         identifier(self.session_id)
         counter(self.device_generation, 1)
         counter(self.rollout_generation, 1)
-        counter(self.expires_boottime_ms, 1)
         token(self.operator_audit_ref, 256)
         if type(self.valid_for_seconds) is not int or not 1 <= self.valid_for_seconds <= 60:
             raise ValueError("node_reboot_duration_invalid")
@@ -61,7 +61,6 @@ class NodeCommands:
             "device_generation": request.device_generation,
             "operator_audit_ref": request.operator_audit_ref,
             "rollout_generation": request.rollout_generation,
-            "expires_boottime_ms": request.expires_boottime_ms,
             "valid_for_seconds": request.valid_for_seconds}, sort_keys=True).encode()).hexdigest()
         started, monotonic = _clock_sample(self.sessions.clock)
         with self.sessions.db.transaction() as conn:
@@ -99,13 +98,8 @@ class NodeCommands:
                     raise NodeControlError("node_reboot_expired", 410)
                 return {"command": json.loads(bytes(prior["payload"])), "duplicate": True,
                         "effect_established": False}
-            estimated_boottime = grant.expires_boottime_ms - (row["expires_at"] - now) * 1000
-            if not estimated_boottime < request.expires_boottime_ms <= min(
-                    grant.expires_boottime_ms,
-                    estimated_boottime + request.valid_for_seconds * 1000):
-                raise NodeControlError("node_reboot_expiry_outside_session", 422)
             command = RebootRequest(request.command_id, "0" * 64, grant.session_id,
-                                     grant.offer_id, grant.producer, request.expires_boottime_ms)
+                                     grant.offer_id, grant.producer)
             command = replace(command, command_sha256=reboot_digest(command))
             payload = encode_reboot_request(command)
             expires_at = min(now + request.valid_for_seconds, row["expires_at"])

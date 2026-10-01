@@ -208,7 +208,7 @@ try:
                     print("PASS production_driver_http_runtime_native_handoff", flush=True)
                     status, raw = transport.request("POST", trial_path, b"{}")
                     if status == 409 and json.loads(raw).get("error") in (
-                        "trial_display_evidence_stale", "trial_current_output_required"
+                        "trial_admitted_surface_required", "trial_current_output_required"
                     ):
                         continue  # Recovery still needs a newly uploaded original presentation.
                     assert status == 200, (status, raw)

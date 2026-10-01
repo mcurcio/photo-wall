@@ -32,7 +32,7 @@ def setup(registry, owner="host_core"):
     _seed(registry)
     sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
     claim = NodeSessionClaim(SERIAL, OFFER_ID, BOOT_ID, owner, uuid4(), uuid4(),
-                             uuid4().hex + uuid4().hex, 1000)
+                             uuid4().hex + uuid4().hex)
     return sessions, claim, sessions.enroll(claim)
 
 
@@ -115,7 +115,7 @@ def test_reboot_audit_response_and_initiation_are_separate(registry):
     gate, _ = _gate(registry)
     generation = gate.open(expected_revision=0).generation
     commands = NodeCommands(sessions, gate)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture", generation, 31000)
+    request = OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture", generation)
     issued = commands.request_reboot(DEVICE_ID, request)
     assert not issued["effect_established"]
     assert commands.request_reboot(DEVICE_ID, request)["duplicate"]
@@ -150,14 +150,14 @@ def test_default_gate_cannot_mint_reboot(registry):
     service = NodeCommands(sessions, RolloutEffectGate(registry.db))
     with pytest.raises(RolloutGateError):
         service.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1,
-                                                        "operator:fixture", 1, 31000))
+                                                        "operator:fixture", 1))
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 0
 
 
 def test_mounted_routes_disabled_by_default_and_real_when_configured(registry):
     _seed(registry)
-    claim = NodeSessionClaim(SERIAL, OFFER_ID, BOOT_ID, "host_core", uuid4(), uuid4(), "d" * 64, 1000)
+    claim = NodeSessionClaim(SERIAL, OFFER_ID, BOOT_ID, "host_core", uuid4(), uuid4(), "d" * 64)
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))

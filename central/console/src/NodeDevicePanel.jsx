@@ -34,8 +34,7 @@ export function NodeDevicePanel({ deviceId }) {
       if (failure) {
         setError(failure.error ?? `Node status unavailable (${failure.status}).`);
       } else {
-        setData({ gate: results[0].data, device: results[1].data, attempts: results[2].data,
-          loadedAt: performance.now() });
+        setData({ gate: results[0].data, device: results[1].data, attempts: results[2].data });
         setError(null);
       }
     } catch {
@@ -58,17 +57,9 @@ export function NodeDevicePanel({ deviceId }) {
     && data.gate.effect_gate.effective_state === "open";
   const reviewReboot = () => {
     if (!selected || !gateOpen || !audit.trim()) return;
-    const elapsed = performance.now() - data.loadedAt;
-    const estimated = selected.expires_boottime_ms
-      - (selected.expires_at - data.device.read_at) * 1000 + elapsed;
-    const expiry = Math.min(selected.expires_boottime_ms, Math.floor(estimated + 20000));
-    if (expiry <= estimated + 1000) {
-      setMessage("This session is expiring. Refresh and choose a current session."); return;
-    }
     setReboot({ command_id: crypto.randomUUID(), session_id: selected.session_id,
       device_generation: data.device.device_generation, operator_audit_ref: audit.trim(),
-      rollout_generation: data.gate.effect_gate.generation, expires_boottime_ms: expiry,
-      valid_for_seconds: 30 });
+      rollout_generation: data.gate.effect_gate.generation, valid_for_seconds: 30 });
     setRebootResult(null);
     setMessage(null);
   };
@@ -140,7 +131,7 @@ export function NodeDevicePanel({ deviceId }) {
           {!gateOpen && <p>Reboot unavailable while the effect gate is closed or status is unavailable.</p>}
           {reboot && <div role="group" aria-label="Reboot request review">
             <p>Request reboot for session <code>{reboot.session_id}</code>, generation {reboot.device_generation}. Command <code>{reboot.command_id}</code>.</p>
-            <p>The command expires at boot time {reboot.expires_boottime_ms} ms. A retry keeps this exact identity and expiry.</p>
+            <p>Central dispatches the command for {reboot.valid_for_seconds} seconds. A retry keeps this exact identity.</p>
             <button type="button" disabled={busy || !gateOpen || ["recorded", "refused"].includes(rebootResult)} onClick={requestReboot}>{rebootResult === "unknown" ? "Retry exact reboot request" : "Request reboot for this session"}</button>
             <button type="button" disabled={busy} onClick={() => { setReboot(null); setRebootResult(null); }}>Close request review</button>
           </div>}

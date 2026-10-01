@@ -71,7 +71,7 @@ def test_boot_store_rejects_symlink_and_corrupt_json(tmp_path):
 def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
     boot, session, offer = uuid4(), uuid4(), uuid4()
     producer = NodeProducerV2("site", "device-" + "a" * 64, 1, boot, "host_core", uuid4())
-    request = RebootRequest(uuid4(), "0" * 64, session, offer, producer, 1000)
+    request = RebootRequest(uuid4(), "0" * 64, session, offer, producer)
     request = replace(request, command_sha256=reboot_digest(request))
 
     class Driver:
@@ -83,13 +83,13 @@ def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
     driver = Driver()
     journal_store = store(tmp_path, boot)
     core = HostCore(producer=producer, session_id=session, offer_id=offer,
-                    session_expires_boottime_ms=1000, journal=FileRebootJournal(journal_store), driver=driver)
+                    journal=FileRebootJournal(journal_store), driver=driver)
     assert core.receive(request, now_ms=1).decision == "accepted"
     assert core.initiate(request.command_id, now_ms=2).effect_unknown
     journal_store.close()
     recovered = store(tmp_path, boot)
     core = HostCore(producer=producer, session_id=session, offer_id=offer,
-                    session_expires_boottime_ms=1000, journal=FileRebootJournal(recovered), driver=driver)
+                    journal=FileRebootJournal(recovered), driver=driver)
     assert core.initiate(request.command_id, now_ms=3).effect_unknown
     assert driver.calls == 1
     recovered.close()

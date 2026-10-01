@@ -198,7 +198,6 @@ def run_demo() -> dict:
                           backend=display_backend)
     reboot_driver = RecordingRebootDriver()
     host = HostCore(producer=host_producer, session_id=session, offer_id=offer,
-                    session_expires_boottime_ms=100000,
                     journal=MemoryRebootJournal(), driver=reboot_driver)
     sampler = SimulatedHostSampler()
     trace = []
@@ -264,8 +263,7 @@ def run_demo() -> dict:
         invalidation_event, received_at=4.1))
     record("old_presentation_duplicate", central=inbox.receive(
         presentation_event, received_at=4.2))
-    request = RebootRequest(UUID(int=15), "f" * 64, session, offer,
-                            host_producer, 10000)
+    request = RebootRequest(UUID(int=15), "f" * 64, session, offer, host_producer)
     response = host.receive(request, now_ms=500)
     record("reboot_command_admitted", response=response,
            reboot_effect_calls=reboot_driver.calls)

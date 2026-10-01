@@ -72,7 +72,6 @@ def test_display_decision_and_completion_renewal(registry):
         claim,
         session_id=uuid4(),
         credential=uuid4().hex + uuid4().hex,
-        sampled_boottime_ms=1500,
     )
     sessions.enroll(renewed)
     completion = replace(
@@ -140,15 +139,6 @@ def test_display_wire_unknown_fields_and_completion_time(registry):
         replace(request, completed_decision_id=uuid4(), completed_boottime_ms=1001)
 
 
-def test_delayed_display_pair_cannot_refresh_presentation_age(registry):
-    coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
-    request = DisplayExchange(grants["display_host"].producer, uuid4(), 1000, facts[0].output, True)
-    registry.clock.advance(6)
-    with pytest.raises(NodeControlError, match="display_sample_stale"):
-        NodeDisplay(sessions, runtime=coordinator).exchange(claims["display_host"].session_id,
-            claims["display_host"].credential, encode_display_exchange(request))
-
-
 def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(registry):
     from test_registry import frame
 
@@ -178,8 +168,7 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1400)
     withdraw = exchange(request)
     assert withdraw.operation == "withdraw" and withdraw.surface == old
-    renewed = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex,
-                      sampled_boottime_ms=1500)
+    renewed = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex)
     sessions.enroll(renewed)
     removed = replace(request, request_id=uuid4(), sampled_boottime_ms=1700, admitted=None,
                       completed_decision_id=withdraw.decision_id, completed_boottime_ms=1500)
@@ -227,8 +216,7 @@ def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry,
     # Real native promotion occurred but was not uploaded before Registry unbound.
     registry.unbind("node-f0", expected_generation=1)
     if renew:
-        claim = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex,
-                        sampled_boottime_ms=1400)
+        claim = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex)
         sessions.enroll(claim)
     promoted = revision.surface
     receipt = DisplayReceipt(promoted, uuid4(), "weston-promoted", "baseline", 1400)

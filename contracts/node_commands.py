@@ -3,6 +3,8 @@
 Serial possession is a LAN claim, never physical-device authentication. Client
 credentials are independently generated per owner and must remain in root-only
 boot storage. A parsed command is inert until the receiver verifies its session.
+Central never represents node time: a grant carries a duration the node applies
+to its own clock, and Central's own expiry bounds commands it dispatches.
 """
 from __future__ import annotations
 
@@ -49,7 +51,6 @@ class NodeSessionClaim:
     incarnation_id: UUID
     session_id: UUID
     credential: str
-    sampled_boottime_ms: int
 
     def __post_init__(self) -> None:
         token(self.serial, 128)
@@ -57,7 +58,6 @@ class NodeSessionClaim:
             identifier(value)
         scope_for_owner(self.owner)
         digest(self.credential)
-        counter(self.sampled_boottime_ms)
 
 
 def encode_session_claim(claim: NodeSessionClaim) -> bytes:
@@ -83,7 +83,7 @@ class NodeSessionGrant:
     producer: NodeProducerV2
     session_id: UUID
     offer_id: UUID
-    expires_boottime_ms: int
+    valid_for_ms: int
     scope: str
     trust_mode: str = "lan_serial"
     command_eligible: bool = False
@@ -94,7 +94,7 @@ class NodeSessionGrant:
             raise ValueError("invalid_session_producer")
         identifier(self.session_id)
         identifier(self.offer_id)
-        counter(self.expires_boottime_ms, 1)
+        counter(self.valid_for_ms, 1)
         if type(self.command_eligible) is not bool:
             raise ValueError("invalid_command_eligibility")
         token(self.command_reason, 64)
@@ -105,7 +105,7 @@ class NodeSessionGrant:
 def encode_session_grant(grant: NodeSessionGrant) -> bytes:
     return _json({"schema": 2, "producer": producer_document(grant.producer),
                   "session_id": str(grant.session_id), "offer_id": str(grant.offer_id),
-                  "expires_boottime_ms": grant.expires_boottime_ms,
+                  "valid_for_ms": grant.valid_for_ms,
                   "scope": grant.scope, "trust_mode": grant.trust_mode,
                   "command_eligible": grant.command_eligible, "command_reason": grant.command_reason})
 
@@ -129,14 +129,12 @@ class RebootRequest:
     command_session_id: UUID
     offer_id: UUID
     producer: NodeProducerV2
-    expires_boottime_ms: int
 
     def __post_init__(self) -> None:
         identifier(self.command_id)
         identifier(self.command_session_id)
         identifier(self.offer_id)
         digest(self.command_sha256)
-        counter(self.expires_boottime_ms, 1)
         if type(self.producer) is not NodeProducerV2 or self.producer.owner != "host_core":
             raise ValueError("reboot_producer_invalid")
 
@@ -145,8 +143,7 @@ def _reboot_payload(request: RebootRequest) -> dict:
     return {"schema": 2, "scope": "operator_reboot", "trust_mode": "lan_serial",
             "command_id": str(request.command_id),
             "command_session_id": str(request.command_session_id),
-            "offer_id": str(request.offer_id), "producer": producer_document(request.producer),
-            "expires_boottime_ms": request.expires_boottime_ms}
+            "offer_id": str(request.offer_id), "producer": producer_document(request.producer)}
 
 
 def reboot_digest(request: RebootRequest) -> str:

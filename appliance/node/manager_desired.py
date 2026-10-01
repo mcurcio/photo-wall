@@ -40,7 +40,7 @@ class DesiredPreparation:
         if grant is None:
             return
         self.observation.flush()
-        status, raw = self.session.transport.request("GET", "/v2/node/app-desired", claim=self.session.claim)
+        status, raw = self.session.request("GET", "/v2/node/app-desired")
         if status != 200:
             return
         value = loads_object(raw, max_bytes=65536)

@@ -23,8 +23,8 @@ def host_values(journal=None, driver=None):
     journal = journal or MemoryRebootJournal()
     driver = driver or RecordingRebootDriver()
     host = HostCore(producer=p, session_id=UUID(int=3), offer_id=UUID(int=4),
-                    session_expires_boottime_ms=100, journal=journal, driver=driver)
-    request = RebootRequest(UUID(int=5), "a" * 64, UUID(int=3), UUID(int=4), p, 90)
+                    journal=journal, driver=driver)
+    request = RebootRequest(UUID(int=5), "a" * 64, UUID(int=3), UUID(int=4), p)
     return host, request, journal, driver
 
 
@@ -40,19 +40,14 @@ def test_reboot_admission_is_not_initiation_and_retries_do_not_repeat():
     assert host.receive(request, now_ms=1000) == response
 
 
-def test_reboot_rechecks_expiry_before_effect():
-    host, request, _, driver = host_values()
+def test_reboot_rechecks_session_scope_before_effect():
+    host, request, journal, driver = host_values()
     host.receive(request, now_ms=0)
-    with pytest.raises(ValueError, match="expiry"):
-        host.initiate(request.command_id, now_ms=90)
+    renewed = HostCore(producer=host.producer, session_id=UUID(int=6), offer_id=host.offer_id,
+                       journal=journal, driver=driver)
+    with pytest.raises(ValueError, match="scope"):
+        renewed.initiate(request.command_id, now_ms=90)
     assert driver.calls == 0
-
-
-@pytest.mark.parametrize("expiry", [True, float("nan"), float("inf"), -1, 1.5])
-def test_reboot_request_rejects_invalid_deadline(expiry):
-    _, request, _, _ = host_values()
-    with pytest.raises(ValueError):
-        replace(request, expires_boottime_ms=expiry)
 
 
 def test_reboot_lost_result_stays_unknown_and_not_repeated_after_reconstruction():

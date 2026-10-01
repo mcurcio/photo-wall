@@ -15,8 +15,7 @@ class PreparationObservation:
         row = self.store.read("preparation-observation") or {}
         if row.get("pending") is None:
             return True
-        status, _ = self.session.transport.request("POST", "/v2/node/app-preparation",
-                                                   row["pending"].encode(), claim=self.session.claim)
+        status, _ = self.session.request("POST", "/v2/node/app-preparation", row["pending"].encode())
         if status != 200:
             return False
         self.store.write("preparation-observation", {**row, "pending": None})

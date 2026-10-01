@@ -49,13 +49,12 @@ def setup(store):
         producer=producer,
         session_id=session,
         offer_id=offer,
-        session_expires_boottime_ms=10000,
         journal=journal,
         driver=driver,
     )
 
     def command():
-        value = RebootRequest(uuid4(), "0" * 64, session, offer, producer, 10000)
+        value = RebootRequest(uuid4(), "0" * 64, session, offer, producer)
         return replace(value, command_sha256=reboot_digest(value))
 
     return core, command, driver
@@ -95,8 +94,10 @@ def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
     runner = HostRunner.__new__(HostRunner)
     runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
     runner.store, runner.core, runner.journal = store, core, core.journal
-    runner.transport = Transport()
-    runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=core.session_id))
+    runner.transport = transport = Transport()
+    grant = SimpleNamespace(producer=core.producer, session_id=core.session_id, offer_id=core.offer_id)
+    runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=core.session_id), ensure=lambda: grant,
+                                     request=lambda method, path, body=None: transport.request(method, path, body))
     runner.sampler = SimpleNamespace(
         sample=lambda: (("uptime", 1, "seconds"),), supervision=lambda: ()
     )

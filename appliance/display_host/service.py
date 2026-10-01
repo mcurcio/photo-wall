@@ -248,11 +248,10 @@ class DisplayService:
                             completed.get(state.key.output_id, (None, None))[0],
                             completed.get(state.key.output_id, (None, None))[1],
                         )
-                        status, raw = transport.request(
+                        status, raw = session.request(
                             "POST",
                             "/v2/node/display",
                             encode_display_exchange(request),
-                            session.claim,
                         )
                         if status == 200:
                             decision = parse_display_decision(raw)
@@ -270,11 +269,10 @@ class DisplayService:
                             sample.facts,
                             stream_gap=True,
                         )
-                        transport.request(
+                        session.request(
                             "POST",
                             "/v2/node/evidence",
                             encode_node_message(evidence),
-                            session.claim,
                         )
                 except (OSError, ValueError, http.client.HTTPException):
                     if store.failed:

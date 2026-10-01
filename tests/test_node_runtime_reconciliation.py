@@ -65,7 +65,7 @@ def rig(registry, *, node_v2=False):
     claims, grants = {}, {}
     for owner in ("host_core", "app_effect_broker", "display_host"):
         claim = NodeSessionClaim(SERIAL, offer_id, BOOT_ID, owner, uuid4(), uuid4(),
-                                 uuid4().hex + uuid4().hex, 1000)
+                                 uuid4().hex + uuid4().hex)
         claims[owner], grants[owner] = claim, sessions.enroll(claim)
     process = NodeProcessIdentity(123, 10, uuid4())
     broker = grants["app_effect_broker"]

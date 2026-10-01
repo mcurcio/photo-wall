@@ -18,7 +18,6 @@ from contracts.node_protocol import (
     NodeEventV2,
     NodeProducerV2,
     RebootFact,
-    counter,
     identifier,
 )
 
@@ -62,17 +61,14 @@ class HostSampler(Protocol):
 
 class HostCore:
     def __init__(self, *, producer: NodeProducerV2, session_id: UUID, offer_id: UUID,
-                 session_expires_boottime_ms: int, journal: RebootJournal,
-                 driver: RebootDriver):
+                 journal: RebootJournal, driver: RebootDriver):
         identifier(session_id)
         identifier(offer_id)
-        counter(session_expires_boottime_ms, 1)
         if type(producer) is not NodeProducerV2 or producer.owner != "host_core":
             raise ValueError("host_owner_required")
         self.producer = producer
         self.session_id = session_id
         self.offer_id = offer_id
-        self.session_expires = session_expires_boottime_ms
         self.journal = journal
         self.driver = driver
         self._lock = RLock()
@@ -101,11 +97,11 @@ class HostCore:
         )
 
     def _current(self, request: RebootRequest, now_ms: int) -> bool:
+        """Scope only: Central dispatches only unexpired commands; the journal dedupes ids."""
         return (request.producer == self.producer
                 and request.command_session_id == self.session_id
                 and request.offer_id == self.offer_id
-                and type(now_ms) is int and now_ms >= 0
-                and now_ms < min(request.expires_boottime_ms, self.session_expires))
+                and type(now_ms) is int and now_ms >= 0)
 
     def receive(self, request: RebootRequest, *, now_ms: int) -> NodeCommandResponseV2:
         """Return admission alone; a caller may publish it before invoking the effect."""

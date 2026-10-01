@@ -22,13 +22,13 @@ def test_lost_observation_response_replays_identical_sample_and_sequence(monkeyp
     sent = []
     fail = [True]
 
-    def request(method, path, body, claim):
+    def request(method, path, body):
         sent.append(body)
         return (503 if fail[0] else 200), b"{}"
 
     store = Store()
     session = SimpleNamespace(grant=SimpleNamespace(producer=NodeProducerV2("home", "device-" + "a" * 64,
-        1, uuid4(), "app_manager", uuid4())), claim=object(), transport=SimpleNamespace(request=request))
+        1, uuid4(), "app_manager", uuid4())), request=request)
     first = PreparationObservation(store, session)
     first.sample("idle")
     second = PreparationObservation(store, session)
