@@ -1,6 +1,5 @@
 """Real historical schemas retain identities and fences through node upgrades."""
 
-import os
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,7 +7,6 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, _seed
 from test_node_central import setup
@@ -26,11 +24,8 @@ MIGRATIONS = Path(database_module.__file__).with_name("migrations")
 
 
 @pytest.fixture
-def history(tmp_path, monkeypatch):
+def history(empty_database, tmp_path, monkeypatch):
     """Use the real runner/ledger for both a historical prefix and its upgrade."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
 
     def through(db, number):
         root = tmp_path / str(number)
@@ -45,20 +40,12 @@ def history(tmp_path, monkeypatch):
 
     @contextmanager
     def create(number):
-        schema = "pw_node_history_" + uuid4().hex
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-        db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
+        db = Database(empty_database)
         try:
             through(db, number)
             yield Registry(db, ManualClock(1000)), through
         finally:
-            try:
-                db.close()
-            finally:
-                with psycopg.connect(dsn, autocommit=True) as conn:
-                    conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
-                        psycopg.sql.Identifier(schema)))
+            db.close()
 
     return create
 

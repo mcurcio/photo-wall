@@ -8,16 +8,12 @@ it). Rows go in through the repositories, or as SQL for tables no repository wri
 from __future__ import annotations
 
 import hashlib
-import os
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
 import psycopg
-import pytest
-from psycopg.conninfo import make_conninfo
 from runtime_fakes import apply_procrastinate_schema
 from test_registry import enroll, frame
 
@@ -35,39 +31,30 @@ MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
 
 
 @contextmanager
-def schema_before(first_unapplied: str) -> Iterator[Database]:
-    """A fresh schema migrated through the migration before `first_unapplied` (a file-name
-    prefix, e.g. "028"), with procrastinate installed; `Database.migrate()` then applies the
-    rest. Skips without PHOTO_WALL_TEST_DATABASE_URL."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    conninfo = make_conninfo(dsn, options=f"-c search_path={schema}")
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    db = None
+def schema_before(empty_database: str, first_unapplied: str, *,
+                  procrastinate: bool = True) -> Iterator[Database]:
+    """`empty_database` (the fixture's conninfo) migrated through the migration before
+    `first_unapplied` (a file-name prefix, e.g. "028"), recorded in the migration ledger, with
+    procrastinate installed unless `procrastinate=False`; `Database.migrate()` then applies the
+    rest."""
+    with psycopg.connect(empty_database) as conn:
+        conn.execute("""CREATE TABLE schema_migrations (
+            name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+        for path in sorted(MIGRATIONS.glob("*.sql")):
+            if path.name >= first_unapplied:
+                break
+            sql = path.read_text()
+            conn.execute(sql)
+            conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
+                         (path.name, hashlib.sha256(sql.encode()).hexdigest()))
+    if procrastinate:
+        apply_procrastinate_schema(empty_database)
+    db = Database(empty_database)
     try:
-        with psycopg.connect(conninfo) as conn:
-            conn.execute("""CREATE TABLE schema_migrations (
-                name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
-            for path in sorted(MIGRATIONS.glob("*.sql")):
-                if path.name >= first_unapplied:
-                    break
-                sql = path.read_text()
-                conn.execute(sql)
-                conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
-                             (path.name, hashlib.sha256(sql.encode()).hexdigest()))
-        apply_procrastinate_schema(conninfo)
-        db = Database(conninfo)
         yield db
     finally:
-        if db is not None:
-            db.close()
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
-                psycopg.sql.Identifier(schema)))
+        db.close()
 
 
 class RecordingTransactions(PgTransactions):

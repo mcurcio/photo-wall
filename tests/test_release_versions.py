@@ -246,8 +246,8 @@ def test_v5_the_last_automatic_promotion_read_every_row_committed_before_it(worl
 # -- V6: migration 029 ----------------------------------------------------------------------------
 
 
-def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag():
-    with schema_before("029") as db:
+def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag(empty_database):
+    with schema_before(empty_database, "029") as db:
         with db.transaction() as conn:
             conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                          "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,1.0,1.0)")

@@ -1,12 +1,9 @@
-"""Shared integration database fixture; each test owns only its random schema."""
+"""Shared fixtures; each database test owns a whole disposable database (support/database.py)."""
 
-import os
 import uuid
-from contextlib import contextmanager
 
-import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
+from support.database import TestDatabases, server_dsn
 
 from central.db import Database
 from central.registry import Registry
@@ -27,36 +24,54 @@ def _mdns_advertise_disabled_by_default(monkeypatch):
     monkeypatch.setenv("PHOTO_WALL_MDNS_ADVERTISE", "false")
 
 
-@contextmanager
-def _private_schema_registry():
-    """A `Registry` over a fresh random schema of PHOTO_WALL_TEST_DATABASE_URL, dropped after."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    try:
-        db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
-        db.migrate()
-        clock = ManualClock(1000)
-        yield Registry(db, clock)
-    finally:
-        if "db" in locals():
-            db.close()
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
+_RUN_ID = pytest.StashKey[str]()
+
+
+def pytest_configure(config):
+    # One id per run, shared by its xdist workers: it names the run's databases.
+    config.stash[_RUN_ID] = getattr(config, "workerinput", {}).get("testrunuid") or uuid.uuid4().hex
+
+
+@pytest.fixture(scope="session")
+def database_provisioner(request):
+    """The root of every database fixture (support/database.py): skips without
+    PHOTO_WALL_TEST_DATABASE_URL, fails under PHOTO_WALL_TEST_REQUIRE_DATABASE=1."""
+    databases = TestDatabases(server_dsn(), request.config.stash[_RUN_ID])
+    yield databases
+    databases.close()
 
 
 @pytest.fixture
-def registry():
-    with _private_schema_registry() as registry:
-        yield registry
+def database(database_provisioner):
+    """A `Database` over a fresh clone of the migrated template, dropped after."""
+    with database_provisioner.migrated() as conninfo:
+        db = Database(conninfo)
+        try:
+            yield db
+        finally:
+            db.close()
+
+
+@pytest.fixture
+def registry(database):
+    return Registry(database, ManualClock(1000))
 
 
 @pytest.fixture(scope="module")
-def module_registry():
+def module_registry(database_provisioner):
     """`registry` shared by one module's tests: for a module whose tests run in order against one
-    long-lived system (real processes on one schema) that is too slow to boot per test."""
-    with _private_schema_registry() as registry:
-        yield registry
+    long-lived system (real processes on one database) that is too slow to boot per test."""
+    with database_provisioner.migrated() as conninfo:
+        db = Database(conninfo)
+        try:
+            yield Registry(db, ManualClock(1000))
+        finally:
+            db.close()
+
+
+@pytest.fixture
+def empty_database(database_provisioner):
+    """The conninfo of a fresh database with no migration applied, dropped after: for tests
+    that migrate through a historical prefix themselves."""
+    with database_provisioner.empty() as conninfo:
+        yield conninfo

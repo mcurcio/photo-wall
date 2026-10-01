@@ -1,0 +1,23 @@
+# The disposable PostgreSQL server the database tests run against, locally and in CI; see the
+# runbook's test section. Its data lives in tmpfs and every durability guarantee is off (the
+# pgtestdb/integresql settings): it holds only throwaway per-test databases, never deployment
+# data, so the credential below is a fixed, test-only value bound to loopback.
+# scripts/test_local.py defaults to it.
+name: photo-wall-test-database
+services:
+  test-database:
+    image: postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94
+    command: [postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off,
+              -c, max_connections=200]
+    environment:
+      POSTGRES_DB: photo_wall_test
+      POSTGRES_USER: photo_wall_test
+      POSTGRES_PASSWORD: isolated-test-only
+    ports:
+      - "127.0.0.1:${PHOTO_WALL_TEST_DB_PORT:-54330}:5432"
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U photo_wall_test -d photo_wall_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

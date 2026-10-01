@@ -148,7 +148,7 @@ def pytest_sessionfinish(session, exitstatus):
         "playwright": importlib.metadata.version("playwright"),
         "browsers": [{"name": name[:24], "version": version[:80]}
                      for name, version in sorted(session.config.stash.get(BROWSERS, set()))],
-        "environment": {"database": "real_postgresql_disposable_schema", "transport": "loopback_http",
+        "environment": {"database": "real_postgresql_disposable_database", "transport": "loopback_http",
                         "equipment": "simulated", "players": 2, "outputs": 3,
                         "scheduler": False, "worker": False, "preview_clock": "controlled",
                         "runtime_advance": "controlled_production_owner",

@@ -29,6 +29,9 @@ jobs:
       packages: read
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # A test that reaches a database fixture fails, never skips, when none is provided.
+      PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'
     steps:
       - name: Require media OS preparation
         env:
@@ -75,6 +78,8 @@ jobs:
           load: true
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
       - name: Prepare digest-pinned published Player wire fixtures
         run: |
           .venv/bin/python scripts/published_player_wire.py prepare \
@@ -101,6 +106,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_TEST_REQUIRE_DATABASE \
             --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
             --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
@@ -139,7 +145,9 @@ jobs:
         run: docker compose logs --no-color --tail 100
       - name: Remove this job's services
         if: always()
-        run: docker compose down --volumes
+        run: |
+          docker compose down --volumes
+          docker compose -f tests/integration/compose.test-database.yml down --volumes
 
   linux-media:
     needs: service-base

@@ -1,7 +1,7 @@
 """Migration 023 carries main's served `.deb` (`app_package_policy.current_sha256`) across, and
 027 records who promoted by main's rule: 'operator' where main would hold the promotion.
 
-Each test builds a schema at main's last migration (019), seeds main's state, then runs
+Each test builds a database at main's last migration (019), seeds main's state, then runs
 `Database.migrate()`, which applies the MVP's 020 onward as an upgrade does: 021 seeds the Asset
 records from main's tables and 023 carries the served `.deb`. Skips without
 PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
@@ -11,16 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
-import uuid
 from pathlib import Path
 
-import psycopg
 import pytest
-from content_db import put_file
+from content_db import put_file, schema_before
 from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
-from psycopg.conninfo import make_conninfo
 
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
@@ -37,7 +33,6 @@ from central.kernel.job_types import SyncReleases
 from central.kernel.ports import ReleaseListing
 from contracts.time import ManualClock
 
-MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
 V1, V2, V3 = "v1.0.0", "v1.1.0", "v1.2.0"
 
 
@@ -46,36 +41,10 @@ def sha(text: str) -> str:
 
 
 @pytest.fixture
-def legacy():
-    """A schema migrated to main's 019 only, and the `Database` over it (not yet upgraded)."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    conninfo = make_conninfo(dsn, options=f"-c search_path={schema}")
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    db = None
-    try:
-        with psycopg.connect(conninfo) as conn:
-            conn.execute("""CREATE TABLE schema_migrations (
-                name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
-            for path in sorted(MIGRATIONS.glob("*.sql")):
-                if path.name >= "020":
-                    break
-                sql = path.read_text()
-                conn.execute(sql)
-                conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
-                             (path.name, hashlib.sha256(sql.encode()).hexdigest()))
-        db = Database(conninfo)
+def legacy(empty_database):
+    """A database migrated to main's 019 only, and the `Database` over it (not yet upgraded)."""
+    with schema_before(empty_database, "020", procrastinate=False) as db:
         yield db
-    finally:
-        if db is not None:
-            db.close()
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
-                psycopg.sql.Identifier(schema)))
 
 
 def _main_state(db: Database, *, current: str | None, promoted: str | None,

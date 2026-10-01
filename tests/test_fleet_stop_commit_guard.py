@@ -1,13 +1,8 @@
 """New unbound stop transitions require a durable permit at transaction commit."""
 
-import os
 from pathlib import Path
-from uuid import uuid4
 
-import psycopg
 import pytest
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
 from psycopg.errors import CheckViolation
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import _principal
@@ -128,15 +123,9 @@ def test_committed_drain_identity_and_snapshot_are_immutable(registry) -> None:
     }
 
 
-def test_migration_preserves_older_unbound_stop_without_permit() -> None:
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_old_stop_" + uuid4().hex
+def test_migration_preserves_older_unbound_stop_without_permit(empty_database) -> None:
     migration_dir = Path(__file__).parents[1] / "central" / "migrations"
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    db = Database(make_conninfo(dsn, options=f"-c search_path={schema}"))
+    db = Database(empty_database)
     try:
         with db.transaction() as conn:
             for path in sorted(migration_dir.glob("*.sql")):
@@ -154,5 +143,3 @@ def test_migration_preserves_older_unbound_stop_without_permit() -> None:
             ).fetchone() == {"phase": "stop_committed", "fleet_drain_id": None}
     finally:
         db.close()
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
