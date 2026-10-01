@@ -37,6 +37,7 @@ class HostRunner:
                                    offer_id=offer_id, kernel_boot_id=kernel_boot_id)
         self.core = None
         self.sampler = LinuxHostSampler()
+        self.recovery = RecoverySupervisor(store, SystemdRebootDriver(), RecoveryObserver())
 
     @property
     def claim(self):
@@ -57,7 +58,8 @@ class HostRunner:
 
     def tick(self) -> None:
         now = boottime_ms()
-        metrics = self.sampler.sample() + self.sampler.supervision()
+        recovery_metrics, recovery_fault = self.recovery.telemetry()
+        metrics = self.sampler.sample() + self.sampler.supervision() + recovery_metrics
         self.store.write("observation", {"sampled_boottime_ms": now, "metrics": metrics})
         if self.core is None or now >= self.core.session_expires:
             if not self.establish_session():
@@ -70,7 +72,7 @@ class HostRunner:
             if self.store.failed:
                 raise
         observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
-                                        now, tuple(HostMetricV2(*row) for row in metrics))
+                                        now, tuple(HostMetricV2(*row) for row in metrics), fault_code=recovery_fault)
         try:
             self.transport.request("POST", "/v2/node/observations",
                                    encode_host_observation(observation), self.claim)
@@ -110,7 +112,7 @@ def main() -> None:
                       policy={"owner": "host_core", "offer_id": value["offer_id"], "serial": value["serial"]})
     runner = HostRunner(store, NodeHTTP(value["central"], timeout=0.5), serial=value["serial"],
                         offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id)
-    recovery = RecoverySupervisor(store, SystemdRebootDriver(), RecoveryObserver())
+    recovery = runner.recovery
     server = RecoveryServer(recovery)
     last_tick = 0.0
     try:

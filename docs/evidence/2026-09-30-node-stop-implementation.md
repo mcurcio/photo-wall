@@ -41,3 +41,37 @@ broker, HostCore and packaging-boundary checks. Remaining acceptance includes
 expanded crash/transport tests, broad portable and applicable DB checks, actual
 PID1 scenarios with rebuilt exact components, full-squashfs integration and
 physical/PXE/display qualification. No new artifact or hardware result is claimed.
+
+
+## Integrated review checkpoint
+
+The second checkpoint integrates preserved concurrent edits after the user stopped
+the other writer. Stop admission now returns before any PID1 I/O; cooperative
+service owns capture, dispatch and observation. The broker persists stop intent,
+request identity and immutable recovery deadlines in one write. Read-only operation
+views keep their original identity. Lost Host acknowledgments prevent dispatch;
+replay cannot renew deadlines or bypass a recorded reboot intent. The adapter
+retains its cgroup descriptor through transient errors and never requires live
+root metadata after capture. Corrupt journal fields refuse completion.
+
+Local challenge identity survives Central session expiry. An exact-process
+challenge response is persisted before HTTP publication, so lost Central ACKs
+cannot erase local control evidence. HostCore reports recovery counters and a
+sanitized recovery fault through existing telemetry; that reporting never gates
+reboot dispatch. Reboot-driver failure remains explicitly unknown with no automatic
+second dispatch, consistent with the selected one-attempt policy.
+
+Before integration, the first source checkpoint passed 2,996 portable tests
+(1,282 skips, 23 warnings, 190.78 seconds) and 112 scoped PostgreSQL tests
+(one warning, 30.56 seconds). A later run passed 3,003 portable tests and 119 scoped
+DB tests, but overlapping source edits prevent treating those runs as final-source
+qualification. The integrated adapter/broker/HostCore set subsequently passed
+98 tests in 2.50 seconds; further boundary tests and stable-source validation follow.
+
+Four real Linux credential-packet tests passed in 0.077 seconds in a networkless,
+read-only arm64 container based on image
+`sha256:90c772d80b3d8a6c0b733e3fdd4464e14e83bc331dc757d828c0b4b8e57cef8c`.
+They exercise kernel credentials and real Unix sockets, with fixture peer-policy
+and process observers. They are not an actual PID1 lifecycle or physical reboot
+qualification. The literal local DB wrapper was attempted and still fails for
+missing `.env`; the reviewed isolated-schema helper supplies supplemental coverage.

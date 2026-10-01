@@ -291,3 +291,76 @@ def test_cancel_loses_permit_race_retains_seal_and_later_quiescence(setup, monke
     with pytest.raises(ValueError, match="sealed"):
         restarted._event("no_stop_quiescent", running=driver.current())
     assert driver.stop_calls == 0 and not driver.starts
+
+
+def test_pending_stop_recovers_locally_after_session_loss_without_redispatch(setup):
+    broker, driver, command, permit, _ = setup
+    driver.unknown_stop = True
+    broker.execute(permit)
+    broker.session.grant = None
+    broker.session.transport.request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network"))
+    driver.unknown_stop = False
+    recovered = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
+    recovered.service()
+    recovered.service()
+    assert driver.stop_calls == 1 and driver.starts == [command.target]
+    events = [parse_app_effect_event(raw.encode()).phase for raw in broker.record["pending"]]
+    assert events == ["intent_stop", "stopped", "starting_new", "running"]
+
+
+def test_host_ack_loss_prevents_stop_and_replay_does_not_extend_obligation(setup):
+    broker, driver, _, permit, _ = setup
+    registrations = []
+    def lost(obligation):
+        registrations.append(obligation)
+        raise TimeoutError()
+    broker.recovery.arm = lost
+    with pytest.raises(TimeoutError):
+        broker.execute(permit)
+    with pytest.raises(TimeoutError):
+        broker.reconcile()
+    assert registrations[0] == registrations[1]
+    assert driver.stop_calls == 0 and driver.starts == []
+
+
+def test_reboot_intent_refuses_replacement_even_after_stop_completion(setup, monkeypatch):
+    broker, driver, _, permit, _ = setup
+    original = broker._start
+    monkeypatch.setattr(broker, "_start", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        broker.execute(permit)
+    monkeypatch.setattr(broker, "_start", original)
+    broker.recovery.arm = lambda *a: (_ for _ in ()).throw(ValueError("reboot_intended"))
+    with pytest.raises(ValueError, match="reboot_intended"):
+        broker.reconcile()
+    assert not driver.starts and driver.stop_calls == 1
+
+
+def test_stop_intent_and_frozen_recovery_are_one_crash_atomic_transition(setup, monkeypatch):
+    broker, driver, command, permit, _ = setup
+    original = broker.store.write
+    intents = []
+    def save(name, value):
+        original(name, value)
+        if name == "online" and value["phase"] == "intent_stop":
+            assert value["stop_request"]["operation_id"] == str(command.operation_id)
+            assert value["recovery"]["operation_id"] == str(command.operation_id)
+            intents.append(value)
+            raise KeyboardInterrupt()
+    monkeypatch.setattr(broker.store, "write", save)
+    with pytest.raises(KeyboardInterrupt):
+        broker.execute(permit)
+    assert driver.stop_calls == 0
+    assert len(intents) == 1
+    assert broker.record["intent_stop_written"]
+    with pytest.raises(ValueError, match="not_ready"):
+        broker.execute(permit)
+    assert broker.record["recovery"] == intents[0]["recovery"]
+
+
+def test_wrong_host_receipt_cannot_dispatch(setup):
+    broker, driver, _, permit, _ = setup
+    broker.recovery.arm = lambda obligation: "wrong"
+    with pytest.raises(ValueError, match="recovery_receipt"):
+        broker.execute(permit)
+    assert driver.stop_calls == 0 and not driver.starts

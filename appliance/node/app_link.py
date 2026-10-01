@@ -94,6 +94,13 @@ class BrokerLinkService:
                 except OSError:
                     pass
 
+    def remember_grant(self):
+        grant = self.session.grant
+        if grant is not None:
+            document = {"grant": encode_session_grant(grant).decode()}
+            if self.session.store.read("local-proof-grant") != document:
+                self.session.store.write("local-proof-grant", document)
+
     def handle(self, connection: socket.socket) -> None:
         credentials, raw = receive_credential_packet(connection, maximum=MAX_NODE_LINK_BYTES)
         pid, uid, _ = credentials
@@ -104,10 +111,10 @@ class BrokerLinkService:
         # Central independently decides whether its carrier is still authorized.
         grant = self.session.grant
         if grant is not None:
-            self.session.store.write("local-proof-grant", {"grant": encode_session_grant(grant).decode()})
+            self.remember_grant()
         else:
             retained = self.session.store.read("local-proof-grant")
-            grant = parse_session_grant(retained["grant"].encode()) if retained else self.session.ensure()
+            grant = parse_session_grant(retained["grant"].encode()) if retained else None
         if uid != 10004 or running is None or running.process.pid != pid or grant is None:
             raise ValueError("node_link_peer")
         begin = parse_node_app_link_begin(raw)

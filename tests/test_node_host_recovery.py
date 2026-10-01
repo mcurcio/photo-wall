@@ -93,6 +93,7 @@ def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
             return 200, b"{}"
 
     runner = HostRunner.__new__(HostRunner)
+    runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
     runner.store, runner.core, runner.journal = store, core, core.journal
     runner.transport = Transport()
     runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=core.session_id))

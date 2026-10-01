@@ -100,7 +100,9 @@ def main() -> None:
             # Local proofs and stop progress must run even without a Central session.
             links.serve_one()
             try:
+                links.remember_grant()
                 grant = session.ensure()
+                links.remember_grant()
                 if grant is not None:
                     current = driver.current()
                     prior = store.read("observed-app")

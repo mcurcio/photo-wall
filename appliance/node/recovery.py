@@ -72,15 +72,26 @@ class RecoverySupervisor:
         self.store, self.driver, self.observer = store, driver, observer
 
     def _load(self):
-        value = self.store.read("local-recovery") or {"schema": 1, "records": {}}
-        if set(value) != {"schema", "records"} or value["schema"] != 1 or type(value["records"]) is not dict or len(value["records"]) > 1024:
+        value = self.store.read("local-recovery")
+        if value is None:
+            value = {"schema": 1, "records": {}}
+        if type(value.get("schema")) is not int or set(value) != {"schema", "records"} or value["schema"] != 1 or type(value["records"]) is not dict or len(value["records"]) > 1024:
             raise ValueError("recovery_journal")
         for key, row in value["records"].items():
+            if type(row) is not dict or set(row) != {"obligation", "phase", "diagnostic"}:
+                raise ValueError("recovery_journal")
             obligation = RecoveryObligation.parse(row["obligation"])
-            if (key != str(obligation.operation_id) or str(obligation.boot_id) != self.store.binding["boot_id"]
+            if (row["diagnostic"] not in (None, "stop_deadline", "restore_deadline") or key != str(obligation.operation_id) or str(obligation.boot_id) != self.store.binding["boot_id"]
                     or row["phase"] not in ("armed", "stopped", "controlled", "reboot_intent", "reboot_requested", "reboot_unknown")):
                 raise ValueError("recovery_journal")
         return value
+
+    def telemetry(self):
+        rows = tuple(self._load()["records"].values())
+        active = tuple(row for row in rows if row["phase"] != "controlled")
+        fault = next(("local_recovery_" + row["diagnostic"] for row in active if row["diagnostic"]), None)
+        return (("local_recovery_active", len(active), "count", "base_recovery"),
+                ("local_recovery_reboot", sum(row["phase"].startswith("reboot") for row in active), "count", "base_recovery")), fault
 
     def _save(self, value, key, row):
         self.store.write("local-recovery", {**value, "records": {**value["records"], key: row}})

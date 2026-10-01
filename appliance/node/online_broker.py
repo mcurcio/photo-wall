@@ -7,9 +7,14 @@ from uuid import UUID, uuid4
 from appliance.node.broker import RunningApp
 from appliance.node.capacity import EMERGENCY_HEADROOM, memory_values
 from appliance.node.clock import boottime_ms
-from appliance.node.lifecycle_storage import primitive, running_from
-from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation, canonical
-from appliance.node.stop_operation import StopGuaranteeUnavailable, StopRequest
+from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation
+from appliance.node.stop_operation import (
+    StopGuaranteeUnavailable,
+    StopRequest,
+    stop_request_digest,
+    stop_request_document,
+    stop_request_from,
+)
 from contracts.node_lifecycle import (
     AppEffectEventV2,
     StageCommandV2,
@@ -118,7 +123,7 @@ class OnlineEffectBroker:
         self._event("cancelled_before_stop", running=old)
         return True
 
-    def _event(self, phase: str, *, running=None, fault=None):
+    def _event(self, phase: str, *, running=None, fault=None, stop_request=None, recovery=None):
         record = self.record
         seal = phase in ("cancelled_before_stop", "no_stop_quiescent")
         # A cancellation seal may add one later post-permit-expiry observation;
@@ -132,6 +137,19 @@ class OnlineEffectBroker:
         if seal and record["pending"]:
             raise ValueError("online_unreported_journal")
         command = parse_stage_command(record["command"].encode())
+        stop_metadata = {}
+        if phase == "intent_stop":
+            if (type(stop_request) is not StopRequest or type(recovery) is not RecoveryObligation
+                    or stop_request.operation_id != command.operation_id
+                    or stop_request.command_sha256 != command.command_sha256
+                    or recovery.operation_id != stop_request.operation_id
+                    or recovery.boot_id != stop_request.boot_id
+                    or recovery.request_sha256 != stop_request_digest(stop_request)):
+                raise ValueError("online_stop_intent_binding")
+            stop_metadata = {"stop_request": stop_request_document(stop_request),
+                             "recovery": recovery.document()}
+        elif stop_request is not None or recovery is not None:
+            raise ValueError("online_stop_intent_phase")
         if len(record["pending"]) >= 128:
             raise ValueError("online_evidence_capacity")
         permit = record.get("permit_id")
@@ -150,7 +168,7 @@ class OnlineEffectBroker:
         seal_metadata = ({"quiescent_event_id": str(event.event_id), "quiescent_at": event.occurred_boottime_ms,
                           "revalidation_id": str(uuid4()), "seal_event": encode_app_effect_event(event).decode()}
                          if phase == "no_stop_quiescent" else {})
-        self._save({**record, **seal_metadata, "phase": phase, "sequence": event.sequence,
+        self._save({**record, **seal_metadata, **stop_metadata, "phase": phase, "sequence": event.sequence,
                     "intent_stop_written": record.get("intent_stop_written", False) or phase == "intent_stop",
                     "stop_consumed": record.get("stop_consumed", False) or phase == "stopped",
                     "executor_sealed": record.get("executor_sealed", False) or seal, "sealed_operations": seals,
@@ -193,7 +211,10 @@ class OnlineEffectBroker:
                 or permit.ready_sha256 != ready_digest(ready)
                 or permit.old_process != command.old_process or permit.old_app_epoch != command.old_app_epoch):
             raise ValueError("online_stop_permit_binding")
-        self._save({**record, "permit": encode_stop_permit(permit).decode(), "permit_id": str(permit.permit_id)})
+        encoded_permit = encode_stop_permit(permit).decode()
+        if record.get("permit") not in (None, encoded_permit):
+            raise ValueError("online_stop_permit_conflict")
+        self._save({**record, "permit": encoded_permit, "permit_id": str(permit.permit_id)})
         if not permit.issued_boottime_ms <= boottime_ms() < permit.expires_boottime_ms:
             return
         if command.fallback is None:
@@ -201,6 +222,7 @@ class OnlineEffectBroker:
         for reference in (command.target, command.fallback):
             if self.driver.verify(reference) is not True:
                 raise ValueError("online_root_unverified")
+        self._bound(command)
         old = self._old(command)
         if boottime_ms() >= permit.expires_boottime_ms:
             return
@@ -210,30 +232,40 @@ class OnlineEffectBroker:
                      self.session.grant.expires_boottime_ms))
         now = boottime_ms()
         obligation = RecoveryObligation(request.boot_id, request.operation_id,
-            hashlib.sha256(canonical(primitive(request))).hexdigest(), old.process, old.app_epoch,
+            stop_request_digest(request), old.process, old.app_epoch,
             old.environment.environment_sha256, command.target.environment_sha256,
             command.fallback.environment_sha256, now, now + STOP_BUDGET_MS,
             now + STOP_BUDGET_MS + RESTORE_BUDGET_MS)
-        self._save({**self.record, "stop_request": primitive(request), "recovery": obligation.document()})
-        self._event("intent_stop", running=old)
+        # One durable transition binds the immutable recovery deadlines and request
+        # to intent. A crash cannot leave awaiting_permit with replaceable deadlines.
+        self._event("intent_stop", running=old, stop_request=request, recovery=obligation)
         # Host acknowledgment is required before dispatch. Lost acknowledgment is
         # recovered by immutable replay; neither owner can extend the deadlines.
-        self.recovery.arm(obligation)
+        self._arm_recovery(obligation)
         try:
             operation = self.driver.stop(request, reattach_only=False)
             self._consume_stop(operation, command)
         except StopGuaranteeUnavailable as error:
-            self._stop_fault(error.code)
+            self._stop_fault(error)
 
-    def _stop_fault(self, code):
+    def _arm_recovery(self, obligation):
+        if self.recovery.arm(obligation) != obligation.receipt:
+            raise ValueError("online_recovery_receipt")
+
+    def _stop_fault(self, error):
+        record = self.record
+        diagnostic = {"code": error.code, "diagnostic_id": error.diagnostic_id}
+        if record.get("stop_failure") != diagnostic:
+            self._save({**record, "stop_failure": diagnostic})
         if self.record["phase"] != "effect_unknown":
-            self._event("effect_unknown", fault=code)
+            self._event("effect_unknown", fault=error.code)
 
     def _consume_stop(self, operation, command):
-        if not operation.done():
+        # The persisted lifecycle transition owns exactly-once consumption.
+        if self.record.get("stop_consumed") or not operation.done():
             return
         completed = operation.result()
-        if primitive(completed.request) != self.record["stop_request"]:
+        if stop_request_document(completed.request) != self.record["stop_request"]:
             raise StopGuaranteeUnavailable("stop_completion_mismatch")
         self._event("stopped", running=completed.request.old)
         self._start(command, command.target, fallback=False)
@@ -257,7 +289,7 @@ class OnlineEffectBroker:
         if record.get("executor_sealed") or str(command.operation_id) in record.get("sealed_operations", {}):
             raise ValueError("online_executor_sealed")
         if record.get("recovery"):
-            self.recovery.arm(RecoveryObligation.parse(record["recovery"]))
+            self._arm_recovery(RecoveryObligation.parse(record["recovery"]))
         # The intent is durable before selection/spawn, including fallback budget.
         self._save({**record, "phase": "fallback_intent" if fallback else "target_intent"})
         try:
@@ -283,15 +315,12 @@ class OnlineEffectBroker:
             return
         command = parse_stage_command(record["command"].encode())
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
-            row = record["stop_request"]
-            request = StopRequest(UUID(row["operation_id"]), UUID(row["boot_id"]), row["command_sha256"],
-                UUID(row["permit_id"]), row["permit_sha256"], running_from(row["old"]),
-                row["dispatch_not_after_boottime_ms"])
-            self.recovery.arm(RecoveryObligation.parse(record["recovery"]))
+            request = stop_request_from(record["stop_request"])
+            self._arm_recovery(RecoveryObligation.parse(record["recovery"]))
             try:
                 self._consume_stop(self.driver.stop(request, reattach_only=True), command)
             except StopGuaranteeUnavailable as error:
-                self._stop_fault(error.code)
+                self._stop_fault(error)
             return
         running = self.driver.current()
         if running is not None and running.operation_id == command.operation_id:

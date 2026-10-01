@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import subprocess
 import tempfile
 from uuid import UUID
 
 from appliance.node.clock import boottime_ms
-from appliance.node.lifecycle_storage import primitive
 from appliance.node.recovery import STOP_TIMEOUT_SECONDS  # noqa: F401
-from appliance.node.stop_operation import StopGuaranteeUnavailable, StopView
+from appliance.node.stop_operation import (
+    StopGuaranteeUnavailable,
+    StopView,
+    stop_request_document,
+)
 
 LOG = logging.getLogger(__name__)
 UNIT = "photo-wall-node-player.service"
 GROUP = "/photowallapp.slice/" + UNIT
 PROPERTIES = "LoadState,ActiveState,MainPID,InvocationID,ControlGroup,RootDirectory,Job,Restart,Delegate,KillMode,TimeoutStopUSec"
+TRANSPORT_TIMEOUT_MS = 1000
 
 
 def proc_birth(proc, pid):
@@ -40,12 +45,22 @@ class StopObserver:
         self.child = self.output = None
         self.child_started = 0
         self.submitting = False
+        self.retiring = []
+        self.capture_allowed = False
 
     def close(self, *, keep_identity=False):
+        """Release local resources without waiting for a transport subprocess.
+
+        poll() reaps with WNOHANG; the serial service loop finishes reaping a killed
+        child. This never signals the Player or cancels its durable operation.
+        """
         if self.child is not None:
             if self.child.poll() is None:
-                self.child.kill()
-            self.child.wait(timeout=1)
+                try:
+                    self.child.kill()
+                except ProcessLookupError:
+                    pass
+                self.retiring.append(self.child)
             self.child = None
         if self.output is not None:
             self.output.close()
@@ -57,9 +72,20 @@ class StopObserver:
     def _read(self, request=None, name=None):
         request = request or self.request
         row = self.driver.store.read(name or self.name)
-        if (row is None or row.get("schema") != 1 or row.get("request") != primitive(request)
+        if (row is None or type(row.get("schema")) is not int or row.get("schema") != 1 or row.get("request") != stop_request_document(request)
                 or set(row) != {"schema", "request", "identity", "dispatch", "completed_ms", "fault", "diagnostic"}
                 or row["dispatch"] not in ("not_dispatched", "dispatch_unknown", "acknowledged")):
+            raise StopGuaranteeUnavailable("stop_journal_invalid")
+        identity = row["identity"]
+        if identity is not None and (type(identity) is not dict or set(identity) != {"group", "root"}
+                or any(type(identity[key]) is not list or len(identity[key]) != 2
+                       or any(type(v) is not int or v < 0 for v in identity[key])
+                       for key in ("group", "root"))):
+            raise StopGuaranteeUnavailable("stop_journal_invalid")
+        if (row["completed_ms"] is not None and (type(row["completed_ms"]) is not int
+                or row["completed_ms"] < 1 or identity is None or row["fault"] is not None)
+                or row["fault"] is not None and (type(row["fault"]) is not str or len(row["fault"]) > 128)
+                or identity is None and row["dispatch"] != "not_dispatched"):
             raise StopGuaranteeUnavailable("stop_journal_invalid")
         return row
 
@@ -73,53 +99,28 @@ class StopObserver:
             if not self.view.done():
                 raise StopGuaranteeUnavailable("stop_owner_busy")
             self.close()
+            self.capture_allowed = False
         self.request = request
         self.name = "stop-" + str(request.operation_id)
         self.view = StopView(request, lambda request=request, name=self.name: self._read(request, name))
         prior = self.driver.store.read(self.name)
         if prior is not None:
-            self._read()  # Exact request/schema check before returning a recovered view.
+            row = self._read()
+            # Repeated admission in this owner preserves capture progress; a new
+            # owner never recreates missing evidence or dispatches a recovered intent.
+            if row["identity"] is None and not self.capture_allowed and row["fault"] is None:
+                self._save({**row, "fault": "stop_capture_unavailable"})
             return self.view
+        self.capture_allowed = False
         if reattach_only:
             raise StopGuaranteeUnavailable("stop_capture_unavailable")
-        if self.driver.current() != request.old:
-            raise StopGuaranteeUnavailable("stop_identity_changed")
-        group = self.driver.cgroups / GROUP.lstrip("/")
-        self.group_fd = os.open(group, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        info = os.fstat(self.group_fd)
-        root = self.driver.roots / request.old.environment.environment_sha256 / "rootfs"
-        root_info = root.stat()
-        row = {"schema": 1, "request": primitive(request),
-               "identity": {"group": [info.st_dev, info.st_ino],
-                            "root": [root_info.st_dev, root_info.st_ino]},
-               "dispatch": "not_dispatched", "completed_ms": None, "fault": None, "diagnostic": None}
-        # Lifecycle intent is already durable. This record precedes any syscall.
-        self._save(row)
-        if self.driver.current() != request.old:
-            self._save({**row, "fault": "stop_identity_changed"})
-            return self.view
-        policy = subprocess.run(["/usr/bin/systemctl", "show", UNIT,
-            "--property=Restart,Delegate,KillMode,TimeoutStopUSec"], capture_output=True,
-            text=True, check=True, timeout=0.25).stdout
-        if dict(line.split("=", 1) for line in policy.splitlines()) != {
-                "Restart": "no", "Delegate": "no", "KillMode": "control-group", "TimeoutStopUSec": "30s"}:
-            self._save({**row, "fault": "stop_unit_policy_changed"})
-            return self.view
-        self._save({**row, "dispatch": "dispatch_unknown"})
-        if boottime_ms() >= request.dispatch_not_after_boottime_ms:
-            self._save({**row, "fault": "stop_dispatch_expired"})
-            return self.view
-        try:
-            self.child = subprocess.Popen(["/usr/bin/systemctl", "--no-block", "stop", UNIT],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env={"PATH": "/usr/bin", "LANG": "C"})
-            self.submitting = True
-            self.child_started = boottime_ms()
-        except OSError:
-            self._save({**self._read(), "diagnostic": "stop_submission_unavailable"})
+        self._save({"schema": 1, "request": stop_request_document(request), "identity": None,
+                    "dispatch": "not_dispatched", "completed_ms": None, "fault": None, "diagnostic": None})
+        self.capture_allowed = True
+        # No PID1 wait or live-process observation happens on the caller's stack.
         return self.view
 
-    def _observe(self, rows):
+    def _identity(self, rows):
         expected = self.request.old
         root = self.driver.roots / expected.environment.environment_sha256 / "rootfs"
         if (rows["InvocationID"] and UUID(rows["InvocationID"]) != expected.process.invocation_id
@@ -128,41 +129,98 @@ class StopObserver:
                 or rows["MainPID"] not in ("0", str(expected.process.pid))):
             raise StopGuaranteeUnavailable("stop_identity_changed")
         if rows["LoadState"] != "not-found" and (
-                rows["Restart"] != "no" or rows["Delegate"] != "no" or rows["KillMode"] != "control-group"):
+                rows["Restart"] != "no" or rows["Delegate"] != "no" or rows["KillMode"] != "control-group"
+                or rows["TimeoutStopUSec"] != f"{STOP_TIMEOUT_SECONDS}s"):
             raise StopGuaranteeUnavailable("stop_unit_policy_changed")
+        return root
+
+    def _capture_and_dispatch(self, rows):
+        root = self._identity(rows)
+        expected = self.request.old
+        if (rows["ActiveState"] != "active" or rows["MainPID"] != str(expected.process.pid)
+                or not rows["InvocationID"] or rows["ControlGroup"] != GROUP
+                or rows["RootDirectory"] != str(root) or rows["Job"] not in ("", "0")):
+            raise StopGuaranteeUnavailable("stop_capture_unavailable")
+        if proc_birth(self.driver.proc, expected.process.pid) != expected.process.start_ticks:
+            raise StopGuaranteeUnavailable("stop_capture_unavailable")
+        group = self.driver.cgroups / GROUP.lstrip("/")
+        if self.group_fd < 0:
+            self.group_fd = os.open(group, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(self.group_fd)
+        current = group.lstat()
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise StopGuaranteeUnavailable("stop_cgroup_replaced")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            root_info = os.fstat(root_fd)
+            actual_root = (self.driver.proc / str(expected.process.pid) / "root").stat()
+            current_root = root.lstat()
+            if ((actual_root.st_dev, actual_root.st_ino) != (root_info.st_dev, root_info.st_ino)
+                    or (current_root.st_dev, current_root.st_ino) != (root_info.st_dev, root_info.st_ino)):
+                raise StopGuaranteeUnavailable("stop_root_changed")
+        finally:
+            os.close(root_fd)
+        with (self.driver.proc / str(expected.process.pid) / "cgroup").open("rb") as stream:
+            cgroup = stream.read(4097)
+        if len(cgroup) > 4096 or f"0::{GROUP}".encode() not in cgroup.splitlines():
+            raise StopGuaranteeUnavailable("stop_identity_changed")
+        if proc_birth(self.driver.proc, expected.process.pid) != expected.process.start_ticks:
+            raise ValueError("stop_capture_changed_during_observation")
+        row = {**self._read(), "identity": {"group": [info.st_dev, info.st_ino],
+                                           "root": [root_info.st_dev, root_info.st_ino]},
+               "diagnostic": None}
+        self._save(row)  # Captured evidence is durable before the dispatch barrier.
+        self.capture_allowed = False
+        self._save({**row, "dispatch": "dispatch_unknown"})
+        if boottime_ms() >= self.request.dispatch_not_after_boottime_ms:
+            self._save({**self._read(), "fault": "stop_dispatch_expired"})
+            self.close()
+            return
+        try:
+            self.child = subprocess.Popen(["/usr/bin/systemctl", "--no-block", "stop", UNIT],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin", "LANG": "C"})
+            self.submitting = True
+            self.child_started = boottime_ms()
+        except OSError:
+            self._save({**self._read(), "diagnostic": "stop_submission_unavailable"})
+
+    def _observe(self, rows):
+        self._identity(rows)
+        expected = self.request.old
         row = self._read()
+        if row["identity"] is None:
+            raise StopGuaranteeUnavailable("stop_capture_unavailable")
         group = self.driver.cgroups / GROUP.lstrip("/")
         try:
             info = group.lstat()
         except FileNotFoundError:
             empty = True
         else:
-            if [info.st_dev, info.st_ino] != row["identity"]["group"]:
+            if not stat.S_ISDIR(info.st_mode) or [info.st_dev, info.st_ino] != row["identity"]["group"]:
                 raise StopGuaranteeUnavailable("stop_cgroup_replaced")
             if self.group_fd < 0:
                 self.group_fd = os.open(group, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             opened = os.fstat(self.group_fd)
             if [opened.st_dev, opened.st_ino] != row["identity"]["group"]:
                 raise StopGuaranteeUnavailable("stop_cgroup_replaced")
-            # Open relative to the captured object; never follow a replaced path.
             fd = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.group_fd)
-            with os.fdopen(fd) as stream:
-                events = dict(line.split() for line in stream.read(4096).splitlines())
-            if events.get("populated") not in ("0", "1"):
+            with os.fdopen(fd, "rb") as stream:
+                raw = stream.read(4097)
+            events = dict(line.split() for line in raw.decode().splitlines())
+            if len(raw) > 4096 or events.get("populated") not in ("0", "1"):
                 raise ValueError("stop_cgroup_malformed")
             empty = events["populated"] == "0"
-        birth = proc_birth(self.driver.proc, expected.process.pid)
-        if birth == expected.process.start_ticks:
-            # Missing teardown metadata is transient; a surviving mismatch is not.
-            actual_root = (self.driver.proc / str(expected.process.pid) / "root").stat()
-            if [actual_root.st_dev, actual_root.st_ino] != row["identity"]["root"]:
-                raise StopGuaranteeUnavailable("stop_root_changed")
+        if proc_birth(self.driver.proc, expected.process.pid) == expected.process.start_ticks:
+            # A live old process is pending. Its teardown root metadata is not
+            # needed: the exact root and subtree were captured before dispatch.
             return False
         return (empty and rows["MainPID"] == "0" and rows["Job"] in ("", "0")
                 and (rows["LoadState"] == "not-found" or rows["ActiveState"] in ("inactive", "failed")))
 
     def service(self, *, now_ms, budget_ms):
-        if self.request is None or budget_ms <= 0 or self.view.done():
+        self.retiring = [child for child in self.retiring if child.poll() is None]
+        if (self.request is None or budget_ms <= 0 or self.view.done() or self.retiring):
             return
         try:
             if self.child is None:
@@ -175,13 +233,14 @@ class StopObserver:
                 return
             status = self.child.poll()
             if status is None:
-                if now_ms - self.child_started >= 1000:
-                    self.child.kill()  # Only our transport child; never signals the Player.
+                if now_ms - self.child_started >= TRANSPORT_TIMEOUT_MS:
+                    self.close(keep_identity=True)  # Only the bounded transport child.
+                    self._save({**self._read(), "diagnostic": "stop_transport_timeout"})
                 return
             self.child = None
             if self.submitting:
-                if status == 0:
-                    self._save({**self._read(), "dispatch": "acknowledged"})
+                self._save({**self._read(), **({"dispatch": "acknowledged", "diagnostic": None} if status == 0
+                    else {"diagnostic": "stop_submission_unavailable"})})
                 return
             self.output.seek(0)
             raw = self.output.read(16385)
@@ -192,7 +251,11 @@ class StopObserver:
             rows = dict(line.split("=", 1) for line in raw.decode().splitlines())
             if set(rows) != set(PROPERTIES.split(",")):
                 raise ValueError("stop_observation_malformed")
-            if self._observe(rows):
+            if self._read()["identity"] is None:
+                if not self.capture_allowed:
+                    raise StopGuaranteeUnavailable("stop_capture_unavailable")
+                self._capture_and_dispatch(rows)
+            elif self._observe(rows):
                 self._save({**self._read(), "completed_ms": now_ms, "diagnostic": None})
                 self.close()
         except StopGuaranteeUnavailable as error:

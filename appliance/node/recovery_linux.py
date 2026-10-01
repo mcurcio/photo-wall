@@ -62,11 +62,10 @@ class RecoveryObserver:
                 or type(progress["sampled_ms"]) is not int or not obligation.armed_ms <= progress["sampled_ms"] <= now_ms
                 or now_ms - progress["sampled_ms"] > 5000):
             return False
-        from contracts.node_protocol import digest
+        from contracts.node_protocol import NodeProcessIdentity, digest
         digest(progress["challenge_sha256"])
         process = progress["process"]
-        if set(process) != {"pid", "start_ticks", "invocation_id"}:
-            return False
+        identity = NodeProcessIdentity(**{**process, "invocation_id": UUID(process["invocation_id"])})
         rows = unit_rows(UNIT)
         return (rows["ActiveState"] == "active" and rows["Job"] in ("", "0")
                 and rows["MainPID"] == str(process["pid"])
@@ -74,7 +73,9 @@ class RecoveryObserver:
                 and rows["ControlGroup"] == GROUP
                 and rows["RootDirectory"] == ROOTS + progress["environment"] + "/rootfs"
                 and read_proc_start_ticks(Path("/proc"), process["pid"]) == process["start_ticks"]
-                and process["invocation_id"] != str(obligation.old_process.invocation_id))
+                and identity.invocation_id != obligation.old_process.invocation_id
+                and "0::" + GROUP in (Path("/proc") / str(identity.pid) / "cgroup").read_text().splitlines()
+                and unit_rows(UNIT) == rows)
 
 
 def broker_peer(pid, uid):
