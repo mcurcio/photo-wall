@@ -167,3 +167,22 @@ def test_startup_waits_for_first_complete_tick(monkeypatch):
         finally:
             coordinator.release.set()
         assert wait_for(client, lambda response: response.status_code == 200).json()["status"] == "ok"
+
+
+def test_plan_horizon_and_renewal_come_from_the_environment_over_deployment_defaults(monkeypatch):
+    """A deployment plans 300 s ahead renewed every 30 s; the wall demo shortens both."""
+    limits = []
+
+    def coordinator(_db, _clock, coordination_limits, **_kwargs):
+        limits.append(coordination_limits)
+        return FakeCoordinator()
+
+    monkeypatch.setattr(central_app, "Coordinator", coordinator)
+    monkeypatch.setattr(central_app, "MediaRepository", lambda *_args, **_kwargs: FakeMedia())
+    for environment in ({}, {"PHOTO_WALL_HORIZON_SECONDS": "15", "PHOTO_WALL_RENEWAL_SECONDS": "10"}):
+        for name in ("PHOTO_WALL_HORIZON_SECONDS", "PHOTO_WALL_RENEWAL_SECONDS"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in environment.items():
+            monkeypatch.setenv(name, value)
+        central_app.create_app(FakeDatabase(), ManualClock(1000), ADMIN, run_scheduler=False)
+    assert [(item.horizon_seconds, item.renewal_seconds) for item in limits] == [(300, 30), (15, 10)]

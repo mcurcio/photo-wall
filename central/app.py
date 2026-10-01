@@ -173,7 +173,8 @@ def create_app(
         db,
         clock,
         CoordinationLimits(
-            horizon_seconds=float(os.environ.get("PHOTO_WALL_HORIZON_SECONDS", "300"))
+            horizon_seconds=float(os.environ.get("PHOTO_WALL_HORIZON_SECONDS", "300")),
+            renewal_seconds=float(os.environ.get("PHOTO_WALL_RENEWAL_SECONDS", "30")),
         ),
         media=media_repository,
     )
