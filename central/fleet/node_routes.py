@@ -17,7 +17,6 @@ from central.fleet.bytes import OfferByteReader
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService, parse_node_deployment
-from central.fleet.node_boot_claims import NodeBootClaims
 from central.fleet.node_calibration import NodeCalibration
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_display import NodeDisplay
@@ -71,7 +70,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
-    boots, boot_claims = NodeBootService(sessions), NodeBootClaims(sessions)
+    boots = NodeBootService(sessions)
     bytes_reader = OfferByteReader(content.reader if content else None)
     effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
     commands = NodeCommands(sessions, effect_gate)
@@ -181,20 +180,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise NodeControlError(exc.reason, 422) from exc
         except ValueError as exc:
             raise NodeControlError(str(exc), 422) from exc
-
-    @app.put("/v1/operator/node/devices/{device_id}/selected-boot", dependencies=[Depends(admin)])
-    async def select_boot(device_id: str, request: Request):
-        raw = await body(request, MAX_COMMAND_BYTES)
-        value = loads_object(raw, max_bytes=MAX_COMMAND_BYTES)
-        try:
-            if value is None or set(value) != {"generation", "expected_revision", "boot_id", "operator_audit_ref"}:
-                raise ValueError("shape")
-            value["boot_id"] = UUID(value["boot_id"])
-            return await asyncio.to_thread(boot_claims.select, device_id, **value)
-        except (ValueError, TypeError) as exc:
-            if isinstance(exc, NodeControlError):
-                raise
-            raise NodeControlError("invalid_node_boot_selection", 422) from exc
 
     @app.post("/v2/node/sessions")
     async def enroll(request: Request):

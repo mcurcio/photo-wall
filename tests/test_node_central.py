@@ -48,7 +48,7 @@ def test_session_exact_retry_concurrent_and_scope_separation(registry):
         with pytest.raises(NodeControlError, match="session_unavailable"):
             sessions.authenticate_in(conn, broker.session_id, claim.credential)
     with pytest.raises(NodeControlError, match="credential_reuse"):
-        sessions.enroll(replace(claim, session_id=uuid4(), expected_session_id=grant.session_id))
+        sessions.enroll(replace(claim, session_id=uuid4()))
 
 
 def test_replaced_producer_cannot_regress_current_projection(registry):
@@ -59,7 +59,7 @@ def test_replaced_producer_cannot_regress_current_projection(registry):
     registry.clock.advance(10)
     assert ingest.ingest(grant.session_id, claim.credential, encode_node_message(event))["received_at"] == first["received_at"]
     next_claim = replace(claim, session_id=uuid4(), incarnation_id=uuid4(),
-                         credential=uuid4().hex + uuid4().hex, expected_session_id=grant.session_id)
+                         credential=uuid4().hex + uuid4().hex)
     sessions.enroll(next_claim)
     later = replace(event, event_id=uuid4(), sequence=2)
     assert ingest.ingest(grant.session_id, claim.credential, encode_node_message(later))["disposition"] == "historical"
@@ -135,7 +135,6 @@ def test_reboot_audit_response_and_initiation_are_separate(registry):
     assert audit["effects"][0]["event_id"] == str(event.event_id)
     assert audit["effects"][0]["physical_completion"] == "unknown"
     assert status["boot_claims"][0]["kernel_boot_id"] == str(BOOT_ID)
-    assert status["boot_claims"][0]["selectable"]
     registry.clock.advance(31)
     assert commands.poll(grant.session_id, claim.credential)["commands"] == []
     with pytest.raises(NodeControlError, match="expired"):
@@ -171,7 +170,8 @@ def test_mounted_routes_disabled_by_default_and_real_when_configured(registry):
         grant = parse_session_grant(response.content)
         headers = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
         assert not grant.command_eligible
-        assert client.get("/v2/node/commands", headers=headers).json() == {"error": "legacy_observation_adoption"}
+        assert not grant.command_eligible and grant.command_reason == "legacy_observation_adoption"
+        assert client.get("/v2/node/commands", headers=headers).json() == {"commands": []}
         assert client.post("/v2/node/evidence", content=b"{}", headers=headers).status_code == 422
         assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
 

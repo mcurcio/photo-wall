@@ -64,29 +64,6 @@ ALTER TABLE node_boot_admissions ADD CONSTRAINT node_boot_admissions_offer_id_fk
 CREATE TRIGGER node_offer_context_immutable BEFORE UPDATE OR DELETE ON node_offer_contexts
     FOR EACH ROW EXECUTE FUNCTION node_immutable_record();
 
--- A competing fresh boot claim is uncertainty, not evidence that either physical Pi ended.
-CREATE TABLE node_boot_claim_conflicts (
-    device_id TEXT NOT NULL REFERENCES devices(device_id),
-    device_generation BIGINT NOT NULL,
-    revision BIGINT NOT NULL CHECK(revision>0),
-    selected_boot_id UUID,
-    conflict BOOLEAN NOT NULL,
-    changed_at DOUBLE PRECISION NOT NULL,
-    operator_audit_ref TEXT,
-    PRIMARY KEY(device_id,device_generation)
-);
-CREATE TABLE node_boot_selections (
-    device_id TEXT NOT NULL,
-    device_generation BIGINT NOT NULL,
-    revision BIGINT NOT NULL,
-    selected_boot_id UUID NOT NULL,
-    operator_audit_ref TEXT NOT NULL,
-    selected_at DOUBLE PRECISION NOT NULL,
-    PRIMARY KEY(device_id,device_generation,revision)
-);
-CREATE TRIGGER node_boot_selection_immutable BEFORE UPDATE OR DELETE ON node_boot_selections
-    FOR EACH ROW EXECUTE FUNCTION node_immutable_record();
-
 CREATE TABLE node_environment_catalog (
     environment_sha256 TEXT PRIMARY KEY,
     reference JSONB NOT NULL

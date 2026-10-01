@@ -50,16 +50,11 @@ class NodeSessionClaim:
     session_id: UUID
     credential: str
     sampled_boottime_ms: int
-    expected_boot_id: UUID | None = None
-    expected_session_id: UUID | None = None
 
     def __post_init__(self) -> None:
         token(self.serial, 128)
         for value in (self.offer_id, self.kernel_boot_id, self.incarnation_id, self.session_id):
             identifier(value)
-        for value in (self.expected_boot_id, self.expected_session_id):
-            if value is not None:
-                identifier(value)
         scope_for_owner(self.owner)
         digest(self.credential)
         counter(self.sampled_boottime_ms)
@@ -76,10 +71,8 @@ def parse_session_claim(raw: bytes) -> NodeSessionClaim:
             or value.pop("schema") != 2):
         raise ValueError("invalid_node_session_claim")
     try:
-        for key in ("offer_id", "kernel_boot_id", "incarnation_id", "session_id",
-                    "expected_boot_id", "expected_session_id"):
-            if value.get(key) is not None:
-                value[key] = UUID(value[key])
+        for key in ("offer_id", "kernel_boot_id", "incarnation_id", "session_id"):
+            value[key] = UUID(value[key])
         return NodeSessionClaim(**value)
     except (TypeError, KeyError, AttributeError) as exc:
         raise ValueError("invalid_node_session_claim") from exc

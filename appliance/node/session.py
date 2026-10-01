@@ -55,8 +55,7 @@ class NodeSession:
         if self.grant is not None:
             previous = self.claim
             self.claim = replace(previous, session_id=uuid4(), credential=secrets.token_hex(32),
-                                 sampled_boottime_ms=now, expected_boot_id=previous.kernel_boot_id,
-                                 expected_session_id=previous.session_id)
+                                 sampled_boottime_ms=now)
             self.grant = None
             self._save()
         status, raw = self.transport.request("POST", "/v2/node/sessions", encode_session_claim(self.claim))

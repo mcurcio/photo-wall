@@ -36,9 +36,8 @@ from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import load_current_node_app_link_in
 from central.fleet.node_boot import NodeBootService, NodeDeployment
-from central.fleet.node_boot_claims import require_command_boot_in
 from central.fleet.node_lifecycle import OperatorAppStage
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError, command_eligibility_in
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
@@ -330,11 +329,10 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                 principal.grant.session_id == command.command_session_id
             )
             result["command_authority_epoch"] = row["authority_epoch"]
-            try:
-                require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
-                result["boot_eligible"] = True
-            except NodeControlError as error:
-                result.update(boot_eligible=False, boot_refusal=error.code)
+            eligible, reason = command_eligibility_in(conn, principal.grant.offer_id)
+            result["boot_eligible"] = eligible
+            if not eligible:
+                result["boot_refusal"] = reason
             effects = conn.execute(
                 "SELECT payload FROM node_app_effects WHERE operation_id=%s ORDER BY sequence",
                 (operation,),

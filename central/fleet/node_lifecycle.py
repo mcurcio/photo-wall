@@ -17,7 +17,6 @@ from central.fleet.models import OfferAsset
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import load_current_node_app_link_in
 from central.fleet.node_boot import parse_node_deployment
-from central.fleet.node_boot_claims import require_command_boot_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.fleet.rollout_gate import RolloutEffectGate
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
@@ -101,7 +100,6 @@ class NodeLifecycle:
                 or principal.grant.session_id != command.command_session_id
                 or row["rollout_generation"] != gate.generation or row["rollout_scope_sha256"] != gate.scope_sha256):
             raise NodeControlError("node_app_command_scope_changed", 403)
-        require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
         if principal.admission.ensure_current(self.sessions.clock) >= row["expires_at"]:
             raise NodeControlError("node_app_command_expired", 410)
         if conn.execute("SELECT 1 FROM node_app_stage_cancellations WHERE operation_id=%s", (command.operation_id,)).fetchone():
@@ -121,7 +119,6 @@ class NodeLifecycle:
             if (producer.device_id != device_id or producer.device_generation != request.device_generation
                     or principal.grant.scope != "app_effect"):
                 raise NodeControlError("node_app_operator_target_changed", 403)
-            require_command_boot_in(conn, producer, principal.grant.offer_id)
             now = principal.admission.ensure_current(self.sessions.clock)
             old = conn.execute("SELECT * FROM node_app_operations WHERE operation_id=%s",
                                (request.operation_id,)).fetchone()
@@ -196,8 +193,6 @@ class NodeLifecycle:
             owner = "app_effect_broker" if effects else "app_manager"
             if principal.grant.producer.owner != owner:
                 raise NodeControlError("node_app_scope_required", 403)
-            if effects:
-                require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
             rows = conn.execute("SELECT * FROM node_app_operations WHERE device_id=%s AND device_generation=%s "
                 "AND expires_at>%s AND NOT EXISTS(SELECT 1 FROM node_app_stage_cancellations c WHERE c.operation_id=node_app_operations.operation_id) ORDER BY created_at DESC LIMIT 1", (principal.grant.producer.device_id,
                 principal.grant.producer.device_generation, self.sessions.clock.utc())).fetchall()
@@ -395,7 +390,6 @@ class NodeLifecycle:
             self._same_boot(principal, command)
             if principal.grant.producer != command.producer or principal.grant.scope != "app_effect":
                 raise NodeControlError("node_app_revalidation_scope_changed")
-            require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
             now = principal.admission.ensure_current(self.sessions.clock)
             self._no_stop_in(conn, operation_id)
             prior = conn.execute("SELECT * FROM node_app_revalidations WHERE revalidation_id=%s",
@@ -460,7 +454,6 @@ class NodeLifecycle:
             if (principal.grant.producer != command.producer or challenge.producer != command.producer
                     or challenge.command_session_id != session_id):
                 raise NodeControlError("node_app_no_effect_scope_changed")
-            require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
             self._no_stop_in(conn, proof.operation_id)
             now = principal.admission.ensure_current(self.sessions.clock)
             grant = conn.execute("SELECT * FROM node_app_revalidations WHERE revalidation_id=%s AND operation_id=%s",
@@ -585,7 +578,6 @@ class NodeLifecycle:
         principal = self.sessions.load_operator_target_in(conn, current["session_id"])
         if principal.grant.producer != command.producer:
             return 0
-        require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
         latest = conn.execute("SELECT payload FROM node_app_effects WHERE operation_id=%s ORDER BY sequence DESC LIMIT 1",
                               (operation_id,)).fetchone()
         if latest is None:

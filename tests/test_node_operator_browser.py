@@ -17,7 +17,6 @@ from test_node_boot import claim_for, cold_setup
 from test_registry import enroll
 
 from central.coordination import Coordinator
-from central.fleet.node_boot_claims import NodeBootClaims
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.media_repository import MediaRepository
@@ -30,10 +29,10 @@ def test_operator_node_browser(registry):
     if os.environ.get("PHOTO_WALL_NODE_BROWSER") != "1":
         pytest.skip("interactive local fixture only")
     boots, sessions, _ = cold_setup(registry)
-    first = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
+    boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
     second = boots.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
-    claim = claim_for(second)
-    sessions.enroll(claim)
+    # The later boot supersedes the earlier one; no operator selection exists.
+    sessions.enroll(claim_for(second))
     enroll(registry, count=1, device_id=DEVICE_ID)
     coordinator = Coordinator(registry.db, registry.clock)
     gate, _ = _gate(registry, _certificate(expires_in=300))
@@ -45,17 +44,10 @@ def test_operator_node_browser(registry):
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
         RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock), coordinator)
     done = threading.Event()
-    seen = {"stale": False, "unknown": False}
+    seen = {"unknown": False}
 
     @app.middleware("http")
     async def disruptions(request, call_next):
-        if request.url.path.endswith("/selected-boot") and request.method == "PUT" and not seen["stale"]:
-            # A competing operator changes the revision after browser selection.
-            with registry.db.transaction() as conn:
-                revision = conn.execute("SELECT revision FROM node_boot_claim_conflicts").fetchone()["revision"]
-            NodeBootClaims(sessions).select(DEVICE_ID, generation=1, expected_revision=revision,
-                boot_id=first.kernel_boot_id, operator_audit_ref="fixture:competing-operator")
-            seen["stale"] = True
         response = await call_next(request)
         if request.url.path.endswith("/reboots") and request.method == "POST" and response.status_code == 200 and not seen["unknown"]:
             # Simulate a gateway losing the successful response, preserving DB effect.
@@ -84,13 +76,12 @@ def test_operator_node_browser(registry):
                 break
             time.sleep(0.01)
         print(f"NODE_BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/equipment", flush=True)
-        print(f"NODE_BROWSER_SELECTED_BOOT {second.kernel_boot_id}", flush=True)
+        print(f"NODE_BROWSER_CURRENT_BOOT {second.kernel_boot_id}", flush=True)
         assert done.wait(330), "operator browser fixture timed out"
         with registry.db.transaction() as conn:
             commands = conn.execute("SELECT count(*) n FROM node_reboot_commands").fetchone()["n"]
-            selection = conn.execute("SELECT selected_boot_id FROM node_boot_claim_conflicts").fetchone()["selected_boot_id"]
-        assert commands == 1 and selection == second.kernel_boot_id and all(seen.values())
-        print("PASS browser_stale_boot_cas_and_exact_unknown_reboot_retry", flush=True)
+        assert commands == 1 and all(seen.values())
+        print("PASS browser_exact_unknown_reboot_retry", flush=True)
     finally:
         server.should_exit = True
         thread.join(timeout=5)

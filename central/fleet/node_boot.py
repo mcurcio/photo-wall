@@ -204,8 +204,8 @@ class NodeBootService:
                     raise NodeControlError("node_boot_nonce_conflict")
                 if prior["refusal"]:
                     refusal = prior["refusal"]
-                elif prior["expires_at"] <= now or prior["device_generation"] != generation:
-                    raise NodeControlError("node_boot_offer_expired", 410)
+                elif prior["device_generation"] != generation:
+                    raise NodeControlError("node_boot_generation_stale", 403)
                 else:
                     result = parse_node_boot_offer(bytes(prior["offer_payload"]))
             else:
@@ -227,9 +227,6 @@ class NodeBootService:
                 if result:
                     conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,node_offer_id) VALUES(%s,'node_v2',%s)",
                                  (offer_id, offer_id))
-            if result:
-                from central.fleet.node_boot_claims import note_boot_claim_in
-                note_boot_claim_in(conn, device_id, generation, request.kernel_boot_id, now)
         if refusal:
             raise NodeControlError(refusal, 503)
         assert result is not None

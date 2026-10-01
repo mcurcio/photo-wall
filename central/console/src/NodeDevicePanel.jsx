@@ -14,7 +14,6 @@ export function NodeDevicePanel({ deviceId }) {
   const [busy, setBusy] = useState(false);
   const [audit, setAudit] = useState("");
   const [sessionId, setSessionId] = useState("");
-  const [bootPick, setBootPick] = useState(null);
   const [reboot, setReboot] = useState(null);
   const [rebootResult, setRebootResult] = useState(null);
   const alive = useRef(true);
@@ -54,13 +53,9 @@ export function NodeDevicePanel({ deviceId }) {
   const eligible = sessions.filter((session) => session.current && session.command_eligible
     && session.scope === "operator_reboot");
   const selected = eligible.find((session) => session.session_id === sessionId);
-  const admission = data?.device.boot_claim_admission;
   const claims = data?.device.boot_claims ?? [];
-  const selectableBoots = [...new Set(claims.filter((claim) => claim.selectable).map((claim) => claim.kernel_boot_id))];
   const gateOpen = !error && data?.gate.transport_enabled
     && data.gate.effect_gate.effective_state === "open";
-  const pickCurrent = bootPick && bootPick.generation === data?.device.device_generation
-    && bootPick.expected_revision === (admission?.revision ?? 0);
   const reviewReboot = () => {
     if (!selected || !gateOpen || !audit.trim()) return;
     const elapsed = performance.now() - data.loadedAt;
@@ -77,35 +72,23 @@ export function NodeDevicePanel({ deviceId }) {
     setRebootResult(null);
     setMessage(null);
   };
-  const write = async (kind) => {
+  const requestReboot = async () => {
     if (writing.current) return;
     writing.current = true;
     setBusy(true);
     try {
-      const result = await apiWrite(`${base}/${kind === "reboot" ? "reboots" : "selected-boot"}`, {
-        method: kind === "reboot" ? "POST" : "PUT",
-        body: kind === "reboot" ? reboot : { ...bootPick, operator_audit_ref: audit.trim() },
-      });
+      const result = await apiWrite(`${base}/reboots`, { method: "POST", body: reboot });
       if (!alive.current) return;
       const unknown = result.status >= 500;
-      if (kind === "reboot") {
-        setRebootResult(unknown ? "unknown" : result.ok ? "recorded" : "refused");
-        setMessage(unknown ? "Reboot request outcome unknown. Refresh the audit or retry this exact request."
-          : result.ok ? "Reboot command recorded. This does not establish that a reboot occurred."
-            : `Reboot request refused: ${result.error ?? result.status}. The existing request was not retargeted.`);
-      } else {
-        setMessage(unknown ? "Boot selection outcome unknown. Refresh the admission record before choosing again."
-          : result.ok ? "Boot selection recorded. Command eligibility is checked separately."
-            : `Boot selection refused: ${result.error ?? result.status}. Refresh and explicitly choose again.`);
-        setBootPick(null);
-      }
+      setRebootResult(unknown ? "unknown" : result.ok ? "recorded" : "refused");
+      setMessage(unknown ? "Reboot request outcome unknown. Refresh the audit or retry this exact request."
+        : result.ok ? "Reboot command recorded. This does not establish that a reboot occurred."
+          : `Reboot request refused: ${result.error ?? result.status}. The existing request was not retargeted.`);
       await refresh();
     } catch {
       if (alive.current) {
-        if (kind === "reboot") setRebootResult("unknown");
-        else setBootPick(null);
-        setMessage(kind === "reboot" ? "Reboot request outcome unknown. Retry preserves the exact command and session."
-          : "Boot selection outcome unknown. Refresh the admission record before choosing again.");
+        setRebootResult("unknown");
+        setMessage("Reboot request outcome unknown. Retry preserves the exact command and session.");
       }
     } finally {
       writing.current = false;
@@ -146,18 +129,9 @@ export function NodeDevicePanel({ deviceId }) {
           </article>)}
           <p>An expired grant does not establish that an app stopped.</p>
         </details>
-        <details><summary>Boot admission and reboot</summary>
-          <p>Boot admission: {admission?.conflict ? "Conflicting boot claims — explicit selection required" : "No unresolved conflict reported"}. Selected boot: <code>{admission?.selected_boot_id ?? "None"}</code>. Revision {admission?.revision ?? 0}.</p>
+        <details><summary>Reboot</summary>
+          <p>The latest boot to enroll is the current boot; it supersedes earlier boots of this serial.</p>
           <label>Operator audit reference <input value={audit} maxLength={256} onChange={(event) => setAudit(event.target.value)} disabled={busy} /></label>
-          <label>Observed boot to select <select value={bootPick?.boot_id ?? ""} disabled={busy || !!error}
-            onChange={(event) => setBootPick(event.target.value ? { boot_id: event.target.value,
-              generation: data.device.device_generation, expected_revision: admission?.revision ?? 0 } : null)}>
-            <option value="">Choose an observed boot…</option>
-            {selectableBoots.map((boot) => <option key={boot} value={boot}>{boot}</option>)}
-          </select></label>
-          {bootPick && !pickCurrent && <p role="alert">Boot admission changed. Choose again from the refreshed record.</p>}
-          <button type="button" disabled={busy || !!error || !pickCurrent || !audit.trim()} onClick={() => write("boot")}>Select this exact boot</button>
-          <p>Selecting a boot resolves admission ambiguity; it does not prove which physical device is present.</p>
           <label>Reboot session <select value={sessionId} disabled={busy || !!reboot} onChange={(event) => setSessionId(event.target.value)}>
             <option value="">Choose a current reboot session…</option>
             {eligible.map((session) => <option key={session.session_id} value={session.session_id}>{session.producer.kernel_boot_id} / {session.session_id}</option>)}
@@ -167,7 +141,7 @@ export function NodeDevicePanel({ deviceId }) {
           {reboot && <div role="group" aria-label="Reboot request review">
             <p>Request reboot for session <code>{reboot.session_id}</code>, generation {reboot.device_generation}. Command <code>{reboot.command_id}</code>.</p>
             <p>The command expires at boot time {reboot.expires_boottime_ms} ms. A retry keeps this exact identity and expiry.</p>
-            <button type="button" disabled={busy || !gateOpen || ["recorded", "refused"].includes(rebootResult)} onClick={() => write("reboot")}>{rebootResult === "unknown" ? "Retry exact reboot request" : "Request reboot for this session"}</button>
+            <button type="button" disabled={busy || !gateOpen || ["recorded", "refused"].includes(rebootResult)} onClick={requestReboot}>{rebootResult === "unknown" ? "Retry exact reboot request" : "Request reboot for this session"}</button>
             <button type="button" disabled={busy} onClick={() => { setReboot(null); setRebootResult(null); }}>Close request review</button>
           </div>}
           <h4>Reboot audit</h4>

@@ -72,6 +72,14 @@ def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
                  (device_id, day - 1))
 
 
+def command_eligibility_in(conn, offer_id: UUID) -> tuple[bool, str]:
+    """Weak legacy observation adoption never carries operator commands."""
+    basis = conn.execute("SELECT basis FROM node_offer_contexts WHERE offer_id=%s", (offer_id,)).fetchone()
+    if basis is None or basis["basis"] != "node_v2":
+        return False, "legacy_observation_adoption"
+    return True, "boot_admitted_rollout_required"
+
+
 class NodeSessions:
     def __init__(self, db: Database, clock: Clock, config: NodeControlConfig | None):
         self.db, self.clock, self.config = db, clock, config
@@ -92,7 +100,8 @@ class NodeSessions:
             raise NodeControlError("node_device_unavailable", 403)
         return lifecycle["generation"]
 
-    def _offer_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int, now: float):
+    def _offer_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int) -> None:
+        """Bind the claim to its offer identity; offer age never refuses enrollment."""
         node = conn.execute("SELECT offer_payload,device_generation FROM node_boot_offers WHERE offer_id=%s",
                             (claim.offer_id,)).fetchone()
         if node:
@@ -102,25 +111,60 @@ class NodeSessions:
             if (offer.device_id, offer.serial, offer.kernel_boot_id, offer.installation_audience) != (
                     device_id, claim.serial, claim.kernel_boot_id, self.config.installation_audience):
                 raise NodeControlError("node_offer_mismatch", 403)
-            return {"expires_at": offer.expires_at_utc_ms / 1000}
+            return
         legacy = conn.execute("SELECT * FROM fleet_boot_offers WHERE offer_id=%s", (claim.offer_id,)).fetchone()
         if (legacy is None or legacy["device_id"] != device_id or legacy["serial"] != claim.serial
                 or legacy["kernel_boot_id"] != claim.kernel_boot_id):
             raise NodeControlError("node_offer_mismatch", 403)
         conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,legacy_offer_id) "
                      "VALUES(%s,'legacy_adoption',%s) ON CONFLICT DO NOTHING", (claim.offer_id, claim.offer_id))
-        return legacy
+
+    def _admit_boot_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int,
+                       now: float):
+        """A claim for its matching offer always admits its boot.
+
+        A different boot supersedes the current admission and revokes every session
+        of the superseded boot. A reboot ends the old boot; serial identity is trusted.
+        """
+        boot = conn.execute("SELECT * FROM node_boot_admissions WHERE device_id=%s "
+                            "AND device_generation=%s AND superseded_at IS NULL FOR UPDATE",
+                            (device_id, generation)).fetchone()
+        if boot and boot["kernel_boot_id"] == claim.kernel_boot_id:
+            prior = boot
+        else:
+            if boot:
+                conn.execute("UPDATE node_boot_admissions SET superseded_at=%s "
+                             "WHERE admission_id=%s", (now, boot["admission_id"]))
+                conn.execute("UPDATE node_sessions SET revoked_at=%s WHERE device_id=%s "
+                             "AND device_generation=%s AND revoked_at IS NULL",
+                             (now, device_id, generation))
+            prior = conn.execute("SELECT * FROM node_boot_admissions WHERE device_id=%s "
+                                 "AND device_generation=%s AND kernel_boot_id=%s FOR UPDATE",
+                                 (device_id, generation, claim.kernel_boot_id)).fetchone()
+        if prior is None:
+            admission_id = uuid4()
+            conn.execute("INSERT INTO node_boot_admissions(admission_id,device_id,"
+                         "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                         "trust_mode,admitted_at) VALUES(%s,%s,%s,%s,%s,%s,'lan_serial',%s)",
+                         (admission_id, device_id, generation, claim.kernel_boot_id,
+                          claim.offer_id, self.config.installation_audience, now))
+            return admission_id
+        if (prior["offer_id"] != claim.offer_id
+                or prior["installation_audience"] != self.config.installation_audience):
+            raise NodeControlError("node_boot_adoption_mismatch", 403)
+        if prior["superseded_at"] is not None:
+            conn.execute("UPDATE node_boot_admissions SET superseded_at=NULL WHERE admission_id=%s",
+                         (prior["admission_id"],))
+        return prior["admission_id"]
 
     def _grant_eligibility_in(self, conn, grant: NodeSessionGrant) -> NodeSessionGrant:
-        from central.fleet.node_boot_claims import command_eligibility_in
         live = conn.execute("SELECT 1 FROM node_sessions s JOIN node_producers p USING(producer_id) "
                             "JOIN node_boot_admissions b USING(admission_id) WHERE s.session_id=%s "
                             "AND s.revoked_at IS NULL AND s.expires_at>%s AND b.superseded_at IS NULL",
                             (grant.session_id, self.clock.utc())).fetchone()
         if live is None:
             return replace(grant, command_eligible=False, command_reason="node_session_unavailable")
-        eligible, reason = command_eligibility_in(conn, grant.producer.device_id,
-            grant.producer.device_generation, grant.producer.kernel_boot_id, grant.offer_id)
+        eligible, reason = command_eligibility_in(conn, grant.offer_id)
         return replace(grant, command_eligible=eligible, command_reason=reason)
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:
@@ -155,62 +199,12 @@ class NodeSessions:
                             (credential_hash,)).fetchone():
                 raise NodeControlError("node_credential_reuse", 409)
             claim_intake_in(conn, device_id, "session", now)
-            offer = self._offer_in(conn, claim, device_id, generation, now)
-            # Context records distinguish genuine V2 offers from weak legacy
-            # observation adoption. Neither rewrites the original offer.
-            boot = conn.execute("SELECT * FROM node_boot_admissions WHERE device_id=%s "
-                                "AND device_generation=%s AND superseded_at IS NULL FOR UPDATE",
-                                (device_id, generation)).fetchone()
-            boot_id = boot["kernel_boot_id"] if boot else None
-            if boot_id != claim.kernel_boot_id:
-                if claim.expected_boot_id != boot_id:
-                    raise NodeControlError("node_boot_conflict", details={
-                        "current_boot_id": str(boot_id) if boot_id else None})
-                used = conn.execute("SELECT admission_id,offer_id FROM node_boot_admissions WHERE device_id=%s "
-                                    "AND device_generation=%s AND kernel_boot_id=%s",
-                                    (device_id, generation, claim.kernel_boot_id)).fetchone()
-                selected = conn.execute("SELECT selected_boot_id,conflict,operator_audit_ref "
-                                        "FROM node_boot_claim_conflicts WHERE device_id=%s AND device_generation=%s",
-                                        (device_id, generation)).fetchone()
-                reselected = bool(used and selected and not selected["conflict"]
-                                  and selected["selected_boot_id"] == claim.kernel_boot_id
-                                  and selected["operator_audit_ref"] is not None
-                                  and used["offer_id"] == claim.offer_id)
-                if (used and not reselected) or (not used and offer["expires_at"] <= now):
-                    raise NodeControlError("node_boot_not_admissible", 403)
-                if boot:
-                    conn.execute("UPDATE node_boot_admissions SET superseded_at=%s "
-                                 "WHERE admission_id=%s", (now, boot["admission_id"]))
-                    conn.execute("UPDATE node_sessions SET revoked_at=%s WHERE device_id=%s "
-                                 "AND device_generation=%s AND revoked_at IS NULL",
-                                 (now, device_id, generation))
-                if reselected:
-                    admission_id = used["admission_id"]
-                    conn.execute("UPDATE node_boot_admissions SET superseded_at=NULL WHERE admission_id=%s",
-                                 (admission_id,))
-                else:
-                    admission_id = uuid4()
-                    conn.execute("INSERT INTO node_boot_admissions(admission_id,device_id,"
-                                 "device_generation,kernel_boot_id,offer_id,installation_audience,"
-                                 "trust_mode,admitted_at) VALUES(%s,%s,%s,%s,%s,%s,'lan_serial',%s)",
-                                 (admission_id, device_id, generation, claim.kernel_boot_id,
-                                  claim.offer_id, config.installation_audience, now))
-            else:
-                if (boot["offer_id"] != claim.offer_id
-                        or boot["installation_audience"] != config.installation_audience):
-                    raise NodeControlError("node_boot_adoption_mismatch", 403)
-                admission_id = boot["admission_id"]
-            current = conn.execute("SELECT session_id FROM node_sessions WHERE device_id=%s "
-                                   "AND device_generation=%s AND owner=%s AND revoked_at IS NULL "
-                                   "FOR UPDATE", (device_id, generation, claim.owner)).fetchone()
-            current_id = current["session_id"] if current else None
-            if claim.expected_session_id != current_id:
-                raise NodeControlError("node_session_conflict", details={
-                    "current_boot_id": str(claim.kernel_boot_id),
-                    "current_session_id": str(current_id) if current_id else None})
-            if current:
-                conn.execute("UPDATE node_sessions SET revoked_at=%s WHERE session_id=%s",
-                             (now, current_id))
+            self._offer_in(conn, claim, device_id, generation)
+            admission_id = self._admit_boot_in(conn, claim, device_id, generation, now)
+            # A new owner session supersedes that owner's prior session.
+            conn.execute("UPDATE node_sessions SET revoked_at=%s WHERE device_id=%s "
+                         "AND device_generation=%s AND owner=%s AND revoked_at IS NULL",
+                         (now, device_id, generation, claim.owner))
             producer = NodeProducerV2(config.installation_audience, device_id, generation,
                                       claim.kernel_boot_id, claim.owner, claim.incarnation_id)
             producer_row = conn.execute("SELECT producer_id FROM node_producers WHERE "
@@ -222,8 +216,6 @@ class NodeSessions:
                              "incarnation_id,producer,admitted_at) VALUES(%s,%s,%s,%s,%s,%s)",
                              (producer_id, admission_id, claim.owner, claim.incarnation_id,
                               Jsonb(producer_document(producer)), now))
-            from central.fleet.node_boot_claims import note_boot_claim_in
-            note_boot_claim_in(conn, device_id, generation, claim.kernel_boot_id, now)
             grant = NodeSessionGrant(producer, claim.session_id, claim.offer_id,
                                      claim.sampled_boottime_ms + config.session_seconds * 1000,
                                      scope_for_owner(claim.owner))

@@ -1,4 +1,4 @@
-"""Frozen cold offers, explicit ambiguity, and weak legacy adoption."""
+"""Frozen cold offers, superseding boot enrollment, and weak legacy adoption."""
 from dataclasses import asdict, replace
 from hashlib import sha256
 from uuid import uuid4
@@ -18,7 +18,6 @@ from test_fleet_attempts import (
 from test_fleet_rollout_gate import _gate
 
 from central.fleet.node_boot import NodeBootService, NodeDeployment
-from central.fleet.node_boot_claims import NodeBootClaims
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from contracts.app_environment import AppEnvironmentRefV2
@@ -84,9 +83,9 @@ def cold_setup(registry, *, app=True):
     return service, sessions, deployment
 
 
-def claim_for(offer, *, owner="host_core", expected_boot_id=None):
+def claim_for(offer, *, owner="host_core"):
     return NodeSessionClaim(offer.serial, offer.offer_id, offer.kernel_boot_id, owner, uuid4(), uuid4(),
-                            uuid4().hex + uuid4().hex, 1000, expected_boot_id=expected_boot_id)
+                            uuid4().hex + uuid4().hex, 1000)
 
 
 def test_frozen_offer_selection_exact_retry_and_no_app(registry):
@@ -106,8 +105,10 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
         service.offer(replace(request, boot_nonce="b" * 64))
     assert sessions.enroll(claim_for(offer)).command_eligible
     registry.clock.advance(3601)
-    with pytest.raises(NodeControlError, match="offer_expired"):
-        service.offer(request)
+    # Offer age never refuses its own boot: a re-offer replays the frozen offer
+    # and a first enrollment after a long Central outage is still admitted.
+    assert service.offer(request) == offer
+    assert sessions.enroll(claim_for(offer, owner="app_effect_broker")).command_eligible
 
 
 def test_manager_pins_and_environment_identity_are_immutable(registry):
@@ -124,7 +125,7 @@ def test_manager_pins_and_environment_identity_are_immutable(registry):
             generation=1, revision=1, now=1)
 
 
-def test_overlapping_boots_block_both_scopes_until_operator_cas(registry):
+def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
     service, sessions, _ = cold_setup(registry)
     first = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
     claim = claim_for(first)
@@ -134,31 +135,21 @@ def test_overlapping_boots_block_both_scopes_until_operator_cas(registry):
     commands = NodeCommands(sessions, gate)
     request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator", generation, 31000)
     commands.request_reboot(DEVICE_ID, request)
+    # A second boot of the same serial needs no knowledge of its predecessor.
     second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
-    assert not sessions.enroll(claim).command_eligible
-    assert sessions.enroll(claim).command_reason == "boot_claim_conflict"
-    for action in (lambda: commands.poll(grant.session_id, claim.credential),
-                   lambda: commands.request_reboot(DEVICE_ID, replace(request, command_id=uuid4()))):
-        with pytest.raises(NodeControlError, match="boot_claim_conflict"):
-            action()
-    second_claim = claim_for(second, expected_boot_id=BOOT_ID)
+    second_claim = claim_for(second)
     second_grant = sessions.enroll(second_claim)
-    assert not second_grant.command_eligible
-    broker_claim = claim_for(second, owner="app_effect_broker")
-    assert not sessions.enroll(broker_claim).command_eligible
-    with pytest.raises(NodeControlError, match="boot_claim_conflict"):
-        commands.poll(second_grant.session_id, second_claim.credential)
-    with registry.db.transaction() as conn:
-        revision = conn.execute("SELECT revision FROM node_boot_claim_conflicts").fetchone()["revision"]
-    registry.clock.advance(1)
-    NodeBootClaims(sessions).select(DEVICE_ID, generation=1, expected_revision=revision,
-                                   boot_id=second.kernel_boot_id, operator_audit_ref="operator:selection")
-    assert service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)) == first
-    assert sessions.enroll(second_claim).command_eligible
+    assert second_grant.command_eligible
+    assert sessions.enroll(claim_for(second, owner="app_effect_broker")).command_eligible
+    with pytest.raises(NodeControlError, match="superseded"):
+        commands.poll(grant.session_id, claim.credential)
+    with pytest.raises(NodeControlError, match="session_unavailable"):
+        commands.request_reboot(DEVICE_ID, replace(request, command_id=uuid4()))
     assert commands.poll(second_grant.session_id, second_claim.credential) == {"commands": []}
-    with pytest.raises(NodeControlError, match="selection_conflict"):
-        NodeBootClaims(sessions).select(DEVICE_ID, generation=1, expected_revision=revision,
-            boot_id=BOOT_ID, operator_audit_ref="operator:stale")
+    # The old boot's frozen offer still enrolls; it supersedes in turn (duplicate serials flap visibly).
+    assert sessions.enroll(claim_for(first)).command_eligible
+    with pytest.raises(NodeControlError, match="superseded"):
+        commands.poll(second_grant.session_id, second_claim.credential)
 
 
 def test_refusal_is_frozen_and_never_retargeted(registry):

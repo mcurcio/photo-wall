@@ -11,8 +11,12 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from uuid import UUID
 
-from central.fleet.node_boot_claims import require_command_boot_in
-from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
+from central.fleet.node_sessions import (
+    NodeControlError,
+    NodeSessions,
+    claim_intake_in,
+    command_eligibility_in,
+)
 from central.fleet.principal import SessionAdmission, _clock_sample
 from central.fleet.rollout_gate import RolloutEffectGate
 from contracts.node_commands import (
@@ -80,7 +84,9 @@ class NodeCommands:
             grant = parse_session_grant(bytes(row["grant_payload"]))
             if grant.producer.installation_audience != config.installation_audience:
                 raise NodeControlError("node_audience_mismatch", 403)
-            require_command_boot_in(conn, grant.producer, grant.offer_id)
+            eligible, reason = command_eligibility_in(conn, grant.offer_id)
+            if not eligible:
+                raise NodeControlError(reason, 409)
             prior = conn.execute("SELECT request_sha256,payload,expires_at FROM node_reboot_commands "
                                  "WHERE command_id=%s", (request.command_id,)).fetchone()
             if prior:
@@ -125,12 +131,10 @@ class NodeCommands:
                                    "WHERE session_id=%s ORDER BY issued_at DESC LIMIT 1",
                                    (session_id,)).fetchone()
             if located is None:
-                principal = self.sessions.authenticate_in(conn, session_id, credential)
-                require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
+                self.sessions.authenticate_in(conn, session_id, credential)
                 return {"commands": []}
             gate = self.gate.require_open_in(conn, expected_generation=located["gate_generation"])
             principal = self.sessions.authenticate_in(conn, session_id, credential)
-            require_command_boot_in(conn, principal.grant.producer, principal.grant.offer_id)
             if principal.grant.scope != "operator_reboot":
                 raise NodeControlError("node_command_scope_denied", 403)
             now = principal.admission.ensure_current(self.sessions.clock)

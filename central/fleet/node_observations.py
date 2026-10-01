@@ -109,17 +109,12 @@ class NodeObservations:
                               "command": json.loads(bytes(command["payload"])),
                               "responses": [{"message": json.loads(bytes(item["payload"])),
                                              "received_at": item["received_at"]} for item in responses]})
-            conflict = conn.execute("SELECT revision,selected_boot_id,conflict,changed_at,operator_audit_ref "
-                                    "FROM node_boot_claim_conflicts WHERE device_id=%s AND device_generation=%s",
-                                    (device_id, generation)).fetchone()
-            if conflict and conflict["selected_boot_id"]:
-                conflict["selected_boot_id"] = str(conflict["selected_boot_id"])
             claims = conn.execute("SELECT kernel_boot_id,offer_id,created_at,refusal FROM node_boot_offers "
                 "WHERE device_id=%s AND device_generation=%s ORDER BY created_at DESC,offer_id LIMIT 64",
                 (device_id, generation)).fetchall()
             boot_claims = [{"kernel_boot_id": str(item["kernel_boot_id"]), "offer_id": str(item["offer_id"]),
                 "first_received_at": item["created_at"], "offer_refusal": item["refusal"],
-                "selectable": item["refusal"] is None, "physical_identity": "unverified"} for item in claims]
-            return {"boot_claims": boot_claims, "boot_claim_admission": conflict, "device_id": device_id, "device_generation": generation, "read_at": now,
+                "physical_identity": "unverified"} for item in claims]
+            return {"boot_claims": boot_claims, "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
                     "runtime_reconciliation": "asynchronous_output_evidence"}

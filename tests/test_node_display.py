@@ -72,7 +72,6 @@ def test_display_decision_and_completion_renewal(registry):
         claim,
         session_id=uuid4(),
         credential=uuid4().hex + uuid4().hex,
-        expected_session_id=grant.session_id,
         sampled_boottime_ms=1500,
     )
     sessions.enroll(renewed)
@@ -180,7 +179,7 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
     withdraw = exchange(request)
     assert withdraw.operation == "withdraw" and withdraw.surface == old
     renewed = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex,
-                      expected_session_id=grant.session_id, sampled_boottime_ms=1500)
+                      sampled_boottime_ms=1500)
     sessions.enroll(renewed)
     removed = replace(request, request_id=uuid4(), sampled_boottime_ms=1700, admitted=None,
                       completed_decision_id=withdraw.decision_id, completed_boottime_ms=1500)
@@ -229,7 +228,7 @@ def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry,
     registry.unbind("node-f0", expected_generation=1)
     if renew:
         claim = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex,
-                        expected_session_id=grant.session_id, sampled_boottime_ms=1400)
+                        sampled_boottime_ms=1400)
         sessions.enroll(claim)
     promoted = revision.surface
     receipt = DisplayReceipt(promoted, uuid4(), "weston-promoted", "baseline", 1400)
