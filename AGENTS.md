@@ -20,8 +20,8 @@ This page is the map; open an owning document only when the routing table sends 
 | `appliance/node/` | Host core, AppManager, broker, storage, stop/recovery | `*_runner.py`, `bootstrap.py` |
 | `appliance/display_host/` | Weston display host and native C clients | `runner.py`, `native/` |
 | `scripts/` | Builds, fixtures, demos, wrappers | `test_local.py`, `demo_wall.py`, `immich_fixture.py`, `check_docs.py` |
-| `tests/` | `test_*.py` (unit + DB); `browser/` Playwright; `integration/` Compose files; `node_pid1_*` opt-in harness (not collected) | `conftest.py` assigns tiers |
-| `.github/workflows/` | `pipeline.yml` gates merges; calls `checks.yml`, `software-e2e.yml`, `netboot-e2e.yml`, … | |
+| `tests/` | `test_*.py` (unit + DB); `browser/` Playwright; `integration/` Compose files; `test_node_pid1.py` + `node_pid1_*` real-systemd node scenarios | `conftest.py` assigns tiers |
+| `.github/workflows/` | `pipeline.yml` gates merges; calls `checks.yml`, `software-e2e.yml`, `netboot-e2e.yml`, `node-pid1.yml`, … | |
 
 **Import layering** (`pyproject.toml` `[tool.importlinter]`): `contracts` imports no domain or persistence package; `uplink` is stdlib-only (no pydantic, httpx or domain package); `player` never imports `central`, `media`, `appliance` or a database/queue; Central layers run `app : content_wiring : content_routes` → `infra` → `content_catalog | assets | health` → `origins` → `kernel`, the inner ones free of psycopg, Procrastinate and FastAPI.
 
@@ -35,7 +35,7 @@ This page is the map; open an owning document only when the routing table sends 
 | Browser | `PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser -n 4 --browser chromium` (test database, built console, `playwright install chromium`) | CI (pinned Playwright container) |
 | Images, Linux media | `image-smoke`, `linux-media` jobs in `checks.yml` | CI only |
 | Wall e2e | `scripts/demo_wall.py` ([recipe](docs/module-wall-demo.md#reproducing-the-current-checkpoint)); refuses uncommitted changes to `central/`, `media/`, `contracts/`, `player/`, `Dockerfile`, `pyproject.toml`, `uv.lock` | CI (`software-e2e.yml`) |
-| PID1 node scenarios | `tests/node_pid1_*`; needs built exact components and an arm64 fixture image ([guide](docs/evidence/player-node-handoff-support/node-lifecycle-qualification.md)) | local opt-in only |
+| PID1 node scenarios | `-m node_pid1` with `PHOTO_WALL_NODE_PID1_FIXTURE` from `scripts/build_node_pid1_fixture.py`; arm64 Docker, privileged ([guide](docs/evidence/player-node-handoff-support/node-lifecycle-qualification.md)) | CI (`node-pid1.yml`, one leg per scenario) + local |
 | Physical Pi, PXE, HDMI, timing | bench evidence ([which evidence](CONTRIBUTING.md#choose-the-right-evidence)) | nothing automated |
 
 Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a directory built by `scripts/published_player_wire.py prepare`. Under `CI`, a skip outside `CI_SKIP_ALLOWLIST` fails. Details: [runbook tests](docs/runbook.md#tests-and-local-development).

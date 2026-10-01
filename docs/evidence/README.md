@@ -1,5 +1,7 @@
 # Acceptance evidence
 
+- [2026-10-01 Player node fix: real-PID1 scenarios automated](2026-10-01-node-fix-qualification.md): success, failure, Central-outage and reboot/re-enrollment scenarios as `node_pid1` tests in the gated node-pid1 CI matrix; first local result at `c30025b`, all four passing; no CI run yet, synthetic hardware only.
+
 - [2026-10-01 PR test gate](2026-10-01-test-gate-tiers.md): unit, database and browser tiers under xdist with template-cloned databases, fail-closed database and skip guards, the e2e adapter/scenario split; local measurements and mutation probes only, CI timings projected.
 
 - [2026-09-30 owned stop implementation](2026-09-30-node-stop-implementation.md): durable stop and bounded HostCore recovery implementation, validation checkpoints and remaining qualification.
