@@ -941,11 +941,11 @@ fall back to a legacy manifest.
 
 For ambiguity, `GET /v1/operator/node/devices/{device_id}` separates current and
 historical scoped credentials, observation sample/receipt ages, reboot requests,
-responses and effect evidence. Overlapping boot claims block command admission.
-An operator may resolve the logical target using the generation/revision CAS at
-`PUT /v1/operator/node/devices/{device_id}/selected-boot`, supplying the exact
-known boot ID and an audit reference. This does not prove which physical Pi exists
-or that an already-delivered effect stopped. Effect rollout still requires the
+responses and effect evidence. The latest boot to enroll is the current boot: it
+supersedes the prior boot and revokes that boot's sessions, so no operator boot
+selection exists. Two Pis claiming one serial flap visibly, each enrollment revoking
+the other. This does not prove which physical Pi exists or that an
+already-delivered effect stopped. Effect rollout still requires the
 existing D17 all-serving/rollback certification and a real injected serving-image
 verifier; there is no environment-variable bypass. See the
 [node Central evidence checkpoint](evidence/2026-09-30-node-central-integration.md)

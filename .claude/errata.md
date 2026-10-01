@@ -1982,3 +1982,38 @@ doc softenings.
   preflight refuses a dirty `central/`, so the local split runs used HEAD's Central (30 s quantum)
   with the new harness; the 10 s quantum is first exercised by CI. Locally on Docker Desktop the
   demo's `--builder default` also needs `DOCKER_CONTEXT=default` (environmental).
+
+## 2026-10-01 — Player-node right-sized fix (proposal /Volumes/Dock/Temp/node-fix-proposal.md Part 1, at 2645c01)
+
+- **B1: `require_command_boot_in` was not only the boot-claim fence.** It also refused commands to
+  sessions enrolled from weak legacy `fleet_boot_offers` adoption (`legacy_observation_adoption`).
+  The proposal's "a superseded session already fails `authenticate_in`" covers the CAS half only.
+  Kept as one `command_eligibility_in(conn, offer_id)` in `node_sessions.py`, enforced at reboot
+  issuance (and reported on the grant); poll for a legacy session now returns no commands.
+- **B1: a superseded boot can re-enroll.** "A claim for its matching offer always admits its boot"
+  includes the old boot's frozen offer: it re-activates its admission row and supersedes the newer
+  boot (the proposal's duplicate-serial flap). `node_boot_adoption_mismatch` still refuses a
+  different offer for an already-admitted boot.
+- **B1: `asset()` still refuses an offer older than its 3600 s TTL** (Central clock only). Not in
+  the spec; a node that re-offers after a >1 h outage gets its frozen offer but 410 on artifacts.
+  Same class as the removed re-offer/enroll expiry; left for the owner.
+- **B2: "stage-time refusal of bound Players is unchanged" — there was none at stage time.** The
+  bound check lived in `ready()` (`bound_drain_policy_unselected`). Moved to `stage()` as
+  `bound_switch_policy_unselected`, with the qualified-fallback requirement (now a non-optional
+  `StageCommandV2.fallback`) and the V1 equipment-drain conflict check.
+- **B2: no command expiry + a command bound to one broker session would strand on renewal.** The
+  broker's `_bound` and Central's `_command_current_in` compared `command_session_id` to the live
+  session; any renewal (hourly, or B3's re-enroll on 401/403) made the desired stage undeliverable
+  and unexecutable. Binding is now the broker producer (boot + owner + incarnation) and offer.
+- **B2: "latest wins" needs a total order.** `created_at` ties (same clock reading) made the
+  latest stage ambiguous; 056 gains `sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE`.
+- **B2: the fallback cohort is now checked at stage time only.** A display mode change after
+  staging no longer blocks the switch (the former `ready()` check); a new stage is refused instead.
+  This is the proposal's stated cost "Central cannot veto a switch at the moment of stop".
+- **B2: `OnlineEffectBroker.flush` stops at the first non-200 effect** (pre-existing). A Central
+  refusal of one event (e.g. 409) blocks every later report of that boot. Not changed.
+- **B4: PID1 harness ported, not run.** `tests/node_pid1_central_{fixture,probe}.py` now run
+  success / failure / outage (35 s node-exchange drop after the broker fetches its stage); the
+  reboot/re-enroll second-container scenario and a ≥9 s cold-start injection are not written.
+  `tests/node_pid1_stop_diagnostic.py` traces a pre-existing stale `stop(expected, *,
+  expires_boottime_ms)` signature, unrelated to this change.

@@ -1,5 +1,7 @@
 # Player node resumption — 2026-09-30
 
+**Superseded in part 2026-10-01:** stop permits, Runtime drains, no-effect revalidation, boot-claim CAS/selection and Central-mapped node-clock deadlines described here were removed; see the [node domain model](../player-node-domain-model.md#refinement-record). This record remains history for the revision it exercised.
+
 This continues the [stable handoff](2026-09-30-player-node-handoff.md) in the exact
 `readiness-design/photo-wall` checkout. The complete Player-node objective remains
 open. No commit, deployment, production command, physical reboot or hardware

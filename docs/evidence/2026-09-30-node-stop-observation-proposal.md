@@ -1,6 +1,8 @@
 # Owned stop operation proposal — 2026-09-30
 
-Status: **design contract; [implementation and current checks](2026-09-30-node-stop-implementation.md) are recorded separately. Not qualified.** This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, permits, executor sealing, Central discharge, D16, D17 or physical qualification.
+Status: **design contract; [implementation and current checks](2026-09-30-node-stop-implementation.md) are recorded separately. Not qualified.** This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, D16, D17 or physical qualification.
+
+**Revised 2026-10-01.** Stop permits, executor sealing, no-effect revalidation and Central drain discharge were removed (see the [node domain model](../player-node-domain-model.md#debian-closure-and-app-effects)). The owned stop operation, local intent journal, `_old` check and recovery obligation below are unchanged. The authorization table and `StopRequest` shape now describe that contract; the dated defect and implementation records remain history.
 
 The [node domain model](../player-node-domain-model.md#debian-closure-and-app-effects) owns authorization and immutable repair. The [red/blue refinement](../player-fleet-red-blue-refinement.md) owns retirement, durable drains and expiry as a restriction on new admission. This proposal supplies a Linux adapter contract beneath those policies. Source references below describe the reviewed dirty readiness checkout, not a released commit.
 
@@ -14,7 +16,7 @@ The architecture correction is an **owned stop operation**, not more identical p
 
 ## Interface and execution ownership
 
-The process-driver port returns `StopOperation` from `stop(StopRequest)`. The request binds the existing operation ID, boot, exact old `RunningApp`, immutable command/permit identity and final stop-dispatch deadline. Admission remains the broker's responsibility; the adapter enforces that supplied deadline immediately before a new effect dispatch.
+The process-driver port returns `StopOperation` from `stop(StopRequest)`. The request binds the existing operation ID, boot, exact old `RunningApp`, immutable command identity and a node-local final stop-dispatch deadline (the recovery stop deadline). Admission remains the broker's responsibility; the adapter enforces that supplied deadline immediately before a new effect dispatch.
 
 `StopOperation` provides `done()` and `result()` and may provide an awaitable view. A successful result is a typed `StopCompleted` witness. An unresolved operation remains pending. An exceptional completion means a named contradiction or irrecoverable loss of the ability to establish the guarantee, with sanitized diagnostic context. It must not mean that one read failed or that a caller waited too long. A caller's timeout, cancellation or dropped handle does not cancel the underlying operation, remove its journal, release ownership, resend stop, or permit replacement. An async view must shield the owned operation from waiter cancellation.
 
@@ -42,15 +44,14 @@ Systemd v257 exposes StopUnit's job identity and JobRemoved notifications; subsc
 
 | Boundary | Required behavior |
 |---|---|
-| Before durable authorized stop intent | Recheck existing command/session/permit bindings and immutable roots. An expired or revoked authority known locally cannot authorize dispatch. Existing Central checks remain unchanged. |
-| Durable intent before submission | Persist adapter identity before any effect. A restart reattaches and observes. It never treats intent as proof that a syscall happened. No blind redispatch after a crash, even if the permit still appears live. |
+| Before durable stop intent | The broker verifies both immutable roots and the exact old process for the latest accepted stage. No Central permit or deadline participates; Central reachability is not required. |
+| Durable intent before submission | Persist adapter identity before any effect. A restart reattaches and observes. It never treats intent as proof that a syscall happened. No blind redispatch after a crash. |
 | Submission response lost | Submission status may remain unknown while the future observes the postcondition. A transient transport error is not proof of either no effect or failed stop. |
 | Old process later exits naturally | Durable authorized intent plus exact old-process absence, original subtree quiescence and exclusive ownership may satisfy the requested postcondition. Report observed quiescence, not a claim that the stop signal caused exit. A submission receipt is diagnostic evidence, not an additional authority prerequisite. |
-| Old process remains alive after expiry | Do not dispatch again or renew the permit. Retain the operation/drain/roots and expose a named unresolved or irrecoverable authority limitation; waiting longer does not create effect authority. |
-| Completion after expiry or session loss | Read-only observation may complete locally. Existing immutable repair authority continues after physical stop; it does not become a new admission or a new command. Central event intake remains evidence with `authority_granted=False`, subject to its existing authenticated carrier rules. |
-| Retirement or newer desired policy | No new attempt. Already admitted local repair finishes the frozen attempt/fallback as the owning contract permits. Remote revocation cannot recall a delivered physical effect; do not claim instantaneous revocation during partition. |
-| Executor seal/no-effect | A sealed operation cannot create or resume effects. No-effect still requires no stop intent, exact old live process, immutable permit expiry plus margin, quiescence and fresh applied control. Caller cancellation, an unacknowledged syscall, elapsed time or a recovered future cannot satisfy that proof. |
-| Completion persisted before stopped event | Replay the same completion into exactly one ordered event. Crash/retry cannot allocate a second stop, new operation, permit or app epoch. |
+| Old process remains alive after the dispatch deadline | Do not dispatch again. Retain the operation and roots and report `effect_unknown`; the HostCore recovery obligation owns escalation. |
+| Completion after session loss | Observation completes locally and the switch continues to target/fallback. Events queue and are reported on reconnect; Central event intake is evidence only, subject to its authenticated carrier rules. |
+| Retirement or newer desired stage | A newer stage replaces an accepted one only before its stop intent or after it completed. A stop or start in flight finishes the frozen attempt/fallback first. Remote revocation cannot recall a delivered physical effect; do not claim instantaneous revocation during partition. |
+| Completion persisted before stopped event | Replay the same completion into exactly one ordered event. Crash/retry cannot allocate a second stop, new operation or app epoch. |
 | Stopped event before target/fallback spawn | Preserve existing target-intent and fallback-intent budgets. A stop future cannot reset them. Recover the exact launch or use the already allowed single fallback; do not retry an ambiguous fallback spawn. |
 | Owner reboot or contradictory identity | Volatile same-boot operation cannot be reattached across boots. Preserve Central uncertainty and existing recovery policy. Never reinterpret new-boot absence as old-operation completion. |
 
@@ -101,8 +102,6 @@ class StopRequest:
     operation_id: UUID
     boot_id: UUID
     command_sha256: str
-    permit_id: UUID
-    permit_sha256: str
     old: RunningApp
     dispatch_not_after_boottime_ms: int
 

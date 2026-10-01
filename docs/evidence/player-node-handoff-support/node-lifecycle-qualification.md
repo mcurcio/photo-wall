@@ -50,7 +50,7 @@ export PYTHONPATH="$PWD:$PWD/tests"
 Run this from the intended checkout. The database wrapper reads the already
 running local Compose database credentials into memory and invokes normal pytest;
 it does not create an `.env` file or print credentials. Tests use a random schema
-and clean only that schema. Select `-k success`, `-k failure` or `-k noeffect` for a
+and clean only that schema. Select `-k success`, `-k failure` or `-k outage` for a
 single phase. Collection alone does not execute privileged Docker work.
 
 ## Evidence and limits
@@ -59,18 +59,16 @@ Every phase captures real cold process linkage and private health publication,
 immutable commands, repeated read-only reconciliation predicates, real owner
 records, final scheduler health, PID1 properties and journal. Success assertions
 require the actual durable event order, exact selected process/environment and
-higher app/authority epochs, and Central's real unbound operational discharge.
-No-effect additionally requires response loss after actual permit commit, original
-process preservation, immutable permit expiry, sealed journal/revalidation and
-fresh local proof. On completed phases, owners are stopped and all three full
+higher app/authority epochs, and Central's projected `target_running` (failure:
+`fallback_running`) state. Outage (since 2026-10-01, replacing the removed
+permit-expiry no-effect phase) drops every node exchange for 35 s once the broker
+has fetched its stage; the switch must complete locally and report on reconnect.
+On completed phases, owners are stopped and all three full
 runtime roots are reverified before container deletion. Before intentional teardown,
 a live PID1 active/running observation and `/proc` birth ticks must match the exact
-admitted current process; no-effect also matches the original process. The first
-committed permit identity, payload hash and both clock deadlines remain identical
-through every later poll, and the final real boot clock exceeds expiry by the
-owner's two-second margin. Removal is attempted even if diagnostic capture fails;
+admitted current process. Removal is attempted even if diagnostic capture fails;
 absence is independently checked. Failure leaves truthful
-unknown effects/drains; the harness never repairs journals or forces ACK/discharge.
+unknown effects; the harness never repairs journals or forces ACK.
 
 The separate fixture configuration token is random and its local file is 0600;
 do not publish that file. Predicate diagnostics contain counters and booleans,

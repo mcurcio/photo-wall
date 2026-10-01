@@ -1,5 +1,7 @@
 # Owned stop and bounded recovery implementation — 2026-09-30
 
+**Superseded in part 2026-10-01:** stop permits, Runtime drains, no-effect revalidation, boot-claim CAS/selection and Central-mapped node-clock deadlines described here were removed; see the [node domain model](../player-node-domain-model.md#refinement-record). This record remains history for the revision it exercised.
+
 Status: implementation in progress on PR #39; not release or hardware qualification.
 This resumes the [saved checkpoint](2026-09-30-player-node-resumption.md) and
 implements the [stop/recovery proposal](2026-09-30-node-stop-observation-proposal.md).

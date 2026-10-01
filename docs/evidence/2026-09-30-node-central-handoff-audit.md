@@ -1,5 +1,7 @@
 # Current Central handoff status
 
+**Superseded in part 2026-10-01:** stop permits, Runtime drains, no-effect revalidation, boot-claim CAS/selection and Central-mapped node-clock deadlines described here were removed; see the [node domain model](../player-node-domain-model.md#refinement-record). This record remains history for the revision it exercised.
+
 This support document preserves an earlier audit and its resumption checkpoint below.
 **Current state supersedes the earlier unapplied labels:** migration060 repair is
 applied with five passing PostgreSQL regressions. Display withdrawal repair is

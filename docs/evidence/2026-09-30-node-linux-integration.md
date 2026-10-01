@@ -1,5 +1,7 @@
 # Node Linux integration checkpoint — 2026-09-30
 
+**Superseded in part 2026-10-01:** stop permits, Runtime drains, no-effect revalidation, boot-claim CAS/selection and Central-mapped node-clock deadlines described here were removed; see the [node domain model](../player-node-domain-model.md#refinement-record). This record remains history for the revision it exercised.
+
 This is a working-tree checkpoint, **not completed qualification**. It accompanies
 the [node domain contract](../player-node-domain-model.md) and supersedes no dated
 physical or released-artifact evidence. The starting tree already contained the
