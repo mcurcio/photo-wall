@@ -89,7 +89,7 @@ jobs:
 
   browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - id: python-uv
@@ -116,8 +116,13 @@ jobs:
             sh -ec 'python -m pip install "uv==$UV_VERSION"
               uv sync --frozen --no-install-project --python /usr/bin/python3.12
               /tmp/photo-wall-browser-venv/bin/python scripts/test_local.py -q \
-                -p no:cacheprovider tests/browser --browser chromium --durations=25 \
+                -p no:cacheprovider tests/browser -n 4 --browser chromium --durations=25 \
                 --tracing retain-on-failure --output /evidence --tb=short'
+      # The xdist controller writes it from every worker's reports (tests/browser/conftest.py).
+      - name: Require passed operator browser evidence
+        run: |
+          python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["status"] != "passed")' \
+            "$RUNNER_TEMP/operator-browser/operator-browser.json"
       - name: Make browser evidence readable
         if: always()
         run: |

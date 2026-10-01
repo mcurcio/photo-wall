@@ -86,7 +86,8 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     selections = {job: _job(workflow, job) for job in ('unit', 'db', 'browser')}
     assert '-m "not db and not browser" -n 4 --dist worksteal' in selections['unit']
     assert '-m db -n 4 --dist loadgroup' in selections['db']
-    assert ' tests/browser --browser chromium' in selections['browser']
+    assert ' tests/browser -n 4 --browser chromium' in selections['browser']
+    assert '["status"] != "passed")' in selections['browser']
     for job, body in selections.items():
         assert 'needs:' not in body, job
         assert '--durations=25' in body, job
