@@ -289,7 +289,8 @@ class NodeLifecycle:
             return {"stored": True, "duplicate": False, "effect_established": False}
 
     def status(self, device_id: str) -> dict:
-        """Project each operation from its latest reported effect; transport is never an effect."""
+        """Project the latest operation from its latest reported effect and every earlier one as
+        superseded; transport is never an effect."""
         self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             generation = self.sessions.lock_device_generation_in(conn, device_id)
@@ -306,8 +307,9 @@ class NodeLifecycle:
                 response = conn.execute("SELECT decision,received_at FROM node_app_responses WHERE command_id=%s ORDER BY received_at DESC LIMIT 1",
                                         (operation["command_id"],)).fetchone()
                 command = parse_stage_command(bytes(operation["command_payload"]))
-                state = (_TERMINAL_STATES.get(event["phase"], "switching") if event
-                         else "staged" if index == 0 else "superseded")
+                # A later stage replaces this one whatever it reported; latest_effect keeps that detail.
+                state = ("superseded" if index > 0
+                         else _TERMINAL_STATES.get(event["phase"], "switching") if event else "staged")
                 rebooted = current is not None and current["kernel_boot_id"] != command.producer.kernel_boot_id
                 if rebooted and state in ("staged", "switching", "effect_unknown"):
                     state = "interrupted_by_reboot"

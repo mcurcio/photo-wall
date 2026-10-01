@@ -130,7 +130,18 @@ def test_reported_effects_project_operation_state_and_hold_nothing(registry):
         fixture.report(command, 'running', 4)
     # Nothing is held: the next stage is admitted immediately.
     fixture.stage(1)
-    assert fixture.states() == ['staged', 'target_running']
+    assert fixture.states() == ['staged', 'superseded']
+
+
+def test_a_replaced_operation_is_superseded_and_keeps_its_last_effect(registry):
+    fixture = Rig(registry)
+    first = fixture.stage(0)
+    fixture.report(first, 'intent_stop', 1)
+    fixture.stage(1)
+    replaced = fixture.service.status(DEVICE_ID)['operations'][1]
+    assert replaced['state'] == 'superseded' and replaced['latest_effect']['phase'] == 'intent_stop'
+    fixture.report(first, 'stopped', 2)  # A late effect of the replaced stage stays detail.
+    assert fixture.states() == ['staged', 'superseded']
 
 
 def test_renewed_broker_session_keeps_the_stage_current_and_reportable(registry):

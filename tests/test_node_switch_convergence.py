@@ -107,4 +107,4 @@ def test_late_first_post_and_outage_after_accept_converge_and_report(registry, t
     following = fixture.stage(1, session_id=session.grant.session_id)
     assert fixture.desired(session.claim) == [following]
     assert [item["state"] for item in fixture.service.status(DEVICE_ID)["operations"]] == [
-        "staged", "target_running"]
+        "staged", "superseded"]
