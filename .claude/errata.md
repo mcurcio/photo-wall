@@ -1964,3 +1964,21 @@ doc softenings.
   needs an owner decision: split the scenario into parallel upstream-fault and
   Central/Player-fault jobs (each repeating setup + baseline, ≈ 52 s), and/or shorten the demo's
   plan horizon/lease so the outage phase waits less.
+- **B7: the plan lease alone does not shorten the Central-outage span; the Player's session
+  backoff does.** Run 36797558553: central stopped at t=0, lease expired t=42, restarted t=45,
+  recovered t=83. The Player retries at t≈0, 1, 6, 21 (SESSION_BACKOFF 1, 5, 15, 60) and then
+  not before t≈81, so a shorter lease moves the restart earlier but recovery still waits for
+  t≈81. The demo runner now sets `player.service.BACKOFF = (1, 2, 3, 5)` (the documented test
+  hook; first step kept, Central's silence threshold derives from it). Local run: recovery
+  38 s -> 16 s.
+- **B7: the demo's lease lever is the 30 s renewal quantum, not the horizon.** A held lease ends
+  `horizon + up to one quantum` ahead; the demo horizon was already 15 s. The quantum was not
+  configurable: Central now reads `PHOTO_WALL_RENEWAL_SECONDS` (default 30, unchanged; bound
+  (0, 60] by CoordinationLimits) and the demo sets 10. Lease 15-45 s -> 15-25 s.
+- **B7: the e2e composite action cannot hold the media OS guard or the checkout.** A local action
+  needs the checkout first, and the guard reads `needs`, which a composite cannot see; both stay
+  in each job (guard first, held by test_existing_required_jobs_fail_if_shared_preparation_fails).
+- **B7: an uncommitted core change cannot be exercised by the wall demo locally.** The demo's
+  preflight refuses a dirty `central/`, so the local split runs used HEAD's Central (30 s quantum)
+  with the new harness; the 10 s quantum is first exercised by CI. Locally on Docker Desktop the
+  demo's `--builder default` also needs `DOCKER_CONTEXT=default` (environmental).

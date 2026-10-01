@@ -220,8 +220,9 @@ draft and every image is tagged with the version. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
 `software-e2e.yml` and the release's media worker image. Both image-building checks
-jobs (`image-smoke`, `linux-media`) share the AMD64 result; both software E2E jobs
-share the ARM64 definition.
+jobs (`image-smoke`, `linux-media`) share the AMD64 result; every software E2E job
+shares the ARM64 definition and builds its images through one shared setup action
+([`software-e2e-setup`](../.github/actions/software-e2e-setup/action.yml)).
 
 `scripts/service_base.py` reads the `media-os` recipe prefix ending at
 `# END MEDIA OS DEFINITION` in the root Dockerfile. The recipe and architecture

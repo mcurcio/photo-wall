@@ -4,10 +4,11 @@ name: Controller and Player software e2e
 # owns the triggers and the concurrency. To prepare a missing media OS dependency by hand,
 # dispatch service-base.yml.
 #
-# Two parallel jobs, each with its own disposable Immich: `immich-adapter` runs the fixture's
-# adapter and network-boundary checks; `two-players-three-outputs` starts a set-up fixture
-# only (`--setup-only`) and runs the wall scenario against it, so the adapter checks are off
-# its critical path.
+# Three parallel jobs, each with its own disposable Immich: `immich-adapter` runs the fixture's
+# adapter and network-boundary checks; `two-players-three-outputs` is one job per fault segment
+# of the full wall scenario (scripts/demo_wall.py SCENARIOS), each starting a set-up fixture only
+# (`--setup-only`) and running the same setup and baseline before its segment. Every job's
+# shared setup is the software-e2e-setup action.
 on:
   workflow_call:
 
@@ -29,8 +30,12 @@ jobs:
     permissions:
       contents: read
       packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [upstream-faults, central-player-faults]
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Require media OS preparation
         env:
@@ -43,45 +48,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Overlap the fixture's largest pulls with this job's setup and image builds; the
-      # fixture's own (retried) pull below joins any still in flight.
-      - name: Prefetch the Immich fixture images in the background
-        run: |
-          FIXTURE_DB_PASSWORD=unused FIXTURE_IMAGE=unused nohup docker compose \
-            -f tests/integration/compose.immich.yml pull --quiet immich database redis \
-            > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
-
-      - uses: ./.github/actions/python-uv
-
-      - name: Install the locked harness environment
-        run: uv sync --frozen
-
-      - name: Authenticate to the durable image registry
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
-      - name: Set up the container build cache
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
-
-      - name: Build or restore the central image
-        id: central
-        uses: ./.github/actions/service-image
+      - name: Set up the e2e runner
+        id: setup
+        uses: ./.github/actions/software-e2e-setup
         with:
-          target: central
-          architecture: arm64
-          load: true
-          tags: photo-wall-software-e2e-central:ci
-
-      - name: Build or restore the media worker image
-        id: worker
-        uses: ./.github/actions/service-image
-        with:
-          target: media-worker
-          architecture: arm64
-          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
-          load: true
-          tags: photo-wall-software-e2e-worker:ci
+          media-base-image: ${{ needs.service-base.outputs.image }}
+          central: 'true'
 
       - name: Build the isolated Player package
         run: |
@@ -91,7 +63,7 @@ jobs:
 
       - name: Start a disposable real Immich fixture
         env:
-          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
           PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
@@ -100,10 +72,11 @@ jobs:
             --base-image "$WORKER_IMAGE" \
             --keep --setup-only
 
-      - name: Exercise two Players and three Outputs
+      - name: Exercise two Players and three Outputs through ${{ matrix.part }}
         env:
-          CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
-          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          PART: ${{ matrix.part }}
+          CENTRAL_IMAGE: ${{ steps.setup.outputs.central-image }}
+          WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
           PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
@@ -114,13 +87,13 @@ jobs:
             --revision "$GITHUB_SHA" \
             --central-image "$CENTRAL_IMAGE" \
             --worker-image "$WORKER_IMAGE" \
-            --scenario full
+            --scenario "$PART"
 
       - name: Upload sanitized software evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-software-e2e-${{ github.sha }}
+          name: photo-wall-software-e2e-${{ matrix.part }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/immich-fixture/evidence.json
             ${{ runner.temp }}/wall-demo/evidence.json
@@ -134,7 +107,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-software-e2e-docker-debug-${{ github.sha }}
+          name: photo-wall-software-e2e-docker-debug-${{ matrix.part }}-${{ github.sha }}
           path: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
           if-no-files-found: warn
           retention-days: 7
@@ -170,33 +143,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/python-uv
-
-      - name: Install the locked harness environment
-        run: uv sync --frozen
-
-      - name: Authenticate to the durable image registry
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
-      - name: Set up the container build cache
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
-
-      - name: Build or restore the media worker image
-        id: worker
-        uses: ./.github/actions/service-image
+      - name: Set up the e2e runner
+        id: setup
+        uses: ./.github/actions/software-e2e-setup
         with:
-          target: media-worker
-          architecture: arm64
-          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
-          load: true
-          tags: photo-wall-software-e2e-worker:ci
+          media-base-image: ${{ needs.service-base.outputs.image }}
 
       # Not retained: the fixture removes its services when it finishes, passed or failed.
       - name: Check the upstream adapter against a disposable real Immich
         env:
-          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
           PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-immich-adapter/docker-debug.log
         run: |

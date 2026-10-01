@@ -17,6 +17,9 @@ from scripts.demo_wall import (
     CORE_IMAGES,
     PLAYER_REVISION,
     PLAYER_RUNNER,
+    SCENARIOS,
+    SCENE_CYCLE_SECONDS,
+    SECURED_LEAD_SECONDS,
     DemoError,
     DemoHost,
     OperationFailure,
@@ -58,7 +61,8 @@ def test_daemon_image_build_explicitly_selects_and_loads_default_builder(tmp_pat
     ]
 
 
-@pytest.mark.parametrize("scenario,count", [("baseline", 1), ("full", 2)])
+@pytest.mark.parametrize("scenario,count",
+                         [(name, 1 if name == "baseline" else 2) for name in SCENARIOS])
 def test_role_topology_has_no_player_upstream_or_private_material(scenario, count):
     document = composition("pw-wall-demo-123456abcdef", "pw-immich-fixture-123456abcdef", scenario)
     assert not any(service.get("ports") for service in document["services"].values())
@@ -80,6 +84,31 @@ def test_role_topology_has_no_player_upstream_or_private_material(scenario, coun
     assert document["services"]["upstream-tools"]["volumes"][0]["read_only"]
     assert all(mount["volume"]["nocopy"] for name, service in document["services"].items()
                if name != "database" for mount in service.get("volumes", []))
+
+
+def test_the_demo_shortens_plan_and_retry_timing_within_their_constraints():
+    """Demo-only timing: shorter than a deployment's, valid where Central and the Player bound it,
+    and long enough that the steps waiting on it still test something."""
+    from central.coordination import CoordinationLimits
+    from contracts.liveness import SESSION_BACKOFF
+
+    central = composition("pw-wall-demo-123456abcdef", "pw-immich-fixture-123456abcdef",
+                          "full")["services"]["central"]["environment"]
+    demo = CoordinationLimits(horizon_seconds=float(central["PHOTO_WALL_HORIZON_SECONDS"]),
+                              renewal_seconds=float(central["PHOTO_WALL_RENEWAL_SECONDS"]))
+    deployed = CoordinationLimits()
+    assert demo.horizon_seconds < deployed.horizon_seconds
+    assert demo.renewal_seconds < deployed.renewal_seconds
+    # Every plan reaches at least the horizon ahead, so each Output always holds an assignment
+    # starting beyond the deletion step's lead: that step always has a secured target.
+    assert demo.horizon_seconds >= SECURED_LEAD_SECONDS + SCENE_CYCLE_SECONDS
+    [backoff] = [ast.literal_eval(node.value) for node in ast.walk(ast.parse(PLAYER_RUNNER))
+                 if isinstance(node, ast.Assign)
+                 and any(getattr(target, "attr", None) == "BACKOFF" for target in node.targets)]
+    # The Player indexes BACKOFF[min(attempt, 3)], and Central's silence threshold is derived
+    # from its first step.
+    assert len(backoff) == len(SESSION_BACKOFF) and backoff[0] == SESSION_BACKOFF[0]
+    assert max(backoff) < max(SESSION_BACKOFF)
 
 
 def test_player_runner_imports_only_stdlib_and_source_neutral_packages():

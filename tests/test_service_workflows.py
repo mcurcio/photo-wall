@@ -2,8 +2,12 @@
 import re
 from pathlib import Path
 
+from scripts.demo_wall import FAULT_SEGMENTS, SCENARIOS
+
 ROOT = Path(__file__).parents[1]
 WORKFLOWS = ROOT / '.github/workflows'
+ACTIONS = ROOT / '.github/actions'
+E2E_SETUP = 'uses: ./.github/actions/software-e2e-setup\n'
 
 
 def test_every_hosted_media_build_supplies_the_retained_base():
@@ -15,6 +19,15 @@ def test_every_hosted_media_build_supplies_the_retained_base():
                 consumers.append(workflow.name)
                 assert 'build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}' in step
                 assert 'uses: ./.github/workflows/service-base.yml' in text
+            if E2E_SETUP in step:  # builds the media worker from the base handed to it
+                consumers.append(workflow.name)
+                assert 'media-base-image: ${{ needs.service-base.outputs.image }}' in step
+                assert 'uses: ./.github/workflows/service-base.yml' in text
+    for action in ACTIONS.glob('*/action.yml'):
+        for step in re.split(r'^    - ', action.read_text(), flags=re.MULTILINE):
+            if re.search(r'target: media-(worker|test)\n', step):
+                assert action.parent.name == 'software-e2e-setup'
+                assert 'build-args: MEDIA_BASE_IMAGE=${{ inputs.media-base-image }}' in step
     assert sorted(consumers) == ['checks.yml', 'checks.yml', 'pipeline.yml', 'software-e2e.yml',
                                  'software-e2e.yml']
 
@@ -103,12 +116,30 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
 
 
 def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
-    """The scenario job starts a set-up fixture only; the full adapter run is its own job."""
+    """The scenario jobs start a set-up fixture only; the full adapter run is its own job."""
     workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
     scenario = _job(workflow, 'two-players-three-outputs')
     adapter = _job(workflow, 'immich-adapter')
     assert '--keep --setup-only' in scenario
     assert 'scripts.immich_fixture run' in adapter
     assert '--setup-only' not in adapter and '--keep' not in adapter
-    assert scenario.index('Prefetch the Immich fixture images') < scenario.index(
+    setup = (ACTIONS / 'software-e2e-setup/action.yml').read_text()
+    assert setup.index('Prefetch the Immich fixture images') < setup.index(
         'Build or restore the central image')
+
+
+def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
+    """The full scenario is its fault segments; the parallel scenario jobs partition them, and
+    every job shares one setup definition."""
+    workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    scenario = _job(workflow, 'two-players-three-outputs')
+    parts = re.search(r'\n        part: \[(.+)\]\n', scenario)[1].split(', ')
+    assert 'PART: ${{ matrix.part }}' in scenario and '--scenario "$PART"' in scenario
+    covered = [segment for part in parts for segment in SCENARIOS[part]]
+    assert sorted(covered) == sorted(set(covered)) == sorted(SCENARIOS['full'])
+    assert SCENARIOS['full'] == tuple(FAULT_SEGMENTS)
+    for job in ('two-players-three-outputs', 'immich-adapter'):
+        body = _job(workflow, job)
+        assert body.count(E2E_SETUP) == 1, job
+        for repeated in ('uv sync', 'docker login', 'setup-buildx-action', 'service-image'):
+            assert repeated not in body, (job, repeated)
