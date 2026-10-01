@@ -320,6 +320,8 @@ NOT_SHIPPED: Final = (
     "scripts/release_plan.py", "scripts/release_seal.py",
     "scripts/runtime_provenance.py",
     "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
+    "scripts/build_node_pid1_fixture.py",  # the node-pid1 scenarios' fixture; never shipped
+    ".github/workflows/node-pid1.yml",
 )
 
 
@@ -389,6 +391,15 @@ SUITES: Final = (
                  "central/migrations/041_fleet_app_observations.sql",
                  "central/content_routes.py", "central/content_catalog/**",
                  "central/assets/**", "central/infra/**", "Dockerfile", "uv.lock")),
+    # The node lifecycle under real systemd (node-pid1.yml): the node packages it boots, the
+    # Central owners it runs against, and its own builder, harness and workflow.
+    Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
+                                 "player-environment"),
+          paths=("tests/test_node_pid1.py", "tests/node_pid1_*",
+                 "scripts/build_node_pid1_fixture.py", "scripts/build_node_components.py",
+                 "scripts/player_start_probe.py", ".github/workflows/node-pid1.yml",
+                 "central/app.py", "central/node_app.py", "central/fleet/**",
+                 "central/migrations/*_node_*.sql", "uv.lock")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # A release runs these; base-image doubles as the release build (its artifacts are what the

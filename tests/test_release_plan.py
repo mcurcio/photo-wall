@@ -131,10 +131,11 @@ def test_feat_releases_a_minor(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
     assert plan.packages == ("central-image", "media-worker-image")
-    # The composition root mounts the packaged OS-agent's v2 route, so it runs
-    # the netboot tracer; a pull request still needs no base-image rebuild.
-    assert plan.suites == ("checks", "e2e", "netboot-e2e")
-    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e")
+    # The composition root mounts the packaged OS-agent's v2 route and the node routes, so it
+    # runs the netboot tracer and the node scenarios; a pull request still needs no base-image
+    # rebuild.
+    assert plan.suites == ("checks", "e2e", "netboot-e2e", "node-pid1")
+    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e", "node-pid1")
     assert "base-image" in ReleaseRun(plan).jobs
 
 
@@ -270,8 +271,10 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     assert values["revision"] == scratch.git("rev-parse", "HEAD")
     assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
         "false", "", "", "")
-    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e"]
-    assert "Jobs: base-image, checks, e2e, netboot-e2e\n" in summary.read_text()
+    # The Player is the sealed environment the node scenarios boot.
+    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e",
+                                          "node-pid1"]
+    assert "Jobs: base-image, checks, e2e, netboot-e2e, node-pid1\n" in summary.read_text()
 
 
 @needs_uvx

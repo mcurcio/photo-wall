@@ -143,3 +143,31 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
         assert body.count(E2E_SETUP) == 1, job
         for repeated in ('uv sync', 'docker login', 'setup-buildx-action', 'service-image'):
             assert repeated not in body, (job, repeated)
+
+
+def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
+    """One matrix leg per scenario of tests/test_node_pid1.py, each required, never skipped,
+    on native arm64 from the components builder base-image.yml runs."""
+    from test_node_pid1 import FIXTURE_VARIABLE, REQUIRE_VARIABLE, SCENARIOS
+
+    workflow = (WORKFLOWS / 'node-pid1.yml').read_text()
+    scenario = _job(workflow, 'scenario')
+    legs = re.search(r'\n        scenario: \[(.+)\]\n', scenario)[1].split(', ')
+    assert sorted(legs) == sorted(SCENARIOS) and len(legs) == len(set(legs))
+    assert 'fail-fast: false' in scenario
+    assert 'runs-on: ubuntu-24.04-arm\n' in scenario
+    assert re.search(r'timeout-minutes: \d+\n', scenario)
+    assert f"\n  {REQUIRE_VARIABLE}: '1'\n" in workflow
+    assert "\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" in workflow
+    assert 'compose.test-database.yml up -d --wait' in scenario
+    for builder in ('build_node_components', 'build_node_pid1_fixture'):
+        assert f'.venv/bin/python -m scripts.{builder}' in scenario, builder
+    assert '.venv/bin/python -m scripts.build_node_components' in (
+        WORKFLOWS / 'base-image.yml').read_text()
+    assert f'{FIXTURE_VARIABLE}: ' in scenario
+    assert '-m node_pid1 -k "$SCENARIO"' in scenario and 'SCENARIO: ${{ matrix.scenario }}' in scenario
+    pipeline = (WORKFLOWS / 'pipeline.yml').read_text()
+    job = _job(pipeline, 'node-pid1')
+    assert "if: contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')" in job
+    assert 'uses: ./.github/workflows/node-pid1.yml' in job
+    assert 'revision: ${{ needs.plan.outputs.revision }}' in job

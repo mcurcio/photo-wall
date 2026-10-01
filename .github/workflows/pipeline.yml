@@ -10,6 +10,8 @@ name: Pipeline
 #   base-image      base-image.yml, when the base bundle or a .deb changed -- and on every
 #                   release, whose assets it builds (no second base build).
 #   netboot-e2e     netboot-e2e.yml, when a .deb or the tracer's own paths changed.
+#   node-pid1       node-pid1.yml, the Player node lifecycle under real systemd, when a node
+#                   package, Central's fleet owners or the scenarios' own paths changed.
 #   tested          the barrier every release job needs: each test job the plan listed passed.
 #   service-base, images, seal
 #                   the release, in that order: a push to main that changed a shipped package.
@@ -154,11 +156,20 @@ jobs:
       packages: read
     uses: ./.github/workflows/netboot-e2e.yml
 
+  node-pid1:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-pid1.yml
+    with:
+      revision: ${{ needs.plan.outputs.revision }}
+
   # The release jobs need this one job, not each test job: a job whose `needs` include a
   # skipped job is itself skipped (and `!failure()` passes a cancelled one), so the rule "every
   # test the plan listed succeeded" is judged here, by the same code as the gate.
   tested:
-    needs: [plan, checks, e2e, base-image, netboot-e2e]
+    needs: [plan, checks, e2e, base-image, netboot-e2e, node-pid1]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -372,7 +383,7 @@ jobs:
   # job the plan listed did not succeed, or when any job failed or was cancelled.
   gate:
     name: gate
-    needs: [plan, checks, e2e, base-image, netboot-e2e, tested, service-base, images, seal]
+    needs: [plan, checks, e2e, base-image, netboot-e2e, node-pid1, tested, service-base, images, seal]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
