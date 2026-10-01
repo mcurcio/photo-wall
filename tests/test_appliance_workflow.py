@@ -15,10 +15,14 @@ def test_software_e2e_uploads_sanitized_docker_failure_diagnostics():
 
     job_prefix = workflow.split("    steps:", 1)[0]
     assert "runner.temp" not in job_prefix
-    assert workflow.count("PHOTO_WALL_DOCKER_DEBUG: '1'") == 3
-    assert workflow.count(
-        "PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log"
-    ) == 3
-    assert "name: Upload Docker failure diagnostics" in workflow
-    assert "if: failure()" in workflow
-    assert "photo-wall-software-e2e/docker-debug.log" in workflow
+    # Each fixture-driving job records its Docker diagnostics privately and uploads them only
+    # when it fails: the wall scenario (fixture, scenario, cleanup) and the adapter checks.
+    scenario, adapter = workflow.split("\n  immich-adapter:\n")
+    for job, steps, log in [(scenario, 3, "photo-wall-software-e2e"),
+                            (adapter, 1, "photo-wall-immich-adapter")]:
+        assert job.count("PHOTO_WALL_DOCKER_DEBUG: '1'") == steps
+        assert job.count(
+            f"PHOTO_WALL_DOCKER_DEBUG_LOG: ${{{{ runner.temp }}}}/{log}/docker-debug.log") == steps
+        upload = job.split("name: Upload Docker failure diagnostics", 1)[1]
+        assert upload.startswith("\n        if: failure()")
+        assert f"{log}/docker-debug.log" in upload

@@ -223,3 +223,64 @@ def test_fixture_host_pull_fails_after_bounded_retries_with_informative_diagnost
     calls = (tmp_path / "calls.log").read_text().splitlines()
     down_calls = [line for line in calls if " down " in f" {line} "]
     assert len(down_calls) == STARTUP_RETRY_ATTEMPTS - 1
+
+
+class _RecordingHost:
+    """A FixtureHost stand-in recording what `run_fixture` asks of the disposable upstream."""
+
+    def __init__(self, state):
+        self.state, self.roles, self.composed = state, [], []
+        state.mkdir()
+
+    def _command(self, args, *, timeout, capture):
+        return "0" * 40 if "rev-parse" in args else ""
+
+    def build(self, *, base_image=None):
+        pass
+
+    def pull(self, *services):
+        pass
+
+    def start(self, **_):
+        pass
+
+    def topology(self):
+        return {}, "192.0.2.1"
+
+    def compose(self, *args, **_):
+        self.composed.append(args[:2])
+        return "{}"
+
+    def probe(self, upstream_ip):
+        return {}
+
+    def role(self, role, action, *, page_size):
+        self.roles.append((role, action))
+        return {}
+
+    def export_runtime(self):
+        pass
+
+    def cleanup(self):
+        pass
+
+
+@pytest.mark.parametrize("setup_only", [False, True])
+def test_setup_only_stops_after_the_setup_and_the_full_run_checks_every_role(
+        tmp_path, monkeypatch, setup_only):
+    import scripts.immich_fixture as fixture
+
+    hosts = []
+    monkeypatch.setattr(fixture.FixtureHost, "create",
+                        classmethod(lambda cls, state: hosts.append(_RecordingHost(state))
+                                    or hosts[-1]))
+    result = fixture.run_fixture(tmp_path / "state", True, setup_only=setup_only)
+    assert result["result"] == "passed"
+    (host,) = hosts
+    if setup_only:
+        assert host.roles == [("setup", "initialize")]
+        assert ("stop", "immich") not in host.composed
+    else:
+        assert host.roles == [*fixture.SETUP_ROLES, *fixture.ADAPTER_ROLES,
+                              ("central", "outage"), ("central", "recovered")]
+        assert ("stop", "immich") in host.composed

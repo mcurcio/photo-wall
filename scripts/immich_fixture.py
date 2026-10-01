@@ -504,11 +504,24 @@ class FixtureHost:
 
 
 
+# The upstream every consumer needs: a signed-in owner, the runtime key and synthetic content.
+SETUP_ROLES = (("setup", "initialize"),)
+# The adapter checks against it, in order (each mutation, then the adapter's view of it).
+ADAPTER_ROLES = (("central", "initial"), ("setup", "live"), ("central", "live"),
+                 ("setup", "delete"), ("central", "deleted"), ("setup", "deny"),
+                 ("central", "deny"), ("setup", "restore"))
+
+
 def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
-                base_image: str | None = None) -> dict:
+                base_image: str | None = None, setup_only: bool = False) -> dict:
+    """Start the disposable upstream, set it up and, unless `setup_only`, run every adapter
+    check against it. `setup_only` serves a consumer that needs only the set-up upstream (the
+    software e2e, whose workflow runs the adapter checks in a parallel job)."""
     require(type(page_size) is int and 1 <= page_size <= 1000, "invalid_page_size")
     host = FixtureHost.create(state)
-    evidence = {"class": "integration", "scope": "real upstream adapter and network boundary",
+    scope = ("set-up upstream only" if setup_only
+             else "real upstream adapter and network boundary")
+    evidence = {"class": "integration", "scope": scope,
                 "started_utc": datetime.now(timezone.utc).isoformat(), "checks": {}}
     evidence["source_state"] = {
         "git_revision": host._command(["git", "rev-parse", "HEAD"], timeout=10,
@@ -544,21 +557,20 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
             for relative in harness_files
         }
         evidence["checks"]["denial_before"] = host.probe(upstream_ip)
-        for role, action in [("setup", "initialize"), ("central", "initial"),
-                             ("setup", "live"), ("central", "live"),
-                             ("setup", "delete"), ("central", "deleted"),
-                             ("setup", "deny"), ("central", "deny"),
-                             ("setup", "restore")]:
+        for role, action in SETUP_ROLES + (() if setup_only else ADAPTER_ROLES):
             evidence["stage"] = role + "_" + action
             write_json(host.state / "evidence.json", evidence)
             evidence["checks"][role + "_" + action] = host.role(role, action, page_size=page_size)
             write_json(host.state / "evidence.json", evidence)
-        evidence["checks"]["denial_after"] = host.probe(upstream_ip)
-        host.compose("stop", "immich", capture=False)
-        evidence["checks"]["central_outage"] = host.role("central", "outage", page_size=page_size)
-        host.compose("up", "-d", "--wait", "--wait-timeout", "120", "immich",
-                     timeout=180, capture=False)
-        evidence["checks"]["central_recovered"] = host.role("central", "recovered", page_size=page_size)
+        if not setup_only:
+            evidence["checks"]["denial_after"] = host.probe(upstream_ip)
+            host.compose("stop", "immich", capture=False)
+            evidence["checks"]["central_outage"] = host.role("central", "outage",
+                                                             page_size=page_size)
+            host.compose("up", "-d", "--wait", "--wait-timeout", "120", "immich",
+                         timeout=180, capture=False)
+            evidence["checks"]["central_recovered"] = host.role("central", "recovered",
+                                                                page_size=page_size)
         evidence["result"] = "passed"
         return {"result": "passed", "evidence": str(host.state / "evidence.json"),
                 "services_retained": keep}
@@ -589,10 +601,11 @@ def main() -> None:
             command.add_argument("--keep", action="store_true")
             command.add_argument("--page-size", type=int, default=3)
             command.add_argument("--base-image")
+            command.add_argument("--setup-only", action="store_true")
     args = parser.parse_args()
     if args.command == "run":
         result = run_fixture(args.state_dir, args.keep, page_size=args.page_size,
-                             base_image=args.base_image)
+                             base_image=args.base_image, setup_only=args.setup_only)
     else:
         FixtureHost(args.state_dir).cleanup()
         result = {"cleaned": True}

@@ -15,7 +15,8 @@ def test_every_hosted_media_build_supplies_the_retained_base():
                 consumers.append(workflow.name)
                 assert 'build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}' in step
                 assert 'uses: ./.github/workflows/service-base.yml' in text
-    assert sorted(consumers) == ['checks.yml', 'checks.yml', 'pipeline.yml', 'software-e2e.yml']
+    assert sorted(consumers) == ['checks.yml', 'checks.yml', 'pipeline.yml', 'software-e2e.yml',
+                                 'software-e2e.yml']
 
 
 def test_shared_producer_queues_all_callers_and_requires_published_output():
@@ -35,7 +36,7 @@ def test_shared_producer_queues_all_callers_and_requires_published_output():
 
 def test_existing_required_jobs_fail_if_shared_preparation_fails():
     for name, jobs in [('checks.yml', ['image-smoke', 'linux-media']),
-                       ('software-e2e.yml', ['two-players-three-outputs'])]:
+                       ('software-e2e.yml', ['two-players-three-outputs', 'immich-adapter'])]:
         workflow = (WORKFLOWS / name).read_text()
         for job in jobs:
             body = re.split(r'^  [\w-]+:\n', workflow.split(f'  {job}:\n')[1],
@@ -99,3 +100,15 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
         assert 'published_player_wire.py prepare' in selections[job]
         assert 'PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR' in selections[job]
     assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
+
+
+def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
+    """The scenario job starts a set-up fixture only; the full adapter run is its own job."""
+    workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    scenario = _job(workflow, 'two-players-three-outputs')
+    adapter = _job(workflow, 'immich-adapter')
+    assert '--keep --setup-only' in scenario
+    assert 'scripts.immich_fixture run' in adapter
+    assert '--setup-only' not in adapter and '--keep' not in adapter
+    assert scenario.index('Prefetch the Immich fixture images') < scenario.index(
+        'Build or restore the central image')

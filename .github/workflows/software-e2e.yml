@@ -3,6 +3,11 @@ name: Controller and Player software e2e
 # Called by pipeline.yml (its `e2e` job) on every pull request and push to main; the pipeline
 # owns the triggers and the concurrency. To prepare a missing media OS dependency by hand,
 # dispatch service-base.yml.
+#
+# Two parallel jobs, each with its own disposable Immich: `immich-adapter` runs the fixture's
+# adapter and network-boundary checks; `two-players-three-outputs` starts a set-up fixture
+# only (`--setup-only`) and runs the wall scenario against it, so the adapter checks are off
+# its critical path.
 on:
   workflow_call:
 
@@ -37,6 +42,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+
+      # Overlap the fixture's largest pulls with this job's setup and image builds; the
+      # fixture's own (retried) pull below joins any still in flight.
+      - name: Prefetch the Immich fixture images in the background
+        run: |
+          FIXTURE_DB_PASSWORD=unused FIXTURE_IMAGE=unused nohup docker compose \
+            -f tests/integration/compose.immich.yml pull --quiet immich database redis \
+            > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
 
       - uses: ./.github/actions/python-uv
 
@@ -85,7 +98,7 @@ jobs:
           .venv/bin/python -m scripts.immich_fixture run \
             --state-dir "$RUNNER_TEMP/immich-fixture" \
             --base-image "$WORKER_IMAGE" \
-            --keep
+            --keep --setup-only
 
       - name: Exercise two Players and three Outputs
         env:
@@ -136,3 +149,75 @@ jobs:
             .venv/bin/python -m scripts.immich_fixture cleanup \
               --state-dir "$RUNNER_TEMP/immich-fixture"
           fi
+
+  immich-adapter:
+    needs: service-base
+    if: always()
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Require media OS preparation
+        env:
+          PREPARATION: ${{ needs.service-base.result }}
+          MEDIA_BASE_IMAGE: ${{ needs.service-base.outputs.image }}
+        run: |
+          test "$PREPARATION" = success
+          test -n "$MEDIA_BASE_IMAGE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked harness environment
+        run: uv sync --frozen
+
+      - name: Authenticate to the durable image registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Set up the container build cache
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Build or restore the media worker image
+        id: worker
+        uses: ./.github/actions/service-image
+        with:
+          target: media-worker
+          architecture: arm64
+          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
+          load: true
+          tags: photo-wall-software-e2e-worker:ci
+
+      # Not retained: the fixture removes its services when it finishes, passed or failed.
+      - name: Check the upstream adapter against a disposable real Immich
+        env:
+          WORKER_IMAGE: ${{ steps.worker.outputs.imageid }}
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-immich-adapter/docker-debug.log
+        run: |
+          .venv/bin/python -m scripts.immich_fixture run \
+            --state-dir "$RUNNER_TEMP/immich-fixture" \
+            --base-image "$WORKER_IMAGE"
+
+      - name: Upload sanitized adapter evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-immich-adapter-${{ github.sha }}
+          path: ${{ runner.temp }}/immich-fixture/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Docker failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-immich-adapter-docker-debug-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-immich-adapter/docker-debug.log
+          if-no-files-found: warn
+          retention-days: 7
