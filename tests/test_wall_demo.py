@@ -278,16 +278,18 @@ def test_immich_runtime_provenance_is_derived_from_complete_bundle():
     assert "scripts/harness_failure.py" in host
 
 
-@pytest.mark.parametrize("code", [
+INDIRECT_CODES = [
     "active_before_outage_timeout", "central_recovery_timeout", "deleted_refresh_timeout",
     "new_media_not_presented", "permission_not_reported", "permission_recovery_timeout",
     "player_rejoin_timeout", "upstream_outage_not_reported", "upstream_recovery_timeout",
     "fixture_http_400", "fixture_http_401", "fixture_http_403", "fixture_http_404",
     "fixture_http_409", "fixture_http_422", "fixture_http_429", "fixture_http_500",
     "fixture_http_502", "fixture_http_503", "fixture_http_504",
-])
-def test_indirect_bounded_failure_codes_remain_in_closed_vocabulary(code):
-    assert str(DemoError(code)) == code
+]
+
+
+def test_indirect_bounded_failure_codes_remain_in_closed_vocabulary():
+    assert [str(DemoError(code)) for code in INDIRECT_CODES] == INDIRECT_CODES
 
 
 def test_code_shaped_unknown_exception_cannot_escape_as_public_failure():
