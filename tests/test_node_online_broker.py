@@ -22,6 +22,7 @@ from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 class Driver:
     def __init__(self, old):
         self.running = old
+        self.old_epoch = old.app_epoch
         self.stop_calls = 0
         self.starts = []
         self.target_fails = False
@@ -59,7 +60,7 @@ class Driver:
         if self.target_fails and len(self.starts) == 1:
             raise OSError("target exited")
         self.running = RunningApp(reference, NodeProcessIdentity(500 + len(self.starts), 999, uuid4()),
-                                  1 + len(self.starts), operation_id)
+                                  self.old_epoch + len(self.starts), operation_id)
         return self.running
 
 

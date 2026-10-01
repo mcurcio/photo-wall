@@ -24,10 +24,9 @@ from contracts.node_protocol import NodeProcessIdentity
 class Rig:
     def __init__(self, registry, *, qualified=True, unbound=True):
         coordinator, player, key, sessions, claims, grants, surfaces, _, proof = rig(registry, node_v2=True)
-        display = NodeDisplay(sessions, runtime=coordinator)
-        for surface in surfaces:
-            display.exchange(grants['display_host'].session_id, claims['display_host'].credential,
-                encode_display_exchange(DisplayExchange(grants['display_host'].producer, uuid4(), 1000, surface.output, True)))
+        self.display = NodeDisplay(sessions, runtime=coordinator)
+        self.display_claim, self.display_grant, self.surfaces = claims['display_host'], grants['display_host'], surfaces
+        self.refresh_display(1000)
         with registry.db.transaction() as conn:
             deployment = parse_node_deployment(bytes(conn.execute('SELECT document FROM node_deployments').fetchone()['document']))
             cohort = current_cohort_in(conn, DEVICE_ID, 1, registry.clock.utc())
@@ -57,6 +56,13 @@ class Rig:
         self.registry, self.sessions, self.proof = registry, sessions, proof
         self.service = NodeLifecycle(sessions, gate)
         self.claim = claims['app_effect_broker']
+
+    def refresh_display(self, sampled_boottime_ms):
+        """Current output evidence: a qualified fallback needs a fresh cohort at stage time."""
+        for surface in self.surfaces:
+            self.display.exchange(self.display_claim.session_id, self.display_claim.credential,
+                encode_display_exchange(DisplayExchange(self.display_grant.producer, uuid4(),
+                                                        sampled_boottime_ms, surface.output, True)))
 
     def stage(self, index=0, *, session_id=None):
         issued = self.service.stage(DEVICE_ID, OperatorAppStage(uuid4(), uuid4(), session_id or self.claim.session_id,
