@@ -19,7 +19,7 @@ export function useCalibrationCapability(frameId, generation) {
   useEffect(() => {
     let current = true;
     setCapability(null);
-    apiWrite(`/v2/operator/frames/${encodeURIComponent(frameId)}/calibration-capability`, { method: "GET" })
+    apiWrite(`/v1/operator/frames/${encodeURIComponent(frameId)}/calibration-capability`, { method: "GET" })
       .then((result) => { if (current) setCapability(result.ok ? result.data : { mode: "unavailable" }); })
       .catch(() => { if (current) setCapability({ mode: "unavailable" }); });
     return () => { current = false; };
@@ -37,7 +37,7 @@ export function LiveCalibrationTrial({ frameId, trying, calibrated }) {
   const alive = useRef(true);
   const mutate = useMutate();
   current.current = row;
-  const base = `/v2/operator/frames/${encodeURIComponent(frameId)}/calibration-trials`;
+  const base = `/v1/operator/frames/${encodeURIComponent(frameId)}/calibration-trials`;
   const run = useCallback(async (operation, calibration) => {
     if (gate.current) return;
     gate.current = true;

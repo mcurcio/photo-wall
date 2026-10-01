@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from scripts import node_build_inputs
 from scripts.build_player_deb import fetch_tree
 from scripts.debian_packages import PIN, packages
 from scripts.node_build_inputs import BUILDER_IMAGE, validate_builder
@@ -18,7 +19,9 @@ from scripts.node_build_inputs import BUILDER_IMAGE, validate_builder
 def build(tree: Path, output: Path, *, builder_image: str, architecture: str) -> Path:
     validate_builder(builder_image, architecture, purpose="display")
     builder_script_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    build_inputs_sha256 = hashlib.sha256((tree / "scripts/node_build_inputs.py").read_bytes()).hexdigest()
+    # The inputs module this builder imported (like the script above and build_app_environment),
+    # not a tree copy: fetch_tree archives only first-party packages and ARCHIVED_FILES.
+    build_inputs_sha256 = hashlib.sha256(Path(node_build_inputs.__file__).read_bytes()).hexdigest()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="photo-wall-display-build-") as temporary:
         work = Path(temporary)

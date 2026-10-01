@@ -158,7 +158,7 @@ try:
     media_waiting = False
     partition_until = None
     expiry_checked = False
-    trial_path = "/v2/operator/frames/native-frame/calibration-trials"
+    trial_path = "/v1/operator/frames/native-frame/calibration-trials"
     end = time.monotonic() + (330 if browser else 50)
     while time.monotonic() < end:
         while backend.pending:
@@ -187,7 +187,7 @@ try:
             partition_until = None
             expiry_checked = True
             trial = None
-            trial_path = "/v2/operator/frames/native-frame/calibration-trials"
+            trial_path = "/v1/operator/frames/native-frame/calibration-trials"
         if controller.host.states() and all(
             s.diagnostic == "released" for s in controller.host.states()
         ):

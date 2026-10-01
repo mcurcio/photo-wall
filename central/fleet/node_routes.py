@@ -87,7 +87,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.middleware("http")
     async def node_no_store(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith(("/v2/node/", "/v2/operator/node/")):
+        if request.url.path.startswith("/v2/node/"):  # operator routes: operator_auth
             response.headers["Cache-Control"] = "private, no-store"
         return response
 
@@ -109,7 +109,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         sessions.require_enabled()
         return await bounded_os_body(request, limit=limit, error_code="node_body_too_large")
 
-    @app.get("/v2/operator/node/status", dependencies=[Depends(admin)])
+    @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
     async def node_status():
         return {"transport_enabled": config is not None,
                 "installation_audience": config.installation_audience if config else None,
@@ -140,7 +140,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             os.close(opened.fd)
             raise
 
-    @app.post("/v2/operator/node/deployments", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/deployments", dependencies=[Depends(admin)])
     async def publish_deployment(request: Request):
         raw = await body(request, MAX_NODE_BOOT_BYTES)
         try:
@@ -149,7 +149,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise NodeControlError("invalid_node_deployment", 422) from exc
         return await invoke(boots.publish, publication)
 
-    @app.put("/v2/operator/node/boot-policy", dependencies=[Depends(admin)])
+    @app.put("/v1/operator/node/boot-policy", dependencies=[Depends(admin)])
     async def select_deployment(request: Request):
         raw = await body(request, MAX_COMMAND_BYTES)
         value = loads_object(raw, max_bytes=MAX_COMMAND_BYTES)
@@ -163,11 +163,11 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                 raise
             raise NodeControlError("invalid_node_boot_selection", 422) from exc
 
-    @app.get("/v2/operator/node/releases", dependencies=[Depends(admin)])
+    @app.get("/v1/operator/node/releases", dependencies=[Depends(admin)])
     async def node_releases():
         return await invoke(publications.list)
 
-    @app.post("/v2/operator/node/releases/{manifest_sha256}/deployments", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/releases/{manifest_sha256}/deployments", dependencies=[Depends(admin)])
     async def publish_release(manifest_sha256: str, request: Request):
         value = loads_object(await body(request, 4096), max_bytes=4096)
         if value is None or set(value) != {"deployment_id", "select_app", "operator_audit_ref"}:
@@ -182,7 +182,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ValueError as exc:
             raise NodeControlError(str(exc), 422) from exc
 
-    @app.put("/v2/operator/node/devices/{device_id}/selected-boot", dependencies=[Depends(admin)])
+    @app.put("/v1/operator/node/devices/{device_id}/selected-boot", dependencies=[Depends(admin)])
     async def select_boot(device_id: str, request: Request):
         raw = await body(request, MAX_COMMAND_BYTES)
         value = loads_object(raw, max_bytes=MAX_COMMAND_BYTES)
@@ -281,7 +281,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             os.close(opened.fd)
             raise
 
-    @app.post("/v2/operator/node/devices/{device_id}/app-stages", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/devices/{device_id}/app-stages", dependencies=[Depends(admin)])
     async def app_stage(device_id: str, request: Request):
         value = loads_object(await body(request, MAX_LIFECYCLE_BYTES), max_bytes=MAX_LIFECYCLE_BYTES)
         try:
@@ -294,7 +294,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise NodeControlError("node_app_stage_invalid", 422) from exc
         return await invoke(lifecycle.stage, device_id, stage)
 
-    @app.post("/v2/operator/node/devices/{device_id}/app-qualifications", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/devices/{device_id}/app-qualifications", dependencies=[Depends(admin)])
     async def app_qualification(device_id: str, request: Request):
         value = loads_object(await body(request, MAX_LIFECYCLE_BYTES), max_bytes=MAX_LIFECYCLE_BYTES)
         try:
@@ -306,19 +306,19 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         return await invoke(acceptance.begin, device_id, qualification_id,
                             value["environment_sha256"], value["operator_audit_ref"])
 
-    @app.post("/v2/operator/node/app-qualifications/{qualification_id}/sample", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/app-qualifications/{qualification_id}/sample", dependencies=[Depends(admin)])
     async def app_qualification_sample(qualification_id: UUID):
         return await invoke(acceptance.sample, qualification_id)
 
-    @app.get("/v2/operator/frames/{frame_id}/calibration-capability", dependencies=[Depends(admin)])
+    @app.get("/v1/operator/frames/{frame_id}/calibration-capability", dependencies=[Depends(admin)])
     async def calibration_capability(frame_id: str):
         return await invoke(Registry(db, clock).calibration_capability, frame_id)
 
-    @app.post("/v2/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
     async def calibration_begin(frame_id: str):
         return await invoke(trials.begin, frame_id)
 
-    @app.post("/v2/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
     async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):
         value = loads_object(await body(request, 4096), max_bytes=4096)
         try:
@@ -340,7 +340,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         sessions.require_enabled()
         return await invoke(commands.poll, *_credentials(request))
 
-    @app.post("/v2/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])
+    @app.post("/v1/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])
     async def reboot(device_id: str, request: Request):
         raw = await body(request, MAX_COMMAND_BYTES)
         try:
@@ -349,10 +349,10 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise NodeControlError("invalid_operator_reboot", 422) from exc
         return await invoke(commands.request_reboot, device_id, command)
 
-    @app.get("/v2/operator/node/devices/{device_id}/app-attempts", dependencies=[Depends(admin)])
+    @app.get("/v1/operator/node/devices/{device_id}/app-attempts", dependencies=[Depends(admin)])
     async def app_status(device_id: str):
         return await invoke(lifecycle.status, device_id)
 
-    @app.get("/v2/operator/node/devices/{device_id}", dependencies=[Depends(admin)])
+    @app.get("/v1/operator/node/devices/{device_id}", dependencies=[Depends(admin)])
     async def status(device_id: str):
         return await invoke(observations.status, device_id)

@@ -883,4 +883,6 @@ def create_app(
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       serving_verifier=node_serving_verifier, content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
+    # Every route is bound: refuse one that `admin` guards outside the cookie's path.
+    operator_auth.require_scoped(app)
     return app

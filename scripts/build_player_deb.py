@@ -101,6 +101,9 @@ UNIT_FILES = ("player.service", "weston.service")
 _PYPI_ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 
 DECLARATION: Final = "scripts/debian_packages.py"
+# The only files outside the first-party packages that fetch_tree archives; a builder may
+# read nothing else from the tree (tests/test_build_trees.py enforces it).
+ARCHIVED_FILES: Final = (DECLARATION, "pyproject.toml")
 
 # The first-party packages, the declaration and pyproject.toml (~1.4 MiB today); guards
 # against archiving an unexpectedly huge tree.
@@ -190,7 +193,7 @@ def fetch_tree(repository: Path, revision: str, into: Path) -> None:
     ).stdout.decode().split("\0")
     first_party = sorted({name.partition("/")[0] for name in listing
                           if re.fullmatch(r"[^/]+/__init__\.py", name)})
-    wanted = (*first_party, DECLARATION, "pyproject.toml")
+    wanted = (*first_party, *ARCHIVED_FILES)
     archive = subprocess.run(
         ["git", "-C", str(repository), "archive", "--format=tar", revision, "--", *wanted],
         check=True, capture_output=True, timeout=60,
@@ -202,7 +205,7 @@ def fetch_tree(repository: Path, revision: str, into: Path) -> None:
         for member in members:
             path = PurePosixPath(member.name)
             inside = (path.parts[0] in first_party
-                      or member.name in (DECLARATION, "pyproject.toml", "scripts"))
+                      or member.name in (*ARCHIVED_FILES, "scripts"))
             if (path.is_absolute() or ".." in path.parts or not inside
                     or not (member.isfile() or member.isdir())):
                 raise BuildError("unexpected or nonregular source member")

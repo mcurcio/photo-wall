@@ -18,12 +18,18 @@ One principal (the admin token), two ways to present it:
 Every `/v1/operator/*` response is `Cache-Control: no-store`, including exception-handler and
 unhandled-500 responses. Nothing here reads a cookie for Player, media or netboot routes, and no
 CORS header is ever sent.
+
+`OPERATOR_PREFIX` is the one declaration the cookie path, the no-store scope and the route scope
+derive from: `OperatorAuth.require_scoped` refuses, at app construction, any route that depends on
+`admin` outside it (a browser would never send the cookie there).
 """
 
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.dependencies.models import Dependant
 from fastapi.responses import PlainTextResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -145,6 +151,10 @@ class _NoStoreOperator:
         await self.app(scope, receive, send_no_store)
 
 
+def _depends_on(dependant: Dependant, call: object) -> bool:
+    return any(sub.call == call or _depends_on(sub, call) for sub in dependant.dependencies)
+
+
 class OperatorAuth:
     """The `admin` dependency and the sign-in routes, under one admin token."""
 
@@ -210,3 +220,13 @@ class OperatorAuth:
             return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
 
         app.add_exception_handler(Exception, server_error)
+
+    def require_scoped(self, app: FastAPI) -> None:
+        """Refuse an app with a route that depends on `admin` outside `OPERATOR_PREFIX`, where the
+        session cookie is never sent and no-store does not apply. Call once every route is bound."""
+        stray = sorted(f"{','.join(sorted(route.methods))} {route.path}" for route in app.routes
+                       if isinstance(route, APIRoute)
+                       and not route.path.startswith(OPERATOR_PREFIX)
+                       and _depends_on(route.dependant, self.admin))
+        if stray:
+            raise RuntimeError(f"operator routes outside {OPERATOR_PREFIX}: {stray}")

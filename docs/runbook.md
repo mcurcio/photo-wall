@@ -913,14 +913,14 @@ The ordinary `central.app:create_app` factory keeps node transport disabled. The
 node factory enables observation, explicit session enrollment, immutable V2 boot
 offers and scoped command routes; it does **not** open the durable effect gate.
 `/healthz` remains process/service health. Authenticated
-`GET /v2/operator/node/status` reports transport selection and the persistent gate
+`GET /v1/operator/node/status` reports transport selection and the persistent gate
 state separately. A running HTTP server, accepted serial claim, stored sample, or
 catalogued artifact is not command qualification, authenticated physical identity,
 verified downloaded bytes, or observed pixels.
 
 Publish a canonical `NodeDeployment` using authenticated
-`POST /v2/operator/node/deployments`, then select its immutable ID with the
-revision CAS at `PUT /v2/operator/node/boot-policy`. The base release must already
+`POST /v1/operator/node/deployments`, then select its immutable ID with the
+revision CAS at `PUT /v1/operator/node/boot-policy`. The base release must already
 have exact catalog provenance; manager primary and any accepted fallback are
 pinned to that base digest. Environment sources feed the existing content worker.
 A missing byte artifact is reported unavailable until the worker acquires and
@@ -928,11 +928,11 @@ verifies it. An explicit no-app deployment still boots the independent base.
 Only the V2 cohort (`photowall.node=v2`) uses these frozen offers; it cannot silently
 fall back to a legacy manifest.
 
-For ambiguity, `GET /v2/operator/node/devices/{device_id}` separates current and
+For ambiguity, `GET /v1/operator/node/devices/{device_id}` separates current and
 historical scoped credentials, observation sample/receipt ages, reboot requests,
 responses and effect evidence. Overlapping boot claims block command admission.
 An operator may resolve the logical target using the generation/revision CAS at
-`PUT /v2/operator/node/devices/{device_id}/selected-boot`, supplying the exact
+`PUT /v1/operator/node/devices/{device_id}/selected-boot`, supplying the exact
 known boot ID and an audit reference. This does not prove which physical Pi exists
 or that an already-delivered effect stopped. Effect rollout still requires the
 existing D17 all-serving/rollback certification and a real injected serving-image

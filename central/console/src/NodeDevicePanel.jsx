@@ -20,13 +20,13 @@ export function NodeDevicePanel({ deviceId }) {
   const alive = useRef(true);
   const reading = useRef(false);
   const writing = useRef(false);
-  const base = `/v2/operator/node/devices/${encodeURIComponent(deviceId)}`;
+  const base = `/v1/operator/node/devices/${encodeURIComponent(deviceId)}`;
   const refresh = useCallback(async () => {
     if (reading.current) return;
     reading.current = true;
     try {
       const results = await Promise.all([
-        apiWrite("/v2/operator/node/status", { method: "GET" }),
+        apiWrite("/v1/operator/node/status", { method: "GET" }),
         apiWrite(base, { method: "GET" }),
         apiWrite(`${base}/app-attempts`, { method: "GET" }),
       ]);
