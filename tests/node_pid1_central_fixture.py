@@ -115,6 +115,22 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
         node_serving_verifier=_LocalImageVerifier(),
     )
     sessions, lifecycle = app.state.node_sessions, app.state.node_lifecycle
+    protocol_refusals = {}
+    refusal_lock = threading.Lock()
+    # Observe sanitized refusal codes without changing any production predicate.
+    def observe_refusals(name, method):
+        def observed(*args, **kwargs):
+            try:
+                return method(*args, **kwargs)
+            except NodeControlError as error:
+                with refusal_lock:
+                    key = name + ":" + error.code
+                    if len(protocol_refusals) < 32 or key in protocol_refusals:
+                        protocol_refusals[key] = protocol_refusals.get(key, 0) + 1
+                raise
+        return observed
+    lifecycle.revalidate = observe_refusals("revalidate", lifecycle.revalidate)
+    lifecycle.no_effect = observe_refusals("no_effect", lifecycle.no_effect)
     boots = NodeBootService(sessions)
     base = NodeBaseRefV2(
         "v99.0.0",
@@ -455,6 +471,7 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                 "current": current,
                 "operations": rows,
                 "response_losses": dict(dropped),
+                "protocol_refusals": dict(protocol_refusals),
                 "fixture_qualification": True,
                 "active_drains": conn.execute(
                     "SELECT count(*) n FROM active_node_app_drains"

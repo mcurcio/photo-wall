@@ -1,0 +1,12 @@
+import os,subprocess,sys
+from pathlib import Path
+repo=Path('/Users/matt/.codex/worktrees/readiness-design/photo-wall')
+root=Path('/Volumes/Dock/Temp/photo-wall-stop-c07666b')
+env=dict(os.environ)
+env.update(PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=str(repo)+':'+str(repo/'tests'),
+ PHOTO_WALL_NODE_COMPONENTS=str(root/'components'),
+ PHOTO_WALL_NODE_FIXTURE_TARGETS=str(root/'lifecycle-fixtures'),
+ PHOTO_WALL_NODE_PID1_IMAGE=(root/'pid1-image/image-id').read_text().strip(),
+ PHOTO_WALL_NODE_QUALIFICATION_WORK=str(root))
+raise SystemExit(subprocess.call([str(repo/'.venv/bin/python'),str(repo/'docs/evidence/player-node-handoff-support/run-isolated-db-tests.txt'),
+ 'tests/node_pid1_central_probe.py','-s','-k',sys.argv[1]],cwd=repo,env=env))

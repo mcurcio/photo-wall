@@ -75,3 +75,52 @@ They exercise kernel credentials and real Unix sockets, with fixture peer-policy
 and process observers. They are not an actual PID1 lifecycle or physical reboot
 qualification. The literal local DB wrapper was attempted and still fails for
 missing `.env`; the reviewed isolated-schema helper supplies supplemental coverage.
+
+
+## Stable source and rebuilt components
+
+Commit `c07666b1b62cdf816980a7d36aaf70e0320e806b` passed:
+
+- Portable suite: **3,016 passed, 1,286 skipped, 23 warnings in 197.81 seconds**.
+  Skips retain the prior PostgreSQL/browser/published-wire/platform prerequisites,
+  plus four Linux-root credential tests run separately below.
+- Scoped PostgreSQL regression: **132 passed, one warning in 32.33 seconds**,
+  covering stop/recovery, Linux adapters, broker, HostCore, Central lifecycle,
+  current-link reconciliation and Runtime reconciliation. No DB skips.
+- Focused boundary set: **101 passed in 2.47 seconds**.
+- Four actual Linux credential-packet tests: **passed in 0.078 seconds**.
+- Repository-wide Ruff and documentation-link checks passed before publication.
+
+The coherent components are retained at
+`/Volumes/Dock/Temp/photo-wall-stop-c07666b/components`. The clean committed source
+was frozen before rebuilding; all non-document inputs matched again at build end.
+The reconstruction tool retains its conservative working-tree provenance label;
+it is not a release-certification tool.
+
+| Identity | Value |
+|---|---|
+| Source inventory SHA256 | `643f3935a82007b51715da78d4b0bca949bf060ff389eb5458432066419066f9` |
+| Components manifest SHA256 | `f06848bf78a8710c771056022dc83202c310c2c075336e446227e39cc8a778de` |
+| Base ABI | `node-v2-efcfc4b30319d94327048ad79c47c362f221494ed23bd1c4fe9908c43ea41da5` |
+| Player environment | `2f246f7c7ce936a3d70e5cb4a95bba7ec066529f743e2bbc33d8b15aa7835d7c` |
+| Manager environment | `6142353f01e335a7b365bcf9052ee8a00c2f6329cad2777a2321ec4439534bbc` |
+| PID1 fixture image | `sha256:86a1e0f2dfe2bd8a71dc8cae2735268aedc58a5f4fbcb138dc7c1156a899614f` |
+
+Independent reopening verified 22,412 Player archive members, 6,296 manager
+members, their 49/23 source files, and all 153 regular base-package members.
+The unchanged native artifact was independently rehashed before reuse.
+[Compact verification](player-node-handoff-support/owned-stop/component-verification.json)
+is preserved with the executed recipes:
+[components](player-node-handoff-support/owned-stop/build-components.txt),
+[verifier](player-node-handoff-support/owned-stop/verify-components.txt),
+[targets](player-node-handoff-support/owned-stop/build-targets.txt),
+[PID1 image](player-node-handoff-support/owned-stop/build-pid1-image.txt), and
+[scenario runner](player-node-handoff-support/owned-stop/run-qualification.txt).
+All old artifact directories remain unchanged.
+
+The first actual PID1 cold/update success case passed **one test, two deselected,
+four warnings in 193.74 seconds**. Its ordered effects were `intent_stop`, `stopped`,
+`starting_new`, `running`; exact final process verification and natural Central
+operational discharge passed. Container cleanup completed. This exercises the
+installed packages with synthetic hardware; full production squashfs, physical
+reboot/PXE/DRM/HDMI and pressure qualification remain distinct.

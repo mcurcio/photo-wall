@@ -116,6 +116,24 @@ AppManager prepares an application update attempt in the background: fetch, veri
 
 Only after preparation and Runtime's withdrawal authorization does the broker record `intent_stop` and enter the disruptive switch. DisplayHost admits the recovery diagnostic on this authorized transition or an independently observed output/app failure. A permit alone is not evidence that this transition occurred. The exact no-effect path below preserves the distinction between a committed drain and a local stop. This rule does not postpone the separately selected immediate operator reboot.
 
+### Owned stop and bounded local recovery
+
+The base process adapter owns the durable stop operation. Its successful completion
+proves old-process/subtree quiescence; transient observation errors remain pending,
+and restarting the broker reattaches without another dispatch. Stop request,
+recovery obligation and lifecycle intent are persisted atomically. HostCore must
+acknowledge the immutable local obligation before dispatch and independently service
+its deadlines without Central session success. Exact replacement-process local
+control proof disarms recovery before Central publication; a general network outage
+never arms it. HostCore records one reboot intent before invoking its existing
+driver, and same-boot restarts cannot repeat that request. A failed driver remains
+explicitly unknown; physical watchdog recovery is a separate qualification.
+
+The [stop/recovery contract](evidence/2026-09-30-node-stop-observation-proposal.md)
+owns crash and authorization rules. The
+[implementation evidence](evidence/2026-09-30-node-stop-implementation.md) records
+implemented policy bounds, source identities, checks and unqualified behavior.
+
 ### Recovery of AppManager itself
 
 The base-owned **manager launcher** owns recovery of the L1 manager executable; it is not another app-policy planner. For this proposal, a base release pins the exact manager root and any accepted compatible fallback root, including digest, size, entry point and launcher/broker ABI, and carries those immutable bytes. Independent online manager self-update is outside this contract; changing that selection requires an explicit compatible base rollout. The launcher verifies the selected root, observes startup/process health under a bounded deadline/retry budget, and on verification or startup failure tries the exact accepted fallback without importing the failed manager. Within the boot it retains the failed-root fence and selection in its own bounded record. With no usable root it stops cycling and reports `manager_recovery_required` through HostCore; a new boot uses the frozen base selection, so changing a persistently broken selection requires base recovery rather than an assumed app update.

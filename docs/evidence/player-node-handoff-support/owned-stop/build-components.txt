@@ -1,0 +1,123 @@
+"""Local dirty-source component reconstruction; never a release-certification claim."""
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from dataclasses import asdict
+from pathlib import Path
+
+REPO = Path('/Users/matt/.codex/worktrees/readiness-design/photo-wall')
+WORK = Path('/Volumes/Dock/Temp/photo-wall-stop-c07666b/components')
+NATIVE = Path('/tmp/photo-wall-native-frame3-build')
+ASSEMBLER = 'sha256:90c772d80b3d8a6c0b733e3fdd4464e14e83bc331dc757d828c0b4b8e57cef8c'
+
+
+def sha(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def main():
+    assembler = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ASSEMBLER]))[0]
+    assert assembler['Id'] == ASSEMBLER and assembler['Architecture'] == 'arm64'
+    WORK.mkdir(parents=True)
+    scratch = WORK.parent / 'scratch'
+    scratch.mkdir(exist_ok=True)
+    tempfile.tempdir = str(scratch)
+    tree = WORK / 'source'
+    tree.mkdir()
+    names = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '-z'], cwd=REPO).decode().split('\0')
+    manifest = {}
+    for name in sorted(set(names) - {''}):
+        path = REPO / name
+        if not path.is_file():
+            raise ValueError('missing_or_nonregular_source_input:' + name)
+        destination = tree / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination, follow_symlinks=False)
+        manifest[name] = {'sha256': sha(path), 'mode': path.lstat().st_mode & 0o7777,
+                          'link': os.readlink(path) if path.is_symlink() else None}
+    (WORK / 'source-inputs.json').write_text(json.dumps(manifest, sort_keys=True))
+    (WORK / 'git-state.txt').write_bytes(subprocess.check_output(['git', 'status', '--short'], cwd=REPO))
+    (WORK / 'git-head.txt').write_bytes(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO))
+    sys.path.insert(0, str(tree))
+    from scripts.build_node_base_deb import stage_tree as stage_base
+    from scripts.build_node_manager_deb import stage_tree as stage_manager
+    from scripts.build_player_deb import stage_tree as stage_player, PLAYER_POLICY
+    from scripts.module_closure import closure_for
+    from player.output_discovery import weston_ini
+    from scripts.build_app_environment import build
+    from scripts.debian_packages import PIN, packages
+    from scripts.node_build_inputs import BUILDER_IMAGE
+    provenance = json.loads((NATIVE / 'display-build-source.json').read_text())
+    native_digest = hashlib.sha256((BUILDER_IMAGE + 'arm64' + PIN.snapshot + ' '.join(packages('node-display', 'node-display-build'))).encode())
+    for path in sorted((tree / 'appliance/display_host').rglob('*')):
+        if path.is_file() and '__pycache__' not in path.parts:
+            native_digest.update(path.relative_to(tree).as_posix().encode() + b'\0' + path.read_bytes())
+    assert native_digest.hexdigest() == provenance['source_sha256']
+    assert sha(tree / 'scripts/build_node_display_deb.py') == provenance['builder_script_sha256']
+    assert sha(tree / 'scripts/node_build_inputs.py') == provenance['build_inputs_sha256']
+    assert sha(NATIVE / 'photo-wall-node-display_arm64.deb') == '00731c94838f064a147605fac011739f995d3771f00d7ea783373131fc613ebe'
+    assert sha(NATIVE / 'libphoto-wall-frame-client.so') == 'a76f6ae10ffecc7c61242161a22106539056c2337fbf8c5c12ed551ab29120e6'
+    for name in ['photo-wall-node-display_arm64.deb', 'libphoto-wall-frame-client.so', 'display-abi.json', 'display-build-source.json', 'display-build-packages.tsv']:
+        shutil.copy2(NATIVE / name, WORK / name)
+    stage_base(tree, WORK / 'base')
+    stage_manager(tree, WORK / 'manager')
+    source_digest = sha(WORK / 'source-inputs.json')
+    previous = Path('/Volumes/Dock/Temp/photo-wall-node-resume-20260930/components-stopfix')
+    version = json.loads((previous / 'app-reference.json').read_text())['deb_version']
+    stage_player(WORK / 'player', closure=closure_for(PLAYER_POLICY, repo=tree), tree=tree,
+                 systemd_source=tree / 'appliance/systemd', weston_ini=weston_ini().encode(),
+                 version=version, native_client=WORK / 'libphoto-wall-frame-client.so', architecture='arm64')
+    def staged_inventory(path):
+        return {str(p.relative_to(path)): ({'link': os.readlink(p)} if p.is_symlink() else
+                {'sha256': sha(p), 'mode': p.stat().st_mode & 0o7777})
+                for p in sorted(path.rglob('*')) if p.is_file() or p.is_symlink()}
+    for role, staged in [('node-base', 'base'), ('manager-primary', 'manager'), ('app', 'player')]:
+        if role == 'app':
+            assert staged_inventory(WORK / staged) == staged_inventory(previous / staged), 'reused_package_payload_changed:' + role
+            shutil.copy2(previous / (role + '.deb'), WORK / (role + '.deb'))
+            continue
+        subprocess.run(['docker', 'run', '--rm', '--platform', 'linux/arm64', '--network', 'none',
+                        '-e', 'SOURCE_DATE_EPOCH=' + str(PIN.epoch), '-v', str(WORK) + ':/work',
+                        ASSEMBLER, 'dpkg-deb', '--build', '--root-owner-group', '/work/' + staged,
+                        '/work/' + role + '.deb'], check=True)
+    shutil.copy2(WORK / 'photo-wall-node-display_arm64.deb', WORK / 'node-display.deb')
+    abi = {**json.loads((WORK / 'base/usr/lib/photo-wall-node-base/abi.json').read_text()),
+           **json.loads((WORK / 'display-abi.json').read_text())}
+    refs = {}
+    for role in ['manager-primary', 'app']:
+        output = WORK / (role + '-environment')
+        reference = build(WORK / (role + '.deb'), output, builder_image=BUILDER_IMAGE, architecture='arm64', **abi)
+        os.link(output / (reference.environment_sha256 + '.tar'), WORK / (role + '.tar'))
+        refs[role] = asdict(reference)
+        (WORK / (role + '-reference.json')).write_text(json.dumps(asdict(reference), sort_keys=True))
+    (WORK / 'components.json').write_text(json.dumps({'schema': 2,
+        'provenance': 'dirty-working-tree; not a release revision', 'source_manifest_sha256': source_digest,
+        'abi': abi, 'app_environment': refs['app'], 'manager_primary': refs['manager-primary'],
+        'manager_fallback': None}, sort_keys=True))
+    (WORK / 'build-provenance.json').write_text(json.dumps({'schema': 2, 'source_manifest_sha256': source_digest,
+        'assembler_image': ASSEMBLER, 'dependency_builder': BUILDER_IMAGE, 'architecture': 'arm64',
+        'native_source': provenance, 'abi': abi, 'reused_app_package_source_manifest_sha256': sha(previous / 'source-inputs.json'), 'node_base_deb_sha256': sha(WORK / 'node-base.deb')}, sort_keys=True))
+    after_names = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '-z'], cwd=REPO).decode().split('\0')
+    expected = {name: value for name, value in manifest.items() if not name.startswith('docs/')}
+    after = {}
+    for name in sorted(set(after_names) - {''}):
+        if name.startswith('docs/'):
+            continue
+        path = REPO / name
+        after[name] = {'sha256': sha(path), 'mode': path.lstat().st_mode & 0o7777,
+                       'link': os.readlink(path) if path.is_symlink() else None}
+    (WORK / 'implementation-inputs-after.json').write_text(json.dumps(after, sort_keys=True))
+    assert after == expected, 'implementation_source_changed_during_build'
+    print('BUILD COMPLETE', json.dumps({'directory': str(WORK), 'abi': abi, 'refs': refs}, sort_keys=True), flush=True)
+
+if __name__ == '__main__':
+    main()
