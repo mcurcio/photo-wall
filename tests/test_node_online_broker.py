@@ -138,6 +138,32 @@ def test_reporting_never_gates_the_switch_and_flush_reports_in_order(setup):
     assert not broker.record["pending"] and not broker.record["response_pending"]
 
 
+def test_a_refused_effect_report_is_dropped_and_never_blocks_later_ones(setup):
+    broker, _, _, _ = setup
+    broker.execute()
+    sent, statuses = [], iter([200, 409, 200, 200])
+    broker.session.request = lambda method, path, body=None: (sent.append((path, body)) or (
+        (200, b"{}") if path.endswith("app-responses") else (next(statuses), b"{}")))
+    broker.flush()
+    assert [parse_app_effect_event(body).sequence for path, body in sent[1:]] == [1, 2, 3, 4]
+    assert not broker.record["pending"] and broker.record["refused_reports"] == 1
+    assert broker.record["last_refused_status"] == 409
+
+
+@pytest.mark.parametrize("status", [500, 503, 401, 429])
+def test_an_unavailable_central_retries_the_same_head_report(setup, status):
+    broker, _, _, _ = setup
+    broker.execute()
+    sent = []
+    broker.session.request = lambda method, path, body=None: (sent.append((path, body)) or (
+        (200, b"{}") if path.endswith("app-responses") else (status, b"{}")))
+    broker.flush()
+    broker.flush()
+    assert [parse_app_effect_event(body).sequence for path, body in sent if path.endswith("app-effects")] == [1, 1]
+    assert phases(broker) == ["intent_stop", "stopped", "starting_new", "running"]
+    assert "refused_reports" not in broker.record
+
+
 def test_latest_stage_replaces_unstarted_switch_but_never_one_in_flight(setup):
     broker, driver, command, _ = setup
     old = driver.running

@@ -7,12 +7,14 @@ transition is an effect event queued for Central; reporting never gates progress
 """
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from appliance.node.broker import RunningApp
 from appliance.node.capacity import EMERGENCY_HEADROOM, memory_values
 from appliance.node.clock import boottime_ms
 from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation
+from appliance.node.session import REFUSED
 from appliance.node.stop_operation import (
     StopGuaranteeUnavailable,
     StopRequest,
@@ -33,6 +35,7 @@ from contracts.node_protocol import NodeCommandResponseV2, encode_node_message
 # or after the switch completed. A stop or start in flight always finishes first;
 # an ambiguous outcome (effect_unknown) belongs to the host recovery obligation.
 _REPLACEABLE = ("preparing", "running", "fallback_running")
+LOG = logging.getLogger(__name__)
 
 
 class OnlineEffectBroker:
@@ -232,7 +235,8 @@ class OnlineEffectBroker:
             self._event("effect_unknown", fault="restart_reconciliation_required")
 
     def flush(self) -> None:
-        """Report queued response and effects in order; an unreachable Central only delays them."""
+        """Report queued response and effects in order; an unreachable Central only delays them
+        and an event Central permanently refuses is dropped, never blocking the ones behind it."""
         record = self.record
         if record is not None and record.get("response_pending"):
             status, _ = self.session.request("POST", "/v2/node/app-responses", record["response"].encode())
@@ -243,6 +247,19 @@ class OnlineEffectBroker:
             if record is None or not record["pending"]:
                 return
             status, _ = self.session.request("POST", "/v2/node/app-effects", record["pending"][0].encode())
-            if status != 200:
+            if status == 200:
+                self._save({**record, "pending": record["pending"][1:]})
+            elif refused_permanently(status):
+                # Central will never accept this event: drop it so it cannot block the rest.
+                LOG.warning("app effect report refused by Central with status %d; dropped", status)
+                self._save({**record, "pending": record["pending"][1:],
+                            "refused_reports": record.get("refused_reports", 0) + 1,
+                            "last_refused_status": status})
+            else:
                 return
-            self._save({**record, "pending": record["pending"][1:]})
+
+
+def refused_permanently(status: int) -> bool:
+    """A 4xx Central repeats for the same report. Session refusal (401/403) re-enrolls and
+    retries; timeout/backpressure (408/429), 5xx and network errors retry the same head."""
+    return 400 <= status < 500 and status not in (*REFUSED, 408, 429)
