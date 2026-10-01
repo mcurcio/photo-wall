@@ -219,8 +219,9 @@ publishes the GitHub Release only once every declared asset is attached to its
 draft and every image is tagged with the version. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
-`software-e2e.yml` and the release's media worker image. Both checks jobs share
-the AMD64 result; software E2E shares the ARM64 definition.
+`software-e2e.yml` and the release's media worker image. Both image-building checks
+jobs (`image-smoke`, `linux-media`) share the AMD64 result; both software E2E jobs
+share the ARM64 definition.
 
 `scripts/service_base.py` reads the `media-os` recipe prefix ending at
 `# END MEDIA OS DEFINITION` in the root Dockerfile. The recipe and architecture

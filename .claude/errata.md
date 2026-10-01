@@ -1930,3 +1930,37 @@ doc softenings.
   `@@PHOTOWALL_CENTRAL@@` once; the explanation lives in the builder as shell comments; the
   seal's verify refuses any other shape, and the base-image check requires the whole file to be
   one line.
+
+## 2026-10-01 — PR test gate (design /Volumes/Dock/Temp/photo-wall-test-gate-design.md, at 2da99ee)
+- **Test database is its own compose file, not a `compose.yaml` profile.** compose.yaml requires
+  `PHOTO_WALL_DB_PASSWORD`/`PHOTO_WALL_ADMIN_TOKEN` (`:?`), and Compose interpolates every
+  service even when one profile is started, so a profile would need deployment secrets to start
+  a throwaway server. Prior art: tests/integration/compose.immich.yml. Now
+  tests/integration/compose.test-database.yml; tests/test_database_provisioning.py holds its
+  image pin equal to compose.yaml's and scripts/test_local.py's URL equal to its settings.
+- **The published-Player-wire prepare is needed by the unit job too, not only db.**
+  test_published_player_extra_field_negative_control uses `published_directory` and no
+  database fixture, so it is a unit test; without the directory it skipped (a CI failure under
+  the skip allowlist). Both unit and db jobs prepare it.
+- **Skip allowlist needs three entries the design did not list**, each skipped in run
+  36797558553 today: `set PHOTO_WALL_NATIVE_DISPLAY_IMAGE`, `interactive local fixture only`,
+  and the `real dpkg-deb build/inspection requires` pair. The dpkg-deb pair is dead in every
+  job: gated on `PHOTO_WALL_IMAGE_TOOL_TESTS=1`, which no workflow sets, and its body skips
+  unconditionally anyway (tests/test_build_player_deb.py:401, test_build_bootstrapper_deb.py:314).
+  Pre-existing hidden coverage loss, allowlisted rather than fixed here.
+- **xdist needs deterministic parameter ids.** tests/test_node_linux_adapters.py parametrized
+  with `str(uuid4())`, so each worker collected different ids and xdist refused the run. Fixed
+  with a constant replacement id.
+- **Classification root is `database_provisioner`, not a list of four fixture names.** Every
+  database fixture builds on it, so a new one classifies itself.
+- **e2e cannot reach < 4.5 min with the levers that keep what it proves.** Run 36797558553:
+  e2e job 401 s = 46 s setup + 106 s Immich fixture (start + adapter checks + Immich restart)
+  + 233 s wall scenario + 14 s. The scenario alone is 233 s: setup 28, baseline 24, live
+  membership/presentation 55, deletion 15, permission/upstream faults 20, central outage 45
+  (waits for every held plan lease to expire), central recovery 38, Player rejoin 5. Done here:
+  the adapter checks move to a parallel `immich-adapter` job (`--setup-only` fixture for the
+  scenario) and the Immich images are prefetched in the background (est. saving 0.7-1.1 min,
+  e2e ≈ 5.6-6.0 min, PR ≈ 6.5-6.9 min; unconfirmed until a CI run). Reaching < 5 min total
+  needs an owner decision: split the scenario into parallel upstream-fault and
+  Central/Player-fault jobs (each repeating setup + baseline, ≈ 52 s), and/or shorten the demo's
+  plan horizon/lease so the outage phase waits less.

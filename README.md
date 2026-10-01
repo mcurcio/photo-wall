@@ -83,7 +83,7 @@ uv sync --frozen
 python3 scripts/check_docs.py
 ```
 
-With the local Compose database running, also run `.venv/bin/python scripts/test_local.py -q`. Report any skipped integration checks explicitly rather than treating a pass as full coverage. See [CONTRIBUTING.md](CONTRIBUTING.md) for the engineering approach.
+With the disposable test database running (`docker compose -f tests/integration/compose.test-database.yml up -d --wait`; see the [runbook](docs/runbook.md#tests-and-local-development)), also run `.venv/bin/python scripts/test_local.py -q -n auto`. Report any skipped integration checks explicitly rather than treating a pass as full coverage. See [CONTRIBUTING.md](CONTRIBUTING.md) for the engineering approach.
 
 ## Provision Player appliances
 

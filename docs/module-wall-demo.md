@@ -1,6 +1,6 @@
 # Full media path demo
 
-Status: the harness has been refactored for central release authority and stateless Players. Its focused tests pass. The `Controller and Player software e2e` workflow now runs the full two-Player/three-Output scenario for each pull-request revision; a passing workflow result is still required before final acceptance evidence is recorded.
+Status: the harness has been refactored for central release authority and stateless Players. Its focused tests pass. The `Controller and Player software e2e` workflow now runs the full two-Player/three-Output scenario for each pull-request revision, against a fixture started with `--setup-only` while a parallel job runs the [fixture's](module-immich-fixture.md) adapter checks; a passing workflow result is still required before final acceptance evidence is recorded.
 
 The demo joins the real Immich fixture, central PostgreSQL application, Procrastinate media worker, media gateway, two Player processes, and three simulated Outputs. Media conversion, queueing, HTTP/WebSocket traffic, exact bytes, session epochs, cache validation, readiness, commitments, and observations are real. `RecordingRenderer` supplies simulated display actuation, so native GTK/GStreamer and physical HDMI remain separate gates.
 

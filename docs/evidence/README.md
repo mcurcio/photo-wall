@@ -1,5 +1,7 @@
 # Acceptance evidence
 
+- [2026-10-01 PR test gate](2026-10-01-test-gate-tiers.md): unit, database and browser tiers under xdist with template-cloned databases, fail-closed database and skip guards, the e2e adapter/scenario split; local measurements and mutation probes only, CI timings projected.
+
 - [2026-09-30 owned stop implementation](2026-09-30-node-stop-implementation.md): durable stop and bounded HostCore recovery implementation, validation checkpoints and remaining qualification.
 
 - [2026-09-30 Player node full base/PXE build](2026-09-30-node-full-base-build.md): exact dirty-source rootfs, kernel, initrd and both bundles; real restricted stage-1 mount probe, artifact inventories and physical qualification limits.

@@ -831,15 +831,23 @@ uv sync --frozen
 python3 scripts/check_docs.py
 ```
 
-The portable command reports PostgreSQL integration tests as **skipped** unless `PHOTO_WALL_TEST_DATABASE_URL` is set. To run all tests against the local Compose database:
+The portable command reports PostgreSQL integration tests as **skipped** unless `PHOTO_WALL_TEST_DATABASE_URL` is set. To run all tests, start the disposable test database and run the suite through the wrapper:
 
 ```sh
-.venv/bin/python scripts/test_local.py -q
+docker compose -f tests/integration/compose.test-database.yml up -d --wait
+.venv/bin/python scripts/test_local.py -q -n auto
 ```
 
-That wrapper reads local `.env` as data, never sources it as shell code. Each PostgreSQL test creates a random `pw_test_*` schema and removes only that schema. It preserves registry data in the deployment's public schema. A custom integration server may be supplied through `PHOTO_WALL_TEST_DATABASE_URL` with permission to create/drop test schemas. Keep it pointed at a development server.
+The [test database](../tests/integration/compose.test-database.yml) runs the deployment's pinned PostgreSQL image on loopback port 54330 (`PHOTO_WALL_TEST_DB_PORT` overrides it), in tmpfs with every durability setting off; it holds only throwaway databases and a fixed test-only credential, and `docker compose -f tests/integration/compose.test-database.yml down` discards it. The wrapper points `PHOTO_WALL_TEST_DATABASE_URL` at it unless that variable is already set; any server where the user may `CREATE DATABASE` serves. Keep it away from deployment data. A [template database](../tests/support/database.py) holding every migration is built once per migration set, under a name derived from the migrations and their runner, and each database test runs in its own clone (`pw_t_*`), dropped after the test; a later run drops clones a crashed run left behind once they are an hour old. Nothing touches a deployment database.
 
-CI installs the locked dependencies, lints, checks local documentation links, builds/launches Compose, runs the PostgreSQL suite, and checks central HTTP health. It separately runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Passing CI does not establish physical Pi/PXE, real Immich, rendering or visible timing.
+**Test tiers.** `tests/conftest.py` gives every test exactly one tier: `browser` for `tests/browser/`, `db` for any test whose fixtures reach the database (all of them build on `database_provisioner`), and unit for the rest. Select a tier with `-m db`, `-m "not db and not browser"`, or the `tests/browser` path, and parallelize with `-n` ([pytest-xdist](https://pytest-xdist.readthedocs.io/)); `-m db` needs `--dist loadgroup`, which keeps a module sharing one `module_registry` on one worker. Two rules keep a tier from silently losing tests:
+
+- With `PHOTO_WALL_TEST_REQUIRE_DATABASE=1`, a test that reaches a database fixture without `PHOTO_WALL_TEST_DATABASE_URL` fails instead of skipping. Every CI job sets it, so a database test that escaped the `db` tier fails the unit job.
+- Under `CI`, a skip whose reason no entry of `CI_SKIP_ALLOWLIST` (tests/conftest.py) owns fails the run. Each entry names a capability that the CI job running the test deliberately lacks (FFmpeg, root, `dtc`, a locally built image, a fork's missing token, the opt-in dpkg-deb build). Add one only with that justification.
+
+A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
+
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health and the served console), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two-Player/three-Output wall scenario run as two parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
@@ -849,20 +857,23 @@ with its architecture and `prepare_base=true`. Fork runs require the definition 
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
 
-The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own temporary PostgreSQL schemas. The shell, the look and each step flow have their own walkthroughs (`tests/browser/test_console_*_browser.py`, `test_scene_flow_browser.py`, `test_source_flow_browser.py`, `test_schedule_flow_browser.py`, `test_show_now_browser.py`), built on the task-level helpers in `tests/browser/console_tasks.py`. The console's pure modules run under Node in ordinary pytest (`tests/test_console_flow.py`, `test_console_schedule_flow.py`, `test_console_show_now.py`); without Node they skip on a developer machine but fail under `CI` or `PHOTO_WALL_BROWSER_TESTS` (the route round trip in `test_console_routes_r4.py` only skips). Install the locked development dependencies and their matching Chromium build, then run:
+The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own disposable PostgreSQL databases. The shell, the look and each step flow have their own walkthroughs (`tests/browser/test_console_*_browser.py`, `test_scene_flow_browser.py`, `test_source_flow_browser.py`, `test_schedule_flow_browser.py`, `test_show_now_browser.py`), built on the task-level helpers in `tests/browser/console_tasks.py`. The console's pure modules run under Node in ordinary pytest (`tests/test_console_flow.py`, `test_console_schedule_flow.py`, `test_console_show_now.py`); without Node they skip on a developer machine but fail under `CI` or `PHOTO_WALL_BROWSER_TESTS` (the route round trip in `test_console_routes_r4.py` only skips). Install the locked development dependencies and their matching Chromium build, then run:
 
 ```sh
 uv sync --frozen
 .venv/bin/python -m playwright install chromium
-PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser \
+PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser -n 4 \
   --browser chromium --tracing retain-on-failure --output artifacts/operator-browser
 ```
+
+Pass `tests/browser` as the path even under `-n`: its conftest gathers the evidence report from every worker's test reports in the process that writes it, and that process loads the conftest only for a path argument.
 
 CI runs these checks in the official Playwright Python 1.62.0 Noble container,
 pinned by digest in `checks.yml`. That image already contains Chromium and its
 Linux dependencies, so CI does not run a browser APT installation. A separate
 container environment installs the repository's frozen Python dependencies and
-connects to the job's local PostgreSQL fixture. Reports and failure traces are
+connects to the job's disposable test database; CI requires the report to say
+`passed`. Reports and failure traces are
 written to the existing artifact directory. Ordinary test runs skip browser
 checks unless opted in. Playwright 1.62.0 and pytest-playwright 0.9.0 are pinned
 in the development dependency group and `uv.lock`; neither enters production
