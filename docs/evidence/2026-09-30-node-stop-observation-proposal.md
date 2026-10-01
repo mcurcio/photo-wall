@@ -1,6 +1,6 @@
 # Owned stop operation proposal — 2026-09-30
 
-Status: **design proposal, not implemented or qualified**. This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, permits, executor sealing, Central discharge, D16, D17 or physical qualification.
+Status: **design contract; [implementation and current checks](2026-09-30-node-stop-implementation.md) are recorded separately. Not qualified.** This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, permits, executor sealing, Central discharge, D16, D17 or physical qualification.
 
 The [node domain model](../player-node-domain-model.md#debian-closure-and-app-effects) owns authorization and immutable repair. The [red/blue refinement](../player-fleet-red-blue-refinement.md) owns retirement, durable drains and expiry as a restriction on new admission. This proposal supplies a Linux adapter contract beneath those policies. Source references below describe the reviewed dirty readiness checkout, not a released commit.
 

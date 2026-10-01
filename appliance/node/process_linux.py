@@ -8,9 +8,9 @@ from pathlib import Path
 from uuid import UUID
 
 from appliance.node.broker import RunningApp
-from appliance.node.clock import boottime_ms
 from appliance.node.environment import verify_root
 from appliance.node.lifecycle_storage import primitive, running_from
+from appliance.node.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.node.storage import BootStore
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
@@ -71,6 +71,7 @@ def app_unit_properties(root: Path) -> tuple[str, ...]:
         "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
         "BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client /run/photo-wall-display/wayland-0:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",
+        f"TimeoutStopSec={STOP_TIMEOUT_SECONDS}", "Delegate=no",
         "Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 GST_REGISTRY=/tmp/gst-registry.bin",
         "UnsetEnvironment=PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD GI_TYPELIB_PATH GST_PLUGIN_PATH GST_PLUGIN_PATH_1_0 GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0",
     )
@@ -82,6 +83,7 @@ class SystemdAppProcessDriver:
                  cgroups: Path = Path("/sys/fs/cgroup")):
         self.roots, self.store, self.proc = roots, store, proc
         self.cgroups = cgroups
+        self.stops = StopObserver(self)
         self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
@@ -207,25 +209,11 @@ class SystemdAppProcessDriver:
             raise ValueError("app_stop_identity_changed")
         return False
 
-    def stop(self, expected: RunningApp, *, expires_boottime_ms: int) -> bool:
-        if self.current() != expected:
-            raise ValueError("app_stop_identity_changed")
-        control_group = systemctl_show(UNIT)["ControlGroup"]
-        if not control_group.startswith("/photowallapp.slice/") or self.current() != expected:
-            raise ValueError("app_stop_identity_changed")
-        if boottime_ms() >= expires_boottime_ms:
-            raise ValueError("app_stop_permit_expired")
-        # Fixed unit, Restart=no, one base writer. A queued stop is not exit proof.
-        subprocess.run(["/usr/bin/systemctl", "--no-block", "stop", UNIT], check=True,
-                       timeout=5, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        deadline = time.monotonic() + 15
-        terminal_samples = 0
-        while time.monotonic() < deadline:
-            terminal_samples = terminal_samples + 1 if self._stop_sample(expected, control_group) else 0
-            if terminal_samples >= 2:
-                return True
-            time.sleep(0.05)
-        return False
+    def stop(self, request, *, reattach_only=False):
+        return self.stops.stop(request, reattach_only=reattach_only)
+
+    def service(self, *, now_ms, budget_ms):
+        self.stops.service(now_ms=now_ms, budget_ms=budget_ms)
 
     def _await_unit_unloaded(self, previous: dict | None) -> None:
         """Wait for PID1's asynchronous collection before reusing the fixed name."""

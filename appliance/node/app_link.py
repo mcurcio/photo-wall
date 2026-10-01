@@ -1,6 +1,7 @@
 """Base broker proof socket: kernel peer + exact running root + signed app receipt."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -9,6 +10,7 @@ import stat
 from pathlib import Path
 
 from appliance.node.clock import boottime_ms
+from appliance.node.lifecycle_storage import primitive
 from appliance.node.session import NodeSession
 from appliance.unix_credentials import receive_credential_packet
 from contracts.node_app_link import (
@@ -19,6 +21,7 @@ from contracts.node_app_link import (
     parse_node_app_link,
     parse_node_app_link_begin,
 )
+from contracts.node_commands import encode_session_grant, parse_session_grant
 
 
 def proof_directory(path: Path, *, owner_uid: int = 0) -> tuple[int, int]:
@@ -97,7 +100,14 @@ class BrokerLinkService:
         if uid != 10004:
             raise ValueError("node_link_peer")
         running = self.driver.current()
-        grant = self.session.ensure()
+        # A retained challenge identity can prove local control while offline.
+        # Central independently decides whether its carrier is still authorized.
+        grant = self.session.grant
+        if grant is not None:
+            self.session.store.write("local-proof-grant", {"grant": encode_session_grant(grant).decode()})
+        else:
+            retained = self.session.store.read("local-proof-grant")
+            grant = parse_session_grant(retained["grant"].encode()) if retained else self.session.ensure()
         if uid != 10004 or running is None or running.process.pid != pid or grant is None:
             raise ValueError("node_link_peer")
         begin = parse_node_app_link_begin(raw)
@@ -111,8 +121,15 @@ class BrokerLinkService:
         link = parse_node_app_link(raw)
         if (response_peer != credentials or link.challenge != challenge
                 or self.driver.current() != running
-                or boottime_ms() > min(challenge.sampled_boottime_ms + 2000, grant.expires_boottime_ms)):
+                or boottime_ms() > challenge.sampled_boottime_ms + 2000):
             raise ValueError("node_link_changed_or_expired")
+        # Kernel-authenticated exact-process challenge/response is local control
+        # evidence, not Central signature/receipt acceptance or visible output.
+        self.session.store.write("local-app-control", {"operation_id": str(running.operation_id),
+            "progress": {"kind": "controlled", "process": primitive(running.process),
+                         "app_epoch": running.app_epoch, "environment": running.environment.environment_sha256,
+                         "sampled_ms": challenge.sampled_boottime_ms,
+                         "challenge_sha256": hashlib.sha256(encoded).hexdigest()}})
         # Central verifies app signature and exact current ControlApplied receipt.
         status, _ = self.session.transport.request("POST", "/v2/node/app-links",
                                                    encode_node_app_link(link), self.session.claim)

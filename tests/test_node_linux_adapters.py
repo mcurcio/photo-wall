@@ -512,29 +512,6 @@ def test_stop_terminal_requires_process_cgroup_and_job_absence(stop_driver, monk
     assert driver._stop_sample(expected, group)
 
 
-@pytest.mark.parametrize("timeout", [False, True])
-def test_stop_issues_once_and_needs_two_consecutive_terminal_samples(stop_driver, monkeypatch, timeout):
-    linux, driver, expected, _, _, _, _ = stop_driver
-    monkeypatch.setattr(driver, "current", lambda: expected)
-    monkeypatch.setattr(linux, "boottime_ms", lambda: 100)
-    calls = []
-    monkeypatch.setattr(linux.subprocess, "run", lambda argv, **kwargs: calls.append(argv))
-    clock = iter(range(100))
-    monkeypatch.setattr(linux.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(linux.time, "sleep", lambda value: None)
-    samples = iter([False, False, True, False, True, True])
-    observed = []
-    def sample(*args):
-        result = False if timeout else next(samples)
-        observed.append(result)
-        return result
-    monkeypatch.setattr(driver, "_stop_sample", sample)
-    assert driver.stop(expected, expires_boottime_ms=200) is not timeout
-    assert calls == [["/usr/bin/systemctl", "--no-block", "stop", linux.UNIT]]
-    if not timeout:
-        assert observed == [False, False, True, False, True, True]
-
-
 def test_player_health_has_bounded_private_mount():
     from appliance.node.process_linux import app_unit_properties
     props = app_unit_properties(Path("/sealed/rootfs"))

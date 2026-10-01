@@ -2,7 +2,7 @@
 Description=Photo Wall exact-root cold app effect broker
 ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/cold.json
-After=photo-wall-display.service
+After=photo-wall-display.service photo-wall-host-core.service
 
 After=photo-wall-node-handoff.service photo-wall-node-prepare.service
 

@@ -22,9 +22,9 @@ from contracts.strict_json import loads_object
 
 
 class OnlineRunner:
-    def __init__(self, store, driver, session):
+    def __init__(self, store, driver, session, recovery):
         self.store, self.driver, self.session = store, driver, session
-        self.broker = OnlineEffectBroker(store, driver, session)
+        self.broker = OnlineEffectBroker(store, driver, session, recovery)
         self.worker = RootImportWorker(store)
 
     def tick(self):

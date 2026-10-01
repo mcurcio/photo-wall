@@ -17,6 +17,8 @@ from appliance.node.host import HostCore
 from appliance.node.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.node.host_storage import FileRebootJournal, RebootDelivery
 from appliance.node.http import NodeHTTP
+from appliance.node.recovery import RecoverySupervisor
+from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
 from appliance.node.session import NodeSession
 from appliance.node.storage import BootStore
 from contracts.node_commands import parse_reboot_request
@@ -106,18 +108,27 @@ def main() -> None:
     kernel_boot_id = boot_id()
     store = BootStore(args.state, boot_id=kernel_boot_id,
                       policy={"owner": "host_core", "offer_id": value["offer_id"], "serial": value["serial"]})
-    runner = HostRunner(store, NodeHTTP(value["central"]), serial=value["serial"],
+    runner = HostRunner(store, NodeHTTP(value["central"], timeout=0.5), serial=value["serial"],
                         offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id)
+    recovery = RecoverySupervisor(store, SystemdRebootDriver(), RecoveryObserver())
+    server = RecoveryServer(recovery)
+    last_tick = 0.0
     try:
         while True:
+            # The local recovery owner runs before telemetry/session work.
+            server.serve_one()
+            recovery.service(now_ms=boottime_ms())
             try:
-                runner.tick()
+                if time.monotonic() - last_tick >= 2:
+                    last_tick = time.monotonic()
+                    runner.tick()
             except (OSError, ValueError, http.client.HTTPException):
                 if store.failed:
                     raise
                 # Fixed bounded cadence; no credential or packet logging.
-            time.sleep(2)
+            time.sleep(0.05)
     finally:
+        server.close()
         store.close()
 
 

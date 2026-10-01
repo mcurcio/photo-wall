@@ -14,6 +14,7 @@ from appliance.node.http import NodeHTTP
 from appliance.node.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.node.online_runner import OnlineRunner
 from appliance.node.process_linux import SystemdAppProcessDriver
+from appliance.node.recovery_linux import RecoveryClient
 from appliance.node.session import NodeSession
 from appliance.node.storage import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
@@ -78,10 +79,10 @@ def main() -> None:
     endpoint = loads_object(configuration.read_bytes(), max_bytes=8192)
     if endpoint is None or set(endpoint) != {"central", "serial"}:
         raise ValueError("broker_session_configuration")
-    session = NodeSession(store, NodeHTTP(endpoint["central"]), owner="app_effect_broker",
+    session = NodeSession(store, NodeHTTP(endpoint["central"], timeout=0.5), owner="app_effect_broker",
                           serial=endpoint["serial"], offer_id=UUID(value["offer_id"]),
                           kernel_boot_id=kernel_boot_id)
-    online = OnlineRunner(store, driver, session)
+    online = OnlineRunner(store, driver, session, RecoveryClient())
     last_online_poll = 0.0
     links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"))
     try:
@@ -91,6 +92,13 @@ def main() -> None:
         while True:
             if online.broker.record is None:
                 broker.reconcile()
+            try:
+                online.broker.service()
+            except (OSError, ValueError, http.client.HTTPException):
+                if store.failed:
+                    raise
+            # Local proofs and stop progress must run even without a Central session.
+            links.serve_one()
             try:
                 grant = session.ensure()
                 if grant is not None:
@@ -102,7 +110,6 @@ def main() -> None:
                     if current is not None:
                         emit_process_evidence(store, session, current, "running")
                     store.write("observed-app", {"running": primitive(current) if current else None})
-                links.serve_one()
                 if grant is not None and time.monotonic() - last_online_poll >= 2:
                     last_online_poll = time.monotonic()
                     online.tick()
@@ -111,6 +118,7 @@ def main() -> None:
                     raise
             time.sleep(0.1)
     finally:
+        driver.stops.close()
         links.close()
         store.close()
 

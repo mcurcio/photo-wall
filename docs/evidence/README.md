@@ -1,5 +1,7 @@
 # Acceptance evidence
 
+- [2026-09-30 owned stop implementation](2026-09-30-node-stop-implementation.md): durable stop and bounded HostCore recovery implementation, validation checkpoints and remaining qualification.
+
 - [2026-09-30 Player node full base/PXE build](2026-09-30-node-full-base-build.md): exact dirty-source rootfs, kernel, initrd and both bundles; real restricted stage-1 mount probe, artifact inventories and physical qualification limits.
 
 - [2026-09-30 StopOperation and bounded recovery proposal](2026-09-30-node-stop-observation-proposal.md): user-directed adapter-owned Future and recovery design; not implemented or physically executed.

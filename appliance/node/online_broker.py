@@ -1,11 +1,15 @@
 """Restart-safe online app effect owner; preparation never implies stop authority."""
 from __future__ import annotations
 
+import hashlib
 from uuid import UUID, uuid4
 
 from appliance.node.broker import RunningApp
 from appliance.node.capacity import EMERGENCY_HEADROOM, memory_values
 from appliance.node.clock import boottime_ms
+from appliance.node.lifecycle_storage import primitive, running_from
+from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation, canonical
+from appliance.node.stop_operation import StopGuaranteeUnavailable, StopRequest
 from contracts.node_lifecycle import (
     AppEffectEventV2,
     StageCommandV2,
@@ -26,8 +30,9 @@ from contracts.strict_json import loads_object
 
 
 class OnlineEffectBroker:
-    def __init__(self, store, driver, session):
+    def __init__(self, store, driver, session, recovery):
         self.store, self.driver, self.session = store, driver, session
+        self.recovery = recovery
 
     @property
     def record(self):
@@ -147,6 +152,7 @@ class OnlineEffectBroker:
                          if phase == "no_stop_quiescent" else {})
         self._save({**record, **seal_metadata, "phase": phase, "sequence": event.sequence,
                     "intent_stop_written": record.get("intent_stop_written", False) or phase == "intent_stop",
+                    "stop_consumed": record.get("stop_consumed", False) or phase == "stopped",
                     "executor_sealed": record.get("executor_sealed", False) or seal, "sealed_operations": seals,
                     "stage_cancelled": record.get("stage_cancelled", False) or phase == "cancelled_before_stop",
                     "pending": [*record["pending"], encode_app_effect_event(event).decode()]})
@@ -198,23 +204,60 @@ class OnlineEffectBroker:
         old = self._old(command)
         if boottime_ms() >= permit.expires_boottime_ms:
             return
-        self._save({**record, "permit": encode_stop_permit(permit).decode(), "permit_id": str(permit.permit_id)})
+        request = StopRequest(command.operation_id, command.producer.kernel_boot_id,
+            command.command_sha256, permit.permit_id, hashlib.sha256(encode_stop_permit(permit)).hexdigest(),
+            old, min(permit.expires_boottime_ms, command.expires_boottime_ms,
+                     self.session.grant.expires_boottime_ms))
+        now = boottime_ms()
+        obligation = RecoveryObligation(request.boot_id, request.operation_id,
+            hashlib.sha256(canonical(primitive(request))).hexdigest(), old.process, old.app_epoch,
+            old.environment.environment_sha256, command.target.environment_sha256,
+            command.fallback.environment_sha256, now, now + STOP_BUDGET_MS,
+            now + STOP_BUDGET_MS + RESTORE_BUDGET_MS)
+        self._save({**self.record, "stop_request": primitive(request), "recovery": obligation.document()})
         self._event("intent_stop", running=old)
+        # Host acknowledgment is required before dispatch. Lost acknowledgment is
+        # recovered by immutable replay; neither owner can extend the deadlines.
+        self.recovery.arm(obligation)
         try:
-            stopped = self.driver.stop(old, expires_boottime_ms=permit.expires_boottime_ms)
-        except Exception:
-            self._event("effect_unknown", fault="stop_outcome_unknown")
+            operation = self.driver.stop(request, reattach_only=False)
+            self._consume_stop(operation, command)
+        except StopGuaranteeUnavailable as error:
+            self._stop_fault(error.code)
+
+    def _stop_fault(self, code):
+        if self.record["phase"] != "effect_unknown":
+            self._event("effect_unknown", fault=code)
+
+    def _consume_stop(self, operation, command):
+        if not operation.done():
             return
-        if not stopped:
-            self._event("effect_unknown", fault="stop_outcome_unknown")
-            return
-        self._event("stopped", running=old)
+        completed = operation.result()
+        if primitive(completed.request) != self.record["stop_request"]:
+            raise StopGuaranteeUnavailable("stop_completion_mismatch")
+        self._event("stopped", running=completed.request.old)
         self._start(command, command.target, fallback=False)
+
+    def service(self):
+        self.driver.service(now_ms=boottime_ms(), budget_ms=100)
+        self.reconcile()
+        record = self.record
+        if record is None or "recovery" not in record:
+            return
+        obligation = RecoveryObligation.parse(record["recovery"])
+        proof = self.store.read("local-app-control")
+        if record["phase"] in ("running", "fallback_running") and proof is not None:
+            if proof["operation_id"] == str(obligation.operation_id):
+                self.recovery.advance(obligation, proof["progress"])
+        elif record.get("stop_consumed"):
+            self.recovery.advance(obligation, {"kind": "stopped"})
 
     def _start(self, command, reference, *, fallback: bool):
         record = self.record
         if record.get("executor_sealed") or str(command.operation_id) in record.get("sealed_operations", {}):
             raise ValueError("online_executor_sealed")
+        if record.get("recovery"):
+            self.recovery.arm(RecoveryObligation.parse(record["recovery"]))
         # The intent is durable before selection/spawn, including fallback budget.
         self._save({**record, "phase": "fallback_intent" if fallback else "target_intent"})
         try:
@@ -239,6 +282,17 @@ class OnlineEffectBroker:
         if record is None or record.get("executor_sealed") or record["phase"] in ("preparing", "awaiting_permit", "awaiting_recovery", "running", "fallback_running", "cancelled_before_stop", "no_stop_quiescent"):
             return
         command = parse_stage_command(record["command"].encode())
+        if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
+            row = record["stop_request"]
+            request = StopRequest(UUID(row["operation_id"]), UUID(row["boot_id"]), row["command_sha256"],
+                UUID(row["permit_id"]), row["permit_sha256"], running_from(row["old"]),
+                row["dispatch_not_after_boottime_ms"])
+            self.recovery.arm(RecoveryObligation.parse(record["recovery"]))
+            try:
+                self._consume_stop(self.driver.stop(request, reattach_only=True), command)
+            except StopGuaranteeUnavailable as error:
+                self._stop_fault(error.code)
+            return
         running = self.driver.current()
         if running is not None and running.operation_id == command.operation_id:
             if running.environment == command.target:
