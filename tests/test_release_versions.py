@@ -19,6 +19,7 @@ import httpx
 import psycopg
 import pytest
 from content_db import schema_before
+from support.database import waiting_backends
 from support.github_release import (
     FIRST_UPLOAD,
     deb_name,
@@ -98,15 +99,13 @@ def references_match_the_row(w: World, tag: str = T1) -> None:
 
 def wait_until_blocked_or_done(w: World, thread: threading.Thread, *,
                                advisory: bool = False) -> bool:
-    """Whether `thread` is waiting on a lock (an advisory `AUTO_PROMOTION_LOCK` wait, or any
-    lock) before it finishes; False once it finished without waiting. Well inside the 5 s
-    `lock_timeout` of `Database.transaction`."""
-    sql = ("SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype='advisory' "
-           "AND objid=%s" if advisory else "SELECT count(*) AS n FROM pg_locks WHERE NOT granted")
+    """Whether `thread` is waiting on a lock in this test's database (an advisory
+    `AUTO_PROMOTION_LOCK` wait, or any lock) before it finishes; False once it finished without
+    waiting. Well inside the 5 s `lock_timeout` of `Database.transaction`."""
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and thread.is_alive():
         with w.db.transaction() as conn:
-            if conn.execute(sql, (AUTO_PROMOTION_LOCK,) if advisory else ()).fetchone()["n"]:
+            if waiting_backends(conn, advisory_lock=AUTO_PROMOTION_LOCK if advisory else None):
                 return True
         time.sleep(0.01)
     return False

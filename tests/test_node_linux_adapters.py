@@ -29,6 +29,10 @@ from contracts.node_protocol import NodeProducerV2
 from scripts.build_app_environment import materialize
 from scripts.build_node_base_deb import stage_tree
 
+# A fixed replacement identity: a parameter value must be the same in every collection (xdist
+# workers each collect, and must agree).
+REPLACEMENT_INVOCATION = "6b8cd57b-2a55-4ba0-89bc-456463455201"
+
 
 def store(directory, boot, policy=None):
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -471,7 +475,7 @@ def test_stop_observation_pending_does_not_relax_public_current(stop_driver, mon
     assert not driver._stop_sample(expected, group)
 
 
-@pytest.mark.parametrize("field,value", [("MainPID", "322"), ("InvocationID", str(uuid4())),
+@pytest.mark.parametrize("field,value", [("MainPID", "322"), ("InvocationID", REPLACEMENT_INVOCATION),
     ("RootDirectory", "/wrong"), ("ControlGroup", "/photowallapp.slice/other.service")])
 def test_stop_observation_refuses_replacement_identity(stop_driver, field, value):
     _, driver, expected, group, rows, _, _ = stop_driver
@@ -520,7 +524,7 @@ def test_player_health_has_bounded_private_mount():
     assert not any(value.startswith(("BindPaths=", "RuntimeDirectory=")) for value in props)
 
 
-@pytest.mark.parametrize("field,value", [("InvocationID", str(uuid4())), ("RootDirectory", "/wrong"),
+@pytest.mark.parametrize("field,value", [("InvocationID", REPLACEMENT_INVOCATION), ("RootDirectory", "/wrong"),
     ("ControlGroup", "/photowallapp.slice/replacement.service")])
 def test_terminal_stop_observation_rejects_retained_replacement(stop_driver, monkeypatch, field, value):
     _, driver, expected, group, rows, ticks, _ = stop_driver

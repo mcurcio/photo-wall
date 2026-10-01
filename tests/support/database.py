@@ -167,3 +167,18 @@ class TestDatabases:
             except psycopg.errors.ObjectInUse:
                 pass
 
+
+
+def waiting_backends(conn, *, advisory_lock: int | None = None) -> int:
+    """How many backends of THIS test's database wait on a lock (on `advisory_lock` only, when
+    given): the one way a test observes a lock wait. `pg_locks` is cluster-wide, so a raw count
+    also sees other tests' waiters (other xdist workers' databases) and passes although this
+    test's session never waited. tests/test_lock_observation_scope.py forbids raw queries."""
+    query = ("SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND pid IN "
+             "(SELECT pid FROM pg_stat_activity WHERE datname = current_database())")
+    params: tuple[int, ...] = ()
+    if advisory_lock is not None:
+        query += " AND locktype = 'advisory' AND objid = %s"
+        params = (advisory_lock,)
+    row = conn.execute(query, params).fetchone()
+    return row["n"] if isinstance(row, dict) else row[0]

@@ -304,6 +304,8 @@ NOT_SHIPPED: Final = (
     # The service images' shared build and BuildKit cache wiring, which pipeline.yml runs: under
     # the same owner ruling, how an image is built is not a release input.
     ".github/actions/service-image/action.yml",
+    # The test jobs' console build; the images build their own bundle (the Dockerfile).
+    ".github/actions/console-bundle/action.yml",
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",

@@ -34,7 +34,7 @@ def test_shared_producer_queues_all_callers_and_requires_published_output():
 
 
 def test_existing_required_jobs_fail_if_shared_preparation_fails():
-    for name, jobs in [('checks.yml', ['portable-and-postgres', 'linux-media']),
+    for name, jobs in [('checks.yml', ['image-smoke', 'linux-media']),
                        ('software-e2e.yml', ['two-players-three-outputs'])]:
         workflow = (WORKFLOWS / name).read_text()
         for job in jobs:
@@ -70,3 +70,31 @@ def test_browser_dependencies_are_published_and_match_locked_playwright():
     assert 'uv sync --frozen --no-install-project' in workflow
     assert '--network host' in workflow  # Existing disposable database stays reachable.
     assert 'scripts/test_local.py -q' in workflow
+
+
+def _job(workflow, job):
+    return re.split(r'^  [\w-]+:\n', workflow.split(f'\n  {job}:\n')[1], maxsplit=1,
+                    flags=re.MULTILINE)[0]
+
+
+def test_the_tier_jobs_partition_the_suite_and_fail_closed():
+    """unit, db and browser run every test exactly once (tests/conftest.py derives the tiers),
+    each needing no other job, and every job refuses a missing database."""
+    workflow = (WORKFLOWS / 'checks.yml').read_text()
+    assert "\nenv:\n  COMPOSE_PROJECT_NAME: photo-wall-ci\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" \
+        in workflow
+    selections = {job: _job(workflow, job) for job in ('unit', 'db', 'browser')}
+    assert '-m "not db and not browser" -n 4 --dist worksteal' in selections['unit']
+    assert '-m db -n 4 --dist loadgroup' in selections['db']
+    assert ' tests/browser --browser chromium' in selections['browser']
+    for job, body in selections.items():
+        assert 'needs:' not in body, job
+        assert '--durations=25' in body, job
+        assert re.search(r'timeout-minutes: \d+\n', body), job
+    for job in ('db', 'browser'):
+        assert 'compose.test-database.yml up -d --wait' in selections[job]
+    assert 'PHOTO_WALL_RELEASE_TOKEN' in selections['db']
+    for job in ('unit', 'db'):  # both tiers hold tests of the published Player wire
+        assert 'published_player_wire.py prepare' in selections[job]
+        assert 'PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR' in selections[job]
+    assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
