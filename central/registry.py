@@ -710,6 +710,30 @@ class Registry:
                          "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)
 
+    @staticmethod
+    def calibration_mode_in(conn, frame_id: str) -> str:
+        """Established V2 capability survives admission/generation revocation.
+
+        Missing current authority cannot downgrade a known V2 device to the
+        legacy write protocol. An explicit capability downgrade is not inferred.
+        """
+        row = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM bindings b JOIN players p ON p.id=b.player_id "
+            "JOIN node_boot_admissions a ON a.device_id=p.device_id "
+            "JOIN node_offer_contexts o ON o.offer_id=a.offer_id "
+            "WHERE b.frame_id=%s AND "
+            "(o.basis='node_v2' OR EXISTS(SELECT 1 FROM node_producers n "
+            "WHERE n.admission_id=a.admission_id AND n.owner='display_host'))) AS native",
+            (frame_id,),
+        ).fetchone()
+        return "native_trial" if row["native"] else "legacy_preview"
+
+    def calibration_capability(self, frame_id: str) -> dict:
+        with self.db.transaction() as conn:
+            if not conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone():
+                raise RegistryError("unknown_frame", 404)
+            return {"mode": self.calibration_mode_in(conn, frame_id)}
+
     def calibrate(self, frame_id: str, operation: str, expected_revision: int,
                   calibration: Calibration | None = None, *, expected_generation: int) -> dict:
         now = self.clock.utc()
@@ -717,6 +741,8 @@ class Registry:
             from central.equipment_drain import require_unfenced_frame_in
 
             require_unfenced_frame_in(conn, frame_id)
+            if self.calibration_mode_in(conn, frame_id) == "native_trial":
+                raise RegistryError("calibration_trial_required", 409)
             self._expire_previews(conn)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
@@ -750,6 +776,40 @@ class Registry:
                          (frame_id,))
             self._audit(conn, f"calibration_{operation}", frame_id)
             return result
+
+    def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
+            authority_epoch: int, output_id: str, binding_generation: int,
+            config_revision: int, calibration_revision: int,
+            calibration: Calibration) -> Calibration:
+        """Registry-owned Save CAS inside the Trial owner's existing transaction.
+
+        Caller holds Coordination→Runtime then Fleet/session locks. This method
+        owns persistent Frame calibration only; it never interprets trial evidence.
+        """
+        from central.equipment_drain import require_unfenced_frame_in
+
+        if not holds_runtime_locks_in(conn):
+            raise RegistryError("calibration_runtime_locks_required")
+        require_unfenced_frame_in(conn, frame_id)
+        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
+                           "FROM frames f JOIN bindings b ON b.frame_id=f.id "
+                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s FOR UPDATE OF f",
+                           (frame_id,)).fetchone()
+        if row is None or row["retired_at"] is not None or (
+            row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
+            row["configuration_revision"]
+        ) != (player_id, authority_epoch, output_id, binding_generation, config_revision):
+            raise RegistryError("calibration_trial_baseline_changed")
+        current = Calibration.model_validate(row["calibration"])
+        if current.revision != calibration_revision:
+            raise RegistryError("calibration_revision_conflict")
+        committed = Calibration.model_validate(calibration.model_dump()).model_copy(
+            update={"revision": current.revision + 1})
+        conn.execute("UPDATE frames SET calibration=%s,calibration_valid=true,preview=NULL,"
+                     "preview_expires=NULL,configuration_revision=configuration_revision+1 "
+                     "WHERE id=%s", (Jsonb(committed.model_dump(mode="json")), frame_id))
+        self._audit(conn, "calibration_trial_commit", frame_id)
+        return committed
 
     def bindings_for(self, player_id: str, epoch: int, *, include_unvalidated=False) -> list[OutputBinding]:
         config = self.configuration_for(player_id, epoch)

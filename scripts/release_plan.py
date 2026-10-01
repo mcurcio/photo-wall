@@ -259,6 +259,17 @@ PACKAGES: Final = (
            "FROM the media OS base service-base.yml prepares", "media-worker",
            "scripts/service_base.py", ".github/workflows/service-base.yml"),
     Package("player-deb", "the Player .deb", _PLAYER_DEB),
+    Package("node-manager-deb", "the exact versioned AppManager .deb",
+            (*_DEB_BUILD, "scripts/build_node_manager_deb.py", "appliance/node/manager.py",
+             "appliance/node/manager_runner.py", "appliance/node/preparer.py", "appliance/node/environment.py", "contracts/**")),
+    Package("node-display-deb", "the isolated native Weston display .deb",
+            (*_DEB_BUILD, "scripts/build_node_display_deb.py", "scripts/node_build_inputs.py", "appliance/display_host/**")),
+    Package("player-environment", "the sealed Debian V2 Player environment",
+            (*_PLAYER_DEB, "scripts/build_app_environment.py", "scripts/node_build_inputs.py", "appliance/node/environment.py")),
+    Package("node-base-deb", "the isolated V2 node base .deb",
+            (*_DEB_BUILD, "scripts/build_node_base_deb.py", "appliance/node/**", "appliance/display_host/**", "contracts/**",
+             "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
+             "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
     Package("bootstrapper-deb", "the bootstrapper .deb", _BOOTSTRAPPER_DEB),
     # The squashfs bakes the bootstrapper .deb, so the bundle reads everything that .deb does;
@@ -266,6 +277,11 @@ PACKAGES: Final = (
     Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and boot data",
             (*_BOOTSTRAPPER_DEB, "appliance/**", "scripts/build_netboot_bundle.sh",
              "scripts/build_boot_data.py", "scripts/verify_netboot_initrd.py",
+             "scripts/build_node_components.py", "scripts/node_release_artifacts.py",
+             "scripts/build_app_environment.py", "scripts/build_node_base_deb.py",
+             "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
+             "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
+             "scripts/node_service_probe.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
              "scripts/eeprom_update.py", "scripts/player_start_probe.py",
              "scripts/os_agent_service_probe.py",
@@ -274,7 +290,8 @@ PACKAGES: Final = (
     # SHA256SUMS, whose names, layout and contents this packager writes to the declaration.
     Package("release-assets", "the GitHub Release's operator asset set (base tarball, "
             "manifest.json, SHA256SUMS)", ("scripts/package_release_artifacts.py",
-                                           "contracts/release.py", "contracts/player_payload.py")),
+                                           "contracts/release.py", "contracts/player_payload.py", "contracts/node_release.py",
+                                           "scripts/node_release_artifacts.py")),
 )
 
 # Every tracked path no package claims must match one of these, so a new top-level directory or
@@ -290,6 +307,8 @@ NOT_SHIPPED: Final = (
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
+    "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
+    "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",
     "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
     "scripts/provenance_models.py", "scripts/published_player_wire.py",

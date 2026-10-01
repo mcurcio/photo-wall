@@ -24,7 +24,7 @@ def post_json(central: LocatedCentral, path: str, value: Mapping[str, object], *
               transport: Transport, seconds: float = 15,
               max_reply: int = MAX_REPLY) -> bytes:
     """One bounded exchange; an HTTP 404 is the caller's route-specific decision."""
-    if not 0 < seconds <= 60 or not 0 < max_reply <= MAX_REPLY:
+    if not 0 < seconds <= 60 or not 0 < max_reply <= 16384:
         raise ValueError("invalid POST bound")
     body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     if len(body) > MAX_BODY:

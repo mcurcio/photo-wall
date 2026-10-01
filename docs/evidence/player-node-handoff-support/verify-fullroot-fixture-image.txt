@@ -1,0 +1,38 @@
+import ast,hashlib,json,tarfile,subprocess
+from pathlib import Path
+ROOT=Path('/Volumes/Dock/Temp/photo-wall-node-resume-20260930')
+WORK=ROOT/'pid1-fullroot-image'
+source=Path(__file__).with_name('build-fullroot-fixture-image.txt').read_text()
+module=ast.parse(source)
+node=next(n for n in module.body if isinstance(n,ast.FunctionDef) and n.name=='inventory')
+exec(compile(ast.Module(body=[node],type_ignores=[]),'<inventory>','exec'))
+def sha(path):
+ with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+image=(WORK/'image-id').read_text().strip()
+inspected=json.loads(subprocess.check_output(['docker','image','inspect',image]))[0]
+assert inspected['Id']==image and inspected['Architecture']=='arm64'
+source_sha=sha(WORK/'rootfs.tar')
+with tarfile.open(WORK/'saved-image.tar') as archive:
+ manifest=json.load(archive.extractfile('manifest.json'))
+ assert len(manifest)==1 and len(manifest[0]['Layers'])==1
+ layer=manifest[0]['Layers'][0]
+ saved_sha=hashlib.file_digest(archive.extractfile(layer),'sha256').hexdigest()
+ assert saved_sha==source_sha==layer.rsplit('/',1)[1]
+ config=json.load(archive.extractfile(manifest[0]['Config']))
+ assert config['architecture']=='arm64' and config['rootfs']['diff_ids']==['sha256:'+source_sha]
+baseline=json.loads((WORK/'baseline-inventory.json').read_text())
+imported=inventory(WORK/'rootfs.tar')
+assert all(imported.get(name)==value for name,value in baseline.items())
+added={name:value for name,value in imported.items() if name not in baseline}
+expected={'var/tmp/node-base.deb','var/tmp/node-display.deb','var/tmp/fixture-head.c','var/tmp/fixture-head.so','var/lib/node-fixture-drm','var/lib/node-fixture-drm/card0-Virtual-1','var/lib/node-fixture-drm/card0-Virtual-1/status'}
+assert set(added)==expected
+actual=inventory(WORK/'image-export.tar')
+diffs={name:{'imported':value,'container_export':actual.get(name)} for name,value in imported.items() if value!=actual.get(name)}
+allowed={'dev/console','etc/mtab','etc/hosts','etc/hostname','etc/resolv.conf'}
+assert set(diffs)<=allowed,diffs
+extra=set(actual)-set(imported)
+assert extra<={'.dockerenv','etc/resolv.conf'},extra
+for name,value in added.items():assert actual[name]==value
+report={'image_id':image,'source_squashfs_sha256':'a3952fe8c2cb0be37d3617dc0e0a16ef06f5c74490b2fe9945955c70f8c13bca','exact_baseline_members':len(baseline),'imported_layer_sha256':source_sha,'saved_image_layer_matches_input_byte_for_byte':True,'fixture_additions':added,'container_runtime_changes':diffs,'container_runtime_additions':list(extra),'architecture':'arm64','qualification':'original imported layer preserves complete production squashfs inventory; Docker runtime normalization explicitly listed; synthetic hardware, no physical PXE claim'}
+(WORK/'image-verification.json').write_text(json.dumps(report,sort_keys=True))
+print(json.dumps({'image_id':image,'baseline_members':len(baseline),'layer_sha256':source_sha,'runtime_changed_paths':list(diffs),'fixture_additions':len(added)},sort_keys=True))

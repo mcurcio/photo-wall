@@ -24,6 +24,7 @@ from contracts.app_process_proof import (
     app_proof_message_v2,
 )
 from contracts.os_attempt_report import OsAttemptReport
+from contracts.player_control import ControlAppliedReceipt
 
 PackageState = Literal["unknown", "committed_target", "rolled_back", "recovery_required",
                        "conflicting"]
@@ -174,9 +175,14 @@ def _report_matches(row: StoredReport, attempt: AttemptIdentity,
 
 def _current_v2_receipt_matches(proof: LocalAppProofV2,
                                 control: AppControl | None) -> bool:
+    return current_control_receipt_matches(proof.challenge.receipt, control)
+
+
+def current_control_receipt_matches(receipt: ControlAppliedReceipt,
+                                    control: AppControl | None) -> bool:
+    """One canonical current-Registry ACK correlation rule for every proof carrier."""
     if control is None:
         return False
-    receipt = proof.challenge.receipt
     return (
         control.status == "negotiated" and control.schema_version == 2
         and control.applied_at is not None and control.last_result_at is not None

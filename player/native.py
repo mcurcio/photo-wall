@@ -7,6 +7,7 @@ bounded Gst samples; they never touch GTK/GL or control-plane state.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from contracts.models import AppliedCalibration
 from player.geometry import cover_rect, homography, inverse
 from player.rendering import (
     CapacityResult,
@@ -160,6 +162,8 @@ class _Draw:
     composition: OutputComposition
     generations: tuple[tuple[str, int, int], ...]
     completed_at: float = 0
+    applied_calibration: AppliedCalibration | None = None
+    primitives: tuple | None = None
 
 
 @dataclass
@@ -199,6 +203,7 @@ uniform vec4 cover;
 uniform int rotation;
 uniform int video;
 uniform int black;
+uniform int commissioning;
 uniform float opacity;
 vec3 linear_rgb(vec3 value) {
     if (video == 1) {
@@ -215,6 +220,12 @@ void main() {
     if (rotation == 90) p = vec2(p.y, 1.0-p.x);
     else if (rotation == 180) p = vec2(1.0)-p;
     else if (rotation == 270) p = vec2(1.0-p.y, p.x);
+    if (commissioning == 1) {
+        vec2 grid = fract(mix(cover.xy, cover.zw, p)*10.0);
+        float line = float(grid.x < 0.035 || grid.y < 0.035);
+        color = vec4(mix(vec3(0.2, 0.3, 0.45), vec3(0.9), line), 1.0);
+        return;
+    }
     if (black == 1) { color=vec4(0.0, 0.0, 0.0, opacity); return; }
     vec4 sample_color = texture(media, mix(cover.xy, cover.zw, p));
     float alpha = sample_color.a * opacity;
@@ -260,6 +271,15 @@ class NativeRenderer:
         if not self.Gtk.init_check()[0]:
             raise RuntimeError("GTK cannot open the configured display")
         self.Gst.init(None)
+        self._frames = None
+        self._frame_timer = None
+        if os.environ.get("PHOTO_WALL_DISPLAY_HOST") == "1":
+            from player.wayland_frames import WaylandFrames
+            display = self.Gdk.Display.get_default()
+            if "Wayland" not in type(display).__name__:
+                raise RuntimeError("node_display_requires_wayland")
+            self._frames = WaylandFrames(display)
+            self._frame_timer = self.GLib.timeout_add(1000, self._renew_display_frames)
         diagnostic_style = self.Gtk.CssProvider()
         diagnostic_style.load_from_data(b"""
             .photo-wall-diagnostic {
@@ -364,9 +384,9 @@ class NativeRenderer:
         gi.require_version("Gdk", "3.0")
         gi.require_version("Gst", "1.0")
         gi.require_version("GstVideo", "1.0")
-        from gi.repository import Gdk, Gst, GstVideo, Gtk
+        from gi.repository import Gdk, GLib, Gst, GstVideo, Gtk
         from OpenGL import GL
-        self.Gtk, self.Gdk, self.Gst, self.GstVideo = Gtk, Gdk, Gst, GstVideo
+        self.Gtk, self.Gdk, self.GLib, self.Gst, self.GstVideo = Gtk, Gdk, GLib, Gst, GstVideo
         self.GL = GL
 
     def _thread(self) -> None:
@@ -374,6 +394,15 @@ class NativeRenderer:
             raise RuntimeError("NativeRenderer requires its owning GLib thread")
         if self._closed:
             raise RuntimeError("NativeRenderer is closed")
+
+    def _renew_display_frames(self) -> bool:
+        if self._closed:
+            return False
+        # Static photos need real tagged buffer commits too. GTK still owns the
+        # paint/commit; no timer or frame callback manufactures display evidence.
+        for surface in self._surfaces.values():
+            surface.area.queue_render()
+        return True
 
     def _window_realized(self, window, surface) -> None:
         gdk_window = window.get_window()
@@ -625,6 +654,13 @@ class NativeRenderer:
         surface = self._surfaces.get(composition.binding.output_id)
         if surface is None or surface.failure:
             return PresentationResult("failed", "decode")
+        frames = getattr(self, "_frames", None)
+        if frames is not None:
+            grant = frames.grant(composition.binding.output_id, composition)
+            if grant is None or not grant.admitted or not grant.matches(composition):
+                surface.acknowledged = None
+                surface.area.queue_render()
+                return PresentationResult("pending")
         if surface.pending and _fingerprint(surface.pending.composition) != _fingerprint(composition):
             surface.pending = None
         if not self.capacity((composition,)).available:
@@ -653,7 +689,8 @@ class NativeRenderer:
         if (ack and _fingerprint(ack.composition) == _fingerprint(composition)
                 and ack.generations == generations and time.monotonic()-ack.completed_at < .5):
             return PresentationResult("presented", composition=ack.composition,
-                                      presented_at=ack.completed_at)
+                                      presented_at=ack.completed_at,
+                                      applied_calibration=ack.applied_calibration if getattr(self, "_frames", None) else None)
         return PresentationResult("pending")
 
     def release(self, assignment_id: str) -> None:
@@ -821,12 +858,21 @@ class NativeRenderer:
         gl.glUseProgram(program)
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA)
-        calibration = draw.composition.calibration
+        calibration = (draw.applied_calibration.calibration if draw.applied_calibration
+                       else draw.composition.calibration)
         matrix = inverse(homography(calibration.corners))
         gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, "inverse_map"), 1, False,
                               [matrix[row*3+column] for column in range(3) for row in range(3)])
         gl.glUniform1i(gl.glGetUniformLocation(program, "rotation"), calibration.rotation)
         gl.glUniform1i(gl.glGetUniformLocation(program, "media"), 0)
+        # An explicit Trial may render a procedural commissioning canvas when
+        # no authorized media exists. It is never a Layer, Run or readiness fact.
+        commissioning = bool(draw.applied_calibration and draw.applied_calibration.trial_id
+                             and draw.composition.fallback and not draw.composition.layers)
+        gl.glUniform1i(gl.glGetUniformLocation(program, "commissioning"), int(commissioning))
+        if commissioning:
+            gl.glUniform4f(gl.glGetUniformLocation(program, "cover"), *calibration.crop)
+            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         for local in _visible(draw.composition):
             variant = local.layer.variant
             if variant is not None:
@@ -854,9 +900,49 @@ class NativeRenderer:
         gtk_framebuffer = int(gl.glGetIntegerv(gl.GL_FRAMEBUFFER_BINDING))
         width = max(1, area.get_allocated_width()*area.get_scale_factor())
         height = max(1, area.get_allocated_height()*area.get_scale_factor())
+        frames = getattr(self, "_frames", None)
+        grant = frames.grant(surface.output.output_id) if frames is not None else None
+        if frames is not None and (grant is None or not grant.admitted):
+            # Before surface admission, show only a fixed synthetic handoff
+            # colour. Authored layers remain in Executor under their own grant.
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
+            gl.glViewport(0, 0, width, height)
+            gl.glClearColor(0.12, 0.17, 0.24, 1)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+            gl.glFlush()
+            if grant is not None and gl.glGetError() == gl.GL_NO_ERROR:
+                frames.tag_rendered_buffer(surface.window.get_window(), grant,
+                                           "candidate-" + str(grant.grant_id))
+            surface.acknowledged = None
+            return True
         draw = surface.pending
         if draw and draw.generations != self._generations(draw.composition):
             surface.pending = draw = None
+        if draw is not None and frames is not None:
+            pending_grant = frames.grant(surface.output.output_id, draw.composition)
+            if pending_grant is None or not pending_grant.admitted:
+                surface.pending = draw = None
+        logical = draw.composition if draw else (surface.acknowledged.composition if surface.acknowledged else None)
+        applied = None
+        trial = None
+        if logical is not None:
+            if frames is not None:
+                exact_grant = frames.grant(surface.output.output_id, logical)
+                if exact_grant is not None:
+                    trial = frames.trial(logical, exact_grant)
+            applied = AppliedCalibration(calibration=trial.calibration if trial else logical.calibration,
+                trial_id=str(trial.candidate.trial_id) if trial else None,
+                trial_generation=trial.candidate.generation if trial else None,
+                trial_sequence=trial.candidate.sequence if trial else None,
+                candidate_sha256=trial.candidate.candidate_sha256 if trial else None)
+            if draw is None and surface.acknowledged.applied_calibration != applied:
+                # Trial edits and expiry redraw retained authorized content through the same shader.
+                # A cached logical composition is never treated as restored baseline pixels.
+                self._serial += 1
+                draw = _Draw(self._serial, logical, self._generations(logical))
+            if draw is not None:
+                draw.applied_calibration = applied
+                draw.primitives = trial.primitives if trial else None
         candidate_ok = False
         try:
             self._targets(surface, width, height)
@@ -880,7 +966,8 @@ class NativeRenderer:
             gl.glBindTexture(gl.GL_TEXTURE_2D, surface.targets[1 if candidate_ok else 0][1])
             gl.glUniform1i(gl.glGetUniformLocation(surface.programs[1], "picture"), 0)
             calibration = draw if candidate_ok else surface.acknowledged
-            gain = calibration.composition.calibration.gain if calibration else 1
+            gain = ((calibration.applied_calibration.calibration if calibration.applied_calibration
+                     else calibration.composition.calibration).gain if calibration else 1)
             gl.glUniform1f(gl.glGetUniformLocation(surface.programs[1], "gain"), gain)
             gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             gl.glFlush()
@@ -901,6 +988,20 @@ class NativeRenderer:
                 surface.acknowledged = draw
                 if surface.pending is draw:
                     surface.pending = None
+            if frames is not None and surface.acknowledged is not None:
+                actual = surface.acknowledged.composition
+                grant = frames.grant(surface.output.output_id, actual)
+                if grant is None or not grant.matches(actual):
+                    raise RuntimeError("display_frame_revision_mismatch")
+                from player.wayland_frames import composition_tag
+                # GLArea render is inside the same GDK paint cycle. The tag and
+                # wp_presentation feedback precede GDK's commit of this draw;
+                # no timer, configure handler or later idle callback tags it.
+                metadata = surface.acknowledged.applied_calibration
+                tag = ("trial-" + metadata.candidate_sha256 if metadata and metadata.trial_id
+                       else composition_tag(actual, _visible(actual)))
+                frames.tag_rendered_buffer(surface.window.get_window(), grant, tag,
+                                           surface.acknowledged.primitives)
         except Exception as error:
             surface.pending = None
             surface.failure = type(error).__name__
@@ -933,6 +1034,12 @@ class NativeRenderer:
 
     def close(self) -> None:
         self._thread()
+        if getattr(self, "_frame_timer", None) is not None:
+            self.GLib.source_remove(self._frame_timer)
+            self._frame_timer = None
+        if getattr(self, "_frames", None) is not None:
+            self._frames.close()
+            self._frames = None
         for decoder in self._decoders.values():
             self._destroy_decoder(decoder)
         self._decoders.clear()

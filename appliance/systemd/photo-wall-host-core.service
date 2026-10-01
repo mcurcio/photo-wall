@@ -1,0 +1,39 @@
+[Unit]
+Description=Photo Wall independent host observation and scoped reboot
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/run/photo-wall-node/host.json
+After=network-online.target
+
+After=photo-wall-node-handoff.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-host-core
+Restart=always
+RestartSec=2
+User=root
+RuntimeDirectory=photo-wall-host-core
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Slice=photowallhostcore.slice
+CPUWeight=1000
+MemoryMin=32M
+MemoryMax=96M
+MemorySwapMax=0
+TasksMax=16
+IOWeight=1000
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/photo-wall-host-core
+InaccessiblePaths=-/run/photo-wall-node-storage/app-roots -/run/photo-wall-node-storage/manager-roots -/run/photo-wall-preparation -/run/photo-wall-app-broker

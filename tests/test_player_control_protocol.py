@@ -17,7 +17,6 @@ from contracts.player_control import (
     ControlSelection,
     select_control,
 )
-from player.service import State
 
 
 class _WireValue:
@@ -132,6 +131,8 @@ def test_first_state_seals_hello_and_new_epoch_can_negotiate(registry):
 
 
 def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(registry):
+    from player.service import State
+
     player, key, request = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}

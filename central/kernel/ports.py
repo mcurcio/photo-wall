@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
-from central.kernel.job_types import AssetJob, FetchOsImage, FetchPackage, FetchPlayerPayload
+from central.kernel.job_types import (
+    AssetJob,
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    FetchSealedEnvironment,
+)
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version, require_reason, require_sha256
 from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
@@ -46,7 +52,7 @@ class Candidates:
     def __post_init__(self) -> None:
         jobs = self.jobs
         if (not isinstance(jobs, tuple) or not jobs
-                or not all(isinstance(job, (FetchOsImage, FetchPackage, FetchPlayerPayload))
+                or not all(isinstance(job, (FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment))
                            for job in jobs)):
             raise ValueError("invalid_candidates")
         if len(set(jobs)) != len(jobs):
@@ -140,6 +146,26 @@ class PlayerPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class NodePublication:
+    manifest: bytes
+    assets: tuple[tuple[str, OriginLocator], ...]
+
+    def __post_init__(self):
+        from contracts.node_release import parse_node_release
+        release = parse_node_release(self.manifest)
+        if type(self.assets) is not tuple or len(self.assets) != len(release.artifacts):
+            raise ValueError("node_publication_assets_invalid")
+        values = dict(self.assets)
+        if len(values) != len(self.assets) or set(values) != {a.role for a in release.artifacts}:
+            raise ValueError("node_publication_assets_invalid")
+        for asset in release.artifacts:
+            locator = values[asset.role]
+            _complete_locator(locator)
+            if (locator.sha256, locator.size) != (asset.sha256, asset.size_bytes):
+                raise ValueError("node_publication_asset_mismatch")
+
+
+@dataclass(frozen=True, slots=True)
 class PublishedRelease:
     tag: str  # release_version-valid
     is_prerelease: bool
@@ -153,6 +179,7 @@ class PublishedRelease:
     payload: PlayerPayload | None = None
     base_abi: str | None = None
     base_abi_squashfs_sha256: str | None = None
+    node_publication: NodePublication | None = None
 
     def __post_init__(self) -> None:
         release_version(self.tag)

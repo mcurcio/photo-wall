@@ -1,0 +1,83 @@
+"""Stage exact dirty-source inputs using production builders; does not launch rootfs."""
+from __future__ import annotations
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tomllib
+
+source = Path('/source')
+components = Path('/components')
+out = Path('/work/rootfs-inputs')
+
+def sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+tool_inputs = json.loads(Path('/recipes/build-project-inputs.json').read_text())
+for name, expected in tool_inputs['source_inputs'].items():
+    assert sha(source / name) == expected, 'tool_project_input_changed:' + name
+
+manifest_path = components / 'source-inputs.json'
+manifest = json.loads(manifest_path.read_text())
+component_refs = json.loads((components / 'components.json').read_text())
+assert sha(manifest_path) == component_refs['source_manifest_sha256']
+for name, expected in manifest.items():
+    path = source / name
+    assert path.is_file(), name
+    assert sha(path) == expected['sha256'], name
+    assert path.lstat().st_mode & 0o7777 == expected['mode'], name
+    assert (os.readlink(path) if path.is_symlink() else None) == expected['link'], name
+assert component_refs['provenance'] == 'dirty-working-tree; not a release revision'
+for field in ('app_environment', 'manager_primary'):
+    for key, value in component_refs['abi'].items():
+        assert component_refs[field][key] == value, (field, key)
+
+# Import exclusively from the verified snapshot, never the host checkout.
+sys.path.insert(0, str(source))
+from scripts import build_bootstrapper_deb as builder
+from scripts.debian_packages import PIN
+builder.assert_declaration_matches(source)
+closure = builder.closure_for(builder.BOOTSTRAPPER_POLICY, repo=source)
+unit_dir = source / 'appliance/systemd'
+unit = (unit_dir / builder.UNIT_NAME).read_bytes()
+args = dict(
+    agent_unit=(unit_dir / builder.AGENT_UNIT_NAME).read_bytes(),
+    player_unit=builder.managed_player_unit((unit_dir / 'player.service').read_bytes()),
+    weston_unit=(unit_dir / 'weston.service').read_bytes(),
+    weston_ini=builder.render_weston_ini().encode(),
+)
+project_version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
+version = builder.package_version(closure, unit, project_version, tree=source, **args)
+out.mkdir()  # Never silently reuse prior staging or outputs.
+staged = out / 'bootstrapper-stage'
+builder.stage_tree(staged, closure=closure, tree=source, unit=unit, version=version, **args)
+builder.assert_minimal(staged)
+os.environ['SOURCE_DATE_EPOCH'] = str(PIN.epoch)
+builder.run_dpkg_deb(staged, out / 'bootstrapper.deb')
+for args, filename in ((['packages', 'bootstrapper', 'player'], 'device-packages.list'),
+                       (['sources'], 'debian-sources.list')):
+    result = subprocess.check_output([sys.executable, '-B', str(source / 'scripts/debian_packages.py'), *args])
+    (out / filename).write_bytes(result)
+provenance = {
+    'qualification': 'local dirty-source build, not a release revision',
+    'git_head': (components / 'git-head.txt').read_text().strip(),
+    'source_manifest_sha256': sha(manifest_path),
+    'components_json_sha256': sha(components / 'components.json'),
+    'bootstrapper_closure_digest': closure.digest,
+    'bootstrapper_version': version,
+    'debian_snapshot': PIN.snapshot,
+    'source_date_epoch': PIN.epoch,
+    'abi': component_refs['abi'],
+    'inputs': {str(p): sha(p) for p in (
+        out / 'bootstrapper.deb', out / 'device-packages.list', out / 'debian-sources.list',
+        components / 'node-base.deb', components / 'node-display.deb',
+        components / 'manager-primary.deb', components / 'app.deb')},
+}
+(out / 'provenance.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n')
+print(json.dumps(provenance, sort_keys=True))

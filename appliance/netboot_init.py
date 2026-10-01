@@ -53,6 +53,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -62,6 +63,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final
+from uuid import UUID
 
 from appliance.boot_offer import BootOffer, BootOfferError, boot_nonce, read_handoff
 from appliance.boot_offer import write_handoff as write_boot_handoff
@@ -78,7 +80,14 @@ from appliance.bootstrap import (
     read_pi_serial,
 )
 from appliance.central_post import UnsupportedRoute, post_json
+from appliance.node_boot_handoff import node_nonce, write_node_handoff
 from contracts.clock_record import ClockRecord
+from contracts.node_boot import (
+    MAX_NODE_BOOT_BYTES,
+    NodeBootRequestV2,
+    encode_node_boot_request,
+    parse_node_boot_offer,
+)
 from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import SystemClock
 from uplink.causes import Cause, UplinkError
@@ -645,9 +654,22 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
     # Phase 6: freeze one exact selection before requesting its bytes. The legacy path is only
     # for a Central that answered the offer POST with its canonical unknown-route response.
     offer: BootOffer | None = None
+    node_offer = None
     boot_id: str | None = None
     nonce: str | None = None
-    if offer_mode:
+    node_mode = (cmdline or {}).get("photowall.node") == "v2"
+    if node_mode:
+        if serial is None:
+            raise NetbootError("node_boot_serial_unavailable")
+        boot_id = boot_id_reader() if boot_id_reader else KERNEL_BOOT_ID.read_text().strip()
+        nonce = node_nonce(ops.run_root, UUID(boot_id))
+        request = NodeBootRequestV2(serial, UUID(boot_id), nonce)
+        body = post_json(located, "/v2/node/boot-offers", json.loads(encode_node_boot_request(request)),
+                         transport=transport, max_reply=MAX_NODE_BOOT_BYTES)
+        node_offer = parse_node_boot_offer(body)
+        if node_offer.kernel_boot_id != UUID(boot_id) or node_offer.boot_nonce != nonce or node_offer.serial != serial:
+            raise NetbootError("node_boot_offer_binding")
+    elif offer_mode:
         if serial is None:
             raise NetbootError("boot_serial_unavailable")
         boot_id = boot_id_reader() if boot_id_reader else KERNEL_BOOT_ID.read_text().strip()
@@ -664,6 +686,11 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
             raise NetbootError(str(error)) from error
     base_path = (NETBOOT_BASE_PATH if offer is None else
                  f"{BOOT_OFFER_PATH}/{offer.offer_id}/base")
+    if node_offer is not None:
+        base_path = f"/v2/node/boot-offers/{node_offer.offer_id}/artifacts/base"
+    expected_digest = (node_offer.base.squashfs_sha256 if node_offer else
+                       offer.base.sha256 if offer else None)
+    expected_size = node_offer.base.size_bytes if node_offer else offer.base.size if offer else None
     headers = {SERIAL_HEADER: serial} if serial else {}
     console.line(6, f"base: GET {located.origin.url(base_path)} headers={headers}")
     fetcher = DirectFetch(located, transport=transport, seconds=BASE_FETCH_SECONDS)
@@ -680,20 +707,22 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
         if captured["digest"] is None:
             console.log.info(f"phase 6/{PHASES} base: NO usable sha-256 Digest header -- "
                              "the fetch will fail closed")
-        if offer is not None and captured["digest"] != offer.base.sha256:
+        if expected_digest is not None and captured["digest"] != expected_digest:
             raise NetbootError("netboot_offer_header_mismatch")
 
     try:
-        chunks = fetcher.chunks(base_path, offer.base.size if offer else MAX_ROOTFS_BYTES,
+        chunks = fetcher.chunks(base_path, expected_size or MAX_ROOTFS_BYTES,
                                 block=CHUNK,
                                 headers=headers, on_response=on_response)
         # keeper.paced pets once per streamed block (S0-AC4).
         fetch_verified(console.keeper.paced(chunks), image,
-                       offer.base.sha256 if offer else lambda: captured.get("digest"),
-                       expected_size=offer.base.size if offer else None, log=console.log)
+                       expected_digest or (lambda: captured.get("digest")),
+                       expected_size=expected_size, log=console.log)
         console.line(7, "mount + handoff: mounting squashfs")
         ops.mount_root(image, rootmnt)
-        if offer_mode:
+        if node_offer is not None:
+            write_node_handoff(rootmnt, central=str(located.origin), offer=node_offer)
+        elif offer_mode:
             assert boot_id is not None and nonce is not None
             try:
                 handoff = write_boot_handoff(rootmnt, kernel_boot_id=boot_id, nonce=nonce,

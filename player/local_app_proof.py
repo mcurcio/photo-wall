@@ -45,16 +45,16 @@ class LocalProofError(ValueError):
     """One bounded local diagnostic; never contains key, bearer or wire bytes."""
 
 
-def _packet(value: dict[str, object]) -> bytes:
+def _packet(value: dict[str, object], *, limit: int = MAX_PROOF_PACKET_BYTES) -> bytes:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(raw) > MAX_PROOF_PACKET_BYTES:
+    if len(raw) > limit:
         raise LocalProofError("packet_limit")
     return raw
 
 
-def _receive(connection: socket.socket) -> dict[str, object]:
+def _receive(connection: socket.socket, *, limit: int = MAX_PROOF_PACKET_BYTES) -> dict[str, object]:
     raw, ancillary, flags, _ = connection.recvmsg(
-        MAX_PROOF_PACKET_BYTES + 1, socket.CMSG_SPACE(256),
+        limit + 1, socket.CMSG_SPACE(256),
         getattr(socket, "MSG_CMSG_CLOEXEC", 0))
     for level, kind, data in ancillary:
         if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
@@ -65,17 +65,17 @@ def _receive(connection: socket.socket) -> dict[str, object]:
                     os.close(descriptor)
                 except OSError:
                     pass
-    if (not raw or len(raw) > MAX_PROOF_PACKET_BYTES or ancillary
+    if (not raw or len(raw) > limit or ancillary
             or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)):
         raise LocalProofError("packet_limit")
-    value = loads_object(raw, max_bytes=MAX_PROOF_PACKET_BYTES)
+    value = loads_object(raw, max_bytes=limit)
     if value is None:
         raise LocalProofError("invalid_packet")
     return value
 
 
-def _send(connection: socket.socket, value: dict[str, object]) -> None:
-    raw = _packet(value)
+def _send(connection: socket.socket, value: dict[str, object], *, limit: int = MAX_PROOF_PACKET_BYTES) -> None:
+    raw = _packet(value, limit=limit)
     if connection.send(raw) != len(raw):
         raise LocalProofError("short_packet")
 

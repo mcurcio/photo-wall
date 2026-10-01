@@ -1,0 +1,4 @@
+FROM photo-wall-node-full-base-tools:20260930-resume
+COPY build-requirements.txt /opt/build-requirements.txt
+RUN python3 -m pip install --require-hashes --target /opt/photo-wall-build-python -r /opt/build-requirements.txt && PYTHONPATH=/opt/photo-wall-build-python python3 -c 'import pydantic; print(pydantic.__version__)'
+ENV PYTHONPATH=/opt/photo-wall-build-python

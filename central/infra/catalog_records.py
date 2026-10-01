@@ -11,8 +11,11 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import fields
+from dataclasses import asdict, fields
+from hashlib import sha256
 from typing import Any, Final
+
+from psycopg.types.json import Jsonb
 
 from central.content_catalog.ports import (
     DeviceRow,
@@ -30,6 +33,7 @@ from central.kernel.assets import OriginLocator
 from central.kernel.ports import PlayerPayload, PublishedRelease
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version
+from contracts.node_release import parse_node_release
 
 _RELEASE_COLUMNS = (
     "tag, is_prerelease, asset_url, asset_sha256, asset_size, "
@@ -282,6 +286,17 @@ class PgReleaseRecords:
         # 2. Otherwise lock the row. Under READ COMMITTED this statement sees the winner's
         #    committed row, so the previous row is never read before the lock is held.
         conn = pg_connection(tx)
+        if release.node_publication is not None:
+            publication = release.node_publication
+            manifest = parse_node_release(publication.manifest)
+            identity = sha256(publication.manifest).hexdigest()
+            conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,%s) "
+                         "ON CONFLICT DO NOTHING", (identity, release.tag, manifest.revision, publication.manifest,
+                         Jsonb({role: asdict(locator) for role, locator in publication.assets}), now))
+            prior = conn.execute("SELECT manifest_sha256 FROM node_release_catalog WHERE tag=%s AND revision=%s",
+                                 (release.tag, manifest.revision)).fetchone()
+            if prior is None or prior["manifest_sha256"] != identity:
+                raise ValueError("node_release_identity_conflict")
         version = release_version(release.tag)
         changed_at, asset_id = _upstream(release)
         mirror_state = "discovered" if release.package is not None else "undeployable"

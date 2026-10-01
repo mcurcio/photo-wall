@@ -1,0 +1,9 @@
+{
+  "parent_tool_image": "sha256:03031bc30a32048aa4ae3022bf3d8bd8636ac5cf8639695022761f6aeb23f001",
+  "requirements_sha256": "34015f8b69a8f601600e2291593a0886f82f3b612b5ebc85698baa68c73af99c",
+  "source_inputs": {
+    "pyproject.toml": "0497c815b0c549a00d9a4c93dee4e463ed0c3957197edbbb71391eb77deff526",
+    "uv.lock": "c68cedd4eb46fc491b77a3d1cfcfb72e39a71b453adac524ea745f831495863b"
+  },
+  "tool_image": "sha256:2e6e0f1ecf7946bd10877069898fa9958881e4fd665702f0a8ae66aa89208a9e"
+}

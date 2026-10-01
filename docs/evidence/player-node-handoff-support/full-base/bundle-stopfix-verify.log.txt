@@ -1,0 +1,487 @@
+*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+source_initrd_closure=b8a9efdeb645bc2f3d20f8010eec9a9c8162668930308565bbb47e4e12c386f0
+OK: netboot initrd content contract satisfied
++ fail=0
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/config.txt ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/cmdline.txt ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/kernel_2712.img ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/initrd.img ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/bcm2712-rpi-5-b.dtb ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/pieeprom.upd ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/boot/pieeprom.sig ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/photo-wall-base.squashfs ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/base-abi.json ']'
++ for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img boot/initrd.img boot/bcm2712-rpi-5-b.dtb boot/pieeprom.upd boot/pieeprom.sig photo-wall-base.squashfs base-abi.json SHA256SUMS
++ '[' -f /work/photo-wall-base-bundle/SHA256SUMS ']'
+++ python3 -c 'from contracts.release import MAX_ROOTFS_BYTES; print(MAX_ROOTFS_BYTES)'
++ max=1073741824
+++ stat -c %s /work/photo-wall-base-bundle/photo-wall-base.squashfs
+squashfs size: 325976064 bytes (MAX_ROOTFS_BYTES 1073741824)
++ sq_bytes=325976064
++ echo 'squashfs size: 325976064 bytes (MAX_ROOTFS_BYTES 1073741824)'
++ '[' 325976064 -gt 0 ']'
++ '[' 325976064 -lt 1073741824 ']'
+++ find /work/photo-wall-base-bundle -type f '!' -name SHA256SUMS
+++ wc -l
+++ tr -d ' '
++ expected=392
+++ wc -l
+++ tr -d ' '
++ listed=392
++ '[' 392 = 392 ']'
++ cd /work/photo-wall-base-bundle
++ sha256sum -c --quiet SHA256SUMS
++ python3 - /work/photo-wall-base-bundle
+++ find /work/photo-wall-base-bundle '(' -name '*.sig' -o -name release.pub.pem -o -name ca.pem -o -name bootstrap.json -o -name boot-policy.json ')' '!' -name pieeprom.sig
++ signed=
++ '[' -n '' ']'
++ for setting in 'BOOT_ORDER=0xf21' 'BOOT_WATCHDOG_TIMEOUT=120'
++ grep -aq -- BOOT_ORDER=0xf21 /work/photo-wall-base-bundle/boot/pieeprom.upd
++ for setting in 'BOOT_ORDER=0xf21' 'BOOT_WATCHDOG_TIMEOUT=120'
++ grep -aq -- BOOT_WATCHDOG_TIMEOUT=120 /work/photo-wall-base-bundle/boot/pieeprom.upd
++ '[' false '!=' true ']'
++ sudo python3 scripts/verify_boot_display.py /work/photo-wall-base-bundle/boot --apply --tools-root /work/netboot-scratch
+sudo: unable to resolve host 6449190891f8: Temporary failure in name resolution
+tools: chroot /work/netboot-scratch: Version: DTC 1.7.2
+vc4 /axi/gpu status=okay
+hvs /hvs@107c580000 status=okay
+pixelvalve0 /soc@107c000000/pixelvalve@7c410000 status=okay
+pixelvalve1 /soc@107c000000/pixelvalve@7c411000 status=okay
+hdmi0 /soc@107c000000/hdmi@7c701400 status=okay
+hdmi1 /soc@107c000000/hdmi@7c706400 status=okay
+v3d /axi/v3d@2000000 status=okay
+OK: config.txt loads vc4-kms-v3d-pi5; vc4, hvs, pixelvalve0, pixelvalve1, hdmi0, hdmi1, v3d are okay in the applied DTB
+++ cat /work/photo-wall-base-bundle/boot/cmdline.txt
++ cmd='console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
+++ wc -l
++ cmd_lines=1
++ '[' 1 -eq 1 ']'
++ grep -q '^#'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ grep -q photowall.central=@@PHOTOWALL_CENTRAL@@
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ grep -q -- console=tty1
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ grep -q -- ip=dhcp
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ grep -q -- boot=photowall-netboot
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ grep -q -- panic=10
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ grep -q -- watchdog.stop_on_reboot=0
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' 'watchdog.stop_on_reboot=0' 'hung_task_panic=1'
++ printf %s 'console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@'
++ grep -q -- hung_task_panic=1
++ grep -Eq 'base_url|base_sha256' /work/photo-wall-base-bundle/boot/cmdline.txt
++ '[' 0 -ne 0 ']'
++ echo 'PASS: bundle content contract satisfied'
++ find /work/photo-wall-base-bundle -type f -printf '%10s %p\n'
+PASS: bundle content contract satisfied
+ 325976064 /work/photo-wall-base-bundle/photo-wall-base.squashfs
+        80 /work/photo-wall-base-bundle/boot/pieeprom.sig
+     78740 /work/photo-wall-base-bundle/boot/bcm2712-rpi-5-b.dtb
+   2097152 /work/photo-wall-base-bundle/boot/pieeprom.upd
+      1505 /work/photo-wall-base-bundle/boot/config.txt
+  26606583 /work/photo-wall-base-bundle/boot/initrd.img
+       137 /work/photo-wall-base-bundle/boot/cmdline.txt
+      1102 /work/photo-wall-base-bundle/boot/overlays/tpm-slb9673.dtbo
+      1071 /work/photo-wall-base-bundle/boot/overlays/uart4-pi5.dtbo
+       630 /work/photo-wall-base-bundle/boot/overlays/spi-gpio35-39.dtbo
+      3477 /work/photo-wall-base-bundle/boot/overlays/imx519.dtbo
+      3742 /work/photo-wall-base-bundle/boot/overlays/imx335.dtbo
+      1662 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplushd.dtbo
+      1098 /work/photo-wall-base-bundle/boot/overlays/uart4.dtbo
+      1045 /work/photo-wall-base-bundle/boot/overlays/spi0-2cs.dtbo
+       937 /work/photo-wall-base-bundle/boot/overlays/i2c3-pi5.dtbo
+       981 /work/photo-wall-base-bundle/boot/overlays/smi.dtbo
+      2371 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-tdo-panel.dtbo
+       808 /work/photo-wall-base-bundle/boot/overlays/midi-uart4-pi5.dtbo
+      3506 /work/photo-wall-base-bundle/boot/overlays/ov5647.dtbo
+      3895 /work/photo-wall-base-bundle/boot/overlays/anyspi.dtbo
+       892 /work/photo-wall-base-bundle/boot/overlays/spi2-1cs-pi5.dtbo
+      1624 /work/photo-wall-base-bundle/boot/overlays/adafruit18.dtbo
+       299 /work/photo-wall-base-bundle/boot/overlays/pineboards-hat-ai.dtbo
+       293 /work/photo-wall-base-bundle/boot/overlays/dwc-otg-deprecated.dtbo
+      1071 /work/photo-wall-base-bundle/boot/overlays/uart1-pi5.dtbo
+      2147 /work/photo-wall-base-bundle/boot/overlays/i2c-pwm-pca9685a.dtbo
+       964 /work/photo-wall-base-bundle/boot/overlays/cma.dtbo
+       801 /work/photo-wall-base-bundle/boot/overlays/dwc2.dtbo
+      4914 /work/photo-wall-base-bundle/boot/overlays/rpi-poe-plus.dtbo
+      1079 /work/photo-wall-base-bundle/boot/overlays/highperi.dtbo
+      1131 /work/photo-wall-base-bundle/boot/overlays/spi4-1cs.dtbo
+      2648 /work/photo-wall-base-bundle/boot/overlays/edt-ft5406.dtbo
+     29099 /work/photo-wall-base-bundle/boot/overlays/camera-mux-2port.dtbo
+       892 /work/photo-wall-base-bundle/boot/overlays/spi3-1cs-pi5.dtbo
+      4385 /work/photo-wall-base-bundle/boot/overlays/tinylcd35.dtbo
+      1169 /work/photo-wall-base-bundle/boot/overlays/spi0-1cs-inverted.dtbo
+      1600 /work/photo-wall-base-bundle/boot/overlays/adau7002-simple.dtbo
+       857 /work/photo-wall-base-bundle/boot/overlays/midi-uart1.dtbo
+      2893 /work/photo-wall-base-bundle/boot/overlays/hy28b-2017.dtbo
+      1793 /work/photo-wall-base-bundle/boot/overlays/mcp2515-can0.dtbo
+      1175 /work/photo-wall-base-bundle/boot/overlays/cm-swap-i2c0.dtbo
+      1006 /work/photo-wall-base-bundle/boot/overlays/pwm-gpio.dtbo
+      1652 /work/photo-wall-base-bundle/boot/overlays/allo-piano-dac-plus-pcm512x-audio.dtbo
+      3429 /work/photo-wall-base-bundle/boot/overlays/udrc.dtbo
+      4234 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dpi-panel.dtbo
+      5671 /work/photo-wall-base-bundle/boot/overlays/gpclk-pi5.dtbo
+      1541 /work/photo-wall-base-bundle/boot/overlays/ugreen-dabboard.dtbo
+      2593 /work/photo-wall-base-bundle/boot/overlays/piscreen2r.dtbo
+       800 /work/photo-wall-base-bundle/boot/overlays/audioinjector-wm8731-audio.dtbo
+       813 /work/photo-wall-base-bundle/boot/overlays/i2c6.dtbo
+      1024 /work/photo-wall-base-bundle/boot/overlays/allo-piano-dac-pcm512x-audio.dtbo
+      1834 /work/photo-wall-base-bundle/boot/overlays/audremap-pi5.dtbo
+      1241 /work/photo-wall-base-bundle/boot/overlays/spi3-2cs-pi5.dtbo
+      3813 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-ili9881-5inch.dtbo
+      1056 /work/photo-wall-base-bundle/boot/overlays/wittypi.dtbo
+      1051 /work/photo-wall-base-bundle/boot/overlays/rpi-codeczero.dtbo
+      1899 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplus-std.dtbo
+      2267 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplusadcpro.dtbo
+      9286 /work/photo-wall-base-bundle/boot/overlays/i2c-rtc.dtbo
+       896 /work/photo-wall-base-bundle/boot/overlays/sunfounder-pipower3.dtbo
+      1985 /work/photo-wall-base-bundle/boot/overlays/rootmaster.dtbo
+      1425 /work/photo-wall-base-bundle/boot/overlays/si446x-spi0.dtbo
+      4104 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-waveshare-800x480.dtbo
+      2326 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-vga666.dtbo
+       716 /work/photo-wall-base-bundle/boot/overlays/midi-uart2.dtbo
+      1504 /work/photo-wall-base-bundle/boot/overlays/spi3-2cs.dtbo
+       892 /work/photo-wall-base-bundle/boot/overlays/spi5-1cs-pi5.dtbo
+      1339 /work/photo-wall-base-bundle/boot/overlays/iqaudio-digi-wm8804-audio.dtbo
+       438 /work/photo-wall-base-bundle/boot/overlays/pcie-32bit-dma.dtbo
+      2269 /work/photo-wall-base-bundle/boot/overlays/spi1-3cs.dtbo
+      1098 /work/photo-wall-base-bundle/boot/overlays/uart3.dtbo
+      2826 /work/photo-wall-base-bundle/boot/overlays/mz61581.dtbo
+      3839 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-ili79600-10-1inch.dtbo
+       935 /work/photo-wall-base-bundle/boot/overlays/i2c1-pi5.dtbo
+      1313 /work/photo-wall-base-bundle/boot/overlays/cap1106.dtbo
+       908 /work/photo-wall-base-bundle/boot/overlays/iqaudio-codec.dtbo
+      3558 /work/photo-wall-base-bundle/boot/overlays/pwm-gpio-fan.dtbo
+       811 /work/photo-wall-base-bundle/boot/overlays/i2c4.dtbo
+      1221 /work/photo-wall-base-bundle/boot/overlays/allo-digione.dtbo
+      1785 /work/photo-wall-base-bundle/boot/overlays/i2c0.dtbo
+      1909 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplus-pro.dtbo
+      1807 /work/photo-wall-base-bundle/boot/overlays/adv7282m.dtbo
+      2795 /work/photo-wall-base-bundle/boot/overlays/irs1125.dtbo
+      1615 /work/photo-wall-base-bundle/boot/overlays/audioinjector-isolated-soundcard.dtbo
+     54642 /work/photo-wall-base-bundle/boot/overlays/camera-mux-4port.dtbo
+      1493 /work/photo-wall-base-bundle/boot/overlays/pwm1.dtbo
+      1492 /work/photo-wall-base-bundle/boot/overlays/ilitek251x.dtbo
+       676 /work/photo-wall-base-bundle/boot/overlays/dionaudio-loco.dtbo
+      1922 /work/photo-wall-base-bundle/boot/overlays/hifiberry-amp4pro.dtbo
+      5165 /work/photo-wall-base-bundle/boot/overlays/mipi-dbi-spi.dtbo
+      3795 /work/photo-wall-base-bundle/boot/overlays/imx477.dtbo
+      1129 /work/photo-wall-base-bundle/boot/overlays/qca7000-uart0.dtbo
+      4972 /work/photo-wall-base-bundle/boot/overlays/sc16is75x-spi.dtbo
+      1073 /work/photo-wall-base-bundle/boot/overlays/disable-bt.dtbo
+      1071 /work/photo-wall-base-bundle/boot/overlays/uart2-pi5.dtbo
+      3387 /work/photo-wall-base-bundle/boot/overlays/waveshare-can-fd-hat-mode-a.dtbo
+      2005 /work/photo-wall-base-bundle/boot/overlays/interludeaudio-analog.dtbo
+       808 /work/photo-wall-base-bundle/boot/overlays/midi-uart2-pi5.dtbo
+       808 /work/photo-wall-base-bundle/boot/overlays/midi-uart3-pi5.dtbo
+      3678 /work/photo-wall-base-bundle/boot/overlays/i2c-fan.dtbo
+      1653 /work/photo-wall-base-bundle/boot/overlays/justboom-both.dtbo
+       779 /work/photo-wall-base-bundle/boot/overlays/tpm-slb9670.dtbo
+      2104 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplus.dtbo
+       532 /work/photo-wall-base-bundle/boot/overlays/dpi18cpadhi.dtbo
+      1426 /work/photo-wall-base-bundle/boot/overlays/rpi-dacpro.dtbo
+      1189 /work/photo-wall-base-bundle/boot/overlays/pps-gpio.dtbo
+      3113 /work/photo-wall-base-bundle/boot/overlays/tc358743.dtbo
+      1455 /work/photo-wall-base-bundle/boot/overlays/gpio-fan.dtbo
+      1618 /work/photo-wall-base-bundle/boot/overlays/mbed-dac.dtbo
+       851 /work/photo-wall-base-bundle/boot/overlays/pciex1-compat-pi5.dtbo
+      2258 /work/photo-wall-base-bundle/boot/overlays/hifiberry-amp100.dtbo
+      2332 /work/photo-wall-base-bundle/boot/overlays/papirus.dtbo
+      3866 /work/photo-wall-base-bundle/boot/overlays/imx462.dtbo
+       672 /work/photo-wall-base-bundle/boot/overlays/dionaudio-kiwi.dtbo
+      8356 /work/photo-wall-base-bundle/boot/overlays/i2c-rtc-gpio.dtbo
+      5269 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-waveshare-panel.dtbo
+      1431 /work/photo-wall-base-bundle/boot/overlays/interludeaudio-digital.dtbo
+      1040 /work/photo-wall-base-bundle/boot/overlays/dionaudio-loco-v2.dtbo
+      4086 /work/photo-wall-base-bundle/boot/overlays/watterott-display.dtbo
+       784 /work/photo-wall-base-bundle/boot/overlays/proto-codec.dtbo
+      4463 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dpi-hyperpixel2r.dtbo
+      3386 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-edatec-panel-070c.dtbo
+      1298 /work/photo-wall-base-bundle/boot/overlays/gpio-led.dtbo
+      1272 /work/photo-wall-base-bundle/boot/overlays/googlevoicehat-soundcard.dtbo
+      1035 /work/photo-wall-base-bundle/boot/overlays/pwm-ir-tx.dtbo
+      1566 /work/photo-wall-base-bundle/boot/overlays/miniuart-bt.dtbo
+       842 /work/photo-wall-base-bundle/boot/overlays/rpi-ft5406.dtbo
+      4094 /work/photo-wall-base-bundle/boot/overlays/cirrus-wm5102.dtbo
+      1259 /work/photo-wall-base-bundle/boot/overlays/gpio-ir.dtbo
+      3541 /work/photo-wall-base-bundle/boot/overlays/ov9281.dtbo
+      4036 /work/photo-wall-base-bundle/boot/overlays/ads1115.dtbo
+      4323 /work/photo-wall-base-bundle/boot/overlays/pivision.dtbo
+      1533 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-lt070me05000-v2.dtbo
+      1469 /work/photo-wall-base-bundle/boot/overlays/hifiberry-amp3.dtbo
+      1604 /work/photo-wall-base-bundle/boot/overlays/goodix.dtbo
+      1523 /work/photo-wall-base-bundle/boot/overlays/spi1-1cs.dtbo
+       975 /work/photo-wall-base-bundle/boot/overlays/dpi24.dtbo
+      2157 /work/photo-wall-base-bundle/boot/overlays/ssd1306-spi.dtbo
+      3561 /work/photo-wall-base-bundle/boot/overlays/arducam-64mp.dtbo
+       758 /work/photo-wall-base-bundle/boot/overlays/vga666.dtbo
+       745 /work/photo-wall-base-bundle/boot/overlays/ramoops-pi5.dtbo
+      1709 /work/photo-wall-base-bundle/boot/overlays/pifacedigital.dtbo
+      1889 /work/photo-wall-base-bundle/boot/overlays/sdio.dtbo
+      1395 /work/photo-wall-base-bundle/boot/overlays/pifi-40.dtbo
+      1285 /work/photo-wall-base-bundle/boot/overlays/iqaudio-dac.dtbo
+      2269 /work/photo-wall-base-bundle/boot/overlays/spi2-3cs.dtbo
+      1041 /work/photo-wall-base-bundle/boot/overlays/adau1977-adc.dtbo
+       988 /work/photo-wall-base-bundle/boot/overlays/uart1.dtbo
+      2760 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-v3d.dtbo
+      3180 /work/photo-wall-base-bundle/boot/overlays/mcp23017.dtbo
+      1896 /work/photo-wall-base-bundle/boot/overlays/spi1-2cs.dtbo
+       404 /work/photo-wall-base-bundle/boot/overlays/smi-dev.dtbo
+      1917 /work/photo-wall-base-bundle/boot/overlays/fe-pi-audio.dtbo
+      1974 /work/photo-wall-base-bundle/boot/overlays/audiosense-pi.dtbo
+      1098 /work/photo-wall-base-bundle/boot/overlays/uart5.dtbo
+      1594 /work/photo-wall-base-bundle/boot/overlays/piglow.dtbo
+      1281 /work/photo-wall-base-bundle/boot/overlays/dht11.dtbo
+      1559 /work/photo-wall-base-bundle/boot/overlays/vc4-fkms-v3d.dtbo
+      1114 /work/photo-wall-base-bundle/boot/overlays/ssd1306.dtbo
+      2361 /work/photo-wall-base-bundle/boot/overlays/pisound.dtbo
+      6004 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dpi-generic.dtbo
+       295 /work/photo-wall-base-bundle/boot/overlays/sixfab_m1m.dtbo
+      2935 /work/photo-wall-base-bundle/boot/overlays/balena-fin.dtbo
+      1953 /work/photo-wall-base-bundle/boot/overlays/fsm-demo.dtbo
+      1981 /work/photo-wall-base-bundle/boot/overlays/superaudioboard.dtbo
+      1532 /work/photo-wall-base-bundle/boot/overlays/chipcap2.dtbo
+      4189 /work/photo-wall-base-bundle/boot/overlays/imx415.dtbo
+      1524 /work/photo-wall-base-bundle/boot/overlays/iqaudio-dacplus.dtbo
+      2095 /work/photo-wall-base-bundle/boot/overlays/sh1106-spi.dtbo
+       258 /work/photo-wall-base-bundle/boot/overlays/gpio-no-irq.dtbo
+      1279 /work/photo-wall-base-bundle/boot/overlays/enc28j60-spi2.dtbo
+      4360 /work/photo-wall-base-bundle/boot/overlays/maxtherm.dtbo
+      1747 /work/photo-wall-base-bundle/boot/overlays/hifiberry-studio-dac8x.dtbo
+      1169 /work/photo-wall-base-bundle/boot/overlays/w1-gpio-pi5.dtbo
+      1418 /work/photo-wall-base-bundle/boot/overlays/rpi-dacplus.dtbo
+       815 /work/photo-wall-base-bundle/boot/overlays/i2c5.dtbo
+      3369 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dpi-hyperpixel4sq.dtbo
+      5401 /work/photo-wall-base-bundle/boot/overlays/mcp2515.dtbo
+       951 /work/photo-wall-base-bundle/boot/overlays/dpi18.dtbo
+      1420 /work/photo-wall-base-bundle/boot/overlays/i2s-master-dac.dtbo
+      4685 /work/photo-wall-base-bundle/boot/overlays/imx500.dtbo
+      3306 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-v3d-pi5.dtbo
+      3884 /work/photo-wall-base-bundle/boot/overlays/i2c-mux.dtbo
+      3866 /work/photo-wall-base-bundle/boot/overlays/imx327.dtbo
+      4249 /work/photo-wall-base-bundle/boot/overlays/gpclk.dtbo
+      3587 /work/photo-wall-base-bundle/boot/overlays/pwm-fan.dtbo
+      4116 /work/photo-wall-base-bundle/boot/overlays/pca953x.dtbo
+      1504 /work/photo-wall-base-bundle/boot/overlays/spi5-2cs.dtbo
+      1476 /work/photo-wall-base-bundle/boot/overlays/smi-nand.dtbo
+      3108 /work/photo-wall-base-bundle/boot/overlays/vd56g3.dtbo
+      3120 /work/photo-wall-base-bundle/boot/overlays/vd65g4.dtbo
+      3866 /work/photo-wall-base-bundle/boot/overlays/imx290.dtbo
+       968 /work/photo-wall-base-bundle/boot/overlays/justboom-digi.dtbo
+      1704 /work/photo-wall-base-bundle/boot/overlays/allo-katana-dac-audio.dtbo
+      1335 /work/photo-wall-base-bundle/boot/overlays/rpi-power-hat-t.dtbo
+      2347 /work/photo-wall-base-bundle/boot/overlays/pibell.dtbo
+      1071 /work/photo-wall-base-bundle/boot/overlays/uart3-pi5.dtbo
+      1540 /work/photo-wall-base-bundle/boot/overlays/rpi-sense-v2.dtbo
+      1246 /work/photo-wall-base-bundle/boot/overlays/chipdip-dac.dtbo
+      4312 /work/photo-wall-base-bundle/boot/overlays/imx258.dtbo
+      3002 /work/photo-wall-base-bundle/boot/overlays/mira220.dtbo
+      1922 /work/photo-wall-base-bundle/boot/overlays/rotary-encoder.dtbo
+       792 /work/photo-wall-base-bundle/boot/overlays/hifiberry-amp.dtbo
+      4215 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-7inch.dtbo
+       936 /work/photo-wall-base-bundle/boot/overlays/uart0.dtbo
+      1004 /work/photo-wall-base-bundle/boot/overlays/i2c1.dtbo
+      1562 /work/photo-wall-base-bundle/boot/overlays/exc3000.dtbo
+       972 /work/photo-wall-base-bundle/boot/overlays/hifiberry-digi.dtbo
+      5977 /work/photo-wall-base-bundle/boot/overlays/draws-pi5.dtbo
+      4309 /work/photo-wall-base-bundle/boot/overlays/mcp3008.dtbo
+      2775 /work/photo-wall-base-bundle/boot/overlays/upstream-pi4.dtbo
+      1951 /work/photo-wall-base-bundle/boot/overlays/hd44780-i2c-lcd.dtbo
+       307 /work/photo-wall-base-bundle/boot/overlays/i2s-gpio28-31.dtbo
+       668 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dac.dtbo
+      1055 /work/photo-wall-base-bundle/boot/overlays/i2c-gpio.dtbo
+      3003 /work/photo-wall-base-bundle/boot/overlays/piscreen.dtbo
+      1131 /work/photo-wall-base-bundle/boot/overlays/spi5-1cs.dtbo
+      3111 /work/photo-wall-base-bundle/boot/overlays/pitft28-resistive.dtbo
+      3136 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-generic.dtbo
+      1916 /work/photo-wall-base-bundle/boot/overlays/ltc294x.dtbo
+      1543 /work/photo-wall-base-bundle/boot/overlays/tc358743-audio.dtbo
+      1566 /work/photo-wall-base-bundle/boot/overlays/sdhost.dtbo
+      2082 /work/photo-wall-base-bundle/boot/overlays/upstream.dtbo
+      1946 /work/photo-wall-base-bundle/boot/overlays/max98357a.dtbo
+      1335 /work/photo-wall-base-bundle/boot/overlays/rpi-power-hat-b.dtbo
+       716 /work/photo-wall-base-bundle/boot/overlays/midi-uart3.dtbo
+       906 /work/photo-wall-base-bundle/boot/overlays/i-sabre-q2m.dtbo
+      1896 /work/photo-wall-base-bundle/boot/overlays/spi2-2cs.dtbo
+      1278 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dac8x.dtbo
+      3699 /work/photo-wall-base-bundle/boot/overlays/imx296.dtbo
+      1718 /work/photo-wall-base-bundle/boot/overlays/merus-amp.dtbo
+      1793 /work/photo-wall-base-bundle/boot/overlays/mcp2515-can1.dtbo
+      3508 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-kippah-7inch.dtbo
+      1590 /work/photo-wall-base-bundle/boot/overlays/ed-backlight-pwm-pi5.dtbo
+      1657 /work/photo-wall-base-bundle/boot/overlays/allo-boss-dac-pcm512x-audio.dtbo
+      2517 /work/photo-wall-base-bundle/boot/overlays/ads1015.dtbo
+      1166 /work/photo-wall-base-bundle/boot/overlays/hdmi-backlight-hwhack-gpio.dtbo
+      1141 /work/photo-wall-base-bundle/boot/overlays/pimidi.dtbo
+      1205 /work/photo-wall-base-bundle/boot/overlays/pifi-dac-hd.dtbo
+      3692 /work/photo-wall-base-bundle/boot/overlays/imx219.dtbo
+      2179 /work/photo-wall-base-bundle/boot/overlays/rt5616.dtbo
+      3387 /work/photo-wall-base-bundle/boot/overlays/seeed-can-fd-hat-v1.dtbo
+       270 /work/photo-wall-base-bundle/boot/overlays/i2c-bcm2708.dtbo
+      3219 /work/photo-wall-base-bundle/boot/overlays/sc16is752-i2c.dtbo
+       737 /work/photo-wall-base-bundle/boot/overlays/ramoops.dtbo
+      1428 /work/photo-wall-base-bundle/boot/overlays/gpio-key.dtbo
+      1462 /work/photo-wall-base-bundle/boot/overlays/gpio-shutdown.dtbo
+      1516 /work/photo-wall-base-bundle/boot/overlays/audioinjector-bare-i2s.dtbo
+      1963 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-lt070me05000.dtbo
+       656 /work/photo-wall-base-bundle/boot/overlays/i2s-dac.dtbo
+      2540 /work/photo-wall-base-bundle/boot/overlays/ads7846.dtbo
+      3479 /work/photo-wall-base-bundle/boot/overlays/cutiepi-panel.dtbo
+      1363 /work/photo-wall-base-bundle/boot/overlays/bcm2712d0.dtbo
+      2722 /work/photo-wall-base-bundle/boot/overlays/seeed-can-fd-hat-v2.dtbo
+       352 /work/photo-wall-base-bundle/boot/overlays/vl805.dtbo
+      1183 /work/photo-wall-base-bundle/boot/overlays/hifiberry-adc8x.dtbo
+      1182 /work/photo-wall-base-bundle/boot/overlays/hifiberry-adc.dtbo
+       567 /work/photo-wall-base-bundle/boot/overlays/rpi-tv.dtbo
+      1349 /work/photo-wall-base-bundle/boot/overlays/vec-gpio-pi5.dtbo
+      1737 /work/photo-wall-base-bundle/boot/overlays/rpi-digiampplus.dtbo
+      4632 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-waveshare-panel-v2.dtbo
+       660 /work/photo-wall-base-bundle/boot/overlays/sdio-pi5.dtbo
+      1504 /work/photo-wall-base-bundle/boot/overlays/spi4-2cs.dtbo
+      1036 /work/photo-wall-base-bundle/boot/overlays/w1-gpio.dtbo
+      2453 /work/photo-wall-base-bundle/boot/overlays/pitft28-capacitive.dtbo
+      3536 /work/photo-wall-base-bundle/boot/overlays/imx283.dtbo
+       924 /work/photo-wall-base-bundle/boot/overlays/gpio-poweroff.dtbo
+      1395 /work/photo-wall-base-bundle/boot/overlays/rpi-fw-uart.dtbo
+      2052 /work/photo-wall-base-bundle/boot/overlays/spi-rtc.dtbo
+      1171 /work/photo-wall-base-bundle/boot/overlays/w1-gpio-pullup.dtbo
+      3309 /work/photo-wall-base-bundle/boot/overlays/imx355.dtbo
+       971 /work/photo-wall-base-bundle/boot/overlays/pifi-mini-210.dtbo
+      1688 /work/photo-wall-base-bundle/boot/overlays/pitft22.dtbo
+      1712 /work/photo-wall-base-bundle/boot/overlays/dacberry400.dtbo
+      1289 /work/photo-wall-base-bundle/boot/overlays/justboom-dac.dtbo
+     17021 /work/photo-wall-base-bundle/boot/overlays/mcp23s17.dtbo
+      1304 /work/photo-wall-base-bundle/boot/overlays/w1-gpio-pullup-pi5.dtbo
+      3773 /work/photo-wall-base-bundle/boot/overlays/ezsound-6x8iso.dtbo
+      1400 /work/photo-wall-base-bundle/boot/overlays/akkordion-iqdacplus.dtbo
+      5976 /work/photo-wall-base-bundle/boot/overlays/draws.dtbo
+      2044 /work/photo-wall-base-bundle/boot/overlays/ssd1351-spi.dtbo
+      1131 /work/photo-wall-base-bundle/boot/overlays/spi6-1cs.dtbo
+      3269 /work/photo-wall-base-bundle/boot/overlays/pcf857x.dtbo
+      5041 /work/photo-wall-base-bundle/boot/overlays/imx500-pi5.dtbo
+       760 /work/photo-wall-base-bundle/boot/overlays/rp1-pio-uart.dtbo
+      1245 /work/photo-wall-base-bundle/boot/overlays/audremap.dtbo
+      3108 /work/photo-wall-base-bundle/boot/overlays/vd66gy.dtbo
+       794 /work/photo-wall-base-bundle/boot/overlays/spi0-0cs.dtbo
+      1138 /work/photo-wall-base-bundle/boot/overlays/hifiberry-digi-pro.dtbo
+      1059 /work/photo-wall-base-bundle/boot/overlays/pwm-2chan.dtbo
+       549 /work/photo-wall-base-bundle/boot/overlays/mlx90640.dtbo
+      1990 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplusadc.dtbo
+       795 /work/photo-wall-base-bundle/boot/overlays/spi-gpio40-45.dtbo
+      2444 /work/photo-wall-base-bundle/boot/overlays/hy28a.dtbo
+       741 /work/photo-wall-base-bundle/boot/overlays/ramoops-pi4.dtbo
+       271 /work/photo-wall-base-bundle/boot/overlays/disable-bt-pi5.dtbo
+      3120 /work/photo-wall-base-bundle/boot/overlays/vd55g1.dtbo
+      4056 /work/photo-wall-base-bundle/boot/overlays/imx708.dtbo
+      3853 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dpi-hyperpixel4.dtbo
+      2285 /work/photo-wall-base-bundle/boot/overlays/adafruit-st7735r.dtbo
+      2291 /work/photo-wall-base-bundle/boot/overlays/adv728x-m.dtbo
+       274 /work/photo-wall-base-bundle/boot/overlays/gpio-no-bank0-irq.dtbo
+      4492 /work/photo-wall-base-bundle/boot/overlays/jedec-spi-nor.dtbo
+      3702 /work/photo-wall-base-bundle/boot/overlays/crystalfontz-cfa050_pi_m.dtbo
+     12764 /work/photo-wall-base-bundle/boot/overlays/fbtft.dtbo
+       811 /work/photo-wall-base-bundle/boot/overlays/i2c3.dtbo
+      3913 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-v3d-pi4.dtbo
+      3277 /work/photo-wall-base-bundle/boot/overlays/ghost-amp.dtbo
+      1523 /work/photo-wall-base-bundle/boot/overlays/spi2-1cs.dtbo
+       716 /work/photo-wall-base-bundle/boot/overlays/midi-uart5.dtbo
+       948 /work/photo-wall-base-bundle/boot/overlays/pwm.dtbo
+       387 /work/photo-wall-base-bundle/boot/overlays/disable-wifi.dtbo
+      1382 /work/photo-wall-base-bundle/boot/overlays/sunfounder-pironman5.dtbo
+      2974 /work/photo-wall-base-bundle/boot/overlays/pisound-micro.dtbo
+      2848 /work/photo-wall-base-bundle/boot/overlays/tc358743-pi5.dtbo
+      2498 /work/photo-wall-base-bundle/boot/overlays/media-center.dtbo
+      2967 /work/photo-wall-base-bundle/boot/overlays/ov7251.dtbo
+      1184 /work/photo-wall-base-bundle/boot/overlays/gpio-charger.dtbo
+      1241 /work/photo-wall-base-bundle/boot/overlays/spi2-2cs-pi5.dtbo
+      1454 /work/photo-wall-base-bundle/boot/overlays/apds9960.dtbo
+       267 /work/photo-wall-base-bundle/boot/overlays/nospi10.dtbo
+      3795 /work/photo-wall-base-bundle/boot/overlays/imx378.dtbo
+      2915 /work/photo-wall-base-bundle/boot/overlays/hy28b.dtbo
+      1558 /work/photo-wall-base-bundle/boot/overlays/w5500.dtbo
+       985 /work/photo-wall-base-bundle/boot/overlays/pwm-pio.dtbo
+      3813 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-ili9881-7inch.dtbo
+      1221 /work/photo-wall-base-bundle/boot/overlays/mmc.dtbo
+      1783 /work/photo-wall-base-bundle/boot/overlays/minipitft13.dtbo
+      2854 /work/photo-wall-base-bundle/boot/overlays/mcp342x.dtbo
+      2564 /work/photo-wall-base-bundle/boot/overlays/gc9a01.dtbo
+      1764 /work/photo-wall-base-bundle/boot/overlays/hifiberry-studio-dac8x-pro.dtbo
+       267 /work/photo-wall-base-bundle/boot/overlays/disable-emmc2.dtbo
+      2171 /work/photo-wall-base-bundle/boot/overlays/hifiberry-studio-digi.dtbo
+       589 /work/photo-wall-base-bundle/boot/overlays/act-led.dtbo
+       267 /work/photo-wall-base-bundle/boot/overlays/disable-wifi-pi5.dtbo
+      1662 /work/photo-wall-base-bundle/boot/overlays/hd44780-lcd.dtbo
+       931 /work/photo-wall-base-bundle/boot/overlays/i2c0-pi5.dtbo
+      1045 /work/photo-wall-base-bundle/boot/overlays/spi0-1cs.dtbo
+       529 /work/photo-wall-base-bundle/boot/overlays/wifimac.dtbo
+      3095 /work/photo-wall-base-bundle/boot/overlays/arducam-pivariety.dtbo
+      3406 /work/photo-wall-base-bundle/boot/overlays/vc4-kms-dsi-edatec-panel-101c.dtbo
+      2927 /work/photo-wall-base-bundle/boot/overlays/ov2311.dtbo
+      6826 /work/photo-wall-base-bundle/boot/overlays/ed-ipc.dtbo
+      1096 /work/photo-wall-base-bundle/boot/overlays/gpio-ir-tx.dtbo
+      4213 /work/photo-wall-base-bundle/boot/overlays/mcp3202.dtbo
+      1536 /work/photo-wall-base-bundle/boot/overlays/rpi-sense.dtbo
+      1583 /work/photo-wall-base-bundle/boot/overlays/ed-backlight-pwm.dtbo
+      1669 /work/photo-wall-base-bundle/boot/overlays/ilitek-ts-i2c.dtbo
+      1903 /work/photo-wall-base-bundle/boot/overlays/audioinjector-ultra.dtbo
+      2765 /work/photo-wall-base-bundle/boot/overlays/pps-rp1.dtbo
+      2361 /work/photo-wall-base-bundle/boot/overlays/pisound-pi5.dtbo
+       621 /work/photo-wall-base-bundle/boot/overlays/gpio-hog.dtbo
+      1879 /work/photo-wall-base-bundle/boot/overlays/audioinjector-addons.dtbo
+      1403 /work/photo-wall-base-bundle/boot/overlays/enc28j60.dtbo
+      1319 /work/photo-wall-base-bundle/boot/overlays/at86rf233.dtbo
+      1420 /work/photo-wall-base-bundle/boot/overlays/sainsmart18.dtbo
+      1071 /work/photo-wall-base-bundle/boot/overlays/uart0-pi5.dtbo
+      1395 /work/photo-wall-base-bundle/boot/overlays/qca7000.dtbo
+      3006 /work/photo-wall-base-bundle/boot/overlays/wm8960-soundcard.dtbo
+      1559 /work/photo-wall-base-bundle/boot/overlays/vc4-fkms-v3d-pi4.dtbo
+       328 /work/photo-wall-base-bundle/boot/overlays/pineboards-hatdrive-poe-plus.dtbo
+      1336 /work/photo-wall-base-bundle/boot/overlays/ws2812-pio.dtbo
+     35570 /work/photo-wall-base-bundle/boot/overlays/sx150x.dtbo
+      1311 /work/photo-wall-base-bundle/boot/overlays/rra-digidac1-wm8741-audio.dtbo
+       808 /work/photo-wall-base-bundle/boot/overlays/midi-uart0-pi5.dtbo
+      4333 /work/photo-wall-base-bundle/boot/overlays/rpi-poe.dtbo
+       432 /work/photo-wall-base-bundle/boot/overlays/pcie-32bit-dma-pi5.dtbo
+       716 /work/photo-wall-base-bundle/boot/overlays/midi-uart4.dtbo
+       712 /work/photo-wall-base-bundle/boot/overlays/hifiberry-dacplusdsp.dtbo
+      1131 /work/photo-wall-base-bundle/boot/overlays/spi3-1cs.dtbo
+      1467 /work/photo-wall-base-bundle/boot/overlays/applepi-dac.dtbo
+       808 /work/photo-wall-base-bundle/boot/overlays/midi-uart1-pi5.dtbo
+      1241 /work/photo-wall-base-bundle/boot/overlays/spi5-2cs-pi5.dtbo
+       815 /work/photo-wall-base-bundle/boot/overlays/i2c2-pi5.dtbo
+      6428 /work/photo-wall-base-bundle/boot/overlays/mcp251xfd.dtbo
+      1845 /work/photo-wall-base-bundle/boot/overlays/allo-boss2-dac-audio.dtbo
+      1813 /work/photo-wall-base-bundle/boot/overlays/iqs550.dtbo
+      1175 /work/photo-wall-base-bundle/boot/overlays/pifi-dac-zero.dtbo
+      3531 /work/photo-wall-base-bundle/boot/overlays/ov64a40.dtbo
+      1693 /work/photo-wall-base-bundle/boot/overlays/ssd1327-spi.dtbo
+       716 /work/photo-wall-base-bundle/boot/overlays/midi-uart0.dtbo
+      3219 /work/photo-wall-base-bundle/boot/overlays/sc16is750-i2c.dtbo
+       489 /work/photo-wall-base-bundle/boot/overlays/rpi-backlight.dtbo
+     24797 /work/photo-wall-base-bundle/boot/overlays/i2c-sensor.dtbo
+      2506 /work/photo-wall-base-bundle/boot/overlays/waveshare-can-fd-hat-mode-b.dtbo
+      3213 /work/photo-wall-base-bundle/boot/overlays/pitft35-resistive.dtbo
+      2044 /work/photo-wall-base-bundle/boot/overlays/ssd1331-spi.dtbo
+      1504 /work/photo-wall-base-bundle/boot/overlays/spi6-2cs.dtbo
+      1098 /work/photo-wall-base-bundle/boot/overlays/uart2.dtbo
+  10197590 /work/photo-wall-base-bundle/boot/kernel_2712.img
+       183 /work/photo-wall-base-bundle/base-abi.json
+     38968 /work/photo-wall-base-bundle/SHA256SUMS

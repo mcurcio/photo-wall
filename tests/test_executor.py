@@ -821,3 +821,17 @@ def test_removed_overlay_reveals_current_video_position_before_original_expiry(t
     observations = rig.executor.tick()
     assert [(o.assignment_id, o.position) for o in observations if o.status == "presented"] == [("video", 32)]
     assert [p for p in rig.renderer.preparations if p.layer.assignment_id == "video"][-1].position == 32
+
+
+def test_first_commissioning_without_plan_renders_empty_operational_fallback(tmp_path):
+    rig = Rig(tmp_path)
+    rig.configuration = rig.configuration.model_copy(update={
+        "configuration_revision": 2, "enabled_outputs": (),
+    })
+    rig.executor.accept_configuration(rig.configuration)
+    assert rig.plan is None
+    assert rig.executor.tick() == ()
+    assert rig.renderer.outputs["hdmi1"].fallback
+    assert rig.renderer.outputs["hdmi1"].layers == ()
+    with pytest.raises(AuthorityError, match="no current plan"):
+        rig.executor.readiness()

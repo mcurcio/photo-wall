@@ -21,6 +21,7 @@ from contracts.app_process_proof import (
 )
 from contracts.enrollment import BootTicketId, Enrollment, OutputReport, enrollment_message
 from contracts.models import Identifier
+from contracts.node_app_link import NodeAppLinkChallengeV2, NodeAppLinkV2, node_app_link_message
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,12 @@ class Identity:
             public_key=self.public_key,
             signature=base64.b64encode(self._key.sign(app_proof_message_v2(challenge))).decode(),
         )
+
+
+    def sign_node_app_link(self, challenge: NodeAppLinkChallengeV2) -> NodeAppLinkV2:
+        """Sign LAN node linkage in its own domain; existing proof versions remain unchanged."""
+        return NodeAppLinkV2(challenge, self.public_key,
+                             self._key.sign(node_app_link_message(challenge)).hex())
 
 
 def load_identity() -> Identity:

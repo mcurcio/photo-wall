@@ -892,3 +892,97 @@ If an Output moves, bind the destination persistent Frame. Returning recognized 
 Preview carries a 30-second expiry and both proposed/committed settings in current process memory so the Executor can revert during a running-process outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Partitioned equipment respects the bounded plan lease and rejects obsolete work when it obtains fresh session authority. Cold reboot requires central time/release/enrollment/control/media connectivity. A surviving cache file can avoid a media request only after the new process validates it against the current assignment; it cannot restore authority.
 
 The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
+
+
+## Opt-in V2 node integration
+
+The V2 node composition uses the same database, cache layout, dependency lock, and
+content worker as Central. Deploy Central and its worker from the same revision
+so both know migrations 053–054 and the sealed-environment job kind. Keep the
+ordinary `PHOTO_WALL_DATABASE_URL` and `PHOTO_WALL_ADMIN_TOKEN` configuration in
+its existing protected deployment settings. No token is placed in a command line.
+
+To select the implemented node transport composition, set an installation-specific
+`PHOTO_WALL_NODE_AUDIENCE` and override the Central process command with:
+
+```sh
+uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 1048576
+```
+
+The ordinary `central.app:create_app` factory keeps node transport disabled. The
+node factory enables observation, explicit session enrollment, immutable V2 boot
+offers and scoped command routes; it does **not** open the durable effect gate.
+`/healthz` remains process/service health. Authenticated
+`GET /v2/operator/node/status` reports transport selection and the persistent gate
+state separately. A running HTTP server, accepted serial claim, stored sample, or
+catalogued artifact is not command qualification, authenticated physical identity,
+verified downloaded bytes, or observed pixels.
+
+Publish a canonical `NodeDeployment` using authenticated
+`POST /v2/operator/node/deployments`, then select its immutable ID with the
+revision CAS at `PUT /v2/operator/node/boot-policy`. The base release must already
+have exact catalog provenance; manager primary and any accepted fallback are
+pinned to that base digest. Environment sources feed the existing content worker.
+A missing byte artifact is reported unavailable until the worker acquires and
+verifies it. An explicit no-app deployment still boots the independent base.
+Only the V2 cohort (`photowall.node=v2`) uses these frozen offers; it cannot silently
+fall back to a legacy manifest.
+
+For ambiguity, `GET /v2/operator/node/devices/{device_id}` separates current and
+historical scoped credentials, observation sample/receipt ages, reboot requests,
+responses and effect evidence. Overlapping boot claims block command admission.
+An operator may resolve the logical target using the generation/revision CAS at
+`PUT /v2/operator/node/devices/{device_id}/selected-boot`, supplying the exact
+known boot ID and an audit reference. This does not prove which physical Pi exists
+or that an already-delivered effect stopped. Effect rollout still requires the
+existing D17 all-serving/rollback certification and a real injected serving-image
+verifier; there is no environment-variable bypass. See the
+[node Central evidence checkpoint](evidence/2026-09-30-node-central-integration.md)
+for current software checks and remaining integration/qualification boundaries.
+
+
+### Optional read-only Kubernetes node verifier
+
+The node factory accepts `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
+read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
+`namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
+`audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
+directory provides `namespace`, `pod_name`, `pod_uid`, `container_name`,
+`deployment_name`, and `deployment_uid`; populate Pod identity through the
+[Kubernetes downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/).
+The reader checks the actual Pod owner chain and registry-qualified
+[`status.containerStatuses.imageID`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/).
+A mutable image tag or runtime config hash is insufficient.
+
+The service-account reader uses verified Kubernetes TLS and GET only. It needs
+complete Pod/ReplicaSet/Deployment, Service/EndpointSlice, Ingress/NetworkPolicy,
+API discovery and supported Gateway resource inventories, plus the two named
+public evidence ConfigMaps. It never reads Secrets. Unknown custom API groups,
+unsupported route resources, forbidden lists or incomplete pagination refuse
+certification. This conservative adapter needs extension and corresponding tests
+before using a cluster with other routing controllers.
+
+Each ConfigMap contains `data["evidence.json"]` with exact `payload` and hex
+`signature` fields. Sign canonical sorted compact JSON after the domain prefix
+`photo-wall-rollout-ci-v1` or `photo-wall-rollout-guard-v1`, each followed by a NUL
+byte. The source `SignedRolloutEvidence` defines the exact payload fields. Both
+records bind audience, record UID, increasing generation, active/revoked state,
+issue/expiry times (at most 300 seconds). CI binds all exact serving and rollback
+image digests plus immutable compatibility, fence and readiness evidence hashes.
+The guard binds Deployment UID/generation, complete endpoint/route hashes, CI
+payload hash, exact image sets, and an irrevocable `mutation_not_before` equal to
+its expiry. Revocation blocks new observation/admission but cannot shorten this
+promised no-mutation interval. The durable local watermark records revocation
+before returning refusal, and rejects earlier signed active records after restart.
+Key rotation or ConfigMap replacement fails closed and requires explicit operator
+reprovisioning; deleting replay floors is not a normal recovery action.
+
+**External implementation dependency:** the separate IaC owner must implement
+and deploy a controller that closes the durable effect gate before changing any
+certified direct Service/Pod/Gateway path, waits out outstanding signed holds,
+prevents uncertified rollback, and retains fenced images while any effect remains
+unreconciled even after certification expiry. It must produce truthful exact-image
+CI matrices and signed guard records from those enforcement results. The adapter
+and signatures do not implement that controller. No real such controller or
+qualification is established by the local tests. An unconfigured or uncertified
+node factory therefore continues to serve observations with effects closed.

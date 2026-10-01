@@ -77,6 +77,8 @@ class MeasuredServingImage:
     deployment_uid: str
     image_digest: str
     measurement_ref: str
+    rollout_scope_sha256: str | None = None
+    verified_until: float | None = None
 
 
 class ServingImageVerifier(Protocol):
@@ -99,6 +101,7 @@ class GateAdmission(GateState):
     rollback_image_digests: tuple[str, ...]
     backend_pid: int
     transaction_id: int
+    measured_until: float | None = None
 
     def ensure_current_in(self, conn) -> None:
         """Recheck the lease immediately before committing a command effect.
@@ -121,7 +124,7 @@ class GateAdmission(GateState):
                 or row["scope_sha256"] != self.scope_sha256
                 or row["expires_at"] != self.expires_at):
             raise RolloutGateError("rollout_gate_closed")
-        if _time_in(conn) >= self.expires_at:
+        if _time_in(conn) >= min(self.expires_at, self.measured_until or self.expires_at):
             raise RolloutGateError("rollout_gate_closed")
 
 
@@ -227,9 +230,15 @@ def require_open_in(conn, *, expected_generation: int,
     if row is None:
         raise RolloutGateError("rollout_gate_missing")
     now = _time_in(conn)
+    if identity.verified_until is not None and (type(identity.verified_until) not in (int, float)
+            or not math.isfinite(identity.verified_until) or identity.verified_until <= now):
+        raise RolloutGateError("rollout_measured_evidence_expired")
     if (row["state"] != "open" or row["generation"] != expected_generation
             or row["expires_at"] is None or float(row["expires_at"]) <= now):
         raise RolloutGateError("rollout_gate_closed")
+    if (identity.rollout_scope_sha256 is not None
+            and identity.rollout_scope_sha256 != row["scope_sha256"]):
+        raise RolloutGateError("rollout_measured_topology_changed")
     certificate = row["certification"]
     if (type(certificate) is not dict
             or certificate.get("deployment_uid") != identity.deployment_uid
@@ -251,7 +260,7 @@ def require_open_in(conn, *, expected_generation: int,
     return GateAdmission(row["generation"], row["revision"], row["scope_sha256"],
                          row["expires_at"], identity.image_digest,
                          tuple(certificate["rollback_image_digests"]),
-                         transaction["backend_pid"], transaction["transaction_id"])
+                         transaction["backend_pid"], transaction["transaction_id"], identity.verified_until)
 
 
 def _scope_keys() -> tuple[str, ...]:
@@ -324,7 +333,7 @@ class RolloutEffectGate:
                     "(command_id IS NOT NULL OR drain_id IS NOT NULL OR "
                     "phase IN ('prepared','stop_committed','installing','starting',"
                     "'expired_unknown','recovery_required'))) AS attempt, "
-                    "EXISTS(SELECT 1 FROM active_equipment_drains) AS drain"
+                    "EXISTS(SELECT 1 FROM active_runtime_drains) AS drain"
                 ).fetchone()
                 if barrier["attempt"] or barrier["drain"]:
                     raise RolloutGateError("rollout_barrier_unresolved")

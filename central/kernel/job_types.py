@@ -32,6 +32,12 @@ class FetchPlayerPayload(Job[AssetReady], name="player_payload.fetch",
     sha256: Sha256
 
 
+class FetchSealedEnvironment(Job[AssetReady], name="sealed_environment.fetch",
+                             asset=AssetKind.SEALED_ENVIRONMENT,
+                             delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
+    sha256: Sha256
+
+
 class SyncReleases(Job[None], name="releases.sync",
                    delivery=Delivery(queue=QueueName.FETCH, every=timedelta(minutes=15))):
     pass
@@ -52,7 +58,7 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = FetchOsImage | FetchPackage | FetchPlayerPayload
+AssetJob: TypeAlias = FetchOsImage | FetchPackage | FetchPlayerPayload | FetchSealedEnvironment
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchPackage, FetchPlayerPayload, SyncReleases, Prefetch,
+    FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, SyncReleases, Prefetch,
     RescueStalledJobs, PurgeFinishedJobs)

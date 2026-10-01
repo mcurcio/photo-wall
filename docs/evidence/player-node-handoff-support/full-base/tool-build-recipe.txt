@@ -1,0 +1,6 @@
+FROM python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+ARG RPI_IMAGE_GEN_REVISION=262d4df5a9f9d4133370465399a7958a7c22cdc7
+COPY debian.list /etc/apt/sources.list
+RUN rm -f /etc/apt/sources.list.d/debian.sources && printf 'Package: *\nPin: origin snapshot.debian.org\nPin-Priority: 1001\n' > /etc/apt/preferences.d/snapshot && apt-get update && apt-get -y --allow-downgrades dist-upgrade && apt-get install -y --no-install-recommends ca-certificates git sudo squashfs-tools initramfs-tools cpio xz-utils file kmod && git clone https://github.com/raspberrypi/rpi-image-gen.git /opt/rpi-image-gen && git -C /opt/rpi-image-gen checkout --detach "$RPI_IMAGE_GEN_REVISION" && test "$(git -C /opt/rpi-image-gen rev-parse HEAD)" = "$RPI_IMAGE_GEN_REVISION" && /opt/rpi-image-gen/install_deps.sh && useradd -m -s /bin/bash builder && printf 'builder ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/builder && chmod 0440 /etc/sudoers.d/builder && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /opt/tool-packages.tsv
+ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+WORKDIR /work

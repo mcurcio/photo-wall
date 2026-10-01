@@ -1,0 +1,13 @@
+# Source this only in the isolated builder, with /source and /components read-only.
+export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/source:/opt/photo-wall-build-python
+export GITHUB_WORKSPACE=/source RUNNER_TEMP=/work GITHUB_OUTPUT=/work/github-output.log
+export WORKROOT=/work/photo-wall-base-work
+export PATH="$WORKROOT/$(dpkg-architecture -qDEB_BUILD_GNU_TYPE)/usr/bin:$PATH"
+export DEVICE_PACKAGES=/work/rootfs-inputs/device-packages.list
+export DEBIAN_SOURCES=/work/rootfs-inputs/debian-sources.list
+export PLAYER_DEB=/components/app.deb
+export SCRATCH=/work/netboot-scratch DIAG=/work/netboot-diag KOUT=/work/netboot-kernel-out
+export BUNDLE=/work/photo-wall-base-bundle KERNEL_CACHE_HIT=false
+export DEBIAN_SNAPSHOT_EPOCH="$(python3 -B /source/scripts/debian_packages.py epoch)"
+export SOURCE_DATE_EPOCH="$DEBIAN_SNAPSHOT_EPOCH"
+cd /source

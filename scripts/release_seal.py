@@ -534,6 +534,24 @@ def check_sealed(github: GitHub, registry: Registry, release: Mapping[str, objec
                 **{filename: (sha256, size) for filename, sha256, size in declared.files.values()}}
     if MANIFEST_V2 in attached:
         expected[MANIFEST_V2] = hashlib.sha256(body).hexdigest(), len(body)
+    from contracts.node_release import (
+        MAX_NODE_RELEASE_BYTES,
+        NODE_RELEASE_MANIFEST,
+        parse_node_release,
+    )
+    if NODE_RELEASE_MANIFEST in attached:
+        node_body = github.asset_bytes(attached[NODE_RELEASE_MANIFEST], MAX_NODE_RELEASE_BYTES)
+        try:
+            node = parse_node_release(node_body)
+            if node.revision != revision or node.base.tag != tag:
+                raise ValueError("node_release_context_mismatch")
+            node_expected = {asset.filename: (asset.sha256, asset.size_bytes) for asset in node.artifacts}
+            if set(node_expected) & {*expected, CHECKSUMS, NODE_RELEASE_MANIFEST}:
+                raise ValueError("node_release_asset_collision")
+            expected.update(node_expected)
+            expected[NODE_RELEASE_MANIFEST] = hashlib.sha256(node_body).hexdigest(), len(node_body)
+        except ValueError as error:
+            raise SealError(f"{tag}'s node manifest is invalid: {error}") from error
     if set(attached) != {*expected, CHECKSUMS} or attached[CHECKSUMS].get("state") != "uploaded" \
             or not all(_matches(attached[name], *record) for name, record in expected.items()):
         raise SealError(f"{tag} is published, but does not attach exactly what its own "
@@ -620,6 +638,8 @@ class Build:
     repository: str                      # owner/name, for the notes' links
     server: str = "https://github.com"
     player_payload: Path | None = None
+    node_components: Path | None = None
+    node_bundle: Path | None = None
 
 
 def seal(github: GitHub, registry: Registry, build: Build) -> dict:
@@ -636,6 +656,9 @@ def seal(github: GitHub, registry: Registry, build: Build) -> dict:
     try:
         payload = ({"player_payload": build.player_payload}
                    if build.player_payload is not None else {})
+        if build.node_components is not None or build.node_bundle is not None:
+            payload.update(node_components=build.node_components, node_bundle=build.node_bundle,
+                           release_tag=build.tag)
         package(build.base_bundle, build.player_deb, build.bootstrapper_deb, build.destination,
                 revision=build.revision, images=build.images,
                 source_date_epoch=build.source_date_epoch, **payload)
@@ -913,6 +936,8 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
     parser.add_argument("--base-bundle", type=Path, required=True)
     parser.add_argument("--player-deb", type=Path, required=True)
     parser.add_argument("--player-payload", type=Path)
+    parser.add_argument("--node-components", type=Path)
+    parser.add_argument("--node-bundle", type=Path)
     parser.add_argument("--bootstrapper-deb", type=Path, required=True)
     parser.add_argument("--image", action="append", default=[], help="NAME=REPOSITORY@DIGEST")
     parser.add_argument("--destination", type=Path, required=True)
@@ -930,7 +955,8 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
                       _one_deb(args.player_deb), _one_deb(args.bootstrapper_deb), images,
                       args.destination, epoch, environ.get("GITHUB_REPOSITORY", ""),
                       environ.get("GITHUB_SERVER_URL") or "https://github.com",
-                      _one_payload(args.player_payload) if args.player_payload else None)
+                      _one_payload(args.player_payload) if args.player_payload else None,
+                      args.node_components, args.node_bundle)
         release = seal(github or GitHubApi.from_env(environ), registry or Buildx(), build)
     except (SealError, PlanError) as error:
         for line in str(error).splitlines():

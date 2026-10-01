@@ -13,7 +13,12 @@ import os
 
 from central.assets.reader import AssetReader, Opened, Unavailable
 from central.fleet.models import FleetError, OfferAsset
-from central.kernel.job_types import FetchOsImage, FetchPackage, FetchPlayerPayload
+from central.kernel.job_types import (
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    FetchSealedEnvironment,
+)
 from central.kernel.ports import Candidates
 from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 
@@ -54,6 +59,8 @@ class OfferByteReader:
             raise FleetError("offer_measurement_busy", 503) from None
         if asset.kind == "base":
             job = FetchOsImage(tarball_sha256=asset.content_key)
+        elif asset.format == "sealed-environment-v2":
+            job = FetchSealedEnvironment(sha256=asset.content_key)
         elif asset.format == PAYLOAD_FORMAT:
             job = FetchPlayerPayload(sha256=asset.content_key)
         elif asset.format is None:

@@ -15,6 +15,7 @@ import {
   playersInOrder,
   playerStanding,
 } from "./health.js";
+import { NodeDevicePanel } from "./NodeDevicePanel.jsx";
 import { useMutate } from "./useMutate.js";
 
 // The three groups, in order: standing -> heading. Retired starts collapsed.
@@ -291,6 +292,7 @@ export function EquipmentRoster({ snapshot, bootFacts = null, onNavigate = null 
             <p className="roster__boot">
               {[serial === null ? null : `Reported serial ${serial}`, boot].filter(Boolean).join(" · ")}
             </p>
+            {player.device_id && <NodeDevicePanel key={player.device_id} deviceId={player.device_id} />}
             {bootPending && (
               <p className="roster__note">
                 Base health is separate from Player connection. Check Last heard above;

@@ -1,0 +1,17 @@
+[Unit]
+Description=Validate frozen V2 boot handoff and prepare owner configurations
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/etc/photo-wall/node-boot.json
+Before=photo-wall-host-core.service photo-wall-node-prepare.service photo-wall-app-broker.service photo-wall-manager-supervisor.service photo-wall-display-controller.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-node-bootstrap handoff
+RemainAfterExit=yes
+User=root
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/run/photo-wall-node /etc/photo-wall
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=

@@ -29,8 +29,20 @@ import httpx
 
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
-from central.kernel.ports import PlayerPayload, PublishedRelease, ReleaseListing, UpstreamVersion
+from central.kernel.ports import (
+    NodePublication,
+    PlayerPayload,
+    PublishedRelease,
+    ReleaseListing,
+    UpstreamVersion,
+)
 from central.kernel.types import release_version, require_sha256
+from contracts.node_release import (
+    MAX_NODE_RELEASE_BYTES,
+    NODE_RELEASE_MANIFEST,
+    encode_node_release,
+    parse_node_release,
+)
 from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
 from contracts.player_payload import MAX_ARCHIVE_BYTES as MAX_PLAYER_PAYLOAD_BYTES
 from contracts.player_payload import archive_name as player_payload_name
@@ -106,11 +118,14 @@ class GitHubReleaseOrigin:
 
     def __init__(self, repo: str, *, token: str | None = None, include_prereleases: bool = False,
                  transport: httpx.AsyncBaseTransport | None = None, api_base: str = GITHUB_API_BASE,
-                 timeout: timedelta = timedelta(seconds=30)) -> None:
+                 timeout: timedelta = timedelta(seconds=30), max_download_bytes: int = MAX_DOWNLOAD_BYTES) -> None:
         if not isinstance(repo, str) or _REPO.fullmatch(repo) is None:
             raise ValueError("invalid_repo")
         if not isinstance(timeout, timedelta) or timeout <= timedelta(0):
             raise ValueError("invalid_timeout")
+        if type(max_download_bytes) is not int or not 0 < max_download_bytes <= 8 * 1024**3:
+            raise ValueError("invalid_max_download_bytes")
+        self._max_download_bytes = max_download_bytes
         self.repo = repo
         self.include_prereleases = bool(include_prereleases)
         self._api_base = _require_api_base(api_base)
@@ -137,6 +152,7 @@ class GitHubReleaseOrigin:
             token=env.get("PHOTO_WALL_RELEASE_TOKEN") or None,
             include_prereleases=env.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in _TRUTHY,
             api_base=env.get("PHOTO_WALL_RELEASE_API_BASE") or GITHUB_API_BASE,
+            max_download_bytes=8 * 1024**3,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -210,12 +226,32 @@ class GitHubReleaseOrigin:
             return None  # non-semver tag: skipped, no record
         assets = _asset_urls(entry.get("assets"))
         manifest = await self._manifest(client, assets)
+        node = await self._node_manifest(client, assets, tag)
         return PublishedRelease(tag=tag, is_prerelease=is_prerelease, package=manifest.package,
                                 package_problem=manifest.package_problem,
                                 os_image=manifest.os_image,
                                 upstream_version=manifest.upstream_version,
                                 payload=manifest.payload, base_abi=manifest.base_abi,
-                                base_abi_squashfs_sha256=manifest.base_abi_squashfs_sha256)
+                                base_abi_squashfs_sha256=manifest.base_abi_squashfs_sha256, node_publication=node)
+
+    async def _node_manifest(self, client, assets, tag):
+        manifest = assets.get(NODE_RELEASE_MANIFEST)
+        if manifest is None:
+            return None
+        try:
+            body = await self._fetch_manifest(client, manifest.url, maximum=MAX_NODE_RELEASE_BYTES)
+            if body is None:
+                raise ValueError("node_manifest_missing")
+            release = parse_node_release(body)
+            if release.base.tag != tag:
+                raise ValueError("node_release_tag_mismatch")
+            locators = tuple((a.role, OriginLocator(assets[a.filename].url, a.sha256, a.size_bytes))
+                             for a in release.artifacts)
+            return NodePublication(encode_node_release(release), locators)
+        except (ValueError, KeyError, _BodyTooLarge, _BodyEncoded):
+            # An attached malformed V2 manifest never falls back to similarly
+            # named legacy assets; reject the observation and retain prior rows.
+            raise OriginRejected("node_release_invalid") from None
 
     async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
         manifest_asset = assets.get(MANIFEST_V2) or assets.get(MANIFEST)
@@ -239,7 +275,7 @@ class GitHubReleaseOrigin:
                 return _Manifest(None, "manifest_invalid", None)
         return _parse_manifest(body, assets, manifest_asset.version)
 
-    async def _fetch_manifest(self, client: httpx.AsyncClient, url: str) -> bytes | None:
+    async def _fetch_manifest(self, client: httpx.AsyncClient, url: str, *, maximum: int = MAX_MANIFEST_BYTES) -> bytes | None:
         """The manifest bytes; None when absent (404/410). A transient failure aborts the whole
         listing (`manifest_unavailable`) rather than recording the release as broken."""
         try:
@@ -249,7 +285,7 @@ class GitHubReleaseOrigin:
                 _raise_rate_limit(response)
                 if response.status_code != 200:
                     raise OriginUnavailable("manifest_unavailable")
-                return await _read_body(response, MAX_MANIFEST_BYTES)
+                return await _read_body(response, maximum)
         except (httpx.HTTPError, _BodyTruncated):
             raise OriginUnavailable("manifest_unavailable") from None
 
@@ -262,7 +298,7 @@ class GitHubReleaseOrigin:
         """
         if not isinstance(locator, OriginLocator):
             raise ValueError("invalid_locator")
-        if type(max_bytes) is not int or not 0 < max_bytes <= MAX_DOWNLOAD_BYTES:
+        if type(max_bytes) is not int or not 0 < max_bytes <= self._max_download_bytes:
             raise ValueError("invalid_max_bytes")
         into = Path(into)
         fd = os.open(into, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # FileExistsError as-is

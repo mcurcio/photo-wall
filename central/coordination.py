@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from psycopg.types.json import Jsonb
 from pydantic import Field
@@ -36,7 +37,7 @@ from central.registry import RegistryError
 from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
-from central.transaction_locks import COORDINATION_LOCK
+from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
 from contracts.models import (
     Commit,
     IdentifyOutput,
@@ -58,6 +59,13 @@ class CoordinationLimits(Model):
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayAdmission:
+    allowed: bool
+    fence: str
+    reason: str
 
 
 class CoordinationError(RegistryError):
@@ -579,6 +587,10 @@ class Coordinator:
                         (player_id, identify["request_id"]),
                     )
             plan = self._current_plan(conn, player_id, epoch)
+            if conn.execute("SELECT 1 FROM active_node_app_drains WHERE player_id=%s", (player_id,)).fetchone():
+                # V2 revalidation observes an inert control envelope behind the
+                # existing fence; it never reopens ordinary app execution.
+                plan, identify_output = None, None
             if plan and (
                 plan.valid_until <= self.clock.utc()
                 or plan.bindings != config.bindings
@@ -779,7 +791,143 @@ class Coordinator:
             self._commit_due(conn, configurations, now)
             return True
 
+    def display_admission_in(self, conn, *, player_id: str, authority_epoch: int,
+                             output_id: str, frame_id: str, binding_generation: int, config_revision: int,
+                             process, app_epoch: int, environment_sha256: str,
+                             phase: str) -> DisplayAdmission:
+        """Authorize an exact operational surface, never an execution Commit.
+
+        Caller holds Coordination→Runtime before authenticating the node session.
+        A live app linkage and Registry tuple are necessary. V1 drain rows cannot
+        authorize V2 starting-new candidates; that requires the V2 lifecycle port.
+        """
+        from central.fleet.node_app_links import load_current_node_app_link_for_player_in
+
+        if not holds_runtime_locks_in(conn):
+            raise ValueError("node_display_runtime_locks_required")
+        if phase not in ("candidate", "handoff", "revision"):
+            raise ValueError("node_display_phase_invalid")
+        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
+        if observed is None or not any(b.output_id == output_id and b.frame_id == frame_id
+                and b.generation == binding_generation
+                and b.configuration_revision == config_revision for b in observed["bindings"]):
+            return DisplayAdmission(False, "", "registry_output_changed")
+        link = load_current_node_app_link_for_player_in(conn, player_id, authority_epoch, self.clock.utc())
+        if link is None or (link.process, link.app_epoch, link.environment_sha256) != (
+                process, app_epoch, environment_sha256):
+            return DisplayAdmission(False, "", "app_process_link_changed")
+        if player_id in fenced_players_in(conn):
+            return DisplayAdmission(False, "", "equipment_drain_requires_v2_target_reservation")
+        fence = identity("display-", [player_id, authority_epoch, output_id, frame_id, binding_generation,
+            config_revision, link.producer.device_generation, str(link.producer.kernel_boot_id),
+            link.process.pid, link.process.start_ticks, str(link.process.invocation_id),
+            link.app_epoch, link.environment_sha256, phase])
+        return DisplayAdmission(True, fence, "current_linked_app")
+
+    def display_withdrawal_in(self, conn, *, player_id: str, authority_epoch: int,
+                              previous_surface, expected_surface) -> DisplayAdmission:
+        """Revoke exactly an old operational role after Registry authority changes.
+
+        Caller proves this DisplayHost previously admitted the old surface. This
+        decision neither changes Run state nor grants a replacement surface.
+        """
+        from central.fleet.node_app_links import load_current_node_app_link_for_player_in
+
+        if not holds_runtime_locks_in(conn):
+            raise ValueError("node_display_runtime_locks_required")
+        if previous_surface.frame_id is None:
+            return DisplayAdmission(False, "", "historical_surface_identity_incomplete")
+        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
+        if observed is None:
+            return DisplayAdmission(False, "", "registry_player_changed")
+        output_id = previous_surface.output.output_id
+        binding = next((b for b in observed["bindings"] if b.output_id == output_id), None)
+        if expected_surface is None:
+            if binding is not None:
+                return DisplayAdmission(False, "", "registry_output_still_bound")
+        else:
+            if (binding is None or expected_surface.output.output_id != output_id
+                    or (binding.frame_id, binding.generation, binding.configuration_revision) != (
+                        expected_surface.frame_id, expected_surface.binding_generation, expected_surface.config_revision)):
+                return DisplayAdmission(False, "", "registry_output_changed")
+            link = load_current_node_app_link_for_player_in(conn, player_id, authority_epoch, self.clock.utc())
+            if link is None or (link.process, link.app_epoch) != (expected_surface.process, expected_surface.app_epoch):
+                return DisplayAdmission(False, "", "app_process_link_changed")
+            if previous_surface == expected_surface:
+                return DisplayAdmission(False, "", "surface_still_current")
+        def parts(surface):
+            if surface is None:
+                return None
+            return [surface.frame_id, surface.output.output_id, str(surface.output.kernel_boot_id),
+                    str(surface.output.display_host_incarnation), surface.output.connection_generation,
+                    surface.output.mode_generation, surface.process.pid, surface.process.start_ticks,
+                    str(surface.process.invocation_id), surface.app_epoch, surface.binding_generation,
+                    surface.config_revision]
+        fence = identity("withdraw-", [player_id, authority_epoch, parts(previous_surface), parts(expected_surface)])
+        return DisplayAdmission(True, fence, "old_registry_surface_revoked")
+
+    def reconcile_node_output_in(self, conn, *, player_id: str, authority_epoch: int,
+                                 output_id: str, binding_generation: int,
+                                 configuration_revision: int, recovering: bool, frame_id: str | None = None,
+                                 producer_id, evidence_id, evidence_kind: str, detail: dict) -> bool:
+        """Apply one affirmatively linked Output fact without changing its Run.
+
+        Caller holds Coordination→Runtime→Fleet locks and owns the inbox transaction.
+        This port rechecks Registry epoch/binding; no other Frame or Actuator is commanded.
+        """
+        if not holds_runtime_locks_in(conn):
+            raise ValueError("node_reconciliation_runtime_locks_required")
+        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
+        if observed is None:
+            return False
+        binding = next((b for b in observed["bindings"] if b.output_id == output_id
+                        and b.frame_id == frame_id and b.generation == binding_generation
+                        and b.configuration_revision == configuration_revision), None)
+        if binding is None:
+            return False
+        now = self.clock.utc()
+        existing = conn.execute("SELECT resolved_at FROM node_output_losses WHERE player_id=%s "
+                                "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
+                                (player_id, authority_epoch, output_id, frame_id, binding_generation)).fetchone()
+        if recovering:
+            if existing is None or existing["resolved_at"] is not None:
+                return False
+            conn.execute("UPDATE node_output_losses SET resolved_at=%s WHERE player_id=%s "
+                         "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
+                         (now, player_id, authority_epoch, output_id, frame_id, binding_generation))
+        else:
+            if existing is not None and existing["resolved_at"] is None:
+                return False
+            conn.execute("INSERT INTO node_output_losses(player_id,authority_epoch,output_id,frame_id,"
+                         "binding_generation,configuration_revision,cause_producer_id,cause_evidence_id,"
+                         "cause_kind,detail,interrupted_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                         "ON CONFLICT(player_id,authority_epoch,output_id,frame_id,binding_generation) DO UPDATE "
+                         "SET configuration_revision=EXCLUDED.configuration_revision,"
+                         "cause_producer_id=EXCLUDED.cause_producer_id,cause_evidence_id=EXCLUDED.cause_evidence_id,"
+                         "cause_kind=EXCLUDED.cause_kind,detail=EXCLUDED.detail,"
+                         "interrupted_at=EXCLUDED.interrupted_at,resolved_at=NULL",
+                         (player_id, authority_epoch, output_id, frame_id, binding_generation,
+                          configuration_revision, producer_id, evidence_id, evidence_kind, Jsonb(detail), now))
+            # Invalidate only layers on this exact Output binding, across retained revisions.
+            offers = conn.execute("SELECT revision,manifest FROM plan_offers WHERE player_id=%s "
+                                  "AND authority_epoch=%s", (player_id, authority_epoch)).fetchall()
+            for row in offers:
+                plan = Plan.model_validate(row["manifest"])
+                assignments = [layer.assignment_id for layer in plan.layers if layer.output_id == output_id
+                               and layer.frame_id == frame_id and layer.binding_generation == binding_generation]
+                if assignments:
+                    conn.execute("UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
+                                 "AND authority_epoch=%s AND revision=%s AND assignment_id=ANY(%s)",
+                                 (player_id, authority_epoch, row["revision"], assignments))
+        self._event(conn, "observation", player_id, detail={**detail, "output_id": output_id,
+                    "frame_id": binding.frame_id, "binding_generation": binding_generation,
+                    "authority_epoch": authority_epoch, "run_lifecycle": "continues"})
+        return True
+
     def _commit_due(self, conn, configurations, now):
+        interrupted = {(row["player_id"], row["authority_epoch"], row["output_id"], row["frame_id"], row["binding_generation"])
+                       for row in conn.execute("SELECT player_id,authority_epoch,output_id,frame_id,binding_generation "
+                                               "FROM node_output_losses WHERE resolved_at IS NULL").fetchall()}
         plans = {
             p: self._current_plan(conn, p, c.authority_epoch) for p, c in configurations.items()
         }
@@ -818,6 +966,7 @@ class Coordinator:
                     not plan
                     or not state
                     or not layer
+                    or (player, epoch, output, layer.frame_id, generation) in interrupted
                     or not self._authorized(layer, configurations[player])
                     or plan.bindings != configurations[player].bindings
                     or plan.valid_until <= now

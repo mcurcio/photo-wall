@@ -1,0 +1,44 @@
+[Unit]
+Description=Photo Wall base-owned Weston display policy
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/usr/lib/photo-wall-display/photo-wall-shell.so
+After=systemd-user-sessions.service systemd-logind.service
+Wants=systemd-logind.service
+Conflicts=photo-wall-weston.service getty@tty1.service
+
+[Service]
+User=pw-display
+Group=pw-display
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=LIBSEAT_BACKEND=logind
+Environment=XDG_SESSION_TYPE=wayland
+SupplementaryGroups=video render input
+RuntimeDirectory=photo-wall-display
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/photo-wall-display
+Environment=PHOTO_WALL_CONTROLLER_UID=10005
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --socket=wayland-0 --idle-time=0
+Restart=always
+RestartSec=2
+Slice=photowallbase.slice
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ReadWritePaths=/run/photo-wall-display
+InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor

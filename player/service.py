@@ -56,6 +56,7 @@ from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError
+from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
 from uplink import watchdog
@@ -392,6 +393,7 @@ class PlayerService:
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  app_proof_client: LocalAppProofClient | None = None,
+                 node_link_client: NodeAppLinkClient | None = None,
                  health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
                  boot_context: BootContext | None = None):
@@ -433,6 +435,7 @@ class PlayerService:
         self._verify_due = threading.Event()
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="player-media")
         self._stop = threading.Event()
+        self.node_link_client = node_link_client or NodeAppLinkClient()
         self._proof_active = False
         self._proof_generation = 0
         self._thread = None
@@ -1157,6 +1160,7 @@ class PlayerService:
         """
         recorded_session: Session | None = None
         recorded_applied: tuple[Session, ControlAppliedReceipt] | None = None
+        recorded_node: tuple[Session, ControlAppliedReceipt] | None = None
         while self._proof_active and not self._stop.is_set():
             session = self._session
             registration = session.registration if session is not None else None
@@ -1190,7 +1194,7 @@ class PlayerService:
                 applied = self._applied_proof_receipt
                 revision = self._control_proof_revision
             if (registration is not None and applied is not None
-                    and applied[0] is session and applied != recorded_applied
+                    and applied[0] is session and (applied != recorded_applied or applied != recorded_node)
                     and self.boot_context is not None and self.boot_id):
                 receipt = applied[1]
 
@@ -1223,6 +1227,20 @@ class PlayerService:
                 except Exception as error:
                     LOG.warning("player: OS-local applied control proof failed: %s",
                                 type(error).__name__)
+                if applied != recorded_node:
+                    try:
+                        node_result = await asyncio.to_thread(
+                            self.node_link_client.exchange_applied, identity=self.identity,
+                            player_id=registration.player_id,
+                            authority_epoch=registration.authority_epoch,
+                            device_id=self.boot_context.device_id,
+                            kernel_boot_id=self.boot_id, receipt=receipt,
+                            enrollment_current=applied_current,
+                        )
+                        if node_result == "recorded" and applied_current():
+                            recorded_node = applied
+                    except (ValueError, OSError, TimeoutError) as error:
+                        LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
             await asyncio.sleep(LOCAL_PROOF_RETRY)
 
     async def run(self):

@@ -16,6 +16,7 @@ from fakes.transactions import FakeTransaction
 from hypothesis import given
 from hypothesis import strategies as st
 from procrastinate.exceptions import AlreadyEnqueued, TaskNotFound
+from runtime_fakes import catalog_instances
 
 from central.infra.job_queue import (
     ATTEMPT_KWARG,
@@ -34,7 +35,6 @@ from central.kernel.job_types import (
     CATALOG,
     FetchOsImage,
     FetchPackage,
-    FetchPlayerPayload,
     PurgeFinishedJobs,
     SyncReleases,
 )
@@ -54,13 +54,6 @@ class Mixed(Job[None], name="test.job_queue_mixed",
     i: int
     b: bool
     c: Colour
-
-
-def catalog_instances() -> list[Job]:
-    samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
-               FetchPackage: FetchPackage(sha256=SHA),
-               FetchPlayerPayload: FetchPlayerPayload(sha256="ef" * 32)}
-    return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 
 # -- task names, kwargs and decode ------------------------------------------------------------

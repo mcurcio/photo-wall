@@ -1,0 +1,15 @@
+import json,tarfile
+from pathlib import Path
+root=Path('/Volumes/Dock/Temp/photo-wall-node-resume-20260930')
+results={}
+for group,names in [('components-stopfix',['app','manager-primary']),('lifecycle-fixtures-stopfix',['success','failure'])]:
+ for name in names:
+  path=root/group/(name+'.tar')
+  with tarfile.open(path,'r:') as archive:
+   dirs=[member for member in archive if member.isdir() and (member.name=='rootfs' or member.name.startswith('rootfs/'))]
+   assert dirs
+   for member in dirs:
+    assert member.mode==0o755,(member.name,member.mode)
+   results[group+'/'+name]={'canonical_rootfs_directories':len(dirs),'directory_mode':'0755'}
+(root/'runtime-directory-verification.json').write_text(json.dumps(results,sort_keys=True))
+print(json.dumps(results,sort_keys=True))

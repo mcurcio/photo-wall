@@ -1,0 +1,9 @@
+/usr/bin/mmdebstrap
+/usr/bin/podman
+/usr/bin/newuidmap
+/usr/bin/unsquashfs
+/usr/bin/mksquashfs
+/usr/sbin/mkinitramfs
+/usr/bin/lsinitramfs
+/usr/bin/cpio
+PRIVATE_MOUNTS_OK

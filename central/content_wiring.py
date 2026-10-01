@@ -21,6 +21,7 @@ from central.assets.handlers import (
     FetchOsImageHandler,
     FetchPackageHandler,
     FetchPlayerPayloadHandler,
+    FetchSealedEnvironmentHandler,
     PrefetchHandler,
 )
 from central.assets.layout import CacheLayout
@@ -119,6 +120,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                             include_prereleases=origin.include_prereleases),
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
         FetchPackageHandler(production=production, origin=origin),
+        FetchSealedEnvironmentHandler(production=production, origin=origin),
         FetchPlayerPayloadHandler(production=production, origin=origin,
                                   expected_abi=payload_expected_abi),
         PrefetchHandler(catalog=core.catalog, records=core.assets, store=core.store,

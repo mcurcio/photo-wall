@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/recipes/prepare-rootfs.py", line 39, in <module>
+    from scripts import build_bootstrapper_deb as builder
+  File "/source/scripts/build_bootstrapper_deb.py", line 56, in <module>
+    from player.output_discovery import weston_ini as render_weston_ini
+  File "/source/player/output_discovery.py", line 10, in <module>
+    from contracts.enrollment import OutputReport
+  File "/source/contracts/enrollment.py", line 6, in <module>
+    from pydantic import Field, model_validator
+ModuleNotFoundError: No module named 'pydantic'

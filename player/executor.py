@@ -723,6 +723,12 @@ class Executor:
                     or not math.isfinite(actual.position) or actual.position < 0
                     or not math.isfinite(actual.alpha) or not 0 <= actual.alpha <= 1):
                 return None
+        if (result.applied_calibration is not None and result.applied_calibration.trial_id is None
+                and result.applied_calibration.calibration != candidate.calibration):
+            return None
+        if not hasattr(self, "_applied_output_calibration"):
+            self._applied_output_calibration = {}
+        self._applied_output_calibration[drawn.binding.output_id] = result.applied_calibration
         return drawn, self._now() - age
 
     def _observation(self, local: LocalLayer, now: float, status: str,
@@ -732,6 +738,8 @@ class Executor:
             plan_id=self._plan.plan_id, revision=self._plan.revision,
             authority_epoch=self._last_epoch, assignment_id=local.layer.assignment_id,
             observed_at=now, status=status, position=local.position, detail=detail,
+            applied_calibration=(getattr(self, "_applied_output_calibration", {}).get(local.layer.output_id)
+                                 if status in ("presented", "fallback") else None),
         )
 
     def tick(self) -> tuple[Observation, ...]:

@@ -1,0 +1,34 @@
+[Unit]
+Description=Photo Wall base-owned exact manager recovery
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/run/photo-wall-node/manager.json
+
+After=photo-wall-node-handoff.service photo-wall-node-prepare.service
+
+[Service]
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-manager-supervisor
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=photo-wall-manager-supervisor
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+User=root
+UMask=0077
+Slice=photowallbase.slice
+MemoryMax=192M
+MemorySwapMax=0
+TasksMax=24
+CPUQuota=50%
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ReadWritePaths=/run/photo-wall-manager-supervisor
+InaccessiblePaths=-/run/photo-wall-host-core

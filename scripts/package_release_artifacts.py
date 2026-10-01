@@ -223,6 +223,9 @@ def package(
     images: Mapping[str, str],
     source_date_epoch: int,
     player_payload: Path | None = None,
+    node_components: Path | None = None,
+    node_bundle: Path | None = None,
+    release_tag: str | None = None,
 ) -> dict:
     """Assemble the flat operator artifact set into a new `destination` directory."""
     if (
@@ -324,6 +327,16 @@ def package(
         (destination / MANIFEST_V2).write_bytes(
             (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
         )
+
+    if node_components is not None or node_bundle is not None:
+        if node_components is None or node_bundle is None or release_tag is None:
+            raise PackagingError("node_release_inputs_incomplete")
+        from scripts.node_release_artifacts import append as append_node
+        try:
+            append_node(node_components, node_bundle, destination, revision=revision,
+                        tag=release_tag, epoch=source_date_epoch)
+        except (ValueError, OSError) as error:
+            raise PackagingError(str(error)) from error
 
     sums = "".join(
         f"{checked_file(path, MAX_TARBALL_BYTES)['sha256']}  {path.name}\n"
@@ -596,6 +609,18 @@ def verify(directory: Path, *, revision: str) -> Packaged:
     names = {MANIFEST, CHECKSUMS, *(filename for filename, _, _ in declared.files.values())}
     if has_v2:
         names.add(MANIFEST_V2)
+    from contracts.node_release import NODE_RELEASE_MANIFEST
+    node = None
+    if NODE_RELEASE_MANIFEST in present:
+        from scripts.node_release_artifacts import verify as verify_node
+        try:
+            node = verify_node(directory, revision)
+        except (ValueError, OSError) as error:
+            raise PackagingError(str(error)) from error
+        node_names = {NODE_RELEASE_MANIFEST, *(asset.filename for asset in node.artifacts)}
+        if node_names & names:
+            raise PackagingError("node_asset_collision")
+        names.update(node_names)
     if present != names:
         raise PackagingError("assets_mismatch:" + ",".join(
             [f"missing {name}" for name in sorted(names - present)]
@@ -630,6 +655,11 @@ def verify(directory: Path, *, revision: str) -> Packaged:
             name for name in set(base_boot) & set(boot_boot) if base_boot[name] != boot_boot[name]})
         raise PackagingError(f"boot_tarball_mismatch:{boot_member(BASE_BOOT)}{differing[0]}")
 
+    if node is not None:
+        assets.append(Asset(NODE_RELEASE_MANIFEST, directory / NODE_RELEASE_MANIFEST,
+                            **_actual(directory, NODE_RELEASE_MANIFEST)))
+        assets.extend(Asset(item.filename, directory / item.filename, item.sha256, item.size_bytes)
+                      for item in node.artifacts)
     sums_record = _actual(directory, CHECKSUMS)
     listed = {}
     for line in (directory / CHECKSUMS).read_text().splitlines():

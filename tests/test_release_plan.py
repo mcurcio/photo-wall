@@ -263,7 +263,7 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
     assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
+            "player-environment, player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
@@ -458,7 +458,9 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
         assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
                                                 "contracts/release.py",
-                                                "contracts/player_payload.py")
+                                                "contracts/player_payload.py",
+                                                "contracts/node_release.py",
+                                                "scripts/node_release_artifacts.py")
     assert "release-assets" in claimed_by("contracts/release.py")
 
 
@@ -756,7 +758,7 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     # no artefact byte. The packager does, and ships as release-assets.
     seal = _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
     assert seal == {"scripts/release_seal.py", "scripts/package_release_artifacts.py",
-                    "scripts/release_plan.py"}
+                    "scripts/node_release_artifacts.py", "scripts/release_plan.py"}
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)

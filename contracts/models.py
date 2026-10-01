@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
@@ -290,6 +290,25 @@ class Commit(Model):
         return self
 
 
+class AppliedCalibration(Model):
+    """Actual operational transform attached to an app draw acknowledgment.
+
+    This describes renderer state, not compositor or physical-pixel evidence.
+    """
+    calibration: Calibration
+    trial_id: Identifier | None = None
+    trial_generation: int | None = Field(default=None, ge=1)
+    trial_sequence: int | None = Field(default=None, ge=1)
+    candidate_sha256: Digest | None = None
+
+    @model_validator(mode="after")
+    def complete_trial_identity(self) -> Self:
+        values = (self.trial_id, self.trial_generation, self.trial_sequence, self.candidate_sha256)
+        if any(value is None for value in values) and any(value is not None for value in values):
+            raise ValueError("operational trial identity must be complete")
+        return self
+
+
 class Observation(Model):
     plan_id: Identifier
     revision: int = Field(ge=1)
@@ -297,6 +316,15 @@ class Observation(Model):
     authority_epoch: int = Field(ge=1)
     observed_at: Instant
     status: Literal["presented", "failed", "skipped", "fallback"]
+    applied_calibration: AppliedCalibration | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_applied_calibration(self, handler):
+        value = handler(self)
+        if self.applied_calibration is None:
+            value.pop("applied_calibration", None)
+        return value
+
     position: float = Field(default=0, ge=0)
     detail: Literal["none", "decode", "download", "capacity", "clock", "expired", "authority"] = "none"
 

@@ -1,0 +1,30 @@
+[Unit]
+Description=Photo Wall base display evidence controller
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/run/photo-wall-node/display.json
+After=photo-wall-display.service
+
+After=photo-wall-node-handoff.service
+
+[Service]
+User=pw-display
+Group=pw-display
+LoadCredential=node-config:/run/photo-wall-node/display.json
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-display-controller --config=%d/node-config
+Restart=always
+RestartSec=2
+Slice=photowallbase.slice
+MemoryMax=96M
+TasksMax=16
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ReadWritePaths=/run/photo-wall-display
+InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor

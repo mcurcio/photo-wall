@@ -27,6 +27,9 @@ from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
 from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.node_routes import mount_node_routes
+from central.fleet.node_sessions import NodeControlConfig
+from central.fleet.rollout_gate import ServingImageVerifier
 from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
 from central.mdns_advertise import MdnsCentralAdvertiser
@@ -41,6 +44,7 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
+from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.player_control_protocol import project_state, state_digest
@@ -144,6 +148,9 @@ def create_app(
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
+    node_control: NodeControlConfig | None = None,
+    node_serving_verifier: ServingImageVerifier | None = None,
+    node_serving_verifier_factory=None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     owns_db = db is None
@@ -152,6 +159,10 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
+    if node_serving_verifier_factory is not None:
+        if node_serving_verifier is not None:
+            raise ValueError("choose one node serving verifier composition")
+        node_serving_verifier = node_serving_verifier_factory(db)
     registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
@@ -232,6 +243,9 @@ def create_app(
         try:
             while True:
                 try:
+                    if hasattr(app.state, "node_reconciler"):
+                        await asyncio.to_thread(app.state.node_reconciler.advance)
+                    await asyncio.to_thread(app.state.node_lifecycle.reconcile)
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(
                         media_application.request_acquisitions, projection.acquisitions
@@ -866,4 +880,7 @@ def create_app(
     if content is not None:
         mount_content_routes(app, content)
     mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)
+    mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
+                      serving_verifier=node_serving_verifier, content=content)
+    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
     return app

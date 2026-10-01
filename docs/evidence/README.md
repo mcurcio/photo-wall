@@ -1,5 +1,15 @@
 # Acceptance evidence
 
+- [2026-09-30 Player node full base/PXE build](2026-09-30-node-full-base-build.md): exact dirty-source rootfs, kernel, initrd and both bundles; real restricted stage-1 mount probe, artifact inventories and physical qualification limits.
+
+- [2026-09-30 StopOperation and bounded recovery proposal](2026-09-30-node-stop-observation-proposal.md): user-directed adapter-owned Future and recovery design; not implemented or physically executed.
+
+- [2026-09-30 Player node resumption](2026-09-30-player-node-resumption.md): exact saved-state validation, packaging/extraction/process repairs, historical migration coverage, exact-snapshot suite results, full-base tool preparation and remaining full-scope boundaries.
+
+- [2026-09-30 Player node stable handoff](2026-09-30-player-node-handoff.md): current dirty implementation, verified package/GTK/operator evidence, pending approvals, remaining work and fresh-session resumption.
+
+- [2026-09-30 node control M1](2026-09-30-node-control-m1.md): portable node/display domains, typed evidence reconciliation, software simulator, deferred adversarial regressions and explicit database/hardware limits.
+
 - [2026-09-30 fleet command and recovery slice](2026-09-30-fleet-command-recovery-slice.md): unmounted command/permit lifecycle, cross-boot repair lease, deferred unbound-stop guard, truthful management view and local software/database limits.
 - [2026-09-30 fleet pre-effect integration](2026-09-30-fleet-pre-effect-integration.md): whole-repository portable and PostgreSQL results for the staged gate, attempt, receipt, proof and Runtime seams; command, deployment and physical qualification remain open.
 - [2026-09-30 local Player process proof](2026-09-30-local-app-proof.md): separate app-to-base key proof client, per-packet Linux credentials, attempt-bound challenge and base packaging checks; service composition and physical qualification remain open.

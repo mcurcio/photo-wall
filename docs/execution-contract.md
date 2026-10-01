@@ -85,7 +85,7 @@ Start with a typed application protocol over a persistent Player-originated WebS
 - Detect disconnects with keepalive; define flow control and reconnect/current-state exchange.
 - Carry enough identity, epoch/revision and validity context to reject duplicates and obsolete work.
 
-An acknowledgment must state what it establishes: receipt, accepted configuration, secured file, prepared playback or observed presentation are different facts. Readiness and failures reach both Planner and Runtime; assignment revision and lifecycle completion have different owners.
+Command responses and occurrence events are distinct: receipt/admission does not establish that an effect occurred, and an observed transition may occur without a command. Events identify their producer, boot/epoch, observation context and known causation; duplicates, reordering and gaps must reconcile without repeating effects or manufacturing history. Current-state exchange complements bounded event delivery. Pure reads need no synthetic effect event. The [node command/event inventory](player-node-domain-model.md#commands-responses-events-and-current-state) assigns producers and evidence limits across the proposed layers. An acknowledgment must state what it establishes: receipt, accepted configuration, secured file, prepared playback or observed presentation are different facts. Readiness and failures reach both Planner and Runtime; assignment revision and lifecycle completion have different owners.
 
 ## Central persistence and reconciliation
 

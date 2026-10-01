@@ -12,6 +12,7 @@ from psycopg.errors import CheckViolation
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import _principal
 from test_fleet_command_lifecycle import _ready, _setup
+from test_node_upgrade_history import seed_historical_committed_stop
 from test_registry import enroll
 
 from central.coordination import Coordinator
@@ -144,15 +145,7 @@ def test_migration_preserves_older_unbound_stop_without_permit() -> None:
                 conn.execute(path.read_text())
         old_registry = Registry(db, ManualClock(1000))
         player, _, request = enroll(old_registry)
-        drain = EquipmentDrain(Coordinator(db, old_registry.clock))
-        drain.prepare_unbound(
-            player["player_id"], "old-attempt", request.boot_id,
-            player["authority_epoch"], authorization_expires_at=1010,
-        )
-        assert drain.commit_stop_unbound(
-            player["player_id"], "old-attempt", request.boot_id,
-            player["authority_epoch"],
-        ).status == "stop_committed"
+        seed_historical_committed_stop(old_registry, player, request)
         with db.transaction() as conn:
             conn.execute((migration_dir / "052_unbound_stop_permit_guard.sql").read_text())
             assert conn.execute(

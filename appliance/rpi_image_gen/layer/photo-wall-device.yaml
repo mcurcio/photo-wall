@@ -40,6 +40,18 @@
 # X-Env-Var-bootstrapper_deb-Valid: file
 # X-Env-Var-bootstrapper_deb-Set: y
 #
+# X-Env-Var-node_base_deb:
+# X-Env-Var-node_base_deb-Desc: Optional photo-wall-node-base .deb for the photowall.node=v2 cohort.
+# X-Env-Var-node_base_deb-Required: n
+# X-Env-Var-node_base_deb-Valid: file
+# X-Env-Var-node_base_deb-Set: y
+#
+# X-Env-Var-node_display_deb:
+# X-Env-Var-node_display_deb-Desc: Optional pinned native display .deb for the V2 cohort.
+# X-Env-Var-node_display_deb-Required: n
+# X-Env-Var-node_display_deb-Valid: file
+# X-Env-Var-node_display_deb-Set: y
+#
 # X-Env-Var-device_packages:
 # X-Env-Var-device_packages-Desc: Absolute host path to the device set, one
 #  Debian package name per line, rendered by .github/workflows/base-image.yml
@@ -58,3 +70,13 @@ mmdebstrap:
       chroot "$1" apt-get install -y --no-install-recommends \
         $(cat "$IGconf_app_device_packages") /tmp/photo-wall-bootstrapper.deb
       rm -f "$1/tmp/photo-wall-bootstrapper.deb"
+      if [ -n "${IGconf_app_node_base_deb:-}" ]; then
+        install -m 0644 "$IGconf_app_node_base_deb" "$1/tmp/photo-wall-node-base.deb"
+        chroot "$1" apt-get install -y --no-install-recommends /tmp/photo-wall-node-base.deb
+        rm -f "$1/tmp/photo-wall-node-base.deb"
+      fi
+      if [ -n "${IGconf_app_node_display_deb:-}" ]; then
+        install -m 0644 "$IGconf_app_node_display_deb" "$1/tmp/photo-wall-node-display.deb"
+        chroot "$1" apt-get install -y --no-install-recommends /tmp/photo-wall-node-display.deb
+        rm -f "$1/tmp/photo-wall-node-display.deb"
+      fi

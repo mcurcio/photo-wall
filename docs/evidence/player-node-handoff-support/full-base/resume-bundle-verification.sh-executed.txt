@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+source /recipes/workflow-environment.sh
+export PATH=/work/photo-wall-base-work/aarch64-linux-gnu/usr/bin:$PATH
+export TMPDIR=/work/bundle-tmp
+zstd --version
+python3 -B - <<'PY'
+from pathlib import Path
+from scripts.build_boot_data import initrd_closure, write_manifest, INITRD_FORBIDDEN
+closure = initrd_closure(Path('/source'))
+assert closure.digest.startswith('b8a9efdeb645'), 'source_closure_changed'
+write_manifest(closure, Path('/work/initrd-closure-manifest.json'), forbidden=INITRD_FORBIDDEN)
+print('source_initrd_closure=' + closure.digest)
+PY
+python3 -B /source/scripts/verify_netboot_initrd.py "$BUNDLE/boot/initrd.img" --manifest /work/initrd-closure-manifest.json
+bash /work/workflow-steps/verify-node-abi.sh
+bash /work/workflow-steps/verify-bundle.sh

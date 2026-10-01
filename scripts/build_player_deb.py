@@ -37,6 +37,7 @@ verbatim by scripts/build_bootstrapper_deb.py (which imports them); do not move 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import re
 import subprocess
@@ -218,7 +219,8 @@ def assert_declaration_matches(tree: Path) -> None:
 
 
 def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: Path,
-               weston_ini: bytes, version: str) -> None:
+               weston_ini: bytes, version: str, native_client: Path | None = None,
+               architecture: str = ARCHITECTURE) -> None:
     """Assemble the `.deb` staging tree.
 
     Refuses a closure that leaves a declared import unreached (the declaration would put an
@@ -241,7 +243,7 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: 
     debian = deb_root / "DEBIAN"
     debian.mkdir(mode=0o755)
     control_path = debian / "control"
-    control_path.write_bytes(control_file(version, packages("player")))
+    control_path.write_bytes(control_file(version, packages("player"), architecture=architecture))
     control_path.chmod(0o644)
     postinst_path = debian / "postinst"
     postinst_path.write_bytes(postinst_script())
@@ -249,6 +251,16 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: 
 
     stage_application(closure, PLAYER_POLICY, repo=tree,
                       into=deb_root / INSTALL_DIR.relative_to("/"))
+
+    if native_client is not None:
+        blob = native_client.read_bytes()
+        machine = {"arm64": 183, "amd64": 62}.get(architecture)
+        if machine is None or len(blob) < 64 or blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(blob[18:20], "little") != machine:
+            raise BuildError("native_client_elf_architecture")
+        client = deb_root / "usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+        client.parent.mkdir(parents=True)
+        client.write_bytes(blob)
+        client.chmod(0o644)
 
     units_dir = deb_root / "etc/systemd/system"
     units_dir.mkdir(parents=True)
@@ -313,7 +325,8 @@ def run_dpkg_deb(deb_root: Path, output: Path) -> Path:
     return output
 
 
-def build(repository: Path, revision: str, output_dir: Path) -> Path:
+def build(repository: Path, revision: str, output_dir: Path, *,
+          native_client: Path | None = None, architecture: str = ARCHITECTURE) -> Path:
     """End to end: `fetch_tree` the committed sources at `revision` -> refuse a stale declaration
     (`assert_declaration_matches`) -> compute the closure -> stage -> `dpkg-deb`.
 
@@ -333,12 +346,15 @@ def build(repository: Path, revision: str, output_dir: Path) -> Path:
         closure = closure_for(PLAYER_POLICY, repo=tree)
         project = tomllib.loads((tree / "pyproject.toml").read_text())
         version = package_version(project["project"]["version"], revision)
+        if native_client is not None:
+            version += ".client" + hashlib.sha256(native_client.read_bytes()).hexdigest()[:12]
         deb_root = Path(tmp) / "deb-root"
         stage_tree(deb_root, closure=closure, tree=tree,
                    systemd_source=tree / "appliance/systemd",
-                   weston_ini=render_weston_ini().encode(), version=version)
+                   weston_ini=render_weston_ini().encode(), version=version,
+                   native_client=native_client, architecture=architecture)
         assert_no_deployment_config(deb_root)
-        output = output_dir / f"{PACKAGE}_{version}_{ARCHITECTURE}.deb"
+        output = output_dir / f"{PACKAGE}_{version}_{architecture}.deb"
         return run_dpkg_deb(deb_root, output)
 
 
@@ -347,9 +363,11 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--native-client", type=Path)
+    parser.add_argument("--architecture", choices=("all", "arm64", "amd64"), default=ARCHITECTURE)
     args = parser.parse_args()
     try:
-        output = build(args.repository, args.revision, args.output_dir)
+        output = build(args.repository, args.revision, args.output_dir, native_client=args.native_client, architecture=args.architecture)
     except (ValueError, OSError, subprocess.SubprocessError, ClosureError) as exc:
         parser.exit(1, f"Player .deb build failed: {exc}\n")
     print(str(output))

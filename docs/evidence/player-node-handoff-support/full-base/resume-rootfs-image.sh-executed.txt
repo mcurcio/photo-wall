@@ -1,0 +1,30 @@
+#!/bin/bash
+# Source and components are read-only; /work is the new task-only native Linux volume.
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH=/source:/opt/photo-wall-build-python
+[ "$(uname -m)" = aarch64 ]
+[ "$(git -C /opt/rpi-image-gen rev-parse HEAD)" = 262d4df5a9f9d4133370465399a7958a7c22cdc7 ]
+[ -d /work/photo-wall-base-work/chroot-2026-09-30/filesystem ]
+python3 -B - <<'VERIFY'
+import hashlib,json
+from pathlib import Path
+p=json.loads(Path('/work/rootfs-inputs/provenance.json').read_text())
+assert hashlib.sha256(Path('/components/source-inputs.json').read_bytes()).hexdigest()==p['source_manifest_sha256']
+assert hashlib.sha256(Path('/components/components.json').read_bytes()).hexdigest()==p['components_json_sha256']
+for name,expected in p['inputs'].items():
+    with open(name,'rb') as stream:
+        assert hashlib.file_digest(stream,'sha256').hexdigest()==expected,name
+VERIFY
+mkdir /work/rootfs-image-tmp
+export TMPDIR=/work/rootfs-image-tmp
+export SOURCE_DATE_EPOCH="$(python3 -B /source/scripts/debian_packages.py epoch)"
+/opt/rpi-image-gen/rpi-image-gen build -i -S /source/appliance/rpi_image_gen -c photo-wall-base.yaml -- \
+  IGconf_sys_workroot=/work/photo-wall-base-work \
+  IGconf_app_bootstrapper_deb=/work/rootfs-inputs/bootstrapper.deb \
+  IGconf_app_node_base_deb=/components/node-base.deb \
+  IGconf_app_node_display_deb=/components/node-display.deb \
+  IGconf_app_device_packages=/work/rootfs-inputs/device-packages.list \
+  IGconf_app_debian_sources=/work/rootfs-inputs/debian-sources.list
+# Exit 0 is only build completion. The workflow's independent content/device/ABI
+# checks and later kernel/initrd/PXE assembly remain mandatory acceptance steps.

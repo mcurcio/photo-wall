@@ -40,7 +40,7 @@ PLAYER_DEB_DEPENDS_BEFORE = (
 DEVICE_INCLUDE = (
     "--include=ca-certificates,gir1.2-gst-plugins-base-1.0,gir1.2-gtk-3.0,gstreamer1.0-libav,"
     "gstreamer1.0-plugins-bad,gstreamer1.0-plugins-base,gstreamer1.0-plugins-good,libegl1,"
-    "libgl1-mesa-dri,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
+    "libgl1-mesa-dri,libwayland-client0,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
     "python3-httpx,python3-opengl,python3-pydantic,python3-websockets,python3-zeroconf,udev,"
     "weston")
 SNAPSHOT_LINES = (
@@ -151,7 +151,7 @@ def test_each_consumer_gets_its_list():
         "ca-certificates", "python3", "python3-cryptography", "python3-pydantic",
         "python3-zeroconf")
     assert packages("player") == tuple(sorted(
-        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev")))
+        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev", "libwayland-client0")))
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
         {*packages("bootstrapper"), *packages("player")}))
     assert packages("initrd-build") == (
@@ -330,6 +330,9 @@ def test_no_deb_builder_writes_a_depends_list():
     declared = {package.name for package in PACKAGES}
     builders = sorted((REPO / "scripts").glob("build_*_deb.py"))
     assert [path.name for path in builders] == ["build_bootstrapper_deb.py",
+                                                "build_node_base_deb.py",
+                                                "build_node_display_deb.py",
+                                                "build_node_manager_deb.py",
                                                 "build_player_deb.py"]
     for path in builders:
         tree = ast.parse(path.read_text())
@@ -340,3 +343,8 @@ def test_no_deb_builder_writes_a_depends_list():
                 literal = {element.value for element in node.elts
                            if isinstance(element, ast.Constant) and isinstance(element.value, str)}
                 assert not literal & declared, (path.name, sorted(literal & declared))
+
+
+def test_node_base_and_manager_explicit_host_dependencies():
+    assert {"udev", "mount", "systemd", "ca-certificates", "login", "libpam-systemd"} <= set(packages("node-base"))
+    assert "ca-certificates" in packages("node-manager")

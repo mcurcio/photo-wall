@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+[ "$(uname -m)" = aarch64 ]
+[ "$(git -C /opt/rpi-image-gen rev-parse HEAD)" = 262d4df5a9f9d4133370465399a7958a7c22cdc7 ]
+for tool in mmdebstrap podman newuidmap unsquashfs mksquashfs mkinitramfs lsinitramfs cpio; do command -v "$tool"; done
+mkdir /work/mount-smoke
+trap 'rmdir /work/mount-smoke' EXIT
+unshare --mount /bin/bash -euc '
+ mount --make-rprivate /
+ mount -t tmpfs -o size=8m,mode=0755 tmpfs /work/mount-smoke
+ trap "umount /work/mount-smoke/devpts; umount /work/mount-smoke/sys; umount /work/mount-smoke/proc; umount /work/mount-smoke" EXIT
+ mkdir /work/mount-smoke/{proc,sys,devpts}
+ mount -t proc proc /work/mount-smoke/proc
+ mount -t sysfs sysfs /work/mount-smoke/sys
+ mount -t devpts devpts /work/mount-smoke/devpts
+ test -r /work/mount-smoke/proc/meminfo
+ test -d /work/mount-smoke/sys/kernel
+ test -c /work/mount-smoke/devpts/ptmx
+ echo PRIVATE_MOUNTS_OK
+'

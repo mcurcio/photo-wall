@@ -39,26 +39,34 @@ def control_fence_in(conn, player_id: str) -> dict | None:
         "SELECT attempt_id,phase,prepared_at FROM active_equipment_drains "
         "WHERE player_id=%s", (player_id,),
     ).fetchone()
-    return dict(row) if row is not None else None
+    if row is not None:
+        return dict(row)
+    node = conn.execute("SELECT d.operation_id,d.prepared_at,r.revalidation_id "
+        "FROM active_node_app_drains d LEFT JOIN LATERAL (SELECT revalidation_id "
+        "FROM node_app_revalidations WHERE operation_id=d.operation_id ORDER BY issued_at DESC LIMIT 1) r ON TRUE "
+        "WHERE d.player_id=%s", (player_id,)).fetchone()
+    return ({"node_operation_id": str(node["operation_id"]), "prepared_at": node["prepared_at"],
+             "revalidation_id": str(node["revalidation_id"]) if node["revalidation_id"] else None}
+            if node else None)
 
 
 def fenced_players_in(conn) -> frozenset[str]:
     """Read the durable fence inside a Coordination-locked transaction."""
     return frozenset(row["player_id"] for row in conn.execute(
-        "SELECT player_id FROM active_equipment_drains"
+        "SELECT player_id FROM active_runtime_drains"
     ).fetchall())
 
 
 def require_unfenced_player_in(conn, player_id: str) -> None:
     if conn.execute(
-        "SELECT 1 FROM active_equipment_drains WHERE player_id=%s", (player_id,),
+        "SELECT 1 FROM active_runtime_drains WHERE player_id=%s", (player_id,),
     ).fetchone():
         raise RegistryError("equipment_draining")
 
 
 def require_unfenced_frame_in(conn, frame_id: str) -> None:
     if conn.execute(
-        "SELECT 1 FROM bindings b JOIN active_equipment_drains d ON d.player_id=b.player_id "
+        "SELECT 1 FROM bindings b JOIN active_runtime_drains d ON d.player_id=b.player_id "
         "WHERE b.frame_id=%s", (frame_id,),
     ).fetchone():
         raise RegistryError("equipment_draining")

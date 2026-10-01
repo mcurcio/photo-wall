@@ -53,7 +53,7 @@ concurrency:
 jobs:
   build-base-image:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 150
     env:
       # The exact commit these assets are built for: the caller's `revision`
       # when called by pipeline.yml, else the triggering commit. Threads through
@@ -166,6 +166,19 @@ jobs:
             --output-dir "$RUNNER_TEMP/photo-wall-player-payload")
           echo "payload_path=$payload_path" >> "$GITHUB_OUTPUT"
 
+      - name: Build the immutable V2 node components
+        id: node-components
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
+        run: |
+          set -eu
+          .venv/bin/python -m scripts.build_node_components \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --output "$RUNNER_TEMP/photo-wall-node-components"
+          digest=$(cat "$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
+                       "$RUNNER_TEMP/photo-wall-node-components/node-display.deb" | sha256sum | cut -d' ' -f1)
+          echo "base_digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The bootstrapper's computed closure digest (scripts/module_closure.py,
       # the code the .deb ships): Cache A's code input, instead of a hand-kept
       # file list that could fall behind the closure.
@@ -239,7 +252,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}-${{ steps.node-components.outputs.base_digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -254,6 +267,8 @@ jobs:
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
+               "IGconf_app_node_base_deb=$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
+               "IGconf_app_node_display_deb=$RUNNER_TEMP/photo-wall-node-components/node-display.deb" \
                "IGconf_app_device_packages=$DEVICE_PACKAGES" \
                "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 
@@ -820,6 +835,24 @@ jobs:
             --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
             --python python3
 
+      - name: Verify installed node ABI and produce the explicit V2 cohort bundle
+        run: |
+          set -eu
+          .venv/bin/python - "$RUNNER_TEMP" <<'PYCODE'
+          import json, pathlib, subprocess, sys
+          work = pathlib.Path(sys.argv[1])
+          components = json.loads((work / "photo-wall-node-components/components.json").read_text())
+          squashfs = work / "photo-wall-base-bundle/photo-wall-base.squashfs"
+          installed = {}
+          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall-display/abi.json"):
+              installed.update(json.loads(subprocess.check_output(["unsquashfs", "-cat", str(squashfs), name])))
+          if installed != components["abi"]:
+              raise SystemExit("installed node ABI does not match exact component roots")
+          PYCODE
+          .venv/bin/python -m scripts.node_release_artifacts \
+            --source-bundle "$RUNNER_TEMP/photo-wall-base-bundle" \
+            --output "$RUNNER_TEMP/photo-wall-node-bundle"
+
       - name: Verify the assembled bundle (content, no hardware)
         env:
           BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
@@ -1062,6 +1095,22 @@ jobs:
         with:
           name: photo-wall-base-bundle-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-base-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload exact V2 node components
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-components-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-components/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the explicit V2 cohort bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-bundle-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-bundle/
           if-no-files-found: error
           retention-days: 7
 

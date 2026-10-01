@@ -4,6 +4,7 @@ import { isBound } from "./health.js";
 import { boundOutput } from "./join.js";
 import { derive } from "./capability.js";
 import { GatedArea } from "./GatedArea.jsx";
+import { LiveCalibrationTrial, useCalibrationCapability } from "./LiveCalibrationTrial.jsx";
 import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
@@ -96,6 +97,7 @@ export function Commissioning({ snapshot, frameId }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
   const calibration = frame?.calibration ?? {};
+  const [calibrationCapability, retryCapability] = useCalibrationCapability(frameId, frame?.generation);
 
   // Plane B draft, seeded from the committed calibration and refresh-proof. This
   // hook is called unconditionally (before the early return) to keep hook order
@@ -479,6 +481,9 @@ export function Commissioning({ snapshot, frameId }) {
         </div>
       </section>
 
+      {calibrationCapability?.mode === "native_trial" ? (
+        <LiveCalibrationTrial key={frameId + ":" + frame?.generation} frameId={frameId} trying={trying} calibrated={frame.calibration_valid === true} />
+      ) : calibrationCapability?.mode === "legacy_preview" ? (
       <section
         className="facet__section facet__section--lease"
         role="group"
@@ -543,6 +548,11 @@ export function Commissioning({ snapshot, frameId }) {
           </p>
         ) : null}
       </section>
+      ) : <section className="facet__section" aria-label="Calibration capability">
+        <p role="status">{calibrationCapability ? "Calibration capability is unavailable. Writes are paused." : "Checking calibration capability…"}</p>
+        {calibrationCapability && <button type="button" onClick={retryCapability}>Retry capability</button>}
+      </section>}
+
 
       <section className="facet__section" role="group" aria-label="Frame facts">
         <h4 className="facet__subtitle">Frame facts</h4>

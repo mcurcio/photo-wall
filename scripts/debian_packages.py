@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["bootstrapper", "player", "initrd-build"]
+Consumer = Literal["bootstrapper", "player", "initrd-build", "node-display", "node-display-build", "node-base", "node-manager"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -124,13 +124,17 @@ _EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"bootstrapper", "player", 
 _DEVICE: Final[frozenset[Consumer]] = frozenset(DEVICE_CONSUMERS)
 _PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
+_NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
+_NODE_BASE: Final[frozenset[Consumer]] = frozenset({"node-base"})
+_DISPLAY: Final[frozenset[Consumer]] = frozenset({"node-display"})
+_DISPLAY_BUILD: Final[frozenset[Consumer]] = frozenset({"node-display-build"})
 _RENDER_STACK: Final = "the render stack, loaded through gi and GStreamer, not imported by name"
 _PI_BOOT: Final = "the Pi 5 kernel, DTBs and bootloader image (unpinned archive)"
 
 PACKAGES: Final[tuple[DebianPackage, ...]] = (
-    DebianPackage("python3", _EVERY_STAGE,
+    DebianPackage("python3", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
                   why="the interpreter every stage runs on (one version at the pin)"),
-    DebianPackage("ca-certificates", _EVERY_STAGE,
+    DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
                   why="Trust.public() reads the Debian bundle (R5); apt over https in the build "
                       "root", stage="bootstrap"),
     DebianPackage("python3-zeroconf", _DEVICE, imports=("zeroconf",)),
@@ -149,11 +153,11 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("gstreamer1.0-libav", _PLAYER, why=_RENDER_STACK),
     DebianPackage("libgl1-mesa-dri", _PLAYER, why=_RENDER_STACK),
     DebianPackage("libegl1", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("weston", _PLAYER, why=_RENDER_STACK),
+    DebianPackage("weston", _PLAYER | _DISPLAY, why=_RENDER_STACK),
     # The base's device layer is metadata-only (appliance/rpi_image_gen/device/
     # photo-wall-device-none.yaml), so nothing else brings udev: without it there is no render
     # or input group and player.service fails at spawn, 216/GROUP.
-    DebianPackage("udev", _PLAYER,
+    DebianPackage("udev", _PLAYER | _NODE_BASE,
                   why="creates the render and input groups player.service's "
                       "SupplementaryGroups name, and gives /dev/dri and /dev/input their "
                       "groups (Debian's 50-udev-default.rules); libinput and logind's seats "
@@ -161,6 +165,24 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("passwd", _PLAYER,
                   why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
                       "script's non-essential tool is a Depends)"),
+    DebianPackage("systemd", _NODE_BASE, why="isolated base unit manager"),
+    DebianPackage("login", _NODE_BASE, why="base Weston PAMName=login session configuration"),
+    DebianPackage("libpam-systemd", _NODE_BASE,
+                  why="base Weston logind seat session and PAM systemd registration"),
+    DebianPackage("mount", _NODE_BASE, why="bounded diskless node storage tmpfs mount"),
+    DebianPackage("libweston-14-0", _DISPLAY, why="base display compositor ABI"),
+    DebianPackage("libjansson4", _DISPLAY, why="bounded native display JSON protocol"),
+    DebianPackage("libcairo2", _DISPLAY, why="base diagnostic rendering"),
+    DebianPackage("libwayland-client0", _DISPLAY | _PLAYER, why="private base diagnostic Wayland client"),
+    DebianPackage("libweston-14-dev", _DISPLAY_BUILD, why="base display shell compiler headers"),
+    DebianPackage("libwayland-dev", _DISPLAY_BUILD, why="base display Wayland protocol compiler headers"),
+    DebianPackage("libjansson-dev", _DISPLAY_BUILD, why="base display JSON compiler headers"),
+    DebianPackage("libcairo2-dev", _DISPLAY_BUILD, why="base diagnostic compiler headers"),
+    DebianPackage("wayland-protocols", _DISPLAY_BUILD, why="xdg-shell protocol source"),
+    DebianPackage("build-essential", _DISPLAY_BUILD, why="base native display compiler"),
+    DebianPackage("meson", _DISPLAY_BUILD, why="base native display build graph"),
+    DebianPackage("ninja-build", _DISPLAY_BUILD, why="base native display build executor"),
+    DebianPackage("pkg-config", _DISPLAY_BUILD, why="base native display ABI discovery"),
     DebianPackage("initramfs-tools", _INITRD_BUILD, why="mkinitramfs"),
     DebianPackage("gnupg", _INITRD_BUILD, why="apt key handling"),
     DebianPackage("kmod", _INITRD_BUILD, why="depmod"),
@@ -214,7 +236,7 @@ def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
         if package.stage not in get_args(Stage):
             raise DeclarationError(f"{package.name}: unknown stage {package.stage!r}")
         if package.stage == "bootstrap" and (package.archive != "debian"
-                                             or package.consumers != _EVERY_STAGE):
+                                             or not _EVERY_STAGE.issubset(package.consumers)):
             raise DeclarationError(f"{package.name}: a bootstrap package comes from the pinned "
                                    "archive and serves every root")
     if (any(source.uri.startswith("https://") for source in pin.sources())
