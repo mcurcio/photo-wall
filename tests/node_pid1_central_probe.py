@@ -67,10 +67,11 @@ def request(origin, token, path, body=None):
         return json.load(response)
 
 
-@pytest.mark.parametrize("phase", ["success", "failure", "noeffect"])
+@pytest.mark.parametrize("phase", ["success", "failure", "outage"])
 def test_actual_pid1_cold_online_lifecycle(registry, phase):
     components_dir, fixture_targets, image, root = qualification_inputs()
-    role = "success" if phase == "noeffect" else phase
+    # outage: a successful switch while Central drops every node exchange after accept.
+    role = "success" if phase == "outage" else phase
     reference = json.loads((fixture_targets / (role + "-reference.json")).read_text())
     work = root / ("pid1-" + phase + "-" + secrets.token_hex(4))
     work.mkdir()
@@ -224,23 +225,12 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
                         raise
                     time.sleep(0.5)
             (work / "issued.json").write_text(json.dumps(issued, sort_keys=True))
-            first_permit = None
             deadline = time.monotonic() + 240
             while time.monotonic() < deadline:
                 status = request(
                     fixture["host_origin"], fixture["fixture_token"], "/fixture/status"
                 )
                 (work / "status-latest.json").write_text(json.dumps(status, sort_keys=True))
-                if phase == "noeffect":
-                    entries = [row for row in status["operations"] if row["phase"] == phase]
-                    if entries and entries[0]["permit"]:
-                        observed_permit = entries[0]["permit"]
-                        if first_permit is None:
-                            first_permit = observed_permit
-                            (work / "first-permit.json").write_text(
-                                json.dumps(first_permit, sort_keys=True)
-                            )
-                        assert observed_permit == first_permit, "immutable permit changed"
                 try:
                     assert_phase_completed(status, phase, AppEnvironmentRefV2(**reference))
                     break
@@ -261,10 +251,6 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
                     json.dumps(status["current"]),
                 )
             )
-            if phase == "noeffect":
-                assert status["current"]["process"] == before["process"]
-                assert first_permit == status["operations"][0]["permit"]
-                assert observation["boottime_ms"] > first_permit["expires_boottime_ms"] + 2000
             (work / "result.json").write_text(
                 json.dumps(
                     {
@@ -355,7 +341,6 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
                     "selected",
                     "process-evidence",
                     "observed-app",
-                    "latest-app-link",
                 ]:
                     state = container.exec(
                         "cat", "/run/photo-wall-app-broker/" + state_name + ".json", timeout=10

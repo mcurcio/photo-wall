@@ -18,16 +18,13 @@ class StopRequest:
     operation_id: UUID
     boot_id: UUID
     command_sha256: str
-    permit_id: UUID
-    permit_sha256: str
     old: RunningApp
     dispatch_not_after_boottime_ms: int
 
     def __post_init__(self):
-        for value in (self.operation_id, self.boot_id, self.permit_id):
+        for value in (self.operation_id, self.boot_id):
             identifier(value)
-        for value in (self.command_sha256, self.permit_sha256):
-            digest(value)
+        digest(self.command_sha256)
         counter(self.dispatch_not_after_boottime_ms, 1)
         if type(self.old) is not RunningApp:
             raise ValueError("stop_request_identity")
@@ -53,12 +50,10 @@ def stop_request_document(request: StopRequest) -> dict:
 
 def stop_request_from(value: dict) -> StopRequest:
     if type(value) is not dict or set(value) != {
-            "operation_id", "boot_id", "command_sha256", "permit_id", "permit_sha256",
-            "old", "dispatch_not_after_boottime_ms"}:
+            "operation_id", "boot_id", "command_sha256", "old", "dispatch_not_after_boottime_ms"}:
         raise ValueError("stop_request_document")
     return StopRequest(UUID(value["operation_id"]), UUID(value["boot_id"]), value["command_sha256"],
-        UUID(value["permit_id"]), value["permit_sha256"], running_from(value["old"]),
-        value["dispatch_not_after_boottime_ms"])
+        running_from(value["old"]), value["dispatch_not_after_boottime_ms"])
 
 
 def stop_request_digest(request: StopRequest) -> str:

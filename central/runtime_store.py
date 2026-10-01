@@ -51,7 +51,7 @@ class RuntimeStore:
         row = conn.execute(
             "SELECT (SELECT snapshot FROM runtime_state WHERE singleton) AS snapshot,"
             "COALESCE((SELECT jsonb_agg(snapshot ORDER BY player_id) "
-            "FROM active_runtime_drains),'[]'::jsonb) AS drains"
+            "FROM active_equipment_drains),'[]'::jsonb) AS drains"
         ).fetchone()
         targets = set()
         for snapshot in row["drains"]:

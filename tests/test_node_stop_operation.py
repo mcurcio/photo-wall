@@ -33,7 +33,7 @@ def stopped(tmp_path, monkeypatch):
     group = driver.cgroups / GROUP.lstrip("/")
     group.mkdir(parents=True)
     (group / "cgroup.events").write_text("populated 0\n")
-    request = StopRequest(uuid4(), boot, "a" * 64, uuid4(), "b" * 64, old, 2000)
+    request = StopRequest(uuid4(), boot, "a" * 64, old, 2000)
     calls = []
     process = driver.proc / str(old.process.pid)
     process.mkdir(parents=True)
@@ -78,7 +78,7 @@ def test_pending_survives_waiter_and_restart_without_second_dispatch(stopped):
     with pytest.raises(InvalidStateError):
         operation.result()
     (group / "cgroup.events").write_text("populated 1\n")
-    service(driver, now=50000)  # Well beyond both permit and former 15-second wait.
+    service(driver, now=50000)  # Well beyond the dispatch bound and former 15-second wait.
     assert not operation.done()
     driver.stops.close()
     driver.stops = StopObserver(driver)
@@ -143,7 +143,7 @@ def test_conflicting_request_and_new_boot_refuse(stopped):
     driver, request, _, _, _ = stopped
     driver.stop(request)
     with pytest.raises(StopGuaranteeUnavailable):
-        driver.stop(replace(request, permit_sha256="c" * 64), reattach_only=True)
+        driver.stop(replace(request, command_sha256="c" * 64), reattach_only=True)
     with pytest.raises(StopGuaranteeUnavailable, match="boot"):
         driver.stop(replace(request, boot_id=uuid4()), reattach_only=True)
 
@@ -266,7 +266,7 @@ def test_completed_record_survives_restart_and_cannot_change_request(stopped):
     driver.stops = StopObserver(driver)
     assert driver.stop(request, reattach_only=True).result() == operation.result()
     with pytest.raises(StopGuaranteeUnavailable, match="journal"):
-        driver.stop(replace(request, permit_id=uuid4()), reattach_only=True)
+        driver.stop(replace(request, dispatch_not_after_boottime_ms=2001), reattach_only=True)
     assert sum("stop" in call for call in calls) == 1
 
 
@@ -394,7 +394,7 @@ def test_local_control_proof_survives_expired_session_and_central_timeout(stoppe
     service.driver = driver
     service.session = SimpleNamespace(grant=None, store=driver.store, claim=None,
         ensure=lambda: (_ for _ in ()).throw(AssertionError("network session gate")),
-        transport=SimpleNamespace(request=lambda *a: (_ for _ in ()).throw(TimeoutError())))
+        request=lambda *a: (_ for _ in ()).throw(TimeoutError()))
     sent = []
     def send(raw):
         sent.append(raw)
@@ -413,4 +413,3 @@ def test_local_control_proof_survives_expired_session_and_central_timeout(stoppe
     proof = driver.store.read("local-app-control")
     assert proof["operation_id"] == str(request.old.operation_id)
     assert proof["progress"]["process"]["pid"] == request.old.process.pid
-    assert driver.store.read("latest-app-link") is None

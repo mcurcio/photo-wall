@@ -1,17 +1,19 @@
 """Sustained qualification through Registry/Runtime/link/Display owners, no pixels claim."""
+import json
 from dataclasses import replace
 from uuid import uuid4
 
 import pytest
 from test_coordination import publish_fixture_catalog, report
 from test_fleet_attempts import DEVICE_ID
-from test_node_lifecycle import fresh_proof
 from test_node_runtime_reconciliation import rig
 
 from central.fleet.node_acceptance import NodeAcceptance
+from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
 from central.runtime import Contribution, Scene
+from contracts.node_app_link import NodeAppLinkV2, encode_node_app_link, node_app_link_message
 from contracts.node_display import (
     DisplayExchange,
     DisplayReceipt,
@@ -20,6 +22,19 @@ from contracts.node_display import (
     parse_display_decision,
 )
 from contracts.node_frame import frame_witness_tag
+from contracts.player_control import ControlAck
+
+
+def fresh_proof(registry, service, claim, old_proof, key, *, sampled=35001):
+    registry.clock.advance(1)
+    delivery = registry.issue_control_delivery_record(old_proof.challenge.player_id, 1, uuid4().hex*2)
+    receipt = registry.control_ack_response(old_proof.challenge.player_id,
+        ControlAck(authority_epoch=1, delivery_id=delivery['delivery_id'], result='applied')).receipt
+    challenge = replace(old_proof.challenge, control_receipt=json.dumps(receipt.model_dump(mode='json', by_alias=True),
+        sort_keys=True, separators=(',', ':')), nonce=uuid4().hex*2, sampled_boottime_ms=sampled)
+    proof = NodeAppLinkV2(challenge, old_proof.public_key, key.sign(node_app_link_message(challenge)).hex())
+    NodeAppLinks(service.sessions).admit(claim.session_id, claim.credential, encode_node_app_link(proof))
+    return proof
 
 
 class Witnesses:
@@ -167,7 +182,7 @@ def test_binding_change_cannot_keep_old_qualification_witness(registry):
         witness.acceptance.sample(witness.qualification)
 
 
-def test_actual_qualification_selects_fallback_but_changed_mode_blocks_stop(registry):
+def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage(registry):
     import json
 
     from test_fleet_rollout_gate import _gate
@@ -175,7 +190,7 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_stop(regi
 
     from central.fleet.node_boot import NodeBootService, parse_node_deployment
     from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
-    from contracts.node_lifecycle import StageReadyV2, encode_stage_ready, parse_stage_command
+    from contracts.node_lifecycle import parse_stage_command
     witness=Witnesses(registry)
     for _ in range(7):
         result=witness.advance()
@@ -202,8 +217,7 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_stop(regi
     changed=DisplayExchange(witness.grant.producer,uuid4(),local_now+1,
                            replace(old.output,mode_generation=2),True)
     witness.send(changed)
-    ready=StageReadyV2(command.producer,command.operation_id,command.command_id,command.command_sha256,
-        command.command_session_id,uuid4(),1,local_now,command.old_process,command.old_app_epoch,
-        command.target.environment_sha256,command.fallback.environment_sha256,True,True)
-    with pytest.raises(NodeControlError,match='fallback_cohort_changed'):
-        lifecycle.ready(claim.session_id,claim.credential,encode_stage_ready(ready))
+    # The fallback is frozen at stage time; a changed output cohort refuses a new stage.
+    with pytest.raises(NodeControlError,match='qualified_fallback_required'):
+        lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,
+                                                   generation,'operator:after-mode-change'))

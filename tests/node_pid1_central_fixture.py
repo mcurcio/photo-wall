@@ -6,8 +6,6 @@ process/display witness injection, operator reboot, or bound withdrawal.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import secrets
 import shutil
@@ -48,6 +46,8 @@ from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2, encode_node_bo
 from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
 from contracts.player_control import ControlAppliedReceipt
 from contracts.time import SystemClock
+
+OUTAGE_SECONDS = 35
 
 
 @contextmanager
@@ -128,8 +128,7 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                         protocol_refusals[key] = protocol_refusals.get(key, 0) + 1
                 raise
         return observed
-    lifecycle.revalidate = observe_refusals("revalidate", lifecycle.revalidate)
-    lifecycle.no_effect = observe_refusals("no_effect", lifecycle.no_effect)
+    lifecycle.effect = observe_refusals("effect", lifecycle.effect)
     boots = NodeBootService(sessions)
     base = NodeBaseRefV2(
         "v99.0.0",
@@ -167,7 +166,10 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
     gate, verifier = _gate(registry, _certificate(expires_in=300))
     generation = gate.open(expected_revision=0).generation
     operations = {}
-    dropped = {"ready": 0, "receipt": 0}
+    # The outage phase drops every node exchange for OUTAGE_SECONDS once the broker
+    # has fetched its stage: the switch must converge locally and report afterwards.
+    dropped = {"outage": 0}
+    outage = {"started": None}
     state_lock = threading.Lock()
     boot_request = None
 
@@ -190,33 +192,16 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
         return principal, link
 
     @app.middleware("http")
-    async def lost_noeffect_response(request, call_next):
-        # Execute real endpoint/transaction first; suppress only its response.
+    async def central_outage_after_accept(request, call_next):
+        entry = operations.get("outage")
+        node = request.url.path.startswith("/v2/node/")
+        started = outage["started"]
+        if entry and node and started is not None and clock.utc() < started + OUTAGE_SECONDS:
+            dropped["outage"] += 1
+            return JSONResponse({"fixture": "central_unreachable"}, status_code=503)
         response = await call_next(request)
-        entry = operations.get("noeffect")
-        ready = request.url.path == "/v2/node/app-ready"
-        receipt = (
-            entry
-            and request.url.path
-            == f"/v2/node/app-attempts/{entry['operation_id']}/stop-permit-receipt"
-        )
-        if entry and (ready or receipt):
-
-            def deadline():
-                with registry.db.transaction() as conn:
-                    row = conn.execute(
-                        "SELECT expires_at FROM node_app_permits WHERE operation_id=%s",
-                        (entry["operation_id"],),
-                    ).fetchone()
-                    return row["expires_at"] if row else None
-
-            expires = await asyncio.to_thread(deadline)
-            if expires is not None and clock.utc() < expires + 3:
-                # Drain original response so streaming tasks complete; its bytes are lost.
-                async for _ in response.body_iterator:
-                    pass
-                dropped["ready" if ready else "receipt"] += 1
-                return JSONResponse({"fixture": "response_lost_after_real_commit"}, status_code=503)
+        if entry and started is None and request.url.path == "/v2/node/app-commands":
+            outage["started"] = clock.utc()  # The broker now holds the desired stage.
         return response
 
     @app.post("/fixture/node-ready")
@@ -304,8 +289,8 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
             operations[phase] = {"operation_id": str(operation), "before": before, **result}
             return operations[phase]
 
-    def discharge_diagnostics(conn, operation):
-        """Read exact owner predicates; never reconcile, ACK or discharge here."""
+    def effect_diagnostics(conn, operation):
+        """Read exact owner predicates and reported effects; never ACK or report here."""
         result = {}
         try:
             row = conn.execute(
@@ -402,11 +387,6 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                 receipt_digest_matches=receipt.state_digest == control.applied_digest,
                 receipt_nonce_matches=receipt.ack_nonce == control.applied_ack_nonce,
             )
-            result["active_drain_present"] = bool(
-                conn.execute(
-                    "SELECT 1 FROM active_node_app_drains WHERE operation_id=%s", (operation,)
-                ).fetchone()
-            )
         except NodeControlError as error:
             result["owner_refusal"] = error.code
         except (ValueError, TypeError, KeyError) as error:
@@ -416,6 +396,9 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
     @app.get("/fixture/status")
     def status(request: Request):
         authenticate(request)
+        # Central's own projection, read before this diagnostic cut takes its locks.
+        projected = {item["operation_id"]: item["state"]
+                     for item in lifecycle.status(DEVICE_ID)["operations"]}
         with registry.db.transaction() as conn:
             acquire_runtime_locks(conn)
             try:
@@ -436,22 +419,6 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                     "WHERE operation_id=%s ORDER BY sequence",
                     (operation,),
                 ).fetchall()
-                discharge = conn.execute(
-                    "SELECT basis,evidence FROM node_app_discharges WHERE operation_id=%s",
-                    (operation,),
-                ).fetchone()
-                permit = conn.execute(
-                    "SELECT permit_id,payload,issued_at,expires_at FROM node_app_permits WHERE operation_id=%s",
-                    (operation,),
-                ).fetchone()
-                if permit is not None:
-                    payload = bytes(permit.pop("payload"))
-                    decoded = json.loads(payload)
-                    permit.update(
-                        payload_sha256=hashlib.sha256(payload).hexdigest(),
-                        issued_boottime_ms=decoded["issued_boottime_ms"],
-                        expires_boottime_ms=decoded["expires_boottime_ms"],
-                    )
                 rows.append(
                     {
                         "phase": phase,
@@ -460,9 +427,8 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                         "effects": [
                             {"phase": e["phase"], "sequence": e["sequence"]} for e in effects
                         ],
-                        "discharge": discharge,
-                        "permit": permit,
-                        "discharge_diagnostics": discharge_diagnostics(conn, operation),
+                        "state": projected.get(operation),
+                        "effect_diagnostics": effect_diagnostics(conn, operation),
                     }
                 )
             return {
@@ -471,9 +437,6 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                 "response_losses": dict(dropped),
                 "protocol_refusals": dict(protocol_refusals),
                 "fixture_qualification": True,
-                "active_drains": conn.execute(
-                    "SELECT count(*) n FROM active_node_app_drains"
-                ).fetchone()["n"],
             }
 
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
@@ -504,52 +467,37 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
 
 
 def assert_phase_completed(status, phase, target_reference):
-    """Assert ledger and actual-link consequences; never infer physical completion."""
+    """Assert reported-effect and actual-link consequences; never infer physical completion."""
     entries = [entry for entry in status["operations"] if entry["phase"] == phase]
     assert len(entries) == 1, status
     entry = entries[0]
     before, current = entry["before"], status["current"]
-    assert current is not None and entry["permit"] is not None, status
-    assert status["active_drains"] == 0, status
+    assert current is not None, status
     phases = [effect["phase"] for effect in entry["effects"]]
-    assert entry["discharge"] is not None, status
-    if phase == "noeffect":
-        assert entry["discharge"]["basis"] == "authorized_no_effect", status
-        assert current == before, status
-        assert "no_stop_quiescent" in phases, status
-        assert not set(phases) & {
-            "intent_stop",
-            "stopped",
-            "starting_new",
-            "running",
-            "fallback_starting",
-            "fallback_running",
-            "effect_unknown",
-        }, status
-        assert status["response_losses"]["ready"] > 0, status
-    else:
-        basis = "operational_fallback" if phase == "failure" else "operational_target"
-        assert entry["discharge"]["basis"] == basis, status
-        expected = (
-            before["environment_sha256"]
-            if phase == "failure"
-            else target_reference.environment_sha256
-        )
-        assert current["environment_sha256"] == expected, status
-        assert current["process"] != before["process"], status
-        assert current["app_epoch"] > before["app_epoch"], status
-        assert current["authority_epoch"] > before["authority_epoch"], status
-        order = (
-            ["intent_stop", "stopped", "target_failed", "fallback_starting", "fallback_running"]
-            if phase == "failure"
-            else ["intent_stop", "stopped", "starting_new", "running"]
-        )
-        positions = [phases.index(name) for name in order]
-        assert all(left < right for left, right in zip(positions, positions[1:])), status
-        assert "effect_unknown" not in phases, status
+    state = "fallback_running" if phase == "failure" else "target_running"
+    assert entry["state"] == state, status
+    expected = (
+        before["environment_sha256"]
+        if phase == "failure"
+        else target_reference.environment_sha256
+    )
+    assert current["environment_sha256"] == expected, status
+    assert current["process"] != before["process"], status
+    assert current["app_epoch"] > before["app_epoch"], status
+    assert current["authority_epoch"] > before["authority_epoch"], status
+    order = (
+        ["intent_stop", "stopped", "target_failed", "fallback_starting", "fallback_running"]
+        if phase == "failure"
+        else ["intent_stop", "stopped", "starting_new", "running"]
+    )
+    positions = [phases.index(name) for name in order]
+    assert all(left < right for left, right in zip(positions, positions[1:])), status
+    assert "effect_unknown" not in phases, status
+    if phase == "outage":
+        assert status["response_losses"]["outage"] > 0, status
     return {
         "phase": phase,
-        "basis": entry["discharge"]["basis"],
+        "state": entry["state"],
         "operation_id": entry["operation_id"],
         "physical_output": "unqualified",
         "rollback_acceptance": "explicit_fixture_not_qualification",

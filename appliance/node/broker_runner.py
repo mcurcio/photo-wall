@@ -42,8 +42,7 @@ def emit_process_evidence(store, session, running, state: str) -> None:
         store.write("process-evidence", document)
     for _ in range(min(4, len(document["pending"]))):
         event = parse_node_message(document["pending"][0].encode())
-        code, _ = session.transport.request("POST", "/v2/node/evidence",
-                                            encode_node_message(event), session.claim)
+        code, _ = session.request("POST", "/v2/node/evidence", encode_node_message(event))
         if code != 200:
             break
         document = {**document, "pending": document["pending"][1:]}
@@ -112,12 +111,17 @@ def main() -> None:
                     if current is not None:
                         emit_process_evidence(store, session, current, "running")
                     store.write("observed-app", {"running": primitive(current) if current else None})
-                if grant is not None and time.monotonic() - last_online_poll >= 2:
-                    last_online_poll = time.monotonic()
-                    online.tick()
             except (OSError, ValueError, http.client.HTTPException):
                 if store.failed:
                     raise
+            # A switch converges even when enrollment or Central is unavailable.
+            if time.monotonic() - last_online_poll >= 2:
+                last_online_poll = time.monotonic()
+                try:
+                    online.tick()
+                except (OSError, ValueError, http.client.HTTPException):
+                    if store.failed:
+                        raise
             time.sleep(0.1)
     finally:
         driver.stops.close()

@@ -1,4 +1,4 @@
-"""Crash and authority-boundary acceptance for the online base effect owner."""
+"""Crash and convergence acceptance for the online base effect owner."""
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,9 +12,8 @@ from appliance.node.online_broker import OnlineEffectBroker
 from appliance.node.stop_operation import StopCompleted, StopView
 from contracts.node_lifecycle import (
     StageCommandV2,
-    StopPermitV2,
+    encode_stage_command,
     parse_app_effect_event,
-    ready_digest,
     stage_digest,
 )
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
@@ -64,6 +63,12 @@ class Driver:
         return self.running
 
 
+def stage(producer, old, target, fallback, *, offer_id):
+    command = StageCommandV2(uuid4(), uuid4(), "0" * 64, producer, uuid4(), offer_id,
+                             old.process, old.app_epoch, old.environment, target, fallback)
+    return replace(command, command_sha256=stage_digest(command))
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     import appliance.node.online_broker as module
@@ -71,52 +76,106 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "memory_values", lambda: (8 * 1024**3, 7 * 1024**3))
     producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
     old = RunningApp(environment("a"), NodeProcessIdentity(100, 200, uuid4()), 1, uuid4())
-    command = StageCommandV2(uuid4(), uuid4(), "0" * 64, producer, uuid4(), uuid4(), old.process,
-        old.app_epoch, old.environment, environment("b"), old.environment, 50000)
-    command = replace(command, command_sha256=stage_digest(command))
+    command = stage(producer, old, environment("b"), old.environment, offer_id=uuid4())
     journal = store(tmp_path, producer.kernel_boot_id)
-    transport = SimpleNamespace(request=lambda *args, **kwargs: (200, b'{}'))
-    session = SimpleNamespace(grant=SimpleNamespace(producer=producer, session_id=command.command_session_id,
-        offer_id=command.offer_id, expires_boottime_ms=60000), claim=None, transport=transport)
+    # A renewed session keeps a command current: binding is to the producer, not one session.
+    session = SimpleNamespace(grant=SimpleNamespace(producer=producer, session_id=uuid4(),
+        offer_id=command.offer_id), claim=None, request=lambda *args, **kwargs: (200, b'{}'))
     driver = Driver(old)
     broker = OnlineEffectBroker(journal, driver, session, SimpleNamespace(arm=lambda x: x.receipt, advance=lambda *a: None))
     broker.accept(command)
-    ready = broker.ready()
-    permit = StopPermitV2(producer, command.operation_id, command.command_id, command.command_sha256,
-        command.command_session_id, uuid4(), uuid4(), ready_digest(ready), old.process, old.app_epoch, 1000, 2000)
-    yield broker, driver, command, permit, module
+    yield broker, driver, command, module
     journal.close()
 
 
-def test_stage_and_readiness_have_no_effect_then_exact_permit_switches(setup):
-    broker, driver, command, permit, _ = setup
-    assert driver.stop_calls == 0 and driver.starts == []
-    with pytest.raises(ValueError, match="permit_binding"):
-        broker.execute(replace(permit, command_session_id=uuid4()))
-    assert driver.stop_calls == 0
-    broker.execute(permit)
+def phases(broker):
+    return [parse_app_effect_event(raw.encode()).phase for raw in broker.record["pending"]]
+
+
+def test_preparation_has_no_effect_then_verified_roots_switch_once(setup):
+    broker, driver, command, _ = setup
+    assert driver.stop_calls == 0 and driver.starts == [] and broker.record["phase"] == "preparing"
+    broker.execute()
     assert driver.stop_calls == 1 and driver.starts == [command.target]
     events = [parse_app_effect_event(raw.encode()) for raw in broker.record["pending"]]
     assert [e.phase for e in events] == ["intent_stop", "stopped", "starting_new", "running"]
     assert [e.sequence for e in events] == [1, 2, 3, 4]
-    with pytest.raises(ValueError, match="not_ready"):
-        broker.execute(permit)
+    with pytest.raises(ValueError, match="not_preparing"):
+        broker.execute()
     assert driver.stop_calls == 1
 
 
+def test_unverified_root_or_changed_old_process_never_journals_intent(setup):
+    broker, driver, command, _ = setup
+    driver.verify = lambda reference: reference != command.fallback
+    with pytest.raises(ValueError, match="root_unverified"):
+        broker.execute()
+    driver.verify = lambda reference: True
+    driver.running = replace(driver.running, app_epoch=7)
+    with pytest.raises(ValueError, match="old_process_changed"):
+        broker.execute()
+    assert broker.record["phase"] == "preparing" and not broker.record["pending"]
+    assert driver.stop_calls == 0 and not driver.starts
+
+
+def test_reporting_never_gates_the_switch_and_flush_reports_in_order(setup):
+    broker, driver, command, _ = setup
+    def outage(*args, **kwargs):
+        raise OSError("central unreachable")
+    broker.session.request = outage
+    broker.session.grant = None
+    broker.execute()
+    assert driver.starts == [command.target]
+    with pytest.raises(OSError):
+        broker.flush()
+    assert phases(broker) == ["intent_stop", "stopped", "starting_new", "running"]
+    sent = []
+    broker.session.request = lambda method, path, body=None: (sent.append((path, body)) or (200, b"{}"))
+    broker.flush()
+    assert [path for path, _ in sent] == ["/v2/node/app-responses"] + ["/v2/node/app-effects"] * 4
+    assert [parse_app_effect_event(body).sequence for _, body in sent[1:]] == [1, 2, 3, 4]
+    assert not broker.record["pending"] and not broker.record["response_pending"]
+
+
+def test_latest_stage_replaces_unstarted_switch_but_never_one_in_flight(setup):
+    broker, driver, command, _ = setup
+    old = driver.running
+    newer = stage(command.producer, old, environment("c"), old.environment, offer_id=command.offer_id)
+    broker.accept(newer)
+    assert broker.record["command"] == encode_stage_command(newer).decode()
+    assert broker.record["phase"] == "preparing"
+    driver.unknown_stop = True
+    broker.execute()
+    assert broker.record["phase"] == "intent_stop"
+    latest = stage(command.producer, old, environment("d"), old.environment, offer_id=command.offer_id)
+    with pytest.raises(ValueError, match="prior_operation_unresolved"):
+        broker.accept(latest)
+    assert driver.stop_calls == 1
+
+
+def test_completed_switch_accepts_the_next_stage_and_keeps_unreported_events(setup):
+    broker, driver, command, _ = setup
+    broker.execute()
+    following = stage(command.producer, driver.running, environment("c"), command.target,
+                      offer_id=command.offer_id)
+    broker.accept(following)
+    assert broker.record["phase"] == "preparing" and broker.record["sequence"] == 0
+    assert phases(broker) == ["intent_stop", "stopped", "starting_new", "running"]
+
+
 def test_target_failure_selects_only_frozen_accepted_fallback(setup):
-    broker, driver, command, permit, _ = setup
+    broker, driver, command, _ = setup
     driver.target_fails = True
-    broker.execute(permit)
+    broker.execute()
     assert driver.starts == [command.target, command.fallback]
     assert broker.record["phase"] == "fallback_running"
     assert driver.stop_calls == 1
 
 
 def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):
-    broker, driver, _, permit, _ = setup
+    broker, driver, _, _ = setup
     driver.unknown_stop = True
-    broker.execute(permit)
+    broker.execute()
     restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
     restarted.reconcile()
     assert restarted.record["phase"] == "intent_stop"
@@ -124,12 +183,12 @@ def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):
 
 
 def test_stop_complete_journal_before_start_recovers_once(setup, monkeypatch):
-    broker, driver, command, permit, _ = setup
+    broker, driver, command, _ = setup
     def crash(*args, **kwargs):
         raise KeyboardInterrupt()
     monkeypatch.setattr(broker, "_start", crash)
     with pytest.raises(KeyboardInterrupt):
-        broker.execute(permit)
+        broker.execute()
     assert broker.record["phase"] == "stopped"
     restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
     restarted.reconcile()
@@ -137,64 +196,9 @@ def test_stop_complete_journal_before_start_recovers_once(setup, monkeypatch):
     assert driver.stop_calls == 1 and driver.starts == [command.target]
 
 
-def test_expired_permit_seal_is_atomic_final_and_restart_safe(setup, monkeypatch):
-    broker, driver, command, permit, module = setup
-    monkeypatch.setattr(module, "boottime_ms", lambda: 5000)
-    broker.execute(permit)
-    assert driver.stop_calls == 0
-    event = broker._event("no_stop_quiescent", running=driver.current())
-    assert event.executor_sealed and event.journal_watermark == event.sequence == 1
-    assert broker.record["sealed_operations"][str(command.operation_id)] == command.command_sha256
-    assert broker.record["quiescent_event_id"] == str(event.event_id)
-    assert broker.record["quiescent_at"] == event.occurred_boottime_ms
-    assert broker.record["revalidation_id"]
-    assert broker.record["seal_event"] == broker.record["pending"][-1]
-    restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
-    restarted.reconcile()
-    with pytest.raises(ValueError, match="not_ready"):
-        restarted.execute(permit)
-    with pytest.raises(ValueError, match="sealed"):
-        restarted._start(command, command.target, fallback=False)
-    with pytest.raises(ValueError, match="sealed"):
-        restarted._event("intent_stop", running=driver.current())
-    assert driver.stop_calls == 0 and driver.starts == []
-
-
-def test_quiescence_cannot_skip_pending_intent_upload(setup):
-    broker, driver, _, permit, _ = setup
-    driver.unknown_stop = True
-    broker.execute(permit)
-    with pytest.raises(ValueError, match="stop_intent_not_no_effect"):
-        broker._event("no_stop_quiescent", running=driver.current())
-    assert not broker.record.get("executor_sealed")
-
-
-def test_live_recovery_receipt_never_becomes_execution_authority(setup):
-    from contracts.node_lifecycle import StopPermitReceiptV2
-    broker, driver, _, permit, _ = setup
-    broker.retain_permit_receipt(StopPermitReceiptV2(permit))
-    assert broker.record["phase"] == "awaiting_recovery"
-    restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
-    restarted.reconcile()
-    with pytest.raises(ValueError, match="not_ready"):
-        restarted.execute(permit)
-    assert driver.stop_calls == 0 and not driver.starts
-
-
-def test_uploaded_stop_intent_still_forbids_no_effect_seal(setup):
-    broker, driver, _, permit, _ = setup
-    driver.unknown_stop = True
-    broker.execute(permit)
-    broker.flush()
-    assert not broker.record["pending"] and broker.record["intent_stop_written"]
-    with pytest.raises(ValueError, match="stop_intent_not_no_effect"):
-        broker._event("no_stop_quiescent", running=driver.current())
-    assert not broker.record.get("executor_sealed")
-
-
 def test_worker_spawn_intent_survives_lost_systemd_reply_without_duplicate(setup, monkeypatch):
     from appliance.node import import_worker
-    broker, _, command, _, _ = setup
+    broker, _, command, _ = setup
     worker = import_worker.RootImportWorker(broker.store)
     monkeypatch.setattr(worker, "ready", lambda command: False)
     calls = []
@@ -212,23 +216,21 @@ def test_worker_spawn_intent_survives_lost_systemd_reply_without_duplicate(setup
     assert len(calls) == 1
 
 
-def test_completed_worker_before_readiness_never_respawns(setup, monkeypatch):
+def test_completed_worker_never_respawns(setup, monkeypatch):
     from appliance.node import import_worker
-    broker, driver, command, _, _ = setup
+    broker, driver, command, _ = setup
     worker = import_worker.RootImportWorker(broker.store)
     monkeypatch.setattr(worker, "ready", lambda command: True)
     def forbidden(*args, **kwargs):
         raise AssertionError("completed worker must not spawn again")
     monkeypatch.setattr(import_worker.subprocess, "run", forbidden)
     worker.advance(command)
-    recovered = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
-    recovered.ready()
     assert driver.stop_calls == 0 and not driver.starts
 
 
 def test_worker_same_unit_new_invocation_never_passes_recovery(setup, monkeypatch):
     from appliance.node import import_worker
-    broker, _, command, _, _ = setup
+    broker, _, command, _ = setup
     worker = import_worker.RootImportWorker(broker.store)
     incarnation = uuid4()
     broker.store.write("import-worker", {"command_sha256": command.command_sha256, "unit": "same.service",
@@ -243,80 +245,29 @@ def test_worker_same_unit_new_invocation_never_passes_recovery(setup, monkeypatc
         worker.advance(command)
 
 
-def test_expired_preparation_closes_only_on_authoritative_cancel_receipt(setup, monkeypatch):
-    broker, driver, command, _, module = setup
-    broker._save({**broker.record, "phase": "preparing", "ready": None})
-    monkeypatch.setattr(module, "boottime_ms", lambda: 51000)
-    assert not broker.cancel_expired(worker_quiescent=False)
-    assert broker.cancel_expired(worker_quiescent=True)
-    event = parse_app_effect_event(broker.record["pending"][0].encode())
-    assert event.phase == "cancelled_before_stop" and event.executor_sealed and event.journal_watermark == 1
-    assert event.process == command.old_process and event.permit_id is None
-    broker.session.transport.request = lambda *a, **kw: (200, b'{"stage_closed":true}')
-    broker.flush()
-    assert broker.record["stage_closed"]
-    assert not broker.cancel_expired(worker_quiescent=True)
-    assert driver.stop_calls == 0 and not driver.starts
-
-
-def test_cancellation_receipt_absence_never_unlocks_new_operation(setup, monkeypatch):
-    broker, driver, command, _, module = setup
-    monkeypatch.setattr(module, "boottime_ms", lambda: 51000)
-    assert broker.cancel_expired(worker_quiescent=True)
-    with pytest.raises(ValueError, match="cancellation_receipt"):
-        broker.flush()
-    assert broker.record["pending"] and not broker.record.get("stage_closed")
-    next_command = replace(command, operation_id=uuid4(), command_id=uuid4(), expires_boottime_ms=59000)
-    next_command = replace(next_command, command_sha256=stage_digest(next_command))
-    with pytest.raises(ValueError, match="cancellation_not_closed"):
-        broker.accept(next_command)
-    assert driver.stop_calls == 0
-
-
-def test_cancel_loses_permit_race_retains_seal_and_later_quiescence(setup, monkeypatch):
-    from contracts.node_lifecycle import StopPermitReceiptV2
-    broker, driver, command, permit, module = setup
-    monkeypatch.setattr(module, "boottime_ms", lambda: 51000)
-    assert broker.cancel_expired(worker_quiescent=True)
-    broker.session.transport.request = lambda *a, **kw: (200, b'{"stage_closed":false}')
-    broker.flush()
-    broker.retain_permit_receipt(StopPermitReceiptV2(permit))
-    restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
-    assert restarted.record["executor_sealed"] and restarted.record["permit_recovery_only"]
-    with pytest.raises(ValueError, match="not_ready"):
-        restarted.execute(permit)
-    event = restarted._event("no_stop_quiescent", running=driver.current())
-    assert event.sequence == event.journal_watermark == 2 and event.executor_sealed
-    assert event.permit_id == permit.permit_id
-    with pytest.raises(ValueError, match="sealed"):
-        restarted._event("no_stop_quiescent", running=driver.current())
-    assert driver.stop_calls == 0 and not driver.starts
-
-
 def test_pending_stop_recovers_locally_after_session_loss_without_redispatch(setup):
-    broker, driver, command, permit, _ = setup
+    broker, driver, command, _ = setup
     driver.unknown_stop = True
-    broker.execute(permit)
+    broker.execute()
     broker.session.grant = None
-    broker.session.transport.request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network"))
+    broker.session.request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network"))
     driver.unknown_stop = False
     recovered = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
     recovered.service()
     recovered.service()
     assert driver.stop_calls == 1 and driver.starts == [command.target]
-    events = [parse_app_effect_event(raw.encode()).phase for raw in broker.record["pending"]]
-    assert events == ["intent_stop", "stopped", "starting_new", "running"]
+    assert phases(broker) == ["intent_stop", "stopped", "starting_new", "running"]
 
 
 def test_host_ack_loss_prevents_stop_and_replay_does_not_extend_obligation(setup):
-    broker, driver, _, permit, _ = setup
+    broker, driver, _, _ = setup
     registrations = []
     def lost(obligation):
         registrations.append(obligation)
         raise TimeoutError()
     broker.recovery.arm = lost
     with pytest.raises(TimeoutError):
-        broker.execute(permit)
+        broker.execute()
     with pytest.raises(TimeoutError):
         broker.reconcile()
     assert registrations[0] == registrations[1]
@@ -324,11 +275,11 @@ def test_host_ack_loss_prevents_stop_and_replay_does_not_extend_obligation(setup
 
 
 def test_reboot_intent_refuses_replacement_even_after_stop_completion(setup, monkeypatch):
-    broker, driver, _, permit, _ = setup
+    broker, driver, _, _ = setup
     original = broker._start
     monkeypatch.setattr(broker, "_start", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
-        broker.execute(permit)
+        broker.execute()
     monkeypatch.setattr(broker, "_start", original)
     broker.recovery.arm = lambda *a: (_ for _ in ()).throw(ValueError("reboot_intended"))
     with pytest.raises(ValueError, match="reboot_intended"):
@@ -337,7 +288,7 @@ def test_reboot_intent_refuses_replacement_even_after_stop_completion(setup, mon
 
 
 def test_stop_intent_and_frozen_recovery_are_one_crash_atomic_transition(setup, monkeypatch):
-    broker, driver, command, permit, _ = setup
+    broker, driver, command, _ = setup
     original = broker.store.write
     intents = []
     def save(name, value):
@@ -349,18 +300,18 @@ def test_stop_intent_and_frozen_recovery_are_one_crash_atomic_transition(setup, 
             raise KeyboardInterrupt()
     monkeypatch.setattr(broker.store, "write", save)
     with pytest.raises(KeyboardInterrupt):
-        broker.execute(permit)
+        broker.execute()
     assert driver.stop_calls == 0
     assert len(intents) == 1
     assert broker.record["intent_stop_written"]
-    with pytest.raises(ValueError, match="not_ready"):
-        broker.execute(permit)
+    with pytest.raises(ValueError, match="not_preparing"):
+        broker.execute()
     assert broker.record["recovery"] == intents[0]["recovery"]
 
 
 def test_wrong_host_receipt_cannot_dispatch(setup):
-    broker, driver, _, permit, _ = setup
+    broker, driver, _, _ = setup
     broker.recovery.arm = lambda obligation: "wrong"
     with pytest.raises(ValueError, match="recovery_receipt"):
-        broker.execute(permit)
+        broker.execute()
     assert driver.stop_calls == 0 and not driver.starts

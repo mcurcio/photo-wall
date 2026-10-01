@@ -246,7 +246,6 @@ def create_app(
                 try:
                     if hasattr(app.state, "node_reconciler"):
                         await asyncio.to_thread(app.state.node_reconciler.advance)
-                    await asyncio.to_thread(app.state.node_lifecycle.reconcile)
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(
                         media_application.request_acquisitions, projection.acquisitions

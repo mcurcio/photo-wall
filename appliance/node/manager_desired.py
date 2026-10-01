@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from appliance.node.clock import boot_id, boottime_ms
+from appliance.node.clock import boot_id
 from appliance.node.http import NodeHTTP
 from appliance.node.manager_observation import PreparationObservation
 from appliance.node.preparer import DownloadPreparer
@@ -54,7 +54,7 @@ class DesiredPreparation:
         if (command.producer.kernel_boot_id != grant.producer.kernel_boot_id
                 or command.producer.device_id != grant.producer.device_id
                 or command.producer.device_generation != grant.producer.device_generation
-                or command.offer_id != grant.offer_id or command.expires_boottime_ms <= boottime_ms()):
+                or command.offer_id != grant.offer_id):
             raise ValueError("manager_desired_binding")
         self.active_command = command
         prior = self.store.read("prepared")
@@ -64,7 +64,7 @@ class DesiredPreparation:
         self.observation.sample("preparing", command=command)
         archives = []
         for kind, reference in (("target", command.target), ("fallback", command.fallback)):
-            if reference is None or reference == command.old_environment:
+            if reference == command.old_environment:
                 continue  # Base independently verifies its exact retained old root.
             url = self.config["central"].rstrip("/") + f"/v2/node/app-attempts/{command.operation_id}/artifacts/{kind}"
             preparer = DownloadPreparer(self.directory / "downloads", url=url,

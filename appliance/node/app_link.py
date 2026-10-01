@@ -138,10 +138,7 @@ class BrokerLinkService:
                          "sampled_ms": challenge.sampled_boottime_ms,
                          "challenge_sha256": hashlib.sha256(encoded).hexdigest()}})
         # Central verifies app signature and exact current ControlApplied receipt.
-        status, _ = self.session.transport.request("POST", "/v2/node/app-links",
-                                                   encode_node_app_link(link), self.session.claim)
-        if status == 200:
-            self.session.store.write("latest-app-link", {"link": encode_node_app_link(link).decode()})
+        status, _ = self.session.request("POST", "/v2/node/app-links", encode_node_app_link(link))
         result = "recorded" if status == 200 else "refused"
         packet = json.dumps({"schema": 2, "kind": "result", "status": result}).encode()
         connection.send(packet)

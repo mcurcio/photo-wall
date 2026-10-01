@@ -75,7 +75,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
     commands = NodeCommands(sessions, effect_gate)
     lifecycle = NodeLifecycle(sessions, effect_gate)
-    links = NodeAppLinks(sessions, observer=lifecycle)
+    links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
     publications = NodeReleaseCatalog(sessions)
     trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock))
@@ -220,16 +220,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         return await invoke(lambda sid, credential: lifecycle.desired(sid, credential, effects=True),
                             *_credentials(request))
 
-    @app.get("/v2/node/app-attempts/{operation_id}/stop-permit-receipt")
-    async def app_permit_receipt(request: Request, operation_id: UUID):
-        return Response(await invoke(lifecycle.permit_receipt, *_credentials(request), operation_id),
-                        media_type="application/json")
-
-    @app.post("/v2/node/app-ready")
-    async def app_ready(request: Request):
-        raw = await body(request, MAX_LIFECYCLE_BYTES)
-        return Response(await invoke(lifecycle.ready, *_credentials(request), raw), media_type="application/json")
-
     @app.post("/v2/node/app-effects")
     async def app_effect(request: Request):
         return await invoke(lifecycle.effect, *_credentials(request), await body(request, MAX_LIFECYCLE_BYTES))
@@ -237,21 +227,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.post("/v2/node/app-responses")
     async def app_response(request: Request):
         return await invoke(lifecycle.response, *_credentials(request), await body(request, MAX_NODE_MESSAGE_BYTES))
-
-    @app.post("/v2/node/app-revalidation")
-    async def app_revalidation(request: Request):
-        value = loads_object(await body(request, MAX_LIFECYCLE_BYTES), max_bytes=MAX_LIFECYCLE_BYTES)
-        try:
-            if value is None or set(value) != {"operation_id", "quiescent_event_id", "revalidation_id"}:
-                raise ValueError("shape")
-            args = [UUID(value[key]) for key in ("operation_id", "quiescent_event_id", "revalidation_id")]
-        except (TypeError, ValueError) as exc:
-            raise NodeControlError("node_app_revalidation_invalid", 422) from exc
-        return Response(await invoke(lifecycle.revalidate, *_credentials(request), *args), media_type="application/json")
-
-    @app.post("/v2/node/app-no-effect")
-    async def app_no_effect(request: Request):
-        return await invoke(lifecycle.no_effect, *_credentials(request), await body(request, MAX_LIFECYCLE_BYTES))
 
     @app.get("/v2/node/app-attempts/{operation_id}/artifacts/{role}")
     async def app_artifact(request: Request, operation_id: UUID, role: str):

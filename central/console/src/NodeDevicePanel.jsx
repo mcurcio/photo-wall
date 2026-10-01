@@ -124,10 +124,10 @@ export function NodeDevicePanel({ deviceId }) {
         <details><summary>App transition observations</summary>
           {(data.attempts.operations ?? []).length === 0 && <p>No app transition attempts recorded.</p>}
           {(data.attempts.operations ?? []).map((operation) => <article key={operation.operation_id}>
-            <p>Operation <code>{operation.operation_id}</code>: {label(operation.state)} · Runtime {operation.runtime_fenced ? "fenced" : "not fenced"}</p>
+            <p>Operation <code>{operation.operation_id}</code>: {label(operation.state)}</p>
             <p>Command response: {label(operation.command_response?.decision)}. Latest effect: {label(operation.latest_effect?.phase)}{operation.latest_effect && ` (sequence ${operation.latest_effect.sequence})`}.</p>
           </article>)}
-          <p>An expired grant does not establish that an app stopped.</p>
+          <p>The latest stage is the desired app; state follows the Player's reported effects.</p>
         </details>
         <details><summary>Reboot</summary>
           <p>The latest boot to enroll is the current boot; it supersedes earlier boots of this serial.</p>

@@ -68,3 +68,7 @@ class NodeSession:
         self.grant = grant
         self._save()
         return grant
+
+    def request(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
+        """One authenticated exchange carrying this owner's current session claim."""
+        return self.transport.request(method, path, body, self.claim)

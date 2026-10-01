@@ -34,4 +34,4 @@ def test_manager_sample_retries_keep_original_age_and_never_authorize(registry):
         observations.record_preparation(claim.session_id,claim.credential,
             encode_manager_preparation(replace(sample,sampled_boottime_ms=11000)))
     with registry.db.transaction() as conn:
-        assert conn.execute('SELECT count(*) n FROM node_app_permits').fetchone()['n']==0
+        assert conn.execute('SELECT count(*) n FROM node_app_operations').fetchone()['n']==0

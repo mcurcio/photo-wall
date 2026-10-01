@@ -587,10 +587,6 @@ class Coordinator:
                         (player_id, identify["request_id"]),
                     )
             plan = self._current_plan(conn, player_id, epoch)
-            if conn.execute("SELECT 1 FROM active_node_app_drains WHERE player_id=%s", (player_id,)).fetchone():
-                # V2 revalidation observes an inert control envelope behind the
-                # existing fence; it never reopens ordinary app execution.
-                plan, identify_output = None, None
             if plan and (
                 plan.valid_until <= self.clock.utc()
                 or plan.bindings != config.bindings

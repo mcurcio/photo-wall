@@ -5,7 +5,6 @@ physical device identity nor qualifies app health, output pixels, or a release.
 """
 from __future__ import annotations
 
-from typing import Protocol
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -13,26 +12,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
-from central.fleet.node_sessions import (
-    NodeControlError,
-    NodePrincipal,
-    NodeSessions,
-    claim_intake_in,
-)
+from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.transaction_locks import acquire_runtime_locks
 from contracts.node_app_link import encode_node_app_link, node_app_link_message, parse_node_app_link
 from contracts.player_control import ControlAppliedReceipt
 
 
-class CurrentNodeLinkObserver(Protocol):
-    def observe_current_link_in(self, conn, principal: NodePrincipal) -> None:
-        """Observe admitted evidence within the caller's canonical locked cut."""
-        ...
-
-
 class NodeAppLinks:
-    def __init__(self, sessions: NodeSessions, *, observer: CurrentNodeLinkObserver | None = None):
-        self.sessions, self.observer = sessions, observer
+    def __init__(self, sessions: NodeSessions):
+        self.sessions = sessions
 
     @staticmethod
     def _require_current_proof_in(conn, challenge, proof, receipt) -> None:
@@ -65,13 +53,6 @@ class NodeAppLinks:
             if prior:
                 if bytes(prior["payload"]) != canonical:
                     raise NodeControlError("node_link_identity_conflict")
-                if self.observer is not None and prior["superseded_at"] is None:
-                    try:
-                        self._require_current_proof_in(conn, challenge, proof, receipt)
-                    except NodeControlError:
-                        pass  # Historical replay stays idempotent, never current authority.
-                    else:
-                        self.observer.observe_current_link_in(conn, principal)
                 return {"stored": True, "duplicate": True, "admitted_at": prior["admitted_at"],
                         "current": prior["superseded_at"] is None, "physical_identity": "unverified"}
             self._require_current_proof_in(conn, challenge, proof, receipt)
@@ -85,8 +66,6 @@ class NodeAppLinks:
                           challenge.producer.device_generation, challenge.player_id,
                           challenge.authority_epoch, canonical, now))
             principal.admission.ensure_current(self.sessions.clock)
-            if self.observer is not None:
-                self.observer.observe_current_link_in(conn, principal)
             return {"stored": True, "duplicate": False, "admitted_at": now,
                     "current": True, "physical_identity": "unverified"}
 

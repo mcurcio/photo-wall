@@ -333,7 +333,7 @@ class RolloutEffectGate:
                     "(command_id IS NOT NULL OR drain_id IS NOT NULL OR "
                     "phase IN ('prepared','stop_committed','installing','starting',"
                     "'expired_unknown','recovery_required'))) AS attempt, "
-                    "EXISTS(SELECT 1 FROM active_runtime_drains) AS drain"
+                    "EXISTS(SELECT 1 FROM active_equipment_drains) AS drain"
                 ).fetchone()
                 if barrier["attempt"] or barrier["drain"]:
                     raise RolloutGateError("rollout_barrier_unresolved")
