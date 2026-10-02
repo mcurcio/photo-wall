@@ -55,7 +55,10 @@ import { useMutate } from "./useMutate.js";
  * @typedef {{frameId: string, outcome: string, label: string}} FrameResult
  * @typedef {{state: ConfirmState, message: string|null, results?: FrameResult[]}} ConfirmResult
  * @typedef {{key: string, title: string, body: React.ReactNode, confirmLabel: string,
- *            handle?: string|null, run: () => Promise<ConfirmResult>}} ConfirmRequest
+ *            handle?: string|null, progress?: string,
+ *            run: () => Promise<ConfirmResult>}} ConfirmRequest
+ *   `progress` replaces "Sending…" while in flight, for a write whose work happens inside its
+ *   request (a release publish says what Central is downloading).
  *
  * @param {{request: ConfirmRequest,
  *          onClose: (result: ConfirmResult|null) => void}} props
@@ -244,7 +247,7 @@ export function ConfirmAction({ request, onClose }) {
           </div>
           {phase === "in-flight" && (
             <p className="confirm__progress" role="status">
-              Sending…
+              {request.progress ?? "Sending…"}
             </p>
           )}
         </>
@@ -518,7 +521,7 @@ export function retireRequest(snapshot, bootFacts, playerId) {
         </ul>
         <p>
           No undo, even after re-imaging: the id comes from the serial. To replace a Pi,
-          unbind it instead. Its netboot record still counts toward the release frontier.
+          unbind it instead.
         </p>
       </>
     ),

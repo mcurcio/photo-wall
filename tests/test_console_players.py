@@ -119,7 +119,7 @@ const read = { read_at: 2000, boot_claims: [
   session("app_effect_broker", { projection }),
   { ...session("host_core"), session_id: "old", current: false },
 ] };
-const reporting = { enabled: true, gate: {}, read, operations: null, readAt: 2000, error: null };
+const reporting = { read, operations: null, readAt: 2000, error: null };
 const rows = (nodeDevice, playerId = "p-a") =>
   node.layerEvidence({ nodeDevice, snapshot, playerId }).map((row) => ({
     key: row.key, layer: row.layer, level: row.level,
@@ -130,11 +130,12 @@ out.layers = rows(reporting);
 out.silentApp = rows(reporting, "p-b").map((row) => row.facts[0][1]);
 out.noHostSample = rows({ ...reporting, read: { ...read, sessions: [session("host_core")] } })
   .map((row) => row.facts[0][1]);
-out.off = rows({ enabled: false, gate: null, read: null, operations: null, readAt: null, error: null })
-  .map((row) => row.facts[0][1]);
-out.noRecord = rows({ enabled: true, gate: {}, read: null, operations: null, readAt: null,
+// A read refused node_control_disabled mid-session is an ordinary failed read (Part E §25).
+out.disabled = rows({ read: null, operations: null, readAt: null,
+                      error: { code: "node_control_disabled", status: 503 } }).map((row) => row.facts[0][1]);
+out.noRecord = rows({ read: null, operations: null, readAt: null,
                       error: { code: "node_device_unavailable", status: 403 } }).map((row) => row.facts[0][1]);
-out.notYet = rows({ enabled: null, gate: null, read: null, operations: null, readAt: null, error: null })
+out.notYet = rows({ read: null, operations: null, readAt: null, error: null })
   .map((row) => row.facts[0][1]);
 out.notEnrolled = rows(reporting, null)[4].facts;
 // A host that stopped reporting: its session lapsed (current: false), its last sample is served.
@@ -181,7 +182,7 @@ const boot = (nodeDevice) => {
 out.boot = [
   boot(reporting),
   boot({ ...reporting, read: { ...read, sessions: [{ ...session("host_core"), current: false }] } }),
-  boot({ enabled: false, read: null, error: null }),
+  boot({ read: null, error: { code: "node_control_disabled", status: 503 } }),
 ];
 // --- panelAtEnrollment: one wording; connected=false is Central's own record, not a report.
 out.panel = [
@@ -340,15 +341,6 @@ def test_display_host_row_reads_the_newest_exchange_per_output():
         assert phrase not in words
 
 
-def test_no_plain_v1_record_line_remains():
-    # Console DDD C2: ManagementFacts renders through fact(), so no "V1 record · …" line.
-    management = (SRC / "ManagementFacts.jsx").read_text()
-    assert "<FactLine" in management and "<p>" not in management
-    offenders = [module.name for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
-                 if "V1 record ·" in module.read_text() or "V1 record:" in module.read_text()]
-    assert offenders == []
-
-
 def test_a_silent_app_with_a_reporting_host_shows_both_ages():
     out = _run()
     # p-b's last readiness report is 10 s old against the snapshot's read time.
@@ -360,9 +352,9 @@ def test_layer_evidence_names_what_it_cannot_read():
     out = _run()
     assert out["noHostSample"][0] == "Unknown: host_observation.received_at not served"
     assert out["noHostSample"][1] == "Unknown: no current App Manager session"
-    off = "Unknown: node management is off on this Central"
-    assert out["off"][:4] == [off] * 4
-    assert out["off"][4] == "Unknown: no readiness report on the current enrollment (epoch 3)"
+    disabled = "Unknown: the node read failed (node_control_disabled)"
+    assert out["disabled"][:4] == [disabled] * 4
+    assert out["disabled"][4] == "Unknown: no readiness report on the current enrollment (epoch 3)"
     record = "Unknown: no current node record for this box"
     assert out["noRecord"][:4] == [record] * 4
     assert out["notYet"][:4] == ["Unknown: not read yet"] * 4
@@ -390,7 +382,7 @@ def test_the_current_session_boot_is_a_claim_or_no_current_session():
         {"kernelBootId": "boot-2",
          "text": "Boot boot-2 (claimed at boot by the box, unverified) · first received 10 min ago"},
         {"kernelBootId": None, "text": "No current node session"},
-        {"kernelBootId": None, "text": "Unknown: node management is off on this Central"},
+        {"kernelBootId": None, "text": "Unknown: the node read failed (node_control_disabled)"},
     ]
 
 

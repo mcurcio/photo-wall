@@ -1,21 +1,23 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
+import { deprecatedBootFact } from "./bootFacts.js";
 import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./FactLine.jsx";
 import { clock, fact, words } from "./facts.js";
-import { useFleetFacts } from "./fleetApi.js";
 import {
-  BOOT_FACTS_UNAVAILABLE, bootOutcomeLabel, interruptionFor, isBound, outputLabel, outputStates,
+  BOOT_FACTS_UNAVAILABLE, interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
+import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
 import { AppOperationsSection, RebootSection } from "./PlayerCommands.jsx";
+import { QualifiedFallback } from "./QualifiedFallback.jsx";
+import { StageApp } from "./StageApp.jsx";
 import { enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice } from "./players.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { formatRoute, isPlainClick, routeIdName } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 import { useMutate } from "./useMutate.js";
-import { V1PlayerSection, v1OfferFact } from "./V1Offers.jsx";
 
 const NO_FRAMES = "No unbound frames. Draw one on the plan first.";
 const RETIRED_NOT_READ = "Not read: Player retired";
@@ -80,50 +82,51 @@ function LayersSection({ node, snapshot, playerId, retired }) {
   );
 }
 
-/** The Boot section: the current node session's boot, then one record per boot path seen. */
-function BootSection({ node, deviceId, bootFacts, fleet, retired }) {
+/**
+ * The Boot section (Part E §25): the current node session's boot, then the latest node boot
+ * offer record. When Central serves `deprecated_boot` (G5), one warning line above them says
+ * this box's newest boot record is not a node boot; the console shows none of those records.
+ */
+function BootSection({ node, retired }) {
   if (retired) {
     return <p className="player__read-time">{RETIRED_NOT_READ}</p>;
   }
   const current = currentSessionBoot(node);
-  const records = [];
-  // Node boot offer (/v2/node/boot-offers): the latest the device read holds.
-  if (node.enabled === false || node.read == null) {
-    records.push(["Node boot offer", current.none?.kind === "unknown" ? current.none : fact({ kind: "unknown", why: "not read yet" })]);
-  } else {
-    const [latest] = node.read.boot_claims ?? [];
+  const read = node.read;
+  let offer = current.none?.kind === "unknown" ? current.none : null;
+  if (read != null) {
+    // Node boot offer (/v2/node/boot-offers): the latest the device read holds.
+    const [latest] = read.boot_claims ?? [];
     if (latest !== undefined) {
-      records.push(["Node boot offer", fact({
+      offer = fact({
         kind: "set",
         value: latest.offer_refusal == null
           ? `Issued for boot ${latest.kernel_boot_id}, not proof the Player booted`
           : `Refused for boot ${latest.kernel_boot_id}: ${words(latest.offer_refusal)}`,
-        receivedAt: latest.first_received_at, readAt: node.read.read_at,
-      })]);
+        receivedAt: latest.first_received_at, readAt: read.read_at,
+      });
     }
   }
-  // V1 boot offer (/v1/netboot/offers): the fleet read's latest offer.
-  const v1Offer = v1OfferFact(fleet, deviceId);
-  if (v1Offer !== null) records.push(["V1 boot offer", v1Offer]);
-  // Netboot base without an offer (/v1/netboot/base): the content catalog's record.
-  const base = bootOutcomeLabel(bootFacts, deviceId);
-  if (base === null || base === BOOT_FACTS_UNAVAILABLE) {
-    records.push(["Netboot base without an offer", fact({ kind: "unknown",
-      why: base === null ? "boot records not read yet" : "boot records unavailable" })]);
-  } else if (base !== "No netboot record") {
-    records.push(["Netboot base without an offer", fact({ kind: "set", value: base })]);
-  }
+  const deprecated = read == null ? null : deprecatedBootFact(read.deprecated_boot, read.read_at);
   return (
     <>
-      <FactLine label="Current node session's boot" fact={current.fact ?? current.none} />
-      {records.length === 0 ? (
-        <p className="roster__empty">No boot offer or netboot base is recorded for this box.</p>
-      ) : (
-        records.map(([label, value]) => <FactLine key={label} label={label} fact={value} />)
+      {deprecated !== null && (
+        <div className="player__warning" role="note">
+          <FactLine label="Booted by the deprecated path" fact={deprecated}
+            suffix="its kernel command line lacks photowall.node=v2; Select and Stage do not reach it" />
+        </div>
       )}
-      <p className="roster__note">
-        A boot path is chosen per boot, not stored per Player. A later boot does not show what caused it.
-      </p>
+      <FactLine label="Current node session's boot" fact={current.fact ?? current.none} />
+      {offer === null ? (
+        <p className="roster__empty">No node boot offer recorded for this box.</p>
+      ) : (
+        <FactLine label="Node boot offer" fact={offer} />
+      )}
+      {deprecated === null && (
+        <p className="roster__note">
+          A Pi boots by node path when its kernel command line carries <code>photowall.node=v2</code>.
+        </p>
+      )}
     </>
   );
 }
@@ -293,10 +296,11 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 /**
  * One Player's home (`#/players/<device-id>`; console DDD §9, Q1 = A): the box's
  * identity and standing, its node layers bottom up, its Outputs, its boot, its reboot, its
- * app operations, its V1 boot offers and its danger zone. Each section shows its own read time and sits behind its own error
- * boundary. Node records are read only here, for this box only (nodeRead.js), and never
- * for a retired box. Writes stay with their aggregate: Bind goes to the Frame, Retire to
- * the Registry, Reboot to the fleet.
+ * app (Stage app and its operations) and its danger zone. Each section shows its own read time and sits behind
+ * its own error boundary. Node records are read only here, for this box only (nodeRead.js),
+ * never for a retired box and never while the shell's node control is not on; with node
+ * control off the node sections give way to one "not shown" line (nodeControl.js). Writes stay with their aggregate: Bind goes to the Frame, Retire to
+ * the Registry, Reboot and Stage app to the fleet.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
  *          wall: import("./wallState.js").WallMemory}} props
@@ -305,8 +309,8 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
   const row = playersByDevice(snapshot, bootFacts).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
-  const node = useNodeDevice(deviceId, { skip: row === null || retired });
-  const fleet = useFleetFacts(snapshot);
+  const control = useNodeControlValue();
+  const node = useNodeDevice(deviceId, { skip: row === null || retired || !nodeReadsAllowed(control) });
   const nameRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
   const focusName = () => nameRef.current?.focus();
   const { open: openDialog, setStatus, confirmation } = useConfirm(focusName, focusName);
@@ -356,9 +360,11 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         </details>
       </header>
 
-      <SectionBoundary title="Layers" resetKey={node.readAt}>
-        <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
-      </SectionBoundary>
+      <NodeRecords>
+        <SectionBoundary title="Layers" resetKey={node.readAt}>
+          <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+        </SectionBoundary>
+      </NodeRecords>
 
       <SectionBoundary title="Outputs" resetKey={snapshot?.at}>
         {player === null ? (
@@ -368,28 +374,28 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         )}
       </SectionBoundary>
 
-      <SectionBoundary title="Boot" resetKey={node.readAt}>
-        <BootSection node={node} deviceId={deviceId} bootFacts={bootFacts} fleet={fleet} retired={retired} />
-      </SectionBoundary>
-
-      {!retired && (
-        <SectionBoundary title="Reboot" resetKey={node.readAt}>
-          <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-            playerId={player?.id ?? null} />
+      <NodeRecords quiet>
+        <SectionBoundary title="Boot" resetKey={node.readAt}>
+          <BootSection node={node} retired={retired} />
         </SectionBoundary>
-      )}
 
-      {!retired && (
-        <SectionBoundary title="App" resetKey={node.operations?.read_at}>
-          <AppOperationsSection node={node} />
-        </SectionBoundary>
-      )}
+        {!retired && (
+          <SectionBoundary title="Reboot" resetKey={node.readAt}>
+            <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
+              playerId={player?.id ?? null} />
+          </SectionBoundary>
+        )}
 
-      {!retired && (
-        <SectionBoundary title="V1 boot offers" resetKey={fleet.data?.read_at}>
-          <V1PlayerSection key={deviceId} deviceId={deviceId} fleet={fleet} />
-        </SectionBoundary>
-      )}
+        {!retired && (
+          <SectionBoundary title="App" resetKey={node.operations?.read_at}>
+            <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
+              player={player} />
+            <AppOperationsSection node={node} />
+            <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
+              playerId={player?.id ?? null} />
+          </SectionBoundary>
+        )}
+      </NodeRecords>
 
       {player !== null && (row.standing === "unbound" || row.standing === "bound") && (
         <SectionBoundary title="Danger zone">

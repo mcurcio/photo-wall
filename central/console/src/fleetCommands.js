@@ -1,8 +1,10 @@
 import { apiWrite } from "./apiWrite.js";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { clock as localClock, fact, LAYER_NAMES, words } from "./facts.js";
+import { clock as localClock, fact, factText, LAYER_NAMES, words } from "./facts.js";
+import { auditRef, frozen } from "./frozenRequest.js";
 import { outputStates } from "./health.js";
 import { liveRunsFor } from "./join.js";
+import { effectGateFact, GATE_UNREADABLE } from "./nodeControl.js";
 import { nodeUnknown } from "./nodeRead.js";
 
 /**
@@ -12,7 +14,8 @@ import { nodeUnknown } from "./nodeRead.js";
  *
  * REBOOT. `rebootTarget` binds Central's fences from the read shown — the ONE current
  * Host Management (`host_core`) session, the device generation and the effect gate's
- * generation — so the operator never picks transport plumbing. `rebootRequest` freezes
+ * generation (the shell's node status read, nodeControl.js, is the gate's one source) — so
+ * the operator never picks transport plumbing. `rebootRequest` freezes
  * the WHOLE request body when the dialog opens (command id, session, generations, audit
  * reference, window); a retry re-sends that frozen body unchanged, so Central's
  * `node_reboot_identity_conflict` cannot arise from the console.
@@ -22,8 +25,9 @@ import { nodeUnknown } from "./nodeRead.js";
  * same predicate its `node_reboot_outstanding` fence uses. The request the page itself holds
  * (`heldReboot`) counts as outstanding until a read lists it or Central's read time reaches
  * its frozen window (`rebootOffer`). `sendReboot` is the ONLY console function that POSTs to
- * the reboots route (a source-scan test enforces it), and it judges the rule on `node.latest()`, the
- * hook's newest read at the moment of sending, never on a read the caller hands it.
+ * the reboots route (a source-scan test enforces it), and it judges the rule on `node.latest()` and
+ * `control.latest()`, the hooks' newest reads at the moment of sending, never on a read the
+ * caller hands it.
  *
  * STATES. `rebootCommandState` and `appOperationState` compute each state only from
  * Central's records and Central's read time (R10): no browser or node clock is involved.
@@ -33,7 +37,9 @@ import { nodeUnknown } from "./nodeRead.js";
  *
  * @typedef {{available: true, sessionId: string, deviceGeneration: number,
  *            rolloutGeneration: number, kernelBootId: string}
- *         | {available: false, reason: string}} RebootTarget
+ *         | {available: false, reason: string, gate?: true}} RebootTarget
+ *   `gate`: the reason is the effect gate's (closed, unreadable or unserved generation), so the
+ *   page links it to Releases › Effect gate, the gate's home (§25)
  * @typedef {{command_id: string, session_id: string, device_generation: number,
  *            operator_audit_ref: string, rollout_generation: number,
  *            valid_for_seconds: number}} RebootBody
@@ -44,9 +50,9 @@ import { nodeUnknown } from "./nodeRead.js";
  * @typedef {{outcome: "done"|"already"|"changed"|"refused"|"unknown", message: string,
  *            retryable: boolean}} RebootResult
  * @typedef {{offer: "new"} | {offer: "retry", reason: string}
- *         | {offer: "blocked", reason: string}} RebootOffer
+ *         | {offer: "blocked", reason: string, gate?: true}} RebootOffer
  *   `retry`: only the held request may be re-sent (its frozen body); `reason` says why no
- *   new request may be built.
+ *   new request may be built; `gate` as on RebootTarget.
  */
 
 /** Central offers a reboot request to Host Management for this long (§11 current choices). */
@@ -59,20 +65,11 @@ const MAX_AUDIT_REF = 256;
 const isTime = (value) => typeof value === "number" && Number.isFinite(value);
 const isGeneration = (value) => Number.isInteger(value) && value >= 1;
 
-/** Deep-freeze a plain value (the frozen request cannot change after it is built). */
-function frozen(value) {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.values(value).forEach(frozen);
-    Object.freeze(value);
-  }
-  return value;
-}
-
 /**
  * The fences a reboot binds, from the node read shown, or why Reboot is unavailable.
  *
  * @param {import("./nodeRead.js").NodeDevice|null} nodeDevice
- * @param {object|null} gate the `GET /v1/operator/node/status` answer
+ * @param {import("./nodeControl.js").EffectGate|null} gate the shell's effect gate (null: not readable)
  * @returns {RebootTarget}
  */
 export function rebootTarget(nodeDevice, gate) {
@@ -82,12 +79,9 @@ export function rebootTarget(nodeDevice, gate) {
     return { available: false,
       reason: `the last node read failed (${nodeDevice.error.code}); press Refresh` };
   }
-  const effectGate = gate?.effect_gate;
-  if (effectGate?.effective_state !== "open") {
-    return { available: false, reason: effectGate?.reason
-      ? `Central's effect gate is closed (${words(effectGate.reason)})`
-      : "Central's effect gate is closed" };
-  }
+  if (gate == null) return { available: false, reason: GATE_UNREADABLE, gate: true };
+  // A closed gate's reason is its one wording (§26), the words Releases shows.
+  if (gate.effective_state !== "open") return { available: false, reason: factText(effectGateFact(gate)), gate: true };
   const read = nodeDevice.read;
   const hosts = read.sessions.filter((session) => session.current && session.producer?.owner === "host_core");
   if (hosts.length === 0) return { available: false, reason: `no current ${LAYER_NAMES.host_core} session on this box` };
@@ -100,12 +94,14 @@ export function rebootTarget(nodeDevice, gate) {
       reason: `Central refuses commands to this ${LAYER_NAMES.host_core} session (${words(host.command_reason)})` };
   }
   if (!isGeneration(read.device_generation)) return { available: false, reason: "the device generation is not served" };
-  if (!isGeneration(effectGate.generation)) return { available: false, reason: "the effect gate's generation is not served" };
+  if (!isGeneration(gate.generation)) {
+    return { available: false, reason: "the effect gate's generation is not served", gate: true };
+  }
   if (typeof host.producer?.kernel_boot_id !== "string") {
     return { available: false, reason: "the session's boot is not served" };
   }
   return { available: true, sessionId: host.session_id, deviceGeneration: read.device_generation,
-    rolloutGeneration: effectGate.generation, kernelBootId: host.producer.kernel_boot_id };
+    rolloutGeneration: gate.generation, kernelBootId: host.producer.kernel_boot_id };
 }
 
 /**
@@ -145,7 +141,7 @@ const isOutstanding = (command) => command?.outstanding !== false;
  * @returns {RebootOffer}
  */
 export function rebootOffer(target, commands, readAt, held, { clock = localClock } = {}) {
-  if (!target.available) return { offer: "blocked", reason: target.reason };
+  if (!target.available) return { offer: "blocked", reason: target.reason, ...(target.gate ? { gate: true } : {}) };
   const listed = commands ?? [];
   const mine = held != null && held.body.session_id === target.sessionId ? held : null;
   const other = listed.find((command) => command.command?.command_session_id === target.sessionId
@@ -184,8 +180,8 @@ export function rebootRequest(target, commands, snapshot, readAt,
   if (offer.offer !== "new") return { refused: offer.reason };
   if (!isTime(readAt)) return { refused: "Central's read time is not served" };
   const note = reason.trim();
-  const auditRef = `console/${new Date(readAt * 1000).toISOString().slice(0, 10)}${note ? `/${note}` : ""}`;
-  if (note !== "" && (!TOKEN.test(note) || auditRef.length > MAX_AUDIT_REF)) {
+  const reference = auditRef(readAt, note);
+  if (note !== "" && (!TOKEN.test(note) || reference.length > MAX_AUDIT_REF)) {
     return { refused: "a reason is one word: letters, digits and _ . : / - only" };
   }
   const frames = playerId === null ? [] : outputStates(snapshot, playerId)
@@ -214,7 +210,7 @@ export function rebootRequest(target, commands, snapshot, readAt,
       command_id: commandId,
       session_id: target.sessionId,
       device_generation: target.deviceGeneration,
-      operator_audit_ref: auditRef,
+      operator_audit_ref: reference,
       rollout_generation: target.rolloutGeneration,
       valid_for_seconds: REBOOT_WINDOW_SECONDS,
     },
@@ -246,10 +242,11 @@ export const REBOOT_OUTSTANDING =
  *
  * @param {FrozenRebootRequest} request
  * @param {import("./nodeRead.js").NodeDevice|null} nodeDevice
+ * @param {import("./nodeControl.js").EffectGate|null} gate the shell's effect gate
  * @returns {string|null}
  */
-export function rebootRefusal(request, nodeDevice) {
-  const target = rebootTarget(nodeDevice, nodeDevice?.gate ?? null);
+export function rebootRefusal(request, nodeDevice, gate) {
+  const target = rebootTarget(nodeDevice, gate);
   const offer = rebootOffer(target, nodeDevice?.read?.reboot_commands, nodeDevice?.readAt ?? null, request);
   if (offer.offer === "retry") return null;
   if (!target.available) return `${REBOOT_STALE} (${target.reason})`;
@@ -264,10 +261,10 @@ export function rebootRefusal(request, nodeDevice) {
  *
  * @param {object} command one `reboot_commands` record
  * @param {import("./nodeRead.js").NodeDevice|null} nodeDevice the read it came from
+ * @param {import("./nodeControl.js").EffectGate|null} effectGate the shell's effect gate
  * @returns {string|null}
  */
-function notOffered(command, nodeDevice) {
-  const effectGate = nodeDevice?.gate?.effect_gate;
+function notOffered(command, nodeDevice, effectGate) {
   if (effectGate != null && effectGate.effective_state !== "open") return "effect gate closed";
   const sessions = nodeDevice?.read?.sessions;
   const targeted = command.command?.command_session_id;
@@ -287,12 +284,14 @@ const decisionOf = (response) => response?.message?.message?.decision ?? null;
  * @param {object} command one `reboot_commands` record of the device read
  * @param {number|null} readAt the device read's `read_at`
  * @param {{clock?: (seconds: number) => string,
- *          nodeDevice?: import("./nodeRead.js").NodeDevice|null}} [options] `clock` formats
- *   Central's times; `nodeDevice` (the read shown) lets a Requested label say when Central is
- *   not offering it now (gate closed, session no longer current). The state is the same.
+ *          nodeDevice?: import("./nodeRead.js").NodeDevice|null,
+ *          gate?: import("./nodeControl.js").EffectGate|null}} [options] `clock` formats
+ *   Central's times; `nodeDevice` (the read shown) and `gate` (the shell's) let a Requested
+ *   label say when Central is not offering it now (gate closed, session no longer current).
+ *   The state is the same.
  * @returns {CommandState}
  */
-export function rebootCommandState(command, readAt, { clock = localClock, nodeDevice = null } = {}) {
+export function rebootCommandState(command, readAt, { clock = localClock, nodeDevice = null, gate = null } = {}) {
   const initiated = (command.effects ?? []).find((effect) => effect.state === "reboot_initiated");
   if (initiated !== undefined) {
     return { state: "initiated", label: "Host Management reported the reboot started · completion unknown",
@@ -322,7 +321,7 @@ export function rebootCommandState(command, readAt, { clock = localClock, nodeDe
       label: `Outcome unknown: no response from Host Management; Central stopped offering it at ${clock(command.expires_at)}`,
       fact: recorded };
   }
-  const paused = notOffered(command, nodeDevice);
+  const paused = notOffered(command, nodeDevice, gate);
   return { state: "requested",
     label: paused !== null
       ? `Requested · Central is not offering it now (${paused})`
@@ -393,6 +392,12 @@ function operationState(operation, readAt) {
       return { state: "interrupted_by_reboot", label: "Interrupted",
         fact: fact({ kind: "derived", value: "Interrupted", basis: "a later boot of this Player was admitted" }),
         prior: prior() };
+    case "ended_by_later_boot":
+      // G2: the stage had finished (target or fallback running); a later boot runs the selection.
+      return { state: "ended_by_later_boot", label: "Ended by a later boot",
+        fact: fact({ kind: "derived", value: "Ended by a later boot",
+          basis: "a later boot was admitted; it runs the boot selection's app" }),
+        prior: prior() };
     default:
       return { state: "unknown", label: "Unknown state",
         fact: fact({ kind: "unknown", why: `Central served an unrecognised state "${words(operation.state)}"` }) };
@@ -400,8 +405,8 @@ function operationState(operation, readAt) {
 }
 
 /**
- * THE one send path for a reboot (§10): judge the frozen request on `node.latest()` — the
- * hook's newest read at the moment of sending — and POST its body (first time or retry, the
+ * THE one send path for a reboot (§10): judge the frozen request on `node.latest()` and
+ * `control.latest()` — the hooks' newest reads at the moment of sending — and POST its body (first time or retry, the
  * same bytes) only when `rebootRefusal` allows it; otherwise refuse without a POST. Central's
  * answer is read in the equipment outcome vocabulary: a 410 (the window ended) is Outcome
  * unknown, never "refused"; an unanswered or gateway-failed request is unknown and may be
@@ -410,10 +415,12 @@ function operationState(operation, readAt) {
  * @param {string} deviceId
  * @param {FrozenRebootRequest} request
  * @param {{latest: () => import("./nodeRead.js").NodeDevice}} node the `useNodeDevice` hook
+ * @param {{latest: () => import("./nodeControl.js").NodeControlRead}} control the shell's
+ *   node control (nodeControl.js), the effect gate's one source
  * @returns {Promise<RebootResult>}
  */
-export async function sendReboot(deviceId, request, node) {
-  const refusal = rebootRefusal(request, node.latest());
+export async function sendReboot(deviceId, request, node, control) {
+  const refusal = rebootRefusal(request, node.latest(), control.latest().gate);
   if (refusal !== null) return { outcome: "changed", message: `${refusal}.`, retryable: false };
   let result;
   try {

@@ -40,11 +40,11 @@ from playwright.sync_api import expect
 # (each page's <h1> reads the same).
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
-FLEET_SECTIONS = frozenset({"players"})
+FLEET_SECTIONS = frozenset({"players", "releases"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now showing", "scenes": "Scenes", "schedule": "Schedule", "sources": "Photo sources",
-    "wall": "Wall", "players": "Players", "attention": "Needs attention",
+    "wall": "Wall", "players": "Players", "releases": "Releases", "attention": "Needs attention",
 }
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
@@ -52,8 +52,8 @@ FACETS = {"calibration": "Calibration", "binding": "Binding", "nowshowing": "Now
 
 
 def go(page, section):
-    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "players"
-    or "attention". Name the section the test is about (a Run test goes to "now", a
+    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "players",
+    "releases" or "attention". Name the section the test is about (a Run test goes to "now", a
     Program test to "schedule").
 
     Clicks the section's sidebar link by its accessible name; on a narrow screen, where

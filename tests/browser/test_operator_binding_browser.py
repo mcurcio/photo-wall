@@ -655,13 +655,12 @@ def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, re
         inspector = open_frame(page, "boot-1", "binding")
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
-        # The Player is named by its serial handle; the serial is its claim, and the
-        # netboot record is labelled with the boot path that produced it.
+        # The Player is named by its serial handle; the serial is its claim. The shared
+        # devices record gives identity only: no boot record of the deprecated path is shown.
         player = open_player(page, f"Player …{SERIAL[-6:]}")
         expect(player).to_contain_text(
             f"Serial: Serial {SERIAL} (claimed at boot by the box, unverified)")
-        expect(page.get_by_role("region", name="Boot", exact=True)).to_contain_text(
-            "Netboot base without an offer: Legacy netboot seen, no image served yet")
+        expect(page.get_by_role("region", name="Boot", exact=True)).not_to_contain_text("Legacy netboot")
 
 
 def test_the_players_list_names_boxes_by_their_distinct_serial_handles(page, registry):
@@ -707,58 +706,19 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
                ).to_be_visible()
 
 
-def test_a_player_that_never_netbooted_reads_no_netboot_record(page, registry):
+def test_a_player_that_never_netbooted_is_named_by_its_player_id_handle(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_player(page, player_name(registry, identity["player_id"]))
-        # Once the boot records are read, no netboot base (and no V1 offer) is recorded for it.
+        # Its Boot section holds node records only, once read.
         boot = page.get_by_role("region", name="Boot", exact=True)
         expect(boot).not_to_contain_text("not read yet")
-        expect(boot).not_to_contain_text("Netboot base without an offer")
-        expect(boot).not_to_contain_text("V1 boot offer")
+        expect(boot).not_to_contain_text("Netboot base")
         # Without a serial the handle is the Player id's hash suffix.
         inspector = open_frame(page, "boot-2", "binding")
         expect(_option(inspector, identity["player_id"])).to_be_visible()
-
-
-OLD, NEW = "v1.4.2", "v1.5.0"
-
-
-@pytest.mark.parametrize(("outcome", "served", "good", "failed", "label"), [
-    ("healthy", OLD, OLD, None,
-     f"Legacy health report for {OLD} · exact base acceptance unverified"),
-    ("healthy", OLD, OLD, NEW,
-     f"Legacy health report for {OLD} after {NEW} · exact base acceptance unverified"),
-    ("pending", NEW, OLD, None,
-     f"Legacy netboot served {NEW} · base acceptance unknown · legacy known-good tag {OLD}, bytes unverified"),
-    ("pending", NEW, None, None,
-     f"Legacy netboot served {NEW} · base acceptance unknown · no verified fallback"),
-    ("pending", OLD, OLD, NEW,
-     f"Legacy netboot served {OLD} · base acceptance unknown · legacy known-good tag {OLD}, bytes unverified"),
-    ("pending", NEW, None, NEW,
-     f"Legacy netboot served {NEW} · base acceptance unknown · no verified fallback"),
-    ("failed", NEW, OLD, NEW,
-     f"Legacy netboot marked {NEW} failed · physical failure unconfirmed · legacy known-good tag {OLD}, bytes unverified"),
-    ("failed", NEW, None, NEW,
-     f"Legacy netboot marked {NEW} failed · physical failure unconfirmed · no verified fallback"),
-])
-def test_the_legacy_boot_outcome_discloses_uncertainty(
-        page, registry, outcome, served, good, failed, label):
-    _netbooted_player(registry)
-    row = {"device_id": device_id_for_serial(SERIAL), "serial": SERIAL, "attached_tag": None,
-           "known_good_tag": good, "last_served_tag": served, "boot_outcome": outcome,
-           "failed_tag": failed}
-    page.route(NETBOOT, lambda route: route.fulfill(
-        status=200, content_type="application/json",
-        body=json.dumps({"frontier": NEW, "devices": [row]})))
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin)
-        open_player(page, f"Player …{SERIAL[-6:]}")
-        boot = page.get_by_role("region", name="Boot", exact=True)
-        expect(boot.get_by_text(f"Netboot base without an offer: {label}", exact=True)
-               ).to_be_visible()
 
 
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):

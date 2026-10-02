@@ -74,6 +74,11 @@ export function formatAge(seconds) {
   return `${Math.floor(whole / 86400)} d`;
 }
 
+/** "4.1" of "4.1 of 8 GB": decimal gigabytes, one place (the media cache, a release download). */
+export function gigabytes(bytes) {
+  return `${Number((Number(bytes ?? 0) / 1e9).toFixed(1))}`;
+}
+
 /**
  * What Central last heard from a Player, aged against the snapshot's `read_at`.
  *
@@ -469,37 +474,6 @@ export function playerSerial(snapshot, bootFacts, playerId) {
 }
 
 export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
-
-/**
- * Historical tag-based netboot status. These records may come from app-owned
- * health or timeout policy; neither proves exact base bytes, physical boot, or
- * an accepted fallback. The fleet projector carries stronger evidence separately.
- *
- * @param {{devices: Map<string, object>, loaded: boolean, unavailable: boolean}|null} bootFacts
- * @param {string} deviceId the Player's `device_id`
- * @returns {string|null}
- */
-export function bootOutcomeLabel(bootFacts, deviceId) {
-  if (!bootFacts?.loaded) {
-    return bootFacts?.unavailable ? BOOT_FACTS_UNAVAILABLE : null;
-  }
-  const row = bootFacts.devices.get(deviceId);
-  if (row === undefined) return "No netboot record";
-  const { last_served_tag: served, known_good_tag: good, failed_tag: failed } = row;
-  const fallback = good ? `legacy known-good tag ${good}, bytes unverified` : "no verified fallback";
-  switch (row.boot_outcome) {
-    case "healthy":
-      return failed
-        ? `Legacy health report for ${served} after ${failed} · exact base acceptance unverified`
-        : `Legacy health report for ${served} · exact base acceptance unverified`;
-    case "pending":
-      return `Legacy netboot served ${served} · base acceptance unknown · ${fallback}`;
-    case "failed":
-      return `Legacy netboot marked ${served} failed · physical failure unconfirmed · ${fallback}`;
-    default:
-      return "Legacy netboot seen, no image served yet";
-  }
-}
 
 /**
  * The one Output wording (chooser, Player page and dialogs): handle · output id ·

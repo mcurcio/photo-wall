@@ -6,6 +6,7 @@ import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
+import { NodeControlBanner, NodeControlContext, useNodeControl } from "./nodeControl.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
@@ -172,6 +173,10 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
+ * NODE CONTROL. One read of node status (nodeControl.js `useNodeControl`), provided to every
+ * page by context: the one source of the effect gate, and the banner above every page when
+ * this Central runs without node control.
+ *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
  *
@@ -185,6 +190,8 @@ export function Shell({ hidden = false }) {
   const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
+  // Node control (Part E §25): ONE node status read, the effect gate's one source.
+  const nodeControl = useNodeControl({ skip: hidden });
   const wall = useWallMemory(route, snapshot, navigate);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
@@ -380,19 +387,22 @@ export function Shell({ hidden = false }) {
           <SectionNav current={current} hrefFor={hrefFor} drafts={drafts} />
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
+          <NodeControlBanner control={nodeControl} />
           {current === null && <p className="page__loading">Loading…</p>}
-          {showRoutes.map((show) => (
-            <Page
-              key={show.section}
-              entry={show}
-              ctx={ctx}
-              ready={ready}
-              hidden={show.section !== current}
-            />
-          ))}
-          {entry !== null && !SHOW.has(entry.section) && (
-            <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
-          )}
+          <NodeControlContext.Provider value={nodeControl}>
+            {showRoutes.map((show) => (
+              <Page
+                key={show.section}
+                entry={show}
+                ctx={ctx}
+                ready={ready}
+                hidden={show.section !== current}
+              />
+            ))}
+            {entry !== null && !SHOW.has(entry.section) && (
+              <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
+            )}
+          </NodeControlContext.Provider>
         </main>
       </div>
 

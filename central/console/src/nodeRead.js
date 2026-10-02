@@ -1,20 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { fact, LAYER_NAMES, words } from "./facts.js";
 import { formatAge } from "./health.js";
+import { usePolledRead } from "./polledRead.js";
 
 /**
  * The Player page's node read and its layer evidence (console DDD §9-§11).
  *
  * THE READ (`useNodeDevice`): one box's node records, read only while its Player page is
- * open — `GET /v1/operator/node/status` (the effect gate), `GET …/node/devices/<id>` (its
- * sessions, host samples, preparation, broker projection, Display Host's newest exchange per
- * Output, boot claims and reboot audit) and
- * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs`, single
- * flight, paused while the tab is hidden, never for a retired box (`skip`). Like the boot
- * facts it goes through `apiWrite(path, {method: "GET"})`, so a failure never touches the
- * session. A failed read KEEPS the last values and reports its error beside them.
+ * open — `GET …/node/devices/<id>` (its sessions, host samples, preparation, broker
+ * projection, Display Host's newest exchange per Output, boot claims, the deprecated-path
+ * boot fact and reboot audit) and `GET …/node/devices/<id>/app-attempts` (its app
+ * operations) — every `cadenceMs` through the shared polled read (polledRead.js), never for
+ * a retired box and never while node control is off (`skip`). The effect gate is NOT read
+ * here: the shell's node status read is its one source (nodeControl.js). Like the boot facts
+ * it goes through `apiWrite(path, {method: "GET"})`, so a failure never touches the session.
+ * A failed read KEEPS the last values and reports its error beside them; a read refused
+ * `node_control_disabled` is such a failure, until the shell's read raises the banner.
  *
  * THE MODEL (`layerEvidence`, `currentSessionBoot`, `processFacts`): pure functions from
  * that read and the snapshot to facts (facts.js). A field that is null or absent renders
@@ -23,24 +26,27 @@ import { formatAge } from "./health.js";
  * Central's receipt time (R10).
  *
  * @typedef {{code: string, status: number|null}} NodeReadError
- * @typedef {{enabled: boolean|null, gate: object|null, read: object|null,
- *            operations: object|null, readAt: number|null,
+ * @typedef {{read: object|null, operations: object|null, readAt: number|null,
  *            error: NodeReadError|null}} NodeDevice
- *   `enabled` is null until Central has answered, false when node management is off on this
- *   Central (no transport, or a read refused `node_control_disabled`). `readAt` is the
- *   device read's `read_at` (Central's clock).
+ *   `readAt` is the device read's `read_at` (Central's clock).
  * @typedef {{key: string, layer: string, level: string,
  *            facts: Array<{label: string, fact: import("./facts.js").Fact}>,
  *            details: string[]}} LayerRow
  */
 
-export const NODE_OFF = "node management is off on this Central";
 export const NO_NODE_RECORD = "no current node record for this box";
 
 const DEFAULT_CADENCE_MS = 5000;
+const NOT_READ = Object.freeze({ read: null, operations: null, readAt: null, error: null });
 
-/** The error a failed node read reports: its code, or the status, or "unanswered". */
-function readError(result) {
+/**
+ * The error a failed node read reports: its code, or the status, or "unanswered" (the
+ * release read reports its failures the same way, releases.js).
+ *
+ * @param {{error: string|null, status: number}|null} result `apiWrite`'s answer, or null
+ * @returns {NodeReadError}
+ */
+export function readError(result) {
   if (result === null) return { code: "unanswered", status: null };
   return { code: result.error ?? String(result.status), status: result.status };
 }
@@ -49,83 +55,28 @@ function readError(result) {
  * Read one box's node records while its Player page is open.
  *
  * @param {string} deviceId
- * @param {{cadenceMs?: number, skip?: boolean}} [options] `skip` (a retired box) reads nothing
+ * @param {{cadenceMs?: number, skip?: boolean}} [options] `skip` (a retired box, node control
+ *   not on) reads nothing
  * @returns {NodeDevice & {refresh: () => Promise<void>, latest: () => NodeDevice}} `refresh`
- *   reads now (after a write); `latest` returns the newest read at call time, from a ref, so a
- *   send judges what arrived even before React re-renders (fleetCommands.js `sendReboot`)
+ *   reads now (after a write); `latest` returns the newest read at call time, so a send
+ *   judges what arrived even before React re-renders (fleetCommands.js `sendReboot`)
  */
 export function useNodeDevice(deviceId, { cadenceMs = DEFAULT_CADENCE_MS, skip = false } = {}) {
-  const [state, setState] = useState(
-    /** @type {NodeDevice} */ ({ enabled: null, gate: null, read: null, operations: null,
-      readAt: null, error: null }),
-  );
-  const newest = useRef(state);
-  const inFlight = useRef(false);
-  const again = useRef(false);
-  const alive = useRef(true);
   const base = `/v1/operator/node/devices/${encodeURIComponent(deviceId)}`;
-
-  const readOnce = useCallback(async () => {
+  const load = useCallback(async (current) => {
     const get = (path) => apiWrite(path, { method: "GET" }).catch(() => null);
-    const [gate, read, operations] = await Promise.all([
-      get("/v1/operator/node/status"), get(base), get(`${base}/app-attempts`),
-    ]);
-    if (!alive.current) return;
-    const off = gate?.ok === true && gate.data?.transport_enabled === false
-      || [read, operations].some((result) => result?.error === "node_control_disabled");
-    const failed = [gate, read, operations].find((result) => result === null || !result.ok);
-    // The ref is the one source of truth; state follows it for rendering.
-    const current = newest.current;
-    newest.current = {
-      enabled: off ? false : gate?.ok ? true : current.enabled,
-      gate: gate?.ok ? gate.data : current.gate,
+    const [read, operations] = await Promise.all([get(base), get(`${base}/app-attempts`)]);
+    const failed = [read, operations].find((result) => result === null || !result.ok);
+    return {
       read: read?.ok ? read.data : current.read,
       operations: operations?.ok ? operations.data : current.operations,
       readAt: read?.ok ? read.data?.read_at ?? null : current.readAt,
       error: failed === undefined ? null : readError(failed),
     };
-    setState(newest.current);
   }, [base]);
-  const latest = useCallback(() => newest.current, []);
-
-  // Single flight. A refresh asked for while a read is in flight is queued, not dropped:
-  // that read may have started before the write it follows, so one more read runs after it.
-  const refresh = useCallback(async () => {
-    if (inFlight.current) {
-      again.current = true;
-      return;
-    }
-    inFlight.current = true;
-    try {
-      do {
-        again.current = false;
-        await readOnce();
-      } while (again.current && alive.current);
-    } finally {
-      inFlight.current = false;
-    }
-  }, [readOnce]);
-
-  useEffect(() => {
-    alive.current = true;
-    if (skip) return () => { alive.current = false; };
-    const tick = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    tick();
-    const timer = setInterval(tick, cadenceMs);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      alive.current = false;
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-    };
-  }, [refresh, cadenceMs, skip]);
-
-  return { ...state, refresh: skip ? noRefresh : refresh, latest };
+  const { value, refresh, latest } = usePolledRead(load, { cadenceMs, skip, initial: NOT_READ });
+  return { ...value, refresh, latest };
 }
-
-const noRefresh = async () => {};
 
 /**
  * The App Effect Broker's app-process facts in one session's served `projection`: each
@@ -182,7 +133,6 @@ function lastSession(read, owner, hasEvidence) {
 
 /** Why no node layer can be read, or null when the read can speak for them. */
 export function nodeUnknown(nodeDevice) {
-  if (nodeDevice?.enabled === false) return NODE_OFF;
   if (nodeDevice?.read == null) {
     const code = nodeDevice?.error?.code;
     if (code === "node_device_unavailable") return NO_NODE_RECORD;

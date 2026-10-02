@@ -15,6 +15,10 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
  *   #/players/<device-id>          {section: "players", id} one Player's page
+ *   #/releases/update/<tag>        {section: "releases", flow: "update", id} Update the wall
+ *   #/releases/update/<tag>/try/<player-id>  … with the operator's tried Player (Part E §25a)
+ *   #/releases/update/<tag>[/try/<player-id>]/skip/<player-id>[/<player-id>…]  … and the
+ *                                  Players the operator skipped in Keep's plan (Part E §25a)
  *   #/<section>                    {section} for every section
  *   #/equipment                    {section: "players"}: the retired Equipment page's
  *                                  bookmark (console DDD §9); never formatted
@@ -30,11 +34,15 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"attention"} Section
- * @typedef {"new"|"edit"|"show"} Flow
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"releases"|"attention"} Section
+ * @typedef {"new"|"edit"|"show"|"update"} Flow
  * @typedef {"calibration"|"binding"|"nowshowing"} Facet
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
- *            initialTarget?: string}} Route
+ *            initialTarget?: string, tried?: string, skipped?: string[]}} Route
+ *   `tried` is the Player an Update the wall journey tries the release on, `skipped` the Players
+ *   it must never reboot, in the order the operator skipped them, none repeated (its URL holds
+ *   only the operator's choices, never progress: Part E §25a). An empty `skipped` is the same
+ *   route as none.
  */
 
 /**
@@ -70,6 +78,7 @@ export const SECTIONS = Object.freeze([
   "sources",
   "wall",
   "players",
+  "releases",
   "attention",
 ]);
 
@@ -85,7 +94,7 @@ const FACET_ALIASES = Object.freeze({ commissioning: "calibration" });
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet", "initialTarget"];
+const KEYS = ["section", "id", "flow", "step", "facet", "initialTarget", "tried", "skipped"];
 
 /**
  * Parse a location hash (with or without its leading "#") into a Route, or null.
@@ -137,6 +146,9 @@ export function parseRoute(hash) {
   if (section === "players" && rest.length === 1) {
     return { section, id: rest[0] };
   }
+  if (section === "releases" && rest[0] === "update" && rest.length >= 2) {
+    return updateRoute(rest[1], rest.slice(2));
+  }
   if (section === "now" && rest.length === 2 && rest[0] === "show") {
     return { section, flow: "show", step: rest[1] };
   }
@@ -155,6 +167,20 @@ export function parseRoute(hash) {
   return null;
 }
 
+/** An Update the wall route from its tag and the segments after it, or null. */
+function updateRoute(id, tail) {
+  const route = { section: "releases", flow: "update", id };
+  let rest = tail;
+  if (rest[0] === "try" && rest.length >= 2) {
+    route.tried = rest[1];
+    rest = rest.slice(2);
+  }
+  if (rest.length === 0) return route;
+  const skipped = rest.slice(1);
+  if (rest[0] !== "skip" || skipped.length === 0 || new Set(skipped).size !== skipped.length) return null;
+  return { ...route, skipped };
+}
+
 /**
  * Format a Route as a location hash ("#/…"). Throws if `route` is not a Route.
  *
@@ -162,7 +188,7 @@ export function parseRoute(hash) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet, initialTarget } = route ?? {};
+  const { section, id, flow, step, facet, initialTarget, tried, skipped } = route ?? {};
   if (initialTarget !== undefined &&
       (section !== "scenes" || flow !== "new" || facet !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
@@ -173,6 +199,9 @@ export function formatRoute(route) {
     parts = [section, "frames", id, facet];
   } else if (flow === "edit") {
     parts = [section, id, "edit", step];
+  } else if (flow === "update") {
+    parts = [section, "update", id, ...(tried === undefined ? [] : ["try", tried]),
+      ...(Array.isArray(skipped) && skipped.length > 0 ? ["skip", ...skipped] : [])];
   } else if (flow !== undefined) {
     parts = [section, flow, step];
   } else if (id !== undefined) {
@@ -223,7 +252,14 @@ export function sameRoute(a, b) {
     return a == b;
   }
   const extra = Object.keys(b).filter((key) => !KEYS.includes(key) && b[key] !== undefined);
-  return extra.length === 0 && KEYS.every((key) => a[key] === b[key]);
+  return extra.length === 0 && KEYS.every((key) => sameValue(a[key], b[key]));
+}
+
+// A list key (`skipped`) compares element by element, and an empty list is the same as none.
+function sameValue(x, y) {
+  if (!Array.isArray(x) && !Array.isArray(y)) return x === y;
+  const [xs, ys] = [x ?? [], y ?? []];
+  return Array.isArray(xs) && Array.isArray(ys) && xs.length === ys.length && xs.every((item, at) => item === ys[at]);
 }
 
 /**

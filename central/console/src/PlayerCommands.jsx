@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 
 import { FactLine } from "./FactLine.jsx";
 import { clock, fact } from "./facts.js";
@@ -12,8 +12,15 @@ import {
   rebootTarget,
   sendReboot,
 } from "./fleetCommands.js";
-import { NODE_OFF, nodeUnknown } from "./nodeRead.js";
+import { useNodeControlValue } from "./nodeControl.js";
+import { nodeUnknown } from "./nodeRead.js";
+import { formatRoute } from "./routes.js";
+import { useSendDialog } from "./useSendDialog.js";
+
 const tail = (id) => `…${String(id).slice(-6)}`;
+
+// The fleet-wide aggregates' home: the boot selection and the effect gate (Part E §25).
+const RELEASES = formatRoute({ section: "releases" });
 
 /** One command's named state and its evidence (fleetCommands.js `CommandState`). */
 function StateEntry({ state, children }) {
@@ -31,71 +38,21 @@ function StateEntry({ state, children }) {
  * The reboot dialog (§10, §11 "Reboot dialog home"): the fleet module's own, so the
  * shared ConfirmAction is not widened. It shows and sends ONE frozen request
  * (fleetCommands.js `rebootRequest`); "Retry the same request" re-sends that body
- * unchanged. Esc and Cancel are blocked while a send is in flight. Send is disabled by
+ * unchanged. Esc and Cancel are blocked while a send is in flight (useSendDialog.js). Send is disabled by
  * `rebootRefusal` on the read on screen; the send itself is judged again by `sendReboot` on
- * the hook's newest read (§10), so the dialog never decides which read counts.
+ * the hooks' newest reads (§10), so the dialog never decides which read counts. The effect
+ * gate is the shell's (`control`, nodeControl.js), its one source.
  *
  * @param {{deviceId: string, name: string, request: import("./fleetCommands.js").FrozenRebootRequest,
- *          retry: boolean, node: object,
+ *          retry: boolean, node: object, control: import("./nodeControl.js").NodeControl,
  *          onSent: (result: import("./fleetCommands.js").RebootResult) => void,
  *          onClose: (result: import("./fleetCommands.js").RebootResult|null) => void}} props
  */
-function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose }) {
+function RebootDialog({ deviceId, name, request, retry, node, control, onSent, onClose }) {
   const titleId = useId();
-  const dialogRef = useRef(/** @type {HTMLDialogElement|null} */ (null));
-  const cancelRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const flying = useRef(false);
-  const resultRef = useRef(/** @type {import("./fleetCommands.js").RebootResult|null} */ (null));
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const [phase, setPhase] = useState(/** @type {"idle"|"in-flight"|"terminal"} */ ("idle"));
-  const [result, setResult] = useState(/** @type {import("./fleetCommands.js").RebootResult|null} */ (null));
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const onCancel = (event) => {
-      if (flying.current) event.preventDefault();
-    };
-    const onCloseEvent = () => {
-      if (flying.current) {
-        dialog.showModal(); // a close got past the guard: keep the dialog and its state
-        return;
-      }
-      onCloseRef.current(resultRef.current);
-    };
-    dialog.addEventListener("cancel", onCancel);
-    dialog.addEventListener("close", onCloseEvent);
-    dialog.showModal();
-    cancelRef.current?.focus();
-    return () => {
-      dialog.removeEventListener("cancel", onCancel);
-      dialog.removeEventListener("close", onCloseEvent);
-    };
-  }, []);
-
-  const stale = rebootRefusal(request, node);
-  const send = async () => {
-    if (flying.current) return;
-    flying.current = true;
-    dialogRef.current.setAttribute("closedby", "none");
-    dialogRef.current.focus();
-    setPhase("in-flight");
-    const sent = await sendReboot(deviceId, request, node);
-    flying.current = false;
-    dialogRef.current?.setAttribute("closedby", "closerequest");
-    resultRef.current = sent;
-    onSent(sent);
-    if (sent.outcome === "done") {
-      dialogRef.current?.close();
-      return;
-    }
-    setResult(sent);
-    setPhase("terminal");
-  };
-
-  const close = () => {
-    if (!flying.current) dialogRef.current.close();
-  };
+  const { dialogRef, cancelRef, phase, result, run, close } = useSendDialog(onClose);
+  const stale = rebootRefusal(request, node, control.gate);
+  const send = () => run(() => sendReboot(deviceId, request, node, control), onSent);
 
   const body = request.body;
   return (
@@ -120,6 +77,11 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
           </>
         )}
         <p>The Run stays active. Central sends no command to other Frames or Actuators.</p>
+        <p>
+          {"On its next boot, Central offers this Player the boot selection current at that moment (see "}
+          <a href={RELEASES}>Releases</a>
+          {")."}
+        </p>
         <p>{`Central offers the request to Host Management for ${request.windowSeconds} s. Delivery is unknown until Host Management responds.`}</p>
         {request.previous !== null && <p>{request.previous}</p>}
         <details>
@@ -156,7 +118,8 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
  * and the reboot history with one named state per request. While any command on the target
  * session is outstanding the only offer is a retry of the request this page sent (its
  * frozen body); one this page does not hold cannot be resent, so Reboot waits for it to
- * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`).
+ * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`). The effect
+ * gate comes from the shell's node control, which is read again when the dialog opens.
  *
  * @param {{deviceId: string, name: string, node: object, snapshot: object,
  *          playerId: string|null}} props
@@ -169,18 +132,18 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
   const [dialog, setDialog] = useState(/** @type {{request: object, retry: boolean}|null} */ (null));
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState(/** @type {string|null} */ (null));
+  const control = useNodeControlValue();
 
-  if (node.enabled === false) {
-    return <FactLine label="Reboot" fact={fact({ kind: "unknown", why: NODE_OFF })} />;
-  }
   const commands = node.read?.reboot_commands ?? [];
-  const target = rebootTarget(node, node.gate);
+  const target = rebootTarget(node, control.gate);
   const offer = rebootOffer(target, commands, node.readAt, held);
   const retryHeld = offer.offer === "retry";
   const blocked = offer.offer === "blocked" ? offer.reason : null;
+  const gateBlocked = offer.offer === "blocked" && offer.gate === true;
 
   const open = () => {
     setStatus(null);
+    void control.refresh(); // the gate, read again on demand when a dialog opens (§25)
     if (retryHeld) {
       setDialog({ request: held, retry: true });
       return;
@@ -219,7 +182,12 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
           aria-describedby={blocked !== null ? reasonId : undefined}>
           {retryHeld ? "Retry reboot request" : "Reboot Player"}
         </button>
-        {blocked !== null && <p id={reasonId} className="roster__note">{`Reboot unavailable: ${blocked}.`}</p>}
+        {blocked !== null && (
+          <p id={reasonId} className="roster__note">
+            {`Reboot unavailable: ${blocked}.`}
+            {gateBlocked && <>{" "}<a href={RELEASES}>See Releases › Effect gate</a></>}
+          </p>
+        )}
       </div>
       {status !== null && <p className="roster__status-line" role="status">{status}</p>}
       <h4 className="player__layer-title">Reboot history</h4>
@@ -230,7 +198,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       ) : (
         <ul className="player__commands" aria-label="Reboot history">
           {commands.map((command) => (
-            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt, { nodeDevice: node })}>
+            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt, { nodeDevice: node, gate: control.gate })}>
               <details className="player__details">
                 <summary>{`Request ${tail(command.command_id)}`}</summary>
                 <ul>
@@ -245,7 +213,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       )}
       {dialog !== null && (
         <RebootDialog key={dialog.request.body.command_id} deviceId={deviceId} name={name}
-          request={dialog.request} retry={dialog.retry} node={node} onSent={onSent} onClose={onClose} />
+          request={dialog.request} retry={dialog.retry} node={node} control={control} onSent={onSent} onClose={onClose} />
       )}
     </>
   );
@@ -258,9 +226,6 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
  * @param {{node: object}} props
  */
 export function AppOperationsSection({ node }) {
-  if (node.enabled === false) {
-    return <FactLine label="App operations" fact={fact({ kind: "unknown", why: NODE_OFF })} />;
-  }
   const read = node.operations;
   if (read == null) {
     const why = nodeUnknown(node)

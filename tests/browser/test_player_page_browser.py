@@ -6,14 +6,23 @@ management mounted (`operator_server(..., node_control=...)`), real node session
 samples, manager preparation and broker evidence recorded through Central's own owner
 services, and a real Registry Player enrolled on the same device. It proves the device-keyed
 join, the node read (only on an open Player page), the facts' labels and their Unknowns, the
-per-section error boundary, node management being off, and the retired `#/equipment` bookmark;
+per-section error boundary and the retired `#/equipment` bookmark;
 and (B2) Reboot Player against Central's real reboot owner behind an open effect gate: the
 frozen request, its retry, its window, late responses and the app operations' named states,
 and (R0) the one send rule: a dialog frozen at an older read sends nothing once the newest read
 lists another outstanding request;
-and (B3) the V1 lane: the V1 fleet target set from the Players list, and a queued maintenance
-request shown on the Player page with Cancel as its only control;
-and (C2) Display Host's newest exchange per Output (the display read) and the V1 records as facts.
+and (C2) Display Host's newest exchange per Output (the display read);
+and (NS1, Part E) Stage app against Central's real stage owner: a Frame-bound Player stages
+(D16), the dialog states this boot only and the bound rule, every served state renders through
+Ended by a later boot, a switch in progress refuses a stale dialog with zero POSTs, a lost answer
+resends the identical body, and refusals read in Central's words;
+and (NS2, Part E) Qualified fallback: Begin names the linked app, this page samples every 2 s
+only while visible, stops with zero further samples on a terminal, unlisted or
+node_control_disabled answer and after 2 minutes without progress, and a qualification Central
+accepts is listed and admits a following Stage as its fallback;
+and (NV1, Part E) the V2 posture: a Central without node control shows one banner, one "not
+shown" line and sends no node read; the Boot section holds node records only, plus the one
+deprecated-path line Central serves; the effect gate comes from the shell's one status read.
 
 Every assertion is behavioural (role, text, outcome); ages are Central's read time minus
 Central's receipt time, driven by the registry's controlled clock.
@@ -21,27 +30,31 @@ Central's receipt time, driven by the registry's controlled clock.
 
 import json
 import os
+import re
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 from console_tasks import connect, current_hash, go, open_player
-from operator_harness import drive_poll, operator_server, report_readiness
+from operator_harness import answer_first, drive_poll, operator_server, report_readiness
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
-from test_node_boot import claim_for, cold_setup
+from test_node_acceptance import Witnesses
+from test_node_boot import claim_for, cold_setup, environment, seed_verified_publication
+from test_node_lifecycle import Rig
 from test_registry import enroll
 
-from central.fleet.models import Artifact, MaintenanceRequestWrite, PolicyWrite
+from central.fleet.node_boot import NodeBootService, parse_node_deployment
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig
-from central.fleet.service import FleetService
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_display import DisplayExchange, encode_display_exchange
+from contracts.node_lifecycle import parse_stage_command
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
 from contracts.node_preparation import ManagerPreparationV2, encode_manager_preparation
 from contracts.node_protocol import (
@@ -61,7 +74,12 @@ pytestmark = pytest.mark.skipif(
 NODE = NodeControlConfig("node-test")
 NAME = f"Player …{SERIAL[-6:]}"
 DEVICE_READ = f"**/v1/operator/node/devices/{DEVICE_ID}"
-OFF = "Unknown: node management is off on this Central"
+BANNER = ("Node management is off on this Central. It was started without node control: Players "
+          "that boot by node path are refused, and node records, Reboot, App operations and Releases "
+          "have nothing to read. Start Central with central.node_app and set PHOTO_WALL_NODE_AUDIENCE "
+          "(runbook › Node control).")
+NOT_SHOWN = "Node records are not shown: node management is off (see the banner)."
+STATUS_READ = "/v1/operator/node/status"
 
 
 class Box:
@@ -119,10 +137,17 @@ class Box:
 
 
 def _node_reads(page):
-    """Every node read the page sends, in order."""
+    """Every node read the pages send, in order, except the shell's node status read."""
     sent = []
     page.on("request", lambda request: sent.append(request.url)
-            if "/v1/operator/node/" in request.url else None)
+            if "/v1/operator/node/" in request.url and STATUS_READ not in request.url else None)
+    return sent
+
+
+def _status_reads(page):
+    """Every node status read the console sends (the shell's, and nobody else's)."""
+    sent = []
+    page.on("request", lambda request: sent.append(request.url) if STATUS_READ in request.url else None)
     return sent
 
 
@@ -233,19 +258,111 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(page.get_by_role("link", name=NAME, exact=True)).to_be_visible()
 
 
-def test_with_node_management_off_the_node_layers_read_unknown_and_the_page_works(page, registry):
-    identity, _, request = enroll(registry, count=1)
-    report_readiness(registry, identity["player_id"])
-    with operator_server(registry.db, registry.clock) as origin:
+def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_works(page, registry):
+    identity, _, request = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    registry.create_frame(FrameCreate(id="off-1", surface_id="wall", x_mm=100, y_mm=100, width_mm=400,
+                                      height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
+                                                                          diagonal_inches=24)))
+    page.route(f"**/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify", lambda route: route.fulfill(
+        status=202, content_type="application/json", body=json.dumps({
+            "request_id": "synthetic-request", "output_id": "HDMI-A-2",
+            "expires_at": registry.clock.utc() + 15})))
+    name = f"Player {request.device_id}"
+    with operator_server(registry.db, registry.clock, node_control=None) as origin:
+        sent = _node_reads(page)
         connect(page, origin)
-        player = open_player(page, f"Player {request.device_id}")
-        for layer in ("Host Management", "App Manager", "App Effect Broker", "Display Host"):
-            expect(_layer(page, layer)).to_contain_text(OFF)
-        expect(_layer(page, "Player app")).to_contain_text("Player app last reported 0 s ago")
-        expect(page.get_by_role("region", name="Reboot", exact=True)).to_contain_text(f"Reboot: {OFF}")
-        expect(page.get_by_role("region", name="App", exact=True)).to_contain_text(f"App operations: {OFF}")
-        expect(player.get_by_role("button", name=f"Retire player {identity['player_id']}", exact=True)
-               ).to_be_visible()
+        banner = page.get_by_role("region", name="Node control", exact=True)
+        expect(banner).to_have_text(BANNER)
+        expect(banner).to_have_count(1)
+        player = open_player(page, name)
+        expect(banner).to_have_count(1)
+        # In place of the node sections, exactly one line.
+        expect(player.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
+        for section in ("Layers", "Boot", "Reboot", "App"):
+            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
+        expect(player).not_to_contain_text("Unknown: node management")
+        # Identify, Bind, Unbind and Retire still work.
+        outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
+        outputs.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True).click()
+        expect(outputs.get_by_role("status")).to_contain_text("Identify requested for HDMI-A-2.")
+        page.get_by_role("combobox", name=f"Frame for {player_id[-6:]} · HDMI-A-1 · Free", exact=True
+                         ).select_option("off-1")
+        outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
+        expect(page.get_by_role("region", name="Frame off-1 inspector", exact=True)).to_be_visible()
+        assert registry.inventory().frames[0].player_id == player_id
+        player = open_player(page, name)
+        player.get_by_role("button", name=f"Unbind all outputs of {player_id}", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("1 of 1 unbound")
+        assert registry.inventory().frames[0].player_id is None
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
+        dialog.get_by_role("button", name="Confirm retire", exact=True).click()
+        expect(player).to_contain_text("Standing: Retired")
+        page.wait_for_timeout(300)
+        assert sent == [], "a node read was sent to a Central without node control"
+
+
+def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_status_itself(
+        page, registry):
+    box = Box(registry)
+    box.host_sample()
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+        status = _status_reads(page)
+        connect(page, origin)
+        expect(page.get_by_role("heading", level=1)).to_be_visible()
+        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
+        go(page, "players")
+        page.wait_for_timeout(200)
+        shell_reads = len(status)
+        assert shell_reads >= 1, "the shell did not read node status"
+        with page.expect_response(DEVICE_READ):
+            open_player(page, NAME)
+        expect(_layer(page, "Host Management")).to_contain_text("Host Management last reported")
+        # A second device read (5 s cadence) sends no status read of the page's own.
+        with page.expect_response(DEVICE_READ, timeout=10_000):
+            pass
+        assert len(status) == shell_reads, "the Player page read node status itself"
+        expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
+
+
+def test_the_boot_section_holds_node_records_and_the_one_deprecated_path_line(page, registry):
+    box = Box(registry)
+    box.host_sample()
+    deprecated = {"on": False}
+
+    def stub(route):
+        data = route.fetch().json()
+        if deprecated["on"]:
+            data["deprecated_boot"] = {"path": "offer", "recorded_at": data["read_at"] - 120}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+    page.route(DEVICE_READ, stub)
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+        connect(page, origin)
+        open_player(page, NAME)
+        boot = page.get_by_role("region", name="Boot", exact=True)
+        expect(boot).to_contain_text(
+            f"Current node session's boot: Boot {BOOT_ID} (claimed at boot by the box, unverified)")
+        expect(boot).to_contain_text(
+            f"Node boot offer: Issued for boot {BOOT_ID}, not proof the Player booted")
+        expect(boot).to_contain_text(
+            "A Pi boots by node path when its kernel command line carries photowall.node=v2.")
+        expect(boot).not_to_contain_text("deprecated")
+        expect(boot.locator("p.fact")).to_have_count(2)
+        deprecated["on"] = True
+        warning = boot.get_by_role("note")
+        expect(warning).to_have_text(
+            "Booted by the deprecated path: Central's newest boot record for this box is a deprecated "
+            "boot offer · recorded 2 min ago · its kernel command line lacks photowall.node=v2; "
+            "Select and Stage do not reach it", timeout=10_000)
+        expect(warning).to_have_count(1)
+        expect(boot).not_to_contain_text("A Pi boots by node path")
+        expect(boot.locator("p.fact")).to_have_count(3)
 
 
 def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registry):
@@ -433,6 +550,10 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
         expect(dialog).to_contain_text("Frame lobby: no live Run")
         expect(dialog).to_contain_text(RUN_STAYS)
         expect(dialog).to_contain_text("Central offers the request to Host Management for 30 s.")
+        # NR2: the one static sentence on what the next boot is offered, linking to Releases.
+        expect(dialog).to_contain_text("On its next boot, Central offers this Player the boot selection current "
+                                       "at that moment (see Releases).")
+        expect(dialog.get_by_role("link", name="Releases", exact=True)).to_have_attribute("href", "#/releases")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog).to_have_count(0)
         expect(_reboot(page).get_by_role("status")).to_have_text(
@@ -517,7 +638,12 @@ def test_a_closed_gate_disables_reboot_with_its_reason(page, registry):
         connect(page, origin)
         open_player(page, NAME)
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_disabled()
-        expect(_reboot(page)).to_contain_text("Reboot unavailable: Central's effect gate is closed")
+        expect(_reboot(page)).to_contain_text(
+            "Reboot unavailable: Effect gate closed · Central's reason: no deployment certification has opened it")
+        # NR2: the gate reason links to the gate's home, which shows the same words.
+        _reboot(page).get_by_role("link", name="See Releases › Effect gate", exact=True).click()
+        expect(page.get_by_role("region", name="Effect gate", exact=True)).to_contain_text(
+            "Effect gate: Effect gate closed · Central's reason: no deployment certification has opened it")
         assert sent == []
 
 
@@ -617,68 +743,365 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
         assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
 
 
-# --- B3: the V1 lane, labelled "V1 boot offers" (console DDD §9, Q2).
+# --- NS1 (Part E): Stage app against Central's real stage owner behind an open effect gate.
 
-V1_TAG = "v1.2.3"
-V1_DIGEST = "a" * 64
-
-
-def _v1_box(registry):
-    """A box Central knows from a V1 netboot, an app release V1 offers can carry, and the
-    Registry Player enrolled on the same device; returns its Player id."""
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
-                     "VALUES(%s,%s,1,1)", (DEVICE_ID, SERIAL))
-        conn.execute(
-            "INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
-            "discovered_at,updated_at,mirror_state,payload_url,payload_sha256,"
-            "payload_size,payload_format,payload_base_abi,payload_source_manifest) "
-            "VALUES(%s,1,2,3,FALSE,1,1,'mirrored','https://example.invalid/app',"
-            "%s,123,'pw-player-data-v1',%s,'manifest.v2.json')",
-            (V1_TAG, V1_DIGEST, "sha256:" + "b" * 64))
-    return enroll(registry, count=1, device_id=DEVICE_ID)[0]["player_id"]
+STAGES = f"**/v1/operator/node/devices/{DEVICE_ID}/app-stages"
+BOUND_RULE = ("Each Frame this Player drives shows the base page while the app switches, then rejoins its Run "
+              "at the current point (missed content is not replayed), as on Reboot.")
+THIS_BOOT = "Applies to this boot only. Any later boot, including an unplanned one, runs the boot selection"
+RECORDED = "Stage recorded; App Effect Broker has not responded yet."
 
 
-def test_the_v1_fleet_target_is_set_from_the_players_list(page, registry):
-    _v1_box(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
-        v1 = page.get_by_role("region", name="V1 boot offers", exact=True)
-        expect(v1).to_contain_text("V1 fleet app target: none")
-        expect(v1.get_by_role("button", name="Queue online update")).to_have_count(0)
-        v1.get_by_label("V1 fleet app").select_option(V1_TAG)
-        v1.get_by_role("button", name="Set V1 fleet target", exact=True).click()
-        expect(v1.get_by_role("status")).to_contain_text(f"V1 fleet app target set: {V1_TAG}.")
-        expect(v1).to_contain_text(f"V1 fleet app target: {V1_TAG} · {V1_DIGEST[:12]}")
-    policy = FleetService(registry.db, registry.clock).status()["fleet_policy"]
-    assert policy["target"]["tag"] == V1_TAG
+def _stage_posts(page):
+    """The body of every stage request the page sends, in order."""
+    sent = []
+    page.on("request", lambda request: sent.append(request.post_data_json)
+            if request.method == "POST" and request.url.endswith("/app-stages") else None)
+    return sent
 
 
-def test_a_queued_maintenance_request_is_shown_and_can_only_be_canceled(page, registry):
-    _v1_box(registry)
-    service = FleetService(registry.db, registry.clock)
-    revision = service.set_app_policy(PolicyWrite(
-        expected_revision=0, target=Artifact(tag=V1_TAG, sha256=V1_DIGEST, size=123)))["revision"]
-    service.request_maintenance(DEVICE_ID, MaintenanceRequestWrite(
-        request_id=uuid4(), expected_device_generation=1, expected_policy_source="explicit",
-        expected_policy_revision=revision, expected_target_sha256=V1_DIGEST, ttl_seconds=3600))
-    with operator_server(registry.db, registry.clock) as origin:
-        posts = []
-        page.on("request", lambda request: posts.append(request.url)
-                if request.method == "POST" and "maintenance-requests" in request.url else None)
+def _app(page):
+    return page.get_by_role("region", name="App", exact=True)
+
+
+def _stage_dialog(page):
+    _app(page).get_by_role("button", name="Stage app…", exact=True).click()
+    return page.get_by_role("dialog", name=f"Stage an app on {NAME}?", exact=True)
+
+
+def _choose(dialog, deployment):
+    dialog.get_by_role("radio", name=re.compile(f"^Deployment {str(deployment.deployment_id)[:4]}…")).check()
+
+
+def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_state(page, registry):
+    """D16 (G6): a Frame-bound Player is staged; the dialog states this boot only and the bound
+    rule; a stranded Staged offers a newer stage saying what it replaces; the operation then reads
+    switching (Stage disabled), the target running, and ended by a later boot (G2)."""
+    fixture = Rig(registry, unbound=False, gate_seconds=300)
+    with _gated_server(registry) as origin:
+        sent = _stage_posts(page)
         connect(page, origin)
         open_player(page, NAME)
-        v1 = page.get_by_role("region", name="V1 boot offers", exact=True)
-        expect(v1).to_contain_text(f"V1 app target: {V1_TAG} · {V1_DIGEST[:12]} · explicit")
-        expect(v1).to_contain_text(f"V1 maintenance request: queued · {V1_TAG}")
-        records = v1.get_by_role("group", name="V1 records", exact=True)
-        expect(records).to_contain_text("V1 loader OS session: ")
-        expect(records).to_contain_text("V1 app attempt: ")
-        expect(records).to_contain_text("V1 authenticated OS attempt claim: ")
-        expect(records).not_to_contain_text("V1 record ·")
-        expect(v1.get_by_role("button", name="Queue online update")).to_have_count(0)
-        v1.get_by_role("button", name="Cancel maintenance request", exact=True).click()
-        expect(v1.get_by_role("status")).to_have_text("V1 maintenance request canceled.")
-        expect(v1).to_contain_text("V1 maintenance request: canceled")
-        expect(v1.get_by_role("button", name="Cancel maintenance request")).to_have_count(0)
-        assert posts == [], "the console created a maintenance request"
+        dialog = _stage_dialog(page)
+        expect(dialog).to_contain_text(THIS_BOOT)
+        expect(dialog).to_contain_text(BOUND_RULE)
+        expect(dialog).to_contain_text("Frames this Player drives: node-f0, node-f1.")
+        for deployment in fixture.deployments:  # each published deployment carrying an app is offered
+            expect(dialog.get_by_role("radio", name=re.compile(
+                f"^Deployment {str(deployment.deployment_id)[:4]}…"))).to_have_count(1)
+        _choose(dialog, fixture.deployments[0])
+        dialog.get_by_role("button", name="Stage app", exact=True).click()
+        expect(dialog).to_have_count(0)
+        expect(_app(page).get_by_role("status")).to_have_text(RECORDED)
+        operations = _app(page).get_by_role("list", name="App operations", exact=True)
+        expect(operations).to_contain_text("Staged; no response from App Effect Broker")
+        # A stranded stage: a newer stage is offered and says what it replaces, never "retry".
+        dialog = _stage_dialog(page)
+        expect(dialog).to_contain_text("Sends a newer stage. It replaces stage")
+        expect(dialog).to_contain_text("which App Effect Broker has not responded to.")
+        dialog.get_by_role("button", name="Cancel", exact=True).click()
+        with registry.db.transaction() as conn:
+            [row] = conn.execute("SELECT command_payload FROM node_app_operations").fetchall()
+        command = parse_stage_command(bytes(row["command_payload"]))
+        assert command.target == fixture.deployments[0].app_environment
+        fixture.report(command, "intent_stop", 1)
+        expect(operations).to_contain_text("App Effect Broker reported switching (intent stop)", timeout=10_000)
+        stage_button = _app(page).get_by_role("button", name="Stage app…", exact=True)
+        expect(stage_button).to_be_disabled()
+        expect(_app(page)).to_contain_text("Stage app unavailable: A switch is in progress; wait for it to finish.")
+        for sequence, phase in enumerate(("stopped", "starting_new", "running"), start=2):
+            fixture.report(command, phase, sequence)
+        expect(operations).to_contain_text("App Effect Broker reported the staged app running", timeout=10_000)
+        expect(stage_button).to_be_enabled()
+        offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
+        fixture.sessions.enroll(claim_for(offer, owner="app_effect_broker"))
+        expect(operations).to_contain_text("Ended by a later boot", timeout=10_000)
+        expect(operations).to_contain_text("a later boot was admitted; it runs the boot selection's app")
+        assert len(sent) == 1
+        assert sent[0]["deployment_id"] == str(fixture.deployments[0].deployment_id)
+        assert sent[0]["rollout_generation"] == fixture.generation
+        assert sent[0]["operator_audit_ref"].startswith("console/")
+
+
+def test_a_closed_gate_disables_stage_with_its_reason_and_a_link_to_the_gate(page, registry):
+    fixture = Rig(registry, gate_seconds=300)
+    fixture.service.gate.close()
+    with _gated_server(registry) as origin:
+        sent = _stage_posts(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        expect(_app(page).get_by_role("button", name="Stage app…", exact=True)).to_be_disabled()
+        expect(_app(page)).to_contain_text("Stage app unavailable: Effect gate closed · Central's reason:")
+        _app(page).get_by_role("link", name="See Releases › Effect gate", exact=True).click()
+        expect(page.get_by_role("region", name="Effect gate", exact=True)).to_contain_text("Effect gate closed")
+        assert sent == []
+
+
+def test_a_stale_stage_dialog_sends_nothing_once_a_switch_is_in_progress(page, registry):
+    """The dialog froze while nothing was switching; another tab's stage then starts switching. Send
+    is disabled, and the dialog's own send handler, called directly, refuses inside sendStage."""
+    fixture = Rig(registry, gate_seconds=300)
+    with _gated_server(registry) as origin:
+        sent = _stage_posts(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        dialog = _stage_dialog(page)
+        _choose(dialog, fixture.deployments[0])
+        send = dialog.get_by_role("button", name="Stage app", exact=True)
+        expect(send).to_be_enabled()
+        other = fixture.stage(1)  # another tab, through Central's real stage owner
+        fixture.report(other, "intent_stop", 1)
+        registry.clock.advance(1)
+        expect(dialog.get_by_role("alert")).to_have_text(
+            "A switch is in progress; wait for it to finish.", timeout=10_000)
+        expect(send).to_be_disabled()
+        _call_send_directly(send)
+        expect(dialog.get_by_role("status")).to_have_text("A switch is in progress; wait for it to finish.")
+        assert sent == []
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM node_app_operations").fetchone()["n"] == 1
+
+
+def test_a_lost_stage_answer_resends_the_identical_body_and_a_recorded_one_is_not_resent(page, registry):
+    """A stage whose request failed at a gateway is held unknown and re-sent byte-identical; one
+    Central did record is settled by the next read, which lists it, and is never re-sent."""
+    # Name a deployment whose app is not the qualified one: the release read lists deployments
+    # published at one instant in no fixed order, so "the first radio" may be the running app.
+    fixture = Rig(registry, gate_seconds=300)
+    with _gated_server(registry) as origin:
+        sent = _stage_posts(page)
+        answer_first(page, STAGES, lambda route: route.fulfill(status=502, body=""))  # never reaches Central
+        connect(page, origin)
+        open_player(page, NAME)
+        dialog = _stage_dialog(page)
+        _choose(dialog, fixture.deployments[0])
+        dialog.get_by_role("button", name="Stage app", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("Central did not answer. Check this after the next refresh.")
+        expect(dialog.get_by_role("radio", name=re.compile(
+            f"^Deployment {str(fixture.deployments[0].deployment_id)[:4]}…"))).to_be_disabled()  # the choice is locked once sent
+        dialog.get_by_role("button", name="Send the same request again", exact=True).click()
+        expect(dialog).to_have_count(0, timeout=10_000)
+        expect(_app(page).get_by_role("status")).to_have_text(RECORDED)
+        assert len(sent) == 2 and sent[0] == sent[1]
+
+        # Recorded by Central, answer lost: the next read lists it, so nothing is re-sent.
+        def lose(route):
+            route.fetch()
+            route.fulfill(status=502, body="")
+
+        page.unroute(STAGES)
+        answer_first(page, STAGES, lose)
+        dialog = _stage_dialog(page)
+        expect(dialog).to_contain_text("Sends a newer stage. It replaces stage")
+        _choose(dialog, fixture.deployments[0])
+        dialog.get_by_role("button", name="Stage app", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text("Central did not answer. Check this after the next refresh.")
+        expect(dialog.get_by_role("alert")).to_have_text("Central already recorded this stage.", timeout=10_000)
+        expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_be_disabled()
+        assert len(sent) == 3
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM node_app_operations").fetchone()["n"] == 2
+
+
+def test_stage_refusals_read_in_centrals_words_and_unlisted_codes_are_refused(page, registry):
+    Rig(registry, gate_seconds=300)
+    answers = iter([(503, "rollout_serving_verifier_unavailable"), (422, "node_app_stage_invalid"),
+                    (409, "node_app_qualified_fallback_required")])
+
+    def refuse(route):
+        status, code = next(answers)
+        route.fulfill(status=status, content_type="application/json", body=json.dumps({"error": code}))
+
+    with _gated_server(registry) as origin:
+        sent = _stage_posts(page)
+        page.route(STAGES, refuse)
+        connect(page, origin)
+        open_player(page, NAME)
+        for words in ("Central refused the effect: rollout_serving_verifier_unavailable.",
+                      "Central refused: node_app_stage_invalid.",
+                      "No qualified fallback for this Player's current Outputs and base: qualify the running app first."):
+            dialog = _stage_dialog(page)
+            dialog.get_by_role("radio").first.check()
+            dialog.get_by_role("button", name="Stage app", exact=True).click()
+            expect(dialog.get_by_role("status")).to_have_text(words)
+            # A refusal is final: no resend offered, nothing re-sent.
+            expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_have_count(0)
+            dialog.get_by_role("button", name="Close", exact=True).click()
+        assert len(sent) == 3
+
+
+# --- NS2 (Part E): Qualified fallback; this page samples (Q7) against Central's real owner.
+
+SAMPLES = "**/v1/operator/node/app-qualifications/*/sample"
+STEADY = "Begin again when the Player app and its Outputs are steady."
+AWAITING = {"status": "awaiting_new_witnesses", "accepted": False}
+
+
+class _Samples:
+    """Answer every sample request with `answer` (a (status, body) pair), counting them; `real`
+    lets them through to Central instead."""
+
+    def __init__(self, page, answer=(200, AWAITING)):
+        self.page, self.answer, self.real, self.sent, self.answered = page, answer, False, 0, 0
+        page.route(SAMPLES, self._handle)
+
+    def _handle(self, route):
+        self.sent += 1
+        if self.real:
+            route.fallback()
+        else:
+            status, body = self.answer
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+        self.answered += 1
+
+    def wait_for(self, count, timeout_ms=10_000):
+        waited = 0
+        while self.answered < count:
+            assert waited < timeout_ms, f"{self.answered} sample answers, expected {count}"
+            self.page.wait_for_timeout(20)
+            waited += 20
+        self.page.wait_for_timeout(50)  # let the page apply the answer
+
+
+def _set_visibility(page, state):
+    page.evaluate("""(state) => {
+        Object.defineProperty(document, "visibilityState", {configurable: true, get: () => state});
+        document.dispatchEvent(new Event("visibilitychange"));
+    }""", state)
+
+
+def _qualified_fallback(page):
+    return _app(page).get_by_role("region", name="Qualified fallback", exact=True)
+
+
+def _begin(page, environment_sha256):
+    section = _qualified_fallback(page)
+    section.get_by_role("button", name=f"Begin qualifying app {environment_sha256[:6]}…", exact=True).click()
+    return section
+
+
+def _begun(registry):
+    """The qualification ids the console began (Central's rows, by the console's audit reference)."""
+    with registry.db.transaction() as conn:
+        return [row["qualification_id"] for row in conn.execute(
+            "SELECT qualification_id FROM node_app_qualifications WHERE operator_audit_ref LIKE 'console/%'")]
+
+
+def test_begin_names_the_linked_app_and_samples_every_two_seconds_only_while_visible(page, registry):
+    fixture = Rig(registry, unbound=False)
+    linked = fixture.proof.challenge.environment_sha256
+    with _gated_server(registry) as origin:
+        samples = _Samples(page)
+        connect(page, origin, paused_at=registry.clock.utc())
+        open_player(page, NAME)
+        section = _qualified_fallback(page)
+        expect(section).to_contain_text(f"App Effect Broker reported the linked Player app {linked[:6]}…")
+        expect(section).to_contain_text("physical pixels unknown")  # the Rig's stored acceptance
+        _begin(page, linked)
+        samples.wait_for(1)  # the first sample at once
+        assert len(_begun(registry)) == 1
+        progress = section.get_by_role("status", name="Qualification progress")
+        expect(progress).to_have_text("Waiting for new reports from the Player app and Display Host")
+        for expected in (2, 3, 4):
+            page.clock.run_for(2000)
+            samples.wait_for(expected)
+        _set_visibility(page, "hidden")
+        page.clock.run_for(20_000)
+        page.wait_for_timeout(300)
+        assert samples.sent == 4, "a hidden tab sampled"
+        _set_visibility(page, "visible")
+        samples.wait_for(5)  # sampling resumes at once on return
+        page.clock.run_for(2000)
+        samples.wait_for(6)
+        expect(section.get_by_role("button", name=re.compile("^Begin qualifying"))).to_be_disabled()
+
+
+@pytest.mark.parametrize("status, code, words", [
+    (409, "node_qualification_process_changed", "Stopped: the Player app's linked process changed or unlinked."),
+    (409, "node_something_new", "Stopped: Central refused: node_something_new."),
+    (503, "node_control_disabled", "Stopped: Central refused: node_control_disabled."),
+])
+def test_a_terminal_or_unlisted_sample_answer_stops_sampling_with_zero_further_posts(
+        page, registry, status, code, words):
+    fixture = Rig(registry, unbound=False)
+    with _gated_server(registry) as origin:
+        samples = _Samples(page, (status, {"error": code}))
+        connect(page, origin, paused_at=registry.clock.utc())
+        open_player(page, NAME)
+        section = _begin(page, fixture.proof.challenge.environment_sha256)
+        samples.wait_for(1)
+        expect(section.get_by_role("status", name="Qualification progress")).to_have_text(f"{words} {STEADY}")
+        page.clock.run_for(30_000)
+        _set_visibility(page, "hidden")
+        _set_visibility(page, "visible")
+        page.wait_for_timeout(300)
+        assert samples.sent == 1
+        # Begin is offered again, as a new attempt.
+        expect(section.get_by_role("button", name=re.compile("^Begin qualifying app"))).to_be_enabled()
+
+
+def test_two_minutes_of_waiting_answers_stop_sampling_with_zero_further_posts(page, registry):
+    fixture = Rig(registry, unbound=False)
+    with _gated_server(registry) as origin:
+        samples = _Samples(page)
+        connect(page, origin, paused_at=registry.clock.utc())
+        open_player(page, NAME)
+        section = _begin(page, fixture.proof.challenge.environment_sha256)
+        samples.wait_for(1)
+        progress = section.get_by_role("status", name="Qualification progress")
+        for expected in range(2, 62):  # the first answer is at 0 s, the 61st at 120 s
+            page.clock.run_for(2000)
+            samples.wait_for(expected)
+        expect(progress).to_have_text("Stopped: no progress for 2 minutes. Last answer: Waiting for new reports "
+                                      "from the Player app and Display Host.")
+        page.clock.run_for(30_000)
+        page.wait_for_timeout(300)
+        assert samples.sent == 61
+
+
+def test_an_accepted_qualification_is_listed_and_a_following_stage_is_admitted_against_it(page, registry):
+    """The page begins and samples; Central's real owners supply advancing witnesses and Central
+    accepts on the 30 s window. The page's next real sample reads accepted, the acceptance is
+    listed, and a Stage of another app is admitted with it as the fallback."""
+    witness = Witnesses(registry)
+    linked = witness.proof.challenge.environment_sha256
+    with registry.db.transaction() as conn:
+        base = parse_node_deployment(bytes(conn.execute("SELECT document FROM node_deployments").fetchone()["document"]))
+    target = environment("b")
+    selected = replace(base, deployment_id=uuid4(), app_environment=target, environment_sources={
+        base.manager_primary.environment_sha256: base.environment_sources[base.manager_primary.environment_sha256],
+        target.environment_sha256: "https://example.invalid/target"})
+    seed_verified_publication(registry, selected)
+    NodeBootService(witness.sessions).publish(selected)
+    _open_gate(registry)
+    with _gated_server(registry) as origin:
+        samples = _Samples(page)
+        sent = _stage_posts(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        section = _begin(page, linked)
+        samples.wait_for(1)
+        [qualification] = _begun(registry)
+        witness.qualification = qualification
+        for _ in range(7):
+            result = witness.advance()
+        assert result["status"] == "accepted"
+        samples.real = True  # the page's next sample reaches Central
+        expect(section.get_by_role("status", name="Qualification progress")).to_have_text(
+            "Qualification: Qualified · physical pixels unknown", timeout=10_000)
+        acceptances = section.get_by_role("list", name="Qualified fallbacks", exact=True)
+        expect(acceptances.get_by_role("listitem")).to_have_count(1, timeout=10_000)
+        expect(acceptances).to_contain_text(f"Qualified on this Player: app {linked[:6]}… on base")
+        settled = samples.sent
+        page.wait_for_timeout(2500)
+        assert samples.sent == settled, "the page sampled after Central accepted"
+
+        dialog = _stage_dialog(page)
+        _choose(dialog, selected)
+        dialog.get_by_role("button", name="Stage app", exact=True).click()
+        expect(dialog).to_have_count(0)
+        expect(_app(page).get_by_text(RECORDED, exact=True)).to_be_visible()
+        assert len(sent) == 1
+    with registry.db.transaction() as conn:
+        [row] = conn.execute("SELECT command_payload FROM node_app_operations").fetchall()
+    assert parse_stage_command(bytes(row["command_payload"])).fallback.environment_sha256 == linked

@@ -1,4 +1,4 @@
-import { ageAt, formatAge, frameHealth } from "./health.js";
+import { ageAt, formatAge, frameHealth, gigabytes } from "./health.js";
 import { LIVE_PHASES, rankedContributions, toTarget } from "./join.js";
 import { clockTime, cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
@@ -44,11 +44,6 @@ export function codeWords(code) {
 }
 
 const WORKER_ERRORS = { storage_pressure: "storage is full" };
-
-/** "4.1 of 8 GB" (decimal gigabytes, one place). */
-function gigabytes(bytes) {
-  return `${Number((Number(bytes ?? 0) / 1e9).toFixed(1))}`;
-}
 
 /**
  * The worker's jobs of its current recipe (central/media_repository.py

@@ -30,21 +30,21 @@ const broker = { session_id: "s-broker", current: true, scope: "app_effect", com
   producer: { owner: "app_effect_broker", kernel_boot_id: "boot-2" } };
 const read = (sessions, extra = {}) => ({ read_at: 1000, device_generation: 3, sessions,
   reboot_commands: [], boot_claims: [], ...extra });
-const open = { transport_enabled: true, effect_gate: { effective_state: "open", generation: 7, reason: null } };
-const node = (r, gate = open, extra = {}) => ({ enabled: true, gate, read: r, operations: null,
-  readAt: r?.read_at ?? null, error: null, ...extra });
-const target = (n) => commands.rebootTarget(n, n.gate);
+// The effect gate is the shell's (nodeControl.js), passed beside the node read, never inside it.
+const open = { state: "open", effective_state: "open", generation: 7, reason: null };
+const closed = { state: "closed", effective_state: "closed", generation: 7, reason: "never_certified" };
+const node = (r, extra = {}) => ({ read: r, operations: null, readAt: r?.read_at ?? null, error: null, ...extra });
+const target = (n, gate = open) => commands.rebootTarget(n, gate);
 out.target = [
   target(node(read([host(), broker, host({ session_id: "old", current: false })]))),
-  target(node(read([host()]), { transport_enabled: true,
-    effect_gate: { effective_state: "closed", generation: 7, reason: "operator_closed" } })),
-  target(node(read([host()]), { transport_enabled: true, effect_gate: { effective_state: "closed" } })),
-  target({ enabled: false, gate: null, read: null, error: null }),
+  target(node(read([host()])), { ...closed, reason: "operator_closed" }),
+  target(node(read([host()])), closed),
+  target(node(read([host()])), null),
   target(node(read([broker]))),
   target(node(read([host({ command_eligible: false, command_reason: "node_offer_superseded" })]))),
   target(node(read([host(), host({ session_id: "s-2" })]))),
-  target(node(read([host()]), open, { error: { code: "500", status: 500 } })),
-  target({ enabled: true, gate: open, read: null, error: { code: "node_device_unavailable", status: 403 } }),
+  target(node(read([host()]), { error: { code: "500", status: 500 } })),
+  target({ read: null, operations: null, readAt: null, error: { code: "node_device_unavailable", status: 403 } }),
 ];
 
 // --- rebootCommandState: one named state per request, Central's clock only.
@@ -67,10 +67,10 @@ out.states = {
 };
 // Requested, but Central's poll would not offer it now: the label says so; the state is unchanged.
 const targeting = command({ command: { command_session_id: "s-host", producer: { kernel_boot_id: "boot-2" } } });
-const notOffered = (n) => show(commands.rebootCommandState(targeting, 1000, { clock, nodeDevice: n }));
+const notOffered = (n, gate = open) => show(commands.rebootCommandState(targeting, 1000, { clock, nodeDevice: n, gate }));
 out.notOffered = {
   offered: notOffered(node(read([host()]))),
-  gateClosed: notOffered(node(read([host()]), { effect_gate: { effective_state: "closed" } })),
+  gateClosed: notOffered(node(read([host()])), closed),
   sessionLapsed: notOffered(node(read([host({ current: false })]))),
 };
 
@@ -96,7 +96,7 @@ out.whileOutstanding = commands.rebootRequest(bound, [onSession("c-1", true)], s
   { playerId: "p-1", commandId: "c-new", clock });
 out.badReason = commands.rebootRequest(bound, [], snapshot, 1000,
   { playerId: "p-1", commandId: "c-new", reason: "two words", clock });
-out.closed = commands.rebootRequest(target(node(read([host()]), { effect_gate: { effective_state: "closed" } })),
+out.closed = commands.rebootRequest(target(node(read([host()])), closed),
   [], snapshot, 1000, { playerId: "p-1", commandId: "c-new", clock });
 out.afterUnknownSameBoot = commands.rebootRequest(bound, [command({ outstanding: false })], snapshot, 1020,
   { playerId: "p-1", commandId: "c-new", clock }).previous;
@@ -144,9 +144,10 @@ globalThis.fetch = async (url, init) => {
 };
 const frozenAt1000 = commands.rebootRequest(bound, [], snapshot, 1000, { playerId: "p-1", commandId: "c-a", clock });
 const hook = (r) => ({ latest: () => node(r) });
-const send = async (request, r) => {
+const control = (gate = open) => ({ latest: () => ({ state: "on", gate, failed: false }) });
+const send = async (request, r, gate = open) => {
   const before = posts.length;
-  const outcome = await commands.sendReboot("d-1", request, hook(r));
+  const outcome = await commands.sendReboot("d-1", request, hook(r), control(gate));
   return { outcome: outcome.outcome, message: outcome.message, posts: posts.length - before };
 };
 out.send = {
@@ -160,6 +161,8 @@ out.send = {
     reboot_commands: [onSession("c-a", true, { expires_at: 1045 })] })),
   // The session changed after the dialog opened: the frozen request is out of date.
   sessionChanged: await send(frozenAt1000, read([host({ session_id: "s-later" })], { read_at: 1005 })),
+  // The shell's gate closed after the dialog opened: judged on control.latest(), no POST.
+  gateClosed: await send(frozenAt1000, read([host()], { read_at: 1005 }), closed),
 };
 out.sentBodies = posts.map((post) => post.body);
 out.sentUrl = posts[0]?.url;
@@ -178,6 +181,7 @@ out.app = [
   app(operation("superseded")),
   app(operation("interrupted_by_reboot")),
   app(operation("mystery")),
+  app(operation("ended_by_later_boot", { latest_effect: { phase: "running", sequence: 4, received_at: 990 } })),
 ];
 // Superseded and interrupted keep the broker's earlier answer as a second Evidence fact.
 const prior = (o) => {
@@ -191,6 +195,9 @@ out.prior = {
     latest_effect: { phase: "stopping_current", sequence: 2, received_at: 995 } })),
   supersededNothing: prior(operation("superseded")),
   stagedHasNone: prior(operation("staged", { command_response: { decision: "rejected", received_at: 990 } })),
+  // G2: a finished stage a later boot ended keeps what the broker reported.
+  endedRunning: prior(operation("ended_by_later_boot", {
+    latest_effect: { phase: "fallback_running", sequence: 5, received_at: 995 } })),
 };
 
 // --- rebootResult: Central's answer in the equipment outcome vocabulary.
@@ -223,9 +230,11 @@ def test_reboot_binds_the_one_current_host_management_session_or_says_why_not():
     assert out["target"] == [
         {"available": True, "sessionId": "s-host", "deviceGeneration": 3, "rolloutGeneration": 7,
          "kernelBootId": "boot-2"},
-        {"available": False, "reason": "Central's effect gate is closed (operator closed)"},
-        {"available": False, "reason": "Central's effect gate is closed"},
-        {"available": False, "reason": "node management is off on this Central"},
+        # A gate reason carries `gate`, so the Player page links it to Releases › Effect gate.
+        {"available": False, "reason": "Effect gate closed · Central's reason: operator closed", "gate": True},
+        {"available": False, "gate": True,
+         "reason": "Effect gate closed · Central's reason: no deployment certification has opened it"},
+        {"available": False, "reason": "Central's effect gate is not readable", "gate": True},
         {"available": False, "reason": "no current Host Management session on this box"},
         {"available": False,
          "reason": "Central refuses commands to this Host Management session (node offer superseded)"},
@@ -280,7 +289,8 @@ def test_no_new_command_id_while_a_command_on_the_session_is_outstanding():
     out = _run()
     assert out["whileOutstanding"] == {
         "refused": "a reboot request is outstanding until t1020; only the page that sent it can retry it"}
-    assert out["closed"] == {"refused": "Central's effect gate is closed"}
+    assert out["closed"] == {
+        "refused": "Effect gate closed · Central's reason: no deployment certification has opened it"}
     assert out["badReason"] == {"refused": "a reason is one word: letters, digits and _ . : / - only"}
 
 
@@ -305,6 +315,7 @@ def test_send_reboot_judges_the_newest_read_at_call_time_and_refuses_without_a_p
     assert send["outOfDate"] == {"outcome": "changed", "posts": 0,
                                  "message": "This request is out of date; close and reopen."}
     assert send["sessionChanged"]["posts"] == 0
+    assert send["gateClosed"]["posts"] == 0
     assert send["inWindow"] == {"outcome": "done", "posts": 1,
                                 "message": "Reboot recorded. Requested · delivery unknown."}
     assert send["heldRetry"]["posts"] == 1
@@ -329,7 +340,7 @@ def test_send_reboot_is_the_only_poster_of_reboots():
     start = source.index("export async function sendReboot(")
     at = route.search(source).start()
     assert start < at < source.index("\n}\n", start)
-    assert "rebootRefusal(request, node.latest())" in source[start:at]
+    assert "rebootRefusal(request, node.latest(), control.latest().gate)" in source[start:at]
 
 
 def test_a_requested_label_says_when_central_is_not_offering_it_now():
@@ -366,6 +377,7 @@ def test_app_operations_read_the_brokers_response_not_only_staged():
         "Replaced by a later stage",
         "Interrupted",
         "Unknown state",
+        "Ended by a later boot",
     ]
     assert app[2]["fact"] == 'App Effect Broker reported a "rejected" response · first received 10 s ago'
     # One phase event, received once: a `first` receipt, never the broker layer's last report.
@@ -373,6 +385,10 @@ def test_app_operations_read_the_brokers_response_not_only_staged():
     assert not [entry for entry in app if "last reported" in entry["fact"]]
     assert app[6]["fact"] == "Interrupted (Central's inference: a later boot of this Player was admitted)"
     assert app[7]["fact"] == 'Unknown: Central served an unrecognised state "mystery"'
+    # G2 (§26): a derived fact, Central's inference from a later admitted boot.
+    assert app[8]["state"] == "ended_by_later_boot"
+    assert app[8]["fact"] == ("Ended by a later boot (Central's inference: a later boot was admitted; "
+                              "it runs the boot selection's app)")
 
 
 def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer():
@@ -382,6 +398,7 @@ def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer()
         "interruptedSwitching": "App Effect Broker reported phase stopping current · first received 5 s ago",
         "supersededNothing": None,
         "stagedHasNone": None,
+        "endedRunning": "App Effect Broker reported phase fallback running · first received 5 s ago",
     }
 
 

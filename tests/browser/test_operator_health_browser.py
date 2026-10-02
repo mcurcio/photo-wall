@@ -113,9 +113,11 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
     report_readiness(registry, player_id)
     registry.clock.advance(40)
     with operator_server(registry.db, registry.clock) as origin:
+        # The shell's one node status read (node control and the effect gate) is not a node record.
         node_reads = []
         page.on("request", lambda request: node_reads.append(request.url)
-                if "/v1/operator/node/" in request.url else None)
+                if "/v1/operator/node/" in request.url
+                and "/v1/operator/node/status" not in request.url else None)
         connect(page, origin, "wall")
         inspector = open_frame(page, FRAME, "binding")
         link = inspector.get_by_role("link", name="See its layers on the Player page", exact=True)

@@ -18,8 +18,13 @@ from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import Coordinator
+from central.fleet.node_sessions import NodeControlConfig
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
+
+# The console assumes node control (console DDD Part E, R20), so the harness runs it by
+# default; `node_control=None` is the misconfigured Central without it.
+NODE_CONTROL = NodeControlConfig("node-test")
 
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
 _SEQUENCE = itertools.count(1)
@@ -27,11 +32,12 @@ _SEQUENCE = itertools.count(1)
 
 @contextmanager
 def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN,
-                    node_control=None, node_serving_verifier=None):
+                    node_control=NODE_CONTROL, node_serving_verifier=None):
     """Run the production app on an ephemeral loopback listener with real lifespan.
 
-    `node_control` (a NodeControlConfig) mounts node management as a Central configured for
-    it does; without it node management is off, as on a Central without node control.
+    `node_control` (a NodeControlConfig, node-test by default) mounts node management as the
+    supported composition does; `node_control=None` runs Central without node control, the
+    misconfiguration the console shows as one banner.
     `node_serving_verifier` lets the effect gate admit node commands (reboots)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
                      media_root=media_root, media_queue=media_queue, node_control=node_control,

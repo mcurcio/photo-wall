@@ -31,7 +31,9 @@
     "players": [
       "#/players",
       "#/players/device-0000000000000000000000000000000000000000000000000000000000000000"
-    ]
+    ],
+    "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",
+      "#/releases/update/v0.15.0/skip/sample-player", "#/releases/update/v0.15.0/try/sample-player/skip/other-player/third-player"]
   },
   "neutral": {
     "attention": ["#/attention"]

@@ -2286,17 +2286,20 @@ label {
   border-left: 2px solid var(--border);
 }
 
-/* Player fleet policy is a separate, independently timed Equipment read. */
-.fleet { margin-block: 1rem 2rem; padding: 1rem; border: 1px solid var(--line, #657082); border-radius: .5rem; }
-.fleet__heading, .fleet__controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
-.fleet__heading h2 { margin-inline-end: auto; }
-.fleet__note { color: var(--muted, #586578); }
-.fleet__devices { display: grid; gap: .75rem; padding: 0; list-style: none; }
-.fleet__device { padding: .75rem; border: 1px solid var(--line, #657082); border-radius: .4rem; }
-.fleet__device h3 { margin-block: 0 .5rem; overflow-wrap: anywhere; }
-.fleet__device p { margin-block: .35rem; overflow-wrap: anywhere; }
-.fleet__controls select { max-width: 100%; margin-inline: .4rem; }
-.fleet__notice { margin-block: .75rem; }
+/* Node control off (Part E §25): the one banner above every page; and a Player's
+   deprecated-path boot line. Both name a misconfiguration, so they read as warnings. */
+.node-banner {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 6px;
+}
+.node-banner p { margin: 0; }
+.player__warning {
+  padding-left: 12px;
+  border-left: 4px solid var(--warn);
+}
 
 /* The Player page (console DDD §9): one section per aggregate part, each with its own
    read time; facts carry their truth kind (FactLine.jsx). */

@@ -476,7 +476,7 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "players", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -512,7 +512,7 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "players", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention")
 ] + [
     {"section": "players", "id": "device-" + "a" * 64},
     {"section": "players", "id": "a/b ç?#%"},
@@ -529,6 +529,11 @@ ROUTES = [
     {"section": "wall", "id": "reception north", "facet": "calibration"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
     {"section": "wall", "id": "frames", "facet": "nowshowing"},
+    {"section": "releases", "flow": "update", "id": "v0.15.0"},
+    {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": ["player/two ç", "try", "skip"]},
+    {"section": "releases", "flow": "update", "id": "v1", "tried": "p", "skipped": ["q"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": []},
 ]
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
@@ -538,6 +543,10 @@ INVALID_HASHES = [
     "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
     "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
     "#/sources/new/name?target=frame",
+    "#/releases/update", "#/releases/update/v1/try", "#/releases/update/v1/other/p",
+    "#/releases/update/v1/try/p/x", "#/releases/v1", "#/releases/update/v1?target=x",
+    "#/releases/update/v1/skip", "#/releases/update/v1/try/p/skip", "#/releases/update/v1/skip/a/a",
+    "#/releases/update/v1/skip/a?target=x",
 ]
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
@@ -546,6 +555,11 @@ INVALID_ROUTES = [
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
     {"section": "equipment"}, {"section": "scenes", "id": "x"},
+    {"section": "players", "id": "x", "tried": "p"}, {"section": "releases", "flow": "update"},
+    {"section": "scenes", "flow": "update", "id": "x"},
+    {"section": "players", "id": "x", "skipped": ["p"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": ["a", "a"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": [""]},
 ]
 
 

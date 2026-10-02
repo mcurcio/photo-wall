@@ -21,13 +21,17 @@ const TIMEOUT_MS = 15000;
  * JSON best-effort on BOTH paths — an empty/non-JSON body yields `data: null`
  * and, on failure, `error: null` — so a caller reads one shape regardless.
  *
+ * `timeoutMs` replaces the shared budget for one call. Only a write that does its work inside
+ * the request passes one (releases.js `sendPublish`: Central downloads and verifies a whole
+ * release before it answers); every other caller keeps the shared 15 s.
+ *
  * @param {string} path
- * @param {{method: string, body?: any}} options
+ * @param {{method: string, body?: any, timeoutMs?: number}} options
  * @returns {Promise<{ok: boolean, status: number, error: string|null, data: any}>}
  */
-export async function apiWrite(path, { method, body } = {}) {
+export async function apiWrite(path, { method, body, timeoutMs = TIMEOUT_MS } = {}) {
   const headers = { ...CONSOLE_HEADER };
-  const init = { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) };
+  const init = { method, headers, signal: AbortSignal.timeout(timeoutMs) };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
