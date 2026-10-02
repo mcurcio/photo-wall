@@ -43,7 +43,7 @@ flowchart LR
     end
     subgraph WALL["wallRoutes: mounted only while current"]
       PLAN["Wall #/wall/frames/id/facet"]
-      EQ["Equipment #/equipment"]
+      EQ["Equipment<br/>(replaced by Players #/players)"]
     end
     subgraph NEU["neutralRoutes"]
       ATT["Needs attention #/attention"]
@@ -125,7 +125,7 @@ flowchart LR
 | Schedule | `#/schedule`, `#/schedule/new/<step>` | Program cards ("Past" collapsed); the Schedule flow | show |
 | Photo sources | `#/sources`, `#/sources/new/<step>` | Source cards with Refresh; the Source flow | show |
 | Wall | `#/wall`, `#/wall/frames/<id>/<facet>` (facet: `binding`, `commissioning` or `nowshowing`, the `Inspector.jsx:43-45` keys) | Surface filter, `Plan`, `UnplacedTray`, `Inspector`, `Guidance` (unchanged) | wall |
-| Equipment | `#/equipment` | `EquipmentRoster`, unchanged | wall |
+| Equipment (replaced) | none: the old address opens `#/players` | Replaced by the Players list and Player pages in the fleet route table, [console DDD pass 1](operator-console-ddd.md#9-screens-and-read-models) | wall |
 | Needs attention | `#/attention` | The attention strip's expanded list, full width. Each item links to `#/wall/frames/<id>/<facetFor(...)>` | neutral |
 
 **Frozen surfaces (one page per slice later; bodies are not designed here).**

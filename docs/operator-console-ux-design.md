@@ -229,6 +229,11 @@ Plane B and the preview lease unchanged.
 
 ## 3. Glossary
 
+*Wording note (2026-10-02):* the [domain-driven console design](operator-console-ddd.md#3-glossary-the-consoles-words)
+pass 1 owns the fleet words (Player, Player app, Host Management, App Manager, App
+Effect Broker, Display Host, Output, Panel, Binding, standing, boot path). The
+entries below that it changed say so; where the two differ, that glossary wins.
+
 - **Surface** — a single flat 2D millimetre coordinate space (origin upper-left,
   +x right, +y down) that Frames sit within. It is a bare TEXT label on frames
   (`surface_id`), not a stored entity and not addressable; there is no room-wide
@@ -248,20 +253,44 @@ Plane B and the preview lease unchanged.
   calibration corners, and schedule all persist. The Display is reached only
   through the selected Frame's Commissioning facet — never a competing unit of
   selection. Distinct from Surface / Frame / Player / Output / Binding / Panel.
+  *Renamed (2026-10-02):* the console now calls this hardware the **Panel**, as the
+  requirements do, and no longer says "Display" for it. "Display" survives only in
+  **Display Host** (the node layer, L1.5, that owns final scanout and reports
+  `presented_to_compositor` per Output, which is not proof of Panel pixels).
 - **Player** — a replaceable Raspberry Pi; `player_id` is a deterministic hash of
   its hardware serial; it re-enrolls fresh every boot with a new `authority_epoch`
-  and holds no authoritative state. A disposable box behind a Frame.
+  and holds no authoritative state. A disposable box behind a Frame. Since
+  2026-10-02 the console keys a Player by its fleet **device** identity
+  (`device-` + sha256 of `pi:<normalized serial>`), because a box exists from its
+  first netboot; the Registry enrollment (`player_id`, `authority_epoch`) is a fact
+  on the Player. The serial is a LAN claim, never verified physical identity. The
+  **Player app** (one enrollment epoch) is a different thing from the box.
+- **Standing** — where a Player stands with the Registry, first match: **Retired**
+  (`retired_at` set), **Unbound** (enrolled, no Output bound), **Bound** (at least
+  one Output bound), or **Not enrolled** (Central saw the box at netboot but it
+  never enrolled). These replace the earlier "Pending", "New" and "In service".
+  Standing is a Central record, not liveness.
+- **Players list / Player page** — the fleet's homes for a Player (the
+  **Players** section, `#/players`): the list has one row per box with its standing
+  and bound Frames and makes no node read; the Player page
+  (`#/players/<device-id>`) is the one home for a box, with its node layers,
+  Outputs, boot records, reboot, app operations and V1 boot offers, each section
+  with its own read time. They replace the Equipment rail and roster; the old
+  `#/equipment` address opens the Players list.
 - **Output** — one HDMI port on a Player (≤2). The thing a Binding attaches to a
   Frame. An unbound Output shows nothing.
-- **Binding** — the one current Output→Frame association. Changing it bumps the
+- **Binding** — the one current Output→Frame association, worded "Bound to Frame X",
+  never "shows" (it is Central's assignment, not observed output). Changing it bumps the
   Frame's `generation`, clears any preview, and marks calibration invalid (but
   does **not** erase the committed calibration blob — see [§1b](#1b-verified-facts-about-todays-code)).
-- **Panel / FrameProfile** — `FrameProfile {width_px, height_px, diagonal_inches,
+- **Panel / FrameProfile** — the **Panel** is the display hardware at a Frame (see
+  Display above); it is not a stored entity. `FrameProfile {width_px, height_px, diagonal_inches,
   video}` are **Frame facts**: operator-declared at `create_frame`, read-only,
   persisting across a panel swap. The only **live Display readback** is
   `OutputReport {width_px, height_px, connected}` from enrollment. Distinct from
   the Frame's mm aperture; a 1080×1920 panel behind a 300×500 mm aperture is
-  normal.
+  normal. The Player page shows these Panel facts as reported at the last Player
+  start and labels them stale.
 - **Calibration** — output-pixel correction bound to the Frame: `revision` (bumps
   on commit), `rotation`, four projective `corners`, a `crop` rectangle, and SDR
   `gain`. **Preview** pushes proposed values to the panel under a 30-second lease;

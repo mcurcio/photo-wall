@@ -2023,3 +2023,105 @@ node_component_inputs.manifest hashes source-tree file bytes only, not mode/syml
 content_version does include mode). An executable-bit-only change to a component source file would not change the
 cache key. Not exploitable today (no declared builder executes source files directly). Fix if a builder ever does:
 include mode in the manifest entry. Source: review of the component-cache bead.
+
+## 2026-10-02 — console DDD §5 rule 2: `claimed` receipt requirement contradicts its own wording pattern
+Rule 2 says a `claimed` fact without "source and receipt" becomes `unknown`, but the truth-kinds table's
+pattern and example ("Serial …a1b2c3 (claimed, unverified)") carry neither, and the serial claim has no
+served receipt time (`/v1/operator/netboot` rows hold no first-seen time). B1 implemented: `claimed`
+requires value + source (rendered "(claimed at boot by <source>, unverified)"); the receipt is optional
+and appended as "· first received <age> ago" when served (the current node session's boot has one, from
+`boot_claims[].first_received_at`). Doc fix (B4): state that `claimed` requires its source, receipt only
+when Central serves one. Source: B1 implementation, central/console/src/facts.js.
+
+## 2026-10-02 — console DDD §10: a Requested reboot can be retried only by the page that sent it
+§10 says "While the latest request is Requested, 'Reboot Player' offers only that retry". The device
+read (`node_observations.py` `status`, `reboot_commands[]`) serves command_id, audit ref, issued_at,
+expires_at and the command payload, but NOT the request's `device_generation`, `rollout_generation` or
+`valid_for_seconds`, all of which are in Central's request hash (`node_commands.py:59-64`). A retry
+rebuilt from the read would therefore risk 409 `node_reboot_identity_conflict`. B2 implemented: the
+retry re-sends the frozen body the page holds in memory; a Requested request this page does not hold
+(another tab, a reload, navigation away) disables Reboot with "a reboot request is Requested until
+<time>; only that request can be retried" until its window ends. No new command id is ever sent while
+Requested. Doc fix (B4): say the retry is offered from the page that sent the request. Source: B2,
+central/console/src/fleetCommands.js `rebootBlocked`, PlayerCommands.jsx `RebootSection`.
+
+## 2026-10-02 — console DDD §10 state wordings vs §5 rule 2 (reported wording pattern)
+The §10 tables word reported states as "Rejected by Host Management", "Accepted by App Effect Broker;
+preparing", etc., which do not fit rule 2's one `reported` wording ("<Layer> reported <fact> · first
+received <age> ago"). B2 renders each request/operation as the §10 wording (the named state, verbatim)
+plus an "Evidence:" line that is a rule-2 `fact()` carrying the receipt, e.g. 'Host Management reported
+a "rejected" response · first received 2 s ago'. Also: an app operation `staged` + `received` response
+is not in the §10 table; B2 words it "Received by App Effect Broker". Doc fix (B4): state that §10
+wordings are state labels and the receipt is shown as a fact beside them; add the `received` row.
+Source: B2, central/console/src/fleetCommands.js.
+
+## 2026-10-02 — console DDD §5: a `claimed` fact needs a receipt kind (latest vs first)
+§5's `claimed` pattern has one receipt wording, " · first received <age> ago". The T0 app claims
+(`V1Offers.jsx` `t0Claim`) carry the LATEST serial check-in's receipt (`age_seconds` is read_at minus the
+newest check-in row, `central/fleet/policy.py:82`; every check-in inserts a row,
+`central/fleet/service.py:555-572`), so they read "first received 3 s ago" for a claim days old — the
+§3 "Last reported" vs "First received" confusion. Fix cycle 1 implemented: `claimed` takes the same
+receipt kind as `reported`; latest renders " · last claimed <age> ago", first renders " · first received
+<age> ago"; a claimed receipt time without a kind becomes `unknown`. T0 claims use latest; the current
+node session's boot claim keeps first (`node_boot_offers` row per boot). Doc §5 truth-kinds row and
+rule 2 updated in place. Source: fix cycle 1 review, central/console/src/facts.js.
+
+## 2026-10-02 — console DDD §10/§11: the sending page's held request blocks a new command id on its own
+§10 "no page ever sends a new command id while Requested" was enforced only from the device read; a
+read that started before the POST committed came back without the new request and re-enabled "Reboot
+Player" for up to one read interval, and a held retryable request bypassed a DIFFERENT Requested one.
+Fix cycle 1: `fleetCommands.js` gains `heldReboot(request, result)` and `rebootOffer(target, latest,
+readAt, held) -> {offer: new | retry | blocked}`; `rebootBlocked` and `rebootRequest` take `held`. The
+held request (done, already, or retryable unknown) is offered for retry while the read lists it as the
+latest Requested request, or, unlisted, while no other request is Requested and Central's read time is
+before the frozen `retryUntil` (= the freeze-time read_at + window, never later than Central's own
+expires_at). `useNodeDevice.refresh` queues one follow-up read instead of dropping it. Doc §11 updated
+in place. Source: fix cycle 1 review.
+
+## 2026-10-02 — console DDD §10 (deferred): interrupted/superseded hide the broker's answer; Requested ignores gate/session
+Two §10 gaps found in fix cycle 1 review, NOT implemented (each changes §10 rows; owner/doc decision):
+(1) `interrupted_by_reboot` and `superseded` replace whatever the broker reported
+(`node_lifecycle.py:310-315`, "latest_effect keeps that detail"), but §10 shows only the state label, so
+a rejected stage later interrupted reads "Interrupted" with the rejection hidden. Proposed: keep the
+label and add the served `command_response` / `latest_effect` as an extra Evidence fact. (2) The
+Requested label "Central offers it to Host Management until <time>" keys on expires_at only, but
+`node_commands.py:130-138` stops offering when the gate closes, its generation moves, or the targeted
+session stops authenticating. Proposed: "Requested · Central is not offering it now (<gate closed |
+session no longer current>)", non-terminal. Source: fix cycle 1 review (minor findings).
+
+## 2026-10-02 — console DDD §9: a layer with no current session hid its last receipt time
+§9 Layers read only `current` sessions, so a host whose session lapsed (fixed `session_seconds`, renewed only
+on re-enrollment, `central/fleet/node_sessions.py:43,231`) read "Unknown: no current Host Management session"
+although the device read still serves non-current sessions with their latest sample and `received_at`
+(`central/fleet/node_observations.py:62-90`). That broke R4 (named cause with last evidence time) and gap 2.
+Fix cycle 2: `nodeRead.js` `nodeRow` falls back to the owner's newest non-current session holding the layer's
+evidence, renders its receipt as `reported` latest/first as before, and adds a `set` "Session: No current
+<layer> session; the evidence above is from its last session". Unknown only when no session of the owner has
+a sample. §9 failure table gained the row. Source: fix cycle 1 review (major), central/console/src/nodeRead.js.
+
+## 2026-10-02 — correction to the "held request blocks a new command id" entry above; stale dialogs
+The entry above claims `retryUntil` is "never later than Central's own expires_at". False when the session's
+expiry caps Central's window (`expires_at = min(now + valid_for, session expires_at)`,
+`central/fleet/node_commands.py:98`); harmless (it ends in 410 or changed). Separately, `retryUntil` is anchored
+at the read the dialog opened on, so a dialog held open past 30 s reopened the stale-read race (a new command id
+while one is Requested). Fix cycle 2: `fleetCommands.js` `rebootStale(request, latest, readAt)` refuses any send
+(first or retry) once Central's read time reaches `retryUntil` and the read does not list the request as the
+latest; the dialog says "This request is out of date; close and reopen". Residual (not closable from the
+console): a POST whose commit is delayed past a read and whose answer is lost is still invisible to that read.
+§10 and §11 updated in place. Source: fix cycle 1 review (minor).
+
+## 2026-10-02 — console DDD §10: Requested label applied for gate closed / session not current
+Applies item (2) of the deferred entry above, without an owner ruling (orchestrator instruction; flagged). The
+Requested label reads "Requested · Central is not offering it now (effect gate closed | session no longer
+current)" while the read shows the gate not open or the targeted `command.command_session_id` not among the
+current sessions; the state stays `requested`, non-terminal. NOT covered: the request's own gate generation and
+scope are not served in `reboot_commands`, so a gate that closed and reopened (generation moved) is not
+detected. Item (1) of that entry (interrupted/superseded hiding the broker's answer) remains deferred.
+Source: fix cycle 1 review (minor), central/console/src/fleetCommands.js `rebootCommandState`.
+
+## 2026-10-02 — console DDD §5 vs §9: ManagementFacts is a rule-2 exception in pass 1
+§5 rule 2 says fleet views render facts only through `fact()`, but §9 has the V1 section reuse
+`ManagementFacts`, which renders its V1 loader session, V1 app attempt and authenticated OS attempt claim
+(with a local-clock receipt time) as plain "V1 record" lines. Decision (fix cycle 2): recorded as rule 2's one
+pass-1 exception in §5; routing the claim through `fact()` (`claimed`, source, latest receipt) and the session
+and attempt as `set` is scheduled for pass 2. Source: fix cycle 1 review (minor).

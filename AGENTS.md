@@ -11,6 +11,7 @@ This page is the map; open an owning document only when the routing table sends 
 | `central/` | Registry, Runtime, Planner, operator API; content-serving layers (below) | `app.py:create_app` (Compose), `node_app.py:create_app` (V2 node transport) |
 | `central/fleet/` | Node boot offers, sessions, commands, rollout, recovery | `routes.py`, `node_routes.py`, `service.py` |
 | `central/console/` | React/Vite operator console, served at `/` | `src/App.jsx`; `npm ci && npm run build` here → `dist/` |
+| `central/console/src/` route tables | Sections by bounded context: `showRoutes.jsx`, `wallRoutes.jsx`, `fleetRoutes.jsx` (Players list + one Player page per box, [console DDD](docs/operator-console-ddd.md)), `neutralRoutes.jsx` | `Shell.jsx`; fleet: `PlayersPage.jsx`, `PlayerPage.jsx`, `facts.js` |
 | `central/migrations/` | Forward-only numbered SQL; never edit an applied one | applied at Central/worker startup |
 | `media/` | Media worker, Immich adapter, preparation | `python -m media.worker` |
 | `player/` | Single-process Player (GTK/GStreamer), cache, executor | `service.py` |

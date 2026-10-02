@@ -1,6 +1,6 @@
 # Operator console: one home per aggregate (domain-driven console)
 
-**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled). Passes 2–5 are planned, not designed at feature level.
+**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled) and built 2026-10-02 (beads B1–B4), awaiting its one full verify and review. Implementation findings are folded in below (see History). Passes 2–5 are planned, not designed at feature level.
 **Layers:** Part A is the **module layer**: the domain-to-console map, the design rules and the roadmap of passes. The owner steers this part. Part B designs **pass 1 at the feature layer** for delivery: screens, read models, signatures and beads.
 **Branch:** every pass lands on one running PR from `claude/console-ddd`.
 **Owner is asked:** Q1 (shape, §4) and Q2 (keep or hide the V1 boot-offer controls, §11). Everything else is a current design choice that the owner can revise. The backend reads that later passes need are listed in §8 so they are not a surprise, but they are asked at the pass-2 gate, not now.
@@ -8,13 +8,13 @@
 
 # Part A: the map and the roadmap (module layer)
 
-## 1. Today, in one picture
+## 1. Before pass 1, in one picture
 
-One physical Player box is drawn three times on `#/equipment`. Each drawing uses a different identity and a different read cadence. The node layers the requirements say to tell apart sit behind a collapsed disclosure.
+Before pass 1, one physical Player box was drawn three times on the Equipment page (since replaced by the Players pages; its old address now opens `#/players`). Each drawing used a different identity and a different read cadence. The node layers the requirements say to tell apart sat behind a collapsed disclosure.
 
 ```mermaid
 flowchart LR
-  subgraph EQ["Equipment page today"]
+  subgraph EQ["Equipment page before pass 1"]
     PV["Player versions<br/>titled by device_id<br/>/fleet every 30 s"]
     ER["Equipment roster<br/>titled by player.id<br/>snapshot every 5 s"]
     ND["Node status and controls<br/>collapsed, 3 s only while open"]
@@ -113,8 +113,8 @@ flowchart TB
 
 | Rule | What it makes impossible | Guarantee |
 |---|---|---|
-| **1. One home per aggregate.** The home is the only page that shows an aggregate's full state. Elsewhere it appears as a link (chip), never as a summary card. A **relationship** between two aggregates may be started from either side, but both sides call the one write its root owns. Binding is the one such relationship in pass 1: the Frame home and the Player page's Outputs both call `bind` (`equipmentApi.js:93`, Frame generation as the fence), as `BindingFacet.jsx` and `EquipmentRoster.jsx` already do today. | Two cards for one box with disagreeing read times; two bind writes with different fences | One write function per relationship (construction); route review; the R4 import-graph test covers fleet routes |
-| **2. Every fact carries its truth kind.** Fleet views render facts only through one `fact()` value. A fact that lacks its label (source and receipt for `reported` or `claimed`, a basis for `derived`) **becomes** `unknown`, naming what is missing. It never renders unlabelled and never throws. | Unlabelled device truth; ages taken from node clocks; a payload change blanking the console | Construction-time (the value cannot be built unlabelled), in pure model functions under Node tests; each Player page section sits behind its own error boundary |
+| **1. One home per aggregate.** The home is the only page that shows an aggregate's full state. Elsewhere it appears as a link (chip), never as a summary card. A **relationship** between two aggregates may be started from either side, but both sides call the one write its root owns. Binding is the one such relationship in pass 1: the Frame home and the Player page's Outputs both call `bind` (`equipmentApi.js:93`, Frame generation as the fence), as `BindingFacet.jsx` and `PlayerPage.jsx` do (the retired `EquipmentRoster.jsx` did the same). | Two cards for one box with disagreeing read times; two bind writes with different fences | One write function per relationship (construction); route review; the R4 import-graph test covers fleet routes |
+| **2. Every fact carries its truth kind.** Fleet views render facts only through one `fact()` value. A fact that lacks its label (source and receipt for `reported`, a source for `claimed`, a basis for `derived`) **becomes** `unknown`, naming what is missing. A `claimed` fact carries its receipt only when Central serves one, and then says which receipt it is, as `reported` does. It never renders unlabelled and never throws. One pass-1 exception: the V1 section's `ManagementFacts` (V1 loader session, V1 app attempt, authenticated OS attempt claim) keeps its plain "V1 record" lines; routing it through `fact()` is scheduled for pass 2. | Unlabelled device truth; ages taken from node clocks; a payload change blanking the console | Construction-time (the value cannot be built unlabelled), in pure model functions under Node tests; each Player page section sits behind its own error boundary |
 | **3. Commands are domain verbs on the aggregate's home.** The console binds Central's fences (session, generation, gate generation, command id) from the read it shows, freezes the whole request when the dialog opens, and asks only when a choice really exists. Outcomes use the existing equipment vocabulary: done, already, changed, refused, unknown. | Operators choosing transport plumbing; a retry that changes the request; a new outcome dialect per module | Construction (one request builder per verb, body frozen at open); browser tests |
 
 **Truth kinds** (rule 2), each with its one wording pattern:
@@ -124,11 +124,11 @@ flowchart TB
 | `set` | Central record written by an operator or policy | "Set …" or a plain noun | "Bound to Frame lobby-left" |
 | `reported`, latest | A node layer reports periodically; this is its latest receipt | "<Layer> last reported <age> ago" | "Host Management last reported 4 s ago" |
 | `reported`, first | One fact a layer sent once, on change | "<Layer> reported <fact> · first received <age> ago" | "App Effect Broker reported the app running · first received 3 d ago" |
-| `claimed` | A LAN claim Central accepted but cannot verify | "… (claimed at boot, unverified)" | "Serial …a1b2c3 (claimed, unverified)" |
+| `claimed` | A LAN claim Central accepted but cannot verify | "… (claimed at boot by <source>, unverified)", then, when Central serves a receipt, " · first received <age> ago" (a claim sent once) or " · last claimed <age> ago" (a claim repeated on every check-in) | "Serial 10000000a1b2c3 (claimed at boot by the box, unverified)" |
 | `derived` | Central's own conclusion from named records | "<Conclusion> (Central's inference: <basis>)" | "Interrupted (Central's inference: a later boot was admitted)" |
-| `unknown` | Not observable, not served, or not read | "Unknown: <why>" | "Panel pixels: unknown (no layer observes them)" |
+| `unknown` | Not observable, not served, or not read | "Unknown: <why>" | "Panel pixels: Unknown: no layer observes them" |
 
-A `reported` fact must say which receipt it carries; without that, it becomes `unknown`. A fifth kind, `planned` (Central's projection of intent, for now-showing), arrives with pass 4, its first user.
+A `reported` fact must say which receipt it carries; without that, it becomes `unknown`. A `set` fact may carry the time Central recorded it (" · recorded <age> ago"). The `claimed` pattern says "at boot" even for the T0 app claims from a V1 serial check-in (source "its serial check-in"); the wording is fixed, so that claim reads as boot-time although it is not. A fifth kind, `planned` (Central's projection of intent, for now-showing), arrives with pass 4, its first user.
 
 ## 6. Domain-to-console map (every aggregate, one home)
 
@@ -233,7 +233,7 @@ flowchart LR
 | — | **Players** (new fleet route table, mounted only while current, like Wall) |
 | Attention | Attention |
 
-**Routes.** The new routes are `#/players` and `#/players/<device-id>`. `#/equipment` parses to `#/players`, so old bookmarks keep working; `formatRoute` never emits it. `routeSamples.json` gains these routes, and the R4 import-graph test covers the fleet table.
+**Routes.** The new routes are `#/players` and `#/players/<device-id>`. `#/equipment` parses to `#/players`, so old bookmarks keep working; `formatRoute` never emits it. `routeSamples.json` gains these routes, and the R4 import-graph test covers the fleet table. The Wall links to the Player page through `players.js` `playerPageHref`, so `players.js` is declared a module shared with Show in that test; it builds addresses and holds no controls.
 
 **Players list.** Built from the snapshot and the shell's existing `/netboot` read only (`playersByDevice`, keyed by `device_id`). It shows name, standing and bound Frames, including a "Not enrolled" box seen only at boot. It does **no** node reads. The V1 fleet policy block (V1 app target, V1 boot baseline) sits at the top, labelled "V1 boot offers".
 
@@ -267,8 +267,10 @@ flowchart LR
 | A section's render throws (payload drift) | "This section could not be shown" in that section; the rest of the page and the console stay up | Per-section error boundary; browser test with a malformed read |
 | Node management off on this Central (`node_control_disabled`) | L0–L1.5 rows, Reboot and App read "Unknown: node management is off on this Central"; the rest of the page works | Browser test |
 | A device read fails | Its rows keep their last values, marked "as of <read time>, refresh failed" | Browser test |
-| Player Retired | Node rows are not read: "Not read: Player retired" (checked from snapshot standing first, because a retired box and a box with no node record both return 403 `node_device_unavailable`) | Model test |
+| Player Retired | Node rows are not read. A plain statement, "Not read: Player retired", stands in their place; it is not a `fact()` (the `unknown` pattern would read "Unknown: …"). Checked from snapshot standing first, because a retired box and a box with no node record both return 403 `node_device_unavailable`. | Model test |
 | No node record (403 on a non-retired box) | "Unknown: no current node record for this box" | Model test |
+| A layer has no current session (a dead host: its session lapsed and was not renewed) | The layer's newest earlier session that holds its evidence still speaks ("Host Management last reported 2 h ago"), with "Session: No current Host Management session; the evidence above is from its last session". Unknown only when no session of that layer has a sample. | Model test |
+| Player app row of a retired Player | "Unknown: Central does not read reports from a retired Player" (Central's read excludes retired Players, so a missing report time says nothing about the box) | Model test |
 
 ## 10. Lifecycles shown
 
@@ -291,21 +293,24 @@ stateDiagram-v2
   OutcomeUnknown --> Initiated: late event
 ```
 
+Each §10 wording below is the request's or operation's **state label**, shown verbatim. Beside it, an "Evidence:" line is a rule-2 `fact()` carrying the receipt, for example 'Host Management reported a "rejected" response · first received 2 s ago'. The labels do not themselves follow rule 2's `reported` pattern.
+
 | State | Wording |
 |---|---|
-| Requested | "Requested · delivery unknown · Central offers it to Host Management until <time>" |
+| Requested | "Requested · delivery unknown · Central offers it to Host Management until <time>"; while the read shows the effect gate closed or the targeted session no longer current, "Requested · Central is not offering it now (effect gate closed \| session no longer current)", still not terminal. The request's own gate generation is not served, so a gate that closed and reopened is not detected. |
 | Outcome unknown | "Outcome unknown: no response from Host Management; Central stopped offering it at <time>" |
 | Received / Accepted / Rejected | "Received by Host Management" / "Accepted by Host Management, not yet started" / "Rejected by Host Management" |
 | Initiated | "Host Management reported the reboot started · completion unknown" |
 | (separately) Current boot | Shown in Boot. It is never linked to a request: "A later boot does not show what caused it." |
 
-**Retry and new requests.** The dialog freezes the whole request body when it opens: session, device and rollout generations, audit reference, reason, window and command id. So a 409 `node_reboot_identity_conflict` cannot arise from the console. Inside the window, a retry of the same body lands "Already recorded". After the window, the same retry gets 410 `node_reboot_expired`, which the console shows as **Outcome unknown**, never as "refused". While the latest request is Requested, "Reboot Player" offers only that retry. After its window, a **new** request is allowed, and its dialog states the previous request's outcome is unknown and whether Host Management's current session is the **same boot** that request targeted or a later one (an identity comparison of kernel boot ids, not a clock comparison). That makes the second request a deliberate operator decision, not a blind resend.
+**Retry and new requests.** The dialog freezes the whole request body when it opens: session, device and rollout generations, audit reference, reason, window and command id. So a 409 `node_reboot_identity_conflict` cannot arise from the console. Inside the window, a retry of the same body lands "Already recorded". After the window, the same retry gets 410 `node_reboot_expired`, which the console shows as **Outcome unknown**, never as "refused". While the latest request is Requested, "Reboot Player" offers only that retry, and only on the page that sent it: the device read does not serve the request's device and rollout generations or its window, all of which are in Central's request hash (`node_commands.py:59-64`), so the retry re-sends the frozen body that page holds. That page counts its own request as Requested until a read lists it settled, or, while no read lists it, until its frozen window ends; a different Requested request blocks it too. The frozen window counts from the read the dialog opened on, so once a read reaches it and does not list the request as the latest, the dialog refuses to send: "This request is out of date; close and reopen" (reopening rebuilds the fences and the bound Frames and Runs). Any other page (another tab, a reload) disables Reboot with the Requested reason until the window ends; no page ever sends a new command id while Requested. After its window, a **new** request is allowed, and its dialog states the previous request's outcome is unknown and whether Host Management's current session is the **same boot** that request targeted or a later one (an identity comparison of kernel boot ids, not a clock comparison). That makes the second request a deliberate operator decision, not a blind resend.
 
 **App operation** (node projection; read-only in pass 1). `appOperationState` reads both `state` and `command_response`, because the backend keeps `state` at `staged` whatever the broker answered (`node_lifecycle.py:307-318`).
 
 | Served state + response | Wording | Truth kind |
 |---|---|---|
 | staged, no response | "Staged; no response from App Effect Broker" | `set` |
+| staged, received | "Received by App Effect Broker" | `reported` (response receipt) |
 | staged, accepted | "Accepted by App Effect Broker; preparing" | `reported` (response receipt) |
 | staged, rejected | "Rejected by App Effect Broker" (the reason is not served) | `reported` (response receipt) |
 | switching | "App Effect Broker reported switching (<latest phase>)" | `reported` (`latest_effect.received_at`) |
@@ -319,7 +324,8 @@ stateDiagram-v2
 
 ```text
 facts.js                                                               (B1)
-  fact({kind, value, source?, receipt?: "latest"|"first", receivedAt?, readAt?, basis?, why?}) -> Fact
+  fact({kind, value, source?, receipt?: "latest"|"first", receivedAt?, readAt?, basis?, why?, field?}) -> Fact
+                                       // field names the served field a missing receipt comes from
                                        // frozen; never throws: a missing label yields kind "unknown" naming it
   factText(fact) -> string             // the one wording per kind (§5)
 FactLine.jsx       <FactLine label fact />          // the only renderer of facts in fleet views
@@ -330,7 +336,7 @@ players.js                                                             (B1)
   PlayerRow = {deviceId, player|null, standing: "not-enrolled"|"unbound"|"bound"|"retired", name, frames}
 
 nodeRead.js                                                            (B1)
-  useNodeDevice(deviceId, {cadenceMs}) -> {enabled: true|false|null, gate, read, operations, readAt, error}
+  useNodeDevice(deviceId, {cadenceMs, skip}) -> {enabled: true|false|null, gate, read, operations, readAt, error, refresh}
                                        // one box; Player page only; pauses in a hidden tab; skipped when retired
   processFacts(session) -> AppProcessFact[]                            // decodes session.projection
   layerEvidence({nodeDevice, snapshot, playerId}) -> LayerRow[]        // five rows, each a Fact
@@ -339,10 +345,16 @@ nodeRead.js                                                            (B1)
 fleetCommands.js                                                       (B2)
   rebootTarget(nodeDevice, gate) -> {available: true, sessionId, deviceGeneration, rolloutGeneration, kernelBootId}
                                   | {available: false, reason}         // binds the one current host_core session
-  rebootRequest(target, latestRequest, snapshot, readAt) -> FrozenRebootRequest
-                                       // whole body frozen at open; refuses a new command id while latest is Requested
-  rebootCommandState(command, readAt) -> {state, fact}                 // §10; Central clock only
-  appOperationState(operation) -> {state, fact}                        // §10; reads command_response
+  heldReboot(request, result) -> FrozenRebootRequest | null          // kept after done, already or a retryable unknown
+  rebootOffer(target, latestRequest, readAt, held) -> {offer: "new"} | {offer: "retry", reason} | {offer: "blocked", reason}
+                                       // the held request counts as Requested until a read settles it or its frozen window ends
+  rebootBlocked(target, latestRequest, readAt, {held}) -> reason | null   // the disabled-button reason
+  rebootRequest(target, latestRequest, snapshot, readAt, {playerId, commandId, reason, held}) -> FrozenRebootRequest | {refused}
+                                       // whole body frozen at open; refuses a new command id while latest (or held) is Requested
+  rebootStale(request, latestRequest, readAt) -> reason | null        // refuses to send once a read reaches retryUntil unlisted
+  rebootCommandState(command, readAt, {nodeDevice}) -> {state, fact}   // §10; Central clock only; nodeDevice words "not offering it now"
+  appOperationState(operation, readAt) -> {state, fact}                // §10; reads command_response; readAt dates receipts
+  rebootResult(result) -> outcome      // done | already | changed | refused | unknown (retry the same body)
 ```
 
 **Current choices** (revisable; this section is recommended as shown):
@@ -366,7 +378,7 @@ Delivery follows the owner's standing preference: the four beads are built back 
 
 | Bead | Contents | Acceptance (observable) | Lines |
 |---|---|---|---|
-| **B1 · Tracer, Players list and Player page** | Tracer first (below). `facts.js`, `FactLine.jsx`, `SectionBoundary.jsx`, `players.js`, `nodeRead.js`; standing words in `health.js`; fleet route table, `PlayersPage.jsx`, `PlayerPage.jsx` (header, layers, Outputs with Bind and Identify, boot, danger zone); delete `EquipmentRoster.jsx`; mount the existing `NodeDevicePanel` and `PlayerVersions` unchanged on the Player page and list until B2 and B3 replace them; Node-run model tests; CI-gated browser suite on `operator_harness` with node routes mounted; rewrite of the roster-based browser tests (`test_operator_binding_browser.py` about 21 `connect(…, "equipment")` sites and the "Equipment" region, `test_console_shell_review_browser.py` `#/equipment` hash, `test_console_routes_r4.py` section list) | `#/players` shows one row per box, including a "Not enrolled" box seen only at boot, with no node read. The Player page shows five layer rows: Host Management, App Manager and Player app with last-reported ages; App Effect Broker with its process fact first-received and last-reported Unknown; Display Host Unknown. A silent app with a reporting host shows both ages. A missing field renders Unknown naming it; a malformed read blanks one section only. Node management off: L0–L1.5 read Unknown and the page works. `#/equipment` lands on `#/players`. Bind (from the Output), Identify, Retire and Unbind all pass from the page. No console string says "Refresh Equipment" or names the Equipment page. | +1,450 / −700 |
+| **B1 · Tracer, Players list and Player page** | Tracer first (below). `facts.js`, `FactLine.jsx`, `SectionBoundary.jsx`, `players.js`, `nodeRead.js`; standing words in `health.js`; fleet route table, `PlayersPage.jsx`, `PlayerPage.jsx` (header, layers, Outputs with Bind and Identify, boot, danger zone); delete `EquipmentRoster.jsx`; mount the existing `NodeDevicePanel` unchanged on the Player page and `PlayerVersions` unchanged on the list (it lists every device and carries the fleet V1 policy) until B2 and B3 replace them; Node-run model tests; CI-gated browser suite on `operator_harness` with node routes mounted; rewrite of the roster-based browser tests (`test_operator_binding_browser.py` about 21 `connect(…, "equipment")` sites and the "Equipment" region, `test_console_shell_review_browser.py` `#/equipment` hash, `test_console_routes_r4.py` section list) | `#/players` shows one row per box, including a "Not enrolled" box seen only at boot, with no node read. The Player page shows five layer rows: Host Management, App Manager and Player app with last-reported ages; App Effect Broker with its process fact first-received and last-reported Unknown; Display Host Unknown. A silent app with a reporting host shows both ages. A missing field renders Unknown naming it; a malformed read blanks one section only. Node management off: L0–L1.5 read Unknown and the page works. `#/equipment` lands on `#/players`. Bind (from the Output), Identify, Retire and Unbind all pass from the page. No console string says "Refresh Equipment" or names the Equipment page. | +1,450 / −700 |
 | **B2 · Reboot and operation states** | `fleetCommands.js`; Reboot section and history; app-operation list; delete `NodeDevicePanel.jsx` and `nodeDevice.css` | The dialog names the Player's bound Frames and their live Runs and says: "The Run stays active. Central sends no command to other Frames or Actuators." A recorded reboot shows "Requested · delivery unknown". A retry inside the window sends the identical body and lands "Already recorded". A retry after the window (410) shows Outcome unknown. A late response after the window moves the state on. While a request is Requested, no new command id can be sent. A closed gate disables Reboot with its reason. Rejected shows its named state. A rejected app operation reads "Rejected by App Effect Broker", not "Staged". No "subsequent boot" line exists. | +400 / −170 |
 | **B3 · V1 lane and honest Wall wording** | V1 fleet policy block on the Players list; per-Player V1 section reusing `ManagementFacts`; "Queue online update" removed; delete `PlayerVersions.jsx`. Wall: `outputStates` "Bound to Frame X"; the Binding facet's Player-silent line links to the Player page (no node read on the Wall); the Commissioning equipment block links to the Player and uses Output/Panel words; the Trial says "presented to the compositor by Display Host"; the attention all-clear reads "All N Frames' Player apps reporting" | No control creates a maintenance request. A queued request is shown and can be cancelled. V1 loader rows read "V1 record". Setting the V1 fleet target from the Players list works in a browser test. No console string says "Shows frame", "presented on the display" or "Display equipment". Existing Wall browser tests are updated to the new strings. | +250 / −380 |
 | **B4 · Docs** | [Console UX design](operator-console-ux-design.md) glossary and §3 (Panel, standing, Players); this document's status; AGENTS.md code-map row for fleet routes | `check_docs.py` passes. No doc still names `#/equipment` as a page. | +100 |
@@ -402,4 +414,4 @@ Delivery follows the owner's standing preference: the four beads are built back 
 | Requirements give Program a recurrence; the code has one window per Program | [Requirements](requirements.md#experience-model) (pass 4 flags it) |
 | Audit claims checked while designing: the reboot response's `message.message.decision` is **correct** (the payload is a `{schema, message}` envelope), so it is not a defect. | — |
 
-**History.** 2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two.
+**History.** 2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two. 2026-10-02: pass 1 built (B1–B4). Implementation findings folded in: a `claimed` fact needs its source, and its receipt only when served; "Not read: Player retired" is a plain statement, not a fact; §10 wordings are state labels with an evidence fact beside them, and a staged operation with a received response has its own row; a Requested reboot is retried only from the page that holds its frozen body; §11 signatures match the code; `players.js` is shared with the Wall in the R4 test; a `claimed` receipt says whether it is the first or the latest; the sending page's own reboot request blocks a new command id until a read settles it; the runbook, README and the pass-2 documents now describe the Players pages in place of the Equipment roster. 2026-10-02 (fix cycle 2): a layer with no current session shows its last session's receipt instead of Unknown; a retired Player's app row no longer claims it has no report; a frozen reboot request is refused once a read reaches its window unlisted; a Requested label says when Central is not offering it now; `ManagementFacts` is recorded as rule 2's one pass-1 exception.
