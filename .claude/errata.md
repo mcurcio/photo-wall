@@ -2125,3 +2125,12 @@ Source: fix cycle 1 review (minor), central/console/src/fleetCommands.js `reboot
 (with a local-clock receipt time) as plain "V1 record" lines. Decision (fix cycle 2): recorded as rule 2's one
 pass-1 exception in §5; routing the claim through `fact()` (`claimed`, source, latest receipt) and the session
 and attempt as `set` is scheduled for pass 2. Source: fix cycle 1 review (minor).
+
+## 2026-10-02 — console DDD: pass-1 errata folded into the design doc; open items assigned
+All 2026-10-02 console DDD entries above are now reflected in docs/operator-console-ddd.md. Open items:
+item (1) of the "§10 (deferred)" entry (superseded / interrupted_by_reboot hide the broker's earlier answer)
+is assigned to bead R0 (§10 rows, §23). The residual race in the "correction … stale dialogs" entry is
+stated in §10 "What the console cannot close"; R0 closes the single-page class (one send rule,
+`rebootPermit`, judged on the newest read; `sendReboot` takes only a permit), and the cross-page race is
+owner question Q4 (a `node_reboot_outstanding` fence in `NodeCommands.request_reboot`). Source: pass-1
+residual review (major: open dialog sends a new command id while a different request is Requested).

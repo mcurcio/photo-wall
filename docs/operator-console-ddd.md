@@ -1,9 +1,9 @@
 # Operator console: one home per aggregate (domain-driven console)
 
-**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled) and built 2026-10-02 (beads B1–B4), awaiting its one full verify and review. Implementation findings are folded in below (see History). Passes 2–5 are planned, not designed at feature level.
-**Layers:** Part A is the **module layer**: the domain-to-console map, the design rules and the roadmap of passes. The owner steers this part. Part B designs **pass 1 at the feature layer** for delivery: screens, read models, signatures and beads.
+**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled), built and reviewed 2026-10-02 (beads B1–B4); its implementation errata are folded in below, and its residual review findings become bead R0 (§23). Passes 2 and 3 are designed at feature level in Parts C and D, revised once after adversarial review, and cut into one batch (§23), awaiting the pass-2/3 gate. The node release workflows are deferred (Q5, §17). Passes 4–5 are planned, not designed.
+**Layers:** Part A is the **module layer**: the domain-to-console map, the design rules and the roadmap of passes. The owner steers this part. Parts B, C and D design **passes 1, 2 and 3 at the feature layer** for delivery: screens, read models, signatures, wordings and beads.
 **Branch:** every pass lands on one running PR from `claude/console-ddd`.
-**Owner is asked:** Q1 (shape, §4) and Q2 (keep or hide the V1 boot-offer controls, §11). Everything else is a current design choice that the owner can revise. The backend reads that later passes need are listed in §8 so they are not a surprise, but they are asked at the pass-2 gate, not now.
+**Owner is asked:** Q1 and Q2 (answered). At the pass-2/3 gate: Q3 (which of two read-only backend reads to add, §16), Q4 (a backend fence for one outstanding reboot, §16) and Q5 (defer the node release workflows, §17). Everything else is a current design choice that the owner can revise. Batch 2 is built to the answers: a declined read keeps its pass-1 Unknown, and no dormant branch ships.
 **Builds on:** [requirements](requirements.md), [Player node domain model](player-node-domain-model.md), [fleet implementation map](player-fleet-implementation-map.md), [console UX design](operator-console-ux-design.md) and its pass-2 history, and the open [library design](operator-console-ux-pass2-library.md) (PR 37), which becomes pass 5 here.
 
 # Part A: the map and the roadmap (module layer)
@@ -83,7 +83,7 @@ flowchart TB
     SRC["Photo sources"]
   end
   subgraph INST["Wall (Registry)"]
-    WALL["Wall: Surfaces, Frames<br/>facets: Binding, Calibration, Profile, Plan"]
+    WALL["Wall: Surfaces, Frames<br/>facets: Calibration, Binding, Now-showing"]
   end
   subgraph FLEET["Fleet (Node lifecycle)  [pass 1]"]
     PL["Players: one row per box"]
@@ -105,7 +105,7 @@ flowchart TB
 | How | Fleet › Players is keyed by device. The Player page combines the Registry Player and the fleet Device, grouped by node layer, and shows each section's own read time. Writes stay with their aggregate: Retire goes to Registry, Reboot goes to Fleet, Bind goes to the Frame. | Wall › Equipment keeps the Registry view (Players, Outputs, Bindings). A new Fleet › Nodes page holds the Devices (boots, layers, reboot, app operations). The two pages cross-link by device id. |
 | Gives | One place answers "what is this box doing, layer by layer". A box that netboots but never enrolls is visible (U4). | Each page has one read source and one cadence. It mirrors the code's contexts exactly. About 40 % less change. |
 | Costs | The Player page carries up to four reads with four labelled read times. Node reads happen only on an open Player page, so the list cannot show node state. | Today's split becomes official: the same box appears in two lists. "Why is Frame X dark?" takes two pages. A never-enrolled box appears only under Nodes. |
-| Both | Two of five layers (App Effect Broker, Display Host) show "last reported: unknown" until a backend read exists (§8). Neither shape can fix that from the UI. | |
+| Both | Two of five layers (App Effect Broker, Display Host) show "last reported: unknown" in pass 1. Display Host gets a read in pass 2 (Q3, §16); the App Effect Broker has no heartbeat, so no read can give it one. Neither shape can fix that from the UI. | |
 
 > **Q1 (shape).** Recommended: **A**. Alternative: **B**, at the costs above.
 
@@ -114,7 +114,7 @@ flowchart TB
 | Rule | What it makes impossible | Guarantee |
 |---|---|---|
 | **1. One home per aggregate.** The home is the only page that shows an aggregate's full state. Elsewhere it appears as a link (chip), never as a summary card. A **relationship** between two aggregates may be started from either side, but both sides call the one write its root owns. Binding is the one such relationship in pass 1: the Frame home and the Player page's Outputs both call `bind` (`equipmentApi.js:93`, Frame generation as the fence), as `BindingFacet.jsx` and `PlayerPage.jsx` do (the retired `EquipmentRoster.jsx` did the same). | Two cards for one box with disagreeing read times; two bind writes with different fences | One write function per relationship (construction); route review; the R4 import-graph test covers fleet routes |
-| **2. Every fact carries its truth kind.** Fleet views render facts only through one `fact()` value. A fact that lacks its label (source and receipt for `reported`, a source for `claimed`, a basis for `derived`) **becomes** `unknown`, naming what is missing. A `claimed` fact carries its receipt only when Central serves one, and then says which receipt it is, as `reported` does. It never renders unlabelled and never throws. One pass-1 exception: the V1 section's `ManagementFacts` (V1 loader session, V1 app attempt, authenticated OS attempt claim) keeps its plain "V1 record" lines; routing it through `fact()` is scheduled for pass 2. | Unlabelled device truth; ages taken from node clocks; a payload change blanking the console | Construction-time (the value cannot be built unlabelled), in pure model functions under Node tests; each Player page section sits behind its own error boundary |
+| **2. Every fact carries its truth kind.** Fleet views render facts only through one `fact()` value. A fact that lacks its label (source and receipt for `reported`, a source for `claimed`, a basis for `derived`) **becomes** `unknown`, naming what is missing. A `claimed` fact carries its receipt only when Central serves one, and then says which receipt it is, as `reported` does. It never renders unlabelled and never throws. One pass-1 exception: the V1 section's `ManagementFacts` (V1 loader session, V1 app attempt, authenticated OS attempt claim) keeps its plain "V1 record" lines; bead C2 (§23) routes it through `fact()` and ends the exception. | Unlabelled device truth; ages taken from node clocks; a payload change blanking the console | Construction-time (the value cannot be built unlabelled), in pure model functions under Node tests; each Player page section sits behind its own error boundary |
 | **3. Commands are domain verbs on the aggregate's home.** The console binds Central's fences (session, generation, gate generation, command id) from the read it shows, freezes the whole request when the dialog opens, and asks only when a choice really exists. Outcomes use the existing equipment vocabulary: done, already, changed, refused, unknown. | Operators choosing transport plumbing; a retry that changes the request; a new outcome dialect per module | Construction (one request builder per verb, body frozen at open); browser tests |
 
 **Truth kinds** (rule 2), each with its one wording pattern:
@@ -142,18 +142,18 @@ A `reported` fact must say which receipt it carries; without that, it becomes `u
 | HostObservation (Fleet) | Player › Layers › Host Management | Host samples | `reported`, latest | 1 |
 | ManagerPreparation (Fleet) | Player › Layers › App Manager | Preparation | `reported`, latest; "preparation is not activation" | 1 |
 | NodeEvidence: AppProcessFact (Fleet) | Player › Layers › App Effect Broker | App process | `reported`, first; layer's last report `unknown` (not served) | 1 |
-| NodeEvidence: SurfaceFact (Fleet) | Player › Layers › Display Host | Output presentation | `unknown` ("Central does not hold Display Host's current presentation"); the served projection holds the first reported state (§13) | 1 unknown; 2 gate |
+| NodeEvidence: SurfaceFact (Fleet) | Player › Layers › Display Host | Output presentation | pass 1 `unknown` (the evidence projection holds the first reported state, §13). Pass 2 reads Display Host's newest **display exchange** per Output for the current boot instead, which that defect does not touch: `reported`, latest (§15, display read) | 1 unknown; 2 (Q3) |
 | RebootCommand (Fleet) | Player › Reboot | Reboot request + history | request `set`; responses and initiation `reported`; outcome `unknown` until reported; completion `unknown` | 1 |
-| AppOperation (Fleet) | Player › App | App operation | request `set`; response and effects `reported`; interrupted `derived` | 1 read, 2 write |
-| Deployment / BootPolicy / NodeRelease (Fleet) | `#/releases` | Node release; Boot deployment | `set` | 2 (pass-2 gate) |
-| Qualification / EnvironmentAcceptance (Fleet) | Player › App › Fallback | Qualified fallback | `set` from `reported` samples | 2 |
+| AppOperation (Fleet) | Player › App | App operation | request `set`; response and effects `reported`; interrupted `derived` | 1 read; Stage deferred (Q5, §17) |
+| NodeRelease / Deployment / BootPolicy (Fleet) | a node Releases home, when designed | Node release; Deployment; Boot selection | release and deployment `set`; selection `set` with its revision | deferred (Q5, §17) |
+| Qualification / EnvironmentAcceptance (Fleet) | Player › App › Qualified fallback, when designed | Qualification; Qualified fallback | Central's answers `set`; stored acceptances `set` | deferred (Q5, §17) |
 | EffectGate (Fleet) | Reason beside a disabled Reboot | Remote changes: open / closed | `set` | 1 |
-| V1 lane: app policy, override, base baseline, maintenance, V1 attempt (Fleet V1) | Players list header (fleet policy); Player › V1 boot offers (per Player) | V1 app target; V1 boot baseline; V1 app attempt | `set`; T0 observations `claimed` | 1 (Q2) |
+| V1 lane: app policy, override, base baseline, maintenance, V1 attempt (Fleet V1) | Players list header › V1 boot offers (fleet policy, until a node Releases home is served); Player › V1 boot offers (per Player) | V1 app target; V1 boot baseline; V1 app attempt | `set`; T0 observations `claimed` | 1 (Q2) |
 | AppLink (Fleet) | Player › Identifiers | Linked app process | `reported`, first | 1 |
-| OutputLoss (Runtime) | Player › Outputs; Run card participant | Output interrupted | needs a read route (pass-2 gate) | 2 |
+| OutputLoss (Runtime) | Frame health (so plan tile, Run card chips, Attention) and Player › Outputs | Output interrupted | `derived` (Central's record from a linked Output-loss fact); only losses fencing the current Binding are served (§16) | 2 (§15, Q3) |
 | Output (Registry) | Player › Outputs | Output | Panel facts at last app start `reported`, first (labelled stale) | 1 |
-| Frame + Binding + Calibration (Registry) | `#/wall/frames/<id>/…` | Frame; Binding; Calibration; Profile | `set` | 3 |
-| CalibrationTrial (Registry + Display Host) | Frame › Calibration | Live calibration | candidate `set`; acknowledgment `reported` | 1 wording; 3 facet |
+| Frame + Binding + Calibration (Registry) | `#/wall/frames/<id>/<facet>`: Calibration (with the Frame profile), Binding, Now-showing | Frame; Binding; Calibration; Frame profile | `set` | 3 (§19) |
+| CalibrationTrial and legacy preview (Registry + Display Host) | Frame › Calibration | Live calibration (one noun for both paths) | candidate `set`; Display Host acknowledgment `reported`; the legacy path has no acknowledgment, says so, and its commit is "Save without acknowledgment" | 1 wording; 3 (§20) |
 | Scene, Program, Activation, Run (Runtime) | `#/scenes`, `#/schedule`, `#/now` | Scene, Program, Show now, Run | `set`; "now" is `planned` | 4 |
 | Coordination: readiness, secured assignment (Runtime) | Frame › Plan; Attention | Readiness report | `reported` | 4 |
 | Source (Media) | `#/sources` | Source | spec `set`; refresh `reported` (via worker) | 5 |
@@ -164,51 +164,54 @@ A `reported` fact must say which receipt it carries; without that, it becomes `u
 | # | Gap | Severity | Pass |
 |---|---|---|---|
 | 1 | One box drawn three times with three identities and cadences | high | 1 |
-| 2 | Host Management silence and Player app silence not told apart (U4/U6) | high | 1 for Host Management, App Manager and Player app (labelled last-reported ages); App Effect Broker and Display Host last-heard is not served (pass-2 gate); a host-silence alarm needs a served threshold (feature proposal) |
+| 2 | Host Management silence and Player app silence not told apart (U4/U6) | high | 1 for Host Management, App Manager and Player app (labelled last-reported ages); Display Host last-heard comes from its display exchanges in pass 2 (Q3); the App Effect Broker sends only on change and has no heartbeat, so it stays Unknown with that reason (§16); a host-silence alarm needs a served threshold (feature proposal) |
 | 3 | Dead "Queue online update"; two meanings of "desired app" | high | 1 |
 | 4 | Output interruption inside a continuing Run cannot be shown (no read route) | high, owner gate | 2 |
 | 5 | Reboot presented as session plumbing | medium | 1 |
 | 6 | Reboot audit correlates a boot to a command by timestamp | medium | 1 |
 | 7 | Reboot and app-operation lifecycles flattened to raw strings; the app operation's broker response not shown | medium | 1 |
-| 8 | Display Host per-Output presentation: the served `projection` keeps the **first** reported state, not the current one (§13) | medium | 1 shows Unknown; backend defect to its owner; pass-2 gate |
+| 8 | Display Host per-Output presentation: the served `projection` keeps the **first** reported state, not the current one (§13) | medium | 1 shows Unknown; 2 reads Display Host's display exchanges instead (Q3); the evidence defect stays with its owner |
 | 9 | "Edit N presented on the display" for a compositor receipt | medium-high | 1 |
 | 10 | "Shows frame X" for a Binding | medium | 1 |
 | 11 | V1 loader-session rows (T1/T2) unlabelled next to V2 `lan_serial` sessions | medium | 1 |
 | 12 | Standing words "Pending", "New", "In service" are not domain terms | low-medium | 1 |
-| 13 | V2 releases, deployments, boot policy and qualification have no UI | medium | 2 (pass-2 gate) |
-| 14 | "Commissioning" mixes Calibration, Profile and Binding; legacy preview and live Trial use different nouns | medium | 3 |
+| 13 | V2 releases, deployments, boot policy and qualification have no UI | medium | deferred (Q5, §17) |
+| 14 | "Commissioning" mixes Calibration and Binding state; legacy preview and live Trial use different nouns, and the legacy commit is not worded as unacknowledged | medium | 3 |
 | 15 | Display, Panel and Output drift (remaining strings) | medium | 1 (fleet strings), 3 (rest) |
-| 16 | Startup display observation raises an alarm as if current | medium | 3 |
+| 16 | Startup display observation raises an alarm worded as if current | medium | 3 (wording; it stays an alarm) |
 | 17 | "Unbind all" is a non-atomic sequence | low-medium | 3 (wording only) |
-| 18 | Identify only on unbound Players; T1/T2 capability tiers in copy | low | 3 |
-| 19 | "Recovered" banner inferred in the browser from epoch diffs | low | 3 |
-| 20 | "Unplaced" is a UI state encoded as position (0,0) | low-medium | 3 |
+| 18 | Identify only on unbound Players; T1/T2 capability tiers in copy | low | 3 (any unbound Output of any active Player; bound Outputs are a feature proposal) |
+| 19 | "Recovered" banner inferred in the browser from epoch diffs | low | 3 (the enrolled fact on the Player page) |
+| 20 | "Unplaced" is a UI state encoded as position (0,0) | low-medium | feature proposal (Registry nullable placement) |
 | 21 | Plan chip says "Scheduled:" for any Run intent; "Now showing" names a plan | medium | 4 |
 | 22 | Program times in the browser's zone with no stated zone | medium | 4 (label the zone); an Installation timezone is a feature proposal |
 | 23 | Source named four ways | low | 5 |
-| 24 | "All N frames heard from" reads as whole-node health | low | 1 |
+| 24 | "All N frames heard from" reads as whole-node health | low | 1; R0 (the all-clear still counts Frames with no report yet) |
+| 25 | An open reboot dialog can send a new command id while a different request is Requested; two pages whose reads predate each other's send can each send one | high | R0 (the console's own class: one send rule evaluated inside the send); Q4 (the cross-page race needs a backend fence) |
 
 ## 8. Roadmap of passes
 
 ```mermaid
 flowchart LR
-  P1["Pass 1 · Fleet: Players<br/>one home per box, layers,<br/>reboot, operation states,<br/>V1 lane labelled<br/>UI only"] --> P2["Pass 2 · Fleet: Releases + App<br/>boot deployment, stage app,<br/>qualified fallback,<br/>Output interruption<br/>backend reads (gate)"]
-  P2 --> P3["Pass 3 · Wall<br/>Frame facets: Binding,<br/>Calibration, Profile; Identify"]
+  P1["Pass 1 · Fleet: Players<br/>one home per box, layers,<br/>reboot, operation states,<br/>V1 lane labelled<br/>UI only"] --> P2["Pass 2 · Fleet: current layers<br/>Output interruption,<br/>Display Host presentation<br/>two backend reads (gate)"]
+  P2 --> P3["Pass 3 · Wall<br/>Calibration facet, Binding facet,<br/>Identify, honest words"]
+  P2 -.->|"deferred (Q5)"| NR["Node release workflows<br/>Releases home, Stage,<br/>qualified fallback"]
   P3 --> P4["Pass 4 · Show<br/>Plan vs Program vs Run words"]
   P4 --> P5["Pass 5 · Sources<br/>PR 37 library design,<br/>re-checked (below)"]
 ```
 
-| Pass | Scope | Backend | Rough size |
-|---|---|---|---|
-| 1 | §9–§12 | none | 4 beads, about +2,200 / −1,250 lines |
-| 2 | `#/releases`: release → deployment → boot selection, once deployments are readable. Player › App: Stage app (unbound Players only, until D16 is answered), qualified fallback. Output interruption on the Player page and on Run cards. Last-reported times for App Effect Broker and Display Host. | One owner gate at pass 2 (below) | about 5 beads |
-| 3 | Frame facets renamed to Binding, Calibration and Profile, so "Commissioning" goes. One live-calibration noun. Identify on any Output through the served capability. Remove T1/T2 tiers. Durable "re-enrolled" wording from Registry facts. Unplaced as an explicit state. | none | about 3 beads |
-| 4 | `planned` truth kind for now-showing. Plan chip shows Run or Program origin. Program times state their zone. Program noun versus the recurrence requirement (doc fix). | none | about 2 beads |
-| 5 | PR 37 library design folded in (below) | as PR 37 already designs | as PR 37 |
+| Pass | Scope | Backend | Size | Status |
+|---|---|---|---|---|
+| 1 | §9–§12 | none | 4 beads, about +2,200 / −1,250 lines | Built and reviewed 2026-10-02; residual findings are bead R0 |
+| 2 | Part C (§14–§18): Output interruption on Frame health and Player › Outputs; Display Host's current presentation and last report; the broker's true reason; `ManagementFacts` through `fact()` | Two read-only additions to existing admin reads (Q3), and optionally one reboot fence (Q4, in R0). Built to the answers | Batch 2 (§23) | Designed (feature layer), revised after review; awaiting the pass-2/3 gate |
+| 3 | Part D (§19–§22): Commissioning renamed Calibration, its equipment block moved to Binding; one live-calibration noun with two honest verbs; Identify on any unbound Output; no tier language; the enrolled fact on the Player page; the startup Panel alarm worded as possibly stale | none | Batch 2 (§23) | Designed (feature layer), revised after review; awaiting the pass-2/3 gate |
+| — | Node release workflows (§17): a Releases home, Publish, boot selection, Stage app, qualified fallback | the boot-policy, boot-offer and acceptance reads (first draft) | about +2,500 at pass 1's rate | Deferred (Q5) |
+| 4 | `planned` truth kind for now-showing. Plan chip shows Run or Program origin. Program times state their zone. Program noun versus the recurrence requirement (doc fix). | none | about 2 beads | Planned |
+| 5 | PR 37 library design folded in (below) | as PR 37 already designs | as PR 37 | Planned |
 
-**Known now, asked at the pass-2 gate** (not a pass-1 question). Each is a concept the UI cannot show honestly from what is served today: (i) Output interruption (`node_output_losses` is read only inside Runtime reconciliation); (ii) the current boot policy and published deployments (no GET exists; `/v1/operator/node/releases` returns the catalog only); (iii) a per-producer last-receipt time for App Effect Broker and Display Host, and Display Host's current per-Output presentation (which first needs the snapshot-sequence defect in §13 fixed by its owner); (iv) optionally, a node device read that does not take the global fleet lock (§11 cost).
+**The pass-2 backend reads** are designed in §16 and asked as Q3: what each adds, its smallest read-only shape on an existing admin read, and what the console shows without it.
 
-**Feature proposals, outside this programme** (they add workflows or records, not alignment): Replace equipment as one Frame-side flow; an Installation timezone record; a Central health page; a host-silence alarm (needs a served threshold); a fleet-summary read route.
+**Feature proposals, outside this programme** (they add workflows or records, not alignment): Replace equipment as one Frame-side flow; an Installation timezone record; a Central health page; a host-silence alarm (needs a served threshold); a fleet-summary read route; Identify on bound Outputs (it overlays a showing Frame); a Registry nullable placement (gap 20); Display Host's current connector state in Frame health; a broker heartbeat.
 
 **PR 37 re-checked against the domain model** (pass 5). Its backend shape (lookup jobs answered as data) is its own approved scope. This programme changes only how it is presented.
 
@@ -235,7 +238,7 @@ flowchart LR
 
 **Routes.** The new routes are `#/players` and `#/players/<device-id>`. `#/equipment` parses to `#/players`, so old bookmarks keep working; `formatRoute` never emits it. `routeSamples.json` gains these routes, and the R4 import-graph test covers the fleet table. The Wall links to the Player page through `players.js` `playerPageHref`, so `players.js` is declared a module shared with Show in that test; it builds addresses and holds no controls.
 
-**Players list.** Built from the snapshot and the shell's existing `/netboot` read only (`playersByDevice`, keyed by `device_id`). It shows name, standing and bound Frames, including a "Not enrolled" box seen only at boot. It does **no** node reads. The V1 fleet policy block (V1 app target, V1 boot baseline) sits at the top, labelled "V1 boot offers".
+**Players list.** Built from the snapshot and the shell's existing `/netboot` read only (`playersByDevice`, keyed by `device_id`). It shows name, standing and bound Frames, including a "Not enrolled" box seen only at boot. It does **no** node reads. The V1 fleet policy block (V1 app target, V1 boot baseline) sits at the top, labelled "V1 boot offers". It stays there until a node Releases home is served (Q5, §17).
 
 **Player page composition (where each section's data comes from).**
 
@@ -299,11 +302,33 @@ Each §10 wording below is the request's or operation's **state label**, shown v
 |---|---|
 | Requested | "Requested · delivery unknown · Central offers it to Host Management until <time>"; while the read shows the effect gate closed or the targeted session no longer current, "Requested · Central is not offering it now (effect gate closed \| session no longer current)", still not terminal. The request's own gate generation is not served, so a gate that closed and reopened is not detected. |
 | Outcome unknown | "Outcome unknown: no response from Host Management; Central stopped offering it at <time>" |
-| Received / Accepted / Rejected | "Received by Host Management" / "Accepted by Host Management, not yet started" / "Rejected by Host Management" |
+| Received / Accepted / Rejected | "Received by Host Management" / "Accepted by Host Management, not yet started" / "Rejected by Host Management". A reboot response carries a served `reason` token (`contracts/node_protocol.py:218,226`; HostCore fills `command_identity_conflict` or `reboot_scope_or_expiry`), so the Evidence fact names it: 'Host Management reported a "rejected" response (reboot scope or expiry) · first received 2 s ago' (R0). |
 | Initiated | "Host Management reported the reboot started · completion unknown" |
 | (separately) Current boot | Shown in Boot. It is never linked to a request: "A later boot does not show what caused it." |
 
-**Retry and new requests.** The dialog freezes the whole request body when it opens: session, device and rollout generations, audit reference, reason, window and command id. So a 409 `node_reboot_identity_conflict` cannot arise from the console. Inside the window, a retry of the same body lands "Already recorded". After the window, the same retry gets 410 `node_reboot_expired`, which the console shows as **Outcome unknown**, never as "refused". While the latest request is Requested, "Reboot Player" offers only that retry, and only on the page that sent it: the device read does not serve the request's device and rollout generations or its window, all of which are in Central's request hash (`node_commands.py:59-64`), so the retry re-sends the frozen body that page holds. That page counts its own request as Requested until a read lists it settled, or, while no read lists it, until its frozen window ends; a different Requested request blocks it too. The frozen window counts from the read the dialog opened on, so once a read reaches it and does not list the request as the latest, the dialog refuses to send: "This request is out of date; close and reopen" (reopening rebuilds the fences and the bound Frames and Runs). Any other page (another tab, a reload) disables Reboot with the Requested reason until the window ends; no page ever sends a new command id while Requested. After its window, a **new** request is allowed, and its dialog states the previous request's outcome is unknown and whether Host Management's current session is the **same boot** that request targeted or a later one (an identity comparison of kernel boot ids, not a clock comparison). That makes the second request a deliberate operator decision, not a blind resend.
+**Retry and new requests.** The dialog freezes the whole request body when it opens: session, device and rollout generations, audit reference, reason, window and command id. So a 409 `node_reboot_identity_conflict` cannot arise from the console. Inside the window, a retry of the same body lands "Already recorded". After the window, the same retry gets 410 `node_reboot_expired`, which the console shows as **Outcome unknown**, never as "refused". A retry is offered only on the page that sent the request: the device read does not serve the request's device and rollout generations or its window, all of which are in Central's request hash (`node_commands.py:59-64`), so the retry re-sends the frozen body that page holds. Any other page (another tab, a reload) disables Reboot with the outstanding reason (below) until the window ends. After its window, a **new** request is allowed, and its dialog states the previous request's outcome is unknown and whether Host Management's current session is the **same boot** that request targeted or a later one (an identity comparison of kernel boot ids, not a clock comparison). That makes the second request a deliberate operator decision, not a blind resend.
+
+**One send rule, evaluated inside the send (R0).** A reboot command is **outstanding** while it is unexpired on Central's clock and has no `rejected` response, on the session it targets. §16 defines this once: with Q4, Central serves it per command; without Q4, the console derives the same predicate from the read. Outstanding is the send predicate, not a state label. Requested, Accepted and Initiated requests are all outstanding until they expire.
+
+A new command id may be sent only when no command on the target Host Management session is outstanding. A request this page holds counts as outstanding until a read lists it, or until Central's read time passes its frozen `retryUntil`.
+
+One function, `sendReboot(deviceId, request, node)`, evaluates `rebootOffer` on `node.latest()`, the hook's newest read **at the moment of sending**. If the rule refuses, it returns that reason without a POST. The caller does not choose which read counts as newest. That choice is where the pass-1 defect lived: the dialog judged its frozen request with the read it was handed (`PlayerCommands.jsx:248`). The Send button's disabled state uses the same `rebootOffer` on the read on screen.
+
+| Dialog (derived, not passed in) | `sendReboot` posts when the newest read shows | Otherwise the dialog says |
+|---|---|---|
+| **New request**: this page does not hold its command id | no command on the target session outstanding (counting the held one), and Central's read time before this request's frozen `retryUntil` | "A reboot request is now outstanding; close this dialog" or "This request is out of date; close and reopen" |
+| **Retry**: this page holds its command id (`heldReboot`) | no **other** command on the session outstanding, and either the read lists this request as outstanding or Central's read time is before its `retryUntil` | the same two reasons |
+
+A first send that ends unknown turns the same dialog into a retry, because "retry" is derived from the held request; there is no second code path.
+
+**Guarantee strength: test-level, not construction.** `sendReboot` is the only console function that POSTs to `/reboots`, and a source-scan test enforces that. A browser test counts zero POSTs when a later read lists another outstanding request, and a mutation probe that removes the call-time check fails it. A future module could still POST directly; the scan is what catches it.
+
+**What the console cannot close.** Without Q4, two cases stay open:
+
+- Two pages whose newest reads both predate the other's POST commit can each send a new command id, within one read interval (5 s) plus request time.
+- A POST whose commit lands after a read, and whose answer is lost, is invisible to that read. Its held block ends at the frozen `retryUntil`, while Central's `expires_at` counts from the later commit (`node_commands.py:105`).
+
+Central records any new command id without checking for an outstanding one (`node_commands.py:89-117`). Only Central can close this, with the fence in Q4 (§16).
 
 **App operation** (node projection; read-only in pass 1). `appOperationState` reads both `state` and `command_response`, because the backend keeps `state` at `staged` whatever the broker answered (`node_lifecycle.py:307-318`).
 
@@ -317,8 +342,8 @@ Each §10 wording below is the request's or operation's **state label**, shown v
 | target_running | "App Effect Broker reported the staged app running" | `reported` |
 | fallback_running | "App Effect Broker reported the fallback app running" | `reported` |
 | effect_unknown | "App Effect Broker reported the outcome as unknown" | `reported` |
-| superseded | "Replaced by a later stage" | `set` |
-| interrupted_by_reboot | "Interrupted (Central's inference: a later boot of this Player was admitted)" | `derived` |
+| superseded | "Replaced by a later stage" | `set`; plus a second Evidence fact for what the broker had reported before (served `command_response` or `latest_effect`), so a rejection is not hidden (R0) |
+| interrupted_by_reboot | "Interrupted (Central's inference: a later boot of this Player was admitted)" | `derived`; plus the same second Evidence fact (R0) |
 
 ## 11. Interface sketch (new modules; signatures only)
 
@@ -335,26 +360,31 @@ players.js                                                             (B1)
   playersByDevice(snapshot, bootFacts) -> PlayerRow[]                  // union keyed by device_id
   PlayerRow = {deviceId, player|null, standing: "not-enrolled"|"unbound"|"bound"|"retired", name, frames}
 
-nodeRead.js                                                            (B1)
-  useNodeDevice(deviceId, {cadenceMs, skip}) -> {enabled: true|false|null, gate, read, operations, readAt, error, refresh}
+nodeRead.js                                                            (B1; R0 adds latest)
+  useNodeDevice(deviceId, {cadenceMs, skip}) -> {enabled: true|false|null, gate, read, operations, readAt, error, refresh, latest}
                                        // one box; Player page only; pauses in a hidden tab; skipped when retired
+                                       // R0: latest() returns the newest read from a ref, at call time
   processFacts(session) -> AppProcessFact[]                            // decodes session.projection
   layerEvidence({nodeDevice, snapshot, playerId}) -> LayerRow[]        // five rows, each a Fact
   currentSessionBoot(nodeDevice) -> {kernelBootId, fact} | {none: fact}
 
-fleetCommands.js                                                       (B2)
+fleetCommands.js                                                       (B2; R0 changes marked)
   rebootTarget(nodeDevice, gate) -> {available: true, sessionId, deviceGeneration, rolloutGeneration, kernelBootId}
                                   | {available: false, reason}         // binds the one current host_core session
   heldReboot(request, result) -> FrozenRebootRequest | null          // kept after done, already or a retryable unknown
-  rebootOffer(target, latestRequest, readAt, held) -> {offer: "new"} | {offer: "retry", reason} | {offer: "blocked", reason}
-                                       // the held request counts as Requested until a read settles it or its frozen window ends
-  rebootBlocked(target, latestRequest, readAt, {held}) -> reason | null   // the disabled-button reason
-  rebootRequest(target, latestRequest, snapshot, readAt, {playerId, commandId, reason, held}) -> FrozenRebootRequest | {refused}
-                                       // whole body frozen at open; refuses a new command id while latest (or held) is Requested
-  rebootStale(request, latestRequest, readAt) -> reason | null        // refuses to send once a read reaches retryUntil unlisted
-  rebootCommandState(command, readAt, {nodeDevice}) -> {state, fact}   // §10; Central clock only; nodeDevice words "not offering it now"
-  appOperationState(operation, readAt) -> {state, fact}                // §10; reads command_response; readAt dates receipts
-  rebootResult(result) -> outcome      // done | already | changed | refused | unknown (retry the same body)
+  rebootOffer(target, commands, readAt, held) -> {offer: "new"} | {offer: "retry", reason} | {offer: "blocked", reason}
+                                       // R0: every command on the target session, judged by outstanding (§10, §16);
+                                       // served when Q4 = yes, else derived; the held request counts until a read lists it
+  rebootRequest(target, commands, snapshot, readAt, {playerId, commandId, reason, held}) -> FrozenRebootRequest | {refused}
+                                       // whole body frozen at open; refuses when rebootOffer is not "new"
+  sendReboot(deviceId, request, node) -> Promise<RebootResult>                                     (R0)
+                                       // the ONE send path: evaluates rebootOffer on node.latest() inside the call,
+                                       // refuses without a POST otherwise; only POSTer of /reboots (source-scan test)
+                                       // R0 deletes rebootStale and rebootBlocked
+  rebootCommandState(command, readAt, {nodeDevice}) -> {state, fact}  // §10; Central clock only; R0: the fact names a served reason
+  appOperationState(operation, readAt) -> {state, fact, prior: Fact|null}  // §10; R0: superseded/interrupted keep the broker's answer in prior
+  rebootResult(result) -> outcome      // done | already | changed | refused | unknown (retry the same body);
+                                       // R0: 409 node_reboot_outstanding -> changed
 ```
 
 **Current choices** (revisable; this section is recommended as shown):
@@ -374,7 +404,7 @@ fleetCommands.js                                                       (B2)
 
 ## 12. Beads (each lands green alone; built back to back, one verify and review per pass)
 
-Delivery follows the owner's standing preference: the four beads are built back to back, each green on its own package tests so the batch can stop at any bead, then one full verify and one review pass over the whole of pass 1.
+Delivery follows the owner's standing preference: the four beads are built back to back, each green on its own package tests so the batch can stop at any bead, then one full verify and one review pass over the whole of pass 1. **Status:** all four built and reviewed 2026-10-02. The review's residual findings (one major: an open reboot dialog could send a new command id while a different request was Requested) are fixed by bead R0, the first bead of batch 2 (§23).
 
 | Bead | Contents | Acceptance (observable) | Lines |
 |---|---|---|---|
@@ -389,15 +419,15 @@ Delivery follows the owner's standing preference: the four beads are built back 
 
 **Costs.**
 - About +2,200 / −1,250 lines, about 800 of them tests, including a rewrite of the roster-based browser tests. The new CI browser suite adds roughly a minute to the browser job.
-- Every open Player page takes the global fleet advisory lock (`pg_advisory_xact_lock`, `locks.py:11-13`) plus device and lifecycle row locks twice per 5 s cycle (the device read and the app-operation read both call `lock_device_generation_in`, `node_sessions.py:92-97`). These serialize against netboot offers, enrollment and retire. Today's open node panel already does this every 3 s, so pass 1 lowers the rate, but two operators watching ten Player pages is twenty lock acquisitions per 5 s. A non-locking read is listed for the pass-2 gate.
+- Every open Player page takes the global fleet advisory lock (`pg_advisory_xact_lock`, `locks.py:11-13`) plus device and lifecycle row locks twice per 5 s cycle (the device read and the app-operation read both call `lock_device_generation_in`, `node_sessions.py:92-97`). These serialize against netboot offers, enrollment and retire. Today's open node panel already does this every 3 s, so pass 1 lowers the rate, but two operators watching ten Player pages is twenty lock acquisitions per 5 s. A non-locking device read stays deferred; pass 2's display read adds one indexed query to this lock hold (§16).
 - The list shows no node state. "Which Players have an unanswered reboot?" needs a page per Player until a summary read exists.
-- App Effect Broker and Display Host show "last reported: unknown" in pass 1. That is honest, but it leaves U6 incomplete for two of five layers until the pass-2 gate.
+- App Effect Broker and Display Host show "last reported: unknown" in pass 1. That is honest, but it leaves U6 incomplete for two of five layers: pass 2 closes it for Display Host (Q3); the broker has no heartbeat (§16).
 - The console decodes a node message encoding nested inside `projection` (broker facts only). A fixture pins it, but a wire change now also breaks the console.
 - The Player page shows up to four read times. That is honest but denser than one.
 - Rule 1 now has two entry points for Binding. One shared write keeps the fence identical, but the two bind UIs must keep the same "an attempt spends the choice" policy by review.
 - Outcome dialects in other modules (fleet `writeMessage`, node "recorded/refused/unknown") converge only where pass 1 touches them.
 
-**Deferred:** `#/releases`, V2 stage, boot selection and qualification UI, Output interruption and broker/Display Host last-reported times (pass 2, behind its gate); Frame facet split and Identify everywhere (pass 3); `planned` and plan wording (pass 4); library (pass 5).
+**Deferred:** Output interruption and Display Host's current presentation (pass 2, Part C); the Calibration facet and Identify on any unbound Output (pass 3, Part D); the node release workflows: Releases home, V2 stage, boot selection and qualification (Q5, §17); `planned` and plan wording (pass 4); library (pass 5). The errata item that superseded and interrupted operations hide the broker's earlier answer is applied by R0 (§10).
 
 **Not planned:** Surface, Installation, Actuator, Sensor, Target group and Panel as console entities. None is stored, and inventing them would be backend design.
 
@@ -405,13 +435,311 @@ Delivery follows the owner's standing preference: the four beads are built back 
 
 | Finding | Owner document |
 |---|---|
-| Display Host posts every snapshot with `covered_through_sequence=0` (`appliance/display_host/service.py:264-270`). Central skips a fact whose sequence is not newer (`central/fleet/node_evidence.py:114`), and a surface's fact key excludes its state, so a later `withdrawn` or `invalidated` is dropped as historical. A probe showed `presented_to_compositor` surviving a withdrawal. The served projection therefore holds the first reported presentation, and Runtime reconciliation is blind to withdrawals. | [Display host](display-host-backend.md); [implementation map](player-fleet-implementation-map.md) |
+| Display Host posts every snapshot with `covered_through_sequence=0` (`appliance/display_host/service.py:264-270`). Central skips a fact whose sequence is not newer (`central/fleet/node_evidence.py:114`), and a surface's fact key excludes its state, so a later `withdrawn` or `invalidated` is dropped as historical. A probe showed `presented_to_compositor` surviving a withdrawal. The served projection therefore holds the first reported presentation, and Runtime reconciliation is blind to withdrawals. Display Host's per-Output **display exchanges** (`node_display_exchanges`, one per Output per sample) are a separate channel the defect does not touch; pass 2 reads presentation from them (§16), so the console no longer waits on this fix. | [Display host](display-host-backend.md); [implementation map](player-fleet-implementation-map.md) |
 | The app operation's `state` stays `staged` after the broker rejects (`node_lifecycle.py:307-318`), and the online broker raises locally on a changed old process without responding (`appliance/node/online_broker.py:66-79`), so a refused stage can look like "no response". | [Implementation map](player-fleet-implementation-map.md) |
 | Migrations 050–052 were deleted (commit 02ec7e5), against the forward-only rule. Docs still cite their behaviour. | AGENTS.md; [implementation map](player-fleet-implementation-map.md) |
 | `node_lifecycle` still refuses on `active_equipment_drains`, which nothing writes (dead fence) | [Implementation map](player-fleet-implementation-map.md) |
 | The implementation map still calls maintenance requests "an honest operator workflow", but `dispatched` is never written | [Implementation map](player-fleet-implementation-map.md) |
 | The domain model calls itself a proposal and says the `lan_serial` sessions and the reboot route are not staged. Both exist. | [Domain model](player-node-domain-model.md) |
 | Requirements give Program a recurrence; the code has one window per Program | [Requirements](requirements.md#experience-model) (pass 4 flags it) |
+| `legacy_preview` calibration commits with no presentation acknowledgment, but U9 says "Save requires the latest candidate's matching presentation acknowledgment" (`requirements.md:41`). The legacy path serves every Frame whose Player has no `node_v2` offer and no `display_host` producer (`registry.py:711-727`). Pass 3 words the commit "Save without acknowledgment" (§20) and leaves behaviour unchanged. The requirements owner either scopes U9 to `native_trial` or retires the legacy commit. | [Requirements](requirements.md) |
+| The implementation map says "No production verifier or command route is installed" (D16/D17 seams). `central/node_app.py:25-30` composes `kubernetes_verifier.configured_verifier` when `PHOTO_WALL_NODE_VERIFIER_CONFIG` is set, so the line is stale for that composition. | [Implementation map](player-fleet-implementation-map.md) |
 | Audit claims checked while designing: the reboot response's `message.message.decision` is **correct** (the payload is a `{schema, message}` envelope), so it is not a defect. | — |
 
-**History.** 2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two. 2026-10-02: pass 1 built (B1–B4). Implementation findings folded in: a `claimed` fact needs its source, and its receipt only when served; "Not read: Player retired" is a plain statement, not a fact; §10 wordings are state labels with an evidence fact beside them, and a staged operation with a received response has its own row; a Requested reboot is retried only from the page that holds its frozen body; §11 signatures match the code; `players.js` is shared with the Wall in the R4 test; a `claimed` receipt says whether it is the first or the latest; the sending page's own reboot request blocks a new command id until a read settles it; the runbook, README and the pass-2 documents now describe the Players pages in place of the Equipment roster. 2026-10-02 (fix cycle 2): a layer with no current session shows its last session's receipt instead of Unknown; a retired Player's app row no longer claims it has no report; a frozen reboot request is refused once a read reaches its window unlisted; a Requested label says when Central is not offering it now; `ManagementFacts` is recorded as rule 2's one pass-1 exception.
+# Part C: pass 2, Fleet: the Player's current layers (feature layer)
+
+## 14. What pass 2 shows, and what it reads
+
+Pass 2 is alignment only. It shows two things Central already records but does not serve, and it ends rule 2's one exception:
+
+1. **Output interruption** inside a continuing Run (R6, gap 4).
+2. **Display Host's current per-Output presentation**, and when Display Host last reported (U6, gaps 2 and 8).
+3. **`ManagementFacts`** rendered through `fact()`.
+
+Items 1 and 2 each need one read-only backend addition (Q3, §16). The batch is built **to the Q3 answer**: a declined read keeps its pass-1 Unknown and leaves no dormant code (§23).
+
+The first draft of this part also designed the **node release workflows**: a Releases home, Publish, boot selection, Stage app and qualified fallback. Review found three problems. They add operator workflows on a lane the default image does not run. Four of them repeat failure classes this programme removes elsewhere. And they needed three of the five reads. They are deferred (Q5, §17), together with the constraints any later design of them must meet.
+
+```mermaid
+flowchart LR
+  subgraph SERVED["Served today"]
+    SNAP["GET /v1/operator/snapshot<br/>(REPEATABLE READ, no fleet lock)"]
+    DEV["GET …/node/devices/{id}<br/>(device read, fleet lock)"]
+    FLEET["GET /fleet<br/>V1 records"]
+  end
+  subgraph Q3["Q3 read additions (§16)"]
+    OI["interruption read<br/>snapshot.output_interruptions<br/>(current Bindings only)"]
+    DX["display read<br/>device.display_outputs<br/>(current boot only)"]
+  end
+  SNAP --> FH["Frame health<br/>plan tile, Run chips, Attention"]
+  OI --> FH
+  OI --> PO["Player › Outputs"]
+  DEV --> PL["Player › Layers"]
+  DX --> PL
+  FLEET --> V1["Player › V1 boot offers<br/>ManagementFacts via fact()"]
+```
+
+## 15. Screens
+
+**Frame health: Output interrupted** (interruption read). `frameHealth` gains one state, **Output interrupted**. It is an alarm, placed after "Player silent" and before the Panel alarm. It shows wherever Frame health already shows: plan tile, Run card Frame chips and Attention. There is one classifier and no second card.
+
+Its wording is "Output interrupted (Central's inference: <Layer> reported the Output lost · recorded <age> ago) · the Run continues". The truth kind is `derived`, with Central's linked Output-loss record as the basis. `<Layer>` is the owner of the producer that reported the loss: Host Management, App Manager, App Effect Broker or Display Host.
+
+The read serves only losses that fence the Frame's **current** Binding (§16). The console therefore keys rows by Frame id and never works out which Binding a row belongs to: a loss from an earlier Binding cannot be painted on the Frame now bound there. With no row, nothing is shown. The console never claims "not interrupted", because Central records only the losses it could link, and Display Host withdrawals are dropped by the defect in §13.
+
+**Player › Outputs.** A bound Output's row shows the same fact, from the same read, through the same function (`interruptionFor`). If Q3 declines the interruption read, every bound Output instead shows "Output interruption: Unknown: Central does not serve Output interruptions". That is the only branch built in that case.
+
+**Player › Layers: Display Host** (display read). "Display Host last reported <age> ago" uses the newest exchange receipt across this boot's Display Host producers (`reported`, latest). Each Output then gets three facts, each `reported`, latest, from that Output's newest exchange:
+
+| Fact | Wording | Why worded so |
+|---|---|---|
+| Connector | "Panel connector: connected" / "Panel connector: not connected" | The exchange carries `connected` (`contracts/node_display.py:93-104`) |
+| Admitted surface | "Admitted surface: the app's surface for Frame <id> (binding generation g)" / "Display Host reported no app surface admitted" | The exchange has `admitted: Surface \| None` and no diagnostic field. Display Host only *requests* its diagnostic page, and that acknowledgment arrives separately (`appliance/display_host/domain.py:34-35`). So the console never names the diagnostic page. |
+| Compositor receipt | "Compositor receipt for that surface, sampled <n> s before this report" / "No compositor receipt for that surface in this report" | The age compares one producer's own boot clock with itself (R10). The console shows the age and judges nothing. Central serves no staleness threshold for presentation: its 5 s rule (`node_acceptance.py:179`) belongs to qualification. This follows the host-silence stance in §11. |
+
+"Panel pixels: Unknown: no layer observes them" still closes the list. If Q3 declines the display read, the Display Host row stays as in pass 1.
+
+**Player › Layers: App Effect Broker.** The last-reported line changes to the true reason, served or not: "Unknown: App Effect Broker sends evidence only on change, and Central stores no receipt of its polls". This is a UI-only change.
+
+**`ManagementFacts`** (V1 section) renders through `fact()`. The authenticated OS attempt claim is `claimed` (source "its serial check-in", latest receipt). The V1 loader session and V1 app attempt are `set`. Rule 2's pass-1 exception ends.
+
+**Failure modes (pass 2).**
+
+| What breaks | What the operator sees | Guarantee |
+|---|---|---|
+| An unresolved loss belongs to an earlier Binding or authority epoch | Nothing. The read does not serve it (§16), so the current Frame can never carry another Binding's interruption | Construction at the read (SQL join to current Bindings); DB test |
+| Display Host restarted within one kernel boot (new producer) | The new producer's newest exchange wins. Exchanges from an earlier boot are never shown as current | Read scoped to the current boot admission; DB test |
+| Node management is off on this Central | The interruption read is served by the snapshot (rows exist only where the node lane ran). The display read rides the device read, so the layers show pass 1's "node management is off" | Browser test (pass 1) |
+| An exchange payload drifts | "This section could not be shown" in Layers only | Per-section boundary (pass 1) |
+| A loss Central could not link (including Display Host withdrawals, §13) | Nothing. Absence is never worded as health | Wording rule; model test |
+
+## 16. Backend reads: the pass-2 gate (Q3 and Q4)
+
+Each read is read-only. It is an additive field on an existing admin read, behind the existing `admin` dependency and `invoke` error mapping (`central/fleet/node_routes.py`), and lands as the first commit of the bead that shows it (§23).
+
+| Read | Concept the console cannot show today | Evidence it is missing | Smallest addition | Console without it | Lines (code / tests) |
+|---|---|---|---|---|---|
+| **Interruption** | Output interruption inside a continuing Run | `node_output_losses` is read only by Runtime reconciliation (`coordination.py:885-899`, `924-926`) | Additive `output_interruptions[]` on `GET /v1/operator/snapshot`, inside its existing REPEATABLE READ snapshot (`operator_snapshot.py:65`), so it agrees with the Bindings beside it. Serves only unresolved rows that match the Player's current `authority_epoch` and a current Binding: the same Frame, Output and binding generation that Runtime reconciles against (`coordination.py:879-882`). The cause layer comes from a join of `cause_producer_id` to `node_producers.owner`; the table has no layer column (`053_node_control.sql:140-155`). Shape: `{frame_id, player_id, output_id, binding_generation, cause_layer, interrupted_at}`. | Player › Outputs Unknown; no Frame-health state | +35 / +60 |
+| **Display** | Display Host's current per-Output presentation and its last report | The evidence projection keeps the first state (§13). The exchanges (`055_node_display.sql:2-14`) are not served | Additive `display_outputs[]` on `GET …/node/devices/{id}`. For the device's current boot admission, it takes the newest `node_display_exchanges` row per Output across that admission's `display_host` producers, ordered by `sampled_boottime_ms`: one kernel boot's clock, compared only within that boot. Shape: `{output_id, received_at, connected, surface: {frame_id, binding_generation, config_revision} \| null, receipt: {matches_surface, age_ms} \| null}`, where `age_ms` is the exchange's sample minus the receipt's sample (one producer). | Display Host row Unknown (pass 1) | +35 / +50 |
+
+**Why the interruption read filters.** Losses are keyed by `(player_id, authority_epoch, output_id, frame_id, binding_generation)` (`060_node_output_frame_identity.sql:34-35`). "A historical unresolved loss is still a fence" (060:1-2), but only on its own exact key: Runtime matches the full tuple (`coordination.py:924-926`). An unresolved row from an earlier epoch or binding generation therefore fences no current Frame. Serving it would invite the console to attach it to whatever Frame is bound there now. Central filters it, so the console holds no second copy of the "which Binding" predicate.
+
+**Lock cost.** The interruption read takes no fleet lock. The display read rides the device read, which holds the global fleet advisory lock (`node_observations.py:52-54`). Its query uses the existing index `node_display_output_latest` (055:14) and is bounded by one boot's producers times its Outputs. That adds one indexed query to the lock hold per open Player page per 5 s. This is not measured: the DB test bounds rows, not time.
+
+**Not proposed.** A last-reported time for the App Effect Broker: it sends evidence only on change (`appliance/node/broker_runner.py` `emit_process_evidence`), and Central stores no poll receipt. That needs a heartbeat write (feature proposal). A non-locking device read also stays deferred.
+
+> **Q3 (backend reads).** Recommended: **A, both reads** (about +70 code and +110 test lines). **B: the interruption read only.** Display Host stays Unknown, so U6 stays incomplete for that layer. **C: none.** Interruption and Display Host stay Unknown, R6's "only this Player's Outputs interrupted" stays invisible, and batch 2 has no backend change.
+
+**The reboot fence (Q4).** "Outstanding" is defined once, in Central. A reboot command is **outstanding** while it is unexpired on Central's clock and has no `rejected` response, scoped to the session it targets.
+
+- **Received, accepted and initiated commands stay outstanding until they expire.** A second command id to the same session would mean two reboot requests for one box, because Host Management dedupes by command id (`appliance/node/host.py:108-116`).
+- **A command to an earlier session never blocks a new one.** Host Management accepts commands only for its current session (`host.py:100-104`).
+
+The fence goes in `NodeCommands.request_reboot`: it refuses a **new** command id with 409 `node_reboot_outstanding` while another command on the same session is outstanding. It runs under the locks `request_reboot` already holds (gate, global fleet lock and session row, `node_commands.py:66-72`), so the check cannot race. A retry of the same command id is unaffected.
+
+The device read serves `outstanding: bool` per command, from the same predicate evaluated at read time, so the console never re-derives it. `outstanding` is the **send** predicate. It is not one of §10's state labels, which stay as they are: a Requested label is outstanding, but so are Accepted and Initiated. The console reads a 409 `node_reboot_outstanding` as **changed**: "Another reboot request for this Player is outstanding; close this dialog and review it".
+
+> **Q4 (reboot fence).** Recommended: **yes**, as the first commit of R0 (+25 code, +60 test lines). R0's console then reads the served `outstanding`, and the cross-page race becomes impossible at the authority. Alternative: **no**. R0 derives the same predicate in the console from its newest read, two pages whose reads predate each other's send can each send a new command id within one read interval, and a commit whose answer is lost after a read stays invisible to that read (§10).
+
+## 17. Deferred: node release workflows (Q5)
+
+The first draft designed a Releases home (release catalog, Publish, boot selection), Stage app and qualified fallback. Review established four things, each confirmed in code:
+
+- **Node control is opt-in.** The workflows run only on a Central composed with node control. The default image runs `central.app:create_app` (`Dockerfile:155`), which "keeps node transport disabled" (`docs/runbook.md:929-931`, `central/node_app.py:1-5`). Every route calls `require_enabled` (`node_release_catalog.py:27,45`; `node_boot.py:167`; `node_acceptance.py:73,95`). Stage also needs the effect gate open (`node_lifecycle.py:115`), and the gate opens only through a configured deployment verifier (`node_app.py:25-30`).
+- **They are feature work.** They add operator workflows, which §8 classes as feature work, not alignment.
+- **They need reads.** Three of the five first-draft reads (boot policy, boot-offer fields, stored acceptances) existed only to serve them.
+- **They repeat known failure classes.** Four repeat classes this programme removes elsewhere (below).
+
+**Constraints any later design must meet** (review findings, kept so the design starts from them):
+
+| Workflow | Constraint | Evidence |
+|---|---|---|
+| Every fleet write | One send rule per verb, evaluated inside the send on the newest read (§10's primitive). Central fences no outstanding app operation: a new operation id silently supersedes the rest, and the broker raises locally on a changed old process without responding | `node_lifecycle.py:109-168`, `311-312`; `appliance/node/online_broker.py:66-79` |
+| Stage app | Offer Stage only where Central would admit it. That needs a current app link, and a qualified fallback for the current cohort and base that differs from the target. Stored acceptances are scoped to the cohort at acceptance time | `node_lifecycle.py:131-133`, `170-182` |
+| Stage lifecycle | Superseded from every state. Interrupted from Staged with any response | `node_lifecycle.py:311-315` |
+| Qualification | Each sample takes the Coordination, Runtime and global fleet locks and runs about 15 queries. Terminal refusals (generation changed, unknown, process changed) must stop sampling with their reason. The environment to qualify is the linked app process's, not the broker's process fact. A reopened page can find its qualification only through a served read | `node_acceptance.py:99-118`; `transaction_locks.py:7-10` |
+| Boot selection | Select is a fleet-wide desired-state change: every new node-path boot gets it, and a deployment with no app makes every new boot's offer say `unconfigured` for the app. Its dialog must name the scope and the affected Players and Frames, and must warn when there is no app. The reboot dialog then says which deployment the next boot is offered | `node_boot.py:52`, `212-219` |
+| Boot-policy read | REPEATABLE READ READ ONLY, ordered by `published_at`, always including the selected deployment, with `require_enabled` | `db.py:47-52`; `operator_snapshot.py:65` |
+| Home of boot policy | The V1 fleet policy stays on the Players list until a node Releases home is served on the deployment | §12 B3 acceptance |
+
+> **Q5 (node release workflows).** Recommended: **defer** them to a later pass, designed when a deployment runs node control and an operator will use it, starting from the constraints above. Alternative: **design them next**, as their own feature-layer pass and gate before batch 3. That costs one more design round, and about +2,500 lines at pass 1's overrun rate (the first draft's +1,400 estimate). Assumption: this design did not check whether the owner's deployment (in mcurcio/iac) runs `central.node_app`. If it does, and node releases are in use, choose the alternative.
+
+## 18. Interface sketch (pass 2; signatures only)
+
+```text
+health.js (extended)                                                     (C1)
+  interruptionFor(snapshot, frameId) -> {fact: Fact} | null   // snapshot.output_interruptions keyed by frame_id;
+                                                              // rows are current-Binding only (§16), never re-matched
+  frameHealth(...)                                            // gains "output-interrupted" (alarm)
+PlayerPage.jsx (Outputs)   bound Output row renders interruptionFor(snapshot, output.frameId)
+
+nodeRead.js (extended)                                                   (C2)
+  displayOutputs(nodeDevice, readAt) -> Array<{outputId, facts: Fact[]}>   // display read; three facts per Output
+  layerEvidence(...)                                          // Display Host row from display_outputs; broker reason
+V1Offers.jsx               ManagementFacts renders through fact()                (C2)
+```
+
+If Q3 declines a read, its function is not built. `interruptionFor` is replaced by one constant Unknown fact on bound Outputs, and `displayOutputs` does not exist.
+
+**Current choices** (revisable; recommended as shown):
+
+| Choice | Current | Alternative and its cost |
+|---|---|---|
+| Who decides which Binding a loss belongs to | Central, in the read: only current-Binding rows are served | Serve every unresolved row and match in the console: a second copy of Runtime's predicate, and the wrong-Frame alarm the review found |
+| Where the display read lives | On the device read (Player page only) | On the snapshot, so Frame health could use Display Host's current connector state: it widens every 5 s snapshot for every operator. It is a feature proposal (Display Host connector state in Frame health) |
+| Compositor receipt age | Shown as an age, not judged | A client staleness threshold: an unowned number (R9) |
+
+# Part D: pass 3, Wall: the Frame's facets (feature layer)
+
+## 19. Screens
+
+Pass 3 needs no backend. It renames the Frame's "Commissioning" facet to **Calibration** and moves the equipment block that mixed in another aggregate's state to **Binding**. It also fixes the Wall words that still blur Output, Panel and Display Host.
+
+**The Frame's facets.** The route is `#/wall/frames/<id>/<facet>`. `routes.js` `FACETS` becomes `calibration | binding | nowshowing`. The old `commissioning` parses to `calibration`, so old bookmarks keep working, and `formatRoute` never emits it (as with `#/equipment` in pass 1). The default facet stays where it is today (the first entry).
+
+| Facet | Contents (from where today) | Writes |
+|---|---|---|
+| **Calibration** (was Commissioning) | Committed calibration; the draft editor ("Adjust calibration"); **Live calibration** (§20); the Frame profile section (operator-declared; persists across a Panel swap) and its profile/report mismatch note | Show on the Panel, Save (per path, §20), Stop; Edit Frame profile (unbound only, existing) |
+| **Binding** | Bound Player (link to its page) and Output; Player app liveness (pass 1); Output interrupted (from Frame health, when served, §15); "Panel at the Player app's last enrollment (may be stale)", moved here from Commissioning with the "Bound Output" block (`Commissioning.jsx:622-662`); for an unbound Frame, the Output picker, each candidate with **Identify Panel** | Bind, Unbind (existing); Identify |
+| Now-showing | unchanged until pass 4 | — |
+
+**Removed:** the two capability-gated placeholders ("Panel color correction", "Display power and parameters"), together with `capability.js` and `GatedArea.jsx`. No served capability exists for either; a control arrives with its served read, as a feature proposal. This also removes every T1/T2 tier word from console source and from the [console UX design](operator-console-ux-design.md).
+
+**The Panel at enrollment, one wording.** `connected=false` is Central's own record: enrollment first marks every Output `connected=false`, then writes the Outputs the Player app listed (`registry.py:185-190`). Everywhere, fleet and Wall, it reads **"No Panel listed as connected at the Player app's last enrollment (may be stale)"** (`set`). `connected=true` reads "Panel connected at the Player app's last enrollment (may be stale)" (`reported`, first). One function, `panelAtEnrollment`, which R0 introduces, renders both.
+
+**Frame health words.** "needs-commissioning" becomes **needs-calibration**, with cause `calibration` and facet `calibration`. The startup Panel alarm **stays an alarm** with the wording above. Gap 16 was a wording fault, not a severity fault. Demoting the alarm would leave a bound Frame whose Panel is unplugged with no alarm anywhere, because Display Host's current connector state is only on the Player page (§18). The CTA after a bind, "Commission the display", becomes "Calibrate this Frame".
+
+**Identify on any unbound Output.** Central identifies any connected, unbound Output of an active Player whose Player app offered the capability (`registry.py:441-452`). Today the console offers Identify only on a Player whose standing is Unbound, so a Bound Player's free second Output cannot be identified. Pass 3 uses one function, `identifyOffer`, on both homes: Player page › Outputs and the Binding facet's picker.
+
+| Output | Control | Reason shown |
+|---|---|---|
+| connected at last enrollment, unbound, Player active | **Identify Panel** | — |
+| not listed as connected at the last enrollment | disabled | "Connect a Panel and restart the Player app" |
+| bound to a Frame | disabled | "Central identifies only unbound Outputs" |
+| Player retired | absent | — |
+| Central answers `identify_unsupported` | outcome | "This Player app did not offer Identify when it enrolled" |
+
+Identifying a bound Output would overlay a showing Frame's content for 15 s. It is on the feature-proposal list, not a question here.
+
+**Enrollment on the Player page.** "Player app enrolled <age> ago (authority epoch N)" is `set`: `last_seen` is Central's enrollment record (R3). It goes in the Player page header, its home (rule 1). The Wall's "Recovered" banner, a browser diff of epochs (`recovery.js`), is deleted. The Binding facet already links to the Player page.
+
+**Unplaced: unchanged.** `isUnplaced` is called only inside `projection.js`, so there is no caller to migrate, and a console-side value would only relabel the Registry's (0, 0) sentinel. The honest fix is a nullable placement in the Registry (a migration). Gap 20 moves to the feature-proposal list.
+
+## 20. One live-calibration noun, two honest verbs
+
+Central offers two paths, chosen per Frame by its served `calibration-capability` `mode`. `native_trial` is a Display Host CalibrationTrial, with a compositor acknowledgment. `legacy_preview` is a 30 s Registry preview lease, with no acknowledgment; it is the mode for any Frame whose Player has no `node_v2` offer and no `display_host` producer (`registry.py:711-727`). Today the two read as two features ("Live calibration trial"; "Preview and commit").
+
+Pass 3 names both **Live calibration**. The verb differs where the domain differs. U9 says "Save requires the latest candidate's matching presentation acknowledgment" (`requirements.md:41`). The native path's **Save calibration** is enabled only from Acknowledged (R7). The legacy path can never have an acknowledgment, so its commit is worded **Save without acknowledgment** and is never called Save calibration. That legacy commit already contradicts U9 today. Pass 3 changes its wording, not its behaviour, and records the gap for the requirements owner (§13).
+
+```mermaid
+stateDiagram-v2
+  state "Live calibration, with Display Host acknowledgment (native_trial)" as N {
+    [*] --> EditPending: Start / edit
+    EditPending --> AwaitingAck: edit sent
+    AwaitingAck --> Acknowledged: presented_to_compositor for this edit
+    Acknowledged --> EditPending: edit
+  }
+  state "Live calibration, without acknowledgment (legacy_preview)" as L {
+    [*] --> Showing: Show on the Panel (lease)
+    Showing --> Showing: Show again
+  }
+  N --> Saved: Save calibration (only from Acknowledged, R7)
+  N --> Stopped: Stop
+  N --> Expired: idle 5 s or 30 s total
+  N --> Invalidated: surface authority changed
+  L --> SavedUnacknowledged: Save without acknowledgment (U9 gap, §13)
+  L --> Stopped: Stop (revert)
+  L --> Expired: lease ends
+  L --> Overtaken: committed elsewhere
+```
+
+The strings change in place in `LiveCalibrationTrial.jsx` and the renamed Calibration facet. No new module joins the two paths' state machines.
+
+| Today | Pass 3 |
+|---|---|
+| "Live calibration trial" · "Begin Trial" · "Start another Trial" · "End Trial" | "Live calibration" · "Start live calibration" · "Start again" · "Stop live calibration" |
+| "Preview and commit" · "Preview" · "Re-preview" · "Commit" · "Revert" | "Live calibration" · "Show on the Panel" · "Show again" · "Save without acknowledgment" · "Stop live calibration" |
+| "Edit N presented to the compositor by Display Host." | "Edit N presented to the compositor by Display Host · not proof of what the Panel shows" (`reported`) |
+| "Previewing on the panel — lease expires in Ns." | "Central sent the draft to the Player app; live calibration ends in N s. No layer acknowledges what is presented on this path." (`set`) |
+| "Trial expired. Your draft is retained." | "Live calibration expired; your draft is kept" |
+| "Committed elsewhere / your preview was superseded — re-review." | "Someone saved a calibration for this Frame meanwhile; review it, then start again" |
+
+**Other pass-3 wordings.**
+
+| Today | Pass 3 |
+|---|---|
+| Inspector tab "Commissioning" | tab "Calibration" |
+| "Display at last Player start" · "Display: Detected / Not detected" | "Panel at the Player app's last enrollment (may be stale)" · the two `panelAtEnrollment` wordings (§19) |
+| "No Display bound — bind a Player output first." | "No Output bound. Bind one on the Binding facet." |
+| "Edit display profile" · "persistent display profile" | "Edit Frame profile" · "Frame profile" |
+| "Identify display" (Wall and fleet strings) | "Identify Panel" |
+| "Unbind all outputs of player X?" | "Unbind each Output of Player X? Central unbinds them one at a time; if one fails, the rest stay as they are." (gap 17) |
+| "Recovered" banner (browser diff of epochs) | Player page header: "Player app enrolled <age> ago (authority epoch N)" (gap 19) |
+| "Requires the display-control capability — not yet available." | removed |
+
+## 21. Interface sketch (pass 3; signatures only)
+
+```text
+routes.js            FACETS = ["calibration", "binding", "nowshowing"]; alias commissioning -> calibration
+CalibrationFacet.jsx (renamed from Commissioning.jsx) committed, draft editor, live calibration, Frame profile;
+                     equipment block removed
+BindingFacet.jsx     (extended) bound Output and Panel at enrollment (moved); Identify on picker candidates
+LiveCalibrationTrial.jsx  strings only (§20)
+players.js (shared with the Wall in the R4 test)
+  panelAtEnrollment(observation, readAt) -> Fact              // R0; one wording for connected true/false
+  identifyOffer(snapshot, playerId, outputId) -> {offer: true} | {offer: false, reason} | {absent: true}
+  enrolledFact(player, readAt) -> Fact                        // set: last_seen is Central's enrollment record
+health.js            frameHealth(...): needs-calibration; Panel alarm uses panelAtEnrollment wording
+Deleted              capability.js, GatedArea.jsx, recovery.js and the Wall banner
+```
+
+**Current choices** (revisable; recommended as shown):
+
+| Choice | Current | Alternative and its cost |
+|---|---|---|
+| Facet split | Rename to Calibration and move the equipment block to Binding; the profile stays a section of Calibration | Separate Calibration and Profile facets: a new facet and more retargeting across the 12 browser-test files that name Commissioning (117 mentions), for a split no requirement asks for |
+| Default facet | Unchanged | Binding first: matches setup order, but churns every Wall test's landing tab |
+| Legacy commit verb | "Save without acknowledgment" (behaviour unchanged; U9 gap recorded) | Disable it on `legacy_preview` (U9 as written): legacy Players lose calibration. Or give it "Save calibration": hides the U9 gap |
+| Startup Panel report | Alarm, worded as an enrollment record (may be stale) | A to-do: the only Wall signal for an unplugged Panel is lost |
+| "Recovered" banner | Replaced by the durable enrolled fact on the Player page | Keep a banner worded from Registry facts: a transient notice that a reload loses |
+| Gated placeholders | Deleted with `capability.js` | Keep the seam, renamed without tiers: two permanently disabled areas |
+
+## 22. Costs and deferrals (passes 2 and 3)
+
+**Costs.**
+- **Size.** Estimated at about +1,500 / −850 lines across batch 2 (§23): about +650 code, +700 tests, +150 docs. Pass 1 overran its estimate: +4,622 / −1,266 actual against +2,200 / −1,250 (`git diff --shortstat origin/main..HEAD`), about 1.8× for code and 2× for tests. At that rate, plan on **about +2,700 / −850**. The browser suite gains well under a minute.
+- **Wire coupling.** The console decodes Display Host's exchange fields, so a wire change can break the Layers section. A per-section boundary contains the break.
+- **Lock cost.** The display read adds one indexed query to every device read's fleet-lock hold (§16).
+- **Interruption absence.** Losses Central could not link stay invisible. Absence of an interruption is never shown as health.
+- **Display Host on the Wall.** Display Host's current connector state appears only on the Player page. Frame health still uses the enrollment-time Panel record, worded as possibly stale.
+- **Legacy calibration.** The legacy commit still saves without acknowledgment, against U9. It is now worded so, and owned in §13.
+- **Node release workflows.** These, and gap 13, stay without UI (Q5).
+
+**Deferred:** node release workflows (Q5, §17); `planned` and Plan wording (pass 4); library (pass 5); a non-locking device read.
+
+**Feature proposals added by this part:** Identify on bound Outputs; a Registry nullable placement (gap 20); Display Host connector state in Frame health; a broker heartbeat (a write).
+
+# Batch 2: R0 plus passes 2 and 3
+
+## 23. Beads (built back to back; one full verify and one review for the batch)
+
+There are five beads, built back to back, each green on its own package tests so the batch can stop after any bead. One full verify and one review then cover the whole batch (owner preference).
+
+- **R0 comes first** because it fixes a shipped defect.
+- **Build to the answers.** Each backend read is the first commit of the bead that shows it, and the batch is built to the Q3 and Q4 answers. A declined read or fence is simply not built, and nothing dormant ships.
+- **Docs come last.**
+
+| Bead | Contents | Acceptance (observable) | Lines (code / tests) |
+|---|---|---|---|
+| **R0 · Reboot send rule and pass-1 residuals** | If Q4 = yes, first commit: the `node_reboot_outstanding` fence and the served per-command `outstanding`, one predicate in `node_commands` used by both (§16). Then, in `fleetCommands.js`: `rebootOffer` judges every command on the target session by `outstanding` (served if Q4 = yes, else derived from the read), and `sendReboot(deviceId, request, node)` evaluates `rebootOffer` on `node.latest()` inside the send. `rebootStale` and `rebootBlocked` are deleted. `useNodeDevice` exposes `latest()`. A 409 `node_reboot_outstanding` reads changed. A source-scan test checks that only `fleetCommands.js` POSTs to `/reboots`. `PlayerCommands.jsx` derives retry from the held request and enables Send from the same `rebootOffer`. Minors: the reboot Evidence fact names the served `reason`; superseded and interrupted operations keep the broker's earlier answer as a second Evidence fact; the attention all-clear reads "No Frame needs attention", plus "· K awaiting a first report" when K > 0; `panelAtEnrollment` gives one wording for the Panel at enrollment (§19). | **Stale dialog.** The dialog is frozen at read 1000, and the next read, at 1005, lists a different outstanding request until 1034. Send is disabled, and a direct `sendReboot` call refuses: the browser test counts **zero** reboot POSTs. Mutation probe: removing the call-time check from `sendReboot` makes that test fail. **Other blockers.** An older outstanding entry that is not the newest blocks Reboot. An Accepted, not-initiated request still blocks. A command to an earlier session does not block. **Retry.** A held retry re-sends identical bytes and lands "Already recorded". **Wording.** A rejected reboot reads 'a "rejected" response (reboot scope or expiry)'. A superseded operation that was rejected still shows the rejection. **Fence (Q4 = yes).** DB tests: a second new id while the first is outstanding gets 409; the same id gets already; after a rejection or expiry, a new id is accepted; the served `outstanding` agrees with the fence on each case. | +115 / −80 · +180 / −30 (fence included) |
+| **C1 · Output interruption** (tracer first) | First commit: the interruption read (§16). Then `health.js` `interruptionFor` and the Output-interrupted state; the Player › Outputs line. If Q3 = C: only the constant Unknown line on bound Outputs | **DB.** Only unresolved rows matching the current epoch and a current Binding are served. A row for an earlier binding generation of the same Output, and one from an earlier epoch, are not. `cause_layer` comes from the producer's owner. **Browser and model.** A served row gives its Frame "Output interrupted … · the Run continues" on the plan tile, Run chip, Attention and the Player's Output row. A Frame newly bound to that Output shows nothing. No row shows nothing | +100 · +150 |
+| **C2 · Display Host and V1 facts** | First commit: the display read (§16). Then `nodeRead.js` `displayOutputs` and the Display Host row. The broker's true reason. `ManagementFacts` through `fact()`. If Q3 = B or C: the broker reason and `ManagementFacts` only | **DB.** The newest exchange per Output is taken across the current admission's Display Host producers, so after a Display Host restart within one boot the new producer wins. An earlier boot's exchanges are not served. The receipt age uses one producer's clock. **Model.** A null surface reads "Display Host reported no app surface admitted". No display string says "diagnostic page", "visible" or "showing". No plain "V1 record" line remains | +165 / −30 · +170 / −20 |
+| **D1 · Wall facets and words** | `routes.js` facets and alias; `Commissioning.jsx` → `CalibrationFacet.jsx` with the equipment block moved to `BindingFacet.jsx`; §20 strings in place; `identifyOffer` on both homes; `enrolledFact` on the Player page header; Frame-health words; delete `capability.js`, `GatedArea.jsx`, `recovery.js` and the banner; Wall browser tests retargeted | **Facets and alias.** Tabs read Calibration, Binding, Now-showing, and `#/wall/frames/x/commissioning` opens Calibration. The Binding facet shows the bound Output and the Panel at enrollment. **Calibration.** On the native path, Save calibration stays disabled until Display Host acknowledges the latest edit. The legacy path offers only "Save without acknowledgment". **Identify.** A Bound Player's free second Output can be identified from its Player page and from an unbound Frame's picker, and a bound Output shows "Central identifies only unbound Outputs". **Banner and alarm.** The Player page header shows the enrolled fact, and no Wall banner remains. An unplugged-at-enrollment Panel on a bound Frame is still an alarm, worded "may be stale". **Words.** No console string says Commissioning, Commission, Trial, Preview (as a noun), T1, T2 or "display" for the Panel | +250 / −420 · +200 / −200 |
+| **E1 · Docs** | [Console UX design](operator-console-ux-design.md) (facets, Panel words, no tiers); this document's status and history; [fleet implementation map](player-fleet-implementation-map.md) links to the new reads and corrects its verifier line (§13); the AGENTS.md code-map row if anything moved | `check_docs.py` passes. No doc names the Commissioning facet or the T1/T2 tiers as current | +150 / −60 (docs) |
+
+**Tracer bullet** (the first commit of C1). The interruption read is served on the snapshot, and the plan tile of the Frame whose **current** Binding has an unresolved loss shows "Output interrupted". An unresolved loss for an earlier binding generation of the same Output shows nothing. The tracer proves the backend read on the snapshot, current-Binding filtering at the authority, the classifier and every Frame-health surface. **Non-goals:** the Player page line, Display Host, the Wall facets. If Q3 = C, the batch has no backend change, and the tracer becomes D1's first commit: `#/wall/frames/x/commissioning` opens the renamed Calibration facet, and the Binding facet shows the moved equipment block.
+
+
+# History
+
+2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two. 2026-10-02: pass 1 built (B1–B4). Implementation findings folded in: a `claimed` fact needs its source, and its receipt only when served; "Not read: Player retired" is a plain statement, not a fact; §10 wordings are state labels with an evidence fact beside them, and a staged operation with a received response has its own row; a Requested reboot is retried only from the page that holds its frozen body; §11 signatures match the code; `players.js` is shared with the Wall in the R4 test; a `claimed` receipt says whether it is the first or the latest; the sending page's own reboot request blocks a new command id until a read settles it; the runbook, README and the pass-2 documents now describe the Players pages in place of the Equipment roster. 2026-10-02 (fix cycle 2): a layer with no current session shows its last session's receipt instead of Unknown; a retired Player's app row no longer claims it has no report; a frozen reboot request is refused once a read reaches its window unlisted; a Requested label says when Central is not offering it now; `ManagementFacts` is recorded as rule 2's one pass-1 exception. 2026-10-02 (passes 2 and 3): Parts C and D designed at the feature layer and cut with R0 into batch 2. Pass-1 errata folded in: §10 states one send rule judged on the newest read and the cross-page race the console cannot close; superseded and interrupted operations keep the broker's earlier answer; a reboot rejection names its served reason. Grounding against the backend found that Display Host's display exchanges carry current per-Output presentation untouched by the evidence defect, and that the App Effect Broker has no heartbeat, so its last report stays Unknown for a stated reason. 2026-10-02 (passes 2 and 3, revised after adversarial review, domain-fidelity/security and simplicity lenses): the node release workflows (Releases home, Publish, boot selection, Stage, qualification) and their three reads are deferred as Q5, because node control is opt-in on the default image and they add workflows, and the review's constraints on them are kept in §17; the interruption read serves only losses that fence the current Binding, so a rebound Frame cannot inherit another Binding's alarm; the display read words a null surface as no admitted surface and serves the receipt's age on one producer clock; the legacy commit reads "Save without acknowledgment", and its U9 gap goes to the requirements owner; R0 drops the branded permit for one `sendReboot` that judges the newest read at call time, its guarantee restated as test-level; "outstanding" is defined once in Central and served per command, and the Q4 fence moves into R0. The review asked that accepted and initiated commands stop counting; they still count, because Host Management dedupes only by command id (`host.py:108-116`); batch 2 is built to the gate answers, with no `useAdminRead`, `servedField` or dormant branches; the V1 fleet policy stays on the Players list; pass 3 becomes one facet rename plus the equipment block moved to Binding, and drops `placement()`, `liveCalibration.js` and the Profile facet; `panelAtEnrollment` gives the Panel record one wording in R0 and D1; the enrolled fact moves to the Player page header; the startup Panel alarm stays an alarm, because it is the only Wall signal for an unplugged Panel; Identify on bound Outputs becomes a feature proposal, not a question; estimates are restated at pass 1's overrun rate.
