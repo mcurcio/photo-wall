@@ -7,7 +7,11 @@ import { formatRoute, parseRoute } from "./routes.js";
  *
  * This hook is the ONLY code that writes `location.hash`; links in the page change it
  * natively. It listens to `hashchange`, so browser Back and Forward, a typed URL and a
- * link all arrive the same way.
+ * link all arrive the same way, and to `popstate`, which the browser fires in the same
+ * task that moves the location (a traversal such as a flow's `history.back()`, or a
+ * fragment navigation), while that move's `hashchange` is queued as a later task. So
+ * the rendered route never waits behind a render already due: a render after the
+ * location moved shows the new route, never the one the browser has left.
  *
  * `navigate(route)` pushes a history entry; `navigate(route, {replace: true})` replaces
  * the current one (landing, plain selection on the Wall, and flow steps later), then
@@ -30,8 +34,12 @@ export function useRoute() {
   useEffect(() => {
     const onChange = () => setHash(window.location.hash);
     window.addEventListener("hashchange", onChange);
+    window.addEventListener("popstate", onChange);
     onChange(); // a change between the first render and this effect
-    return () => window.removeEventListener("hashchange", onChange);
+    return () => {
+      window.removeEventListener("hashchange", onChange);
+      window.removeEventListener("popstate", onChange);
+    };
   }, []);
 
   const route = useMemo(() => parseRoute(hash), [hash]);
