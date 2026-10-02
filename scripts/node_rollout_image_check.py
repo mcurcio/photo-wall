@@ -73,10 +73,30 @@ def inside(output: Path):
 def _test_dependencies(destination: Path):
     # Exact tools from the lock-installed CI environment; no application deps
     # are overlaid. Docker Linux and CI host use the same CPython minor version.
-    for name in ("pytest", "_pytest", "iniconfig", "packaging", "pluggy", "pygments"):
-        module = importlib.import_module(name)
-        source = Path(module.__file__).parent
-        shutil.copytree(source, destination / name, ignore=shutil.ignore_patterns("__pycache__"))
+    # Every installed file of pytest's runtime distribution closure is copied
+    # (packages and single-file modules such as py.py), per its metadata.
+    from importlib.metadata import distribution
+
+    from packaging.requirements import Requirement
+
+    pending, seen = ["pytest"], set()
+    while pending:
+        dist = distribution(pending.pop())
+        name = dist.metadata["Name"].lower().replace("_", "-")
+        if name in seen:
+            continue
+        seen.add(name)
+        pending.extend(req.name for req in map(Requirement, dist.requires or ())
+                       if req.marker is None or req.marker.evaluate({"extra": ""}))
+        root = Path(dist.locate_file("")).resolve()
+        for file in dist.files:
+            source = Path(dist.locate_file(file)).resolve()
+            if (not source.is_relative_to(root) or "__pycache__" in source.parts
+                    or source.suffix == ".pyc"):
+                continue
+            target = destination / source.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
 
 
 def check(images: list[str], revision: str, output: Path):
