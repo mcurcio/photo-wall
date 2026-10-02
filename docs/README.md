@@ -6,6 +6,8 @@ Implementation status and commands: [delivery checklist](implementation-checklis
 
 The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are in the [production-readiness intake](production-readiness-v0.13.md). Its observations are not release qualification. The [Player control-protocol](player-protocol-compatibility-design.md) and [base-owned fleet-control](player-fleet-control-design.md) proposals address F0 and F1–F4/F6. The [Player node domain model](player-node-domain-model.md) refines Host Management, App Lifecycle, Display Host and Player Runtime after the 2026-09-30 owner clarification. The [adversarial architecture review](player-fleet-adversarial-review.md) and [red/blue refinement](player-fleet-red-blue-refinement.md) record counterexamples, channel separation, cross-boundary invariants and remaining decisions. The [implementation map](player-fleet-implementation-map.md) assigns those contracts to current module seams and claimable slices; all await review.
 
+The [domain-driven operator console design](operator-console-ddd.md) gives each domain aggregate one home in the console, ranks the console's domain gaps and plans its incremental passes, Player fleet first. It refines the [console UX design](operator-console-ux-design.md); pass 1 is approved.
+
 ## Reading order and ownership
 
 | Document | Owns | Read it to |
