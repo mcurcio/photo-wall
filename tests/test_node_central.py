@@ -145,6 +145,32 @@ def test_reboot_audit_response_and_initiation_are_separate(registry):
     assert not any(item["producer"]["kernel_boot_id"] == str(second.kernel_boot_id) for item in status["sessions"])
 
 
+def test_the_device_read_serves_a_deprecated_boot_only_when_it_is_the_newest_boot_record(registry):
+    """G5: the newer of the V1 offer and the netboot-base serve, served only while newer than
+    every node boot offer for the box; Central compares its own clock readings."""
+    from test_node_boot import cold_setup
+
+    from central.content_catalog.catalog import device_id_for_serial
+    from contracts.node_boot import NodeBootRequestV2
+    service, sessions, _ = cold_setup(registry)  # seeds a V1 offer at 900, no node offer
+    read = NodeObservations(sessions)
+    assert read.status(DEVICE_ID)["deprecated_boot"] == {"path": "offer", "recorded_at": 900}
+    service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))  # node offer at 1000
+    assert read.status(DEVICE_ID)["deprecated_boot"] is None
+    registry.clock.advance(5)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE devices SET last_served_tag='v1.0.0', last_served_at=%s WHERE device_id=%s",
+                     (registry.clock.utc(), DEVICE_ID))
+    assert read.status(DEVICE_ID)["deprecated_boot"] == {"path": "base_without_offer", "recorded_at": 1005}
+    registry.clock.advance(5)
+    service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
+    assert read.status(DEVICE_ID)["deprecated_boot"] is None
+    # A box with node boot records and no V1 record at all.
+    other_serial = "10000000c0ffee93"
+    service.offer(NodeBootRequestV2(other_serial, uuid4(), "c" * 64))
+    assert read.status(device_id_for_serial(other_serial))["deprecated_boot"] is None
+
+
 def test_reboot_fence_one_outstanding_per_session_and_served_outstanding(registry):
     from test_node_boot import claim_for, cold_setup
 
