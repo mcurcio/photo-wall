@@ -8,7 +8,7 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * classifier (health.js) exactly as the Wall labels it.
  *
  * A badge is a STATUS, never a control: a Frame that cannot present matters to the
- * showrunner, but every Display CONTROL stays behind the Wall's Commissioning facet
+ * showrunner, but every Display CONTROL stays behind the Wall's Calibration facet
  * (R4, J4). This module imports no Wall component.
  *
  * @param {{snapshot: object|null}} props

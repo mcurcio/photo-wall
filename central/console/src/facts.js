@@ -32,6 +32,18 @@ const KINDS = new Set(["set", "reported", "claimed", "derived", "unknown"]);
 const isText = (value) => typeof value === "string" && value !== "";
 const isTime = (value) => typeof value === "number" && Number.isFinite(value);
 
+/**
+ * The console's word for each node producer owner Central serves (§3 glossary): the layer
+ * a served `owner` or `cause_layer` names.
+ */
+export const LAYER_NAMES = Object.freeze({
+  host_core: "Host Management",
+  app_manager: "App Manager",
+  app_effect_broker: "App Effect Broker",
+  display_host: "Display Host",
+  player_runtime: "Player app",
+});
+
 /** A served code in words: `node_offer_superseded` -> "node offer superseded". */
 export const words = (value) => String(value ?? "unknown").replaceAll("_", " ");
 

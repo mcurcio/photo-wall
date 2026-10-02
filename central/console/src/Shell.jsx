@@ -11,7 +11,7 @@ import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
 import { useRoute } from "./useRoute.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
-import { useRecovery, useWallMemory } from "./wallState.js";
+import { useWallMemory } from "./wallState.js";
 import { wallRoutes } from "./wallRoutes.jsx";
 
 /**
@@ -20,7 +20,6 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            route: import("./routes.js").Route,
  *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
  *            wall: import("./wallState.js").WallMemory,
- *            recovery: {recovered: string[], dismiss: () => void},
  *            recentScene: {sceneId: string, seq: number}|null,
  *            rememberScene: (sceneId: string) => void,
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
@@ -158,7 +157,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
  * status and alert regions leave the accessibility tree). Wall, fleet and neutral
- * sections mount only while current, so no hidden page ever holds Commissioning DOM
+ * sections mount only while current, so no hidden page ever holds Calibration DOM
  * (R4) and a Player page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the snapshot says
@@ -187,7 +186,6 @@ export function Shell({ hidden = false }) {
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
   const wall = useWallMemory(route, snapshot, navigate);
-  const recovery = useRecovery(snapshot);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
   const [recentScene, setRecentScene] = useState(
@@ -311,14 +309,12 @@ export function Shell({ hidden = false }) {
       route,
       navigate,
       wall,
-      recovery,
       recentScene,
       rememberScene,
       markDraft,
       handOffs,
     }),
-    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentScene, rememberScene, markDraft,
-      handOffs],
+    [snapshot, bootFacts, health, route, navigate, wall, recentScene, rememberScene, markDraft, handOffs],
   );
 
   return (

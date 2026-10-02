@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from "react";
 
 import { BindingFacet } from "./BindingFacet.jsx";
-import { Commissioning } from "./Commissioning.jsx";
+import { CalibrationFacet } from "./CalibrationFacet.jsx";
 import { frameHealth } from "./health.js";
 import { NowShowingFacet } from "./NowShowingFacet.jsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
@@ -10,17 +10,16 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * Frame Inspector shell (Bead 3, read-only) — shared primitive #6.
  *
  * A tabbed, read-only view of the selected Frame with three facets:
- * **Commissioning | Binding | Now-showing** (design §5 J3/J4). `facet` selects
- * the visible tab and defaults to "commissioning"; `onFacet(next)` is called
+ * **Calibration | Binding | Now-showing** (console DDD §19). `facet` selects
+ * the visible tab and defaults to "calibration"; `onFacet(next)` is called
  * when the operator switches tabs (the open facet lives in the route,
  * `#/wall/frames/<id>/<facet>`, owned by WallPage.jsx). The facets are composed here as declarative JSX CHILDREN —
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
- * The Commissioning tab hosts the read-only Commissioning facet (Bead 4):
- * committed geometry + SDR gain, Frame facts, the Display as detected at the
- * last Player start, the bound Player/Output, and the capability-gated hardware
- * areas rendered "not yet available".
+ * The Calibration tab hosts the Calibration facet: committed calibration, the draft
+ * editor, live calibration and the Frame profile. The Binding tab holds the bound
+ * Player and Output and the Panel at the Player app's last enrollment.
  *
  * Above the tabs, a heading names the frame and a health header states its
  * health from the one classifier (health.js) — the same label its plan tile
@@ -32,7 +31,7 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * for that frame's heading. A request is consumed once — `onFocusDone` clears it — so remounting the Inspector
  * (Wall → another section → Wall) never moves focus again.
  *
- * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
+ * @typedef {"calibration"|"binding"|"nowshowing"} Facet
  * With no frame selected (`frameId` null) it renders its empty state, "Select
  * a frame", so the Inspector column keeps its place in the layout.
  *
@@ -43,7 +42,7 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  *          onFocusDone?: () => void}} props
  */
 const FACETS = [
-  { key: "commissioning", label: "Commissioning" },
+  { key: "calibration", label: "Calibration" },
   { key: "binding", label: "Binding" },
   { key: "nowshowing", label: "Now-showing" },
 ];
@@ -57,7 +56,7 @@ export function Inspector({
   focusRequest = null,
   onFocusDone = () => {},
 }) {
-  const active = facet ?? "commissioning";
+  const active = facet ?? "calibration";
   const sectionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
 
@@ -123,8 +122,8 @@ export function Inspector({
         role="tabpanel"
         aria-label={`${activeLabel} facet`}
       >
-        {active === "commissioning" && (
-          <Commissioning key={frameId} snapshot={snapshot} frameId={frameId} />
+        {active === "calibration" && (
+          <CalibrationFacet key={frameId} snapshot={snapshot} frameId={frameId} />
         )}
         {active === "binding" && (
           <BindingFacet

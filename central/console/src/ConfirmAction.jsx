@@ -422,7 +422,7 @@ export function deleteFrameRequest(snapshot, frameId) {
           </>
         )}
         <p>Central checks references again when you confirm.</p>
-        <p>Cannot be undone: recreating the id starts uncommissioned.</p>
+        <p>Cannot be undone: recreating the id starts uncalibrated.</p>
       </>
     ),
     run: async () => {
@@ -469,7 +469,7 @@ export function unbindRequest(snapshot, bootFacts, frameId) {
     body: (
       <>
         <p>{`Frame ${frameId} stops being served by ${output}.`}</p>
-        <p>Its calibration is kept but marked invalid, so it must be re-commissioned.</p>
+        <p>Its calibration is kept but marked invalid, so it must be calibrated again.</p>
         <RunList runs={runs} lead="Its live Runs lose this frame:" />
         {siblings.length > 0 && (
           <p>
@@ -552,14 +552,18 @@ export function unbindAllRequest(snapshot, bootFacts, playerId) {
     });
   return {
     key: `unbind-all:${playerId}`,
-    title: `Unbind all outputs of player ${handle}?`,
+    title: `Unbind each Output of Player ${handle}?`,
     confirmLabel: "Confirm unbind all",
     body: (
       <>
         <p className="confirm__id">{`Player ${playerId}.`}</p>
         <p>
+          Central unbinds them one at a time. One that changed since you opened this is
+          skipped; if an outcome is unknown, the rest are not attempted.
+        </p>
+        <p>
           Each listed Frame stops being served. Its calibration is kept but marked invalid,
-          so it must be re-commissioned:
+          so it must be calibrated again:
         </p>
         <ul className="confirm__frames" aria-label="Frames to unbind">
           {targets.map((target) => (

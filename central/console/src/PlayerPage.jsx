@@ -5,10 +5,12 @@ import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./FactLine.jsx";
 import { clock, fact, words } from "./facts.js";
 import { useFleetFacts } from "./fleetApi.js";
-import { BOOT_FACTS_UNAVAILABLE, bootOutcomeLabel, isBound, outputLabel, outputStates } from "./health.js";
+import {
+  BOOT_FACTS_UNAVAILABLE, bootOutcomeLabel, interruptionFor, isBound, outputLabel, outputStates,
+} from "./health.js";
 import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
 import { AppOperationsSection, RebootSection } from "./PlayerCommands.jsx";
-import { playersByDevice } from "./players.js";
+import { enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice } from "./players.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { formatRoute, isPlainClick, routeIdName } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
@@ -60,7 +62,9 @@ function LayersSection({ node, snapshot, playerId, retired }) {
           <li key={row.key} className="player__layer">
             <div role="group" aria-label={row.layer}>
               <h4 className="player__layer-title">{`${row.layer} (${row.level})`}</h4>
-              {row.facts.map((entry) => <FactLine key={entry.label} label={entry.label} fact={entry.fact} />)}
+              {row.facts.map((entry, index) => (
+                <FactLine key={`${entry.label}-${index}`} label={entry.label} fact={entry.fact} />
+              ))}
               {row.details.length > 0 && (
                 <details className="player__details">
                   <summary>{`${row.layer} details`}</summary>
@@ -127,7 +131,10 @@ function BootSection({ node, deviceId, bootFacts, fleet, retired }) {
 /**
  * The Outputs section: each Output's Binding (a link to the Frame), the shared bind write
  * for a free Output (design rule 1: the same `bind` and Frame-generation fence the Binding
- * facet uses), Identify on an unbound Player, and the Panel facts from the last app start.
+ * facet uses), Identify Panel where players.js `identifyOffer` offers it (any unbound
+ * Output, whatever the Player's standing, as on the Binding facet), the Panel at enrollment and,
+ * on a bound Output, its Output interruption when Central serves one (health.js
+ * `interruptionFor`, the same fact Frame health shows).
  */
 function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
   const mutate = useMutate();
@@ -161,7 +168,7 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
     }
   }, [snapshot]);
 
-  // After a bind: open the Frame once the refresh has rendered (to commission it).
+  // After a bind: open the Frame once the refresh has rendered (to calibrate it).
   useEffect(() => {
     if (navigateTo !== null) {
       wall.visitFrame(navigateTo);
@@ -216,13 +223,9 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
         const label = outputLabel(snapshot, bootFacts, player.id, entry.outputId);
         const chosen = picks.get(entry.outputId);
         const message = messages.get(entry.outputId);
-        const noDisplay = row.standing === "unbound" && entry.state === "no-display";
-        const canIdentify = row.standing === "unbound" && entry.state === "free";
+        const identify = identifyOffer(snapshot, player.id, entry.outputId);
         const reasonId = `${ids}-identify-${index}`;
-        const report = reports.get(entry.outputId);
-        const panel = report?.connected === true
-          ? `a ${report.width_px}×${report.height_px} Panel on ${entry.outputId} at its last start`
-          : report?.connected === false ? `no Panel on ${entry.outputId} at its last start` : null;
+        const interruption = entry.frameId === null ? null : interruptionFor(snapshot, entry.frameId);
         return (
           <li key={entry.outputId} className={`roster__output roster__output--${entry.state}`}>
             <span className="roster__output-label">
@@ -230,24 +233,24 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
                 ? <>{`${entry.outputId} · Bound to `}<FrameLink frameId={entry.frameId} wall={wall} /></>
                 : label}
             </span>
-            <FactLine label="Panel at last start (stale)" fact={fact({ kind: "reported", source: "Player app",
-              receipt: "first", value: panel, receivedAt: player.last_seen,
-              readAt: snapshot?.inventory?.read_at, field: "last_seen" })} />
+            <FactLine label="Panel at enrollment" fact={panelAtEnrollment(reports.get(entry.outputId),
+              snapshot?.inventory?.read_at, player.last_seen)} />
+            {interruption !== null && (
+              <FactLine label="Interruption" fact={interruption.fact} suffix={interruption.suffix} />
+            )}
             {entry.frameId !== null && <ReadinessNotice snapshot={snapshot} frameId={entry.frameId} />}
-            {(canIdentify || noDisplay) && (
+            {identify.absent !== true && (
               <span className="roster__identify">
                 <button
                   type="button"
-                  disabled={noDisplay || busy !== null}
-                  aria-describedby={noDisplay ? reasonId : undefined}
+                  disabled={!identify.offer || busy !== null}
+                  aria-describedby={identify.offer ? undefined : reasonId}
                   onClick={() => doIdentify(entry.outputId)}
                 >
-                  Identify display<span className="visually-hidden">{` ${entry.outputId}`}</span>
+                  Identify Panel<span className="visually-hidden">{` ${entry.outputId}`}</span>
                 </button>
-                {noDisplay && (
-                  <span id={reasonId} className="roster__note">
-                    Connect a Panel and restart the Player, then press Refresh.
-                  </span>
+                {!identify.offer && (
+                  <span id={reasonId} className="roster__note">{identify.reason}</span>
                 )}
               </span>
             )}
@@ -326,6 +329,9 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         <p><a href={formatRoute({ section: "players" })}>All Players</a></p>
         <h2 ref={nameRef} className="player__name" tabIndex={-1}>{row.name}</h2>
         <FactLine label="Standing" fact={fact({ kind: "set", value: row.standingLabel })} />
+        {player !== null && (
+          <FactLine label="Enrollment" fact={enrolledFact(player, snapshot?.inventory?.read_at)} />
+        )}
         {row.serial !== null && (
           <FactLine label="Serial" fact={fact({ kind: "claimed", value: `Serial ${row.serial}`, source: "the box" })} />
         )}

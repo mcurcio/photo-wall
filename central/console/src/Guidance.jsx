@@ -7,8 +7,8 @@ import React from "react";
  *
  * First-run is inferred from Plane A: an installation with no Frames yet has an
  * empty canvas, so the banner points the installer at the first steps (draw a
- * Frame, power on one Pi, bind the Frame to one of its Outputs, commission the
- * display — slice 2 §5). Once any Frame exists the banner never shows.
+ * Frame, power on one Pi, bind the Frame to one of its Outputs, calibrate the
+ * Frame — slice 2 §5). Once any Frame exists the banner never shows.
  *
  * The dismissed flag lives in PLANE B — the navigation shell's state, never in
  * the snapshot — so a Plane A refresh (poll, after-mutate, explicit Refresh)
@@ -37,7 +37,7 @@ export function Guidance({ snapshot, dismissed, onAddFirstFrame, onDismiss }) {
     >
       <p className="console__guidance-text">
         Add a frame, power on one Pi, bind the frame to one of its outputs, then
-        commission the display. To show photos, make a Scene targeting that Frame,
+        calibrate the Frame. To show photos, make a Scene targeting that Frame,
         then Show now or Schedule it.
       </p>
       <button type="button" onClick={onAddFirstFrame}>

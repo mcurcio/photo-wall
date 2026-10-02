@@ -123,7 +123,7 @@ def _seed_now_showing(registry):
 
 def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, registry):
     player_id = _seed_now_showing(registry)
-    # The Player is heard, so each tile's health reaches its display/commissioning rows.
+    # The Player is heard, so each tile's health reaches its Panel/calibration rows.
     report_readiness(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -135,16 +135,16 @@ def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, re
         expect(showing).to_contain_text(f"Scheduled: {SCENE}")
         expect(showing).to_contain_text("Phase: body")
         # Its bound output had a display at Player start; it was never commissioned.
-        expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs commissioning")
+        expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs calibration")
 
         # The second frame's bound output reported no display: its health says so,
         # scoped to that frame's identity (compound-key join -- the two frames
         # share a player but resolve to different ports).
         offline = page.get_by_role("group", name=f"Frame {OFFLINE} status", exact=True)
         expect(tile_health(page, OFFLINE)).to_have_accessible_name(
-            "No display detected when the Player started")
-        expect(offline).to_contain_text("No display detected")
-        expect(showing).not_to_contain_text("No display detected")
+            "No Panel listed as connected at the Player app's last enrollment (may be stale)")
+        expect(offline).to_contain_text("No Panel listed at the last enrollment")
+        expect(showing).not_to_contain_text("No Panel listed at the last enrollment")
 
         # Honesty (design §6a): the surface asserts intent, never confirmed
         # playback -- the literal "LIVE" appears nowhere on the console.
@@ -164,9 +164,8 @@ def test_selecting_frame_opens_inspector_with_binding_and_nowshowing(page, regis
         inspector = page.get_by_role("region", name=f"Frame {SHOWING} inspector", exact=True)
         expect(inspector).to_be_visible()
 
-        # The three facet tabs exist; Commissioning is present as a stub (its real
-        # body lands in Bead 4 -- it is NOT a hardware control here).
-        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_be_visible()
+        # The three facet tabs exist (console DDD §19).
+        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_be_visible()
         expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_be_visible()
         expect(inspector.get_by_role("tab", name="Now-showing", exact=True)).to_be_visible()
 
@@ -292,8 +291,8 @@ def _seed_empty_wall(registry):
 
 
 def _fill_landscape_profile(page):
-    page.get_by_label("Display width (px)").fill("1920")
-    page.get_by_label("Display height (px)").fill("1080")
+    page.get_by_label("Pixel width (px)").fill("1920")
+    page.get_by_label("Pixel height (px)").fill("1080")
     page.get_by_label("Diagonal (inches)").fill("24")
 
 

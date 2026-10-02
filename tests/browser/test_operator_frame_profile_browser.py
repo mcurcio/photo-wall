@@ -1,4 +1,4 @@
-"""Frame display profile editing through the Commissioning facet."""
+"""Frame profile editing through the Calibration facet."""
 
 import os
 
@@ -26,16 +26,16 @@ def _frame(registry, frame_id="profile-frame"):
 
 
 def _editor(inspector):
-    inspector.get_by_role("group", name="Frame facts", exact=True).get_by_role(
-        "button", name="Edit profile", exact=True).click()
-    return inspector.get_by_role("form", name="Edit display profile", exact=True)
+    inspector.get_by_role("group", name="Frame profile", exact=True).get_by_role(
+        "button", name="Edit Frame profile", exact=True).click()
+    return inspector.get_by_role("form", name="Edit Frame profile", exact=True)
 
 
 def test_profile_save_uses_generation_zero_and_invalidates_calibration(page, registry):
     _frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, "profile-frame", "commissioning")
+        inspector = open_frame(page, "profile-frame", "calibration")
         form = _editor(inspector)
         expect(form.get_by_label("Pixel width", exact=True)).to_have_value("1920")
         expect(form.get_by_label("Pixel height", exact=True)).to_have_value("1080")
@@ -52,8 +52,8 @@ def test_profile_save_uses_generation_zero_and_invalidates_calibration(page, reg
             "width_px": 2560, "height_px": 1440,
             "diagonal_inches": 24, "video": True,
         }
-        expect(inspector.get_by_role("group", name="Frame facts").get_by_role("status")).to_contain_text("Recalibrate")
-        expect(inspector.get_by_role("button", name="Edit profile", exact=True)).to_be_focused()
+        expect(inspector.get_by_role("group", name="Frame profile").get_by_role("status")).to_contain_text("Calibrate this Frame again")
+        expect(inspector.get_by_role("button", name="Edit Frame profile", exact=True)).to_be_focused()
         saved = registry.inventory().frames[0]
         assert saved.profile.width_px == 2560
         assert saved.generation == 1
@@ -64,11 +64,11 @@ def test_saving_identical_profile_does_not_claim_calibration_was_invalidated(pag
     _frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, "profile-frame", "commissioning")
+        inspector = open_frame(page, "profile-frame", "calibration")
         form = _editor(inspector)
         form.get_by_role("button", name="Save profile", exact=True).click()
-        expect(inspector.get_by_role("group", name="Frame facts").get_by_role("status")).to_have_text(
-            "Display profile already matches; calibration was not changed.")
+        expect(inspector.get_by_role("group", name="Frame profile").get_by_role("status")).to_have_text(
+            "Frame profile already matches; calibration was not changed.")
         frame = registry.inventory().frames[0]
         assert frame.generation == 0
         assert frame.calibration_valid is False
@@ -83,16 +83,16 @@ def test_switching_frames_discards_the_previous_frame_profile_editor(page, regis
     ))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        first = open_frame(page, "first-profile", "commissioning")
+        first = open_frame(page, "first-profile", "calibration")
         first_form = _editor(first)
         first_form.get_by_label("Pixel width", exact=True).fill("2560")
 
-        # Change the route while the same Inspector/Commissioning position stays mounted.
-        visit(page, "#/wall/frames/second-profile/commissioning")
+        # Change the route while the same Inspector/Calibration position stays mounted.
+        visit(page, "#/wall/frames/second-profile/calibration")
         second = page.get_by_role(
             "region", name="Frame second-profile inspector", exact=True)
         expect(second).to_be_visible()
-        expect(second.get_by_role("form", name="Edit display profile", exact=True)).to_have_count(0)
+        expect(second.get_by_role("form", name="Edit Frame profile", exact=True)).to_have_count(0)
         second_form = _editor(second)
         expect(second_form.get_by_label("Pixel width", exact=True)).to_have_value("1280")
         expect(second_form.get_by_label("Pixel height", exact=True)).to_have_value("720")
@@ -102,7 +102,7 @@ def test_profile_orientation_validation_sends_no_write(page, registry):
     _frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        form = _editor(open_frame(page, "profile-frame", "commissioning"))
+        form = _editor(open_frame(page, "profile-frame", "calibration"))
         form.get_by_label("Pixel width", exact=True).fill("1080")
         form.get_by_label("Pixel height", exact=True).fill("1920")
         requests = []
@@ -110,7 +110,7 @@ def test_profile_orientation_validation_sends_no_write(page, registry):
                 if request.url.endswith("/v1/operator/frames/profile-frame/profile") else None)
         form.get_by_role("button", name="Save profile", exact=True).click()
         expect(form.get_by_role("alert")).to_have_text(
-            "Display profile must match the frame's orientation.")
+            "Frame profile must match the frame's orientation.")
         assert not requests
 
 
@@ -121,7 +121,7 @@ def test_bound_refusal_keeps_profile_draft_and_explains_unbind(page, registry):
     registry.bind("profile-frame", identity["player_id"], "HDMI-A-1", expected_generation=0)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, "profile-frame", "commissioning")
+        inspector = open_frame(page, "profile-frame", "calibration")
         form = _editor(inspector)
         form.get_by_label("Pixel width", exact=True).fill("2560")
         form.get_by_label("Pixel height", exact=True).fill("1440")
@@ -136,7 +136,7 @@ def test_stale_generation_refusal_keeps_draft_and_guides_reload(page, registry):
     _frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, "profile-frame", "commissioning")
+        inspector = open_frame(page, "profile-frame", "calibration")
         form = _editor(inspector)
         form.get_by_label("Pixel width", exact=True).fill("2560")
         form.get_by_label("Pixel height", exact=True).fill("1440")

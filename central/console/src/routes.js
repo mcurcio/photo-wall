@@ -18,6 +18,9 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/<section>                    {section} for every section
  *   #/equipment                    {section: "players"}: the retired Equipment page's
  *                                  bookmark (console DDD §9); never formatted
+ *   #/wall/frames/<id>/commissioning  {section: "wall", id, facet: "calibration"}: the
+ *                                  renamed facet's old bookmark (console DDD §19); never
+ *                                  formatted
  *
  * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Facets are
  * the Inspector's keys. Ids and steps are URI-encoded, so an id may hold any text.
@@ -29,7 +32,7 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *
  * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"attention"} Section
  * @typedef {"new"|"edit"|"show"} Flow
- * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
+ * @typedef {"calibration"|"binding"|"nowshowing"} Facet
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
  *            initialTarget?: string}} Route
  */
@@ -74,7 +77,10 @@ export const SECTIONS = Object.freeze([
 const ALIASES = Object.freeze({ equipment: "players" });
 
 /** The Inspector's facet keys (Inspector.jsx FACETS). */
-export const FACETS = Object.freeze(["commissioning", "binding", "nowshowing"]);
+export const FACETS = Object.freeze(["calibration", "binding", "nowshowing"]);
+
+// Old facet names that parse to a current one, so their bookmarks keep working.
+const FACET_ALIASES = Object.freeze({ commissioning: "calibration" });
 
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
@@ -124,8 +130,9 @@ export function parseRoute(hash) {
   if (query !== "" && !(section === "scenes" && rest.length === 2 && rest[0] === "new")) {
     return null;
   }
-  if (section === "wall" && rest.length === 3 && rest[0] === "frames" && FACETS.includes(rest[2])) {
-    return { section, id: rest[1], facet: rest[2] };
+  if (section === "wall" && rest.length === 3 && rest[0] === "frames") {
+    const facet = Object.hasOwn(FACET_ALIASES, rest[2]) ? FACET_ALIASES[rest[2]] : rest[2];
+    if (FACETS.includes(facet)) return { section, id: rest[1], facet };
   }
   if (section === "players" && rest.length === 1) {
     return { section, id: rest[0] };

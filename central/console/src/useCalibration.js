@@ -38,7 +38,7 @@ async function postCalibration(frameId, body) {
 }
 
 /**
- * Calibration control hook for the open Commissioning facet (Bead 8, design
+ * Calibration control hook for the open Calibration facet (Bead 8, design
  * §4b/§6b/J2). HIGH-RISK concurrency surface — the load-bearing guarantees:
  *
  *  1. EVERY op carries BOTH optimistic tokens — `expected_revision` AND

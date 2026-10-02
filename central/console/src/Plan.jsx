@@ -31,7 +31,7 @@ import { useMutate } from "./useMutate.js";
  * an in-progress rectangle (Plane B, held as component-local drag state) and, on
  * release, opens a minimal new-frame form to capture the Frame id (slice 2 §8:
  * readable, checked as you type against FRAME_ID_PATTERN, never generated) and
- * the display `FrameProfile`; submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
+ * the Frame profile (`FrameProfile`); submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
  * ON an existing frame repositions it via {@link moveFrame} (`PATCH`,
  * last-write-wins, no token — §9a). Both writes go through the shared
  * `useMutate()` hook so the plan corrects from the next Plane A snapshot. A press
@@ -314,7 +314,7 @@ export function Plan({
     const checkedWidth = placementForm.mode === "edit" ? Number(effectiveProfile?.width_px) : widthPx;
     const checkedHeight = placementForm.mode === "edit" ? Number(effectiveProfile?.height_px) : heightPx;
     if (!orientationCoherent(numeric.width_mm, numeric.height_mm, checkedWidth, checkedHeight)) {
-      setFormError("Display profile must match the frame's orientation.");
+      setFormError("Frame profile must match the frame's orientation.");
       return;
     }
     if (placementForm.mode === "edit") {
@@ -521,7 +521,7 @@ export function Plan({
           </label>
           {placementForm.mode === "create" && <>
           <label className="plan__new-frame-field">
-            Display width (px)
+            Pixel width (px)
             <input
               type="number"
               min="1"
@@ -530,7 +530,7 @@ export function Plan({
             />
           </label>
           <label className="plan__new-frame-field">
-            Display height (px)
+            Pixel height (px)
             <input
               type="number"
               min="1"

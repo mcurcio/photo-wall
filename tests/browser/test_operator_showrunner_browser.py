@@ -10,10 +10,10 @@ or DOM structure (design §1c). This is a /console test file; the legacy flat-pa
 tests were retired at the Bead 17 cutover (this file re-hosts their Showrunner
 content on the redesign).
 
-The R4 rule (design §2 R4, J4) is the load-bearing check: the Commissioning
+The R4 rule (design §2 R4, J4) is the load-bearing check: the Calibration
 facet — the home of every Display CONTROL — is UNREACHABLE in Showrunner mode.
 This is the now-fully-enforceable version of Bead 4's placeholder probe: with
-Showrunner mode existing, "Commissioning is Wall-only" is a real, red-able
+Showrunner mode existing, "Calibration is Wall-only" is a real, red-able
 assertion.
 """
 
@@ -207,7 +207,7 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
         connect(page, origin, "wall")
         # The wall's labels, read first so the show layer can be held to them.
         valid_label = "Last heard 3 s ago"
-        invalid_label = "Needs commissioning"
+        invalid_label = "Needs calibration"
         expect(tile_health(page, VALID_FRAME)).to_have_accessible_name(valid_label)
         expect(tile_health(page, INVALID_FRAME)).to_have_accessible_name(invalid_label)
         go(page, "now")
@@ -217,7 +217,7 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
 
         # Each Frame's health renders as a STATUS badge, located by its accessible
         # identity label, with exactly the label the wall shows — a committed,
-        # heard frame reads as heard; a bound-only frame needs commissioning (a
+        # heard frame reads as heard; a bound-only frame needs calibration (a
         # to-do, never the alarm colour).
         expect(
             health.get_by_label(f"Frame {VALID_FRAME}: {valid_label}", exact=True)
@@ -228,27 +228,27 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
 
 
 def test_r4_commissioning_unreachable_in_showrunner(page, registry):
-    """R4: the Commissioning facet — the only home of Display CONTROLS — cannot
+    """R4: the Calibration facet — the only home of Display CONTROLS — cannot
     be reached in the show layer. Showrunner never mounts the Inspector, so there
-    is no Commissioning tab and no committed-calibration control anywhere in the
+    is no Calibration tab and no committed-calibration control anywhere in the
     show-mode DOM (design §2 R4 / J4).
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
 
-        # Sanity: on the Wall the Commissioning facet IS reachable (proves the
+        # Sanity: on the Wall the Calibration facet IS reachable (proves the
         # assertion below is meaningful, not vacuously true).
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
-        expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_be_visible()
+        expect(page.get_by_role("tab", name="Calibration", exact=True)).to_be_visible()
 
-        # On every Show page: no Commissioning tab, no committed-calibration control,
+        # On every Show page: no Calibration tab, no committed-calibration control,
         # no editor, not even in hidden DOM — the facet is composed out of the show
         # layer entirely (tests/browser/test_console_shell_browser.py visits every
-        # Show route; this visits each Show page from an open Commissioning facet).
+        # Show route; this visits each Show page from an open Calibration facet).
         for section in ("now", "scenes", "schedule", "sources"):
             go(page, section)
-            expect(page.get_by_role("tab", name="Commissioning", exact=True,
+            expect(page.get_by_role("tab", name="Calibration", exact=True,
                                     include_hidden=True)).to_have_count(0)
             expect(page.get_by_role("group", name="Committed calibration",
                                     include_hidden=True)).to_have_count(0)

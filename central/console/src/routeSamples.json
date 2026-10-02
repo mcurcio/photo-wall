@@ -22,7 +22,7 @@
   "wall": {
     "wall": [
       "#/wall",
-      "#/wall/frames/sample-frame/commissioning",
+      "#/wall/frames/sample-frame/calibration",
       "#/wall/frames/sample-frame/binding",
       "#/wall/frames/sample-frame/nowshowing"
     ]

@@ -223,15 +223,15 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         for player_id in players:
             report_readiness(registry, player_id)
         drive_poll(page)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
         recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
         expect(recovery).to_have_attribute(
-            "href", f"#/wall/frames/{INVALID_FRAME}/commissioning")
+            "href", f"#/wall/frames/{INVALID_FRAME}/calibration")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
         recovery.click()
         inspector = page.get_by_role("region", name=f"Frame {INVALID_FRAME} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
         # Ordinary route navigation away and back leaves Show now's values and
@@ -240,7 +240,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         visit(page, "#/now/show/review")
         form = show_form(page)
         expect(form.get_by_text(SCENE_ID, exact=True)).to_be_visible()
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
 

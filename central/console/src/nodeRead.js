@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { fact, words } from "./facts.js";
+import { fact, LAYER_NAMES, words } from "./facts.js";
 import { formatAge } from "./health.js";
 
 /**
@@ -9,7 +9,8 @@ import { formatAge } from "./health.js";
  *
  * THE READ (`useNodeDevice`): one box's node records, read only while its Player page is
  * open — `GET /v1/operator/node/status` (the effect gate), `GET …/node/devices/<id>` (its
- * sessions, host samples, preparation, broker projection, boot claims and reboot audit) and
+ * sessions, host samples, preparation, broker projection, Display Host's newest exchange per
+ * Output, boot claims and reboot audit) and
  * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs`, single
  * flight, paused while the tab is hidden, never for a retired box (`skip`). Like the boot
  * facts it goes through `apiWrite(path, {method: "GET"})`, so a failure never touches the
@@ -49,13 +50,16 @@ function readError(result) {
  *
  * @param {string} deviceId
  * @param {{cadenceMs?: number, skip?: boolean}} [options] `skip` (a retired box) reads nothing
- * @returns {NodeDevice & {refresh: () => Promise<void>}} `refresh` reads now (after a write)
+ * @returns {NodeDevice & {refresh: () => Promise<void>, latest: () => NodeDevice}} `refresh`
+ *   reads now (after a write); `latest` returns the newest read at call time, from a ref, so a
+ *   send judges what arrived even before React re-renders (fleetCommands.js `sendReboot`)
  */
 export function useNodeDevice(deviceId, { cadenceMs = DEFAULT_CADENCE_MS, skip = false } = {}) {
   const [state, setState] = useState(
     /** @type {NodeDevice} */ ({ enabled: null, gate: null, read: null, operations: null,
       readAt: null, error: null }),
   );
+  const newest = useRef(state);
   const inFlight = useRef(false);
   const again = useRef(false);
   const alive = useRef(true);
@@ -70,15 +74,19 @@ export function useNodeDevice(deviceId, { cadenceMs = DEFAULT_CADENCE_MS, skip =
     const off = gate?.ok === true && gate.data?.transport_enabled === false
       || [read, operations].some((result) => result?.error === "node_control_disabled");
     const failed = [gate, read, operations].find((result) => result === null || !result.ok);
-    setState((current) => ({
+    // The ref is the one source of truth; state follows it for rendering.
+    const current = newest.current;
+    newest.current = {
       enabled: off ? false : gate?.ok ? true : current.enabled,
       gate: gate?.ok ? gate.data : current.gate,
       read: read?.ok ? read.data : current.read,
       operations: operations?.ok ? operations.data : current.operations,
       readAt: read?.ok ? read.data?.read_at ?? null : current.readAt,
       error: failed === undefined ? null : readError(failed),
-    }));
+    };
+    setState(newest.current);
   }, [base]);
+  const latest = useCallback(() => newest.current, []);
 
   // Single flight. A refresh asked for while a read is in flight is queued, not dropped:
   // that read may have started before the write it follows, so one more read runs after it.
@@ -114,7 +122,7 @@ export function useNodeDevice(deviceId, { cadenceMs = DEFAULT_CADENCE_MS, skip =
     };
   }, [refresh, cadenceMs, skip]);
 
-  return { ...state, refresh: skip ? noRefresh : refresh };
+  return { ...state, refresh: skip ? noRefresh : refresh, latest };
 }
 
 const noRefresh = async () => {};
@@ -190,7 +198,8 @@ export function nodeUnknown(nodeDevice) {
  * speaks instead, with a Session fact saying none is current; Unknown only when no session
  * of the layer has any.
  */
-function nodeRow(key, layer, level, owner, nodeDevice, hasEvidence, build) {
+function nodeRow(key, level, owner, nodeDevice, hasEvidence, build) {
+  const layer = LAYER_NAMES[owner];
   const why = nodeUnknown(nodeDevice);
   if (why !== null) {
     return { key, layer, level, facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why }) }],
@@ -221,11 +230,11 @@ function nodeRow(key, layer, level, owner, nodeDevice, hasEvidence, build) {
  * @returns {LayerRow[]}
  */
 export function layerEvidence({ nodeDevice, snapshot, playerId }) {
-  const host = nodeRow("host", "Host Management", "L0", "host_core", nodeDevice,
+  const host = nodeRow("host", "L0", "host_core", nodeDevice,
     (session) => session.host_observation != null, (session, readAt) => {
     const sample = session.host_observation?.sample;
     return {
-      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: "Host Management",
+      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: LAYER_NAMES.host_core,
         receipt: "latest", receivedAt: session.host_observation?.received_at, readAt,
         field: "host_observation.received_at" }) }],
       details: [
@@ -236,11 +245,11 @@ export function layerEvidence({ nodeDevice, snapshot, playerId }) {
       ],
     };
   });
-  const manager = nodeRow("manager", "App Manager", "L1", "app_manager", nodeDevice,
+  const manager = nodeRow("manager", "L1", "app_manager", nodeDevice,
     (session) => session.manager_preparation != null, (session, readAt) => {
     const preparation = session.manager_preparation;
     return {
-      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: "App Manager",
+      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: LAYER_NAMES.app_manager,
         receipt: "latest", receivedAt: preparation?.received_at, readAt,
         value: preparation?.sample?.state ? `preparation ${words(preparation.sample.state)}` : null,
         field: "manager_preparation.received_at" }) }],
@@ -250,18 +259,17 @@ export function layerEvidence({ nodeDevice, snapshot, playerId }) {
       ],
     };
   });
-  const broker = nodeRow("broker", "App Effect Broker", "L1", "app_effect_broker", nodeDevice,
+  const broker = nodeRow("broker", "L1", "app_effect_broker", nodeDevice,
     (session) => processFacts(session).length > 0, (session, readAt) => {
       const [latest, ...earlier] = processFacts(session);
       const process = latest === undefined
-        ? fact({ kind: "unknown", why: "App Effect Broker has reported no app process on this session" })
-        : fact({ kind: "reported", source: "App Effect Broker", receipt: "first",
+        ? fact({ kind: "unknown", why: `${LAYER_NAMES.app_effect_broker} has reported no app process on this session` })
+        : fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
           value: `the app ${words(latest.state)}`, receivedAt: latest.receivedAt, readAt,
           field: "projection received_at" });
       return {
         facts: [
-          { label: "Last reported",
-            fact: fact({ kind: "unknown", why: "Central does not serve when this layer last reported" }) },
+          { label: "Last reported", fact: fact({ kind: "unknown", why: BROKER_SILENT }) },
           { label: "App process", fact: process },
         ],
         details: [
@@ -271,20 +279,89 @@ export function layerEvidence({ nodeDevice, snapshot, playerId }) {
         ],
       };
     });
-  const offWhy = nodeUnknown(nodeDevice);
-  const display = {
-    key: "display", layer: "Display Host", level: "L1.5", details: [],
-    facts: [{ label: "Output presentation", fact: fact({ kind: "unknown",
-      why: offWhy ?? "Central does not hold Display Host's current presentation" }) }],
+  return [host, manager, broker, displayRow(nodeDevice), playerAppRow(snapshot, playerId)];
+}
+
+/** Why the App Effect Broker's last report is Unknown, served or not (§15). */
+export const BROKER_SILENT =
+  `${LAYER_NAMES.app_effect_broker} sends evidence only on change, and Central stores no receipt of its polls`;
+
+/**
+ * Display Host's newest exchange per Output on the box's current boot, as three `reported`
+ * (latest) facts each, from the device read's `display_outputs` (§15, §16 display read). The
+ * receipt age compares one producer's own boot clock with itself (R10) and is shown, never
+ * judged. Nothing here is Panel pixels or names Display Host's own diagnostic page. An Output
+ * Central served as `undecodable` (its stored exchange no longer parses) is one Unknown fact.
+ *
+ * @param {NodeDevice|null} nodeDevice
+ * @param {number|null} readAt Central's read time
+ * @returns {Array<{outputId: string, facts: import("./facts.js").Fact[]}>}
+ */
+export function displayOutputs(nodeDevice, readAt) {
+  const source = LAYER_NAMES.display_host;
+  return (nodeDevice?.read?.display_outputs ?? []).map((output) => {
+    if (output.undecodable === true) {
+      return { outputId: output.output_id, facts: [fact({ kind: "unknown",
+        why: `Central could not decode ${source}'s last exchange for this Output` })] };
+    }
+    const reported = (value) => fact({ kind: "reported", source, receipt: "latest",
+      value, receivedAt: output.received_at, readAt, field: "display_outputs received_at" });
+    const surface = output.surface;
+    const receipt = output.receipt;
+    return {
+      outputId: output.output_id,
+      facts: [
+        reported(typeof output.connected === "boolean"
+          ? `Panel connector: ${output.connected ? "connected" : "not connected"}` : null),
+        reported(surface == null ? `${source} reported no app surface admitted`
+          : `Admitted surface: the app's surface for Frame ${surface.frame_id} (binding generation ${surface.binding_generation})`),
+        reported(receipt?.matches_surface === true && typeof receipt.age_ms === "number"
+          ? `Compositor receipt for that surface, sampled ${formatAge(Math.max(0, receipt.age_ms) / 1000)} before this report`
+          : "No compositor receipt for that surface in this report"),
+      ],
+    };
+  });
+}
+
+/**
+ * The Display Host (L1.5) row: when it last reported (the newest exchange receipt across this
+ * boot's Display Host producers), then each Output's three facts.
+ */
+function displayRow(nodeDevice) {
+  const row = { key: "display", layer: LAYER_NAMES.display_host, level: "L1.5" };
+  const why = nodeUnknown(nodeDevice);
+  const unknownRow = (reason) => ({ ...row, details: [],
+    facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why: reason }) }] });
+  if (why !== null) return unknownRow(why);
+  const read = nodeDevice.read;
+  if (!Array.isArray(read.display_outputs)) return unknownRow("display_outputs not served");
+  if (read.display_outputs.length === 0) {
+    return unknownRow(`${row.layer} has reported no Output on this boot`);
+  }
+  const times = read.display_outputs.map((output) => output.received_at).filter(Number.isFinite);
+  const outputs = displayOutputs(nodeDevice, read.read_at);
+  return { ...row,
+    facts: [
+      { label: "Last reported", fact: fact({ kind: "reported", source: row.layer, receipt: "latest",
+        receivedAt: times.length > 0 ? Math.max(...times) : null, readAt: read.read_at,
+        field: "display_outputs received_at" }) },
+      ...outputs.flatMap((output) => output.facts.map((value) => ({ label: `Output ${output.outputId}`,
+        fact: value }))),
+    ],
+    details: [
+      ...read.display_outputs.filter((output) => output.surface != null).map((output) =>
+        `Output ${output.output_id}: admitted surface configuration revision ${output.surface.config_revision}`),
+      `Source: ${row.layer}'s newest display exchange per Output on the current boot (node device read). `
+        + "A compositor receipt is not proof of Panel pixels.",
+    ],
   };
-  return [host, manager, broker, display, playerAppRow(snapshot, playerId)];
 }
 
 /** The Player app (L2) row: its last readiness report on the current epoch (R3). */
 function playerAppRow(snapshot, playerId) {
   const inventory = snapshot?.inventory;
   const player = (inventory?.players ?? []).find((candidate) => candidate.id === playerId) ?? null;
-  const row = { key: "app", layer: "Player app", level: "L2" };
+  const row = { key: "app", layer: LAYER_NAMES.player_runtime, level: "L2" };
   if (player === null) {
     return { ...row, details: [],
       facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why: "this box has not enrolled" }) }] };
@@ -296,7 +373,7 @@ function playerAppRow(snapshot, playerId) {
     : player.last_report_at == null
     ? fact({ kind: "unknown",
       why: `no readiness report on the current enrollment (epoch ${player.authority_epoch})` })
-    : fact({ kind: "reported", source: "Player app", receipt: "latest",
+    : fact({ kind: "reported", source: row.layer, receipt: "latest",
       receivedAt: player.last_report_at, readAt: inventory.read_at, field: "last_report_at" });
   const enrolled = typeof inventory?.read_at === "number" && typeof player.last_seen === "number"
     ? `Enrolled ${formatAge(Math.max(0, inventory.read_at - player.last_seen))} ago (enrollment is not a report)`

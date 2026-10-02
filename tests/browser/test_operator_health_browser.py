@@ -83,9 +83,13 @@ def test_a_reporting_player_reads_last_heard_with_centrals_age(page, registry):
         inspector.get_by_role("tab", name="Binding", exact=True).click()
         expect(inspector.get_by_role("tabpanel")).to_contain_text("Last heard 2 s ago")
 
-        # Honesty: ok states when Central last heard the Player, never playback.
-        for claim in ("LIVE", "online", "connected"):
+        # Honesty: ok states when Central last heard the Player, never playback. The one
+        # "connected" allowed is the Binding facet's Panel record, worded as Central's record
+        # at the last enrollment (console DDD §19), never as liveness.
+        for claim in ("LIVE", "online", r"connected(?! at the Player app's last enrollment)"):
             expect(page.get_by_text(re.compile(claim))).to_have_count(0)
+        expect(page.get_by_text(re.compile("Panel connected at the Player app's last enrollment"))
+               ).to_have_count(1)
 
 
 def test_a_player_not_heard_past_the_threshold_reads_silent(page, registry):
@@ -170,7 +174,7 @@ def test_a_never_commissioned_frame_is_a_todo_not_an_alarm(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         label = _health(page)
-        expect(label).to_have_text("Needs commissioning")
+        expect(label).to_have_text("Needs calibration")
         expect(label).to_have_class(_severity("todo"))
         expect(label).not_to_have_class(_severity("alarm"))
 
@@ -320,7 +324,7 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         # The dropped poll released its slot: the next tick reads and applies.
         report_readiness(registry, identity["player_id"])
         page.clock.run_for(5000)
-        expect(_health(page)).to_have_accessible_name("Needs commissioning")
+        expect(_health(page)).to_have_accessible_name("Needs calibration")
 
 
 # --- The attention strip and navigation (pass 2 §5).
@@ -370,7 +374,7 @@ def test_the_strip_counts_alarms_apart_from_todos(page, registry):
             "silent-a — Player silent · last heard 4 min ago",
             "silent-b — Player silent · last heard 4 min ago",
             "no-player — Needs a Player",
-            "to-commission — Needs commissioning",
+            "to-commission — Needs calibration",
         ])
 
 
@@ -379,9 +383,9 @@ def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_insp
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        _open_list(page).get_by_role("button", name="to-commission — Needs commissioning").click()
+        _open_list(page).get_by_role("button", name="to-commission — Needs calibration").click()
         inspector = page.get_by_role("region", name="Frame to-commission inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
             "aria-selected", "true")
         expect(inspector.get_by_role("heading", name="Frame to-commission", exact=True)
                ).to_be_focused()
@@ -449,6 +453,16 @@ def test_a_player_just_enrolled_is_not_yet_counted_as_a_todo(page, registry):
         ])
 
 
+def test_the_all_clear_does_not_claim_a_report_that_has_not_arrived(page, registry):
+    """With nothing to do but a settling Frame, the all-clear counts it as awaiting a first
+    report instead of claiming its Player app is reporting (console DDD R0)."""
+    _bound_frame(registry, "just-enrolled", x_mm=500)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        expect(_strip(page).get_by_role("status")).to_have_text(
+            "No Frame needs attention · 1 awaiting a first report")
+
+
 def test_showrunner_strip_entries_are_text_not_navigation(page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -475,7 +489,7 @@ def test_a_stalled_scheduler_collapses_silent_frames_into_one_causal_line(page, 
             "3 frames silent — Central's scheduler is stale; Players may be unable to report "
             "until it recovers.",
             "no-player — Needs a Player",
-            "to-commission — Needs commissioning",
+            "to-commission — Needs calibration",
         ])
 
 
@@ -532,7 +546,7 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
         expect(page.get_by_role("region", name="Frame silent-b inspector", exact=True)
                ).to_be_visible()
         _open_list(page)
-        for facet in ("Commissioning", "Binding", "Now-showing"):
+        for facet in ("Calibration", "Binding", "Now-showing"):
             page.get_by_role("tab", name=facet, exact=True).click()
             assert_fits_width(page, facet)
         # Every Show page too, not only the last one visited.

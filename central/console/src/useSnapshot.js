@@ -14,7 +14,7 @@ import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number,
  *            readAt: number, playerReportsReadAt: number,
- *            readinessDiagnostics: object[]}} Snapshot
+ *            readinessDiagnostics: object[], outputInterruptions: object[]}} Snapshot
  * @typedef {"checking"|"signedIn"|"signedOut"} Auth
  * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|null} AuthNotice
  */
@@ -127,7 +127,8 @@ export function SnapshotProvider({ children }) {
       if (!aggregate?.inventory || !aggregate?.runtime || !aggregate?.media ||
           !Number.isFinite(aggregate.read_at) ||
           !Number.isFinite(aggregate.player_reports_read_at) ||
-          !Array.isArray(aggregate.readiness_diagnostics)) {
+          !Array.isArray(aggregate.readiness_diagnostics) ||
+          !Array.isArray(aggregate.output_interruptions)) {
         throw new Error("Invalid operator snapshot response");
       }
       next = {
@@ -138,6 +139,7 @@ export function SnapshotProvider({ children }) {
         readAt: aggregate.read_at,
         playerReportsReadAt: aggregate.player_reports_read_at,
         readinessDiagnostics: aggregate.readiness_diagnostics,
+        outputInterruptions: aggregate.output_interruptions,
       };
     } catch (error) {
       failure = error;

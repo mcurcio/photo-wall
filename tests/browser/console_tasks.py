@@ -48,7 +48,7 @@ LABELS = {
 }
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
-FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": "Now-showing"}
+FACETS = {"calibration": "Calibration", "binding": "Binding", "nowshowing": "Now-showing"}
 
 
 def go(page, section):
@@ -404,7 +404,7 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
 
 
 def open_frame(page, frame_id, facet):
-    """Open frame `frame_id` on the Wall at `facet` ("binding", "commissioning" or
+    """Open frame `frame_id` on the Wall at `facet` ("binding", "calibration" or
     "nowshowing", the Inspector.jsx keys); returns its Inspector.
 
     Follows the frame's route, `#/wall/frames/<id>/<facet>`, as a typed URL would: the

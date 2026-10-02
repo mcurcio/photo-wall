@@ -139,9 +139,12 @@ export function retirePlayer(playerId) {
 }
 
 /**
- * Ask a pending Player to briefly identify one connected, unbound Output.
- * Acceptance means Central queued the request, not that anything was observed
- * on the Panel. The Player page owns the success wording and never claims output.
+ * Ask a Player app to briefly identify one connected, unbound Output (console DDD §19;
+ * players.js `identifyOffer` decides where it is offered). Acceptance means Central queued
+ * the request, not that anything was observed on the Panel. The caller owns the success
+ * wording and never claims output. `identify_unsupported` names its cause: Central has not
+ * negotiated Identify with this Player app's current enrollment (no schema-2 control session
+ * on the current epoch offering `identify_output`).
  *
  * @param {string} playerId
  * @param {string} outputId
@@ -149,7 +152,7 @@ export function retirePlayer(playerId) {
  */
 export async function identifyOutput(playerId, outputId) {
   const unknown =
-    "The request outcome is unknown. Check the display before trying again.";
+    "The request outcome is unknown. Check the Panel before trying again.";
   let result;
   try {
     result = await apiWrite(
@@ -168,8 +171,9 @@ export async function identifyOutput(playerId, outputId) {
   return {
     outcome: "refused",
     code: result.error ?? String(result.status),
-    message:
-      result.status === 404 || result.status === 409
+    message: result.error === "identify_unsupported"
+      ? "Central has not negotiated Identify with this Player app's current enrollment"
+      : result.status === 404 || result.status === 409
         ? "This Output changed or the Player is no longer eligible. Press Refresh before trying again."
         : "Identify was refused. Press Refresh and try again.",
   };

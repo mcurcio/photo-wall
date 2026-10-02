@@ -1,4 +1,7 @@
-import { playerSerial, playersInOrder, playerStanding } from "./health.js";
+import { fact, LAYER_NAMES } from "./facts.js";
+import {
+  ageAt, formatAge, NO_PANEL_AT_ENROLLMENT, outputStates, playerSerial, playersInOrder, playerStanding,
+} from "./health.js";
 import { frameForOutput } from "./join.js";
 import { formatRoute } from "./routes.js";
 
@@ -101,4 +104,78 @@ export function playersByDevice(snapshot, bootFacts) {
     }));
   }
   return rows;
+}
+
+/**
+ * The Panel on one Output as Central recorded it at the Player app's last enrollment, in ONE
+ * wording for fleet and Wall (console DDD §19). Enrollment first marks every Output
+ * `connected=false`, then writes the Outputs the Player app listed (`registry.py`), so
+ * `connected=false` is Central's own record (`set`), not a report; only `connected=true`
+ * comes from the Player app (`reported`, first receipt). Both may be stale.
+ *
+ * @param {object|null} observation the Output's served `observation`
+ * @param {number|null} readAt the snapshot's `inventory.read_at`
+ * @param {number|null} enrolledAt the Player's `last_seen` (Central's enrollment record)
+ * @returns {import("./facts.js").Fact}
+ */
+export function panelAtEnrollment(observation, readAt, enrolledAt) {
+  if (observation?.connected === true) {
+    return fact({ kind: "reported", source: LAYER_NAMES.player_runtime, receipt: "first",
+      value: "Panel connected at the Player app's last enrollment (may be stale)",
+      receivedAt: enrolledAt, readAt, field: "last_seen" });
+  }
+  if (observation?.connected === false) {
+    return fact({ kind: "set", value: NO_PANEL_AT_ENROLLMENT,
+      receivedAt: enrolledAt, readAt });
+  }
+  return fact({ kind: "unknown", why: "Central holds no Panel record from the Player app's last enrollment" });
+}
+
+/**
+ * Whether the console offers Identify Panel on one Output (console DDD §19), the one rule
+ * both homes use: the Player page's Outputs and the Binding facet's picker. Central
+ * identifies any connected, unbound Output of an active Player (`registry.py`
+ * `identify_output`), whatever the Player's standing, so a Bound Player's free second Output
+ * is offered. Whether the Player app offered the capability at enrollment is not served; a
+ * refusal names it (equipmentApi.js `identifyOutput`).
+ *
+ * @param {object|null} snapshot
+ * @param {string} playerId
+ * @param {string} outputId
+ * @returns {{offer: true}|{offer: false, reason: string}|{absent: true}} absent for a retired
+ *   Player, or a Player or Output the snapshot does not list
+ */
+export function identifyOffer(snapshot, playerId, outputId) {
+  const output = outputStates(snapshot, playerId).find((entry) => entry.outputId === outputId);
+  switch (output?.state) {
+    case "free":
+      return { offer: true };
+    case "no-display":
+      return { offer: false, reason: "Connect a Panel and restart the Player app" };
+    case "bound":
+      return { offer: false, reason: "Central identifies only unbound Outputs" };
+    default:
+      return { absent: true };
+  }
+}
+
+/**
+ * When the Player app last enrolled, as Central recorded it (console DDD §19, R3): a `set`
+ * fact, because `last_seen` is Central's enrollment record, not a report. The age is Central's
+ * read time minus Central's record time.
+ *
+ * @param {object|null} player the Registry Player row
+ * @param {number|null} readAt the snapshot's `inventory.read_at`
+ * @returns {import("./facts.js").Fact}
+ */
+export function enrolledFact(player, readAt) {
+  if (player == null) {
+    return fact({ kind: "unknown", why: "the Player app has not enrolled" });
+  }
+  const age = ageAt(readAt, player.last_seen);
+  if (Number.isNaN(age)) {
+    return fact({ kind: "unknown", why: "Central's enrollment record time is not served" });
+  }
+  return fact({ kind: "set",
+    value: `Player app enrolled ${formatAge(Math.max(0, age))} ago (authority epoch ${player.authority_epoch})` });
 }

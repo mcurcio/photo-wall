@@ -12,8 +12,7 @@ import { UnplacedTray } from "./UnplacedTray.jsx";
  */
 
 /**
- * The Wall page (#/wall, #/wall/frames/<id>/<facet>): the recovery banner, the
- * first-run Guidance, the Surface filter, the per-Surface Plan, the Unplaced tray and
+ * The Wall page (#/wall, #/wall/frames/<id>/<facet>): the first-run Guidance, the Surface filter, the per-Surface Plan, the Unplaced tray and
  * the Frame Inspector.
  *
  * The selected frame and its open facet are the route's. Selecting a frame on the plan
@@ -31,9 +30,9 @@ import { UnplacedTray } from "./UnplacedTray.jsx";
  *
  * @param {{snapshot: object, bootFacts: object|null, route: Route,
  *          navigate: (route: Route, options?: {replace?: boolean}) => void,
- *          memory: WallMemory, recovery: {recovered: string[], dismiss: () => void}}} props
+ *          memory: WallMemory}} props
  */
-export function WallPage({ snapshot, bootFacts, route, navigate, memory, recovery }) {
+export function WallPage({ snapshot, bootFacts, route, navigate, memory }) {
   const trayDragRef = useRef(/** @type {string|null} */ (null));
   // Reuse the Plan's measured-create action so onboarding opens the same form as
   // the existing control, with the Plan remaining the owner of creation state.
@@ -89,17 +88,6 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
   return (
     <div className={split ? "console__body console__body--split" : "console__body"}>
       <div className="console__main">
-        {recovery.recovered.length > 0 && (
-          <div className="console__recovery" role="status">
-            <p className="console__recovery-text">
-              Recovered — already bound (serial match, not identity):{" "}
-              {recovery.recovered.join(", ")}
-            </p>
-            <button type="button" onClick={recovery.dismiss}>
-              Dismiss
-            </button>
-          </div>
-        )}
         <Guidance
           snapshot={snapshot}
           dismissed={memory.guidanceDismissed}

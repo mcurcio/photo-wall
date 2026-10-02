@@ -1,6 +1,6 @@
 import { apiWrite } from "./apiWrite.js";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
-import { clock as localClock, fact, words } from "./facts.js";
+import { clock as localClock, fact, LAYER_NAMES, words } from "./facts.js";
 import { outputStates } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { nodeUnknown } from "./nodeRead.js";
@@ -15,11 +15,15 @@ import { nodeUnknown } from "./nodeRead.js";
  * generation — so the operator never picks transport plumbing. `rebootRequest` freezes
  * the WHOLE request body when the dialog opens (command id, session, generations, audit
  * reference, window); a retry re-sends that frozen body unchanged, so Central's
- * `node_reboot_identity_conflict` cannot arise from the console. While the latest request
- * is Requested no new command id is built (`rebootBlocked`). The request the page itself
- * holds (`heldReboot`) counts as Requested until a read shows it settled or its frozen
- * window ends, so a read that predates the send cannot re-enable a new command id
- * (`rebootOffer`).
+ * `node_reboot_identity_conflict` cannot arise from the console.
+ *
+ * ONE SEND RULE (§10, §16). A new command id may be sent only when no command on the target
+ * Host Management session is OUTSTANDING — Central serves `outstanding` per command, from the
+ * same predicate its `node_reboot_outstanding` fence uses. The request the page itself holds
+ * (`heldReboot`) counts as outstanding until a read lists it or Central's read time reaches
+ * its frozen window (`rebootOffer`). `sendReboot` is the ONLY console function that POSTs to
+ * the reboots route (a source-scan test enforces it), and it judges the rule on `node.latest()`, the
+ * hook's newest read at the moment of sending, never on a read the caller hands it.
  *
  * STATES. `rebootCommandState` and `appOperationState` compute each state only from
  * Central's records and Central's read time (R10): no browser or node clock is involved.
@@ -86,14 +90,14 @@ export function rebootTarget(nodeDevice, gate) {
   }
   const read = nodeDevice.read;
   const hosts = read.sessions.filter((session) => session.current && session.producer?.owner === "host_core");
-  if (hosts.length === 0) return { available: false, reason: "no current Host Management session on this box" };
+  if (hosts.length === 0) return { available: false, reason: `no current ${LAYER_NAMES.host_core} session on this box` };
   if (hosts.length > 1) {
-    return { available: false, reason: "Central holds more than one current Host Management session" };
+    return { available: false, reason: `Central holds more than one current ${LAYER_NAMES.host_core} session` };
   }
   const [host] = hosts;
   if (host.scope !== "operator_reboot" || host.command_eligible !== true) {
     return { available: false,
-      reason: `Central refuses commands to this Host Management session (${words(host.command_reason)})` };
+      reason: `Central refuses commands to this ${LAYER_NAMES.host_core} session (${words(host.command_reason)})` };
   }
   if (!isGeneration(read.device_generation)) return { available: false, reason: "the device generation is not served" };
   if (!isGeneration(effectGate.generation)) return { available: false, reason: "the effect gate's generation is not served" };
@@ -117,73 +121,67 @@ export function heldReboot(request, result) {
   return result.outcome === "done" || result.outcome === "already" || result.retryable ? request : null;
 }
 
+/** Central serves `outstanding` per command (§16); anything but `false` is treated as outstanding. */
+const isOutstanding = (command) => command?.outstanding !== false;
+
 /**
  * What the Reboot control offers now (§10): a new request, only a retry of the request
  * this page holds, or nothing (with why).
  *
- * The held request is offered for retry while the read lists it as the latest request and
- * Requested, or — when the read does not list it as the latest — while no other request is
- * Requested and Central's read time is inside the window frozen with it (`retryUntil`). A
- * different Requested request blocks Reboot, held or not.
+ * Every command on the target session is judged by Central's served `outstanding` — not only
+ * the newest, so an older outstanding entry still blocks, and Accepted or Initiated requests
+ * block until they expire. A command to an earlier session never blocks. The held request
+ * counts as outstanding until a read lists it (then Central's `outstanding` decides) or
+ * Central's read time reaches its frozen `retryUntil`; while it counts, only it may be re-sent.
+ *
+ * Passing a frozen request as `held` asks whether THAT request may be sent now: "retry" means
+ * yes. `sendReboot` and the dialog ask exactly this (`rebootRefusal`).
  *
  * @param {RebootTarget} target
- * @param {object|null} latest the newest `reboot_commands` record
+ * @param {Array<object>|null} commands the read's `reboot_commands` (every one)
  * @param {number|null} readAt the device read's `read_at`
  * @param {FrozenRebootRequest|null} held the request this page sent (`heldReboot`)
  * @param {{clock?: (seconds: number) => string}} [options]
  * @returns {RebootOffer}
  */
-export function rebootOffer(target, latest, readAt, held, { clock = localClock } = {}) {
+export function rebootOffer(target, commands, readAt, held, { clock = localClock } = {}) {
   if (!target.available) return { offer: "blocked", reason: target.reason };
-  const latestRequested = latest != null && rebootCommandState(latest, readAt, { clock }).state === "requested";
-  if (held != null) {
-    const retry = { offer: "retry",
-      reason: "the reboot request this page sent may still be offered; only that request can be retried" };
-    if (latest != null && latest.command_id === held.body.command_id) {
-      if (latestRequested) return retry;
-    } else if (!latestRequested && isTime(readAt) && readAt < held.retryUntil) {
-      return retry;
-    }
+  const listed = commands ?? [];
+  const mine = held != null && held.body.session_id === target.sessionId ? held : null;
+  const other = listed.find((command) => command.command?.command_session_id === target.sessionId
+    && command.command_id !== mine?.body.command_id && isOutstanding(command));
+  if (other !== undefined) {
+    return { offer: "blocked", reason: isTime(other.expires_at)
+      ? `a reboot request is outstanding until ${clock(other.expires_at)}; only the page that sent it can retry it`
+      : "a reboot request is outstanding; only the page that sent it can retry it" };
   }
-  if (latestRequested) {
-    return { offer: "blocked", reason: isTime(latest.expires_at)
-      ? `a reboot request is Requested until ${clock(latest.expires_at)}; only that request can be retried`
-      : "a reboot request is Requested; only that request can be retried" };
+  if (mine !== null) {
+    const record = listed.find((command) => command.command_id === mine.body.command_id);
+    if (record !== undefined ? isOutstanding(record) : isTime(readAt) && readAt < mine.retryUntil) {
+      return { offer: "retry",
+        reason: "the reboot request this page sent may still be offered; only that request can be retried" };
+    }
   }
   return { offer: "new" };
 }
 
 /**
- * Why no NEW reboot request can be built now, or null (`rebootOffer` other than "new").
- *
- * @param {RebootTarget} target
- * @param {object|null} latest the newest `reboot_commands` record
- * @param {number|null} readAt the device read's `read_at`
- * @param {{held?: FrozenRebootRequest|null, clock?: (seconds: number) => string}} [options]
- * @returns {string|null}
- */
-export function rebootBlocked(target, latest, readAt, { held = null, clock = localClock } = {}) {
-  const offer = rebootOffer(target, latest, readAt, held, { clock });
-  return offer.offer === "new" ? null : offer.reason;
-}
-
-/**
  * Freeze the whole reboot request when its dialog opens: the body sent (and re-sent
  * unchanged on retry), the Frames bound to this Player with their live Runs, and what is
- * known of the previous request. Refuses a new command id while the latest is Requested.
+ * known of the previous request. Refuses unless `rebootOffer` is "new".
  *
  * @param {RebootTarget} target
- * @param {object|null} latest the newest `reboot_commands` record
+ * @param {Array<object>|null} commands the read's `reboot_commands`, newest first
  * @param {object|null} snapshot
  * @param {number|null} readAt the device read's `read_at` (Central's clock; dates the audit reference)
  * @param {{playerId: string|null, commandId: string, reason?: string,
  *          held?: FrozenRebootRequest|null, clock?: (seconds: number) => string}} options
  * @returns {FrozenRebootRequest|{refused: string}}
  */
-export function rebootRequest(target, latest, snapshot, readAt,
+export function rebootRequest(target, commands, snapshot, readAt,
   { playerId, commandId, reason = "", held = null, clock = localClock }) {
-  const blocked = rebootBlocked(target, latest, readAt, { held, clock });
-  if (blocked !== null) return { refused: blocked };
+  const offer = rebootOffer(target, commands, readAt, held, { clock });
+  if (offer.offer !== "new") return { refused: offer.reason };
   if (!isTime(readAt)) return { refused: "Central's read time is not served" };
   const note = reason.trim();
   const auditRef = `console/${new Date(readAt * 1000).toISOString().slice(0, 10)}${note ? `/${note}` : ""}`;
@@ -196,6 +194,7 @@ export function rebootRequest(target, latest, snapshot, readAt,
       runs: liveRunsFor(snapshot?.runtime, output.frameId)
         .map((run) => ({ runId: run.run_id, sceneId: run.scene_id, phase: run.phase })) }));
   let previous = null;
+  const [latest = null] = commands ?? [];
   if (latest != null) {
     const prior = rebootCommandState(latest, readAt, { clock });
     if (prior.state === "outcome_unknown") {
@@ -223,32 +222,38 @@ export function rebootRequest(target, latest, snapshot, readAt,
     windowSeconds: REBOOT_WINDOW_SECONDS,
     // Central's clock: the read time it was frozen at plus its window. Central's own
     // expires_at counts from the later send (and is capped by the session's expiry), so
-    // the two may differ; `rebootStale` refuses to send once a read reaches this time.
+    // the two may differ; `rebootOffer` stops counting an unlisted request at this time.
     retryUntil: readAt + REBOOT_WINDOW_SECONDS,
     frames,
     previous,
   });
 }
 
-/** What the reboot dialog says when its frozen request may no longer be sent. */
+/** What the reboot dialog says when its frozen request may no longer be sent (§10). */
 export const REBOOT_STALE = "This request is out of date; close and reopen";
+/**
+ * The one wording for "another reboot request on this session is outstanding" (§16): the
+ * client-side refusal and Central's 409 `node_reboot_outstanding` are the same outcome.
+ */
+export const REBOOT_OUTSTANDING =
+  "Another reboot request for this Player is outstanding; close this dialog and review it";
 
 /**
- * Why a frozen request may no longer be sent (first time or retry), or null. Once Central's
- * read time reaches the request's frozen `retryUntil` and no read lists the request as the
- * latest, the page could no longer tell a read that predates its send from one that does
- * not, so it would offer a new command id while Central may hold this one Requested.
- * Reopening rebuilds the request from a fresh read (fences, bound Frames and Runs). A request
- * the read lists as the latest may be re-sent: Central answers already, or 410 (unknown).
+ * Why a frozen request may not be sent now (first time or retry), or null: `rebootOffer`
+ * with the request as `held`, on the given read. Another outstanding command on its session
+ * refuses it; so does a request that a read has settled, or that no read lists once Central's
+ * read time reaches its frozen window (reopening rebuilds it from a fresh read).
  *
  * @param {FrozenRebootRequest} request
- * @param {object|null} latest the newest `reboot_commands` record
- * @param {number|null} readAt the latest device read's `read_at`
+ * @param {import("./nodeRead.js").NodeDevice|null} nodeDevice
  * @returns {string|null}
  */
-export function rebootStale(request, latest, readAt) {
-  if (latest != null && latest.command_id === request.body.command_id) return null;
-  return isTime(readAt) && readAt >= request.retryUntil ? REBOOT_STALE : null;
+export function rebootRefusal(request, nodeDevice) {
+  const target = rebootTarget(nodeDevice, nodeDevice?.gate ?? null);
+  const offer = rebootOffer(target, nodeDevice?.read?.reboot_commands, nodeDevice?.readAt ?? null, request);
+  if (offer.offer === "retry") return null;
+  if (!target.available) return `${REBOOT_STALE} (${target.reason})`;
+  return offer.offer === "blocked" ? REBOOT_OUTSTANDING : REBOOT_STALE;
 }
 
 /**
@@ -273,9 +278,6 @@ function notOffered(command, nodeDevice) {
   return null;
 }
 
-const HOST = "Host Management";
-const BROKER = "App Effect Broker";
-
 /** A response record's decision, wherever the stored message carries it. */
 const decisionOf = (response) => response?.message?.message?.decision ?? null;
 
@@ -294,7 +296,7 @@ export function rebootCommandState(command, readAt, { clock = localClock, nodeDe
   const initiated = (command.effects ?? []).find((effect) => effect.state === "reboot_initiated");
   if (initiated !== undefined) {
     return { state: "initiated", label: "Host Management reported the reboot started · completion unknown",
-      fact: fact({ kind: "reported", source: HOST, receipt: "first", value: "a reboot-initiated event naming this request",
+      fact: fact({ kind: "reported", source: LAYER_NAMES.host_core, receipt: "first", value: "a reboot-initiated event naming this request",
         receivedAt: initiated.received_at, readAt, field: "effects[].received_at" }) };
   }
   const responses = [...(command.responses ?? [])];
@@ -305,8 +307,11 @@ export function rebootCommandState(command, readAt, { clock = localClock, nodeDe
     const label = { received: "Received by Host Management",
       accepted: "Accepted by Host Management, not yet started",
       rejected: "Rejected by Host Management" }[decision];
+    // HostCore's served reason token names why (e.g. reboot_scope_or_expiry), when present.
+    const why = response.message?.message?.reason;
     return { state: decision, label,
-      fact: fact({ kind: "reported", source: HOST, receipt: "first", value: `a "${decision}" response`,
+      fact: fact({ kind: "reported", source: LAYER_NAMES.host_core, receipt: "first",
+        value: `a "${decision}" response${typeof why === "string" && why !== "" ? ` (${words(why)})` : ""}`,
         receivedAt: response.received_at, readAt, field: "responses[].received_at" }) };
   }
   const recorded = fact({ kind: "set",
@@ -330,22 +335,33 @@ export function rebootCommandState(command, readAt, { clock = localClock, nodeDe
 /**
  * One app operation's named state (§10). Central keeps `state` at `staged` whatever the
  * broker answered, so the broker's `command_response` is read too: a rejected stage reads
- * "Rejected by App Effect Broker", never "Staged".
+ * "Rejected by App Effect Broker", never "Staged". A superseded or interrupted operation
+ * keeps what the broker had reported before (its latest effect, else its response) as
+ * `prior`, a second Evidence fact, so a rejection is not hidden behind the later state.
  *
  * @param {object} operation one entry of the app-attempts read's `operations`
  * @param {number|null} readAt that read's `read_at`
- * @returns {CommandState}
+ * @returns {CommandState & {prior: import("./facts.js").Fact|null}}
  */
 export function appOperationState(operation, readAt) {
+  return { prior: null, ...operationState(operation, readAt) };
+}
+
+function operationState(operation, readAt) {
   const response = operation.command_response;
   const effect = operation.latest_effect;
   const recorded = fact({ kind: "set", value: operation.operator_audit_ref
     ? `Stage recorded by Central · audit ${operation.operator_audit_ref}` : "Stage recorded by Central" });
   // One phase event of this operation, received once: a `first` receipt, never the broker's
   // last report (Central does not serve when the broker layer last reported).
-  const effectFact = () => fact({ kind: "reported", source: BROKER, receipt: "first",
+  const effectFact = () => fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
     value: effect?.phase ? `phase ${words(effect.phase)}` : null, receivedAt: effect?.received_at, readAt,
     field: "latest_effect.received_at" });
+  const responseFact = () => fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
+    value: `a "${words(response.decision)}" response`, receivedAt: response.received_at, readAt,
+    field: "command_response.received_at" });
+  // What the broker had reported before a later stage or boot replaced this operation.
+  const prior = () => (effect != null ? effectFact() : response != null ? responseFact() : null);
   switch (operation.state) {
     case "staged": {
       if (response == null) {
@@ -358,9 +374,7 @@ export function appOperationState(operation, readAt) {
         return { state: "unknown", label: "Unknown response from App Effect Broker",
           fact: fact({ kind: "unknown", why: `Central served an unrecognised decision "${words(response.decision)}"` }) };
       }
-      return { state: response.decision, label,
-        fact: fact({ kind: "reported", source: BROKER, receipt: "first", value: `a "${response.decision}" response`,
-          receivedAt: response.received_at, readAt, field: "command_response.received_at" }) };
+      return { state: response.decision, label, fact: responseFact() };
     }
     case "switching":
       return { state: "switching", label: `App Effect Broker reported switching (${words(effect?.phase)})`,
@@ -374,10 +388,11 @@ export function appOperationState(operation, readAt) {
       return { state: "effect_unknown", label: "App Effect Broker reported the outcome as unknown", fact: effectFact() };
     case "superseded":
       return { state: "superseded", label: "Replaced by a later stage",
-        fact: fact({ kind: "set", value: "A later stage is recorded by Central" }) };
+        fact: fact({ kind: "set", value: "A later stage is recorded by Central" }), prior: prior() };
     case "interrupted_by_reboot":
       return { state: "interrupted_by_reboot", label: "Interrupted",
-        fact: fact({ kind: "derived", value: "Interrupted", basis: "a later boot of this Player was admitted" }) };
+        fact: fact({ kind: "derived", value: "Interrupted", basis: "a later boot of this Player was admitted" }),
+        prior: prior() };
     default:
       return { state: "unknown", label: "Unknown state",
         fact: fact({ kind: "unknown", why: `Central served an unrecognised state "${words(operation.state)}"` }) };
@@ -385,20 +400,25 @@ export function appOperationState(operation, readAt) {
 }
 
 /**
- * Send a frozen reboot body (first time or retry — the same bytes either way) and read
- * Central's answer in the equipment outcome vocabulary. A 410 (the window ended) is
- * Outcome unknown, never "refused"; an unanswered or gateway-failed request is unknown
- * and may be retried with the same body.
+ * THE one send path for a reboot (§10): judge the frozen request on `node.latest()` — the
+ * hook's newest read at the moment of sending — and POST its body (first time or retry, the
+ * same bytes) only when `rebootRefusal` allows it; otherwise refuse without a POST. Central's
+ * answer is read in the equipment outcome vocabulary: a 410 (the window ended) is Outcome
+ * unknown, never "refused"; an unanswered or gateway-failed request is unknown and may be
+ * retried with the same body.
  *
  * @param {string} deviceId
- * @param {RebootBody} body
+ * @param {FrozenRebootRequest} request
+ * @param {{latest: () => import("./nodeRead.js").NodeDevice}} node the `useNodeDevice` hook
  * @returns {Promise<RebootResult>}
  */
-export async function sendReboot(deviceId, body) {
+export async function sendReboot(deviceId, request, node) {
+  const refusal = rebootRefusal(request, node.latest());
+  if (refusal !== null) return { outcome: "changed", message: `${refusal}.`, retryable: false };
   let result;
   try {
     result = await apiWrite(`/v1/operator/node/devices/${encodeURIComponent(deviceId)}/reboots`,
-      { method: "POST", body });
+      { method: "POST", body: request.body });
   } catch {
     return { outcome: "unknown", message: UNKNOWN_MESSAGE, retryable: true };
   }
@@ -427,6 +447,10 @@ export function rebootResult(result) {
   const central = typeof code === "string" && /^(node|rollout)_/.test(code);
   if (result.status >= 500 && !central) {
     return { outcome: "unknown", message: UNKNOWN_MESSAGE, retryable: true };
+  }
+  if (code === "node_reboot_outstanding") {
+    return { outcome: "changed", retryable: false,
+      message: `${REBOOT_OUTSTANDING}.` };
   }
   if (code === "node_reboot_session_unavailable" || code === "rollout_gate_closed") {
     return { outcome: "changed", message: CHANGED_MESSAGE, retryable: false };

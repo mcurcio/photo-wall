@@ -158,7 +158,7 @@ export function isBound(frame) {
  * (player_id AND output_id). This is the ONE copy of the compound-key join rule
  * (outputs PK is `(player_id, output_id)`, 001_registry.sql:20; `output_id`
  * repeats across players so output_id alone resolves the wrong player's port).
- * Both health.js (display detection) and the Commissioning facet's Display facts
+ * Both health.js (the Panel at enrollment) and the Binding facet's Panel facts
  * read the bound output through here, so the rule lives in exactly one place.
  *
  * Returns null when the frame is unknown, unbound (either id null), or has no

@@ -9,7 +9,7 @@ import SAMPLES from "./routeSamples.json";
  * (`#/players`) and one Player page per box (`#/players/<device-id>`). Like the Wall
  * sections, the shell mounts them ONLY while current, so a Player page's node read stops
  * when the operator leaves it. Like the Show and neutral sections they never reach the
- * Commissioning facet or the Inspector (R4; tests/test_console_routes_r4.py): a Frame
+ * Calibration facet or the Inspector (R4; tests/test_console_routes_r4.py): a Frame
  * appears here only as a link to its home on the Wall.
  *
  * @type {ReadonlyArray<import("./Shell.jsx").RouteEntry>}

@@ -9,7 +9,7 @@ where the drawer's layout is the point.
 
 Sections are pages with hash routes. The Show pages stay mounted and `hidden` when not current
 (rule 2), so a draft survives any navigation; the Wall and neutral pages mount only while
-current, so no Show or neutral page holds Commissioning DOM (R4). The route tables' sample paths
+current, so no Show or neutral page holds Calibration DOM (R4). The route tables' sample paths
 come from routeSamples.json, the file the tables themselves read (tests/test_console_routes_r4.py
 checks that every table takes its samples from its own group), so these visits follow the
 tables without parsing JSX.
@@ -232,7 +232,7 @@ def test_back_and_forward_move_between_sections(page, registry):
         page.get_by_role("button", name="Frame first", exact=True).click()
         expect(page.get_by_role("region", name="Frame first inspector", exact=True)
                ).to_be_visible()
-        assert current_hash(page) == "#/wall/frames/first/commissioning"
+        assert current_hash(page) == "#/wall/frames/first/calibration"
         assert page.evaluate("history.length") == before
         page.go_back()
         _expect_on(page, "schedule")
@@ -276,7 +276,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         report_readiness(registry, identity["player_id"])
         drive_poll(page)
         go(page, "now")
-        expect(badge).to_have_accessible_name("Frame first: Needs commissioning")
+        expect(badge).to_have_accessible_name("Frame first: Needs calibration")
 
 
 def test_a_malformed_aggregate_keeps_the_last_whole_snapshot(page, registry):
@@ -352,19 +352,19 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         commissioning = [
-            page.get_by_role("tab", name="Commissioning", exact=True, include_hidden=True),
+            page.get_by_role("tab", name="Calibration", exact=True, include_hidden=True),
             page.get_by_role("group", name="Committed calibration", include_hidden=True),
             page.get_by_role("group", name="Adjust calibration", include_hidden=True),
             page.get_by_role("region", name=re.compile(r"inspector$"), include_hidden=True),
         ]
-        # Positive control: every Wall sample is a Wall page, and the Commissioning sample
+        # Positive control: every Wall sample is a Wall page, and the Calibration sample
         # shows the controls, so the checks below are not vacuous.
         for section, paths in SAMPLES["wall"].items():
             for path in paths:
                 visit(page, path)
                 _expect_on(page, section)
                 assert current_hash(page) == path
-        visit(page, f"#/wall/frames/{SAMPLE_FRAME}/commissioning")
+        visit(page, f"#/wall/frames/{SAMPLE_FRAME}/calibration")
         for landmark in commissioning:
             expect(landmark).to_have_count(1)
 
@@ -399,18 +399,18 @@ def test_needs_attention_links_each_frame_to_the_facet_showing_its_cause(page, r
 
         entries = visible_page(page).get_by_role("list", name="Frames needing attention")
         expect(entries.get_by_role("link")).to_have_text([
-            "no-player — Needs a Player", "to-commission — Needs commissioning"])
+            "no-player — Needs a Player", "to-commission — Needs calibration"])
         expect(entries.get_by_role("link", name="no-player — Needs a Player")).to_have_attribute(
             "href", "#/wall/frames/no-player/binding")
-        entries.get_by_role("link", name="to-commission — Needs commissioning").click()
+        entries.get_by_role("link", name="to-commission — Needs calibration").click()
 
         _expect_on(page, "wall")
         inspector = page.get_by_role("region", name="Frame to-commission inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
             "aria-selected", "true")
         expect(inspector.get_by_role("heading", name="Frame to-commission", exact=True)
                ).to_be_focused()
-        assert current_hash(page) == "#/wall/frames/to-commission/commissioning"
+        assert current_hash(page) == "#/wall/frames/to-commission/calibration"
 
 
 # --- The drawer under 850 px.

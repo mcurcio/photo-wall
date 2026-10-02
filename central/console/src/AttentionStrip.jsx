@@ -40,14 +40,14 @@ export function AttentionStrip({ snapshot, central, onNavigate, onShowAll }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const toggleRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const { frameCount, alarms, todos, rows } = attentionView(snapshot, central);
+  const { frameCount, awaiting, alarms, todos, rows } = attentionView(snapshot, central);
   if (frameCount === 0) {
     return null;
   }
 
   const summary =
     alarms.length === 0 && todos.length === 0
-      ? `All ${frameCount} ${frameCount === 1 ? "Frame's Player app" : "Frames' Player apps"} reporting`
+      ? `No Frame needs attention${awaiting > 0 ? ` · ${awaiting} awaiting a first report` : ""}`
       : [
           alarms.length > 0 &&
             `${frames(alarms.length)} ${alarms.length === 1 ? "needs" : "need"} attention`,

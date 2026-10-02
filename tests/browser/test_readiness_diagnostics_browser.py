@@ -120,4 +120,4 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         chain = why.get_by_role("group", name=f"Why nothing new on {VALID_FRAME}?", exact=True)
         expect(chain.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")).to_contain_text(
             UNKNOWN_RECOVERY)
-        expect(page.get_by_role("tab", name="Commissioning", exact=True)).to_have_count(0)
+        expect(page.get_by_role("tab", name="Calibration", exact=True)).to_have_count(0)

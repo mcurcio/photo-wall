@@ -102,7 +102,7 @@ def _binding_requests(page):
 
 
 def _disconnect_output(registry, player_id, output_id):
-    """The Player's last start reported no display on this Output (connected=false)."""
+    """Central's enrollment record lists no Panel on this Output (connected=false)."""
     with registry.db.transaction() as conn:
         conn.execute("UPDATE outputs SET observation=jsonb_set(observation,'{connected}','false') "
                      "WHERE player_id=%s AND output_id=%s", (player_id, output_id))
@@ -132,13 +132,13 @@ def test_unbound_output_identify_requests_exact_output_and_explains_no_display(p
         open_player(page, name)
         outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
         identify = outputs.get_by_role(
-            "button", name="Identify display HDMI-A-1", exact=True)
+            "button", name="Identify Panel HDMI-A-1", exact=True)
         no_display = outputs.get_by_role(
-            "button", name="Identify display HDMI-A-2", exact=True)
+            "button", name="Identify Panel HDMI-A-2", exact=True)
         expect(identify).to_be_enabled()
         expect(no_display).to_be_disabled()
         expect(no_display).to_have_accessible_description(
-            "Connect a Panel and restart the Player, then press Refresh.")
+            "Connect a Panel and restart the Player app")
 
         gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
         gate.holding = True
@@ -158,14 +158,16 @@ def test_unbound_output_identify_requests_exact_output_and_explains_no_display(p
         expect(identify).to_be_enabled()
 
 
-@pytest.mark.parametrize("status, expected", [
-    (404, "This Output changed or the Player is no longer eligible. "
-          "Press Refresh before trying again."),
-    (409, "This Output changed or the Player is no longer eligible. "
-          "Press Refresh before trying again."),
-    (503, "The request outcome is unknown. Check the display before trying again."),
+@pytest.mark.parametrize("status, error, expected", [
+    (404, "unknown_output", "This Output changed or the Player is no longer eligible. "
+                            "Press Refresh before trying again."),
+    (409, "output_disconnected", "This Output changed or the Player is no longer eligible. "
+                                 "Press Refresh before trying again."),
+    # Console DDD §19: Central's identify_unsupported names its cause.
+    (409, "identify_unsupported", "Central has not negotiated Identify with this Player app's current enrollment"),
+    (503, "server_unavailable", "The request outcome is unknown. Check the Panel before trying again."),
 ])
-def test_unbound_output_identify_failure_is_honest(page, registry, status, expected):
+def test_unbound_output_identify_failure_is_honest(page, registry, status, error, expected):
     identity, _, _ = enroll(registry, count=1)
     name = player_name(registry, identity["player_id"])
     with operator_server(registry.db, registry.clock) as origin:
@@ -173,20 +175,18 @@ def test_unbound_output_identify_failure_is_honest(page, registry, status, expec
         open_player(page, name)
         outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
         identify = outputs.get_by_role(
-            "button", name="Identify display HDMI-A-1", exact=True)
+            "button", name="Identify Panel HDMI-A-1", exact=True)
         gate = RequestGate(page, "**/v1/operator/players/*/outputs/*/identify")
         gate.holding = True
         identify.click()
         gate.wait_held()
-        gate.release(status=status, content_type="application/json", body=json.dumps({
-            "error": {404: "unknown_output", 409: "output_disconnected"}.get(
-                status, "server_unavailable"),
-        }))
+        gate.release(status=status, content_type="application/json",
+                     body=json.dumps({"error": error}))
         expect(outputs.get_by_role("alert")).to_have_text(expected)
         expect(identify).to_be_enabled()
 
 
-def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
+def test_binding_pending_output_shows_review_and_calibrate_cta(page, registry):
     identity, _, _ = enroll(registry, count=1)  # an unbound Player with HDMI-A-1
     _placed_frame(registry, "wall-1")
     name = player_name(registry, identity["player_id"])
@@ -203,13 +203,13 @@ def test_binding_pending_output_shows_review_and_commission_cta(page, registry):
 
         # The facet shows the amber "Review required" state and the CTA...
         expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
-        cta = inspector.get_by_role("button", name="Commission the display", exact=True)
+        cta = inspector.get_by_role("button", name="Calibrate this Frame", exact=True)
         expect(cta).to_be_visible()
 
-        # ...and the CTA switches the Inspector to the Commissioning facet.
+        # ...and the CTA switches the Inspector to the Calibration facet.
         cta.click()
         expect(
-            inspector.get_by_role("tabpanel", name="Commissioning facet")
+            inspector.get_by_role("tabpanel", name="Calibration facet")
         ).to_be_visible()
 
         # On its Player page the Player is now Bound, its Output bound to the Frame (Plane A
@@ -255,7 +255,7 @@ def test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output(page, 
         go(page, "wall")
         expect(inspector).to_be_visible()
         expect(inspector.get_by_role("radio")).to_have_count(0)
-        expect(inspector.get_by_text("No free outputs with a detected display",
+        expect(inspector.get_by_text("No free Output has a Panel listed as connected",
                                      exact=False)).to_be_visible()
 
 
@@ -411,52 +411,70 @@ def test_no_display_and_retired_outputs_are_never_offered(page, registry):
                ).to_have_count(0)
 
 
-def test_recovery_banner_is_suppressed_on_the_true_first_run(page, registry):
-    # A returning-Pi shape (a Player already bound), but observed for the FIRST
-    # time by this console -> no prior snapshot to diff -> no banner.
-    identity, _, _ = enroll(registry, count=2)
-    _placed_frame(registry, "rec-1")
-    registry.bind("rec-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "wall")
-
-        # Force a wait for the first snapshot to load.
-        expect(
-            page.get_by_role("button", name="Frame rec-1", exact=True)
-        ).to_be_visible()
-
-        # On the true first run the recovery banner is suppressed.
-        expect(
-            page.get_by_text("Recovered — already bound", exact=False)
-        ).to_have_count(0)
-
-
-def test_recovery_banner_appears_for_a_returning_bound_player(page, registry):
+def test_a_returning_bound_player_shows_its_enrollment_on_its_page_and_no_wall_banner(
+        page, registry):
+    # Console DDD §19 (gap 19): the Wall's "Recovered" banner, a browser diff of epochs, is
+    # gone; the Player page header carries Central's enrollment record instead.
     identity, key, request = enroll(registry, count=2)
+    player_id = identity["player_id"]
     _placed_frame(registry, "rec-2")
-    registry.bind("rec-2", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("rec-2", player_id, "HDMI-A-1", expected_generation=0)
+    name = player_name(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
+        expect(page.get_by_role("button", name="Frame rec-2", exact=True)).to_be_visible()
 
-        # First snapshot: known bound Pi at authority_epoch 1, no banner yet.
-        expect(
-            page.get_by_role("button", name="Frame rec-2", exact=True)
-        ).to_be_visible()
-        expect(
-            page.get_by_text("Recovered — already bound", exact=False)
-        ).to_have_count(0)
-
-        # The Pi reboots: re-enroll by the same serial reassociates the SAME
-        # player_id, preserves its Frame binding (is_bound stays true), and bumps
-        # authority_epoch.
+        # The box reboots: re-enrolling by the same serial keeps the Player and its Binding
+        # and bumps its authority epoch.
+        registry.clock.advance(90)
         enroll(registry, key=key, device_id=request.device_id, count=2)
-
-        # Refresh the console (one Plane A refresh); the diff
-        # against the retained prior snapshot now surfaces the recovery banner.
         page.get_by_role("button", name="Refresh", exact=True).click()
-        banner = page.get_by_text("Recovered — already bound", exact=False)
-        expect(banner).to_be_visible()
-        expect(banner).to_contain_text(identity["player_id"])
+        expect(page.get_by_role("button", name="Frame rec-2", exact=True)).to_be_visible()
+        expect(page.get_by_text("Recovered", exact=False)).to_have_count(0)
+
+        player = open_player(page, name)
+        expect(player).to_contain_text(
+            "Enrollment: Player app enrolled 0 s ago (authority epoch 2)")
+
+
+def test_a_bound_players_free_second_output_can_be_identified_from_both_homes(page, registry):
+    # Console DDD §19: Central identifies any connected, unbound Output of an active Player,
+    # so one rule (players.js identifyOffer) offers it on the Player page and on an unbound
+    # Frame's picker, whatever the Player's standing; the bound Output says why it is not.
+    identity, _, _ = enroll(registry, count=2)
+    player_id = identity["player_id"]
+    _placed_frame(registry, "taken")
+    _placed_frame(registry, "spare")
+    registry.bind("taken", player_id, "HDMI-A-1", expected_generation=0)
+    name = player_name(registry, player_id)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        player = open_player(page, name)
+        expect(player).to_contain_text("Standing: Bound")
+        outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
+        bound = outputs.get_by_role("button", name="Identify Panel HDMI-A-1", exact=True)
+        free = outputs.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True)
+        expect(bound).to_be_disabled()
+        expect(bound).to_have_accessible_description("Central identifies only unbound Outputs")
+        expect(free).to_be_enabled()
+
+        sent = []
+        page.route("**/v1/operator/players/*/outputs/*/identify", lambda route: (
+            sent.append(route.request.url),
+            route.fulfill(status=202, content_type="application/json", body=json.dumps({
+                "request_id": "synthetic-request", "output_id": "HDMI-A-2",
+                "expires_at": registry.clock.utc() + 15})))[-1])
+        free.click()
+        expect(outputs.get_by_role("status")).to_contain_text("Identify requested for HDMI-A-2")
+
+        inspector = open_frame(page, "spare", "binding")
+        expect(inspector.get_by_role("radio")).to_have_count(1)
+        picker = inspector.get_by_role("radiogroup", name="Choose an output", exact=True)
+        picker.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True).click()
+        expect(inspector.get_by_role("status").filter(
+            has_text="Identify requested for HDMI-A-2")).to_be_visible()
+        assert [url.endswith(f"/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify")
+                for url in sent] == [True, True]
 
 
 # --- One confirmation pattern (slice 2 §7).
@@ -845,11 +863,14 @@ def test_the_player_page_lists_each_output_with_its_state_and_offers_no_retire_w
         expect(outputs).to_have_count(2)
         expect(outputs.nth(0)).to_contain_text("HDMI-A-1 · Bound to Frame lobby-left")
         expect(outputs.nth(0)).to_contain_text(
-            "Panel at last start (stale): Player app reported a 1920×1080 Panel on HDMI-A-1 "
-            "at its last start · first received")
+            "Panel at enrollment: Player app reported Panel connected at the Player app's last "
+            "enrollment (may be stale) · first received")
         expect(outputs.nth(1)).to_contain_text(
-            f"{handle} · HDMI-A-2 · No display detected at last Player start")
-        expect(outputs.nth(1)).to_contain_text("no Panel on HDMI-A-2 at its last start")
+            f"{handle} · HDMI-A-2 · No Panel listed at the last enrollment")
+        # connected=false is Central's own enrollment record, never worded as a Player app report.
+        expect(outputs.nth(1)).to_contain_text(
+            "Panel at enrollment: No Panel listed as connected at the Player app's last enrollment "
+            "(may be stale) · recorded")
         expect(_danger(page).get_by_role("button", name=f"Retire player {player_id}", exact=True)
                ).to_have_count(0)
         expect(_danger(page).get_by_role("button", name=f"Unbind all outputs of {player_id}",

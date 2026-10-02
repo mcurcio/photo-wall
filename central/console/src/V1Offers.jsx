@@ -334,7 +334,7 @@ export function V1PlayerSection({ deviceId, fleet }) {
         label="Fallback"
         fact={fact({ kind: "set", value: `${words(device.fallback)}${device.accepted_fallback?.sha256 ? ` · recorded ${short(device.accepted_fallback.sha256)}` : ""}` })}
       />
-      <ManagementFacts management={device.management} />
+      <ManagementFacts management={device.management} readAt={view.read_at} />
       {request && (
         <div className="fleet__policy">
           <FactLine

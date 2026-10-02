@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { facetFor, frameHealth } from "./health.js";
-import { detectRecovery } from "./recovery.js";
 
 // The Wall's state that outlives the Wall page (flow design §6): the shell holds it,
 // so it lives here, in a module that imports no component. Shell.jsx must not reach
-// the Inspector or Commissioning except through wallRoutes.jsx (R4;
+// the Inspector or the Calibration facet except through wallRoutes.jsx (R4;
 // tests/test_console_routes_r4.py).
 
 /**
@@ -58,7 +57,7 @@ export function useWallMemory(route, snapshot, navigate) {
   const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
   const [guidanceDismissed, setGuidanceDismissed] = useState(false);
   const focusSeqRef = useRef(0);
-  const lastFacetRef = useRef(/** @type {Facet} */ ("commissioning"));
+  const lastFacetRef = useRef(/** @type {Facet} */ ("calibration"));
   const lastWallRef = useRef(/** @type {Route} */ ({ section: "wall" }));
   if (route?.section === "wall") {
     // Idempotent, so safe during render: the Wall as last shown, for the sidebar link.
@@ -127,30 +126,4 @@ export function useWallMemory(route, snapshot, navigate) {
       },
     };
   }, [surfaceId, focusRequest, guidanceDismissed, lastFacet, lastWall, snapshot, navigate]);
-}
-
-/**
- * Auto-recovery banner state (design J1, §1a D-a). Recovery is INFERRED by diffing
- * the CURRENT Plane A snapshot against the PRIOR one, so the prior snapshot is kept
- * here. The shell calls this, so every snapshot is seen even while the Wall is not
- * mounted; the banner shows on the Wall. It surfaces "a known Pi returned already
- * bound" and is suppressed on the true first run (no prior snapshot) by detectRecovery.
- *
- * @param {object|null} snapshot
- * @returns {{recovered: string[], dismiss: () => void}}
- */
-export function useRecovery(snapshot) {
-  const prevSnapshotRef = useRef(/** @type {object|null} */ (null));
-  const [recovered, setRecovered] = useState(/** @type {string[]} */ ([]));
-  useEffect(() => {
-    if (snapshot == null) {
-      return;
-    }
-    const returned = detectRecovery(prevSnapshotRef.current, snapshot);
-    if (returned.length > 0) {
-      setRecovered(returned);
-    }
-    prevSnapshotRef.current = snapshot;
-  }, [snapshot]);
-  return useMemo(() => ({ recovered, dismiss: () => setRecovered([]) }), [recovered]);
 }

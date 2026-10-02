@@ -1,11 +1,13 @@
-"""The fleet commands' pure parts (console DDD §10-§11, bead B2): fleetCommands.js
-(`rebootTarget`, `rebootRequest`, `rebootCommandState`, `appOperationState`, `rebootResult`),
+"""The fleet commands' pure parts (console DDD §10-§11, beads B2 and R0): fleetCommands.js
+(`rebootTarget`, `rebootOffer`, `rebootRequest`, `sendReboot`, `rebootCommandState`,
+`appOperationState`, `rebootResult`),
 run under Node as tests/test_console_players.py runs the B1 model. Without Node it skips on a
 developer machine, but FAILS where the checks are meant to run in full. The browser half is
 tests/browser/test_player_page_browser.py.
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -57,6 +59,8 @@ out.states = {
   lateAccepted: state(command({ responses: [response("received", 1030), response("accepted", 1040)] }), 1050),
   received: state(command({ responses: [response("received", 995)] })),
   rejected: state(command({ responses: [response("received", 995), response("rejected", 996)] })),
+  rejectedReason: state(command({ responses: [{ message: { message: { decision: "rejected",
+    reason: "reboot_scope_or_expiry" } }, received_at: 996 }] })),
   initiated: state(command({ responses: [response("accepted", 995)],
     effects: [{ state: "reboot_initiated", received_at: 998 }] })),
   noWindow: state(command({ expires_at: null })),
@@ -70,7 +74,7 @@ out.notOffered = {
   sessionLapsed: notOffered(node(read([host({ current: false })]))),
 };
 
-// --- rebootRequest: the whole body frozen at open; no new command id while Requested.
+// --- rebootRequest: the whole body frozen at open; no new command id while one is outstanding.
 const snapshot = { inventory: { read_at: 1000, players: [{ id: "p-1", device_id: "d-1", retired_at: null }],
   outputs: [{ player_id: "p-1", output_id: "HDMI-A-1", observation: { connected: true } },
             { player_id: "p-1", output_id: "HDMI-A-2", observation: { connected: true } }],
@@ -81,57 +85,85 @@ const snapshot = { inventory: { read_at: 1000, players: [{ id: "p-1", device_id:
     { run_id: "r-2", scene_id: "ended", phase: "ended", participants: ["frame:hall"] },
   ] } } };
 const bound = target(node(read([host()])));
-const built = commands.rebootRequest(bound, null, snapshot, 1759363200,
+// One served reboot command on a session; `outstanding` is Central's (§16).
+const onSession = (id, outstanding, extra = {}) => command({ command_id: id, outstanding,
+  command: { command_session_id: "s-host", producer: { kernel_boot_id: "boot-2" } }, ...extra });
+const built = commands.rebootRequest(bound, [], snapshot, 1759363200,
   { playerId: "p-1", commandId: "c-new", reason: "stuck", clock });
 out.request = built;
 out.frozen = Object.isFrozen(built) && Object.isFrozen(built.body) && Object.isFrozen(built.frames[0].runs);
-out.whileRequested = commands.rebootRequest(bound, command(), snapshot, 1000,
+out.whileOutstanding = commands.rebootRequest(bound, [onSession("c-1", true)], snapshot, 1000,
   { playerId: "p-1", commandId: "c-new", clock });
-out.badReason = commands.rebootRequest(bound, null, snapshot, 1000,
+out.badReason = commands.rebootRequest(bound, [], snapshot, 1000,
   { playerId: "p-1", commandId: "c-new", reason: "two words", clock });
 out.closed = commands.rebootRequest(target(node(read([host()]), { effect_gate: { effective_state: "closed" } })),
-  null, snapshot, 1000, { playerId: "p-1", commandId: "c-new", clock });
-out.afterUnknownSameBoot = commands.rebootRequest(bound, command(), snapshot, 1020,
+  [], snapshot, 1000, { playerId: "p-1", commandId: "c-new", clock });
+out.afterUnknownSameBoot = commands.rebootRequest(bound, [command({ outstanding: false })], snapshot, 1020,
   { playerId: "p-1", commandId: "c-new", clock }).previous;
 out.afterUnknownLaterBoot = commands.rebootRequest(bound,
-  command({ command: { producer: { kernel_boot_id: "boot-1" } } }), snapshot, 1020,
+  [command({ outstanding: false, command: { producer: { kernel_boot_id: "boot-1" } } })], snapshot, 1020,
   { playerId: "p-1", commandId: "c-new", clock }).previous;
-out.afterRejected = commands.rebootRequest(bound, command({ responses: [response("rejected", 995)] }),
+out.afterRejected = commands.rebootRequest(bound,
+  [command({ outstanding: false, responses: [response("rejected", 995)] })],
   snapshot, 1000, { playerId: "p-1", commandId: "c-new", clock }).previous;
 
-// --- rebootOffer: the request this page holds counts as Requested until a read settles it.
-const sent = commands.rebootRequest(bound, null, snapshot, 1000, { playerId: "p-1", commandId: "c-1", clock });
-const offer = (latest, at, held = sent) => commands.rebootOffer(bound, latest, at, held, { clock }).offer;
+// --- rebootOffer: every command on the target session, judged by Central's `outstanding`.
+const sent = commands.rebootRequest(bound, [], snapshot, 1000, { playerId: "p-1", commandId: "c-1", clock });
+const offer = (listed, at, held = sent) => commands.rebootOffer(bound, listed, at, held, { clock }).offer;
 const result = (outcome, retryable = false) => ({ outcome, retryable, message: "" });
 out.held = ["done", "already", "refused", "changed"].map((outcome) => commands.heldReboot(sent, result(outcome)) !== null)
   .concat([commands.heldReboot(sent, result("unknown", true)) !== null,
            commands.heldReboot(sent, result("unknown", false)) !== null]);
 out.offers = {
-  // A read that predates the send: the held request is not listed yet.
-  staleReadNone: offer(null, 1002),
-  staleReadOlderSettled: offer(command({ command_id: "c-0", responses: [response("rejected", 990)] }), 1002),
-  listedRequested: offer(command(), 1010),
-  listedSettled: offer(command({ responses: [response("rejected", 995)] }), 1010),
-  listedUnknown: offer(command(), 1020),
-  // Another request is the latest and Requested: no retry of the held one, no new id.
-  otherRequested: offer(command({ command_id: "c-other" }), 1005),
+  // A read that predates the send: the held request is not listed yet, so it still counts.
+  staleReadNone: offer([], 1002),
+  staleReadOlderSettled: offer([onSession("c-0", false)], 1002),
+  listedOutstanding: offer([onSession("c-1", true)], 1010),
+  listedSettled: offer([onSession("c-1", false)], 1010),
+  // Another outstanding request blocks: no retry of the held one, no new id.
+  otherOutstanding: offer([onSession("c-other", true)], 1005),
+  // An older outstanding entry that is not the newest still blocks.
+  olderOutstanding: offer([onSession("c-new2", false), onSession("c-old", true)], 1040, null),
+  // Accepted, not initiated: Central still serves it outstanding until it expires.
+  accepted: offer([onSession("c-acc", true, { responses: [response("accepted", 995)] })], 1000, null),
+  // A command to an earlier session never blocks a new one.
+  earlierSession: offer([command({ command_id: "c-early", outstanding: true,
+    command: { command_session_id: "s-old", producer: { kernel_boot_id: "boot-1" } } })], 1000, null),
   // The held request is not listed and its frozen window has ended: a new request.
-  unlistedAfterWindow: offer(null, 1030),
-  noHeld: offer(null, 1002, null),
+  unlistedAfterWindow: offer([], 1030),
+  noHeld: offer([], 1002, null),
 };
-out.newWhileHeld = commands.rebootRequest(bound, null, snapshot, 1002,
+out.newWhileHeld = commands.rebootRequest(bound, [], snapshot, 1002,
   { playerId: "p-1", commandId: "c-2", held: sent, clock });
 
-// --- rebootStale: a dialog held open past its frozen window may not send (sent.retryUntil = 1030).
-out.stale = {
-  inWindow: commands.rebootStale(sent, null, 1029),
-  // Opened at 1000, still open at 1045: a send now would reopen the stale-read race.
-  heldOpen: commands.rebootStale(sent, null, 1044),
-  otherLatest: commands.rebootStale(sent, command({ command_id: "c-0" }), 1031),
-  // Central lists this very request: re-sending lands "already" or 410, never a new id.
-  listed: commands.rebootStale(sent, command(), 1044),
-  noReadTime: commands.rebootStale(sent, null, null),
+// --- sendReboot: the ONE send path; judged on node.latest() at call time, refuses without a POST.
+const posts = [];
+globalThis.fetch = async (url, init) => {
+  posts.push({ url, body: JSON.parse(init.body) });
+  return new Response(JSON.stringify({ duplicate: false }), { status: 200 });
 };
+const frozenAt1000 = commands.rebootRequest(bound, [], snapshot, 1000, { playerId: "p-1", commandId: "c-a", clock });
+const hook = (r) => ({ latest: () => node(r) });
+const send = async (request, r) => {
+  const before = posts.length;
+  const outcome = await commands.sendReboot("d-1", request, hook(r));
+  return { outcome: outcome.outcome, message: outcome.message, posts: posts.length - before };
+};
+out.send = {
+  // The dialog was frozen at read 1000; the newest read, at 1005, lists another tab's request until 1034.
+  staleDialog: await send(frozenAt1000, read([host()], { read_at: 1005,
+    reboot_commands: [onSession("c-x", true, { expires_at: 1034 })] })),
+  outOfDate: await send(frozenAt1000, read([host()], { read_at: 1031 })),
+  inWindow: await send(frozenAt1000, read([host()], { read_at: 1005 })),
+  // A held retry the read lists as outstanding re-sends the identical body.
+  heldRetry: await send(frozenAt1000, read([host()], { read_at: 1040,
+    reboot_commands: [onSession("c-a", true, { expires_at: 1045 })] })),
+  // The session changed after the dialog opened: the frozen request is out of date.
+  sessionChanged: await send(frozenAt1000, read([host({ session_id: "s-later" })], { read_at: 1005 })),
+};
+out.sentBodies = posts.map((post) => post.body);
+out.sentUrl = posts[0]?.url;
+out.frozenBody = frozenAt1000.body;
 
 // --- appOperationState: the broker's response is read, not only Central's `state`.
 const operation = (state, extra = {}) => ({ operation_id: "o-1", command_id: "c-1",
@@ -147,6 +179,19 @@ out.app = [
   app(operation("interrupted_by_reboot")),
   app(operation("mystery")),
 ];
+// Superseded and interrupted keep the broker's earlier answer as a second Evidence fact.
+const prior = (o) => {
+  const value = commands.appOperationState(o, 1000).prior;
+  return value === null ? null : factText(value);
+};
+out.prior = {
+  supersededRejected: prior(operation("superseded", { command_response: { decision: "rejected", received_at: 990 } })),
+  interruptedSwitching: prior(operation("interrupted_by_reboot", {
+    command_response: { decision: "accepted", received_at: 990 },
+    latest_effect: { phase: "stopping_current", sequence: 2, received_at: 995 } })),
+  supersededNothing: prior(operation("superseded")),
+  stagedHasNone: prior(operation("staged", { command_response: { decision: "rejected", received_at: 990 } })),
+};
 
 // --- rebootResult: Central's answer in the equipment outcome vocabulary.
 const answer = (ok, status, error = null, data = null) => commands.rebootResult({ ok, status, error, data });
@@ -158,6 +203,7 @@ out.results = [
   answer(false, 503, "rollout_gate_closed"),
   answer(false, 403, "node_reboot_session_unavailable"),
   answer(false, 409, "node_offer_superseded"),
+  answer(false, 409, "node_reboot_outstanding"),
 ];
 console.log(JSON.stringify(out));
 """
@@ -205,6 +251,9 @@ def test_each_reboot_request_has_one_named_state_from_centrals_records():
     assert states["received"]["label"] == "Received by Host Management"
     assert states["rejected"]["state"] == "rejected"
     assert states["rejected"]["label"] == "Rejected by Host Management"
+    # The served reason token is named in the Evidence fact (R0).
+    assert states["rejectedReason"]["fact"] == (
+        'Host Management reported a "rejected" response (reboot scope or expiry) · first received 4 s ago')
     assert states["initiated"]["label"] == (
         "Host Management reported the reboot started · completion unknown")
     assert states["initiated"]["fact"] == (
@@ -227,24 +276,60 @@ def test_the_reboot_request_is_frozen_whole_when_the_dialog_opens():
     assert out["frozen"] is True
 
 
-def test_no_new_command_id_while_the_latest_request_is_requested():
+def test_no_new_command_id_while_a_command_on_the_session_is_outstanding():
     out = _run()
-    assert out["whileRequested"] == {
-        "refused": "a reboot request is Requested until t1020; only that request can be retried"}
+    assert out["whileOutstanding"] == {
+        "refused": "a reboot request is outstanding until t1020; only the page that sent it can retry it"}
     assert out["closed"] == {"refused": "Central's effect gate is closed"}
     assert out["badReason"] == {"refused": "a reason is one word: letters, digits and _ . : / - only"}
 
 
-def test_the_request_this_page_sent_blocks_a_new_command_id_until_a_read_settles_it():
+def test_every_command_on_the_target_session_is_judged_by_centrals_outstanding():
     out = _run()
     # Held: recorded (done, already) or retryable unknown; not refused, changed or a 410.
     assert out["held"] == [True, True, False, False, True, False]
     assert out["offers"] == {
         "staleReadNone": "retry", "staleReadOlderSettled": "retry",
-        "listedRequested": "retry", "listedSettled": "new", "listedUnknown": "new",
-        "otherRequested": "blocked", "unlistedAfterWindow": "new", "noHeld": "new"}
+        "listedOutstanding": "retry", "listedSettled": "new",
+        "otherOutstanding": "blocked", "olderOutstanding": "blocked", "accepted": "blocked",
+        "earlierSession": "new", "unlistedAfterWindow": "new", "noHeld": "new"}
     assert out["newWhileHeld"] == {"refused": (
         "the reboot request this page sent may still be offered; only that request can be retried")}
+
+
+def test_send_reboot_judges_the_newest_read_at_call_time_and_refuses_without_a_post():
+    send = _run()["send"]
+    # The dialog frozen at read 1000 meets a read at 1005 listing another outstanding request.
+    assert send["staleDialog"] == {"outcome": "changed", "posts": 0,
+                                   "message": "Another reboot request for this Player is outstanding; close this dialog and review it."}
+    assert send["outOfDate"] == {"outcome": "changed", "posts": 0,
+                                 "message": "This request is out of date; close and reopen."}
+    assert send["sessionChanged"]["posts"] == 0
+    assert send["inWindow"] == {"outcome": "done", "posts": 1,
+                                "message": "Reboot recorded. Requested · delivery unknown."}
+    assert send["heldRetry"]["posts"] == 1
+
+
+def test_a_held_retry_posts_the_identical_frozen_body():
+    out = _run()
+    assert out["sentBodies"] == [out["frozenBody"], out["frozenBody"]]
+    assert out["sentUrl"] == "/v1/operator/node/devices/d-1/reboots"
+
+
+def test_send_reboot_is_the_only_poster_of_reboots():
+    # §10 guarantee strength: test-level. Every console source whose code names the reboots
+    # route (a string or template literal ending in /reboots) is fleetCommands.js, once, inside
+    # sendReboot, after its call-time check.
+    route = re.compile(r"/reboots[`'\"]")
+    naming = {module.name: module.read_text() for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
+              if route.search(module.read_text())}
+    assert list(naming) == ["fleetCommands.js"]
+    source = naming["fleetCommands.js"]
+    assert len(route.findall(source)) == 1
+    start = source.index("export async function sendReboot(")
+    at = route.search(source).start()
+    assert start < at < source.index("\n}\n", start)
+    assert "rebootRefusal(request, node.latest())" in source[start:at]
 
 
 def test_a_requested_label_says_when_central_is_not_offering_it_now():
@@ -257,13 +342,6 @@ def test_a_requested_label_says_when_central_is_not_offering_it_now():
     assert out["sessionLapsed"]["state"] == "requested"
     assert out["sessionLapsed"]["label"] == (
         "Requested · Central is not offering it now (session no longer current)")
-
-
-def test_a_frozen_request_is_not_sent_once_a_read_reaches_its_window():
-    stale = _run()["stale"]
-    out_of_date = "This request is out of date; close and reopen"
-    assert stale == {"inWindow": None, "heldOpen": out_of_date, "otherLatest": out_of_date,
-                     "listed": None, "noReadTime": None}
 
 
 def test_a_new_request_after_the_window_states_the_previous_outcome_and_boot_identity():
@@ -297,14 +375,26 @@ def test_app_operations_read_the_brokers_response_not_only_staged():
     assert app[7]["fact"] == 'Unknown: Central served an unrecognised state "mystery"'
 
 
+def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer():
+    prior = _run()["prior"]
+    assert prior == {
+        "supersededRejected": 'App Effect Broker reported a "rejected" response · first received 10 s ago',
+        "interruptedSwitching": "App Effect Broker reported phase stopping current · first received 5 s ago",
+        "supersededNothing": None,
+        "stagedHasNone": None,
+    }
+
+
 def test_reboot_answers_use_the_equipment_outcomes_and_410_is_outcome_unknown():
     results = _run()["results"]
     assert [(entry["outcome"], entry["retryable"]) for entry in results] == [
         ("done", False), ("already", False), ("unknown", False), ("unknown", True),
-        ("changed", False), ("changed", False), ("refused", False)]
+        ("changed", False), ("changed", False), ("refused", False), ("changed", False)]
     assert results[1]["message"] == "Already recorded. Requested · delivery unknown."
     assert results[2]["message"].startswith("Outcome unknown")
     assert results[6]["message"] == "Refused: node offer superseded."
+    assert results[7]["message"] == (
+        "Another reboot request for this Player is outstanding; close this dialog and review it.")
 
 
 def test_no_reboot_is_linked_to_a_later_boot_by_timestamps():

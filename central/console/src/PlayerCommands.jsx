@@ -7,8 +7,8 @@ import {
   heldReboot,
   rebootCommandState,
   rebootOffer,
+  rebootRefusal,
   rebootRequest,
-  rebootStale,
   rebootTarget,
   sendReboot,
 } from "./fleetCommands.js";
@@ -21,6 +21,7 @@ function StateEntry({ state, children }) {
     <li className="player__command">
       <p className="player__state">{state.label}</p>
       <FactLine label="Evidence" fact={state.fact} />
+      {state.prior != null && <FactLine label="Evidence" fact={state.prior} />}
       {children}
     </li>
   );
@@ -30,15 +31,16 @@ function StateEntry({ state, children }) {
  * The reboot dialog (§10, §11 "Reboot dialog home"): the fleet module's own, so the
  * shared ConfirmAction is not widened. It shows and sends ONE frozen request
  * (fleetCommands.js `rebootRequest`); "Retry the same request" re-sends that body
- * unchanged. Esc and Cancel are blocked while a send is in flight. Once the request is out
- * of date (`stale`, fleetCommands.js `rebootStale`) it is not sent; the operator reopens.
+ * unchanged. Esc and Cancel are blocked while a send is in flight. Send is disabled by
+ * `rebootRefusal` on the read on screen; the send itself is judged again by `sendReboot` on
+ * the hook's newest read (§10), so the dialog never decides which read counts.
  *
  * @param {{deviceId: string, name: string, request: import("./fleetCommands.js").FrozenRebootRequest,
- *          retry: boolean, stale: string|null,
+ *          retry: boolean, node: object,
  *          onSent: (result: import("./fleetCommands.js").RebootResult) => void,
  *          onClose: (result: import("./fleetCommands.js").RebootResult|null) => void}} props
  */
-function RebootDialog({ deviceId, name, request, retry, stale, onSent, onClose }) {
+function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose }) {
   const titleId = useId();
   const dialogRef = useRef(/** @type {HTMLDialogElement|null} */ (null));
   const cancelRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
@@ -71,13 +73,14 @@ function RebootDialog({ deviceId, name, request, retry, stale, onSent, onClose }
     };
   }, []);
 
+  const stale = rebootRefusal(request, node);
   const send = async () => {
-    if (flying.current || stale !== null) return;
+    if (flying.current) return;
     flying.current = true;
     dialogRef.current.setAttribute("closedby", "none");
     dialogRef.current.focus();
     setPhase("in-flight");
-    const sent = await sendReboot(deviceId, request.body);
+    const sent = await sendReboot(deviceId, request, node);
     flying.current = false;
     dialogRef.current?.setAttribute("closedby", "closerequest");
     resultRef.current = sent;
@@ -150,11 +153,10 @@ function RebootDialog({ deviceId, name, request, retry, stale, onSent, onClose }
 
 /**
  * The Reboot section (§9, §10): "Reboot Player", with its reason when it is unavailable,
- * and the reboot history with one named state per request. While the latest request is
- * Requested the only offer is a retry of the request this page sent (its frozen body);
- * one this page does not hold cannot be resent, so Reboot waits for its outcome. The
- * request this page sent counts as Requested until a read shows otherwise
- * (fleetCommands.js `rebootOffer`).
+ * and the reboot history with one named state per request. While any command on the target
+ * session is outstanding the only offer is a retry of the request this page sent (its
+ * frozen body); one this page does not hold cannot be resent, so Reboot waits for it to
+ * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`).
  *
  * @param {{deviceId: string, name: string, node: object, snapshot: object,
  *          playerId: string|null}} props
@@ -172,9 +174,8 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
     return <FactLine label="Reboot" fact={fact({ kind: "unknown", why: NODE_OFF })} />;
   }
   const commands = node.read?.reboot_commands ?? [];
-  const [latest = null] = commands;
   const target = rebootTarget(node, node.gate);
-  const offer = rebootOffer(target, latest, node.readAt, held);
+  const offer = rebootOffer(target, commands, node.readAt, held);
   const retryHeld = offer.offer === "retry";
   const blocked = offer.offer === "blocked" ? offer.reason : null;
 
@@ -184,7 +185,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       setDialog({ request: held, retry: true });
       return;
     }
-    const built = rebootRequest(target, latest, snapshot, node.readAt,
+    const built = rebootRequest(target, commands, snapshot, node.readAt,
       { playerId, commandId: crypto.randomUUID(), reason, held });
     if ("refused" in built) {
       setStatus(`Reboot unavailable: ${built.refused}.`);
@@ -244,8 +245,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       )}
       {dialog !== null && (
         <RebootDialog key={dialog.request.body.command_id} deviceId={deviceId} name={name}
-          request={dialog.request} retry={dialog.retry}
-          stale={rebootStale(dialog.request, latest, node.readAt)} onSent={onSent} onClose={onClose} />
+          request={dialog.request} retry={dialog.retry} node={node} onSent={onSent} onClose={onClose} />
       )}
     </>
   );

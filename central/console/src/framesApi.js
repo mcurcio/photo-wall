@@ -37,7 +37,7 @@ function interpretFrame(result) {
 
 /**
  * Create a Frame (Bead 10; slice 2 §8): POST /v1/operator/frames with the
- * operator's readable id, the drag placement and the display profile. The id
+ * operator's readable id, the drag placement and the Frame profile. The id
  * must match {@link FRAME_ID_PATTERN} (the caller checks it before sending) and
  * cannot be changed later; a taken id answers 409 `frame_exists`. The server
  * re-runs the orientation-coherence guard and 422s an incoherent profile. Wrap
@@ -57,7 +57,7 @@ export async function createFrame(id, placement, profile) {
 }
 
 /**
- * Replace a Frame's persistent display profile. The generation is captured when
+ * Replace a Frame's persistent Frame profile. The generation is captured when
  * the editor opens so a concurrent equipment change cannot silently authorize
  * this edit. Bound Frames and Frames targeted by a live Run are refused by the
  * server. A successful change also invalidates the committed calibration.
@@ -91,7 +91,7 @@ export function frameProfileProblem(profile, frame) {
     return "Diagonal must be a positive number.";
   }
   if (!orientationCoherent(frame.width_mm, frame.height_mm, width, height)) {
-    return "Display profile must match the frame's orientation.";
+    return "Frame profile must match the frame's orientation.";
   }
   return null;
 }

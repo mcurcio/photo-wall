@@ -24,11 +24,11 @@ export function frames(count) {
  *
  * @param {object} snapshot
  * @param {{scheduler: string|null}|null} central
- * @returns {{frameCount: number, alarms: Array<object>, todos: Array<object>,
+ * @returns {{frameCount: number, awaiting: number, alarms: Array<object>, todos: Array<object>,
  *            rows: AttentionRow[]}}
  */
 export function attentionView(snapshot, central) {
-  const { frameCount, alarms, todos } = wallAttention(snapshot);
+  const { frameCount, awaiting, alarms, todos } = wallAttention(snapshot);
   const stalled = central?.scheduler ?? null;
   const silenced =
     stalled === null ? [] : alarms.filter((entry) => entry.health.cause === "liveness");
@@ -53,7 +53,7 @@ export function attentionView(snapshot, central) {
       }),
     ),
   ];
-  return { frameCount, alarms, todos, rows };
+  return { frameCount, awaiting, alarms, todos, rows };
 }
 
 /**

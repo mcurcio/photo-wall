@@ -8,9 +8,12 @@ services, and a real Registry Player enrolled on the same device. It proves the 
 join, the node read (only on an open Player page), the facts' labels and their Unknowns, the
 per-section error boundary, node management being off, and the retired `#/equipment` bookmark;
 and (B2) Reboot Player against Central's real reboot owner behind an open effect gate: the
-frozen request, its retry, its window, late responses and the app operations' named states;
+frozen request, its retry, its window, late responses and the app operations' named states,
+and (R0) the one send rule: a dialog frozen at an older read sends nothing once the newest read
+lists another outstanding request;
 and (B3) the V1 lane: the V1 fleet target set from the Players list, and a queued maintenance
-request shown on the Player page with Cancel as its only control.
+request shown on the Player page with Cancel as its only control;
+and (C2) Display Host's newest exchange per Output (the display read) and the V1 records as facts.
 
 Every assertion is behavioural (role, text, outcome); ages are Central's read time minus
 Central's receipt time, driven by the registry's controlled clock.
@@ -38,6 +41,7 @@ from central.fleet.service import FleetService
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 from contracts.node_boot import NodeBootRequestV2
+from contracts.node_display import DisplayExchange, encode_display_exchange
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
 from contracts.node_preparation import ManagerPreparationV2, encode_manager_preparation
 from contracts.node_protocol import (
@@ -45,6 +49,7 @@ from contracts.node_protocol import (
     NodeCommandResponseV2,
     NodeProcessIdentity,
     NodeSnapshotV2,
+    OutputKey,
     encode_node_message,
 )
 
@@ -66,7 +71,7 @@ class Box:
     def __init__(self, registry, *, enrolled=True):
         self.registry = registry
         boots, self.sessions, _ = cold_setup(registry)
-        offer = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
+        offer = self.offer = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
         self.claims = {}
         for owner in ("host_core", "app_manager", "app_effect_broker"):
             claim = claim_for(offer, owner=owner)
@@ -95,6 +100,22 @@ class Box:
         snapshot = NodeSnapshotV2(grant.producer, uuid4(), 1, 1000, (fact,))
         NodeIngest(self.sessions).ingest(grant.session_id, claim.credential,
                                          encode_node_message(snapshot))
+
+    def display_exchange(self, output_id="HDMI-A-1"):
+        """One Display Host exchange on this boot, stored as Central's display owner stores it.
+        Inserted directly: the read under test is the device read's, not the display owner's
+        decision path (tests/test_node_display.py proves that)."""
+        claim = claim_for(self.offer, owner="display_host")
+        grant = self.sessions.enroll(claim)
+        output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, output_id, 1, 1)
+        exchange = DisplayExchange(grant.producer, uuid4(), 1000, output, True)
+        with self.registry.db.transaction() as conn:
+            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
+                         "sampled_boottime_ms,request,response,decision_id,received_at) "
+                         "SELECT producer_id,%s,session_id,%s,1000,%s,'{}',%s,%s FROM node_sessions "
+                         "WHERE session_id=%s",
+                         (exchange.request_id, output_id, encode_display_exchange(exchange), uuid4(),
+                          self.registry.clock.utc(), grant.session_id))
 
 
 def _node_reads(page):
@@ -140,6 +161,7 @@ def test_five_layers_and_a_silent_app_with_a_reporting_host_shows_both_ages(page
     report_readiness(registry, box.player_id)
     box.preparation()
     box.app_running()
+    box.display_exchange()
     registry.clock.advance(120)
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
@@ -153,11 +175,16 @@ def test_five_layers_and_a_silent_app_with_a_reporting_host_shows_both_ages(page
             "App Manager last reported 2 min ago · preparation verified")
         broker = _layer(page, "App Effect Broker")
         expect(broker).to_contain_text(
-            "Last reported: Unknown: Central does not serve when this layer last reported")
+            "Last reported: Unknown: App Effect Broker sends evidence only on change, and Central "
+            "stores no receipt of its polls")
         expect(broker).to_contain_text(
             "App process: App Effect Broker reported the app running · first received 2 min ago")
-        expect(_layer(page, "Display Host")).to_contain_text(
-            "Unknown: Central does not hold Display Host's current presentation")
+        display = _layer(page, "Display Host")
+        expect(display).to_contain_text("Last reported: Display Host last reported 2 min ago")
+        expect(display).to_contain_text(
+            "Output HDMI-A-1: Display Host last reported 2 min ago · Panel connector: connected")
+        expect(display).to_contain_text("Display Host reported no app surface admitted")
+        expect(display).to_contain_text("No compositor receipt for that surface in this report")
         # The Player app's readiness is two minutes old while its host reports now.
         expect(_layer(page, "Player app")).to_contain_text("Player app last reported 2 min ago")
         expect(player).to_contain_text("Panel pixels: Unknown: no layer observes them")
@@ -301,7 +328,7 @@ def _gated_server(registry):
                            node_serving_verifier=_LocalImageVerifier())
 
 
-def _respond(box, command_id, decision):
+def _respond(box, command_id, decision, reason="reboot_scope_or_expiry"):
     """Host Management answers a recorded reboot request (stored with no expiry check)."""
     with box.registry.db.transaction() as conn:
         payload = json.loads(bytes(conn.execute(
@@ -309,7 +336,7 @@ def _respond(box, command_id, decision):
         ).fetchone()["payload"]))
     claim, grant = box.claims["host_core"]
     response = NodeCommandResponseV2(grant.producer, command_id, payload["command_sha256"],
-                                     grant.session_id, "operator_reboot", decision, "fixture")
+                                     grant.session_id, "operator_reboot", decision, reason)
     NodeIngest(box.sessions).ingest(grant.session_id, claim.credential, encode_node_message(response))
 
 
@@ -334,6 +361,56 @@ def _lose_first_response(page):
         route.fulfill(status=502, body="")
 
     page.route(REBOOTS, handle)
+
+
+class _HeldDeviceRead:
+    """Serve the device read as last fetched once frozen: a read that has not arrived yet.
+
+    `freeze()` returns only once the page holds a read fetched before it and no fetch is in
+    flight, so a read already on its way to Central cannot arrive after the test moves
+    Central on (its clock, another page's commit) and overtake the frozen one.
+    """
+
+    def __init__(self, page):
+        self.page, self.on, self.body, self.in_flight, self.served = page, False, None, 0, 0
+        page.route(DEVICE_READ, self._handle)
+
+    def _handle(self, route):
+        if self.on and self.body is not None:
+            self.served += 1
+            route.fulfill(status=200, content_type="application/json", body=self.body)
+            return
+        self.in_flight += 1
+        try:
+            response = route.fetch()
+            self.body = response.text()
+            route.fulfill(response=response)
+        finally:
+            self.in_flight -= 1
+
+    def freeze(self, timeout_ms=15_000):
+        self.on, self.served = True, 0
+        waited = 0
+        while self.in_flight or not self.served:
+            assert waited < timeout_ms, "no held device read was served"
+            self.page.wait_for_timeout(50)
+            waited += 50
+
+    def release(self):
+        self.on = False
+
+
+def _call_send_directly(dialog_button):
+    """Run the dialog's own send handler even though its button is disabled.
+
+    A click on a disabled button runs nothing, so this calls React's onClick from the
+    element's props: the send path is then `sendReboot` alone, whose call-time check on the
+    hook's newest read is what is under test.
+    """
+    dialog_button.evaluate("""(button) => {
+        const key = Object.keys(button).find((name) => name.startsWith("__reactProps$"));
+        button[key].onClick();
+    }""")
 
 
 def _reboot(page):
@@ -400,22 +477,28 @@ def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_i
     with _gated_server(registry) as origin:
         sent = _reboot_posts(page)
         _lose_first_response(page)
+        held = _HeldDeviceRead(page)
         connect(page, origin)
         open_player(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog.get_by_role("button", name="Retry the same request", exact=True)).to_be_enabled()
+        # The window ends before the next read arrives: Central, not the page, answers the retry.
+        held.freeze()
         registry.clock.advance(31)
         dialog.get_by_role("button", name="Retry the same request", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Outcome unknown: Central stopped offering this request before it was confirmed.")
+        held.release()
         expect(dialog.get_by_role("button", name="Retry the same request", exact=True)).to_have_count(0)
         assert len(sent) == 2 and sent[0] == sent[1]
         dialog.get_by_role("button", name="Close", exact=True).click()
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
+        # The first read after the release arrives within one 5 s poll interval.
         expect(history).to_contain_text(
-            "Outcome unknown: no response from Host Management; Central stopped offering it at")
+            "Outcome unknown: no response from Host Management; Central stopped offering it at",
+            timeout=10_000)
         # After the window a NEW request may be made; it states the previous outcome and boot.
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         expect(page.get_by_role("dialog")).to_contain_text(
@@ -453,6 +536,9 @@ def test_rejected_reboots_and_app_operations_show_their_named_states(page, regis
         data["operations"] = [{
             "operation_id": str(uuid4()), "command_id": str(uuid4()), "operator_audit_ref": "fixture",
             "state": "staged", "command_response": {"decision": "rejected", "received_at": data["read_at"] - 3},
+            "latest_effect": None, "physical_output": "unknown", "artifact_roots_retained": True}, {
+            "operation_id": str(uuid4()), "command_id": str(uuid4()), "operator_audit_ref": "fixture",
+            "state": "superseded", "command_response": {"decision": "rejected", "received_at": data["read_at"] - 3},
             "latest_effect": None, "physical_output": "unknown", "artifact_roots_retained": True}]
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
@@ -462,14 +548,73 @@ def test_rejected_reboots_and_app_operations_show_their_named_states(page, regis
         open_player(page, NAME)
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
         expect(history).to_contain_text("Rejected by Host Management")
-        expect(history).to_contain_text('Host Management reported a "rejected" response · first received 0 s ago')
+        expect(history).to_contain_text(
+            'Host Management reported a "rejected" response (reboot scope or expiry) · first received 0 s ago')
         # Rejected is a settled answer, so a new request may be made.
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_enabled()
         app = page.get_by_role("region", name="App", exact=True).get_by_role(
             "list", name="App operations", exact=True)
         expect(app).to_contain_text("Rejected by App Effect Broker")
         expect(app).not_to_contain_text("Staged")
+        # A superseded stage the broker had rejected still shows the rejection.
+        superseded = app.get_by_role("listitem").filter(has_text="Replaced by a later stage")
+        expect(superseded).to_contain_text('App Effect Broker reported a "rejected" response')
         expect(page.get_by_role("main")).not_to_contain_text("ubsequent boot")
+
+
+def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_outstanding(
+        page, registry):
+    """R0's stale dialog: the dialog freezes its request at one read; another page then records
+    a different reboot request, which the next read lists as outstanding. Send is disabled, and
+    the dialog's own send handler, called directly, refuses inside `sendReboot`: zero POSTs."""
+    box = Box(registry)
+    gate, generation = _open_gate(registry)
+    with _gated_server(registry) as origin:
+        sent = _reboot_posts(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
+        dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
+        send = dialog.get_by_role("button", name="Reboot Player", exact=True)
+        expect(send).to_be_enabled()
+        # Another tab's request, recorded by Central's real reboot owner after the dialog froze.
+        _, grant = box.claims["host_core"]
+        NodeCommands(box.sessions, gate).request_reboot(
+            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab", generation))
+        registry.clock.advance(5)
+        expect(dialog.get_by_role("alert")).to_have_text(
+            "Another reboot request for this Player is outstanding; close this dialog and review it.", timeout=10_000)
+        expect(send).to_be_disabled()
+        _call_send_directly(send)
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Another reboot request for this Player is outstanding; close this dialog and review it.")
+        assert sent == []
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
+
+
+def test_centrals_outstanding_fence_reads_as_changed(page, registry):
+    """A 409 node_reboot_outstanding (another page's request committed after this page's newest
+    read) reads as changed, never as a refusal of this Player."""
+    box = Box(registry)
+    gate, generation = _open_gate(registry)
+    with _gated_server(registry) as origin:
+        sent = _reboot_posts(page)
+        held = _HeldDeviceRead(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
+        dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
+        held.freeze()  # the other page's commit lands after this page's newest read
+        _, grant = box.claims["host_core"]
+        NodeCommands(box.sessions, gate).request_reboot(
+            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab", generation))
+        dialog.get_by_role("button", name="Reboot Player", exact=True).click()
+        expect(dialog.get_by_role("status")).to_have_text(
+            "Another reboot request for this Player is outstanding; close this dialog and review it.")
+        assert len(sent) == 1
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
 
 
 # --- B3: the V1 lane, labelled "V1 boot offers" (console DDD §9, Q2).
@@ -526,8 +671,11 @@ def test_a_queued_maintenance_request_is_shown_and_can_only_be_canceled(page, re
         v1 = page.get_by_role("region", name="V1 boot offers", exact=True)
         expect(v1).to_contain_text(f"V1 app target: {V1_TAG} · {V1_DIGEST[:12]} · explicit")
         expect(v1).to_contain_text(f"V1 maintenance request: queued · {V1_TAG}")
-        expect(v1.get_by_role("group", name="V1 records", exact=True)).to_contain_text(
-            "V1 record · Loader OS session:")
+        records = v1.get_by_role("group", name="V1 records", exact=True)
+        expect(records).to_contain_text("V1 loader OS session: ")
+        expect(records).to_contain_text("V1 app attempt: ")
+        expect(records).to_contain_text("V1 authenticated OS attempt claim: ")
+        expect(records).not_to_contain_text("V1 record ·")
         expect(v1.get_by_role("button", name="Queue online update")).to_have_count(0)
         v1.get_by_role("button", name="Cancel maintenance request", exact=True).click()
         expect(v1.get_by_role("status")).to_have_text("V1 maintenance request canceled.")

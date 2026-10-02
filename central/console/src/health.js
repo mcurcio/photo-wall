@@ -1,4 +1,5 @@
-import { boundOutput, frameForOutput, isBound } from "./join.js";
+import { fact, factText, LAYER_NAMES } from "./facts.js";
+import { boundOutput, frameForOutput, isBound, liveRunsFor } from "./join.js";
 
 // The one definition lives with the bound-output join; consumers read it through here.
 export { isBound };
@@ -6,7 +7,7 @@ export { isBound };
 /**
  * Wall health: the ONE classifier (console pass 2, slice 1 — design
  * docs/operator-console-ux-pass2.md §4). Every surface that says whether a frame
- * or Player is alright — the plan tile, the Inspector header, Commissioning,
+ * or Player is alright — the plan tile, the Inspector header, Calibration,
  * Binding, the Players pages, the Unplaced tray, the Showrunner frame list and
  * the attention strip — reads it through here, so the states, their precedence
  * and their wording live in exactly one place. Equipment standing (slice 2,
@@ -31,10 +32,10 @@ export { isBound };
 
 /**
  * @typedef {"ok"|"todo"|"alarm"} Severity
- * @typedef {"unbound"|"awaiting-report"|"player-silent"|"display-not-detected"|
- *           "needs-commissioning"|"ok"} FrameState
- * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
- * @typedef {"liveness"|"binding"|"display"|"commissioning"} Cause
+ * @typedef {"unbound"|"awaiting-report"|"player-silent"|"output-interrupted"|
+ *           "no-panel-at-enrollment"|"needs-calibration"|"ok"} FrameState
+ * @typedef {"calibration"|"binding"|"nowshowing"} Facet
+ * @typedef {"liveness"|"binding"|"output"|"panel"|"calibration"} Cause
  * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
  *            label: string, tileLabel: string, settling: boolean,
  *            facet: Facet|null}} FrameHealth
@@ -43,8 +44,9 @@ export { isBound };
  *
  * `cause` groups states by what must change: "liveness" (awaiting-report and
  * player-silent — the Player's reports are not reaching Central), "binding"
- * (unbound), "display" (display-not-detected), "commissioning"
- * (needs-commissioning); null when ok. `label` is the full fact with its age;
+ * (unbound), "output" (output-interrupted — a node layer reported the bound Output
+ * lost while its Run continues), "panel" (no-panel-at-enrollment), "calibration"
+ * (needs-calibration); null when ok. `label` is the full fact with its age;
  * `tileLabel` is the same fact without the age, short enough for a plan tile.
  * `settling` marks an awaiting-report frame enrolled within the grace (two
  * report intervals): it is still never ok, but the attention strip does not
@@ -134,8 +136,9 @@ export function ageAt(readAt, timestamp) {
 
 /**
  * The health of one frame: the first matching state, in design §4 order.
- * Rows 1–3 make the facts below them stale; a physical cause (no display)
- * precedes a configuration to-do (commissioning). Only alarms are alarms.
+ * Rows 1–3 make the facts below them stale; an Output interruption Central has
+ * linked to the current Binding (console DDD §15) follows them; a physical cause (no Panel
+ * listed at enrollment) precedes a configuration to-do (calibration). Only alarms are alarms.
  *
  * @param {object|null} snapshot
  * @param {string} frameId
@@ -169,28 +172,99 @@ export function frameHealth(snapshot, frameId) {
     const { label } = liveness;
     return healthOf("player-silent", "alarm", "liveness", label, "Player silent", "binding");
   }
-  // Fail closed: a missing output row reads as no display detected.
+  const interruption = interruptionFor(snapshot, frameId);
+  if (interruption !== null) {
+    const tile = interruption.suffix === null ? "Output interrupted"
+      : `Output interrupted · ${interruption.suffix}`;
+    return healthOf("output-interrupted", "alarm", "output", interruption.label, tile, "binding");
+  }
+  // Fail closed: a missing output row reads as no Panel listed. It stays an alarm (console
+  // DDD §19): the enrollment record is the Wall's only signal for an unplugged Panel. Its
+  // facet is Binding, where the Panel at enrollment is shown.
   if (!displayDetected(boundOutput(snapshot, frameId))) {
     return healthOf(
-      "display-not-detected",
+      "no-panel-at-enrollment",
       "alarm",
-      "display",
-      "No display detected when the Player started",
-      "No display detected",
-      "commissioning",
+      "panel",
+      NO_PANEL_AT_ENROLLMENT,
+      NO_PANEL_LISTED,
+      "binding",
     );
   }
   if (frame.calibration_valid !== true) {
     return healthOf(
-      "needs-commissioning",
+      "needs-calibration",
       "todo",
-      "commissioning",
-      "Needs commissioning",
-      "Needs commissioning",
-      "commissioning",
+      "calibration",
+      "Needs calibration",
+      "Needs calibration",
+      "calibration",
     );
   }
   return healthOf("ok", "ok", null, liveness.label, "Heard recently", null);
+}
+
+/**
+ * The Panel record at the Player app's last enrollment when no Panel is listed as connected
+ * (console DDD §19): the one wording players.js `panelAtEnrollment` and the Frame-health
+ * alarm both use. `connected=false` is Central's own record, so it may be stale.
+ */
+export const NO_PANEL_AT_ENROLLMENT =
+  "No Panel listed as connected at the Player app's last enrollment (may be stale)";
+
+/** The short form of {@link NO_PANEL_AT_ENROLLMENT}: a plan tile and an Output's state. */
+export const NO_PANEL_LISTED = "No Panel listed at the last enrollment";
+
+/**
+ * What an Output-interrupted wording ends with when a live Run targets the Frame (R6: the
+ * Run is not cancelled). With no live Run it is omitted: the console never claims a Run.
+ */
+export const RUN_CONTINUES = "the Run continues";
+
+/**
+ * What each layer actually reported when Central records an Output loss from it
+ * (node_runtime_reconciliation.py; the owner of each fact kind is fixed in
+ * contracts/node_protocol.py `owners`): the App Effect Broker reports an app process
+ * exit, which Central applies to every Output linked to that process; Display Host
+ * reports one Output's app surface invalidated or withdrawn. Any other served layer gets
+ * the neutral wording, never a report it did not make. Each entry follows the layer's name
+ * from LAYER_NAMES, read at call time (facts.js and this module import each other).
+ */
+const LOSS_REPORTS = Object.freeze({
+  app_effect_broker: "reported the app process exited",
+  display_host: "reported the app surface invalidated or withdrawn",
+});
+
+/**
+ * The Output interruption of a Frame, from Central's interruption read
+ * (`snapshot.outputInterruptions`, the snapshot's `output_interruptions`; design §15-§16):
+ * the one function the Frame-health state and the Player page's Output row both read.
+ *
+ * Central serves only unresolved losses that fence the Frame's CURRENT Binding, so a row
+ * is matched by Frame id alone and never re-matched to a Binding here. The fact is
+ * `derived` (Central's inference from its linked Output-loss record), its basis what the
+ * cause layer actually reported (LOSS_REPORTS), its age Central's read time minus
+ * Central's record time (R10). With no row this returns null: Central records only the
+ * losses it could link, so absence is never worded as "not interrupted".
+ *
+ * @param {object|null} snapshot
+ * @param {string} frameId
+ * @returns {{fact: import("./facts.js").Fact, suffix: string|null, label: string}|null}
+ *   `suffix` is RUN_CONTINUES when a live Run targets the Frame, else null; `label` is the
+ *   full wording: the fact, then " · " and the suffix when there is one
+ */
+export function interruptionFor(snapshot, frameId) {
+  const row = (snapshot?.outputInterruptions ?? []).find((entry) => entry?.frame_id === frameId);
+  if (row === undefined) {
+    return null;
+  }
+  const layer = LAYER_NAMES[row.cause_layer] ?? "An unnamed layer";
+  const report = `${layer} ${LOSS_REPORTS[row.cause_layer] ?? "sent the evidence Central linked to this Output"}`;
+  const age = ageAt(snapshot?.readAt, row.interrupted_at);
+  const recorded = Number.isNaN(age) ? "" : ` · recorded ${formatAge(Math.max(0, age))} ago`;
+  const value = fact({ kind: "derived", value: "Output interrupted", basis: `${report}${recorded}` });
+  const suffix = liveRunsFor(snapshot?.runtime, frameId).length > 0 ? RUN_CONTINUES : null;
+  return { fact: value, suffix, label: suffix === null ? factText(value) : `${factText(value)} · ${suffix}` };
 }
 
 /** One FrameHealth; only an awaiting-report frame can be settling. */
@@ -213,10 +287,11 @@ export function facetFor(health, currentFacet) {
 /**
  * Every frame that needs attention, alarms first then to-dos, each group in
  * frame-id order. A settling frame (enrolled within the grace, no report yet)
- * needs no attention yet and is left out.
+ * needs no attention yet and is left out, but counted in `awaiting` so the
+ * all-clear never claims a report that has not arrived.
  *
  * @param {object|null} snapshot
- * @returns {{frameCount: number,
+ * @returns {{frameCount: number, awaiting: number,
  *            alarms: Array<{frame: object, health: FrameHealth}>,
  *            todos: Array<{frame: object, health: FrameHealth}>}}
  */
@@ -226,15 +301,18 @@ export function wallAttention(snapshot) {
   );
   const alarms = [];
   const todos = [];
+  let awaiting = 0;
   for (const frame of frames) {
     const health = frameHealth(snapshot, frame.id);
     if (health.severity === "alarm") {
       alarms.push({ frame, health });
-    } else if (health.severity === "todo" && !health.settling) {
+    } else if (health.severity === "todo" && health.settling) {
+      awaiting += 1;
+    } else if (health.severity === "todo") {
       todos.push({ frame, health });
     }
   }
-  return { frameCount: frames.length, alarms, todos };
+  return { frameCount: frames.length, awaiting, alarms, todos };
 }
 
 // --- Equipment standing (slice 2 §4).
@@ -248,8 +326,8 @@ export function wallAttention(snapshot) {
  */
 
 /**
- * Whether the Player reported a display on this Output when it last started
- * (`observation.connected`). Fails closed: a missing row reads as no display.
+ * Whether the Player app listed a Panel as connected on this Output at its last
+ * enrollment (`observation.connected`). Fails closed: a missing row reads as no Panel.
  *
  * @param {object|null|undefined} output an OutputInventory row
  * @returns {boolean}
@@ -273,7 +351,7 @@ export function playersInOrder(snapshot) {
 /**
  * Each Output of a Player, ordered by output id, with its state (first match):
  * retired (its Player is retired), bound (a Frame is bound to it), no-display
- * (unbound, and no display detected at the last Player start — a stale row
+ * (unbound, and no Panel listed at the Player app's last enrollment — a stale row
  * cannot be told from an empty connector), free.
  *
  * @param {object|null} snapshot
@@ -298,7 +376,7 @@ export function outputStates(snapshot, playerId) {
       return {
         ...standing,
         state: "no-display",
-        label: "No display detected at last Player start",
+        label: NO_PANEL_LISTED,
       };
     }
     return { ...standing, state: "free", label: "Free" };

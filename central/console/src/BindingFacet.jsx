@@ -1,7 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
 import { unbindRequest, useConfirm } from "./ConfirmAction.jsx";
-import { bind } from "./equipmentApi.js";
+import { bind, identifyOutput } from "./equipmentApi.js";
+import { FactLine } from "./FactLine.jsx";
 import {
   BOOT_FACTS_UNAVAILABLE,
   bindableOutputs,
@@ -9,7 +10,8 @@ import {
   outputLabel,
   playerLiveness,
 } from "./health.js";
-import { playerPageHref } from "./players.js";
+import { boundOutput } from "./join.js";
+import { identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -19,21 +21,24 @@ import { useMutate } from "./useMutate.js";
  * Read state comes straight from the Frame's FrameInventory row
  * (`player_id`/`output_id`); the console never invents a Player or Output that
  * the inventory does not carry (design R1). A bound Frame also shows when Central
- * last heard from its Player (health.js `playerLiveness`). Writes go through the
+ * last heard from its Player (health.js `playerLiveness`), links the Player to its home
+ * (the Player page) and shows the Panel at the Player app's last enrollment (players.js
+ * `panelAtEnrollment`, the one wording fleet and Wall share; console DDD §19). Writes go through the
  * one equipment write module (equipmentApi.js) inside `useMutate()`, so the
  * whole surface refreshes from one new Plane A snapshot after each write.
  *
  * FRAME-FIRST BINDING. An unbound Frame offers a radiogroup of every bindable
  * Output (health.js `bindableOutputs`: free Outputs only — never bound,
  * no-display or retired ones), Players in registration order. NOTHING is
- * pre-selected, even with one option: the operator chooses. Choosing captures
+ * pre-selected, even with one option: the operator chooses. Each candidate offers
+ * Identify Panel by the same rule as the Player page (players.js `identifyOffer`). Choosing captures
  * the Frame generation seen at that moment, and the bind carries exactly that
  * pair and generation — the live snapshot is never read at click time. A poll
  * that removes the chosen Output clears the choice and announces it.
  *
  * On success the facet shows the amber "Review required" state and a
- * "Commission the display" CTA that switches the Inspector to the
- * Commissioning facet (design J1: pending -> bind -> commission).
+ * "Calibrate this Frame" CTA that switches the Inspector to the Calibration
+ * facet (pending -> bind -> calibrate).
  *
  * UNBIND opens the one confirmation dialog (ConfirmAction, slice 2 §7), which
  * captures the Frame's generation, live Runs and sibling Frame when it opens.
@@ -59,6 +64,10 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     ),
   );
   const [busy, setBusy] = useState(false);
+  // The last Identify request's outcome, worded for the operator (one line for the picker).
+  const [identified, setIdentified] = useState(
+    /** @type {{kind: "status"|"alert", text: string}|null} */ (null),
+  );
   const [focusSuccessor, setFocusSuccessor] = useState(false);
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
   const chooserRef = useRef(/** @type {HTMLDivElement|null} */ (null));
@@ -79,6 +88,11 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
   // Wall itself makes no node read.
   const silentHref = liveness?.state === "silent" ? playerPageHref(snapshot, frame.player_id) : null;
   const options = bound ? [] : bindableOutputs(snapshot);
+  const playerHref = bound ? playerPageHref(snapshot, frame.player_id) : null;
+  const observation = bound ? boundOutput(snapshot, frameId)?.observation ?? null : null;
+  const enrolledAt = bound
+    ? (snapshot?.inventory?.players ?? []).find((player) => player.id === frame.player_id)?.last_seen ?? null
+    : null;
 
   // A new snapshot that no longer offers the chosen Output clears the choice
   // and says so; one that shows the Frame bound clears it silently.
@@ -143,6 +157,20 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
     setMessage(result.message);
   };
 
+  const doIdentify = async (option) => {
+    if (busy) {
+      return;
+    }
+    setBusy(true);
+    setIdentified(null);
+    const result = await mutate(() => identifyOutput(option.playerId, option.outputId));
+    setBusy(false);
+    setIdentified(result.outcome === "done"
+      ? { kind: "status",
+        text: `Identify requested for ${option.outputId}. Check the Panel; this request expires in 15 seconds.` }
+      : { kind: "alert", text: result.message });
+  };
+
   const openUnbind = (event) => {
     if (!bound) {
       return;
@@ -162,7 +190,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
           <dl className="facet__fields">
             <div className="facet__field">
               <dt>Player</dt>
-              <dd>{frame.player_id}</dd>
+              <dd>{playerHref === null ? frame.player_id : <a href={playerHref}>{frame.player_id}</a>}</dd>
             </div>
             <div className="facet__field">
               <dt>Output</dt>
@@ -181,6 +209,16 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
               </dd>
             </div>
           </dl>
+          <section className="facet__section" role="group"
+            aria-label="Panel at the Player app's last enrollment (may be stale)">
+            <h4 className="facet__subtitle">Panel at the Player app&apos;s last enrollment (may be stale)</h4>
+            <FactLine label="Panel" fact={panelAtEnrollment(observation, snapshot?.inventory?.read_at, enrolledAt)} />
+            {observation?.connected === true && (
+              <p className="facet__note">
+                {`Output resolution at that enrollment: ${observation.width_px} × ${observation.height_px}`}
+              </p>
+            )}
+          </section>
           {reviewRequired && (
             <div className="facet__review" role="status">
               <p className="facet__review-text">
@@ -190,9 +228,9 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
               <button
                 type="button"
                 className="facet__cta"
-                onClick={() => onFacet?.("commissioning")}
+                onClick={() => onFacet?.("calibration")}
               >
-                Commission the display
+                Calibrate this Frame
               </button>
             </div>
           )}
@@ -220,12 +258,14 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
             )}
             {options.length === 0 ? (
               <p className="chooser__empty">
-                No free outputs with a detected display. Power on a Pi with its panel
-                attached; it appears under Players.
+                No free Output has a Panel listed as connected at its Player app&apos;s last
+                enrollment. Power on a Player with its Panel attached; it appears under Players.
               </p>
             ) : (
               options.map((option, index) => {
                 const livenessId = `${ids}-liveness-${index}`;
+                const identifyReasonId = `${ids}-identify-${index}`;
+                const identify = identifyOffer(snapshot, option.playerId, option.outputId);
                 const selected =
                   choice !== null &&
                   choice.playerId === option.playerId &&
@@ -245,6 +285,21 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
                     <span id={livenessId} className="chooser__liveness">
                       {playerLiveness(snapshot, option.playerId)?.label}
                     </span>
+                    {identify.absent !== true && (
+                      <span className="chooser__identify">
+                        <button
+                          type="button"
+                          disabled={!identify.offer || busy}
+                          aria-describedby={identify.offer ? undefined : identifyReasonId}
+                          onClick={() => doIdentify(option)}
+                        >
+                          Identify Panel<span className="visually-hidden">{` ${option.outputId}`}</span>
+                        </button>
+                        {!identify.offer && (
+                          <span id={identifyReasonId} className="chooser__note">{identify.reason}</span>
+                        )}
+                      </span>
+                    )}
                   </div>
                 );
               })
@@ -261,6 +316,11 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
         </>
       )}
 
+      {identified !== null && (
+        <p className={identified.kind === "alert" ? "facet__conflict" : "chooser__note"} role={identified.kind}>
+          {identified.text}
+        </p>
+      )}
       {confirmation("chooser__status")}
       {message != null && (
         <p className="facet__conflict" role="alert">

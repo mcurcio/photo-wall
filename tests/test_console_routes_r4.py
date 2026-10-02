@@ -45,9 +45,11 @@ ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "neutral": "neutralRoutes.jsx"}
-DISPLAY_CONTROLS = {"Commissioning.jsx", "Inspector.jsx", "useCalibration.js"}
-# The display's calibration route (central/app.py): only the Wall side may name it.
-CALIBRATION_ROUTE = "/calibration"
+DISPLAY_CONTROLS = {"CalibrationFacet.jsx", "Inspector.jsx", "useCalibration.js"}
+# The display's calibration route (central/app.py `/v1/operator/frames/{frame_id}/calibration`):
+# only the Wall side may name it. Matched with the interpolated Frame id's closing brace, so the
+# Calibration facet's own hash (`#/wall/frames/<id>/calibration`, a route sample) is not it.
+CALIBRATION_ROUTE = "}/calibration"
 # Modules the Wall table reaches that the Show, fleet or neutral sides use too, besides the
 # shell's own. The
 # rest of the Wall's closure is Wall-only: sharing another module is a design decision, made
@@ -56,6 +58,7 @@ SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
     "NowShowingFacet.jsx",  # a frame's intent, also shown on Now showing
     "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
+    "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
     "framesApi.js",
     "players.js",  # a Player page address (Wall links to the box's home); pure, no controls
     "projection.js",
@@ -454,7 +457,7 @@ def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, t
 
 
 def test_the_wall_routes_do_reach_display_controls(graph):
-    # Positive control: the closure holds Commissioning and the calibration write, where
+    # Positive control: the closure holds the Calibration facet and the calibration write, where
     # they are meant to be.
     assert DISPLAY_CONTROLS <= _wall_only(graph)
     assert any(CALIBRATION_ROUTE in module.read_text() for module in graph
@@ -497,6 +500,10 @@ out.landing = [landingRoute(0), landingRoute(3)];
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
 out.equipment = parseRoute("#/equipment");
+out.commissioning = parseRoute("#/wall/frames/x/commissioning");
+out.commissioningRoute = (() => { try {
+  return formatRoute({ section: "wall", id: "x", facet: "commissioning" });
+} catch { return "refused"; } })();
 out.badTargetRoute = (() => { try {
   return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
 } catch { return "refused"; } })();
@@ -519,7 +526,7 @@ ROUTES = [
     {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
     {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
-    {"section": "wall", "id": "reception north", "facet": "commissioning"},
+    {"section": "wall", "id": "reception north", "facet": "calibration"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
     {"section": "wall", "id": "frames", "facet": "nowshowing"},
 ]
@@ -566,5 +573,8 @@ def test_routes_parse_format_and_round_trip():
     assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
     # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
     assert out["equipment"] == {"section": "players"}
+    # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
+    assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
+    assert out["commissioningRoute"] == "refused"
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"

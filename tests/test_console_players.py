@@ -144,6 +144,26 @@ out.deadHost = rows({ ...reporting, read: { ...read, read_at: 10000, sessions: [
   { ...lapsed({ host_observation: { received_at: 100, sample: {} } }), session_id: "s-older" },
 ] } })[0];
 out.deadHostNoSample = rows({ ...reporting, read: { ...read, sessions: [lapsed({})] } })[0].facts;
+// --- Display Host (C2): the display read's newest exchange per Output on the current boot.
+const displayOutputs = [
+  { output_id: "HDMI-A-1", received_at: 1997, connected: true,
+    surface: { frame_id: "lobby", binding_generation: 3, config_revision: 7 },
+    receipt: { matches_surface: true, age_ms: 2400 } },
+  { output_id: "HDMI-A-2", received_at: 1990, connected: false, surface: null,
+    receipt: { matches_surface: false, age_ms: 100 } },
+  { output_id: "HDMI-A-3", received_at: 1985, connected: true,
+    surface: { frame_id: "hall", binding_generation: 1, config_revision: 2 }, receipt: null },
+];
+const withDisplay = (display_outputs) => ({ ...reporting, read: { ...read, display_outputs } });
+out.display = rows(withDisplay(displayOutputs))[3];
+out.displayModel = node.displayOutputs(withDisplay(displayOutputs), 2000).map((output) => ({
+  outputId: output.outputId, facts: output.facts.map(factText) }));
+out.displayEmpty = rows(withDisplay([]))[3].facts;
+// An Output Central could not decode (served undecodable): one Unknown fact, the rest unaffected.
+out.displayUndecodable = rows(withDisplay([displayOutputs[1],
+  { output_id: "HDMI-A-9", received_at: 1999, undecodable: true }]))[3].facts;
+out.displayNoTime = node.displayOutputs(withDisplay([{ ...displayOutputs[0], received_at: null }]), 2000)
+  .map((output) => output.facts.map(factText));
 // Central reads no reports from a retired Player: its null last_report_at is not "no report".
 out.retiredApp = rows(reporting, "p-r")[4].facts;
 // Payload drift (a field of the wrong type) throws, for the section's boundary to contain.
@@ -162,6 +182,13 @@ out.boot = [
   boot(reporting),
   boot({ ...reporting, read: { ...read, sessions: [{ ...session("host_core"), current: false }] } }),
   boot({ enabled: false, read: null, error: null }),
+];
+// --- panelAtEnrollment: one wording; connected=false is Central's own record, not a report.
+out.panel = [
+  factText(players.panelAtEnrollment({ connected: true, width_px: 1920 }, 160, 100)),
+  factText(players.panelAtEnrollment({ connected: false }, 160, 100)),
+  players.panelAtEnrollment({ connected: false }, 160, 100).kind,
+  factText(players.panelAtEnrollment(null, 160, 100)),
 ];
 console.log(JSON.stringify(out));
 """
@@ -262,15 +289,64 @@ def test_layer_evidence_has_five_labelled_rows_bottom_up():
     assert layers[1]["facts"] == [
         ["Last reported", "App Manager last reported 30 s ago · preparation ready"]]
     assert layers[2]["facts"] == [
-        ["Last reported", "Unknown: Central does not serve when this layer last reported"],
+        ["Last reported", "Unknown: App Effect Broker sends evidence only on change, and Central "
+                          "stores no receipt of its polls"],
         # The newest process fact, first received (ages from Central's clock only).
         ["App process", "App Effect Broker reported the app running · first received 15 min ago"],
     ]
-    assert layers[3]["facts"] == [
-        ["Output presentation", "Unknown: Central does not hold Display Host's current presentation"]]
+    # A Central that does not serve the display read: Unknown, naming the field.
+    assert layers[3]["facts"] == [["Last reported", "Unknown: display_outputs not served"]]
     assert layers[4]["facts"] == [
         ["Last reported", "Unknown: no readiness report on the current enrollment (epoch 3)"]]
     assert "Enrolled 10 min ago (enrollment is not a report)" in layers[4]["details"]
+
+
+def test_display_host_row_reads_the_newest_exchange_per_output():
+    out = _run()
+    display = out["display"]
+    # Last reported: the newest exchange receipt across the boot (1997 against read 2000).
+    assert display["facts"][0] == ["Last reported", "Display Host last reported 3 s ago"]
+    assert display["facts"][1:] == [
+        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Panel connector: connected"],
+        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Admitted surface: the app's surface "
+                            "for Frame lobby (binding generation 3)"],
+        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Compositor receipt for that surface, "
+                            "sampled 2 s before this report"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Panel connector: not connected"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Display Host reported no app surface admitted"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · No compositor receipt for that surface "
+                            "in this report"],
+        ["Output HDMI-A-3", "Display Host last reported 15 s ago · Panel connector: connected"],
+        ["Output HDMI-A-3", "Display Host last reported 15 s ago · Admitted surface: the app's surface "
+                            "for Frame hall (binding generation 1)"],
+        ["Output HDMI-A-3", "Display Host last reported 15 s ago · No compositor receipt for that surface "
+                            "in this report"],
+    ]
+    assert [item["outputId"] for item in out["displayModel"]] == ["HDMI-A-1", "HDMI-A-2", "HDMI-A-3"]
+    assert [len(item["facts"]) for item in out["displayModel"]] == [3, 3, 3]
+    assert out["displayEmpty"] == [["Last reported", "Unknown: Display Host has reported no Output on this boot"]]
+    assert out["displayNoTime"] == [["Unknown: display_outputs received_at not served"] * 3]
+    assert out["displayUndecodable"] == [
+        ["Last reported", "Display Host last reported 1 s ago"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Panel connector: not connected"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Display Host reported no app surface admitted"],
+        ["Output HDMI-A-2", "Display Host last reported 10 s ago · No compositor receipt for that surface "
+                            "in this report"],
+        ["Output HDMI-A-9", "Unknown: Central could not decode Display Host's last exchange for this Output"],
+    ]
+    # The display wording never names the diagnostic page, and never claims what is seen.
+    words = " ".join([text for _, text in display["facts"]] + display["details"]).lower()
+    for phrase in ("diagnostic page", "visible", "showing"):
+        assert phrase not in words
+
+
+def test_no_plain_v1_record_line_remains():
+    # Console DDD C2: ManagementFacts renders through fact(), so no "V1 record · …" line.
+    management = (SRC / "ManagementFacts.jsx").read_text()
+    assert "<FactLine" in management and "<p>" not in management
+    offenders = [module.name for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
+                 if "V1 record ·" in module.read_text() or "V1 record:" in module.read_text()]
+    assert offenders == []
 
 
 def test_a_silent_app_with_a_reporting_host_shows_both_ages():
@@ -344,3 +420,13 @@ def test_no_console_string_words_central_intent_as_device_truth():
                 offenders.append((module.name, phrase))
     assert offenders == []
     assert not (SRC / "PlayerVersions.jsx").exists()
+
+
+def test_the_panel_at_enrollment_has_one_wording_and_its_true_truth_kind():
+    assert _run()["panel"] == [
+        "Player app reported Panel connected at the Player app's last enrollment (may be stale) "
+        "· first received 1 min ago",
+        "No Panel listed as connected at the Player app's last enrollment (may be stale) · recorded 1 min ago",
+        "set",
+        "Unknown: Central holds no Panel record from the Player app's last enrollment",
+    ]

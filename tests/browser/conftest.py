@@ -36,14 +36,14 @@ CHECKS = {
         "equipment_replacement_retirement",
     ),
     "test_drag_create_posts_frame_with_scaled_placement": ("frame_creation_binding",),
-    # Commissioning / calibration lease + conflict handling.
+    # Calibration: live calibration lease + conflict handling.
     "test_manual_revert_clears_preview_and_returns_draft_to_committed": (
         "calibration_preview_revert_commit",
     ),
     "test_calibration_stale_commit_conflicts_on_revision": ("stale_calibration_conflict",),
     "test_calibration_overtaken_detected_by_inventory_poll": ("inventory_refresh_recovery",),
     "test_calibration_lease_expiry_reverts_to_committed_no_auto_renew": ("preview_expiry",),
-    "test_commissioning_provenance_frame_facts_vs_display_at_player_start": (
+    "test_calibration_provenance_frame_profile_vs_panel_at_enrollment": (
         "fresh_server_persistence",
     ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).
