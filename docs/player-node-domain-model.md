@@ -130,9 +130,7 @@ driver, and same-boot restarts cannot repeat that request. A failed driver remai
 explicitly unknown; physical watchdog recovery is a separate qualification.
 
 The [stop/recovery contract](evidence/2026-09-30-node-stop-observation-proposal.md)
-owns crash and authorization rules. The
-[implementation evidence](evidence/2026-09-30-node-stop-implementation.md) records
-implemented policy bounds, source identities, checks and unqualified behavior.
+owns crash and authorization rules.
 
 ### Recovery of AppManager itself
 
@@ -215,4 +213,4 @@ The subsequent owner review selected separate command responses and independentl
 
 A fresh protocol/layer adversarial round then found two further gaps: snapshots needed per-fact sequence coverage to fence delayed same-epoch events, and the versioned AppManager fallback needed a recovery owner outside AppManager. Both contracts are now explicit above. This review tightens the proposal only; the acceptance traces remain future software and hardware work.
 
-The 2026-09-30 PID1 qualification exposed two strands: a one-shot no-effect seal behind a permanent drain (bug 1) and a rebooted Player refused for not naming its predecessor (bug 2). Both came from Central holding authority it could not release: stop permits, Runtime drains, no-effect revalidation, boot-claim CAS and Central-mapped node-clock deadlines. On 2026-10-01 they were removed. Central now declares the latest stage, the broker converges locally and reports, a new boot supersedes the prior one, and each node owner keeps grant expiry on its own clock. The [2026-09-30 evidence](evidence/2026-09-30-player-node-resumption.md) records the superseded design as history.
+The 2026-09-30 PID1 qualification exposed two strands: a one-shot no-effect seal behind a permanent drain (bug 1) and a rebooted Player refused for not naming its predecessor (bug 2). Both came from Central holding authority it could not release: stop permits, Runtime drains, no-effect revalidation, boot-claim CAS and Central-mapped node-clock deadlines. On 2026-10-01 they were removed. Central now declares the latest stage, the broker converges locally and reports, a new boot supersedes the prior one, and each node owner keeps grant expiry on its own clock. The superseded design remains in Git history.

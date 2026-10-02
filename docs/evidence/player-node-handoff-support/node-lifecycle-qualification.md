@@ -80,30 +80,6 @@ do not publish that file. Predicate diagnostics contain counters and booleans,
 not receipt nonce/digest or bearer credentials. Owner evidence contains actual
 signed protocol observations and should remain with the local qualification run.
 
-## Preserved reconstruction and verification sources
-
-These dated Python reconstruction recipes are preserved as text so they are not default
-pytest/CI entry points. They predate the automated scenarios and name the former
-`tests/node_pid1_central_probe.py`. Review their fixed source/output paths before deliberate
-reuse; existing output directories fail closed rather than being reclaimed.
-The image recipe uses the checked-in C fixture path and verifies the pre-existing
-unique local FROM alias against its exact assembler image ID before building.
-
-- [Initial full component reconstruction](build-full-components-initial.txt)
-- [Stop/health fixed full components](build-full-components-stopfix.txt)
-- [Independent full component verifier](verify-full-components-stopfix.txt)
-- [Initial distinct nonrelease target packages](build-lifecycle-targets-initial.txt)
-- [Reseal targets for the repaired base ABI](reseal-lifecycle-targets-stopfix.txt)
-- [Independent target verifier](verify-lifecycle-targets-stopfix.txt)
-- [Pinned PID1 fixture image construction](build-lifecycle-pid1-image-stopfix.txt)
-- [Independent canonical directory-mode verifier](verify-runtime-directory-members.txt)
-
-The full source manifest used to build node packages predates the later Central
-and harness changes. Node package/closure identities remain those frozen in the
-component directory; final repository inventory and later tests are reported
-separately in the [Linux evidence](../2026-09-30-node-linux-integration.md) and
-[resumption evidence](../2026-09-30-player-node-resumption.md).
-
 ## Opt-in stop diagnostic wrapper
 
 Set `PHOTO_WALL_NODE_STOP_DIAGNOSTICS=1` only for a diagnostic run. The separate
@@ -114,10 +90,3 @@ failed stop, the original exception/result plus read-only process/cgroup state.
 It does not add retries, alter outcomes, issue effects or change authorization.
 These runs are labeled diagnostic fixture composition, not exact-entry-point
 qualification. The wrapper's journal marker is `NODE_STOP_DIAGNOSTIC`.
-
-The separately verified full-squashfs-derived fixture construction is preserved as
-[construction attempt](build-fullroot-fixture-image.txt) and
-[final saved-layer verification](verify-fullroot-fixture-image.txt). The first recipe
-retains its conservative failed runtime-export comparison; the second explains and
-checks the exact imported layer and declared Docker runtime differences. This image
-has not yet run the lifecycle scenarios.

@@ -1,7 +1,0 @@
-{"selected_minor": 0, "probe_name": "stage1-pw-d5b6439b06a613ef.squashfs", "before_backing_hashes": {}}
-modules=6.18.50+rpt-rpi-2712 files=293 bytes=5701450
-marker=f25b09dc9068ecad
-resolve vc4 exit=0 files=23 missing=0 last=vc4.ko.xz
-resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz
-{"after_backing_hashes": {}, "violations": []}
-SCOPED_REAL_INITRD_MOUNT_PROBE_PASS

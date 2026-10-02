@@ -1,6 +1,6 @@
 # Owned stop operation proposal — 2026-09-30
 
-Status: **design contract; [implementation and current checks](2026-09-30-node-stop-implementation.md) are recorded separately. Not qualified.** This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, D16, D17 or physical qualification.
+Status: **design contract; automated checks are in the test suite. Not qualified.** This scopes the user's direction that stopping exposes an owned Promise/Future whose successful completion means the stop postcondition is satisfied. Transient platform observations belong inside that operation. It does not change command admission, D16, D17 or physical qualification.
 
 **Revised 2026-10-01.** Stop permits, executor sealing, no-effect revalidation and Central drain discharge were removed (see the [node domain model](../player-node-domain-model.md#debian-closure-and-app-effects)). The owned stop operation, local intent journal, `_old` check and recovery obligation below are unchanged. The authorization table and `StopRequest` shape now describe that contract; the dated defect and implementation records remain history.
 

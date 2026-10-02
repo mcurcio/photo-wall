@@ -947,9 +947,8 @@ selection exists. Two Pis claiming one serial flap visibly, each enrollment revo
 the other. This does not prove which physical Pi exists or that an
 already-delivered effect stopped. Effect rollout still requires the
 existing D17 all-serving/rollback certification and a real injected serving-image
-verifier; there is no environment-variable bypass. See the
-[node Central evidence checkpoint](evidence/2026-09-30-node-central-integration.md)
-for current software checks and remaining integration/qualification boundaries.
+verifier; there is no environment-variable bypass. The automated node scenarios and
+their limits are listed in [validation](validation.md).
 
 
 ### Optional read-only Kubernetes node verifier

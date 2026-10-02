@@ -1,6 +1,6 @@
 # Player control-protocol compatibility after a Central upgrade
 
-**Status:** design proposal for review, not implemented or qualified. **Scope:** F0 in the [v0.13 production-readiness intake](production-readiness-v0.13.md). **Evidence:** the [2026-09-29 Kubernetes diagnosis](evidence/2026-09-29-kubernetes-central-diagnosis.md) and exact v0.12.0/v0.13.0 release sources. This design concerns the Player **application** control-state schema; the base-OS management protocol is proposed separately in the [fleet-control design](player-fleet-control-design.md).
+**Status:** design proposal for review, not implemented or qualified. **Scope:** F0 in the [v0.13 production-readiness intake](production-readiness-v0.13.md). **Evidence:** a read-only 2026-09-29 Kubernetes diagnosis and exact v0.12.0/v0.13.0 release sources. This design concerns the Player **application** control-state schema; the base-OS management protocol is proposed separately in the [fleet-control design](player-fleet-control-design.md).
 
 ## Failure to prevent
 
