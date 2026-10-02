@@ -22,6 +22,9 @@ from scripts.published_player_wire import PLAYERS, _verified_package, package_ro
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/published_player_wire.py"
 STATE_FIELDS = {"configuration", "plan", "commits", "revocations"}
+# Each wait spans a cold published-Player interpreter start; under -n 4 on a 4-vCPU
+# runner that exceeded 15 s. The assertion is that the request arrives, not its speed.
+HANDSHAKE_SECONDS = 45
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +65,7 @@ def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool)
             selector.register(process.stdout, selectors.EVENT_READ)
             for _ in range(rounds):
                 for path in expected_paths:
-                    assert selector.select(timeout=15), "published Player enrollment timed out"
+                    assert selector.select(timeout=HANDSHAKE_SECONDS), "published Player enrollment timed out"
                     line = process.stdout.readline()
                     assert line, "published Player enrollment exited before HTTP request"
                     request = json.loads(line)
@@ -77,7 +80,7 @@ def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool)
                     process.stdin.flush()
                     if path.endswith("/register"):
                         registrations.append(response.json())
-                assert selector.select(timeout=15), "published Player registration timed out"
+                assert selector.select(timeout=HANDSHAKE_SECONDS), "published Player registration timed out"
                 line = process.stdout.readline()
                 assert line, "published Player omitted parsed registration"
                 registered = json.loads(line)
@@ -102,6 +105,8 @@ def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool)
     return registrations[-1]
 
 
+# One worker runs the whole matrix so its cells do not contend for CPU with each other.
+@pytest.mark.xdist_group("published_player_wire_matrix")
 @pytest.mark.parametrize("player", PLAYERS, ids=lambda value: value.tag)
 @pytest.mark.parametrize("cold", (False, True), ids=("warm", "cold-reenrollment"))
 @pytest.mark.parametrize("bound", (False, True), ids=("unbound", "bound-active-plan"))

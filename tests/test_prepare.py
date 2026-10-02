@@ -442,7 +442,8 @@ def test_cancellation_reaps_active_native_process_and_cleans_destination(tmp_pat
     async def perform():
         task = asyncio.create_task(preparer((wrapper, native_tools[1])).prepare(asset, source, destination))
         try:
-            async with asyncio.timeout(5):
+            # Generous: this asserts reaping, not start-up speed under a loaded -n auto runner.
+            async with asyncio.timeout(30):
                 while not marker.exists():
                     if task.done():
                         await task
